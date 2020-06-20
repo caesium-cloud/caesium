@@ -6,9 +6,7 @@ import (
 	"github.com/pkg/errors"
 )
 
-// Variables stores all of the necessary set environment
-// variables as outlined in the Environment structure
-var variables *Environment
+var variables = new(Environment)
 
 // Process the environment variables set for caesium.
 func Process() (err error) {
