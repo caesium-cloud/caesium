@@ -2,9 +2,13 @@ version: 2
 jobs:
   build:
     docker:
-      - image: circleci/golang:1.14
+      - image: circleci/golang:1.15
     working_directory: /go/src/github.com/caesium-dev/caesium
     steps:
       - checkout
       - run: go get -v -t -d ./...
       - run: go test -v ./...
+      - setup_remote_docker:
+          version: 19.03.13
+      - run: |
+          docker build -t caesium-dev/caesium:${CIRCLE_SHA1:0:7} .
