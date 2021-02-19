@@ -8,7 +8,7 @@ WORKDIR $GOPATH/src/github.com/caesium-dev/caesium
 COPY . .
 
 RUN go get -d -v
-RUN go build -o /go/bin/caesium
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /go/bin/caesium
 
 # Package for lightweight deployment
 FROM scratch
