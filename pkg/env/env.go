@@ -1,7 +1,7 @@
 package env
 
 import (
-	"github.com/caesium-dev/caesium/log"
+	"github.com/caesium-dev/caesium/pkg/log"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
 )
