@@ -4,7 +4,7 @@ Caesium's primary function is a job scheduler and executor. As such, the design 
 
 ## `Job`
 
-A `Job` is the primary unit of work in Caesium. A `Job` is analagous to a `DAG` in Airflow, and will also be defined as an acyclic graph. A job is is made up of several other primitives described below.
+A `Job` is collection of related tasks. All the tasks in a single Job will depend on the same `Trigger`(s), or the completion of the other tasks in the `Job`. A `Job` is analogous to a `DAG` in Airflow, and is also defined as a directed acyclic graph. A `Job` can contain other primitive types in addition to `Task`s, as described below.
 
 ### `Trigger`
 
