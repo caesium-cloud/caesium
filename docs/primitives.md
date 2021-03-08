@@ -8,7 +8,7 @@ A `Job` is collection of related tasks. All the tasks in a single Job will depen
 
 ### `Trigger`
 
-`Job`s are initiated by one or many `Trigger`s. A `Trigger` may be defined as a simple cron, or import a plugin that will listen, or consume from a remote source. Examples of such remote sources would be an AWS SQS queue, a Kafka topic, or a simple webhook. Caesium in general will, in general, rely heavily on [Go plugins](https://golang.org/pkg/plugin/), and this will be another example of where they will be leveraged.
+`Job`s are initiated by one or many `Trigger`s. A `Trigger` may be defined as a simple cron, or import a plugin that will listen, or consume from a remote source. Examples of such remote sources would be an AWS SQS queue, a Kafka topic, or a simple webhook. Caesium will, in general, rely heavily on [Go plugins](https://golang.org/pkg/plugin/), and this will be another example of where they will be leveraged.
 
 ### `Task`
 

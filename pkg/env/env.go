@@ -31,4 +31,5 @@ func Variables() Environment {
 // by caesium.
 type Environment struct {
 	LogLevel string `default:"info"`
+	Port     int    `default:"8080"`
 }
