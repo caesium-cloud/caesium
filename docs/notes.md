@@ -9,7 +9,7 @@ E.g. if I have a process that I run infrequently/irregularly, that has dependenc
 Log file contains import information like Git hashes, and Docker hashes. 
 * Low entry barrier. 
 Should be roughly on par with Cron. 
-* Sophisticated scedule descriptions. E.g. "Run at 1700 on the last business day of the month."
+* Sophisticated schedule descriptions. E.g. "Run at 1700 on the last business day of the month."
 * No operators. Execute code in containers. 
 * Simple. Ideally we should be able to run the scheduler without needing a database, message queue, webserver, etc. 
 * Rerun logic built into DAG definitions.

@@ -1,6 +1,10 @@
 package start
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/caesium-dev/caesium/api"
+	"github.com/caesium-dev/caesium/pkg/log"
+	"github.com/spf13/cobra"
+)
 
 const (
 	usage   = "start"
@@ -23,6 +27,6 @@ var (
 )
 
 func start(cmd *cobra.Command, args []string) error {
-	// TODO: implement
-	return nil
+	log.Info("spinning up api")
+	return api.Start()
 }
