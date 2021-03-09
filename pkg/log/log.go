@@ -120,10 +120,23 @@ func SetLevelFromString(level string) error {
 type Level int
 
 const (
+	// DEBUG log level is the lowest log level and meant
+	// to be used for diagnosing issues.
 	DEBUG Level = iota
+	// INFO is the standard log level and is the recommended
+	// level to run Caesium with.
 	INFO
+	// WARNING log messages indicates something isn't ideal
+	// in Caesium, but that it can carry on doing its job
+	// anyways.
 	WARNING
+	// ERROR log messages indicate something is wrong and
+	// it should be addressed and/or diagnosed. A stack
+	// trace will be printed for ERROR messages.
 	ERROR
+	// FATAL log messages are only seen once per run of
+	// Caesium because it will immediately exit after one
+	// is logged. RIP.
 	FATAL
 )
 
