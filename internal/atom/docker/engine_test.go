@@ -3,9 +3,10 @@ package docker
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/capsule"
+	"github.com/caesium-dev/caesium/internal/atom"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -15,12 +16,12 @@ func (s *DockerTestSuite) TestNewEngine() {
 }
 
 func (s *DockerTestSuite) TestGet() {
-	req := &capsule.EngineGetRequest{
-		ID: testCapsuleID,
+	req := &atom.EngineGetRequest{
+		ID: testAtomID,
 	}
 
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerInspect", testCapsuleID).
+		On("ContainerInspect", testAtomID).
 		Return()
 
 	c, err := s.engine.Get(req)
@@ -29,8 +30,8 @@ func (s *DockerTestSuite) TestGet() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
-func (s *DockerTestSuite) TestGetInvalidContainer() {
-	req := &capsule.EngineGetRequest{}
+func (s *DockerTestSuite) TestGetError() {
+	req := &atom.EngineGetRequest{}
 
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerInspect", "").
@@ -43,24 +44,24 @@ func (s *DockerTestSuite) TestGetInvalidContainer() {
 }
 
 func (s *DockerTestSuite) TestList() {
-	req := &capsule.EngineListRequest{}
+	req := &atom.EngineListRequest{}
 
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerList").
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerInspect", testCapsuleID).
+		On("ContainerInspect", testAtomID).
 		Return()
 
-	capsules, err := s.engine.List(req)
+	atoms, err := s.engine.List(req)
 	assert.Nil(s.T(), err)
-	assert.NotNil(s.T(), capsules)
-	assert.Len(s.T(), capsules, 1)
+	assert.NotNil(s.T(), atoms)
+	assert.Len(s.T(), atoms, 1)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
 func (s *DockerTestSuite) TestListError() {
-	req := &capsule.EngineListRequest{
+	req := &atom.EngineListRequest{
 		Since: time.Now(),
 	}
 
@@ -68,14 +69,14 @@ func (s *DockerTestSuite) TestListError() {
 		On("ContainerList").
 		Return(fmt.Errorf("docker daeamon list error"))
 
-	capsules, err := s.engine.List(req)
+	atoms, err := s.engine.List(req)
 	assert.NotNil(s.T(), err)
-	assert.Nil(s.T(), capsules)
+	assert.Nil(s.T(), atoms)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
 func (s *DockerTestSuite) TestListGetError() {
-	req := &capsule.EngineListRequest{
+	req := &atom.EngineListRequest{
 		Before: time.Now(),
 	}
 
@@ -86,14 +87,14 @@ func (s *DockerTestSuite) TestListGetError() {
 		On("ContainerInspect", "").
 		Return(fmt.Errorf("invalid container id"))
 
-	capsules, err := s.engine.List(req)
+	atoms, err := s.engine.List(req)
 	assert.NotNil(s.T(), err)
-	assert.Nil(s.T(), capsules)
+	assert.Nil(s.T(), atoms)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
 func (s *DockerTestSuite) TestCreate() {
-	req := &capsule.EngineCreateRequest{
+	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
 		Image:   testImage,
 		Command: []string{"test"},
@@ -103,21 +104,21 @@ func (s *DockerTestSuite) TestCreate() {
 		On("ContainerCreate", testContainerName).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerStart", testCapsuleID).
+		On("ContainerStart", testAtomID).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerInspect", testCapsuleID).
+		On("ContainerInspect", testAtomID).
 		Return()
 
 	c, err := s.engine.Create(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
-	assert.Equal(s.T(), testCapsuleID, c.ID())
+	assert.Equal(s.T(), testAtomID, c.ID())
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
 func (s *DockerTestSuite) TestCreateError() {
-	req := &capsule.EngineCreateRequest{
+	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
 		Image:   "",
 		Command: []string{"test"},
@@ -134,7 +135,7 @@ func (s *DockerTestSuite) TestCreateError() {
 }
 
 func (s *DockerTestSuite) TestCreateStartError() {
-	req := &capsule.EngineCreateRequest{
+	req := &atom.EngineCreateRequest{
 		Image:   testImage,
 		Command: []string{"test"},
 	}
@@ -153,15 +154,15 @@ func (s *DockerTestSuite) TestCreateStartError() {
 }
 
 func (s *DockerTestSuite) TestStop() {
-	req := &capsule.EngineStopRequest{
-		ID: testCapsuleID,
+	req := &atom.EngineStopRequest{
+		ID: testAtomID,
 	}
 
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerStop", testCapsuleID).
+		On("ContainerStop", testAtomID).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerRemove", testCapsuleID).
+		On("ContainerRemove", testAtomID).
 		Return()
 
 	assert.Nil(s.T(), s.engine.Stop(req))
@@ -169,7 +170,7 @@ func (s *DockerTestSuite) TestStop() {
 }
 
 func (s *DockerTestSuite) TestStopError() {
-	req := &capsule.EngineStopRequest{ID: ""}
+	req := &atom.EngineStopRequest{ID: ""}
 
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerStop", "").
@@ -180,16 +181,21 @@ func (s *DockerTestSuite) TestStopError() {
 }
 
 func (s *DockerTestSuite) TestLogs() {
-	req := &capsule.EngineLogsRequest{
-		ID: testCapsuleID,
+	req := &atom.EngineLogsRequest{
+		ID:    testAtomID,
+		Since: time.Now(),
 	}
 
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerLogs", testCapsuleID).
+		On("ContainerLogs", testAtomID).
 		Return()
 
 	logs, err := s.engine.Logs(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), logs)
+
+	buf, err := ioutil.ReadAll(logs)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "logs", string(buf))
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }

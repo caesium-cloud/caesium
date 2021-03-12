@@ -47,7 +47,7 @@ func (m *mockDockerBackend) ContainerList(ctx context.Context, options types.Con
 
 	return []types.Container{
 		{
-			ID: testCapsuleID,
+			ID: testAtomID,
 		},
 	}, nil
 }
@@ -62,7 +62,7 @@ func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *contain
 		return containertypes.ContainerCreateCreatedBody{ID: ""}, nil
 	}
 
-	return containertypes.ContainerCreateCreatedBody{ID: testCapsuleID}, nil
+	return containertypes.ContainerCreateCreatedBody{ID: testAtomID}, nil
 }
 
 func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options types.ContainerStartOptions) error {
@@ -97,13 +97,9 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string,
 	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
-func (s *DockerTestSuite) SetupTest() {
-	s.engine = &dockerEngine{backend: &mockDockerBackend{}}
-}
-
 var (
-	testCapsuleID     = "test_id"
-	testContainerName = "test_capsule"
+	testAtomID        = "test_id"
+	testContainerName = "test_atom"
 	testImage         = "caesium.dev/caesium"
 )
 
@@ -114,6 +110,13 @@ func newContainer(id string, state *types.ContainerState) types.ContainerJSON {
 			State:   state,
 			Created: time.Now().Format(time.RFC3339Nano),
 		},
+	}
+}
+
+func (s *DockerTestSuite) SetupTest() {
+	s.engine = &dockerEngine{
+		backend: &mockDockerBackend{},
+		ctx:     context.Background(),
 	}
 }
 

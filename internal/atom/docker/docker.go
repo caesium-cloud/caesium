@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/capsule"
+	"github.com/caesium-dev/caesium/internal/atom"
 	"github.com/docker/docker/api/types"
 	containertypes "github.com/docker/docker/api/types/container"
 	networktypes "github.com/docker/docker/api/types/network"
@@ -23,24 +23,22 @@ type dockerBackend interface {
 }
 
 var (
-	stateMap = map[string]capsule.State{
-		"created":    capsule.Created,
-		"running":    capsule.Running,
-		"paused":     capsule.Invalid, // a container should never be paused
-		"restarting": capsule.Invalid, // a container should never be restarting
-		"removing":   capsule.Stopping,
-		"exited":     capsule.Stopped,
-		"dead":       capsule.Stopped,
+	stateMap = map[string]atom.State{
+		"created":    atom.Created,
+		"running":    atom.Running,
+		"paused":     atom.Invalid, // a container should never be paused
+		"restarting": atom.Invalid, // a container should never be restarting
+		"removing":   atom.Stopping,
+		"exited":     atom.Stopped,
+		"dead":       atom.Stopped,
 	}
-	resultMap = map[int]capsule.Result{
-		0:   capsule.Success,
-		1:   capsule.Failure,
-		125: capsule.StartupFailure,
-		126: capsule.StartupFailure,
-		127: capsule.StartupFailure,
-		137: capsule.Killed,
-		143: capsule.Terminated,
+	resultMap = map[int]atom.Result{
+		0:   atom.Success,
+		1:   atom.Failure,
+		125: atom.StartupFailure,
+		126: atom.StartupFailure,
+		127: atom.StartupFailure,
+		137: atom.Killed,
+		143: atom.Terminated,
 	}
 )
-
-const label = "dev.caesium"

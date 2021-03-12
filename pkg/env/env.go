@@ -30,6 +30,8 @@ func Variables() Environment {
 // Environment defines the environment variables used
 // by caesium.
 type Environment struct {
-	LogLevel string `default:"info"`
-	Port     int    `default:"8080"`
+	LogLevel            string `default:"info"`
+	Port                int    `default:"8080"`
+	KubernetesConfig    string `default:""`
+	KubernetesNamespace string `default:"default"`
 }
