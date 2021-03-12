@@ -14,9 +14,9 @@ A `Job` is collection of related tasks. All the tasks in a single Job will depen
 
 A `Job` is primarily comprised of `Task`s in the same way that Airflow `DAG`s are comprised of `Task`s. Once a `Job` is triggered, Caesium will traverse the acyclic graph and execute each of the tasks. A task should not be designed to be long-running, and the underlying process' runtime should only be limited by compute, network or IO constraints (i.e. don't have arbitary sleeps in your task code).
 
-#### `Capsule`
+#### `Atom`
 
-Caesium `Task`s run in `Capsule`s. A `Capsule`, while can be, is not necessarily the traditional definition of a container like in Docker, rkt, or LXD. Just like how `Trigger`s will be imported and run using Go plugins, so will `Capsule`s. A Caesium `Capsule` is defined as an isolated runtime environment for a `Job`'s `Task`s to run in with dedicated compute, network and IO resources. Concrete examples of `Capsule`s include Docker containers, Kubernetes pods, a Slurm job with dedicated resources allocated, or an EC2 on-demand or spot instance.
+Caesium `Task`s run in `Atom`s. A `Atom`, while can be, is not necessarily the traditional definition of a container like in Docker, rkt, or LXD. Just like how `Trigger`s will be imported and run using Go plugins, so will `Atom`s. A Caesium `Atom` is defined as an isolated runtime environment for a `Job`'s `Task`s to run in with dedicated compute, network and IO resources. Concrete examples of `Atom`s include Docker containers, Kubernetes pods, a Slurm job with dedicated resources allocated, or an EC2 on-demand or spot instance.
 
 ### `Callback`
 

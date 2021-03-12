@@ -5,7 +5,7 @@ import (
 	"io"
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/capsule"
+	"github.com/caesium-dev/caesium/internal/atom"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -13,9 +13,9 @@ import (
 )
 
 // Engine defines the interface for treating the
-// Docker API as a capsule.Engine.
+// Docker API as a atom.Engine.
 type Engine interface {
-	capsule.Engine
+	atom.Engine
 }
 
 type dockerEngine struct {
@@ -24,7 +24,7 @@ type dockerEngine struct {
 }
 
 // NewEngine creates a new instance of docker.Engine
-// for interacting with docker.Capsules.
+// for interacting with docker.Atoms.
 func NewEngine(ctx context.Context) Engine {
 	cli, err := client.NewEnvClient()
 	if err != nil {
@@ -38,25 +38,25 @@ func NewEngine(ctx context.Context) Engine {
 }
 
 // Get a Caesium Docker container and its corresponding metadata.
-func (e *dockerEngine) Get(req *capsule.EngineGetRequest) (capsule.Capsule, error) {
+func (e *dockerEngine) Get(req *atom.EngineGetRequest) (atom.Atom, error) {
 	metadata, err := e.backend.ContainerInspect(e.ctx, req.ID)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Capsule{metadata: metadata}, nil
+	return &Atom{metadata: metadata}, nil
 }
 
-// List all of Caesium's docker containers. Note that List is a
+// List all of Caesium's Docker containers. Note that List is a
 // relatively heavy request because it does not only a LIST request
 // to the Docker API, but also an INSPECT for each of the containers
 // because the default LIST response does not include enough data.
 // This should be fine since DockerEngine.List should only really
 // be needed on start-up or in the event of a crash.
-func (e *dockerEngine) List(req *capsule.EngineListRequest) ([]capsule.Capsule, error) {
+func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 	opts := types.ContainerListOptions{
 		All:     true,
-		Filters: filters.NewArgs(filters.KeyValuePair{Key: label}),
+		Filters: filters.NewArgs(filters.KeyValuePair{Key: atom.Label}),
 	}
 
 	if !req.Since.IsZero() {
@@ -72,22 +72,22 @@ func (e *dockerEngine) List(req *capsule.EngineListRequest) ([]capsule.Capsule, 
 		return nil, err
 	}
 
-	capsules := make([]capsule.Capsule, len(containers))
+	atoms := make([]atom.Atom, len(containers))
 
 	for i, container := range containers {
-		capsules[i], err = e.Get(&capsule.EngineGetRequest{ID: container.ID})
+		atoms[i], err = e.Get(&atom.EngineGetRequest{ID: container.ID})
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	return capsules, nil
+	return atoms, nil
 }
 
 // Create and start a Caesium Docker container. Caesium has
-// no concept of a creating a Capsule without it also starting,
-// so we encapsulate both functions inside docker.Capsule.Create.
-func (e *dockerEngine) Create(req *capsule.EngineCreateRequest) (capsule.Capsule, error) {
+// no concept of a creating a Atom without it also starting,
+// so we encapsulate both functions inside docker.Atom.Create.
+func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	cfg := &container.Config{Image: req.Image, Cmd: req.Command}
 
 	created, err := e.backend.ContainerCreate(e.ctx, cfg, nil, nil, nil, req.Name)
@@ -101,14 +101,14 @@ func (e *dockerEngine) Create(req *capsule.EngineCreateRequest) (capsule.Capsule
 		return nil, err
 	}
 
-	return e.Get(&capsule.EngineGetRequest{ID: created.ID})
+	return e.Get(&atom.EngineGetRequest{ID: created.ID})
 }
 
 // Stop and remove a Caesium Docker container. Since Caesium
 // doesn't distinguish between a "stopped" and a "removed"
 // container, we encapsulate both functions inside
-// docker.Capsule.Stop.
-func (e *dockerEngine) Stop(req *capsule.EngineStopRequest) error {
+// docker.Atom.Stop.
+func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 	if err := e.backend.ContainerStop(e.ctx, req.ID, &req.Timeout); err != nil {
 		return err
 	}
@@ -124,14 +124,16 @@ func (e *dockerEngine) Stop(req *capsule.EngineStopRequest) error {
 
 // Logs streams the log output from a Caesium Docker container
 // based on the request input.
-func (e *dockerEngine) Logs(req *capsule.EngineLogsRequest) (io.ReadCloser, error) {
+func (e *dockerEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
 	opts := types.ContainerLogsOptions{
-		ShowStdout: req.Stdout,
-		ShowStderr: req.Stderr,
-		Since:      req.Since.Format(time.RFC3339Nano),
-		Until:      req.Until.Format(time.RFC3339Nano),
+		ShowStdout: true,
+		ShowStderr: true,
 		Timestamps: true,
 		Follow:     true,
+	}
+
+	if !req.Since.IsZero() {
+		opts.Since = req.Since.Format(time.RFC3339Nano)
 	}
 
 	return e.backend.ContainerLogs(e.ctx, req.ID, opts)

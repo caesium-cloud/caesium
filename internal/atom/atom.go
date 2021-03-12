@@ -1,14 +1,14 @@
-package capsule
+package atom
 
 import (
 	"io"
 	"time"
 )
 
-// Capsule defines the interface for interacting with
-// an individual Capsule. A Capsule is analagous to a
+// Atom defines the interface for interacting with
+// an individual Atom. A Atom is analagous to a
 // Docker container or a Kubernetes pod/deployment.
-type Capsule interface {
+type Atom interface {
 	ID() string
 	State() State
 	Result() Result
@@ -18,12 +18,12 @@ type Capsule interface {
 }
 
 // Engine defines the interface for interacting with
-// a Capsule environment. A capsule.Engine is analagous
+// a Atom environment. A atom.Engine is analagous
 // to a Docker daemon or a Kubernetes master.
 type Engine interface {
-	Get(*EngineGetRequest) (Capsule, error)
-	List(*EngineListRequest) ([]Capsule, error)
-	Create(*EngineCreateRequest) (Capsule, error)
+	Get(*EngineGetRequest) (Atom, error)
+	List(*EngineListRequest) ([]Atom, error)
+	Create(*EngineCreateRequest) (Atom, error)
 	Stop(*EngineStopRequest) error
 	Logs(*EngineLogsRequest) (io.ReadCloser, error)
 }
@@ -60,14 +60,11 @@ type EngineStopRequest struct {
 // EngineLogsRequest defines the input parameters to
 // an Engine.Logs request.
 type EngineLogsRequest struct {
-	ID     string
-	Stdout bool
-	Stderr bool
-	Since  time.Time
-	Until  time.Time
+	ID    string
+	Since time.Time
 }
 
-// State defines the various states a Capsule can be in
+// State defines the various states a Atom can be in
 // during its lifecycle while executing jobs.
 type State string
 
@@ -75,7 +72,7 @@ const (
 	// Created occurs immediately after engine.Create is
 	// called successfully.
 	Created State = "created"
-	// Running occurs after a Capsule has been created,
+	// Running occurs after a Atom has been created,
 	// and has begun executing its job. This is verified
 	// by at least one subsequent State() call after
 	// engine.Create is called.
@@ -83,55 +80,59 @@ const (
 	// Stopping occurs immediately after engine.Stop is
 	// called successfully.
 	Stopping State = "stopping"
-	// Stopped occurs after a capsule has been stopped,
+	// Stopped occurs after a atom has been stopped,
 	// and has returned at least one subsequent State()
 	// call after engine.Stop is called.
 	Stopped State = "stopped"
 	// Deleting occurs immediately after engine.Delete
 	// is called successfully.
 	Deleting State = "deleting"
-	// Deleted occurs after a capsule has been deleted,
-	// and the Capsule no longer appears in the list
-	// of Capsules returned by engine.List.
+	// Deleted occurs after a atom has been deleted,
+	// and the Atom no longer appears in the list
+	// of Atoms returned by engine.List.
 	Deleted State = "deleted"
-	// Invalid occurs if a capsule.Engine returns an
-	// unknown or unexpected state. If a Capsule reaches
+	// Invalid occurs if a atom.Engine returns an
+	// unknown or unexpected state. If a Atom reaches
 	// an Invalid state, alerts will fire and it will be
 	// deleted/retried.
 	Invalid State = "invalid"
 )
 
-// Result defines the various end states that the Capsule
+// Result defines the various end states that the Atom
 // terminates in, depending on where and why in during
 // the lifecycle it was terminated.
 type Result string
 
 const (
-	// Success result is returned if the Capsule was able
+	// Success result is returned if the Atom was able
 	// to successfully complete its Job with an exit
 	// code of 0 returned by the underlying code.
 	Success Result = "success"
 	// Failure result is returned if the underlying job
-	// has failed, but the Capsule itself behaved as
+	// has failed, but the Atom itself behaved as
 	// expected.
 	Failure Result = "failure"
-	// StartupFailure result is returned if the Capsule
+	// StartupFailure result is returned if the Atom
 	// was misconfigured and was unable to ever reach
 	// a running state upon creation.
 	StartupFailure Result = "startup_failure"
-	// ResourceFailure result is returned if the Capsule
+	// ResourceFailure result is returned if the Atom
 	// was unable to successfully complete its job due
 	// to resource exhaustion. This could be an OOM kill
 	// for example, or an eviction.
 	ResourceFailure Result = "resource_failure"
-	// Killed result is returned if the Capsule was
+	// Killed result is returned if the Atom was
 	// ungracefully terminated via a SIGKILL signal.
 	Killed Result = "killed"
-	// Terminated result is returned if the Capsule was
+	// Terminated result is returned if the Atom was
 	// gracefully terminated via a SIGTERM signal.
 	Terminated Result = "terminated"
-	// Unknown result is returned if the capsule.Engine
-	// returns an unexpected exit code. A Capsule that
+	// Unknown result is returned if the atom.Engine
+	// returns an unexpected exit code. A Atom that
 	// results Unknown will be treated as a Failure.
 	Unknown Result = "unknown"
 )
+
+// Label to apply to the Atom to identify that it
+// is managed by Caesium.
+const Label = "dev.caesium"
