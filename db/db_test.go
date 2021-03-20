@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/caesium-dev/caesium/db/command"
-	"github.com/caesium-dev/caesium/db/testdata/chinook"
+	"github.com/caesium-cloud/caesium/db/command"
+	"github.com/caesium-cloud/caesium/db/testdata/chinook"
 )
 
 /*

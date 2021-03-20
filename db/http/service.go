@@ -21,9 +21,9 @@ import (
 	"sync"
 	"time"
 
-	sql "github.com/caesium-dev/caesium/db"
-	"github.com/caesium-dev/caesium/db/command"
-	"github.com/caesium-dev/caesium/db/store"
+	sql "github.com/caesium-cloud/caesium/db"
+	"github.com/caesium-cloud/caesium/db/command"
+	"github.com/caesium-cloud/caesium/db/store"
 )
 
 // Database is the interface any queryable system must implement

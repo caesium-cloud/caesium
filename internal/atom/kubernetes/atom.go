@@ -3,7 +3,7 @@ package kubernetes
 import (
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	v1 "k8s.io/api/core/v1"
 )
 

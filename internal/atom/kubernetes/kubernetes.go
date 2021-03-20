@@ -1,7 +1,7 @@
 package kubernetes
 
 import (
-	"github.com/caesium-dev/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	v1 "k8s.io/api/core/v1"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 )

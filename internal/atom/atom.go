@@ -135,4 +135,4 @@ const (
 
 // Label to apply to the Atom to identify that it
 // is managed by Caesium.
-const Label = "dev.caesium"
+const Label = "cloud.caesium"

@@ -5,7 +5,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/caesium-dev/caesium/db/store/badger"
+	"github.com/caesium-cloud/caesium/db/store/badger"
 	"github.com/hashicorp/raft"
 )
 

@@ -22,9 +22,9 @@ import (
 	"time"
 	"unsafe"
 
-	sql "github.com/caesium-dev/caesium/db"
-	"github.com/caesium-dev/caesium/db/command"
-	dblog "github.com/caesium-dev/caesium/db/log"
+	sql "github.com/caesium-cloud/caesium/db"
+	"github.com/caesium-cloud/caesium/db/command"
+	dblog "github.com/caesium-cloud/caesium/db/log"
 	"github.com/golang/snappy"
 	"github.com/hashicorp/raft"
 )
