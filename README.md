@@ -3,6 +3,8 @@
 [![Pkg Widget]][Pkg]
 [![Drone CI Widget]][Drone CI]
 [![Go Report Widget]][Go Report]
+[![GitHub Widget]][GitHub]
+[![Docker Widget]][Docker]
 
 ----
 
@@ -14,3 +16,7 @@ Caesium is an open source distributed scheduling system that is currently a work
 [Drone CI Widget]: https://cloud.drone.io/api/badges/caesium-cloud/caesium/status.svg
 [Go Report]: https://goreportcard.com/report/github.com/caesium-cloud/caesium
 [Go Report Widget]: https://goreportcard.com/badge/github.com/caesium-cloud/caesium
+[GitHub]: https://github.com/caesium-cloud/caesium/releases
+[GitHub Widget]: https://img.shields.io/github/release/caesium-cloud/caesium.svg
+[Docker]: https://hub.docker.com/r/caesiumcloud/caesium/
+[Docker Widget]: https://img.shields.io/docker/pulls/caesiumcloud/caesium?style=plastic
