@@ -17,7 +17,7 @@ steps:
   - name: deps
     path: /go
   commands:
-  - go test -race -cover ./...
+  - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
   depends_on:
     - dependencies
 
@@ -30,6 +30,14 @@ steps:
   - go build
   depends_on:
     - dependencies
+
+- name: coverage
+  image: plugins/codecov
+  settings:
+    token:
+      from_secret: codecov_token
+  depends_on:
+    - unit test
 
 - name: containerize
   image: plugins/docker
