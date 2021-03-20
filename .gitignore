@@ -1,9 +1,14 @@
 # Binaries for programs and plugins
+caesium
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+
+# Database
+*.sqlite
+*.db
 
 # Test binary, built with `go test -c`
 *.test
