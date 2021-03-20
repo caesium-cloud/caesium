@@ -3,9 +3,9 @@ package api
 import (
 	"fmt"
 
-	"github.com/caesium-dev/caesium/api/gql"
-	"github.com/caesium-dev/caesium/api/rest/v1"
-	"github.com/caesium-dev/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/api/gql"
+	"github.com/caesium-cloud/caesium/api/rest/v1"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
 )

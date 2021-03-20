@@ -4,7 +4,7 @@ FROM golang:alpine AS builder
 RUN apk update 
 RUN apk add --no-cache git g++
 
-WORKDIR $GOPATH/src/github.com/caesium-dev/caesium
+WORKDIR $GOPATH/src/github.com/caesium-cloud/caesium
 COPY . .
 
 RUN go get -d -v

@@ -1,7 +1,7 @@
 package gql
 
 import (
-	"github.com/caesium-dev/caesium/api/gql/schema"
+	"github.com/caesium-cloud/caesium/api/gql/schema"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
 	"github.com/labstack/echo/v4"

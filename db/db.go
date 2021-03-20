@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caesium-dev/caesium/db/command"
+	"github.com/caesium-cloud/caesium/db/command"
 	"github.com/rqlite/go-sqlite3"
 )
 

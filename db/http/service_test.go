@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"testing"
 
-	sql "github.com/caesium-dev/caesium/db"
-	"github.com/caesium-dev/caesium/db/command"
-	"github.com/caesium-dev/caesium/db/store"
-	"github.com/caesium-dev/caesium/db/testdata/x509"
+	sql "github.com/caesium-cloud/caesium/db"
+	"github.com/caesium-cloud/caesium/db/command"
+	"github.com/caesium-cloud/caesium/db/store"
+	"github.com/caesium-cloud/caesium/db/testdata/x509"
 
 	"golang.org/x/net/http2"
 )

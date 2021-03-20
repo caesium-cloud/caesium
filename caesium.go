@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/caesium-dev/caesium/cmd"
-	"github.com/caesium-dev/caesium/pkg/env"
-	"github.com/caesium-dev/caesium/pkg/log"
+	"github.com/caesium-cloud/caesium/cmd"
+	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
 func main() {

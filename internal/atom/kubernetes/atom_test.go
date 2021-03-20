@@ -3,7 +3,7 @@ package kubernetes
 import (
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

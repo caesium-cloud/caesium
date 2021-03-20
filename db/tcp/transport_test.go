@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/caesium-dev/caesium/db/testdata/x509"
+	"github.com/caesium-cloud/caesium/db/testdata/x509"
 )
 
 func Test_NewTransport(t *testing.T) {

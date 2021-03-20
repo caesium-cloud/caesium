@@ -6,7 +6,7 @@ import (
 	"io/ioutil"
 	"time"
 
-	"github.com/caesium-dev/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/stretchr/testify/assert"
 )
 

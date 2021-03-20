@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	sql "github.com/caesium-dev/caesium/db"
-	"github.com/caesium-dev/caesium/db/command"
-	"github.com/caesium-dev/caesium/db/testdata/chinook"
+	sql "github.com/caesium-cloud/caesium/db"
+	"github.com/caesium-cloud/caesium/db/command"
+	"github.com/caesium-cloud/caesium/db/testdata/chinook"
 )
 
 func Test_OpenStoreSingleNode(t *testing.T) {

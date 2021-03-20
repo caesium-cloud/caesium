@@ -7,8 +7,8 @@ import (
 	"os/user"
 	"path/filepath"
 
-	"github.com/caesium-dev/caesium/internal/atom"
-	"github.com/caesium-dev/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"

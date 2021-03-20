@@ -100,7 +100,7 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string,
 var (
 	testAtomID        = "test_id"
 	testContainerName = "test_atom"
-	testImage         = "caesium.dev/caesium"
+	testImage         = "caesiumcloud/caesium"
 )
 
 func newContainer(id string, state *types.ContainerState) types.ContainerJSON {

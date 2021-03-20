@@ -100,7 +100,7 @@ func (m *mockKubernetesBackend) GetLogs(name string, opts *v1.PodLogOptions) *re
 var (
 	testAtomID  = "test_id"
 	testPodName = "test_atom"
-	testImage   = "caesium.dev/caesium"
+	testImage   = "caesiumcloud/caesium"
 )
 
 func newPod(name string, status v1.PodStatus, createdAt, deletedAt time.Time) *v1.Pod {
