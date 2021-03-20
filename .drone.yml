@@ -1,0 +1,49 @@
+kind: pipeline
+type: docker
+name: default
+
+steps:
+- name: dependencies
+  image: golang
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+  - go get -v -t -d ./...
+
+- name: unit test
+  image: golang
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+  - go test -race -cover ./...
+  depends_on:
+    - dependencies
+
+- name: build
+  image: golang
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+  - go build
+  depends_on:
+    - dependencies
+
+- name: containerize
+  image: plugins/docker
+  settings:
+    repo: caesiumcloud/caesium
+    auto_tag: true
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+  depends_on:
+    - build
+    - unit test
+
+volumes:
+- name: deps
+  temp: {}
