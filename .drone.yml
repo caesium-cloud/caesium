@@ -43,8 +43,8 @@ steps:
   image: plugins/docker
   settings:
     repo: caesiumcloud/caesium
+    tags: ${DRONE_COMMIT_SHA:0:7}
     dockerfile: build/Dockerfile
-    auto_tag: true
     username:
       from_secret: docker_username
     password:
