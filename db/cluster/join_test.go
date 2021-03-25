@@ -47,7 +47,7 @@ func Test_SingleJoinOK(t *testing.T) {
 	if got, exp := body["id"].(string), "id0"; got != exp {
 		t.Fatalf("wrong node ID supplied, exp %s, got %s", exp, got)
 	}
-	if got, exp := body["addr"].(string), "127.0.0.1:9090"; got != exp {
+	if got, exp := body["address"].(string), "127.0.0.1:9090"; got != exp {
 		t.Fatalf("wrong address supplied, exp %s, got %s", exp, got)
 	}
 	if got, exp := body["voter"].(bool), false; got != exp {
@@ -102,10 +102,10 @@ func Test_SingleJoinMetaOK(t *testing.T) {
 	if id, _ := body["id"]; id != "id0" {
 		t.Fatalf("node joined supplying wrong ID, exp %s, got %s", "id0", body["id"])
 	}
-	if addr, _ := body["addr"]; addr != nodeAddr {
-		t.Fatalf("node joined supplying wrong address, exp %s, got %s", nodeAddr, body["addr"])
+	if addr, _ := body["address"]; addr != nodeAddr {
+		t.Fatalf("node joined supplying wrong address, exp %s, got %s", nodeAddr, body["address"])
 	}
-	rxMd, _ := body["meta"].(map[string]interface{})
+	rxMd, _ := body["metadata"].(map[string]interface{})
 	if len(rxMd) != len(md) || rxMd["foo"] != "bar" {
 		t.Fatalf("node joined supplying wrong meta")
 	}

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	httpd "github.com/caesium-cloud/caesium/db/http"
+	"github.com/caesium-cloud/caesium/api/rest/service/private/cluster"
 )
 
 var (
@@ -71,7 +71,7 @@ func join(srcIP, joinAddr, id, addr string, voter bool, meta map[string]string, 
 	}
 
 	// Check for protocol scheme, and insert default if necessary.
-	fullAddr := httpd.NormalizeAddr(fmt.Sprintf("%s/join", joinAddr))
+	fullAddr := NormalizeAddr(fmt.Sprintf("%s/join", joinAddr))
 
 	// Create and configure the client to connect to the other node.
 	tr := &http.Transport{
@@ -84,11 +84,11 @@ func join(srcIP, joinAddr, id, addr string, voter bool, meta map[string]string, 
 	}
 
 	for {
-		b, err := json.Marshal(map[string]interface{}{
-			"id":    id,
-			"addr":  resv.String(),
-			"voter": voter,
-			"meta":  meta,
+		b, err := json.Marshal(cluster.JoinRequest{
+			ID:       id,
+			Address:  resv.String(),
+			Voter:    voter,
+			Metadata: meta,
 		})
 		if err != nil {
 			return "", err
@@ -126,10 +126,24 @@ func join(srcIP, joinAddr, id, addr string, voter bool, meta map[string]string, 
 			}
 
 			logger.Print("join via HTTP failed, trying via HTTPS")
-			fullAddr = httpd.EnsureHTTPS(fullAddr)
+			fullAddr = EnsureHTTPS(fullAddr)
 			continue
 		default:
 			return "", fmt.Errorf("failed to join, node returned: %s: (%s)", resp.Status, string(b))
 		}
 	}
+}
+
+func NormalizeAddr(addr string) string {
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		return fmt.Sprintf("http://%s", addr)
+	}
+	return addr
+}
+
+func EnsureHTTPS(addr string) string {
+	if !strings.HasPrefix(addr, "http://") && !strings.HasPrefix(addr, "https://") {
+		return fmt.Sprintf("https://%s", addr)
+	}
+	return strings.Replace(addr, "http://", "https://", 1)
 }

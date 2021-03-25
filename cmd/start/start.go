@@ -10,7 +10,6 @@ import (
 
 	"github.com/caesium-cloud/caesium/api"
 	"github.com/caesium-cloud/caesium/db/cluster"
-	"github.com/caesium-cloud/caesium/db/http"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/db/tcp"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -60,11 +59,12 @@ func clusterize() error {
 	}
 	dbConf := store.NewDBConfig(env.Variables().DSN, !env.Variables().OnDisk)
 
-	s := store.New(tn, &store.StoreConfig{
+	store.NewGlobal(tn, &store.StoreConfig{
 		DBConf: dbConf,
 		Dir:    dbPath,
 		ID:     idOrRaftAddr(),
 	})
+	s := store.GlobalStore()
 
 	// Set optional parameters on store.
 	s.SetRequestCompression(
@@ -164,10 +164,6 @@ func clusterize() error {
 		log.Fatal("failed to set store metadata: %s", err.Error())
 	}
 
-	// Start the HTTP API server.
-	if err := startHTTPService(s); err != nil {
-		log.Fatal("failed to start HTTP server: %s", err.Error())
-	}
 	log.Info("node is ready")
 
 	// Block until signalled.
@@ -208,11 +204,6 @@ func waitForConsensus(s *store.Store) error {
 		log.Info("not waiting for logs to be applied")
 	}
 	return nil
-}
-
-func startHTTPService(s *store.Store) error {
-	srv := http.New(env.Variables().HttpAddr, s, nil)
-	return srv.Start()
 }
 
 func idOrRaftAddr() string {

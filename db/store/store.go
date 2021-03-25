@@ -45,6 +45,9 @@ var (
 	// ErrInvalidBackupFormat is returned when the requested backup format
 	// is not valid.
 	ErrInvalidBackupFormat = errors.New("invalid backup format")
+
+	globalStore *Store
+	once        sync.Once
 )
 
 const (
@@ -187,6 +190,16 @@ func New(ln Listener, c *StoreConfig) *Store {
 		logger:        logger,
 		ApplyTimeout:  applyTimeout,
 	}
+}
+
+func NewGlobal(ln Listener, c *StoreConfig) {
+	once.Do(func() {
+		globalStore = New(ln, c)
+	})
+}
+
+func GlobalStore() *Store {
+	return globalStore
 }
 
 // Open opens the Store. If enableBootstrap is set, then this node becomes a
