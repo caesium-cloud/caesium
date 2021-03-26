@@ -9,27 +9,34 @@ import (
 
 	"github.com/dgraph-io/badger/v3"
 	"github.com/hashicorp/raft"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func testBadgerStore(t testing.TB) (*BadgerStore, string) {
-	path, err := ioutil.TempDir("", "raftbadger")
-	if err != nil {
-		t.Fatalf("err. %s", err)
-	}
-	os.RemoveAll(path)
+type BadgerTestSuite struct {
+	suite.Suite
+	path  string
+	store *BadgerStore
+}
 
-	// Successfully creates and returns a store
-	badgerOpts := badger.DefaultOptions(path).WithLogger(nil)
-	store, err := New(Options{
-		Path:          path,
+func (s *BadgerTestSuite) SetupTest() {
+	var err error
+	s.path, err = ioutil.TempDir("", "raftbadger")
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), os.RemoveAll(s.path))
+
+	badgerOpts := badger.DefaultOptions(s.path).WithLogger(nil)
+	s.store, err = New(Options{
+		Path:          s.path,
 		NoSync:        true,
 		BadgerOptions: &badgerOpts,
 	})
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), err)
+}
 
-	return store, path
+func (s *BadgerTestSuite) TeardownTest() {
+	assert.Nil(s.T(), s.store.Close())
+	assert.Nil(s.T(), os.RemoveAll(s.path))
 }
 
 func testRaftLog(idx uint64, data string) *raft.Log {
@@ -39,338 +46,169 @@ func testRaftLog(idx uint64, data string) *raft.Log {
 	}
 }
 
-func TestBadgerStore_Implements(t *testing.T) {
+func (s *BadgerTestSuite) TestImplements() {
 	var store interface{} = &BadgerStore{}
-	if _, ok := store.(raft.StableStore); !ok {
-		t.Fatalf("BadgerStore does not implement raft.StableStore")
-	}
-	if _, ok := store.(raft.LogStore); !ok {
-		t.Fatalf("BadgerStore does not implement raft.LogStore")
-	}
+
+	_, implements := store.(raft.StableStore)
+	assert.True(s.T(), implements)
+
+	_, implements = store.(raft.LogStore)
+	assert.True(s.T(), implements)
 }
 
-func TestBadgerOptionsReadOnly(t *testing.T) {
-	store, path := testBadgerStore(t)
-	// Create the log
+func (s *BadgerTestSuite) TestBadgerOptionsReadOnly() {
 	log := &raft.Log{
 		Data:  []byte("log1"),
 		Index: 1,
 	}
-	// Attempt to store the log
-	if err := store.StoreLog(log); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	store.Close()
+	assert.Nil(s.T(), s.store.StoreLog(log))
+	assert.Nil(s.T(), s.store.Close())
 
-	defaultOpts := badger.DefaultOptions(path).WithLogger(nil)
+	defaultOpts := badger.DefaultOptions(s.path).WithLogger(nil)
 	options := Options{
-		Path:          path,
+		Path:          s.path,
 		BadgerOptions: &defaultOpts,
 	}
 	options.BadgerOptions.ReadOnly = true
 	roStore, err := New(options)
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), err)
 	defer roStore.Close()
 
 	result := new(raft.Log)
-	if err := roStore.GetLog(1, result); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Ensure the log comes back to same
-	if !reflect.DeepEqual(log, result) {
-		t.Errorf("bad: %v", result)
-	}
-
-	// Attempt to store the log, should fail on a read-only store
-	err = roStore.StoreLog(log)
-	if err != badger.ErrReadOnlyTxn {
-		t.Errorf("expecting error %v, but got %v", badger.ErrReadOnlyTxn, err)
-	}
+	assert.Nil(s.T(), roStore.GetLog(1, result))
+	assert.True(s.T(), reflect.DeepEqual(log, result))
+	assert.Equal(s.T(), badger.ErrReadOnlyTxn, roStore.StoreLog(log))
 }
 
-func TestNewBadgerStore(t *testing.T) {
-	store, path := testBadgerStore(t)
+func (s *BadgerTestSuite) TestNewBadgerStore() {
+	assert.Equal(s.T(), s.path, s.store.path)
+	_, err := os.Stat(s.path)
+	assert.Nil(s.T(), err)
 
-	// Ensure the directory was created
-	if store.path != path {
-		t.Fatalf("unexpected file path %q", store.path)
-	}
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), s.store.Close())
 
-	// Close the store so we can open again
-	if err := store.Close(); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Ensure our files were created
-	opts := badger.DefaultOptions(path).WithLogger(nil)
+	opts := badger.DefaultOptions(s.path).WithLogger(nil)
 	db, err := badger.Open(opts)
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	db.Close()
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), db.Close())
 }
 
-func TestBadgerStore_FirstIndex(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
+func (s *BadgerTestSuite) TestFirstIndex() {
+	idx, err := s.store.FirstIndex()
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), idx)
 
-	// Should get 0 index on empty log
-	idx, err := store.FirstIndex()
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if idx != 0 {
-		t.Fatalf("bad index: %v", idx)
-	}
-
-	// Set a mock raft log
 	logs := []*raft.Log{
 		testRaftLog(1, "log1"),
 		testRaftLog(2, "log2"),
 		testRaftLog(3, "log3"),
 	}
-	if err := store.StoreLogs(logs); err != nil {
-		t.Fatalf("bad: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
-	// Fetch the first Raft index
-	idx, err = store.FirstIndex()
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if idx != 1 {
-		t.Fatalf("bad index: %d", idx)
-	}
+	idx, err = s.store.FirstIndex()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(1), idx)
 }
 
-func TestBadgerStore_LastIndex(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
+func (s *BadgerTestSuite) TestLastIndex() {
+	idx, err := s.store.LastIndex()
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), idx)
 
-	// Should get 0 index on empty log
-	idx, err := store.LastIndex()
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if idx != 0 {
-		t.Fatalf("bad index: %v", idx)
-	}
-
-	// Set a mock raft log
 	logs := []*raft.Log{
 		testRaftLog(1, "log1"),
 		testRaftLog(2, "log2"),
 		testRaftLog(3, "log3"),
 	}
-	if err := store.StoreLogs(logs); err != nil {
-		t.Fatalf("bad: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
-	// Fetch the last Raft index
-	idx, err = store.LastIndex()
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if idx != 3 {
-		t.Fatalf("bad index: %d", idx)
-	}
+	idx, err = s.store.LastIndex()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(3), idx)
 }
 
-func TestBadgerStore_GetLog(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
+func (s *BadgerTestSuite) TestGetLog() {
 	log := new(raft.Log)
 
-	// Should return an error on non-existent log
-	if err := store.GetLog(1, log); err != raft.ErrLogNotFound {
-		t.Fatalf("expected raft log not found error, got: %v", err)
-	}
+	assert.Equal(s.T(), raft.ErrLogNotFound, s.store.GetLog(1, log))
 
-	// Set a mock raft log
 	logs := []*raft.Log{
 		testRaftLog(1, "log1"),
 		testRaftLog(2, "log2"),
 		testRaftLog(3, "log3"),
 	}
-	if err := store.StoreLogs(logs); err != nil {
-		t.Fatalf("bad: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
-	// Should return the proper log
-	if err := store.GetLog(2, log); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if !reflect.DeepEqual(log, logs[1]) {
-		t.Fatalf("bad: %#v", log)
-	}
+	assert.Nil(s.T(), s.store.GetLog(2, log))
+	assert.True(s.T(), reflect.DeepEqual(log, logs[1]))
 }
 
-func TestBadgerStore_SetLog(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
-	// Create the log
+func (s *BadgerTestSuite) TestSetLog() {
 	log := &raft.Log{
 		Data:  []byte("log1"),
 		Index: 1,
 	}
 
-	// Attempt to store the log
-	if err := store.StoreLog(log); err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLog(log))
 
-	// Retrieve the log again
 	result := new(raft.Log)
-	if err := store.GetLog(1, result); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Ensure the log comes back the same
-	if !reflect.DeepEqual(log, result) {
-		t.Fatalf("bad: %v", result)
-	}
+	assert.Nil(s.T(), s.store.GetLog(1, result))
+	assert.True(s.T(), reflect.DeepEqual(log, result))
 }
 
-func TestBadgerStore_SetLogs(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
-	// Create a set of logs
+func (s *BadgerTestSuite) TestSetLogs() {
 	logs := []*raft.Log{
 		testRaftLog(1, "log1"),
 		testRaftLog(2, "log2"),
 	}
 
-	// Attempt to store the logs
-	if err := store.StoreLogs(logs); err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
-	// Ensure we stored them all
 	result1, result2 := new(raft.Log), new(raft.Log)
-	if err := store.GetLog(1, result1); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if !reflect.DeepEqual(logs[0], result1) {
-		t.Fatalf("bad: %#v", result1)
-	}
-	if err := store.GetLog(2, result2); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if !reflect.DeepEqual(logs[1], result2) {
-		t.Fatalf("bad: %#v", result2)
-	}
+	assert.Nil(s.T(), s.store.GetLog(1, result1))
+	assert.True(s.T(), reflect.DeepEqual(logs[0], result1))
+	assert.Nil(s.T(), s.store.GetLog(2, result2))
+	assert.True(s.T(), reflect.DeepEqual(logs[1], result2))
 }
 
-func TestBadgerStore_DeleteRange(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
-	// Create a set of logs
+func (s *BadgerTestSuite) TestDeleteRange() {
 	log1 := testRaftLog(1, "log1")
 	log2 := testRaftLog(2, "log2")
 	log3 := testRaftLog(3, "log3")
 	logs := []*raft.Log{log1, log2, log3}
 
-	// Attempt to store the logs
-	if err := store.StoreLogs(logs); err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
-	// Attempt to delete a range of logs
-	if err := store.DeleteRange(1, 2); err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	assert.Nil(s.T(), s.store.DeleteRange(1, 2))
 
-	// Ensure the logs were deleted
-	if err := store.GetLog(1, new(raft.Log)); err != raft.ErrLogNotFound {
-		t.Fatalf("should have deleted log1")
-	}
-	if err := store.GetLog(2, new(raft.Log)); err != raft.ErrLogNotFound {
-		t.Fatalf("should have deleted log2")
-	}
+	assert.Equal(s.T(), raft.ErrLogNotFound, s.store.GetLog(1, new(raft.Log)))
+	assert.Equal(s.T(), raft.ErrLogNotFound, s.store.GetLog(2, new(raft.Log)))
 }
 
-func TestBadgerStore_Set_Get(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
-	// Returns error on non-existent key
-	if _, err := store.Get([]byte("bad")); err != ErrKeyNotFound {
-		t.Fatalf("expected not found error, got: %q", err)
-	}
+func (s *BadgerTestSuite) TestSetGet() {
+	_, err := s.store.Get([]byte("bad"))
+	assert.Equal(s.T(), ErrKeyNotFound, err)
 
 	k, v := []byte("hello"), []byte("world")
+	assert.Nil(s.T(), s.store.Set(k, v))
 
-	// Try to set a k/v pair
-	if err := store.Set(k, v); err != nil {
-		t.Fatalf("err: %s", err)
-	}
-
-	// Try to read it back
-	val, err := store.Get(k)
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if !bytes.Equal(val, v) {
-		t.Fatalf("bad: %v", val)
-	}
+	val, err := s.store.Get(k)
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), bytes.Equal(val, v))
 }
 
-func TestBadgerStore_SetUint64_GetUint64(t *testing.T) {
-	store, path := testBadgerStore(t)
-	defer func() {
-		store.Close()
-		os.RemoveAll(path)
-	}()
-
-	// Returns error on non-existent key
-	if _, err := store.GetUint64([]byte("bad")); err != ErrKeyNotFound {
-		t.Fatalf("expected not found error, got: %q", err)
-	}
+func (s *BadgerTestSuite) TestSetGetUint64() {
+	_, err := s.store.GetUint64([]byte("bad"))
+	assert.Equal(s.T(), ErrKeyNotFound, err)
 
 	k, v := []byte("abc"), uint64(123)
+	assert.Nil(s.T(), s.store.SetUint64(k, v))
 
-	// Attempt to set the k/v pair
-	if err := store.SetUint64(k, v); err != nil {
-		t.Fatalf("err: %s", err)
-	}
+	val, err := s.store.GetUint64(k)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), v, val)
+}
 
-	// Read back the value
-	val, err := store.GetUint64(k)
-	if err != nil {
-		t.Fatalf("err: %s", err)
-	}
-	if val != v {
-		t.Fatalf("bad: %v", val)
-	}
+func TestBadgerTestSuite(t *testing.T) {
+	suite.Run(t, new(BadgerTestSuite))
 }

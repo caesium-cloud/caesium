@@ -6,28 +6,22 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/db/testdata/x509"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func Test_NewTransport(t *testing.T) {
-	if NewTransport() == nil {
-		t.Fatal("failed to create new Transport")
-	}
+type TCPTestSuite struct {
+	suite.Suite
 }
 
-func Test_TransportOpenClose(t *testing.T) {
+func (s *TCPTestSuite) TestTransportOpenClose() {
 	tn := NewTransport()
-	if err := tn.Open("localhost:0"); err != nil {
-		t.Fatalf("failed to open transport: %s", err.Error())
-	}
-	if tn.Addr().String() == "localhost:0" {
-		t.Fatalf("transport address set incorrectly, got: %s", tn.Addr().String())
-	}
-	if err := tn.Close(); err != nil {
-		t.Fatalf("failed to close transport: %s", err.Error())
-	}
+	assert.Nil(s.T(), tn.Open("localhost:0"))
+	assert.Regexp(s.T(), "127.0.0.1:[0-9]+", tn.Addr().String())
+	assert.Nil(s.T(), tn.Close())
 }
 
-func Test_TransportDial(t *testing.T) {
+func (s *TCPTestSuite) TestTransportDial() {
 	tn1 := NewTransport()
 	defer tn1.Close()
 	tn1.Open("localhost:0")
@@ -36,36 +30,21 @@ func Test_TransportDial(t *testing.T) {
 	tn2 := NewTransport()
 	defer tn2.Close()
 	_, err := tn2.Dial(tn1.Addr().String(), time.Second)
-	if err != nil {
-		t.Fatalf("failed to connect to first transport: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 }
 
-func Test_NewTLSTransport(t *testing.T) {
-	c := x509.CertFile("")
-	defer os.Remove(c)
-	k := x509.KeyFile("")
-	defer os.Remove(k)
-
-	if NewTLSTransport(c, k, true) == nil {
-		t.Fatal("failed to create new TLS Transport")
-	}
-}
-
-func Test_TLSTransportOpenClose(t *testing.T) {
+func (s *TCPTestSuite) TestTLSTransportOpenClose() {
 	c := x509.CertFile("")
 	defer os.Remove(c)
 	k := x509.KeyFile("")
 	defer os.Remove(k)
 
 	tn := NewTLSTransport(c, k, true)
-	if err := tn.Open("localhost:0"); err != nil {
-		t.Fatalf("failed to open TLS transport: %s", err.Error())
-	}
-	if tn.Addr().String() == "localhost:0" {
-		t.Fatalf("TLS transport address set incorrectly, got: %s", tn.Addr().String())
-	}
-	if err := tn.Close(); err != nil {
-		t.Fatalf("failed to close TLS transport: %s", err.Error())
-	}
+	assert.Nil(s.T(), tn.Open("localhost:0"))
+	assert.Regexp(s.T(), "127.0.0.1:[0-9]+", tn.Addr().String())
+	assert.Nil(s.T(), tn.Close())
+}
+
+func TestTCPTestSuite(t *testing.T) {
+	suite.Run(t, new(TCPTestSuite))
 }

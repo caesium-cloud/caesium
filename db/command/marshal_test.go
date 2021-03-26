@@ -4,16 +4,15 @@ import (
 	"testing"
 
 	"github.com/golang/protobuf/proto"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func Test_NewRequestMarshaler(t *testing.T) {
-	r := NewRequestMarshaler()
-	if r == nil {
-		t.Fatal("failed to create Request marshaler")
-	}
+type CommandTestSuite struct {
+	suite.Suite
 }
 
-func Test_MarshalUncompressed(t *testing.T) {
+func (s *CommandTestSuite) TestUncompressed() {
 	rm := NewRequestMarshaler()
 	r := &QueryRequest{
 		Request: &Request{
@@ -28,12 +27,8 @@ func Test_MarshalUncompressed(t *testing.T) {
 	}
 
 	b, comp, err := rm.Marshal(r)
-	if err != nil {
-		t.Fatalf("failed to marshal QueryRequest: %s", err)
-	}
-	if comp {
-		t.Fatal("Marshaled QueryRequest incorrectly compressed")
-	}
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), comp)
 
 	c := &Command{
 		Type:       Command_COMMAND_TYPE_QUERY,
@@ -42,40 +37,22 @@ func Test_MarshalUncompressed(t *testing.T) {
 	}
 
 	b, err = Marshal(c)
-	if err != nil {
-		t.Fatalf("failed to marshal Command: %s", err)
-	}
+	assert.Nil(s.T(), err)
 
 	var nc Command
-	if err := Unmarshal(b, &nc); err != nil {
-		t.Fatalf("failed to unmarshal Command: %s", err)
-	}
-	if nc.Type != Command_COMMAND_TYPE_QUERY {
-		t.Fatalf("unmarshaled command has wrong type: %s", nc.Type)
-	}
-	if nc.Compressed {
-		t.Fatal("Unmarshaled QueryRequest incorrectly marked as compressed")
-	}
+	assert.Nil(s.T(), Unmarshal(b, &nc))
+	assert.Equal(s.T(), Command_COMMAND_TYPE_QUERY, nc.GetType())
+	assert.False(s.T(), nc.GetCompressed())
 
 	var nr QueryRequest
-	if err := UnmarshalSubCommand(&nc, &nr); err != nil {
-		t.Fatalf("failed to unmarshal sub command: %s", err)
-	}
-	if nr.Timings != r.Timings {
-		t.Fatalf("unmarshaled timings incorrect")
-	}
-	if nr.Freshness != r.Freshness {
-		t.Fatalf("unmarshaled Freshness incorrect")
-	}
-	if len(nr.Request.Statements) != 1 {
-		t.Fatalf("unmarshaled number of statements incorrect")
-	}
-	if nr.Request.Statements[0].Sql != `INSERT INTO "names" VALUES(1,'bob','123-45-678')` {
-		t.Fatalf("unmarshaled SQL incorrect")
-	}
+	assert.Nil(s.T(), UnmarshalSubCommand(&nc, &nr))
+	assert.Equal(s.T(), r.Timings, nr.GetTimings())
+	assert.Equal(s.T(), r.Freshness, nr.GetFreshness())
+	assert.Len(s.T(), nr.Request.Statements, 1)
+	assert.Equal(s.T(), `INSERT INTO "names" VALUES(1,'bob','123-45-678')`, nr.Request.Statements[0].GetSql())
 }
 
-func Test_MarshalCompressedBatch(t *testing.T) {
+func (s *CommandTestSuite) TestCompressedBatch() {
 	rm := NewRequestMarshaler()
 	rm.BatchThreshold = 1
 	rm.ForceCompression = true
@@ -93,12 +70,8 @@ func Test_MarshalCompressedBatch(t *testing.T) {
 	}
 
 	b, comp, err := rm.Marshal(r)
-	if err != nil {
-		t.Fatalf("failed to marshal QueryRequest: %s", err)
-	}
-	if !comp {
-		t.Fatal("Marshaled QueryRequest wasn't compressed")
-	}
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), comp)
 
 	c := &Command{
 		Type:       Command_COMMAND_TYPE_QUERY,
@@ -107,31 +80,19 @@ func Test_MarshalCompressedBatch(t *testing.T) {
 	}
 
 	b, err = Marshal(c)
-	if err != nil {
-		t.Fatalf("failed to marshal Command: %s", err)
-	}
+	assert.Nil(s.T(), err)
 
 	var nc Command
-	if err := Unmarshal(b, &nc); err != nil {
-		t.Fatalf("failed to unmarshal Command: %s", err)
-	}
-	if nc.Type != Command_COMMAND_TYPE_QUERY {
-		t.Fatalf("unmarshaled command has wrong type: %s", nc.Type)
-	}
-	if !nc.Compressed {
-		t.Fatal("Unmarshaled QueryRequest incorrectly marked as uncompressed")
-	}
+	assert.Nil(s.T(), Unmarshal(b, &nc))
+	assert.Equal(s.T(), Command_COMMAND_TYPE_QUERY, nc.GetType())
+	assert.True(s.T(), nc.GetCompressed())
 
 	var nr QueryRequest
-	if err := UnmarshalSubCommand(&nc, &nr); err != nil {
-		t.Fatalf("failed to unmarshal sub command: %s", err)
-	}
-	if !proto.Equal(&nr, r) {
-		t.Fatal("Original and unmarshaled Query Request are not equal")
-	}
+	assert.Nil(s.T(), UnmarshalSubCommand(&nc, &nr))
+	assert.True(s.T(), proto.Equal(&nr, r))
 }
 
-func Test_MarshalCompressedSize(t *testing.T) {
+func (s *CommandTestSuite) TestCompressedSize() {
 	rm := NewRequestMarshaler()
 	rm.SizeThreshold = 1
 	rm.ForceCompression = true
@@ -149,12 +110,8 @@ func Test_MarshalCompressedSize(t *testing.T) {
 	}
 
 	b, comp, err := rm.Marshal(r)
-	if err != nil {
-		t.Fatalf("failed to marshal QueryRequest: %s", err)
-	}
-	if !comp {
-		t.Fatal("Marshaled QueryRequest wasn't compressed")
-	}
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), comp)
 
 	c := &Command{
 		Type:       Command_COMMAND_TYPE_QUERY,
@@ -163,31 +120,19 @@ func Test_MarshalCompressedSize(t *testing.T) {
 	}
 
 	b, err = Marshal(c)
-	if err != nil {
-		t.Fatalf("failed to marshal Command: %s", err)
-	}
+	assert.Nil(s.T(), err)
 
 	var nc Command
-	if err := Unmarshal(b, &nc); err != nil {
-		t.Fatalf("failed to unmarshal Command: %s", err)
-	}
-	if nc.Type != Command_COMMAND_TYPE_QUERY {
-		t.Fatalf("unmarshaled command has wrong type: %s", nc.Type)
-	}
-	if !nc.Compressed {
-		t.Fatal("Unmarshaled QueryRequest incorrectly marked as uncompressed")
-	}
+	assert.Nil(s.T(), Unmarshal(b, &nc))
+	assert.Equal(s.T(), Command_COMMAND_TYPE_QUERY, nc.GetType())
+	assert.True(s.T(), nc.GetCompressed())
 
 	var nr QueryRequest
-	if err := UnmarshalSubCommand(&nc, &nr); err != nil {
-		t.Fatalf("failed to unmarshal sub command: %s", err)
-	}
-	if !proto.Equal(&nr, r) {
-		t.Fatal("Original and unmarshaled Query Request are not equal")
-	}
+	assert.Nil(s.T(), UnmarshalSubCommand(&nc, &nr))
+	assert.True(s.T(), proto.Equal(&nr, r))
 }
 
-func Test_MarshalWontCompressBatch(t *testing.T) {
+func (s *CommandTestSuite) TestUncompressedBatch() {
 	rm := NewRequestMarshaler()
 	rm.BatchThreshold = 1
 
@@ -204,15 +149,11 @@ func Test_MarshalWontCompressBatch(t *testing.T) {
 	}
 
 	_, comp, err := rm.Marshal(r)
-	if err != nil {
-		t.Fatalf("failed to marshal QueryRequest: %s", err)
-	}
-	if comp {
-		t.Fatal("Marshaled QueryRequest was compressed")
-	}
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), comp)
 }
 
-func Test_MarshalWontCompressSize(t *testing.T) {
+func (s *CommandTestSuite) TestUncompressedSize() {
 	rm := NewRequestMarshaler()
 	rm.SizeThreshold = 1
 
@@ -229,10 +170,10 @@ func Test_MarshalWontCompressSize(t *testing.T) {
 	}
 
 	_, comp, err := rm.Marshal(r)
-	if err != nil {
-		t.Fatalf("failed to marshal QueryRequest: %s", err)
-	}
-	if comp {
-		t.Fatal("Marshaled QueryRequest was compressed")
-	}
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), comp)
+}
+
+func TestCommandTestSuite(t *testing.T) {
+	suite.Run(t, new(CommandTestSuite))
 }

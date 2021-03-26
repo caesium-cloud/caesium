@@ -69,11 +69,6 @@ func (x QueryRequest_Level) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use QueryRequest_Level.Descriptor instead.
-func (QueryRequest_Level) EnumDescriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{3, 0}
-}
-
 type Command_Type int32
 
 const (
@@ -127,11 +122,6 @@ func (x Command_Type) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use Command_Type.Descriptor instead.
-func (Command_Type) EnumDescriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{8, 0}
-}
-
 type Parameter struct {
 	state         protoimpl.MessageState
 	sizeCache     protoimpl.SizeCache
@@ -171,11 +161,6 @@ func (x *Parameter) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Parameter.ProtoReflect.Descriptor instead.
-func (*Parameter) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{0}
 }
 
 func (m *Parameter) GetValue() isParameter_Value {
@@ -290,11 +275,6 @@ func (x *Statement) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Statement.ProtoReflect.Descriptor instead.
-func (*Statement) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{1}
-}
-
 func (x *Statement) GetSql() string {
 	if x != nil {
 		return x.Sql
@@ -343,11 +323,6 @@ func (x *Request) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Request.ProtoReflect.Descriptor instead.
-func (*Request) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *Request) GetTransaction() bool {
@@ -400,11 +375,6 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
-func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *QueryRequest) GetRequest() *Request {
@@ -471,11 +441,6 @@ func (x *ExecuteRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ExecuteRequest.ProtoReflect.Descriptor instead.
-func (*ExecuteRequest) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{4}
-}
-
 func (x *ExecuteRequest) GetRequest() *Request {
 	if x != nil {
 		return x.Request
@@ -524,11 +489,6 @@ func (x *MetadataSet) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use MetadataSet.ProtoReflect.Descriptor instead.
-func (*MetadataSet) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *MetadataSet) GetRaftId() string {
@@ -580,11 +540,6 @@ func (x *MetadataDelete) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use MetadataDelete.ProtoReflect.Descriptor instead.
-func (*MetadataDelete) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{6}
-}
-
 func (x *MetadataDelete) GetRaftId() string {
 	if x != nil {
 		return x.RaftId
@@ -625,11 +580,6 @@ func (x *Noop) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Noop.ProtoReflect.Descriptor instead.
-func (*Noop) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Noop) GetId() string {
@@ -674,11 +624,6 @@ func (x *Command) ProtoReflect() protoreflect.Message {
 		return ms
 	}
 	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Command.ProtoReflect.Descriptor instead.
-func (*Command) Descriptor() ([]byte, []int) {
-	return file_command_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Command) GetType() Command_Type {
@@ -788,13 +733,6 @@ var (
 	file_command_proto_rawDescOnce sync.Once
 	file_command_proto_rawDescData = file_command_proto_rawDesc
 )
-
-func file_command_proto_rawDescGZIP() []byte {
-	file_command_proto_rawDescOnce.Do(func() {
-		file_command_proto_rawDescData = protoimpl.X.CompressGZIP(file_command_proto_rawDescData)
-	})
-	return file_command_proto_rawDescData
-}
 
 var file_command_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
 var file_command_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
