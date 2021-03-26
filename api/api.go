@@ -4,7 +4,7 @@ import (
 	"fmt"
 
 	"github.com/caesium-cloud/caesium/api/gql"
-	"github.com/caesium-cloud/caesium/api/rest/v1"
+	"github.com/caesium-cloud/caesium/api/rest/bind"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
@@ -23,7 +23,7 @@ func Start() error {
 	prometheus.NewPrometheus("caesium", nil).Use(e)
 
 	// REST
-	rest.Bind(e.Group("/v1"))
+	bind.All(e.Group("/v1"))
 
 	// GraphQL
 	e.GET("/gql", gql.Handler())
