@@ -2,9 +2,10 @@ package tcp
 
 import (
 	"crypto/tls"
-	"fmt"
 	"net"
 	"time"
+
+	"github.com/pkg/errors"
 )
 
 // Transport is the network layer for internode communications.
@@ -69,7 +70,6 @@ func (t *Transport) Dial(addr string, timeout time.Duration) (net.Conn, error) {
 		conf := &tls.Config{
 			InsecureSkipVerify: t.skipVerify,
 		}
-		fmt.Println("doing a TLS dial")
 		conn, err = tls.DialWithDialer(dialer, "tcp", addr, conf)
 	} else {
 		conn, err = dialer.Dial("tcp", addr)
@@ -81,10 +81,7 @@ func (t *Transport) Dial(addr string, timeout time.Duration) (net.Conn, error) {
 // Accept waits for the next connection.
 func (t *Transport) Accept() (net.Conn, error) {
 	c, err := t.ln.Accept()
-	if err != nil {
-		fmt.Println("error accepting: ", err.Error())
-	}
-	return c, err
+	return c, errors.Wrap(err, "error accepting")
 }
 
 // Close closes the transport
@@ -103,11 +100,10 @@ func (t *Transport) Addr() net.Addr {
 // createTLSConfig returns a TLS config from the given cert and key.
 func createTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	var err error
-	config := &tls.Config{}
-	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
+	cfg := &tls.Config{Certificates: make([]tls.Certificate, 1)}
+	cfg.Certificates[0], err = tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
 		return nil, err
 	}
-	return config, nil
+	return cfg, nil
 }

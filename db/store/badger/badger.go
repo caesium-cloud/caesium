@@ -100,10 +100,11 @@ func New(options Options) (*BadgerStore, error) {
 
 	// Start GC routine
 	if options.ValueLogGC {
-
-		var gcInterval time.Duration
-		var mandatoryGCInterval time.Duration
-		var threshold int64
+		var (
+			gcInterval          time.Duration
+			mandatoryGCInterval time.Duration
+			threshold           int64
+		)
 
 		if gcInterval = 1 * time.Minute; options.GCInterval != 0 {
 			gcInterval = options.GCInterval

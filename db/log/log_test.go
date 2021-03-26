@@ -7,230 +7,134 @@ import (
 
 	"github.com/caesium-cloud/caesium/db/store/badger"
 	"github.com/hashicorp/raft"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func Test_LogNewEmpty(t *testing.T) {
-	path := mustTmpDir()
-	defer os.Remove(path)
-
-	l, err := NewLog(path)
-	if err != nil {
-		t.Fatalf("failed to create log: %s", err)
-	}
-	fi, err := l.FirstIndex()
-	if err != nil {
-		t.Fatalf("failed to get first index: %s", err)
-	}
-	if fi != 0 {
-		t.Fatalf("got non-zero value for first index of empty log: %d", fi)
-	}
-
-	li, err := l.LastIndex()
-	if err != nil {
-		t.Fatalf("failed to get last index: %s", err)
-	}
-	if li != 0 {
-		t.Fatalf("got non-zero value for last index of empty log: %d", li)
-	}
-
-	lci, err := l.LastCommandIndex()
-	if err != nil {
-		t.Fatalf("failed to get last command index: %s", err)
-	}
-	if lci != 0 {
-		t.Fatalf("got wrong value for last command index of not empty log: %d", lci)
-	}
-
+type LogTestSuite struct {
+	suite.Suite
+	path string
 }
 
-func Test_LogNewExistNotEmpty(t *testing.T) {
-	path := mustTmpDir()
-	defer os.Remove(path)
+func (s *LogTestSuite) SetupTest() {
+	var err error
+	s.path, err = ioutil.TempDir("", "rqlite-db-test")
+	assert.Nil(s.T(), err)
+}
 
-	// Write some entries directory to the BoltDB Raft store.
-	bs, err := badger.NewBadgerStore(path)
-	if err != nil {
-		t.Fatalf("failed to create badger store: %s", err)
-	}
-	for i := 4; i > 0; i-- {
-		if err := bs.StoreLog(&raft.Log{
-			Index: uint64(i),
-		}); err != nil {
-			t.Fatalf("failed to write entry to raft log: %s", err)
-		}
-	}
-	if err := bs.Close(); err != nil {
-		t.Fatalf("failed to close badger db: %s", err)
-	}
+func (s *LogTestSuite) TeardownTest() {
+	assert.Nil(s.T(), os.Remove(s.path))
+}
 
-	l, err := NewLog(path)
-	if err != nil {
-		t.Fatalf("failed to create new log: %s", err)
-	}
+func (s *LogTestSuite) TestNewEmpty() {
+	l, err := NewLog(s.path)
+	assert.Nil(s.T(), err)
 
 	fi, err := l.FirstIndex()
-	if err != nil {
-		t.Fatalf("failed to get first index: %s", err)
-	}
-	if fi != 1 {
-		t.Fatalf("got wrong value for first index of empty log: %d", fi)
-	}
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), fi)
 
 	li, err := l.LastIndex()
-	if err != nil {
-		t.Fatalf("failed to get last index: %s", err)
-	}
-	if li != 4 {
-		t.Fatalf("got wrong value for last index of not empty log: %d", li)
-	}
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), li)
 
 	lci, err := l.LastCommandIndex()
-	if err != nil {
-		t.Fatalf("failed to get last command index: %s", err)
-	}
-	if lci != 4 {
-		t.Fatalf("got wrong value for last command index of not empty log: %d", lci)
-	}
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), lci)
+}
 
-	if err := l.Close(); err != nil {
-		t.Fatalf("failed to close log: %s", err)
+func (s *LogTestSuite) TestNewExistNotEmpty() {
+	bs, err := badger.NewBadgerStore(s.path)
+	assert.Nil(s.T(), err)
+	for i := 4; i > 0; i-- {
+		assert.Nil(s.T(), bs.StoreLog(&raft.Log{Index: uint64(i)}))
 	}
+	assert.Nil(s.T(), bs.Close())
+
+	l, err := NewLog(s.path)
+	assert.Nil(s.T(), err)
+
+	fi, err := l.FirstIndex()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(1), fi)
+
+	li, err := l.LastIndex()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(4), li)
+
+	lci, err := l.LastCommandIndex()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(4), lci)
+
+	assert.Nil(s.T(), l.Close())
 
 	// Delete an entry, recheck index functionality.
-	bs, err = badger.NewBadgerStore(path)
-	if err != nil {
-		t.Fatalf("failed to re-open badger store: %s", err)
-	}
-	if err := bs.DeleteRange(1, 1); err != nil {
-		t.Fatalf("failed to delete range: %s", err)
-	}
-	if err := bs.Close(); err != nil {
-		t.Fatalf("failed to close badger db: %s", err)
-	}
+	bs, err = badger.NewBadgerStore(s.path)
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), bs.DeleteRange(1, 1))
+	assert.Nil(s.T(), bs.Close())
 
-	l, err = NewLog(path)
-	if err != nil {
-		t.Fatalf("failed to create new log: %s", err)
-	}
+	l, err = NewLog(s.path)
+	assert.Nil(s.T(), err)
 
 	fi, err = l.FirstIndex()
-	if err != nil {
-		t.Fatalf("failed to get first index: %s", err)
-	}
-	if fi != 2 {
-		t.Fatalf("got wrong value for first index of empty log: %d", fi)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(2), fi)
 
 	li, err = l.LastIndex()
-	if err != nil {
-		t.Fatalf("failed to get last index: %s", err)
-	}
-	if li != 4 {
-		t.Fatalf("got wrong value for last index of empty log: %d", li)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(4), li)
 
 	fi, li, err = l.Indexes()
-	if err != nil {
-		t.Fatalf("failed to get indexes: %s", err)
-	}
-	if fi != 2 {
-		t.Fatalf("got wrong value for first index of empty log: %d", fi)
-	}
-	if li != 4 {
-		t.Fatalf("got wrong value for last index of empty log: %d", li)
-	}
-
-	if err := l.Close(); err != nil {
-		t.Fatalf("failed to close log: %s", err)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(2), fi)
+	assert.Equal(s.T(), uint64(4), li)
+	assert.Nil(s.T(), l.Close())
 }
 
-func Test_LogLastCommandIndexNotExist(t *testing.T) {
-	path := mustTmpDir()
-	defer os.Remove(path)
-
-	// Write some entries directory to the BoltDB Raft store.
-	bs, err := badger.NewBadgerStore(path)
-	if err != nil {
-		t.Fatalf("failed to create badger store: %s", err)
-	}
+func (s *LogTestSuite) TestLastCommandIndexNotExist() {
+	bs, err := badger.NewBadgerStore(s.path)
+	assert.Nil(s.T(), err)
 	for i := 4; i > 0; i-- {
-		if err := bs.StoreLog(&raft.Log{
-			Index: uint64(i),
-			Type:  raft.LogNoop,
-		}); err != nil {
-			t.Fatalf("failed to write entry to raft log: %s", err)
-		}
+		assert.Nil(s.T(), bs.StoreLog(
+			&raft.Log{
+				Index: uint64(i),
+				Type:  raft.LogNoop,
+			},
+		))
 	}
-	if err := bs.Close(); err != nil {
-		t.Fatalf("failed to close badger db: %s", err)
-	}
+	assert.Nil(s.T(), bs.Close())
 
-	l, err := NewLog(path)
-	if err != nil {
-		t.Fatalf("failed to create new log: %s", err)
-	}
+	l, err := NewLog(s.path)
+	assert.Nil(s.T(), err)
 
 	fi, err := l.FirstIndex()
-	if err != nil {
-		t.Fatalf("failed to get first index: %s", err)
-	}
-	if fi != 1 {
-		t.Fatalf("got wrong value for first index of empty log: %d", fi)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(1), fi)
 
 	li, err := l.LastIndex()
-	if err != nil {
-		t.Fatalf("failed to get last index: %s", err)
-	}
-	if li != 4 {
-		t.Fatalf("got wrong for last index of not empty log: %d", li)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), uint64(4), li)
 
 	lci, err := l.LastCommandIndex()
-	if err != nil {
-		t.Fatalf("failed to get last command index: %s", err)
-	}
-	if lci != 0 {
-		t.Fatalf("got wrong value for last command index of not empty log: %d", lci)
-	}
-
-	if err := l.Close(); err != nil {
-		t.Fatalf("failed to close log: %s", err)
-	}
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), lci)
+	assert.Nil(s.T(), l.Close())
 
 	// Delete first log.
-	bs, err = badger.NewBadgerStore(path)
-	if err != nil {
-		t.Fatalf("failed to re-open badger store: %s", err)
-	}
-	if err := bs.DeleteRange(1, 1); err != nil {
-		t.Fatalf("failed to delete range: %s", err)
-	}
-	if err := bs.Close(); err != nil {
-		t.Fatalf("failed to close badger db: %s", err)
-	}
+	bs, err = badger.NewBadgerStore(s.path)
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), bs.DeleteRange(1, 1))
+	assert.Nil(s.T(), bs.Close())
 
-	l, err = NewLog(path)
-	if err != nil {
-		t.Fatalf("failed to create new log: %s", err)
-	}
+	l, err = NewLog(s.path)
+	assert.Nil(s.T(), err)
 
 	lci, err = l.LastCommandIndex()
-	if err != nil {
-		t.Fatalf("failed to get last command index: %s", err)
-	}
-	if lci != 0 {
-		t.Fatalf("got wrong value for last command index of not empty log: %d", lci)
-	}
+	assert.Nil(s.T(), err)
+	assert.Zero(s.T(), lci)
 }
 
-// mustTmpDir returns a path to a temporary file in directory dir. It is up to the
-// caller to remove the file once it is no longer needed.
-func mustTmpDir() string {
-	tmpDir, err := ioutil.TempDir("", "rqlite-db-test")
-	if err != nil {
-		panic(err.Error())
-	}
-	return tmpDir
+func TestLogTestSuite(t *testing.T) {
+	suite.Run(t, new(LogTestSuite))
 }

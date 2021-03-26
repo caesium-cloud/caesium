@@ -1,10 +1,9 @@
 package log
 
 import (
-	"fmt"
-
 	"github.com/caesium-cloud/caesium/db/store/badger"
 	"github.com/hashicorp/raft"
+	"github.com/pkg/errors"
 )
 
 // Log is an object that can return information about the Raft log.
@@ -16,7 +15,7 @@ type Log struct {
 func NewLog(path string) (*Log, error) {
 	bs, err := badger.NewBadgerStore(path)
 	if err != nil {
-		return nil, fmt.Errorf("new bolt store: %s", err)
+		return nil, errors.Wrap(err, "new badger store")
 	}
 	return &Log{bs}, nil
 }
@@ -25,11 +24,11 @@ func NewLog(path string) (*Log, error) {
 func (l *Log) Indexes() (uint64, uint64, error) {
 	fi, err := l.FirstIndex()
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get first index: %s", err)
+		return 0, 0, errors.Wrap(err, "failed to get first index")
 	}
 	li, err := l.LastIndex()
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get last index: %s", err)
+		return 0, 0, errors.Wrap(err, "failed to get last index")
 	}
 	return fi, li, nil
 }
@@ -40,7 +39,7 @@ func (l *Log) Indexes() (uint64, uint64, error) {
 func (l *Log) LastCommandIndex() (uint64, error) {
 	fi, li, err := l.Indexes()
 	if err != nil {
-		return 0, fmt.Errorf("get indexes: %s", err)
+		return 0, errors.Wrap(err, "get indexes")
 	}
 
 	// Check for empty log.
@@ -51,7 +50,7 @@ func (l *Log) LastCommandIndex() (uint64, error) {
 	var rl raft.Log
 	for i := li; i >= fi; i-- {
 		if err := l.GetLog(i, &rl); err != nil {
-			return 0, fmt.Errorf("get log at index %d: %s", i, err)
+			return 0, errors.Wrapf(err, "get log at index %d", i)
 		}
 		if rl.Type == raft.LogCommand {
 			return i, nil
