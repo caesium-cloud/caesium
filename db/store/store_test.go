@@ -8,358 +8,218 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	sql "github.com/caesium-cloud/caesium/db"
 	"github.com/caesium-cloud/caesium/db/command"
 	"github.com/caesium-cloud/caesium/db/testdata/chinook"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-func Test_OpenStoreSingleNode(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-
-	s.WaitForLeader(10 * time.Second)
-	if got, exp := s.LeaderAddr(), s.Addr(); got != exp {
-		t.Fatalf("wrong leader address returned, got: %s, exp %s", got, exp)
-	}
-	id, err := s.LeaderID()
-	if err != nil {
-		t.Fatalf("failed to retrieve leader ID: %s", err.Error())
-	}
-	if got, exp := id, s.raftID; got != exp {
-		t.Fatalf("wrong leader ID returned, got: %s, exp %s", got, exp)
-	}
+type StoreTestSuite struct {
+	suite.Suite
+	m sync.Map
 }
 
-func Test_OpenStoreCloseSingleNode(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	s.WaitForLeader(10 * time.Second)
-	if err := s.Close(true); err != nil {
-		t.Fatalf("failed to close single-node store: %s", err.Error())
-	}
+func (s *StoreTestSuite) SetupTest() {
+	store := mustNewStore(strings.Contains(s.T().Name(), "Memory"))
+	assert.Nil(s.T(), store.Open(true))
+	_, err := store.WaitForLeader(10 * time.Second)
+	assert.Nil(s.T(), err)
+	s.m.Store(s.T().Name(), store)
 }
 
-func Test_SingleNodeInMemExecuteQuery(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
+func (s *StoreTestSuite) TeardownTest() {
+	assert.Nil(s.T(), s.Store().Close(true))
+	assert.Nil(s.T(), os.RemoveAll(s.Store().Path()))
+	s.m.Delete(s.T().Name())
+}
 
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) Store() *Store {
+	v, ok := s.m.Load(s.T().Name())
+	assert.True(s.T(), ok)
+	return v.(*Store)
+}
 
-	er := executeRequestFromStrings([]string{
+func (s *StoreTestSuite) TestOpenSingleNode() {
+	got, exp := s.Store().LeaderAddr(), s.Store().Addr()
+	assert.Equal(s.T(), exp, got)
+
+	id, err := s.Store().LeaderID()
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), id, s.Store().raftID)
+}
+
+func (s *StoreTestSuite) TestSingleNodeInMemoryQuery() {
+	eReq := executeRequestFromStrings([]string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, false)
-	_, err := s.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
+	_, err := s.Store().Execute(eReq)
+	assert.Nil(s.T(), err)
 
-	qr := queryRequestFromString("SELECT * FROM foo", false, false)
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
-	r, err := s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	qReq := queryRequestFromString("SELECT * FROM foo", false, false)
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
+	r, err := s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-// Test_SingleNodeInMemExecuteQueryFail ensures database level errors are presented by the store.
-func Test_SingleNodeInMemExecuteQueryFail(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	er := executeRequestFromStrings([]string{
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+func (s *StoreTestSuite) TestSingleNodeInMemoryQueryFail() {
+	eReq := executeRequestFromStrings([]string{
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, false)
-	r, err := s.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
-	if exp, got := "no such table: foo", r[0].Error; exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Execute(eReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "no such table: foo", r[0].Error)
 }
-
-func Test_SingleNodeFileExecuteQuery(t *testing.T) {
-	s := mustNewStore(false)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	er := executeRequestFromStrings([]string{
+func (s *StoreTestSuite) TestSingleNodeFileQuery() {
+	eReq := executeRequestFromStrings([]string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, false)
-	_, err := s.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
+	_, err := s.Store().Execute(eReq)
+	assert.Nil(s.T(), err)
 
-	// Every query should return the same results, so use a function for the check.
-	check := func(r []*sql.Rows) {
-		if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-		}
-		if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-		}
-	}
+	qReq := queryRequestFromString("SELECT * FROM foo", false, false)
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
+	r, err := s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
-	qr := queryRequestFromString("SELECT * FROM foo", false, false)
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
-	r, err := s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	check(r)
+	qReq = queryRequestFromString("SELECT * FROM foo", false, false)
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
+	r, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
-	qr = queryRequestFromString("SELECT * FROM foo", false, false)
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	check(r)
+	qReq = queryRequestFromString("SELECT * FROM foo", false, false)
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
+	r, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
-	qr = queryRequestFromString("SELECT * FROM foo", false, false)
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	check(r)
+	qReq = queryRequestFromString("SELECT * FROM foo", false, true)
+	qReq.Timings = true
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
+	r, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
-	qr = queryRequestFromString("SELECT * FROM foo", false, true)
-	qr.Timings = true
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	check(r)
-
-	qr = queryRequestFromString("SELECT * FROM foo", true, false)
-	qr.Request.Transaction = true
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	check(r)
+	qReq = queryRequestFromString("SELECT * FROM foo", true, false)
+	qReq.Request.Transaction = true
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
+	r, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeExecuteQueryTx(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	er := executeRequestFromStrings([]string{
+func (s *StoreTestSuite) TestSingleNodeQueryTransaction() {
+	eReq := executeRequestFromStrings([]string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, true)
-	_, err := s.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
+	_, err := s.Store().Execute(eReq)
+	assert.Nil(s.T(), err)
 
-	qr := queryRequestFromString("SELECT * FROM foo", false, true)
+	qReq := queryRequestFromString("SELECT * FROM foo", false, true)
 	var r []*sql.Rows
 
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
-	_, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
+	_, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
 
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
-	_, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
+	_, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
 
-	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	qReq.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
+	r, err = s.Store().Query(qReq)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeBackupBinary(t *testing.T) {
-	t.Parallel()
-
-	s := mustNewStore(false)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeBackupBinary() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE foo (id integer not null primary key, name text);
-INSERT INTO "foo" VALUES(1,'fiona');
+INSERT INTO "foo" VALUES(1,'bar');
 COMMIT;
 `
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load simple dump: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 
-	f, err := ioutil.TempFile("", "rqlite-baktest-")
+	f, err := ioutil.TempFile("", "caesium-baktest-")
+	assert.Nil(s.T(), err)
 	defer os.Remove(f.Name())
-	s.logger.Printf("backup file is %s", f.Name())
+	s.Store().logger.Printf("backup file is %s", f.Name())
 
-	if err := s.Backup(true, BackupBinary, f); err != nil {
-		t.Fatalf("Backup failed %s", err.Error())
-	}
+	assert.Nil(s.T(), s.Store().Backup(true, BackupBinary, f))
 
 	// Check the backed up data by reading back up file, underlying SQLite file,
 	// and comparing the two.
 	bkp, err := ioutil.ReadFile(f.Name())
-	if err != nil {
-		t.Fatalf("Backup Failed: unable to read backup file, %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
-	dbFile, err := ioutil.ReadFile(filepath.Join(s.Path(), sqliteFile))
-	if err != nil {
-		t.Fatalf("Backup Failed: unable to read source SQLite file, %s", err.Error())
-	}
-
-	if ret := bytes.Compare(bkp, dbFile); ret != 0 {
-		t.Fatalf("Backup Failed: backup bytes are not same")
-	}
+	dbFile, err := ioutil.ReadFile(filepath.Join(s.Store().Path(), sqliteFile))
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), bytes.Equal(bkp, dbFile))
 }
 
-func Test_SingleNodeBackupText(t *testing.T) {
-	t.Parallel()
-
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeBackupText() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE foo (id integer not null primary key, name text);
-INSERT INTO "foo" VALUES(1,'fiona');
+INSERT INTO "foo" VALUES(1,'bar');
 COMMIT;
 `
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load simple dump: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 
-	f, err := ioutil.TempFile("", "rqlite-baktest-")
+	f, err := ioutil.TempFile("", "caesium-baktest-")
+	assert.Nil(s.T(), err)
 	defer os.Remove(f.Name())
-	s.logger.Printf("backup file is %s", f.Name())
+	s.Store().logger.Printf("backup file is %s", f.Name())
 
-	if err := s.Backup(true, BackupSQL, f); err != nil {
-		t.Fatalf("Backup failed %s", err.Error())
-	}
+	assert.Nil(s.T(), s.Store().Backup(true, BackupSQL, f))
 
 	// Check the backed up data
 	bkp, err := ioutil.ReadFile(f.Name())
-	if err != nil {
-		t.Fatalf("Backup Failed: unable to read backup file, %s", err.Error())
-	}
-	if ret := bytes.Compare(bkp, []byte(dump)); ret != 0 {
-		t.Fatalf("Backup Failed: backup bytes are not same")
-	}
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), bytes.Equal(bkp, []byte(dump)))
 }
 
-func Test_SingleNodeLoad(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeLoad() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE foo (id integer not null primary key, name text);
-INSERT INTO "foo" VALUES(1,'fiona');
+INSERT INTO "foo" VALUES(1,'bar');
 COMMIT;
 `
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load simple dump: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 
 	// Check that data were loaded correctly.
 	qr := queryRequestFromString("SELECT * FROM foo", false, true)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err := s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Query(qr)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeSingleCommandTrigger(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeSingleCmdTrigger() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE foo (id integer primary key asc, name text);
@@ -374,189 +234,90 @@ CREATE VIEW foobar as select name as Person, Age as age from foo inner join bar 
 CREATE TRIGGER new_foobar instead of insert on foobar begin insert into foo (name) values (new.Person); insert into bar (nameid, age) values ((select id from foo where name == new.Person), new.Age); end;
 COMMIT;
 `
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load dump with trigger: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 
 	// Check that the VIEW and TRIGGER are OK by using both.
 	er := executeRequestFromString("INSERT INTO foobar VALUES('jason', 16)", false, true)
-	r, err := s.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to insert into view on single node: %s", err.Error())
-	}
-	if exp, got := int64(3), r[0].LastInsertID; exp != got {
-		t.Fatalf("unexpected results for query\nexp: %d\ngot: %d", exp, got)
-	}
+	r, err := s.Store().Execute(er)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), int64(3), r[0].LastInsertID)
 }
 
-func Test_SingleNodeLoadNoStatements(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeLoadNoStatement() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 COMMIT;
 `
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load dump with no commands: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 }
 
-func Test_SingleNodeLoadEmpty(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeLoadEmpty() {
 	dump := ``
-	_, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load empty dump: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
 }
 
-func Test_SingleNodeLoadAbortOnError(t *testing.T) {
-	t.Parallel()
-
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeLoadAbortOnError() {
 	dump := `PRAGMA foreign_keys=OFF;
 BEGIN TRANSACTION;
 CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT);
-COMMIT;
-`
-	r, err := s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load commands: %s", err.Error())
-	}
-	if r[0].Error != "" {
-		t.Fatalf("error received creating table: %s", r[0].Error)
-	}
+COMMIT;`
 
-	r, err = s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load commands: %s", err.Error())
-	}
-	if r[0].Error != "table foo already exists" {
-		t.Fatalf("received wrong error message: %s", r[0].Error)
-	}
+	r, err := s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
+	assert.Empty(s.T(), r[0].Error)
 
-	r, err = s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load commands: %s", err.Error())
-	}
-	if r[0].Error != "cannot start a transaction within a transaction" {
-		t.Fatalf("received wrong error message: %s", r[0].Error)
-	}
+	r, err = s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "table foo already exists", r[0].Error)
 
-	r, err = s.ExecuteOrAbort(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load commands: %s", err.Error())
-	}
-	if r[0].Error != "cannot start a transaction within a transaction" {
-		t.Fatalf("received wrong error message: %s", r[0].Error)
-	}
+	r, err = s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "cannot start a transaction within a transaction", r[0].Error)
 
-	r, err = s.Execute(executeRequestFromString(dump, false, false))
-	if err != nil {
-		t.Fatalf("failed to load commands: %s", err.Error())
-	}
-	if r[0].Error != "table foo already exists" {
-		t.Fatalf("received wrong error message: %s", r[0].Error)
-	}
+	r, err = s.Store().ExecuteOrAbort(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "cannot start a transaction within a transaction", r[0].Error)
+
+	r, err = s.Store().Execute(executeRequestFromString(dump, false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), "table foo already exists", r[0].Error)
 }
 
-func Test_SingleNodeLoadChinook(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	_, err := s.Execute(executeRequestFromString(chinook.DB, false, false))
-	if err != nil {
-		t.Fatalf("failed to load chinook dump: %s", err.Error())
-	}
-
-	// Check that data were loaded correctly.
+func (s *StoreTestSuite) TestSingleNodeLoadChinook() {
+	_, err := s.Store().Execute(executeRequestFromString(chinook.DB, false, false))
+	assert.Nil(s.T(), err)
 
 	qr := queryRequestFromString("SELECT count(*) FROM track", false, true)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err := s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["count(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[3503]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Query(qr)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["count(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[3503]]`, asJSON(r[0].Values))
 
 	qr = queryRequestFromString("SELECT count(*) FROM album", false, true)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["count(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[347]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.Store().Query(qr)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["count(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[347]]`, asJSON(r[0].Values))
 
 	qr = queryRequestFromString("SELECT count(*) FROM artist", false, true)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
-	r, err = s.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["count(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[275]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-
+	r, err = s.Store().Query(qr)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["count(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[275]]`, asJSON(r[0].Values))
 }
 
-func Test_MultiNodeJoinRemove(t *testing.T) {
-	s0 := mustNewStore(true)
-	defer os.RemoveAll(s0.Path())
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) TestMultiNodeJoinRemove() {
+	s0 := s.Store()
 
 	s1 := mustNewStore(true)
 	defer os.RemoveAll(s1.Path())
-	if err := s1.Open(false); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(false))
 	defer s1.Close(true)
 
 	// Get sorted list of cluster nodes.
@@ -564,67 +325,40 @@ func Test_MultiNodeJoinRemove(t *testing.T) {
 	sort.StringSlice(storeNodes).Sort()
 
 	// Join the second node to the first.
-	if err := s0.Join(s1.ID(), s1.Addr(), true, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), true, nil))
 
 	s1.WaitForLeader(10 * time.Second)
 
-	// Check leader state on follower.
-	if got, exp := s1.LeaderAddr(), s0.Addr(); got != exp {
-		t.Fatalf("wrong leader address returned, got: %s, exp %s", got, exp)
-	}
+	assert.Equal(s.T(), s1.LeaderAddr(), s0.Addr())
+	assert.True(s.T(), s0.IsLeader())
+	assert.Equal(s.T(), Leader, s0.State())
+	assert.Equal(s.T(), Follower, s1.State())
+
 	id, err := s1.LeaderID()
-	if err != nil {
-		t.Fatalf("failed to retrieve leader ID: %s", err.Error())
-	}
-	if got, exp := id, s0.raftID; got != exp {
-		t.Fatalf("wrong leader ID returned, got: %s, exp %s", got, exp)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), id, s0.raftID)
 
 	nodes, err := s0.Nodes()
-	if err != nil {
-		t.Fatalf("failed to get nodes: %s", err.Error())
-	}
-
-	if len(nodes) != len(storeNodes) {
-		t.Fatalf("size of cluster is not correct")
-	}
-	if storeNodes[0] != nodes[0].ID || storeNodes[1] != nodes[1].ID {
-		t.Fatalf("cluster does not have correct nodes")
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), len(nodes), len(storeNodes))
+	assert.Equal(s.T(), storeNodes[0], nodes[0].ID)
+	assert.Equal(s.T(), storeNodes[1], nodes[1].ID)
 
 	// Remove a node.
-	if err := s0.Remove(s1.ID()); err != nil {
-		t.Fatalf("failed to remove %s from cluster: %s", s1.ID(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Remove(s1.ID()))
 
 	nodes, err = s0.Nodes()
-	if err != nil {
-		t.Fatalf("failed to get nodes post remove: %s", err.Error())
-	}
-	if len(nodes) != 1 {
-		t.Fatalf("size of cluster is not correct post remove")
-	}
-	if s0.ID() != nodes[0].ID {
-		t.Fatalf("cluster does not have correct nodes post remove")
-	}
+	assert.Nil(s.T(), err)
+	assert.Len(s.T(), nodes, 1)
+	assert.Equal(s.T(), s0.ID(), nodes[0].ID)
 }
 
-func Test_MultiNodeJoinNonVoterRemove(t *testing.T) {
-	s0 := mustNewStore(true)
-	defer os.RemoveAll(s0.Path())
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) TestMultiNodeJoinNonVoterRemove() {
+	s0 := s.Store()
 
 	s1 := mustNewStore(true)
 	defer os.RemoveAll(s1.Path())
-	if err := s1.Open(false); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(false))
 	defer s1.Close(true)
 
 	// Get sorted list of cluster nodes.
@@ -632,245 +366,153 @@ func Test_MultiNodeJoinNonVoterRemove(t *testing.T) {
 	sort.StringSlice(storeNodes).Sort()
 
 	// Join the second node to the first.
-	if err := s0.Join(s1.ID(), s1.Addr(), false, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), false, nil))
 
 	s1.WaitForLeader(10 * time.Second)
 
 	// Check leader state on follower.
-	if got, exp := s1.LeaderAddr(), s0.Addr(); got != exp {
-		t.Fatalf("wrong leader address returned, got: %s, exp %s", got, exp)
-	}
+	assert.Equal(s.T(), s1.LeaderAddr(), s0.Addr())
+
 	id, err := s1.LeaderID()
-	if err != nil {
-		t.Fatalf("failed to retrieve leader ID: %s", err.Error())
-	}
-	if got, exp := id, s0.raftID; got != exp {
-		t.Fatalf("wrong leader ID returned, got: %s, exp %s", got, exp)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), id, s0.raftID)
 
 	nodes, err := s0.Nodes()
-	if err != nil {
-		t.Fatalf("failed to get nodes: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), len(nodes), len(storeNodes))
+	assert.Equal(s.T(), storeNodes[0], nodes[0].ID)
+	assert.Equal(s.T(), storeNodes[1], nodes[1].ID)
 
-	if len(nodes) != len(storeNodes) {
-		t.Fatalf("size of cluster is not correct")
-	}
-	if storeNodes[0] != nodes[0].ID || storeNodes[1] != nodes[1].ID {
-		t.Fatalf("cluster does not have correct nodes")
-	}
-
-	// Remove the non-voter.
-	if err := s0.Remove(s1.ID()); err != nil {
-		t.Fatalf("failed to remove %s from cluster: %s", s1.ID(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Remove(s1.ID()))
 
 	nodes, err = s0.Nodes()
-	if err != nil {
-		t.Fatalf("failed to get nodes post remove: %s", err.Error())
-	}
-	if len(nodes) != 1 {
-		t.Fatalf("size of cluster is not correct post remove")
-	}
-	if s0.ID() != nodes[0].ID {
-		t.Fatalf("cluster does not have correct nodes post remove")
-	}
+	assert.Nil(s.T(), err)
+	assert.Len(s.T(), nodes, 1)
+	assert.Equal(s.T(), s0.ID(), nodes[0].ID)
 }
 
-func Test_MultiNodeExecuteQuery(t *testing.T) {
-	s0 := mustNewStore(true)
-	defer os.RemoveAll(s0.Path())
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) TestMultiNodeExecuteQuery() {
+	s0 := s.Store()
 
 	s1 := mustNewStore(true)
 	defer os.RemoveAll(s1.Path())
-	if err := s1.Open(false); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(false))
 	defer s1.Close(true)
 
 	s2 := mustNewStore(true)
 	defer os.RemoveAll(s2.Path())
-	if err := s2.Open(false); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
+	assert.Nil(s.T(), s2.Open(false))
 	defer s2.Close(true)
 
 	// Join the second node to the first as a voting node.
-	if err := s0.Join(s1.ID(), s1.Addr(), true, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), true, nil))
 
 	// Join the third node to the first as a non-voting node.
-	if err := s0.Join(s2.ID(), s2.Addr(), false, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s2.ID(), s2.Addr(), false, nil))
 
 	er := executeRequestFromStrings([]string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, false)
 	_, err := s0.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+
 	qr := queryRequestFromString("SELECT * FROM foo", false, false)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	r, err := s0.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query leader node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// Wait until the 3 log entries have been applied to the voting follower,
 	// and then query.
-	if err := s1.WaitForAppliedIndex(3, 5*time.Second); err != nil {
-		t.Fatalf("error waiting for follower to apply index: %s:", err.Error())
-	}
+	assert.Nil(s.T(), s1.WaitForAppliedIndex(3, 5*time.Second))
 
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
 	_, err = s1.Query(qr)
-	if err == nil {
-		t.Fatalf("successfully queried non-leader node")
-	}
+	assert.NotNil(s.T(), err)
+
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
 	_, err = s1.Query(qr)
-	if err == nil {
-		t.Fatalf("successfully queried non-leader node")
-	}
+	assert.NotNil(s.T(), err)
+
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	r, err = s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query follower node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// Wait until the 3 log entries have been applied to the non-voting follower,
 	// and then query.
-	if err := s2.WaitForAppliedIndex(3, 5*time.Second); err != nil {
-		t.Fatalf("error waiting for follower to apply index: %s:", err.Error())
-	}
+	assert.Nil(s.T(), s2.WaitForAppliedIndex(3, 5*time.Second))
 
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
 	_, err = s1.Query(qr)
-	if err == nil {
-		t.Fatalf("successfully queried non-voting node with Weak")
-	}
+	assert.NotNil(s.T(), err)
+
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
 	_, err = s1.Query(qr)
-	if err == nil {
-		t.Fatalf("successfully queried non-voting node with Strong")
-	}
+	assert.NotNil(s.T(), err)
+
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	r, err = s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query non-voting node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_MultiNodeExecuteQueryFreshness(t *testing.T) {
-	s0 := mustNewStore(true)
-	defer os.RemoveAll(s0.Path())
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) TestMultiNodeExecuteQueryFreshness() {
+	s0 := s.Store()
 
 	s1 := mustNewStore(true)
 	defer os.RemoveAll(s1.Path())
-	if err := s1.Open(false); err != nil {
-		t.Fatalf("failed to open node for multi-node test: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(false))
 	defer s1.Close(true)
 
 	// Join the second node to the first.
-	if err := s0.Join(s1.ID(), s1.Addr(), true, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), true, nil))
 
 	er := executeRequestFromStrings([]string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}, false, false)
 	_, err := s0.Execute(er)
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
 	qr := queryRequestFromString("SELECT * FROM foo", false, false)
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	r, err := s0.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query leader node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// Wait until the 3 log entries have been applied to the follower,
 	// and then query.
-	if err := s1.WaitForAppliedIndex(3, 5*time.Second); err != nil {
-		t.Fatalf("error waiting for follower to apply index: %s:", err.Error())
-	}
+	assert.Nil(s.T(), s1.WaitForAppliedIndex(3, 5*time.Second))
 
 	// "Weak" consistency queries with 1 nanosecond freshness should pass, because freshness
 	// is ignored in this case.
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_WEAK
 	qr.Freshness = mustParseDuration("1ns").Nanoseconds()
 	_, err = s0.Query(qr)
-	if err != nil {
-		t.Fatalf("Failed to ignore freshness if level is Weak: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_STRONG
 	// "Strong" consistency queries with 1 nanosecond freshness should pass, because freshness
 	// is ignored in this case.
 	_, err = s0.Query(qr)
-	if err != nil {
-		t.Fatalf("Failed to ignore freshness if level is Strong: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
 	// Kill leader.
-	s0.Close(true)
+	assert.Nil(s.T(), s0.Close(true))
 
 	// "None" consistency queries should still work.
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	qr.Freshness = 0
 	r, err = s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query follower node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// Wait for the freshness interval to pass.
 	time.Sleep(mustParseDuration("1s"))
@@ -880,388 +522,210 @@ func Test_MultiNodeExecuteQueryFreshness(t *testing.T) {
 	qr.Level = command.QueryRequest_QUERY_REQUEST_LEVEL_NONE
 	qr.Freshness = mustParseDuration("1ns").Nanoseconds()
 	_, err = s1.Query(qr)
-	if err == nil {
-		t.Fatalf("freshness violating query didn't return an error")
-	}
-	if err != ErrStaleRead {
-		t.Fatalf("freshness violating query didn't returned wrong error: %s", err.Error())
-	}
+	assert.Equal(s.T(), ErrStaleRead, err)
 
 	// Freshness of 0 is ignored.
 	qr.Freshness = 0
 	r, err = s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query follower node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// "None" consistency queries with 1 hour freshness should pass, because it should
 	// not be that long since the leader died.
 	qr.Freshness = mustParseDuration("1h").Nanoseconds()
 	r, err = s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query follower node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_StoreLogTruncationMultinode(t *testing.T) {
-	s0 := mustNewStore(true)
-	defer os.RemoveAll(s0.Path())
+func (s *StoreTestSuite) TestLogTruncationMultiNode() {
+	s0 := s.Store()
+	s0.Close(true)
+
 	s0.SnapshotThreshold = 4
 	s0.SnapshotInterval = 100 * time.Millisecond
 
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s0.Close(true)
+	assert.Nil(s.T(), s0.Open(true))
 	s0.WaitForLeader(10 * time.Second)
 	nSnaps := stats.Get(numSnaphots).String()
 
 	// Write more than s.SnapshotThreshold statements.
 	queries := []string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
-		`INSERT INTO foo(id, name) VALUES(2, "fiona")`,
-		`INSERT INTO foo(id, name) VALUES(3, "fiona")`,
-		`INSERT INTO foo(id, name) VALUES(4, "fiona")`,
-		`INSERT INTO foo(id, name) VALUES(5, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
+		`INSERT INTO foo(id, name) VALUES(2, "bar")`,
+		`INSERT INTO foo(id, name) VALUES(3, "bar")`,
+		`INSERT INTO foo(id, name) VALUES(4, "bar")`,
+		`INSERT INTO foo(id, name) VALUES(5, "bar")`,
 	}
 	for i := range queries {
 		_, err := s0.Execute(executeRequestFromString(queries[i], false, false))
-		if err != nil {
-			t.Fatalf("failed to execute on single node: %s", err.Error())
-		}
+		assert.Nil(s.T(), err)
 	}
 
 	// Wait for the snapshot to happen and log to be truncated.
 	f := func() bool {
 		return stats.Get(numSnaphots).String() != nSnaps
 	}
-	testPoll(t, f, 100*time.Millisecond, 2*time.Second)
+	testPoll(s.T(), f, 100*time.Millisecond, 2*time.Second)
 
 	// Fire up new node and ensure it picks up all changes. This will
 	// involve getting a snapshot and truncated log.
 	s1 := mustNewStore(true)
-	if err := s1.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(true))
 	defer s1.Close(true)
 
 	// Join the second node to the first.
-	if err := s0.Join(s1.ID(), s1.Addr(), true, nil); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), true, nil))
 	s1.WaitForLeader(10 * time.Second)
+
 	// Wait until the log entries have been applied to the follower,
 	// and then query.
-	if err := s1.WaitForAppliedIndex(8, 5*time.Second); err != nil {
-		t.Fatalf("error waiting for follower to apply index: %s:", err.Error())
-	}
+	assert.Nil(s.T(), s1.WaitForAppliedIndex(8, 5*time.Second))
+
 	qr := queryRequestFromString("SELECT count(*) FROM foo", false, true)
 	r, err := s1.Query(qr)
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["count(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[5]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["count(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[5]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeSnapshotOnDisk(t *testing.T) {
-	s := mustNewStore(false)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeSnapshotOnDisk() {
 	queries := []string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}
-	_, err := s.Execute(executeRequestFromStrings(queries, false, false))
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
-	_, err = s.Query(queryRequestFromString("SELECT * FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
+	_, err := s.Store().Execute(executeRequestFromStrings(queries, false, false))
+	assert.Nil(s.T(), err)
+
+	_, err = s.Store().Query(queryRequestFromString("SELECT * FROM foo", false, false))
+	assert.Nil(s.T(), err)
 
 	// Snap the node and write to disk.
-	f, err := s.Snapshot()
-	if err != nil {
-		t.Fatalf("failed to snapshot node: %s", err.Error())
-	}
+	f, err := s.Store().Snapshot()
+	assert.Nil(s.T(), err)
 
 	snapDir := mustTempDir()
 	defer os.RemoveAll(snapDir)
 	snapFile, err := os.Create(filepath.Join(snapDir, "snapshot"))
-	if err != nil {
-		t.Fatalf("failed to create snapshot file: %s", err.Error())
-	}
-	sink := &mockSnapshotSink{snapFile}
-	if err := f.Persist(sink); err != nil {
-		t.Fatalf("failed to persist snapshot to disk: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), f.Persist(&mockSnapshotSink{snapFile}))
 
 	// Check restoration.
 	snapFile, err = os.Open(filepath.Join(snapDir, "snapshot"))
-	if err != nil {
-		t.Fatalf("failed to open snapshot file: %s", err.Error())
-	}
-	if err := s.Restore(snapFile); err != nil {
-		t.Fatalf("failed to restore snapshot from disk: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), s.Store().Restore(snapFile))
 
 	// Ensure database is back in the correct state.
-	r, err := s.Query(queryRequestFromString("SELECT * FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Query(queryRequestFromString("SELECT * FROM foo", false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeSnapshotInMem(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeSnapshotInMemory() {
 	queries := []string{
 		`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`,
-		`INSERT INTO foo(id, name) VALUES(1, "fiona")`,
-	}
-	_, err := s.Execute(executeRequestFromStrings(queries, false, false))
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
-	_, err = s.Query(queryRequestFromString("SELECT * FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
+		`INSERT INTO foo(id, name) VALUES(1, "bar")`,
 	}
 
+	_, err := s.Store().Execute(executeRequestFromStrings(queries, false, false))
+	assert.Nil(s.T(), err)
+
+	_, err = s.Store().Query(queryRequestFromString("SELECT * FROM foo", false, false))
+	assert.Nil(s.T(), err)
+
 	// Snap the node and write to disk.
-	f, err := s.Snapshot()
-	if err != nil {
-		t.Fatalf("failed to snapshot node: %s", err.Error())
-	}
+	f, err := s.Store().Snapshot()
+	assert.Nil(s.T(), err)
 
 	snapDir := mustTempDir()
 	defer os.RemoveAll(snapDir)
 	snapFile, err := os.Create(filepath.Join(snapDir, "snapshot"))
-	if err != nil {
-		t.Fatalf("failed to create snapshot file: %s", err.Error())
-	}
-	sink := &mockSnapshotSink{snapFile}
-	if err := f.Persist(sink); err != nil {
-		t.Fatalf("failed to persist snapshot to disk: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+
+	assert.Nil(s.T(), f.Persist(&mockSnapshotSink{snapFile}))
 
 	// Check restoration.
 	snapFile, err = os.Open(filepath.Join(snapDir, "snapshot"))
-	if err != nil {
-		t.Fatalf("failed to open snapshot file: %s", err.Error())
-	}
-	if err := s.Restore(snapFile); err != nil {
-		t.Fatalf("failed to restore snapshot from disk: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+
+	assert.Nil(s.T(), s.Store().Restore(snapFile))
 
 	// Ensure database is back in the correct state.
-	r, err := s.Query(queryRequestFromString("SELECT * FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["id","name"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[1,"fiona"]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Query(queryRequestFromString("SELECT * FROM foo", false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["id","name"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[1,"bar"]]`, asJSON(r[0].Values))
 
 	// Write a record, ensuring it works and can be queried back i.e. that
 	// the system remains functional.
-	_, err = s.Execute(executeRequestFromString(`INSERT INTO foo(id, name) VALUES(2, "fiona")`, false, false))
-	if err != nil {
-		t.Fatalf("failed to execute on single node: %s", err.Error())
-	}
-	r, err = s.Query(queryRequestFromString("SELECT COUNT(*) FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["COUNT(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[2]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	_, err = s.Store().Execute(executeRequestFromString(`INSERT INTO foo(id, name) VALUES(2, "bar")`, false, false))
+	assert.Nil(s.T(), err)
+
+	r, err = s.Store().Query(queryRequestFromString("SELECT COUNT(*) FROM foo", false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["COUNT(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[2]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeRestoreNoncompressed(t *testing.T) {
-	s := mustNewStore(false)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
+func (s *StoreTestSuite) TestSingleNodeRestoreUncompressed() {
 	// Check restoration from a pre-compressed SQLite database snap.
 	// This is to test for backwards compatilibty of this code.
-	f, err := os.Open(filepath.Join("testdata", "noncompressed-sqlite-snap.bin"))
-	if err != nil {
-		t.Fatalf("failed to open snapshot file: %s", err.Error())
-	}
-	if err := s.Restore(f); err != nil {
-		t.Fatalf("failed to restore noncompressed snapshot from disk: %s", err.Error())
-	}
+	f, err := os.Open(filepath.Join("testdata", "uncompressed-sqlite-snap.bin"))
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), s.Store().Restore(f))
 
 	// Ensure database is back in the expected state.
-	r, err := s.Query(queryRequestFromString("SELECT count(*) FROM foo", false, false))
-	if err != nil {
-		t.Fatalf("failed to query single node: %s", err.Error())
-	}
-	if exp, got := `["count(*)"]`, asJSON(r[0].Columns); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	if exp, got := `[[5000]]`, asJSON(r[0].Values); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.Store().Query(queryRequestFromString("SELECT count(*) FROM foo", false, false))
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `["count(*)"]`, asJSON(r[0].Columns))
+	assert.Equal(s.T(), `[[5000]]`, asJSON(r[0].Values))
 }
 
-func Test_SingleNodeNoop(t *testing.T) {
-	s0 := mustNewStore(true)
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
-
-	if err := s0.Noop("1"); err != nil {
-		t.Fatalf("failed to write noop command: %s", err.Error())
-	}
-	if s0.numNoops != 1 {
-		t.Fatalf("noop count is wrong, got: %d", s0.numNoops)
-	}
+func (s *StoreTestSuite) TestSingleNodeNoop() {
+	assert.Nil(s.T(), s.Store().Noop("1"))
+	assert.Equal(s.T(), s.Store().numNoops, 1)
 }
 
-func Test_MetadataMultinode(t *testing.T) {
-	s0 := mustNewStore(true)
-	if err := s0.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s0.Close(true)
-	s0.WaitForLeader(10 * time.Second)
+func (s *StoreTestSuite) TestMetadataMultiNode() {
+	s0 := s.Store()
+
 	s1 := mustNewStore(true)
-	if err := s1.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
+	assert.Nil(s.T(), s1.Open(true))
 	defer s1.Close(true)
 	s1.WaitForLeader(10 * time.Second)
 
-	if s0.Metadata(s0.raftID, "foo") != "" {
-		t.Fatal("nonexistent metadata foo found")
-	}
-	if s0.Metadata("nonsense", "foo") != "" {
-		t.Fatal("nonexistent metadata foo found for nonexistent node")
-	}
+	assert.Empty(s.T(), s0.Metadata(s0.raftID, "foo"))
+	assert.Empty(s.T(), s0.Metadata("nonsense", "foo"))
 
-	if err := s0.SetMetadata(map[string]string{"foo": "bar"}); err != nil {
-		t.Fatalf("failed to set metadata: %s", err.Error())
-	}
-	if s0.Metadata(s0.raftID, "foo") != "bar" {
-		t.Fatal("key foo not found")
-	}
-	if s0.Metadata("nonsense", "foo") != "" {
-		t.Fatal("nonexistent metadata foo found for nonexistent node")
-	}
+	assert.Nil(s.T(), s0.SetMetadata(map[string]string{"foo": "bar"}))
+	assert.Equal(s.T(), s0.Metadata(s0.raftID, "foo"), "bar")
+	assert.Empty(s.T(), s0.Metadata("nonsense", "foo"))
 
 	// Join the second node to the first.
 	meta := map[string]string{"baz": "qux"}
-	if err := s0.Join(s1.ID(), s1.Addr(), true, meta); err != nil {
-		t.Fatalf("failed to join to node at %s: %s", s0.Addr(), err.Error())
-	}
+	assert.Nil(s.T(), s0.Join(s1.ID(), s1.Addr(), true, meta))
+
 	s1.WaitForLeader(10 * time.Second)
 	// Wait until the log entries have been applied to the follower,
 	// and then query.
-	if err := s1.WaitForAppliedIndex(5, 5*time.Second); err != nil {
-		t.Fatalf("error waiting for follower to apply index: %s:", err.Error())
-	}
-
-	if s1.Metadata(s0.raftID, "foo") != "bar" {
-		t.Fatal("key foo not found for s0")
-	}
-	if s0.Metadata(s1.raftID, "baz") != "qux" {
-		t.Fatal("key baz not found for s1")
-	}
+	assert.Nil(s.T(), s1.WaitForAppliedIndex(5, 5*time.Second))
+	assert.Equal(s.T(), s1.Metadata(s0.raftID, "foo"), "bar")
+	assert.Equal(s.T(), s0.Metadata(s1.raftID, "baz"), "qux")
 
 	// Remove a node.
-	if err := s0.Remove(s1.ID()); err != nil {
-		t.Fatalf("failed to remove %s from cluster: %s", s1.ID(), err.Error())
-	}
-	if s1.Metadata(s0.raftID, "foo") != "bar" {
-		t.Fatal("key foo not found for s0")
-	}
-	if s0.Metadata(s1.raftID, "baz") != "" {
-		t.Fatal("key baz found for removed node s1")
-	}
+	assert.Nil(s.T(), s0.Remove(s1.ID()))
+	assert.Equal(s.T(), s1.Metadata(s0.raftID, "foo"), "bar")
+	assert.Empty(s.T(), s0.Metadata(s1.raftID, "baz"))
 }
 
-func Test_IsLeader(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	if !s.IsLeader() {
-		t.Fatalf("single node is not leader!")
-	}
-}
-
-func Test_State(t *testing.T) {
-	s := mustNewStore(true)
-	defer os.RemoveAll(s.Path())
-
-	if err := s.Open(true); err != nil {
-		t.Fatalf("failed to open single-node store: %s", err.Error())
-	}
-	defer s.Close(true)
-	s.WaitForLeader(10 * time.Second)
-
-	state := s.State()
-	if state != Leader {
-		t.Fatalf("single node returned incorrect state (not Leader): %v", s)
-	}
+func (s *StoreTestSuite) TestStats() {
+	stats, err := s.Store().Stats()
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), stats)
 }
 
 func mustNewStoreAtPath(path string, inmem bool) *Store {
@@ -1320,8 +784,7 @@ func (m *mockListener) Close() error { return m.ln.Close() }
 func (m *mockListener) Addr() net.Addr { return m.ln.Addr() }
 
 func mustTempDir() string {
-	var err error
-	path, err := ioutil.TempDir("", "rqlilte-test-")
+	path, err := ioutil.TempDir("", "caesium-test-")
 	if err != nil {
 		panic("failed to create temp dir")
 	}
@@ -1404,4 +867,8 @@ func testPoll(t *testing.T, f func() bool, p time.Duration, d time.Duration) {
 			t.Fatalf("timeout expired: %s", t.Name())
 		}
 	}
+}
+
+func TestStoreTestSuite(t *testing.T) {
+	suite.Run(t, new(StoreTestSuite))
 }

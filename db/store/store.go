@@ -122,7 +122,7 @@ type Store struct {
 	reqMarshaller *command.RequestMarshaler // Request marshaler for writing to log.
 	raftLog       raft.LogStore             // Persistent log store.
 	raftStable    raft.StableStore          // Persistent k-v store.
-	boltStore     *dblog.Log                // Physical store.
+	badgerStore   *dblog.Log                // Physical store.
 
 	onDiskCreated        bool      // On disk database actually created?
 	snapsExistOnOpen     bool      // Any snaps present when store opens?
@@ -238,12 +238,12 @@ func (s *Store) Open(enableBootstrap bool) error {
 	s.snapsExistOnOpen = len(snaps) > 0
 
 	// Create the log store and stable store.
-	s.boltStore, err = dblog.NewLog(filepath.Join(s.raftDir, raftDBPath))
+	s.badgerStore, err = dblog.NewLog(filepath.Join(s.raftDir, raftDBPath))
 	if err != nil {
 		return fmt.Errorf("new log store: %s", err)
 	}
-	s.raftStable = s.boltStore
-	s.raftLog, err = raft.NewLogCache(raftLogCacheSize, s.boltStore)
+	s.raftStable = s.badgerStore
+	s.raftLog, err = raft.NewLogCache(raftLogCacheSize, s.badgerStore)
 	if err != nil {
 		return fmt.Errorf("new cached store: %s", err)
 	}
@@ -310,7 +310,7 @@ func (s *Store) Close(wait bool) error {
 	if err := s.db.Close(); err != nil {
 		return err
 	}
-	if err := s.boltStore.Close(); err != nil {
+	if err := s.badgerStore.Close(); err != nil {
 		return err
 	}
 	return nil
@@ -468,6 +468,7 @@ func (s *Store) Stats() (map[string]interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	dbStatus := map[string]interface{}{
 		"dsn":            s.dbConf.DSN,
 		"fk_constraints": enabledFromBool(fkEnabled),
@@ -551,12 +552,11 @@ func (s *Store) Execute(ex *command.ExecuteRequest) ([]*sql.Result, error) {
 func (s *Store) ExecuteOrAbort(ex *command.ExecuteRequest) (results []*sql.Result, retErr error) {
 	defer func() {
 		var errored bool
-		if results != nil {
-			for i := range results {
-				if results[i].Error != "" {
-					errored = true
-					break
-				}
+
+		for i := range results {
+			if results[i].Error != "" {
+				errored = true
+				break
 			}
 		}
 		if retErr != nil || errored {
@@ -883,15 +883,15 @@ func (s *Store) openOnDisk(b []byte) (*sql.DB, error) {
 // setLogInfo records some key indexs about the log.
 func (s *Store) setLogInfo() error {
 	var err error
-	s.firstIdxOnOpen, err = s.boltStore.FirstIndex()
+	s.firstIdxOnOpen, err = s.badgerStore.FirstIndex()
 	if err != nil {
 		return fmt.Errorf("failed to get last index: %s", err)
 	}
-	s.lastIdxOnOpen, err = s.boltStore.LastIndex()
+	s.lastIdxOnOpen, err = s.badgerStore.LastIndex()
 	if err != nil {
 		return fmt.Errorf("failed to get last index: %s", err)
 	}
-	s.lastCommandIdxOnOpen, err = s.boltStore.LastCommandIndex()
+	s.lastCommandIdxOnOpen, err = s.badgerStore.LastCommandIndex()
 	if err != nil {
 		return fmt.Errorf("failed to get last command index: %s", err)
 	}
