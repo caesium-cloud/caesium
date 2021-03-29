@@ -8,17 +8,25 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-const numAttempts int = 3
-const attemptInterval time.Duration = 5 * time.Second
+const (
+	numAttempts     int           = 30
+	attemptInterval time.Duration = 500 * time.Millisecond
+)
 
-func Test_SingleJoinOK(t *testing.T) {
+type ClusterTestSuite struct {
+	suite.Suite
+}
+
+func (s *ClusterTestSuite) TestSingleJoin() {
 	var body map[string]interface{}
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Fatalf("Client did not use POST")
-		}
+		assert.Equal(s.T(), http.MethodPost, r.Method)
 		w.WriteHeader(http.StatusOK)
 
 		b, err := ioutil.ReadAll(r.Body)
@@ -35,44 +43,46 @@ func Test_SingleJoinOK(t *testing.T) {
 
 	defer ts.Close()
 
-	j, err := Join("127.0.0.1", []string{ts.URL}, "id0", "127.0.0.1:9090", false, nil,
-		numAttempts, attemptInterval, nil)
-	if err != nil {
-		t.Fatalf("failed to join a single node: %s", err.Error())
-	}
-	if j != ts.URL+"/join" {
-		t.Fatalf("node joined using wrong endpoint, exp: %s, got: %s", j, ts.URL)
-	}
-
-	if got, exp := body["id"].(string), "id0"; got != exp {
-		t.Fatalf("wrong node ID supplied, exp %s, got %s", exp, got)
-	}
-	if got, exp := body["address"].(string), "127.0.0.1:9090"; got != exp {
-		t.Fatalf("wrong address supplied, exp %s, got %s", exp, got)
-	}
-	if got, exp := body["voter"].(bool), false; got != exp {
-		t.Fatalf("wrong voter state supplied, exp %v, got %v", exp, got)
-	}
+	j, err := Join(&JoinRequest{
+		SourceIP:        "",
+		JoinAddress:     []string{ts.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           false,
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), ts.URL+"/join", j)
+	assert.Equal(s.T(), body["id"].(string), "id0")
+	assert.Equal(s.T(), body["address"].(string), "127.0.0.1:9090")
+	assert.False(s.T(), body["voter"].(bool))
 }
 
-func Test_SingleJoinZeroAttempts(t *testing.T) {
+func (s *ClusterTestSuite) TestSingleJoinZeroAttempts() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		t.Fatalf("handler should not have been called")
+		s.T().Fatalf("handler should not have been called")
 	}))
 
-	_, err := Join("127.0.0.1", []string{ts.URL}, "id0", "127.0.0.1:9090", false, nil, 0, attemptInterval, nil)
-	if err != ErrJoinFailed {
-		t.Fatalf("Incorrect error returned when zero attempts specified")
-	}
+	_, err := Join(&JoinRequest{
+		SourceIP:        "127.0.0.1",
+		JoinAddress:     []string{ts.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           false,
+		Attempts:        0,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.Equal(s.T(), ErrJoinFailed, err)
 }
 
-func Test_SingleJoinMetaOK(t *testing.T) {
+func (s *ClusterTestSuite) TestSingleJoinMeta() {
 	var body map[string]interface{}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" {
-			t.Fatalf("Client did not use POST")
-		}
+		assert.Equal(s.T(), http.MethodPost, r.Method)
 		w.WriteHeader(http.StatusOK)
 
 		b, err := ioutil.ReadAll(r.Body)
@@ -88,43 +98,48 @@ func Test_SingleJoinMetaOK(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodeAddr := "127.0.0.1:9090"
-	md := map[string]string{"foo": "bar"}
-	j, err := Join("", []string{ts.URL}, "id0", nodeAddr, true, md,
-		numAttempts, attemptInterval, nil)
-	if err != nil {
-		t.Fatalf("failed to join a single node: %s", err.Error())
+	req := &JoinRequest{
+		SourceIP:        "127.0.0.1",
+		JoinAddress:     []string{ts.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           true,
+		Metadata:        map[string]string{"foo": "bar"},
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
 	}
-	if j != ts.URL+"/join" {
-		t.Fatalf("node joined using wrong endpoint, exp: %s, got: %s", j, ts.URL)
-	}
+	j, err := Join(req)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), ts.URL+"/join", j)
+	assert.Equal(s.T(), "id0", body["id"])
+	assert.Equal(s.T(), req.Address, body["address"])
 
-	if id, _ := body["id"]; id != "id0" {
-		t.Fatalf("node joined supplying wrong ID, exp %s, got %s", "id0", body["id"])
-	}
-	if addr, _ := body["address"]; addr != nodeAddr {
-		t.Fatalf("node joined supplying wrong address, exp %s, got %s", nodeAddr, body["address"])
-	}
 	rxMd, _ := body["metadata"].(map[string]interface{})
-	if len(rxMd) != len(md) || rxMd["foo"] != "bar" {
-		t.Fatalf("node joined supplying wrong meta")
-	}
+	assert.Equal(s.T(), len(req.Metadata), len(rxMd))
+	assert.Equal(s.T(), "bar", rxMd["foo"])
 }
 
-func Test_SingleJoinFail(t *testing.T) {
+func (s *ClusterTestSuite) TestSingleJoinFailure() {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer ts.Close()
 
-	_, err := Join("", []string{ts.URL}, "id0", "127.0.0.1:9090", true, nil,
-		numAttempts, attemptInterval, nil)
-	if err == nil {
-		t.Fatalf("expected error when joining bad node")
-	}
+	_, err := Join(&JoinRequest{
+		SourceIP:        "",
+		JoinAddress:     []string{ts.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           true,
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.NotNil(s.T(), err)
 }
 
-func Test_DoubleJoinOK(t *testing.T) {
+func (s *ClusterTestSuite) TestDoubleJoinFirstNode() {
 	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	}))
 	defer ts1.Close()
@@ -132,17 +147,21 @@ func Test_DoubleJoinOK(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	j, err := Join("127.0.0.1", []string{ts1.URL, ts2.URL}, "id0", "127.0.0.1:9090", true, nil,
-		numAttempts, attemptInterval, nil)
-	if err != nil {
-		t.Fatalf("failed to join a single node: %s", err.Error())
-	}
-	if j != ts1.URL+"/join" {
-		t.Fatalf("node joined using wrong endpoint, exp: %s, got: %s", j, ts1.URL)
-	}
+	j, err := Join(&JoinRequest{
+		SourceIP:        "127.0.0.1",
+		JoinAddress:     []string{ts1.URL, ts2.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           true,
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), ts1.URL+"/join", j)
 }
 
-func Test_DoubleJoinOKSecondNode(t *testing.T) {
+func (s *ClusterTestSuite) TestDoubleJoinSecondNode() {
 	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
@@ -151,17 +170,21 @@ func Test_DoubleJoinOKSecondNode(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	j, err := Join("", []string{ts1.URL, ts2.URL}, "id0", "127.0.0.1:9090", true, nil,
-		numAttempts, attemptInterval, nil)
-	if err != nil {
-		t.Fatalf("failed to join a single node: %s", err.Error())
-	}
-	if j != ts2.URL+"/join" {
-		t.Fatalf("node joined using wrong endpoint, exp: %s, got: %s", j, ts2.URL)
-	}
+	j, err := Join(&JoinRequest{
+		SourceIP:        "",
+		JoinAddress:     []string{ts1.URL, ts2.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           true,
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), ts2.URL+"/join", j)
 }
 
-func Test_DoubleJoinOKSecondNodeRedirect(t *testing.T) {
+func (s *ClusterTestSuite) TestDoubleJoinSecondNodeRedirect() {
 	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 	}))
 	defer ts1.Close()
@@ -172,12 +195,20 @@ func Test_DoubleJoinOKSecondNodeRedirect(t *testing.T) {
 	}))
 	defer ts2.Close()
 
-	j, err := Join("127.0.0.1", []string{ts2.URL}, "id0", "127.0.0.1:9090", true, nil,
-		numAttempts, attemptInterval, nil)
-	if err != nil {
-		t.Fatalf("failed to join a single node: %s", err.Error())
-	}
-	if j != redirectAddr {
-		t.Fatalf("node joined using wrong endpoint, exp: %s, got: %s", redirectAddr, j)
-	}
+	j, err := Join(&JoinRequest{
+		SourceIP:        "127.0.0.1",
+		JoinAddress:     []string{ts2.URL},
+		ID:              "id0",
+		Address:         "127.0.0.1:9090",
+		Voter:           true,
+		Attempts:        numAttempts,
+		AttemptInterval: attemptInterval,
+		TLSConfig:       nil,
+	})
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), redirectAddr, j)
+}
+
+func TestClusterTestSuite(t *testing.T) {
+	suite.Run(t, new(ClusterTestSuite))
 }
