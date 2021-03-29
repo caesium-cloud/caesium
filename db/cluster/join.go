@@ -22,41 +22,66 @@ var (
 	ErrJoinFailed = errors.New("failed to join cluster")
 )
 
+type JoinRequest struct {
+	SourceIP        string
+	JoinAddress     []string
+	ID              string
+	Address         string
+	Voter           bool
+	Metadata        map[string]string
+	Attempts        int
+	AttemptInterval time.Duration
+	TLSConfig       *tls.Config
+}
+
 // Join attempts to join the cluster at one of the addresses given in joinAddr.
 // It walks through joinAddr in order, and sets the node ID and Raft address of
 // the joining node as id addr respectively. It returns the endpoint successfully
 // used to join the cluster.
-func Join(srcIP string, joinAddr []string, id, addr string, voter bool, meta map[string]string, numAttempts int,
-	attemptInterval time.Duration, tlsConfig *tls.Config) (string, error) {
+func Join(req *JoinRequest) (string, error) {
 	var err error
 	var j string
 	logger := log.New(os.Stderr, "[cluster-join] ", log.LstdFlags)
-	if tlsConfig == nil {
-		tlsConfig = &tls.Config{InsecureSkipVerify: true}
+	if req.TLSConfig == nil {
+		req.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	for i := 0; i < numAttempts; i++ {
-		for _, a := range joinAddr {
-			j, err = join(srcIP, a, id, addr, voter, meta, tlsConfig, logger)
-			if err == nil {
+	for i := 0; i < req.Attempts; i++ {
+		for _, a := range req.JoinAddress {
+			if j, err = join(
+				req.SourceIP,
+				a,
+				req.ID,
+				req.Address,
+				req.Voter,
+				req.Metadata,
+				req.TLSConfig,
+				logger,
+			); err == nil {
 				// Success!
 				return j, nil
 			}
 		}
-		logger.Printf("failed to join cluster at %s: %s, sleeping %s before retry", joinAddr, err.Error(), attemptInterval)
-		time.Sleep(attemptInterval)
+		logger.Printf("failed to join cluster at %s: %s, sleeping %s before retry", req.JoinAddress, err.Error(), req.AttemptInterval)
+		time.Sleep(req.AttemptInterval)
 	}
-	logger.Printf("failed to join cluster at %s, after %d attempts", joinAddr, numAttempts)
+	logger.Printf("failed to join cluster at %s, after %d attempts", req.JoinAddress, req.Attempts)
 	return "", ErrJoinFailed
 }
 
-func join(srcIP, joinAddr, id, addr string, voter bool, meta map[string]string, tlsConfig *tls.Config, logger *log.Logger) (string, error) {
+func join(
+	srcIP, joinAddr, id, addr string,
+	voter bool,
+	meta map[string]string,
+	tlsConfig *tls.Config,
+	logger *log.Logger,
+) (string, error) {
+
 	if id == "" {
 		return "", fmt.Errorf("node ID not set")
 	}
 	// The specified source IP is optional
-	var dialer *net.Dialer
-	dialer = &net.Dialer{}
+	dialer := &net.Dialer{}
 	if srcIP != "" {
 		netAddr := &net.TCPAddr{
 			IP:   net.ParseIP(srcIP),
@@ -74,13 +99,14 @@ func join(srcIP, joinAddr, id, addr string, voter bool, meta map[string]string, 
 	fullAddr := NormalizeAddr(fmt.Sprintf("%s/join", joinAddr))
 
 	// Create and configure the client to connect to the other node.
-	tr := &http.Transport{
-		TLSClientConfig: tlsConfig,
-		Dial:            dialer.Dial,
-	}
-	client := &http.Client{Transport: tr}
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+	client := &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: tlsConfig,
+			Dial:            dialer.Dial,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
 	}
 
 	for {

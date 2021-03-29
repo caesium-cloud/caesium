@@ -138,13 +138,15 @@ func clusterize() error {
 
 		tlsConfig := tls.Config{InsecureSkipVerify: true}
 
-		if j, err := cluster.Join(
-			env.Variables().JoinSrcIP,
-			joins, s.ID(), advAddr,
-			!env.Variables().RaftNonVoter, meta,
-			env.Variables().JoinAttempts,
-			env.Variables().JoinInterval,
-			&tlsConfig); err != nil {
+		if j, err := cluster.Join(&cluster.JoinRequest{
+			SourceIP:    env.Variables().JoinSrcIP,
+			JoinAddress: joins,
+			ID:          s.ID(),
+			Address:     advAddr,
+			Voter:       !env.Variables().RaftNonVoter,
+			Metadata:    meta,
+			TLSConfig:   &tlsConfig,
+		}); err != nil {
 			log.Fatal("failed to join cluster at %s: %s", joins, err.Error())
 		} else {
 			log.Info("successfully joined cluster at", j)
