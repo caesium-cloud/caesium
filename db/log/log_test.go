@@ -18,7 +18,7 @@ type LogTestSuite struct {
 
 func (s *LogTestSuite) SetupTest() {
 	var err error
-	s.path, err = ioutil.TempDir("", "rqlite-db-test")
+	s.path, err = ioutil.TempDir("", "caesium-db-test")
 	assert.Nil(s.T(), err)
 }
 

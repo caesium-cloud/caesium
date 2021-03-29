@@ -174,7 +174,7 @@ func clusterize() error {
 		log.Info("failed to close store: %s", err.Error())
 	}
 
-	log.Info("rqlite server stopped")
+	log.Info("caesium server stopped")
 
 	return err
 }
