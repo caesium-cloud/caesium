@@ -32,7 +32,7 @@ func mustWriteToFile(dir, content string) string {
 // caller to remove the file once it is no longer needed. If dir is the empty
 // string, then the default directory for temporary files is used.
 func mustTempFile(dir string) string {
-	tmpfile, err := ioutil.TempFile(dir, "rqlite-tls-test")
+	tmpfile, err := ioutil.TempFile(dir, "caesium-tls-test")
 	if err != nil {
 		panic(err.Error())
 	}

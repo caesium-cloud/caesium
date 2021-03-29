@@ -2,383 +2,248 @@ package db
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/db/command"
 	"github.com/caesium-cloud/caesium/db/testdata/chinook"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
-/*
- * Lowest-layer database tests
- */
+type DBTestSuite struct {
+	suite.Suite
+	m sync.Map
+}
 
-func Test_DbFileCreation(t *testing.T) {
-	dir, err := ioutil.TempDir("", "rqlite-test-")
-	defer os.RemoveAll(dir)
+func (s *DBTestSuite) SetupTest() {
+	dir, err := ioutil.TempDir("", "caesium-test-")
+	assert.Nil(s.T(), err)
 
 	db, err := Open(path.Join(dir, "test_db"))
-	if err != nil {
-		t.Fatalf("failed to open new database: %s", err.Error())
-	}
-	if db == nil {
-		t.Fatal("database is nil")
-	}
-	err = db.Close()
-	if err != nil {
-		t.Fatalf("failed to close database: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
+	s.m.Store(s.T().Name(), db)
 }
 
-func Test_TableCreation(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-
-	r, err := db.QueryStringStmt("SELECT * FROM foo")
-	if err != nil {
-		t.Fatalf("failed to query empty table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
+func (s *DBTestSuite) TeardownTest() {
+	assert.Nil(s.T(), s.DB().Close())
+	assert.Nil(s.T(), os.RemoveAll(s.DB().path))
 }
 
-func Test_SQLiteMasterTable(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-
-	r, err := db.QueryStringStmt("SELECT * FROM sqlite_master")
-	if err != nil {
-		t.Fatalf("failed to query master table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["type","name","tbl_name","rootpage","sql"],"types":["text","text","text","int","text"],"values":[["table","foo","foo",2,"CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
+func (s *DBTestSuite) DB() *DB {
+	db, ok := s.m.Load(s.T().Name())
+	assert.True(s.T(), ok)
+	assert.NotNil(s.T(), db)
+	return db.(*DB)
 }
 
-func Test_LoadInMemory(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestTableCreation() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	r, err := s.DB().QueryStringStmt("SELECT * FROM foo")
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r))
+}
 
-	r, err := db.QueryStringStmt("SELECT * FROM foo")
-	if err != nil {
-		t.Fatalf("failed to query empty table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
+func (s *DBTestSuite) TestMasterTable() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
-	inmem, err := LoadInMemoryWithDSN(path, "")
-	if err != nil {
-		t.Fatalf("failed to create loaded in-memory database: %s", err.Error())
-	}
+	r, err := s.DB().QueryStringStmt("SELECT * FROM sqlite_master")
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["type","name","tbl_name","rootpage","sql"],"types":["text","text","text","int","text"],"values":[["table","foo","foo",2,"CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)"]]}]`, asJSON(r))
+}
+
+func (s *DBTestSuite) TestLoadInMemory() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
+
+	r, err := s.DB().QueryStringStmt("SELECT * FROM foo")
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r))
+
+	inmem, err := LoadInMemoryWithDSN(s.DB().path, "")
+	assert.Nil(s.T(), err)
 
 	// Ensure it has been loaded correctly into the database
 	r, err = inmem.QueryStringStmt("SELECT * FROM foo")
-	if err != nil {
-		t.Fatalf("failed to query empty table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r))
 }
 
-func Test_DeserializeInMemoryWithDSN(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+// ---------------------------------------------------------
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestDeserializeInMemoryWithDSN() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(3, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(3, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
+
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
 	// Get byte representation of database on disk which, according to SQLite docs
 	// is the same as a serialized version.
-	b, err := ioutil.ReadFile(path)
-	if err != nil {
-		t.Fatalf("failed to read database on disk: %s", err.Error())
-	}
+	b, err := ioutil.ReadFile(s.DB().path)
+	assert.Nil(s.T(), err)
 
 	newDB, err := DeserializeInMemoryWithDSN(b, "")
-	if err != nil {
-		t.Fatalf("failed to deserialize database: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 	defer newDB.Close()
 
 	ro, err := newDB.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[3,"bar"],[4,"bar"]]}]`, asJSON(ro))
 
 	// Write a lot of records to the new database, to ensure it's fully functional.
 	req = &command.Request{
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(name) VALUES("fiona")`,
+				Sql: `INSERT INTO foo(name) VALUES("bar")`,
 			},
 		},
 	}
 	for i := 0; i < 5000; i++ {
 		_, err = newDB.Execute(req, false)
-		if err != nil {
-			t.Fatalf("failed to insert records: %s", err.Error())
-		}
+		assert.Nil(s.T(), err)
 	}
 	ro, err = newDB.QueryStringStmt(`SELECT COUNT(*) FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["COUNT(*)"],"types":[""],"values":[[5004]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["COUNT(*)"],"types":[""],"values":[[5004]]}]`, asJSON(ro))
 }
 
-func Test_EmptyStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestEmptyStatements() {
+	_, err := s.DB().ExecuteStringStmt("")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("")
-	if err != nil {
-		t.Fatalf("failed to execute empty statement: %s", err.Error())
-	}
-	_, err = db.ExecuteStringStmt(";")
-	if err != nil {
-		t.Fatalf("failed to execute empty statement with semicolon: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(";")
+	assert.Nil(s.T(), err)
 }
 
-func Test_SimpleSingleStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimpleSingleStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("bar")`)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("fiona")`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("baz")`)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("aoife")`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	r, err := s.DB().QueryStringStmt(`SELECT * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"baz"]]}]`, asJSON(r))
 
-	r, err := db.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().QueryStringStmt(`SELECT * FROM foo WHERE name="baz"`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"baz"]]}]`, asJSON(r))
 
-	r, err = db.QueryStringStmt(`SELECT * FROM foo WHERE name="aoife"`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().QueryStringStmt(`SELECT * FROM foo WHERE name="qux"`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r))
 
-	r, err = db.QueryStringStmt(`SELECT * FROM foo WHERE name="dana"`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().QueryStringStmt(`SELECT * FROM foo ORDER BY name DESC`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"baz"],[1,"bar"]]}]`, asJSON(r))
 
-	r, err = db.QueryStringStmt(`SELECT * FROM foo ORDER BY name`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"aoife"],[1,"fiona"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-
-	r, err = db.QueryStringStmt(`SELECT *,name FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name","name"],"types":["integer","text","text"],"values":[[1,"fiona","fiona"],[2,"aoife","aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().QueryStringStmt(`SELECT *,name FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name","name"],"types":["integer","text","text"],"values":[[1,"bar","bar"],[2,"baz","baz"]]}]`, asJSON(r))
 }
 
-func Test_SimpleSingleJSONStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimpleSingleJSONStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (c0 VARCHAR(36), c1 JSON, c2 NCHAR, c3 NVARCHAR, c4 CLOB)")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (c0 VARCHAR(36), c1 JSON, c2 NCHAR, c3 NVARCHAR, c4 CLOB)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(c0, c1, c2, c3, c4) VALUES("bar", '{"foo": "bar"}', "baz", "qux", "quux")`)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO foo(c0, c1, c2, c3, c4) VALUES("fiona", '{"mittens": "foobar"}', "bob", "dana", "declan")`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-
-	r, err := db.QueryStringStmt("SELECT * FROM foo")
-	if err != nil {
-		t.Fatalf("failed to query: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["c0","c1","c2","c3","c4"],"types":["varchar(36)","json","nchar","nvarchar","clob"],"values":[["fiona","{\"mittens\": \"foobar\"}","bob","dana","declan"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query, expected %s, got %s", exp, got)
-	}
+	r, err := s.DB().QueryStringStmt("SELECT * FROM foo")
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["c0","c1","c2","c3","c4"],"types":["varchar(36)","json","nchar","nvarchar","clob"],"values":[["bar","{\"foo\": \"bar\"}","baz","qux","quux"]]}]`, asJSON(r))
 }
 
-func Test_SimpleJoinStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE names (id INTEGER NOT NULL PRIMARY KEY, name TEXT, ssn TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestSimpleJoinStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE names (id INTEGER NOT NULL PRIMARY KEY, name TEXT, ssn TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO "names" VALUES(1,'bob','123-45-678')`,
+				Sql: `INSERT INTO "names" VALUES(1,'bar','123-45-678')`,
 			},
 			{
-				Sql: `INSERT INTO "names" VALUES(2,'tom','111-22-333')`,
+				Sql: `INSERT INTO "names" VALUES(2,'baz','111-22-333')`,
 			},
 			{
-				Sql: `INSERT INTO "names" VALUES(3,'matt','222-22-333')`,
+				Sql: `INSERT INTO "names" VALUES(3,'qux','222-22-333')`,
 			},
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt("CREATE TABLE staff (id INTEGER NOT NULL PRIMARY KEY, employer TEXT, ssn TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt("CREATE TABLE staff (id INTEGER NOT NULL PRIMARY KEY, employer TEXT, ssn TEXT)")
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO "staff" VALUES(1,'acme','222-22-333')`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO "staff" VALUES(1,'quux','222-22-333')`)
+	assert.Nil(s.T(), err)
 
-	r, err := db.QueryStringStmt(`SELECT names.id,name,names.ssn,employer FROM names INNER JOIN staff ON staff.ssn = names.ssn`)
-	if err != nil {
-		t.Fatalf("failed to query table using JOIN: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name","ssn","employer"],"types":["integer","text","text","text"],"values":[[3,"matt","222-22-333","acme"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().QueryStringStmt(`SELECT names.id,name,names.ssn,employer FROM names INNER JOIN staff ON staff.ssn = names.ssn`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name","ssn","employer"],"types":["integer","text","text","text"],"values":[[3,"qux","222-22-333","quux"]]}]`, asJSON(r))
 }
 
-func Test_SimpleSingleConcatStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimpleSingleConcatStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("bar")`)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("fiona")`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-
-	r, err := db.QueryStringStmt(`SELECT id || "_bar", name FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id || \"_bar\"","name"],"types":["","text"],"values":[["1_bar","fiona"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().QueryStringStmt(`SELECT id || "_bar", name FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id || \"_bar\"","name"],"types":["","text"],"values":[["1_bar","bar"]]}]`, asJSON(r))
 }
 
-func Test_SimpleMultiStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestSimpleMultiStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(name) VALUES("fiona")`,
+				Sql: `INSERT INTO foo(name) VALUES("bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(name) VALUES("dana")`,
+				Sql: `INSERT INTO foo(name) VALUES("baz")`,
 			},
 		},
 	}
-	re, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1}]`, asJSON(re); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	re, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1}]`, asJSON(re))
 
 	req = &command.Request{
 		Statements: []*command.Statement{
@@ -390,20 +255,12 @@ func Test_SimpleMultiStatements(t *testing.T) {
 			},
 		},
 	}
-	ro, err := db.Query(req, false)
-	if err != nil {
-		t.Fatalf("failed to query empty table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"dana"]]},{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"dana"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	ro, err := s.DB().Query(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"baz"]]},{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"baz"]]}]`, asJSON(ro))
 }
 
-func Test_SimpleSingleMultiLineStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
+func (s *DBTestSuite) TestSimpleSingleMultiLineStatements() {
 	req := &command.Request{
 		Statements: []*command.Statement{
 			{
@@ -415,140 +272,77 @@ name TEXT
 			},
 		},
 	}
-	_, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
 	req = &command.Request{
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(name) VALUES("fiona")`,
+				Sql: `INSERT INTO foo(name) VALUES("bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(name) VALUES("dana")`,
+				Sql: `INSERT INTO foo(name) VALUES("baz")`,
 			},
 		},
 	}
-	re, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1}]`, asJSON(re); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	re, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1}]`, asJSON(re))
 }
 
-func Test_SimpleFailingStatements_Execute(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimpleFailingExecuteStatements() {
+	r, err := s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("bar")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"no such table: foo"}]`, asJSON(r))
 
-	r, err := db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("fiona")`)
-	if err != nil {
-		t.Fatalf("error executing insertion into non-existent table: %s", err.Error())
-	}
-	if exp, got := `[{"error":"no such table: foo"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{}]`, asJSON(r))
 
-	r, err = db.ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	r, err = db.ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
-	if err != nil {
-		t.Fatalf("failed to attempt creation of duplicate table: %s", err.Error())
-	}
-	if exp, got := `[{"error":"table foo already exists"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"table foo already exists"}]`, asJSON(r))
 
-	r, err = db.ExecuteStringStmt(`INSERT INTO foo(id, name) VALUES(11, "fiona")`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":11,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	r, err = db.ExecuteStringStmt(`INSERT INTO foo(id, name) VALUES(11, "fiona")`)
-	if err != nil {
-		t.Fatalf("failed to attempt duplicate record insertion: %s", err.Error())
-	}
-	if exp, got := `[{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(id, name) VALUES(11, "bar")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":11,"rows_affected":1}]`, asJSON(r))
 
-	r, err = db.ExecuteStringStmt(`utter nonsense`)
-	if err != nil {
-		if exp, got := `[{"error":"near \"utter\": syntax error"}]`, asJSON(r); exp != got {
-			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-		}
-	}
+	r, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(id, name) VALUES(11, "bar")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r))
+
+	r, err = s.DB().ExecuteStringStmt(`utter nonsense`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"near \"utter\": syntax error"}]`, asJSON(r))
 }
 
-func Test_SimpleFailingStatements_Query(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimpleFailingQueryStatements() {
+	ro, err := s.DB().QueryStringStmt(`SELECT * FROM bar`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"no such table: bar"}]`, asJSON(ro))
 
-	ro, err := db.QueryStringStmt(`SELECT * FROM bar`)
-	if err != nil {
-		t.Fatalf("failed to attempt query of non-existent table: %s", err.Error())
-	}
-	if exp, got := `[{"error":"no such table: bar"}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	ro, err = s.DB().QueryStringStmt(`SELECTxx * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"near \"SELECTxx\": syntax error"}]`, asJSON(ro))
 
-	ro, err = db.QueryStringStmt(`SELECTxx * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to attempt nonsense query: %s", err.Error())
-	}
-	if exp, got := `[{"error":"near \"SELECTxx\": syntax error"}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	r, err := db.QueryStringStmt(`utter nonsense`)
-	if err != nil {
-		if exp, got := `[{"error":"near \"utter\": syntax error"}]`, asJSON(r); exp != got {
-			t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-		}
-	}
+	r, err := s.DB().QueryStringStmt(`utter nonsense`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"near \"utter\": syntax error"}]`, asJSON(r))
 }
 
-func Test_SimplePragmaTableInfo(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestSimplePragmaTableInfo() {
+	r, err := s.DB().ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{}]`, asJSON(r))
 
-	r, err := db.ExecuteStringStmt(`CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)`)
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-	if exp, got := `[{}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-
-	res, err := db.QueryStringStmt(`PRAGMA table_info("foo")`)
-	if err != nil {
-		t.Fatalf("failed to query a common table expression: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["","","","","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(res); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	res, err := s.DB().QueryStringStmt(`PRAGMA table_info("foo")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["cid","name","type","notnull","dflt_value","pk"],"types":["","","","","",""],"values":[[0,"id","INTEGER",1,null,1],[1,"name","TEXT",0,null,0]]}]`, asJSON(res))
 }
 
-func Test_SimpleParameterizedStatements(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestSimpleParameterizedStatements() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Statements: []*command.Statement{
@@ -557,62 +351,46 @@ func Test_SimpleParameterizedStatements(t *testing.T) {
 				Parameters: []*command.Parameter{
 					{
 						Value: &command.Parameter_S{
-							S: "fiona",
+							S: "bar",
 						},
 					},
 				},
 			},
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
 	req.Statements[0].Parameters[0] = &command.Parameter{
 		Value: &command.Parameter_S{
-			S: "aoife",
+			S: "baz",
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
-	r, err := db.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().QueryStringStmt(`SELECT * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"baz"]]}]`, asJSON(r))
 
 	req.Statements[0].Sql = "SELECT * FROM foo WHERE name=?"
 	req.Statements[0].Parameters[0] = &command.Parameter{
 		Value: &command.Parameter_S{
-			S: "aoife",
+			S: "baz",
 		},
 	}
-	r, err = db.Query(req, false)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().Query(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[2,"baz"]]}]`, asJSON(r))
 
 	req.Statements[0].Parameters[0] = &command.Parameter{
 		Value: &command.Parameter_S{
-			S: "fiona",
+			S: "bar",
 		},
 	}
-	r, err = db.Query(req, false)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().Query(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"]]}]`, asJSON(r))
 
 	req = &command.Request{
 		Statements: []*command.Statement{
@@ -621,7 +399,7 @@ func Test_SimpleParameterizedStatements(t *testing.T) {
 				Parameters: []*command.Parameter{
 					{
 						Value: &command.Parameter_S{
-							S: "fiona",
+							S: "bar",
 						},
 					},
 				},
@@ -631,617 +409,344 @@ func Test_SimpleParameterizedStatements(t *testing.T) {
 				Parameters: []*command.Parameter{
 					{
 						Value: &command.Parameter_S{
-							S: "aoife",
+							S: "baz",
 						},
 					},
 				},
 			},
 		},
 	}
-	r, err = db.Query(req, false)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"]]},{"columns":["id","name"],"types":["integer","text"],"values":[[2,"aoife"]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().Query(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"]]},{"columns":["id","name"],"types":["integer","text"],"values":[[2,"baz"]]}]`, asJSON(r))
 }
 
-func Test_CommonTableExpressions(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestCommonTableExpressions() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE test(x foo)")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE test(x foo)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	_, err = s.DB().ExecuteStringStmt(`INSERT INTO test VALUES(1)`)
+	assert.Nil(s.T(), err)
 
-	_, err = db.ExecuteStringStmt(`INSERT INTO test VALUES(1)`)
-	if err != nil {
-		t.Fatalf("failed to insert record: %s", err.Error())
-	}
+	r, err := s.DB().QueryStringStmt(`WITH bar AS (SELECT * FROM test) SELECT * FROM test WHERE x = 1`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["x"],"types":["foo"],"values":[[1]]}]`, asJSON(r))
 
-	r, err := db.QueryStringStmt(`WITH bar AS (SELECT * FROM test) SELECT * FROM test WHERE x = 1`)
-	if err != nil {
-		t.Fatalf("failed to query a common table expression: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["x"],"types":["foo"],"values":[[1]]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-
-	r, err = db.QueryStringStmt(`WITH bar AS (SELECT * FROM test) SELECT * FROM test WHERE x = 2`)
-	if err != nil {
-		t.Fatalf("failed to query a common table expression: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["x"],"types":["foo"]}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().QueryStringStmt(`WITH bar AS (SELECT * FROM test) SELECT * FROM test WHERE x = 2`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["x"],"types":["foo"]}]`, asJSON(r))
 }
 
-func Test_ForeignKeyConstraints(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, ref INTEGER REFERENCES foo(id))")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestForeignKeyConstraints() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, ref INTEGER REFERENCES foo(id))")
+	assert.Nil(s.T(), err)
 
 	// Explicitly disable constraints.
-	if err := db.EnableFKConstraints(false); err != nil {
-		t.Fatalf("failed to enable foreign key constraints: %s", err.Error())
-	}
+	assert.Nil(s.T(), s.DB().EnableFKConstraints(false))
 
 	// Check constraints
-	fk, err := db.FKConstraints()
-	if err != nil {
-		t.Fatalf("failed to check FK constraints: %s", err.Error())
-	}
-	if fk != false {
-		t.Fatal("FK constraints are not disabled")
-	}
+	fk, err := s.DB().FKConstraints()
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), fk)
 
-	r, err := db.ExecuteStringStmt(`INSERT INTO foo(id, ref) VALUES(1, 2)`)
-	if err != nil {
-		t.Fatalf("failed to execute FK test statement: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().ExecuteStringStmt(`INSERT INTO foo(id, ref) VALUES(1, 2)`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r))
 
 	// Explicitly enable constraints.
-	if err := db.EnableFKConstraints(true); err != nil {
-		t.Fatalf("failed to enable foreign key constraints: %s", err.Error())
-	}
+	assert.Nil(s.T(), s.DB().EnableFKConstraints(true))
 
 	// Check constraints
-	fk, err = db.FKConstraints()
-	if err != nil {
-		t.Fatalf("failed to check FK constraints: %s", err.Error())
-	}
-	if fk != true {
-		t.Fatal("FK constraints are not enabled")
-	}
+	fk, err = s.DB().FKConstraints()
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), fk)
 
-	r, err = db.ExecuteStringStmt(`INSERT INTO foo(id, ref) VALUES(1, 3)`)
-	if err != nil {
-		t.Fatalf("failed to execute FK test statement: %s", err.Error())
-	}
-	if exp, got := `[{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(id, ref) VALUES(1, 3)`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r))
 }
 
-func Test_UniqueConstraints(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestUniqueConstraints() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT, CONSTRAINT name_unique UNIQUE (name))")
+	assert.Nil(s.T(), err)
 
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT, CONSTRAINT name_unique UNIQUE (name))")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
-
-	r, err := db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("fiona")`)
-	if err != nil {
-		t.Fatalf("error executing insertion into table: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for INSERT\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("bar")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1}]`, asJSON(r))
 
 	// UNIQUE constraint should fire.
-	r, err = db.ExecuteStringStmt(`INSERT INTO foo(name) VALUES("fiona")`)
-	if err != nil {
-		t.Fatalf("error executing insertion into table: %s", err.Error())
-	}
-	if exp, got := `[{"error":"UNIQUE constraint failed: foo.name"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for INSERT\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err = s.DB().ExecuteStringStmt(`INSERT INTO foo(name) VALUES("bar")`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"error":"UNIQUE constraint failed: foo.name"}]`, asJSON(r))
 }
 
-func Test_DBSize(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestDBSize() {
+	_, err := s.DB().Size()
+	assert.Nil(s.T(), err)
 
-	if _, err := db.Size(); err != nil {
-		t.Fatalf("failed to read database size: %s", err)
-	}
+	_, err = s.DB().FileSize()
+	assert.Nil(s.T(), err)
 }
 
-func Test_DBFileSize(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestActiveTransaction() {
+	assert.False(s.T(), s.DB().TransactionActive())
 
-	if _, err := db.FileSize(); err != nil {
-		t.Fatalf("failed to read database file size: %s", err)
-	}
+	_, err := s.DB().ExecuteStringStmt(`BEGIN`)
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), s.DB().TransactionActive())
+
+	_, err = s.DB().ExecuteStringStmt(`COMMIT`)
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), s.DB().TransactionActive())
+
+	_, err = s.DB().ExecuteStringStmt(`BEGIN`)
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), s.DB().TransactionActive())
+
+	_, err = s.DB().ExecuteStringStmt(`ROLLBACK`)
+	assert.Nil(s.T(), err)
+	assert.False(s.T(), s.DB().TransactionActive())
 }
 
-func Test_ActiveTransaction(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestAbortTransaction() {
+	assert.Nil(s.T(), s.DB().AbortTransaction())
 
-	if db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as active")
-	}
+	_, err := s.DB().ExecuteStringStmt(`BEGIN`)
+	assert.Nil(s.T(), err)
+	assert.True(s.T(), s.DB().TransactionActive())
 
-	if _, err := db.ExecuteStringStmt(`BEGIN`); err != nil {
-		t.Fatalf("error starting transaction: %s", err.Error())
-	}
-
-	if !db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as inactive")
-	}
-
-	if _, err := db.ExecuteStringStmt(`COMMIT`); err != nil {
-		t.Fatalf("error starting transaction: %s", err.Error())
-	}
-
-	if db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as active")
-	}
-
-	if _, err := db.ExecuteStringStmt(`BEGIN`); err != nil {
-		t.Fatalf("error starting transaction: %s", err.Error())
-	}
-
-	if !db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as inactive")
-	}
-
-	if _, err := db.ExecuteStringStmt(`ROLLBACK`); err != nil {
-		t.Fatalf("error starting transaction: %s", err.Error())
-	}
-
-	if db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as active")
-	}
+	assert.Nil(s.T(), s.DB().AbortTransaction())
+	assert.False(s.T(), s.DB().TransactionActive())
 }
 
-func Test_AbortTransaction(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	if err := db.AbortTransaction(); err != nil {
-		t.Fatalf("error abrorting non-active transaction: %s", err.Error())
-	}
-
-	if _, err := db.ExecuteStringStmt(`BEGIN`); err != nil {
-		t.Fatalf("error starting transaction: %s", err.Error())
-	}
-
-	if !db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as inactive")
-	}
-
-	if err := db.AbortTransaction(); err != nil {
-		t.Fatalf("error abrorting non-active transaction: %s", err.Error())
-	}
-
-	if db.TransactionActive() {
-		t.Fatal("transaction incorrectly marked as active")
-	}
-}
-
-func Test_PartialFail(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestPartialFailure() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	r, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"error":"UNIQUE constraint failed: foo.id"},{"last_insert_id":4,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	ro, err := db.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"error":"UNIQUE constraint failed: foo.id"},{"last_insert_id":4,"rows_affected":1}]`, asJSON(r))
+
+	ro, err := s.DB().QueryStringStmt(`SELECT * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[4,"bar"]]}]`, asJSON(ro))
 }
 
-func Test_SimpleTransaction(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestSimpleTransaction() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(3, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(3, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	r, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"last_insert_id":3,"rows_affected":1},{"last_insert_id":4,"rows_affected":1}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	ro, err := db.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"last_insert_id":3,"rows_affected":1},{"last_insert_id":4,"rows_affected":1}]`, asJSON(r))
+
+	ro, err := s.DB().QueryStringStmt(`SELECT * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[3,"bar"],[4,"bar"]]}]`, asJSON(ro))
 }
 
-func Test_PartialFailTransaction(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestPartialFailureTransaction() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	r, err := db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
-	if exp, got := `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
-	ro, err := db.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	r, err := s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"last_insert_id":1,"rows_affected":1},{"last_insert_id":2,"rows_affected":1},{"error":"UNIQUE constraint failed: foo.id"}]`, asJSON(r))
+
+	ro, err := s.DB().QueryStringStmt(`SELECT * FROM foo`)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"]}]`, asJSON(ro))
 }
 
-func Test_Backup(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestBackup() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(3, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(3, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
 	dstDB := mustTempFile()
 	defer os.Remove(dstDB)
 
-	err = db.Backup(dstDB)
-	if err != nil {
-		t.Fatalf("failed to backup database: %s", err.Error())
-	}
+	assert.Nil(s.T(), s.DB().Backup(dstDB))
 
 	newDB, err := Open(dstDB)
-	if err != nil {
-		t.Fatalf("failed to open backup database: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 	defer newDB.Close()
 	defer os.Remove(dstDB)
 	ro, err := newDB.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[3,"bar"],[4,"bar"]]}]`, asJSON(ro))
 }
 
-func Test_Copy(t *testing.T) {
-	srcDB, path := mustCreateDatabase()
-	defer srcDB.Close()
-	defer os.Remove(path)
+func (s *DBTestSuite) TestCopy() {
+	srcDB := s.DB()
 
 	_, err := srcDB.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(3, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(3, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
 	_, err = srcDB.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
 	dstFile := mustTempFile()
 	defer os.Remove(dstFile)
 	dstDB, err := Open(dstFile)
-	if err != nil {
-		t.Fatalf("failed to open destination database: %s", err)
-	}
+	assert.Nil(s.T(), err)
 	defer dstDB.Close()
 
-	err = srcDB.Copy(dstDB)
-	if err != nil {
-		t.Fatalf("failed to copy database: %s", err.Error())
-	}
+	assert.Nil(s.T(), srcDB.Copy(dstDB))
 
 	ro, err := dstDB.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[3,"bar"],[4,"bar"]]}]`, asJSON(ro))
 }
 
-func Test_Serialize(t *testing.T) {
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
-	if err != nil {
-		t.Fatalf("failed to create table: %s", err.Error())
-	}
+func (s *DBTestSuite) TestSerialize() {
+	_, err := s.DB().ExecuteStringStmt("CREATE TABLE foo (id INTEGER NOT NULL PRIMARY KEY, name TEXT)")
+	assert.Nil(s.T(), err)
 
 	req := &command.Request{
 		Transaction: true,
 		Statements: []*command.Statement{
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(1, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(1, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(2, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(2, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(3, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(3, "bar")`,
 			},
 			{
-				Sql: `INSERT INTO foo(id, name) VALUES(4, "fiona")`,
+				Sql: `INSERT INTO foo(id, name) VALUES(4, "bar")`,
 			},
 		},
 	}
-	_, err = db.Execute(req, false)
-	if err != nil {
-		t.Fatalf("failed to insert records: %s", err.Error())
-	}
+	_, err = s.DB().Execute(req, false)
+	assert.Nil(s.T(), err)
 
-	dstDB, err := ioutil.TempFile("", "rqlite-bak-")
-	if err != nil {
-		t.Fatalf("failed to create temp file: %s", err.Error())
-	}
+	dstDB, err := ioutil.TempFile("", "caesium-bak-")
+	assert.Nil(s.T(), err)
 	dstDB.Close()
 	defer os.Remove(dstDB.Name())
 
 	// Get the bytes, and write to a temp file.
-	b, err := db.Serialize()
-	if err != nil {
-		t.Fatalf("failed to serialize database: %s", err.Error())
-	}
-	err = ioutil.WriteFile(dstDB.Name(), b, 0644)
-	if err != nil {
-		t.Fatalf("failed to write serialized database to file: %s", err.Error())
-	}
+	b, err := s.DB().Serialize()
+	assert.Nil(s.T(), err)
+	assert.Nil(s.T(), ioutil.WriteFile(dstDB.Name(), b, 0644))
 
 	newDB, err := Open(dstDB.Name())
-	if err != nil {
-		t.Fatalf("failed to open on-disk serialized database: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 	defer newDB.Close()
 	defer os.Remove(dstDB.Name())
 	ro, err := newDB.QueryStringStmt(`SELECT * FROM foo`)
-	if err != nil {
-		t.Fatalf("failed to query table: %s", err.Error())
-	}
-	if exp, got := `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"fiona"],[2,"fiona"],[3,"fiona"],[4,"fiona"]]}]`, asJSON(ro); exp != got {
-		t.Fatalf("unexpected results for query\nexp: %s\ngot: %s", exp, got)
-	}
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), `[{"columns":["id","name"],"types":["integer","text"],"values":[[1,"bar"],[2,"bar"],[3,"bar"],[4,"bar"]]}]`, asJSON(ro))
 }
 
-func Test_Dump(t *testing.T) {
-	t.Parallel()
-
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	_, err := db.ExecuteStringStmt(chinook.DB)
-	if err != nil {
-		t.Fatalf("failed to load chinook dump: %s", err.Error())
-	}
+func (s *DBTestSuite) TestDump() {
+	_, err := s.DB().ExecuteStringStmt(chinook.DB)
+	assert.Nil(s.T(), err)
 
 	var b strings.Builder
-	if err := db.Dump(&b); err != nil {
-		t.Fatalf("failed to dump database: %s", err.Error())
-	}
-
-	if b.String() != chinook.DB {
-		t.Fatal("dumped database does not equal entered database")
-	}
+	assert.Nil(s.T(), s.DB().Dump(&b))
+	assert.Equal(s.T(), chinook.DB, b.String())
 }
 
-func Test_DumpMemory(t *testing.T) {
-	t.Parallel()
-
-	db, path := mustCreateDatabase()
-	defer db.Close()
-	defer os.Remove(path)
-
-	inmem, err := LoadInMemoryWithDSN(path, "")
-	if err != nil {
-		t.Fatalf("failed to create loaded in-memory database: %s", err.Error())
-	}
+func (s *DBTestSuite) TestDumpMemory() {
+	inmem, err := LoadInMemoryWithDSN(s.DB().path, "")
+	assert.Nil(s.T(), err)
 
 	_, err = inmem.ExecuteStringStmt(chinook.DB)
-	if err != nil {
-		t.Fatalf("failed to load chinook dump: %s", err.Error())
-	}
+	assert.Nil(s.T(), err)
 
 	var b strings.Builder
-	if err := inmem.Dump(&b); err != nil {
-		t.Fatalf("failed to dump database: %s", err.Error())
-	}
-
-	if b.String() != chinook.DB {
-		t.Fatal("dumped database does not equal entered database")
-	}
-}
-
-func mustCreateDatabase() (*DB, string) {
-	var err error
-	f := mustTempFile()
-	db, err := Open(f)
-	if err != nil {
-		panic("failed to open database")
-	}
-
-	return db, f
-}
-
-func mustWriteAndOpenDatabase(b []byte) (*DB, string) {
-	var err error
-	f := mustTempFile()
-	err = ioutil.WriteFile(f, b, 0660)
-	if err != nil {
-		panic("failed to write file")
-	}
-
-	db, err := Open(f)
-	if err != nil {
-		panic("failed to open database")
-	}
-	return db, f
-}
-
-// mustExecute executes a statement, and panics on failure. Used for statements
-// that should never fail, even taking into account test setup.
-func mustExecute(db *DB, stmt string) {
-	_, err := db.ExecuteStringStmt(stmt)
-	if err != nil {
-		panic(fmt.Sprintf("failed to execute statement: %s", err.Error()))
-	}
-}
-
-// mustQuery executes a statement, and panics on failure. Used for statements
-// that should never fail, even taking into account test setup.
-func mustQuery(db *DB, stmt string) {
-	_, err := db.QueryStringStmt(stmt)
-	if err != nil {
-		panic(fmt.Sprintf("failed to query: %s", err.Error()))
-	}
+	assert.Nil(s.T(), inmem.Dump(&b))
+	assert.Equal(s.T(), chinook.DB, b.String())
 }
 
 func asJSON(v interface{}) string {
@@ -1255,10 +760,14 @@ func asJSON(v interface{}) string {
 // mustTempFile returns a path to a temporary file in directory dir. It is up to the
 // caller to remove the file once it is no longer needed.
 func mustTempFile() string {
-	tmpfile, err := ioutil.TempFile("", "rqlite-db-test")
+	tmpfile, err := ioutil.TempFile("", "caesium-db-test")
 	if err != nil {
 		panic(err.Error())
 	}
 	tmpfile.Close()
 	return tmpfile.Name()
+}
+
+func TestDBTestSuite(t *testing.T) {
+	suite.Run(t, new(DBTestSuite))
 }
