@@ -163,7 +163,6 @@ COMMIT;
 	f, err := ioutil.TempFile("", "caesium-baktest-")
 	assert.Nil(s.T(), err)
 	defer os.Remove(f.Name())
-	s.Store().logger.Printf("backup file is %s", f.Name())
 
 	assert.Nil(s.T(), s.Store().Backup(true, BackupBinary, f))
 
@@ -190,7 +189,6 @@ COMMIT;
 	f, err := ioutil.TempFile("", "caesium-baktest-")
 	assert.Nil(s.T(), err)
 	defer os.Remove(f.Name())
-	s.Store().logger.Printf("backup file is %s", f.Name())
 
 	assert.Nil(s.T(), s.Store().Backup(true, BackupSQL, f))
 

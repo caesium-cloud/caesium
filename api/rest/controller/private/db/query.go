@@ -10,14 +10,14 @@ import (
 )
 
 func Query(c echo.Context) error {
-	var req *db.QueryRequest
+	var req db.QueryRequest
 
-	if err := c.Bind(req); err != nil {
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, err)
 	}
 
 	svc := db.Service()
-	resp, err := svc.Query(req)
+	resp, err := svc.Query(&req)
 
 	switch err {
 	case nil:

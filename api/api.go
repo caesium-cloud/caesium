@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/caesium-cloud/caesium/api/gql"
@@ -10,9 +11,11 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
+var e *echo.Echo
+
 // Start launches Caesium's API.
 func Start() error {
-	e := echo.New()
+	e = echo.New()
 	e.HideBanner = true
 	e.HidePort = true
 
@@ -29,4 +32,12 @@ func Start() error {
 	e.GET("/gql", gql.Handler())
 
 	return e.Start(fmt.Sprintf(":%v", env.Variables().Port))
+}
+
+func Shutdown() error {
+	if e != nil {
+		return e.Shutdown(context.Background())
+	}
+
+	return nil
 }

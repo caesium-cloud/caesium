@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
 	"strings"
+	"syscall"
 
 	"github.com/caesium-cloud/caesium/api"
 	"github.com/caesium-cloud/caesium/db/cluster"
@@ -38,9 +40,43 @@ var (
 )
 
 func start(cmd *cobra.Command, args []string) error {
-	clusterize()
-	log.Info("spinning up api")
-	return api.Start()
+	signalChan := make(chan os.Signal)
+	go func() {
+		for s := range signalChan {
+			switch s {
+			case syscall.SIGUSR1:
+				log.Info("dumping stack traces due to SIGUSR1 signal")
+				pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+			case syscall.SIGINT:
+				log.Info("gracefully shutting down due to SIGINT signal")
+				shutdown()
+				os.Exit(0)
+			}
+		}
+	}()
+	signal.Notify(signalChan, syscall.SIGUSR1)
+	signal.Notify(signalChan, syscall.SIGINT)
+
+	errs := make(chan error)
+
+	go func() {
+		log.Info("clusterizing caesium")
+		errs <- clusterize()
+	}()
+
+	go func() {
+		log.Info("spinning up api")
+		errs <- api.Start()
+	}()
+
+	defer shutdown()
+
+	return <-errs
+}
+
+func shutdown() {
+	api.Shutdown()
+	store.GlobalStore().Close(true)
 }
 
 func clusterize() error {
@@ -49,13 +85,13 @@ func clusterize() error {
 	// Create internode network layer.
 	tn := tcp.NewTransport()
 	if err := tn.Open(env.Variables().RaftAddr); err != nil {
-		log.Fatal("failed to open inter-node network layer: %s", err.Error())
+		log.Fatal("failed to open inter-node network", "error", err)
 	}
 
 	// Create and open the store.
 	dbPath, err := filepath.Abs(dbPath)
 	if err != nil {
-		log.Fatal("failed to determine absolute data path: %s", err.Error())
+		log.Fatal("failed to determine absolute data path", "error", err)
 	}
 	dbConf := store.NewDBConfig(env.Variables().DSN, !env.Variables().OnDisk)
 
@@ -84,17 +120,17 @@ func clusterize() error {
 	var enableBootstrap bool
 	isNew := store.IsNewNode(dbPath)
 	if isNew {
-		log.Info("no preexisting node state detected in %s, node may be bootstrapping", dbPath)
+		log.Info("node bootstrapping", "path", dbPath)
 		enableBootstrap = true // New node, so we may be bootstrapping
 	} else {
-		log.Info("preexisting node state detected in %s", dbPath)
+		log.Info("preexisting node state detected", "path", dbPath)
 	}
 
 	// Determine join addresses
 	var joins []string
 	joins, err = determineJoinAddresses()
 	if err != nil {
-		log.Fatal("unable to determine join addresses: %s", err.Error())
+		log.Fatal("failed to determine join addresses", "error", err)
 	}
 
 	// Supplying join addresses means bootstrapping a new cluster won't
@@ -113,7 +149,7 @@ func clusterize() error {
 
 	// Now, open store.
 	if err := s.Open(enableBootstrap); err != nil {
-		log.Fatal("failed to open store: %s", err.Error())
+		log.Fatal("failed to open raft store", "error", err)
 	}
 
 	// Prepare metadata for join command.
@@ -130,7 +166,6 @@ func clusterize() error {
 
 	// Execute any requested join operation.
 	if len(joins) > 0 && isNew {
-		log.Info("join addresses are:", joins)
 		advAddr := env.Variables().RaftAddr
 		if env.Variables().RaftAdvAddr != "" {
 			advAddr = env.Variables().RaftAdvAddr
@@ -147,23 +182,23 @@ func clusterize() error {
 			Metadata:    meta,
 			TLSConfig:   &tlsConfig,
 		}); err != nil {
-			log.Fatal("failed to join cluster at %s: %s", joins, err.Error())
+			log.Fatal("failed to join cluster", "addresses", joins, "error", err)
 		} else {
-			log.Info("successfully joined cluster at", j)
+			log.Info("successfully joined cluster", "address", j)
 		}
 
 	}
 
 	// Wait until the store is in full consensus.
 	if err := waitForConsensus(s); err != nil {
-		log.Fatal(err.Error())
+		log.Fatal("failed to wait for consensus", "error", err)
 	}
 
 	// This may be a standalone server. In that case set its own metadata.
 	if err := s.SetMetadata(meta); err != nil && err != store.ErrNotLeader {
 		// Non-leader errors are OK, since metadata will then be set through
 		// consensus as a result of a join. All other errors indicate a problem.
-		log.Fatal("failed to set store metadata: %s", err.Error())
+		log.Fatal("failed to set store metadata", "error", err)
 	}
 
 	log.Info("node is ready")
@@ -173,7 +208,7 @@ func clusterize() error {
 	signal.Notify(terminate, os.Interrupt)
 	<-terminate
 	if err := s.Close(true); err != nil {
-		log.Info("failed to close store: %s", err.Error())
+		log.Info("failed to close store", "error", err)
 	}
 
 	log.Info("caesium server stopped")

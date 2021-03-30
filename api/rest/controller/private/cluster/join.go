@@ -9,9 +9,9 @@ import (
 )
 
 func Join(c echo.Context) error {
-	var req *cluster.JoinRequest
+	var req cluster.JoinRequest
 
-	if err := c.Bind(req); err != nil {
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, err)
 	}
 
@@ -23,7 +23,7 @@ func Join(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, "address must to be empty")
 	}
 
-	err := cluster.Service().Join(req)
+	err := cluster.Service().Join(&req)
 
 	switch err {
 	case nil:
