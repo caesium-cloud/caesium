@@ -7,12 +7,10 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"expvar"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,8 +23,10 @@ import (
 	sql "github.com/caesium-cloud/caesium/db"
 	"github.com/caesium-cloud/caesium/db/command"
 	dblog "github.com/caesium-cloud/caesium/db/log"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/golang/snappy"
 	"github.com/hashicorp/raft"
+	"github.com/pkg/errors"
 )
 
 var (
@@ -141,8 +141,6 @@ type Store struct {
 	metaMu sync.RWMutex
 	meta   map[string]map[string]string
 
-	logger *log.Logger
-
 	ShutdownOnRemove   bool
 	SnapshotThreshold  uint64
 	SnapshotInterval   time.Duration
@@ -165,20 +163,14 @@ func IsNewNode(raftDir string) bool {
 
 // StoreConfig represents the configuration of the underlying Store.
 type StoreConfig struct {
-	DBConf *DBConfig   // The DBConfig object for this Store.
-	Dir    string      // The working directory for raft.
-	Tn     Transport   // The underlying Transport for raft.
-	ID     string      // Node ID.
-	Logger *log.Logger // The logger to use to log stuff.
+	DBConf *DBConfig // The DBConfig object for this Store.
+	Dir    string    // The working directory for raft.
+	Tn     Transport // The underlying Transport for raft.
+	ID     string    // Node ID.
 }
 
 // New returns a new Store.
 func New(ln Listener, c *StoreConfig) *Store {
-	logger := c.Logger
-	if logger == nil {
-		logger = log.New(os.Stderr, "[store] ", log.LstdFlags)
-	}
-
 	return &Store{
 		ln:            ln,
 		raftDir:       c.Dir,
@@ -187,7 +179,6 @@ func New(ln Listener, c *StoreConfig) *Store {
 		dbPath:        filepath.Join(c.Dir, sqliteFile),
 		reqMarshaller: command.NewRequestMarshaler(),
 		meta:          make(map[string]map[string]string),
-		logger:        logger,
 		ApplyTimeout:  applyTimeout,
 	}
 }
@@ -208,11 +199,11 @@ func GlobalStore() *Store {
 // operation after opening the Store.
 func (s *Store) Open(enableBootstrap bool) error {
 	s.openT = time.Now()
-	s.logger.Printf("opening store with node ID %s", s.raftID)
 
-	s.logger.Printf("ensuring directory at %s exists", s.raftDir)
-	err := os.MkdirAll(s.raftDir, 0755)
-	if err != nil {
+	log.Info("opening store", "node_id", s.raftID)
+	log.Info("ensuring raft directory exists", "dir", s.raftDir)
+
+	if err := os.MkdirAll(s.raftDir, 0755); err != nil {
 		return err
 	}
 
@@ -224,6 +215,7 @@ func (s *Store) Open(enableBootstrap bool) error {
 
 	config := s.raftConfig()
 	config.LocalID = raft.ServerID(s.raftID)
+	config.Logger = &RaftLogger{}
 
 	// Create the snapshot store. This allows Raft to truncate the log.
 	snapshots, err := raft.NewFileSnapshotStore(s.raftDir, retainSnapshotCount, os.Stderr)
@@ -234,26 +226,35 @@ func (s *Store) Open(enableBootstrap bool) error {
 	if err != nil {
 		return fmt.Errorf("list snapshots: %s", err)
 	}
-	s.logger.Printf("%d preexisting snapshots present", len(snaps))
+
+	log.Info("existing snapshots detected", "count", len(snaps))
+
 	s.snapsExistOnOpen = len(snaps) > 0
 
 	// Create the log store and stable store.
 	s.badgerStore, err = dblog.NewLog(filepath.Join(s.raftDir, raftDBPath))
 	if err != nil {
-		return fmt.Errorf("new log store: %s", err)
+		return errors.Wrap(err, "new log store")
 	}
 	s.raftStable = s.badgerStore
-	s.raftLog, err = raft.NewLogCache(raftLogCacheSize, s.badgerStore)
-	if err != nil {
-		return fmt.Errorf("new cached store: %s", err)
+	if s.raftLog, err = raft.NewLogCache(raftLogCacheSize, s.badgerStore); err != nil {
+		return errors.Wrap(err, "new cached store")
 	}
 
 	// Get some info about the log, before any more entries are committed.
-	if err := s.setLogInfo(); err != nil {
-		return fmt.Errorf("set log info: %s", err)
+	if err = s.setLogInfo(); err != nil {
+		return errors.Wrap(err, "set log info")
 	}
-	s.logger.Printf("first log index: %d, last log index: %d, last command log index: %d:",
-		s.firstIdxOnOpen, s.lastIdxOnOpen, s.lastCommandIdxOnOpen)
+
+	log.Info(
+		"log indexes detected",
+		"first_log_index",
+		s.firstIdxOnOpen,
+		"last_log_index",
+		s.lastIdxOnOpen,
+		"last_cmd_log_index",
+		s.lastCommandIdxOnOpen,
+	)
 
 	// If an on-disk database has been requested, and there are no snapshots, and
 	// there are no commands in the log, then this is the only opportunity to
@@ -279,7 +280,7 @@ func (s *Store) Open(enableBootstrap bool) error {
 	}
 
 	if enableBootstrap {
-		s.logger.Printf("executing new cluster bootstrap")
+		log.Info("bootstrapping cluster")
 		configuration := raft.Configuration{
 			Servers: []raft.Server{
 				{
@@ -290,7 +291,7 @@ func (s *Store) Open(enableBootstrap bool) error {
 		}
 		ra.BootstrapCluster(configuration)
 	} else {
-		s.logger.Printf("no cluster bootstrap requested")
+		log.Info("no bootstrap required")
 	}
 
 	s.raft = ra
@@ -322,10 +323,13 @@ func (s *Store) WaitForApplied(timeout time.Duration) error {
 	if timeout == 0 {
 		return nil
 	}
-	s.logger.Printf("waiting for up to %s for application of initial logs", timeout)
+
+	log.Info("waiting for initial log application", "timeout", timeout)
+
 	if err := s.WaitForAppliedIndex(s.raft.LastIndex(), timeout); err != nil {
 		return ErrOpenTimeout
 	}
+
 	return nil
 }
 
@@ -378,7 +382,7 @@ func (s *Store) LeaderID() (string, error) {
 	addr := s.LeaderAddr()
 	configFuture := s.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
-		s.logger.Printf("failed to get raft configuration: %v", err)
+		log.Error("failed to get raft configuration", "error", err)
 		return "", err
 	}
 
@@ -561,7 +565,7 @@ func (s *Store) ExecuteOrAbort(ex *command.ExecuteRequest) (results []*sql.Resul
 		}
 		if retErr != nil || errored {
 			if err := s.db.AbortTransaction(); err != nil {
-				s.logger.Printf("WARNING: failed to abort transaction: %s", err.Error())
+				log.Warn("failed to abort transaction", "error", err)
 			}
 		}
 	}()
@@ -688,14 +692,14 @@ func (s *Store) Query(qr *command.QueryRequest) ([]*sql.Rows, error) {
 // Join joins a node, identified by id and located at addr, to this store.
 // The node must be ready to respond to Raft communications at that address.
 func (s *Store) Join(id, addr string, voter bool, metadata map[string]string) error {
-	s.logger.Printf("received request to join node at %s", addr)
+	log.Info("joining node", "address", addr)
 	if s.raft.State() != raft.Leader {
 		return ErrNotLeader
 	}
 
 	configFuture := s.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
-		s.logger.Printf("failed to get raft configuration: %v", err)
+		log.Error("failed to get raft configuration", "error", err)
 		return err
 	}
 
@@ -706,12 +710,16 @@ func (s *Store) Join(id, addr string, voter bool, metadata map[string]string) er
 			// However if *both* the ID and the address are the same, the no
 			// join is actually needed.
 			if srv.Address == raft.ServerAddress(addr) && srv.ID == raft.ServerID(id) {
-				s.logger.Printf("node %s at %s already member of cluster, ignoring join request", id, addr)
+				log.Info(
+					"ignoring join request because node is already a member",
+					"node_id", id,
+					"address", addr,
+				)
 				return nil
 			}
 
 			if err := s.remove(id); err != nil {
-				s.logger.Printf("failed to remove node: %v", err)
+				log.Error("failed to remove node", "node_id", id, "error", err)
 				return err
 			}
 		}
@@ -735,19 +743,20 @@ func (s *Store) Join(id, addr string, voter bool, metadata map[string]string) er
 		return err
 	}
 
-	s.logger.Printf("node at %s joined successfully as %s", addr, prettyVoter(voter))
+	log.Info("node joined successfully", "address", addr, "voter", voter)
 	return nil
 }
 
 // Remove removes a node from the store, specified by ID.
 func (s *Store) Remove(id string) error {
-	s.logger.Printf("received request to remove node %s", id)
+	log.Info("removing node", "node_id", id)
 	if err := s.remove(id); err != nil {
-		s.logger.Printf("failed to remove node %s: %s", id, err.Error())
+		log.Error("failed to remove node", "node_id", id, "error", err)
 		return err
 	}
 
-	s.logger.Printf("node %s removed successfully", id)
+	log.Info("node removed", "node_id", id)
+
 	return nil
 }
 
@@ -986,12 +995,16 @@ func (s *Store) Apply(l *raft.Log) (e interface{}) {
 			// opened.
 			s.appliedOnOpen++
 			if l.Index == s.lastCommandIdxOnOpen {
-				s.logger.Printf("%d committed log entries applied in %s, took %s since open",
-					s.appliedOnOpen, time.Since(s.firstLogAppliedT), time.Since(s.openT))
+				log.Info(
+					"log entries committed",
+					"count", s.appliedOnOpen,
+					"elapsed", time.Since(s.firstLogAppliedT),
+					"since_open", time.Since(s.openT),
+				)
 
 				// Last command log applied. Time to switch to on-disk database?
 				if s.dbConf.Memory {
-					s.logger.Println("continuing use of in-memory database")
+					log.Info("continuing use of in-memory database")
 				} else {
 					// Since we're here, it means that a) an on-disk database was requested
 					// *and* there were commands in the log. A snapshot may or may not have
@@ -1001,17 +1014,18 @@ func (s *Store) Apply(l *raft.Log) (e interface{}) {
 					b, _ := s.db.Serialize()
 					err := s.db.Close()
 					if err != nil {
-						e = &fsmGenericResponse{error: fmt.Errorf("close failed: %s", err)}
+						e = &fsmGenericResponse{error: errors.Wrap(err, "close failed")}
 						return
 					}
 					// Open a new on-disk database.
 					s.db, err = s.openOnDisk(b)
 					if err != nil {
-						e = &fsmGenericResponse{error: fmt.Errorf("open on-disk failed: %s", err)}
+						e = &fsmGenericResponse{error: errors.Wrap(err, "open on-disk failed")}
 						return
 					}
 					s.onDiskCreated = true
-					s.logger.Println("successfully switched to on-disk database")
+
+					log.Info("switched on-disk database")
 				}
 			}
 		}
@@ -1031,7 +1045,7 @@ func (s *Store) Apply(l *raft.Log) (e interface{}) {
 	case command.Command_COMMAND_TYPE_QUERY:
 		var qr command.QueryRequest
 		if err := command.UnmarshalSubCommand(&c, &qr); err != nil {
-			panic(fmt.Sprintf("failed to unmarshal query subcommand: %s", err.Error()))
+			log.Panic("failed to unmarshal query subcommand", "error", err)
 		}
 		// Read from database. If a transaction is requested, we must block
 		// certain other database operations.
@@ -1108,10 +1122,7 @@ func (s *Store) Database(leader bool) ([]byte, error) {
 // http://sqlite.org/howtocorrupt.html states it is safe to do this
 // as long as no transaction is in progress.
 func (s *Store) Snapshot() (raft.FSMSnapshot, error) {
-	fsm := &fsmSnapshot{
-		startT: time.Now(),
-		logger: s.logger,
-	}
+	fsm := &fsmSnapshot{startT: time.Now()}
 
 	s.txMu.Lock()
 	defer s.txMu.Unlock()
@@ -1123,12 +1134,14 @@ func (s *Store) Snapshot() (raft.FSMSnapshot, error) {
 
 	fsm.meta, err = json.Marshal(s.meta)
 	if err != nil {
-		s.logger.Printf("failed to encode meta for snapshot: %s", err.Error())
+		log.Error("failed to encode metadata for snapshot", "error", err)
 		return nil, err
 	}
 
 	stats.Add(numSnaphots, 1)
-	s.logger.Printf("node snapshot created in %s", time.Since(fsm.startT))
+
+	log.Info("node snapshot created", "elapsed", time.Since(fsm.startT))
+
 	return fsm, nil
 }
 
@@ -1189,12 +1202,12 @@ func (s *Store) Restore(rc io.ReadCloser) error {
 			offset += int64(sz)
 		}
 	} else {
-		s.logger.Println("no database data present in restored snapshot")
+		log.Info("no data present in restored snapshot")
 		database = nil
 	}
 
 	if err := s.db.Close(); err != nil {
-		return fmt.Errorf("failed to close pre-restore database: %s", err)
+		return errors.Wrap(err, "failed to close pre-restore database")
 	}
 
 	var db *sql.DB
@@ -1208,7 +1221,7 @@ func (s *Store) Restore(rc io.ReadCloser) error {
 			return fmt.Errorf("open on-disk file during restore: %s", err)
 		}
 		s.onDiskCreated = true
-		s.logger.Println("successfully switched to on-disk database due to restore")
+		log.Info("switched to on-disk database due to restore")
 	} else {
 		// Deserialize into an in-memory database because a) an in-memory database
 		// has been requested, or b) while there was a snapshot, there are also
@@ -1233,7 +1246,9 @@ func (s *Store) Restore(rc io.ReadCloser) error {
 	}
 
 	stats.Add(numRestores, 1)
-	s.logger.Printf("node restored in %s", time.Since(startT))
+
+	log.Info("node restored", "elapsed", time.Since(startT))
+
 	return nil
 }
 
@@ -1258,7 +1273,6 @@ func (s *Store) logSize() (int64, error) {
 
 type fsmSnapshot struct {
 	startT time.Time
-	logger *log.Logger
 
 	database []byte
 	meta     []byte
@@ -1267,7 +1281,7 @@ type fsmSnapshot struct {
 // Persist writes the snapshot to the given sink.
 func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 	defer func() {
-		f.logger.Printf("snapshot and persist took %s", time.Since(f.startT))
+		log.Info("snapshot persisted", "elapsed", time.Since(f.startT))
 	}()
 
 	err := func() error {
@@ -1306,7 +1320,7 @@ func (f *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
 				return err
 			}
 		} else {
-			f.logger.Println("no database data available for snapshot")
+			log.Info("no database data available for snapshot")
 			err = writeUint64(b, uint64(0))
 			if err != nil {
 				return err

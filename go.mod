@@ -16,6 +16,7 @@ require (
 	github.com/gorilla/mux v1.8.0 // indirect
 	github.com/graphql-go/graphql v0.7.9
 	github.com/graphql-go/handler v0.2.3
+	github.com/hashicorp/go-hclog v0.9.1
 	github.com/hashicorp/raft v1.2.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/labstack/echo-contrib v0.9.0

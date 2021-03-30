@@ -7,14 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/private/cluster"
+	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
 var (
@@ -39,9 +38,11 @@ type JoinRequest struct {
 // the joining node as id addr respectively. It returns the endpoint successfully
 // used to join the cluster.
 func Join(req *JoinRequest) (string, error) {
-	var err error
-	var j string
-	logger := log.New(os.Stderr, "[cluster-join] ", log.LstdFlags)
+	var (
+		err error
+		j   string
+	)
+
 	if req.TLSConfig == nil {
 		req.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	}
@@ -56,16 +57,28 @@ func Join(req *JoinRequest) (string, error) {
 				req.Voter,
 				req.Metadata,
 				req.TLSConfig,
-				logger,
 			); err == nil {
 				// Success!
 				return j, nil
 			}
 		}
-		logger.Printf("failed to join cluster at %s: %s, sleeping %s before retry", req.JoinAddress, err.Error(), req.AttemptInterval)
+
+		log.Warn(
+			"failed to join cluster",
+			"address", req.JoinAddress,
+			"sleep", req.AttemptInterval,
+			"error", err,
+		)
+
 		time.Sleep(req.AttemptInterval)
 	}
-	logger.Printf("failed to join cluster at %s, after %d attempts", req.JoinAddress, req.Attempts)
+
+	log.Error(
+		"failed to join cluster",
+		"address", req.JoinAddress,
+		"attempts", req.Attempts,
+	)
+
 	return "", ErrJoinFailed
 }
 
@@ -74,7 +87,6 @@ func join(
 	voter bool,
 	meta map[string]string,
 	tlsConfig *tls.Config,
-	logger *log.Logger,
 ) (string, error) {
 
 	if id == "" {
@@ -151,7 +163,8 @@ func join(
 				return "", fmt.Errorf("failed to join, node returned: %s: (%s)", resp.Status, string(b))
 			}
 
-			logger.Print("join via HTTP failed, trying via HTTPS")
+			log.Info("join via http failed, trying https")
+
 			fullAddr = EnsureHTTPS(fullAddr)
 			continue
 		default:

@@ -10,14 +10,14 @@ import (
 )
 
 func Load(c echo.Context) error {
-	var req *db.LoadRequest
+	var req db.LoadRequest
 
-	if err := c.Bind(req); err != nil {
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, err)
 	}
 
 	svc := db.Service()
-	resp, err := svc.Load(req)
+	resp, err := svc.Load(&req)
 
 	switch err {
 	case nil:

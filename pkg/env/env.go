@@ -11,17 +11,17 @@ import (
 var variables = new(Environment)
 
 // Process the environment variables set for caesium.
-func Process() (err error) {
-	if err = envconfig.Process("caesium", variables); err != nil {
+func Process() error {
+	if err := envconfig.Process("caesium", variables); err != nil {
 		return errors.Wrap(err, "failed to process environment variables")
 	}
 
 	// set the log level
-	if err = log.SetLevelFromString(variables.LogLevel); err != nil {
+	if err := log.SetLevel(variables.LogLevel); err != nil {
 		return errors.Wrap(err, "failed to set log level")
 	}
 
-	return
+	return nil
 }
 
 // Variables returns the processed environment variables.

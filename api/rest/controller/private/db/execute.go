@@ -10,14 +10,14 @@ import (
 )
 
 func Execute(c echo.Context) error {
-	var req *db.ExecuteRequest
+	var req db.ExecuteRequest
 
-	if err := c.Bind(req); err != nil {
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, err)
 	}
 
 	svc := db.Service()
-	resp, err := svc.Execute(req)
+	resp, err := svc.Execute(&req)
 
 	switch err {
 	case nil:

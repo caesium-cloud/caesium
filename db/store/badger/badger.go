@@ -81,7 +81,10 @@ func New(options Options) (*BadgerStore, error) {
 
 	// build badger options
 	if options.BadgerOptions == nil {
-		defaultOpts := badger.DefaultOptions(options.Path)
+		defaultOpts := badger.
+			DefaultOptions(options.Path).
+			WithLogger(&BadgerLogger{})
+
 		options.BadgerOptions = &defaultOpts
 	}
 	options.BadgerOptions.SyncWrites = !options.NoSync

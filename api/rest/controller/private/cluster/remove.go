@@ -9,9 +9,9 @@ import (
 )
 
 func Remove(c echo.Context) error {
-	var req *cluster.RemoveRequest
+	var req cluster.RemoveRequest
 
-	if err := c.Bind(req); err != nil {
+	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, err)
 	}
 
@@ -19,7 +19,7 @@ func Remove(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, "id must not be empty")
 	}
 
-	err := cluster.Service().Remove(req)
+	err := cluster.Service().Remove(&req)
 
 	switch err {
 	case nil:
