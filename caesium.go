@@ -7,8 +7,6 @@ import (
 )
 
 func main() {
-	log.Info("launching caesium")
-
 	if err := env.Process(); err != nil {
 		log.Fatal("environment failure", "error", err)
 	}
