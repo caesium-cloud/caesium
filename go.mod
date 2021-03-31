@@ -4,6 +4,7 @@ go 1.16
 
 require (
 	github.com/Microsoft/go-winio v0.4.16 // indirect
+	github.com/c-bata/go-prompt v0.2.6
 	github.com/containerd/containerd v1.4.4 // indirect
 	github.com/dgraph-io/badger/v3 v3.2011.1
 	github.com/docker/distribution v2.7.1+incompatible // indirect
