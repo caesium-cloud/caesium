@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io/ioutil"
 	"os"
-	"reflect"
 	"testing"
 
 	"github.com/dgraph-io/badger/v3"
@@ -76,7 +75,7 @@ func (s *BadgerTestSuite) TestBadgerOptionsReadOnly() {
 
 	result := new(raft.Log)
 	assert.Nil(s.T(), roStore.GetLog(1, result))
-	assert.True(s.T(), reflect.DeepEqual(log, result))
+	assert.True(s.T(), logsEqual(log, result))
 	assert.Equal(s.T(), badger.ErrReadOnlyTxn, roStore.StoreLog(log))
 }
 
@@ -140,7 +139,7 @@ func (s *BadgerTestSuite) TestGetLog() {
 	assert.Nil(s.T(), s.store.StoreLogs(logs))
 
 	assert.Nil(s.T(), s.store.GetLog(2, log))
-	assert.True(s.T(), reflect.DeepEqual(log, logs[1]))
+	assert.True(s.T(), logsEqual(log, logs[1]))
 }
 
 func (s *BadgerTestSuite) TestSetLog() {
@@ -153,7 +152,7 @@ func (s *BadgerTestSuite) TestSetLog() {
 
 	result := new(raft.Log)
 	assert.Nil(s.T(), s.store.GetLog(1, result))
-	assert.True(s.T(), reflect.DeepEqual(log, result))
+	assert.True(s.T(), logsEqual(log, result))
 }
 
 func (s *BadgerTestSuite) TestSetLogs() {
@@ -166,9 +165,9 @@ func (s *BadgerTestSuite) TestSetLogs() {
 
 	result1, result2 := new(raft.Log), new(raft.Log)
 	assert.Nil(s.T(), s.store.GetLog(1, result1))
-	assert.True(s.T(), reflect.DeepEqual(logs[0], result1))
+	assert.True(s.T(), logsEqual(logs[0], result1))
 	assert.Nil(s.T(), s.store.GetLog(2, result2))
-	assert.True(s.T(), reflect.DeepEqual(logs[1], result2))
+	assert.True(s.T(), logsEqual(logs[1], result2))
 }
 
 func (s *BadgerTestSuite) TestDeleteRange() {
@@ -207,6 +206,15 @@ func (s *BadgerTestSuite) TestSetGetUint64() {
 	val, err := s.store.GetUint64(k)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), v, val)
+}
+
+func logsEqual(left, right *raft.Log) bool {
+	return bytes.Equal(left.Data, right.Data) &&
+		bytes.Equal(left.Extensions, right.Extensions) &&
+		left.Index == right.Index &&
+		left.Term == right.Term &&
+		left.Type == right.Type &&
+		left.AppendedAt.Unix() == right.AppendedAt.Unix()
 }
 
 func TestBadgerTestSuite(t *testing.T) {

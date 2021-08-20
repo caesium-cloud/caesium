@@ -10,8 +10,9 @@ import (
 )
 
 type Database interface {
+	WithStore(*store.Store) Database
 	Query(*QueryRequest) (*QueryResponse, error)
-	Execute(*ExecuteRequest) (*ExecutResponse, error)
+	Execute(*ExecuteRequest) (*ExecuteResponse, error)
 	Backup(*BackupRequest) error
 	Load(*LoadRequest) (*LoadResponse, error)
 }
@@ -24,6 +25,11 @@ func Service() Database {
 	return &dbService{
 		s: store.GlobalStore(),
 	}
+}
+
+func (d *dbService) WithStore(s *store.Store) Database {
+	d.s = s
+	return d
 }
 
 type QueryRequest struct {
@@ -78,12 +84,12 @@ type ExecuteRequest struct {
 	AllOrNone   bool     `json:"all_or_none"`
 }
 
-type ExecutResponse struct {
+type ExecuteResponse struct {
 	Results []*db.Result  `json:"results,omitempty"`
 	Time    time.Duration `json:"time,omitempty"`
 }
 
-func (d *dbService) Execute(req *ExecuteRequest) (*ExecutResponse, error) {
+func (d *dbService) Execute(req *ExecuteRequest) (*ExecuteResponse, error) {
 	statements := make([]*command.Statement, len(req.Statements))
 
 	for i, s := range req.Statements {
@@ -114,7 +120,7 @@ func (d *dbService) Execute(req *ExecuteRequest) (*ExecutResponse, error) {
 		return nil, err
 	}
 
-	resp := &ExecutResponse{Results: results}
+	resp := &ExecuteResponse{Results: results}
 	if req.Timings {
 		resp.Time = time.Since(start)
 	}

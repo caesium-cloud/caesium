@@ -13,11 +13,10 @@ func Query(c echo.Context) error {
 	var req db.QueryRequest
 
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, err)
+		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	svc := db.Service()
-	resp, err := svc.Query(&req)
+	resp, err := db.Service().Query(&req)
 
 	switch err {
 	case nil:
@@ -25,6 +24,6 @@ func Query(c echo.Context) error {
 	case store.ErrNotLeader:
 		return cluster.Redirect(c)
 	default:
-		return c.JSON(http.StatusInternalServerError, err)
+		return echo.ErrInternalServerError.SetInternal(err)
 	}
 }
