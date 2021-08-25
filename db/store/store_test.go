@@ -728,7 +728,7 @@ func (s *StoreTestSuite) TestStats() {
 
 func mustNewStoreAtPath(path string, inmem bool) *Store {
 	cfg := NewDBConfig("", inmem)
-	s := New(mustMockLister("localhost:0"), &StoreConfig{
+	s := New(mustMockListener("localhost:0"), &StoreConfig{
 		DBConf: cfg,
 		Dir:    path,
 		ID:     path, // Could be any unique string.
@@ -763,7 +763,7 @@ type mockListener struct {
 	ln net.Listener
 }
 
-func mustMockLister(addr string) Listener {
+func mustMockListener(addr string) Listener {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		panic("failed to create new listner")

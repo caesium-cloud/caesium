@@ -1,8 +1,7 @@
 package bind
 
 import (
-	"net/http"
-
+	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	"github.com/caesium-cloud/caesium/api/rest/controller/private/cluster"
 	"github.com/caesium-cloud/caesium/api/rest/controller/private/db"
 	"github.com/labstack/echo/v4"
@@ -14,9 +13,13 @@ func All(g *echo.Group) {
 }
 
 func Public(g *echo.Group) {
-	g.GET("/placeholder", func(c echo.Context) error {
-		return c.JSON(http.StatusNoContent, nil)
-	})
+	// atoms
+	{
+		g.GET("/atoms", atom.List)
+		g.GET("/atoms/{id}", atom.Get)
+		g.POST("/atoms", atom.Post)
+		g.DELETE("/atoms/{id}", atom.Delete)
+	}
 }
 
 func Private(g *echo.Group) {

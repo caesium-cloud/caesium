@@ -23,6 +23,6 @@ RUN ldd caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
     xargs -I % sh -c 'mkdir -p $(dirname ./%); cp % ./%;'
 
 # Package for lightweight deployment
-FROM scratch
-COPY --chown=0:0 --from=builder /dist /
-ENTRYPOINT ["/caesium"]
+FROM alpine
+COPY --chown=0:0 --from=builder /dist /bin/
+ENTRYPOINT ["/bin/caesium"]

@@ -17,7 +17,7 @@ func Backup(c echo.Context) error {
 	req.LeaderOnly, _ = strconv.ParseBool(c.Param("leader_only"))
 
 	if err := db.Service().Backup(&req); err != nil {
-		return c.JSON(http.StatusInternalServerError, err)
+		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
 	return c.JSON(http.StatusNoContent, nil)

@@ -8,26 +8,22 @@ steps:
   volumes:
   - name: deps
     path: /go
-  commands:
-  - go get -v -t -d ./...
+  commands: [go get -v -t -d ./...]
 
 - name: unit test
   image: golang
   volumes:
   - name: deps
     path: /go
-  commands:
-  - go test -race -coverprofile=coverage.txt -covermode=atomic ./...
-  depends_on:
-    - dependencies
+  commands: [go test -race -coverprofile=coverage.txt -covermode=atomic ./...]
+  depends_on: [dependencies]
 
 - name: build
   image: golang
   volumes:
   - name: deps
     path: /go
-  commands:
-  - go build
+  commands: [go build]
   depends_on:
     - dependencies
 
@@ -52,6 +48,27 @@ steps:
   depends_on:
     - build
     - unit test
+
+- name: caesium
+  image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
+  commands:
+    - caesium start
+  detach: true
+  depends_on:
+    - containerize
+
+- name: integration test
+  image: golang
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+    - sleep 5
+    - go test ./test/ -tags=integration
+  environment:
+    CAESIUM_HOST: caesium
+  depends_on:
+    - caesium
 
 volumes:
 - name: deps

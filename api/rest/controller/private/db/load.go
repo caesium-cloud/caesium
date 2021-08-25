@@ -13,11 +13,10 @@ func Load(c echo.Context) error {
 	var req db.LoadRequest
 
 	if err := c.Bind(&req); err != nil {
-		return c.JSON(http.StatusBadRequest, err)
+		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	svc := db.Service()
-	resp, err := svc.Load(&req)
+	resp, err := db.Service().Load(&req)
 
 	switch err {
 	case nil:
@@ -25,6 +24,6 @@ func Load(c echo.Context) error {
 	case store.ErrNotLeader:
 		return cluster.Redirect(c)
 	default:
-		return c.JSON(http.StatusInternalServerError, err)
+		return echo.ErrInternalServerError.SetInternal(err)
 	}
 }
