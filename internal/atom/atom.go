@@ -15,6 +15,7 @@ type Atom interface {
 	CreatedAt() time.Time
 	StartedAt() time.Time
 	StoppedAt() time.Time
+	Engine() Engine
 }
 
 // Engine defines the interface for interacting with

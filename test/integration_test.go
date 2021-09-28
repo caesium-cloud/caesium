@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 package test
 
@@ -23,11 +23,19 @@ func (s *IntegrationTestSuite) SetupTest() {
 		host = "localhost"
 	}
 	s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
+
+	// migrate DB
+	resp, err := http.Post(
+		fmt.Sprintf("%v/v1/private/db/migrate", s.caesiumURL),
+		"application/json",
+		nil,
+	)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 }
 
 func (s *IntegrationTestSuite) TestHealth() {
 	resp, err := http.Get(fmt.Sprintf("%v/health", s.caesiumURL))
-	fmt.Println(resp, err)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 }

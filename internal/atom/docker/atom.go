@@ -14,6 +14,23 @@ type Atom struct {
 	metadata types.ContainerJSON
 }
 
+// func New(ctx context.Context, a *models.Atom) (atom.Atom, error) {
+// 	if a.Engine != models.AtomEngineDocker {
+// 		return nil, fmt.Errorf("engine is %v not %v", a.Engine, models.AtomEngineDocker)
+// 	}
+
+// 	eng := NewEngine(ctx)
+
+// 	return &Atom{
+// 		metadata: types.ContainerJSON{
+// 			ContainerJSONBase: &types.ContainerJSONBase{
+// 				Image: a.Image,
+// 			},
+// 		},
+// 		engine: &eng,
+// 	}, nil
+// }
+
 // ID returns the ID of the Atom. This ID is identical
 // to the Docker ID assigned by the Docker daemon.
 func (c *Atom) ID() string {

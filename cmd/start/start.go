@@ -1,6 +1,7 @@
 package start
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/db/cluster"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/db/tcp"
+	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/spf13/cobra"
@@ -41,6 +43,7 @@ var (
 
 func start(cmd *cobra.Command, args []string) error {
 	signalChan := make(chan os.Signal)
+
 	go func() {
 		for s := range signalChan {
 			switch s {
@@ -54,19 +57,28 @@ func start(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}()
+
 	signal.Notify(signalChan, syscall.SIGUSR1)
 	signal.Notify(signalChan, syscall.SIGINT)
 
-	errs := make(chan error)
+	var (
+		errs = make(chan error)
+		ctx  = context.Background()
+	)
 
 	go func() {
 		log.Info("clusterizing caesium")
-		errs <- clusterize()
+		errs <- clusterize(ctx)
 	}()
 
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start()
+		errs <- api.Start(ctx)
+	}()
+
+	go func() {
+		log.Info("launching execution routine")
+		errs <- executor.Start(ctx)
 	}()
 
 	defer shutdown()
@@ -79,7 +91,7 @@ func shutdown() {
 	store.GlobalStore().Close(true)
 }
 
-func clusterize() error {
+func clusterize(ctx context.Context) error {
 	dbPath := env.Variables().DBPath
 
 	// Create internode network layer.
@@ -233,6 +245,7 @@ func waitForConsensus(s *store.Store) error {
 		}
 		log.Info("ignoring error while waiting for leader")
 	}
+
 	if env.Variables().RaftOpenTimeout != 0 {
 		if err := s.WaitForApplied(env.Variables().RaftOpenTimeout); err != nil {
 			return fmt.Errorf("log was not fully applied within timeout: %s", err.Error())
@@ -240,6 +253,7 @@ func waitForConsensus(s *store.Store) error {
 	} else {
 		log.Info("not waiting for logs to be applied")
 	}
+
 	return nil
 }
 
@@ -247,8 +261,10 @@ func idOrRaftAddr() string {
 	if env.Variables().NodeID != "" {
 		return env.Variables().NodeID
 	}
+
 	if env.Variables().RaftAdvAddr == "" {
 		return env.Variables().RaftAddr
 	}
+
 	return env.Variables().RaftAdvAddr
 }

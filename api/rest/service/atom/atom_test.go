@@ -1,7 +1,6 @@
 package atom
 
 import (
-	"fmt"
 	"io/ioutil"
 	"net"
 	"sync"
@@ -42,7 +41,6 @@ func (s *AtomTestSuite) SetupTest() {
 		Statements: []string{models.AtomCreate},
 	})
 	assert.Nil(s.T(), err)
-	fmt.Println(resp.Results[0].Error)
 	assert.Empty(s.T(), resp.Results[0].Error)
 	s.m.Store(s.T().Name(), Service().WithStore(tmpStore))
 }
@@ -64,7 +62,7 @@ func (s *AtomTestSuite) TestCreate() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), atom)
 	assert.NotEmpty(s.T(), atom.ID)
-	assert.Equal(s.T(), req.Engine, atom.Engine)
+	assert.Equal(s.T(), models.AtomEngine(req.Engine), atom.Engine)
 	assert.Equal(s.T(), req.Image, atom.Image)
 	assert.NotZero(s.T(), atom.CreatedAt)
 	assert.NotZero(s.T(), atom.UpdatedAt)

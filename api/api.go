@@ -14,7 +14,7 @@ import (
 var e *echo.Echo
 
 // Start launches Caesium's API.
-func Start() error {
+func Start(ctx context.Context) error {
 	e = echo.New()
 	e.HideBanner = true
 	e.HidePort = true

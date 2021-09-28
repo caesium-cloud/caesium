@@ -3,9 +3,11 @@ package docker
 import (
 	"context"
 	"io"
+	"io/ioutil"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
@@ -26,7 +28,7 @@ type dockerEngine struct {
 // NewEngine creates a new instance of docker.Engine
 // for interacting with docker.Atoms.
 func NewEngine(ctx context.Context) Engine {
-	cli, err := client.NewEnvClient()
+	cli, err := client.NewClientWithOpts()
 	if err != nil {
 		panic(err)
 	}
@@ -88,7 +90,25 @@ func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 // no concept of a creating a Atom without it also starting,
 // so we encapsulate both functions inside docker.Atom.Create.
 func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	cfg := &container.Config{Image: req.Image, Cmd: req.Command}
+	log.Info("pulling docker image", "image", req.Image)
+
+	r, err := e.backend.ImagePull(e.ctx, req.Image, types.ImagePullOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err = ioutil.ReadAll(r); err != nil {
+		return nil, err
+	}
+
+	log.Info("docker image pulled", "image", req.Image)
+
+	cfg := &container.Config{
+		Image: req.Image,
+		Cmd:   req.Command,
+	}
+
+	log.Info("creating docker container", "image", req.Image)
 
 	created, err := e.backend.ContainerCreate(e.ctx, cfg, nil, nil, nil, req.Name)
 	if err != nil {
@@ -96,6 +116,13 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	}
 
 	opts := types.ContainerStartOptions{}
+
+	log.Info(
+		"starting docker container",
+		"image", req.Image,
+		"cmd", req.Command,
+		"id", created.ID,
+	)
 
 	if err = e.backend.ContainerStart(e.ctx, created.ID, opts); err != nil {
 		return nil, err
@@ -109,14 +136,17 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 // container, we encapsulate both functions inside
 // docker.Atom.Stop.
 func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
+	log.Info("stopping docker container", "id", req.ID)
+
 	if err := e.backend.ContainerStop(e.ctx, req.ID, &req.Timeout); err != nil {
 		return err
 	}
 
+	log.Info("removing docker container", "id", req.ID)
+
 	opts := types.ContainerRemoveOptions{
 		Force:         req.Force,
 		RemoveVolumes: true,
-		RemoveLinks:   true,
 	}
 
 	return e.backend.ContainerRemove(e.ctx, req.ID, opts)
