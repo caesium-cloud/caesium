@@ -1,6 +1,7 @@
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/caesium-cloud/caesium/db"
@@ -17,16 +18,29 @@ var (
 		image		TEXT,
 		command		TEXT,
 		created_at 	TIMESTAMP,
-		updated_at 	TIMESTAMP)`
+		updated_at 	TIMESTAMP);`
+)
+
+type AtomEngine string
+
+const (
+	AtomEngineDocker     AtomEngine = "docker"
+	AtomEngineKubernetes AtomEngine = "kubernetes"
 )
 
 type Atom struct {
-	ID        uuid.UUID `db:"id"`
-	Engine    string    `db:"engine"`
-	Image     string    `db:"image"`
-	Command   string    `db:"command"`
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
+	ID        uuid.UUID  `db:"id"`
+	Engine    AtomEngine `db:"engine"`
+	Image     string     `db:"image"`
+	Command   string     `db:"command"`
+	CreatedAt time.Time  `db:"created_at"`
+	UpdatedAt time.Time  `db:"updated_at"`
+}
+
+func (a *Atom) Cmd() []string {
+	cmd := []string{}
+	json.Unmarshal([]byte(a.Command), &cmd)
+	return cmd
 }
 
 func NewAtom(columns []string, values []interface{}) (*Atom, error) {
@@ -34,9 +48,14 @@ func NewAtom(columns []string, values []interface{}) (*Atom, error) {
 		return nil, err
 	}
 
+	id, err := uuid.Parse(values[0].(string))
+	if err != nil {
+		return nil, err
+	}
+
 	return &Atom{
-		ID:        uuid.MustParse(values[0].(string)),
-		Engine:    values[1].(string),
+		ID:        id,
+		Engine:    AtomEngine(values[1].(string)),
 		Image:     values[2].(string),
 		Command:   values[3].(string),
 		CreatedAt: values[4].(time.Time),

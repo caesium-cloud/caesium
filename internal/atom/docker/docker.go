@@ -20,6 +20,7 @@ type dockerBackend interface {
 	ContainerStop(context.Context, string, *time.Duration) error
 	ContainerRemove(context.Context, string, types.ContainerRemoveOptions) error
 	ContainerLogs(context.Context, string, types.ContainerLogsOptions) (io.ReadCloser, error)
+	ImagePull(context.Context, string, types.ImagePullOptions) (io.ReadCloser, error)
 }
 
 var (

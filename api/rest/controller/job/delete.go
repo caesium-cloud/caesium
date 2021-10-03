@@ -1,9 +1,9 @@
-package atom
+package job
 
 import (
 	"net/http"
 
-	"github.com/caesium-cloud/caesium/api/rest/service/atom"
+	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 )
@@ -14,7 +14,7 @@ func Delete(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	if err := atom.Service().Delete(id); err != nil {
+	if err := job.Service().Delete(id); err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 

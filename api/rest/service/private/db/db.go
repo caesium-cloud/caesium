@@ -2,11 +2,13 @@ package db
 
 import (
 	"io"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/db"
 	"github.com/caesium-cloud/caesium/db/command"
 	"github.com/caesium-cloud/caesium/db/store"
+	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
 type Database interface {
@@ -49,6 +51,12 @@ func (d *dbService) Query(req *QueryRequest) (*QueryResponse, error) {
 	statements := make([]*command.Statement, len(req.Queries))
 
 	for i, q := range req.Queries {
+		if !strings.HasSuffix(q, ";") {
+			q += ";"
+		}
+
+		log.Debug("db query", "statement", q)
+
 		statements[i] = &command.Statement{Sql: q}
 	}
 
@@ -74,6 +82,8 @@ func (d *dbService) Query(req *QueryRequest) (*QueryResponse, error) {
 		resp.Time = time.Since(start)
 	}
 
+	log.Debug("db query", "results", resp.Results[0])
+
 	return resp, nil
 }
 
@@ -93,6 +103,12 @@ func (d *dbService) Execute(req *ExecuteRequest) (*ExecuteResponse, error) {
 	statements := make([]*command.Statement, len(req.Statements))
 
 	for i, s := range req.Statements {
+		if !strings.HasSuffix(s, ";") {
+			s += ";"
+		}
+
+		log.Debug("db execution", "statement", s)
+
 		statements[i] = &command.Statement{Sql: s}
 	}
 
@@ -124,6 +140,8 @@ func (d *dbService) Execute(req *ExecuteRequest) (*ExecuteResponse, error) {
 	if req.Timings {
 		resp.Time = time.Since(start)
 	}
+
+	log.Debug("db execution", "results", resp.Results[0])
 
 	return resp, nil
 }

@@ -54,15 +54,15 @@ func (m *mockDockerBackend) ContainerList(ctx context.Context, options types.Con
 
 func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *containertypes.Config, hostConfig *containertypes.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (containertypes.ContainerCreateCreatedBody, error) {
 	args := m.Called(containerName)
-	if config.Image == "" {
+
+	switch containerName {
+	case "fail":
 		return containertypes.ContainerCreateCreatedBody{}, args.Error(0)
-	}
-
-	if containerName == "" {
+	case "":
 		return containertypes.ContainerCreateCreatedBody{ID: ""}, nil
+	default:
+		return containertypes.ContainerCreateCreatedBody{ID: testAtomID}, nil
 	}
-
-	return containertypes.ContainerCreateCreatedBody{ID: testAtomID}, nil
 }
 
 func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options types.ContainerStartOptions) error {
@@ -95,6 +95,14 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string,
 		return nil, args.Error(0)
 	}
 	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
+}
+
+func (m *mockDockerBackend) ImagePull(ctx context.Context, image string, options types.ImagePullOptions) (io.ReadCloser, error) {
+	args := m.Called(image)
+	if image == "" {
+		return nil, args.Error(0)
+	}
+	return ioutil.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
 
 var (

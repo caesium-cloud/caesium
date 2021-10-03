@@ -101,6 +101,9 @@ func (s *DockerTestSuite) TestCreate() {
 	}
 
 	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", testImage).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
 		On("ContainerCreate", testContainerName).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
@@ -117,7 +120,7 @@ func (s *DockerTestSuite) TestCreate() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
-func (s *DockerTestSuite) TestCreateError() {
+func (s *DockerTestSuite) TestCreatePullError() {
 	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
 		Image:   "",
@@ -125,7 +128,27 @@ func (s *DockerTestSuite) TestCreateError() {
 	}
 
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerCreate", testContainerName).
+		On("ImagePull", "").
+		Return(fmt.Errorf("invalid image"))
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateError() {
+	req := &atom.EngineCreateRequest{
+		Name:    "fail",
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", req.Name).
 		Return(fmt.Errorf("invalid container image"))
 
 	c, err := s.engine.Create(req)
@@ -141,10 +164,13 @@ func (s *DockerTestSuite) TestCreateStartError() {
 	}
 
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerCreate", "").
+		On("ImagePull", req.Image).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerStart", "").
+		On("ContainerCreate", req.Name).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", req.Name).
 		Return(fmt.Errorf("invalid container id"))
 
 	c, err := s.engine.Create(req)

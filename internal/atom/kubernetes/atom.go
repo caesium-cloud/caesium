@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/models"
 	v1 "k8s.io/api/core/v1"
 )
 
@@ -12,6 +13,10 @@ import (
 type Atom struct {
 	atom.Atom
 	metadata *v1.Pod
+}
+
+func New(a *models.Atom) (atom.Atom, error) {
+	return nil, nil
 }
 
 // ID returns the ID of the Atom. This ID is

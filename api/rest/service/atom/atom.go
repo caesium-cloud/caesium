@@ -1,6 +1,7 @@
 package atom
 
 import (
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -9,7 +10,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/doug-martin/goqu/v9"
 	"github.com/google/uuid"
-	"gopkg.in/yaml.v2"
 )
 
 type Atom interface {
@@ -109,7 +109,7 @@ type CreateRequest struct {
 }
 
 func (r *CreateRequest) CommandString() (string, error) {
-	buf, err := yaml.Marshal(r.Command)
+	buf, err := json.Marshal(r.Command)
 	return string(buf), err
 }
 
@@ -127,7 +127,7 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 	q := goqu.Insert(models.AtomTable).Rows(
 		models.Atom{
 			ID:        id,
-			Engine:    req.Engine,
+			Engine:    models.AtomEngine(req.Engine),
 			Image:     req.Image,
 			Command:   cmd,
 			CreatedAt: createdAt,

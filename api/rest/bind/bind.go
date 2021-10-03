@@ -2,6 +2,7 @@ package bind
 
 import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
+	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/private/cluster"
 	"github.com/caesium-cloud/caesium/api/rest/controller/private/db"
 	"github.com/labstack/echo/v4"
@@ -19,6 +20,14 @@ func Public(g *echo.Group) {
 		g.GET("/atoms/{id}", atom.Get)
 		g.POST("/atoms", atom.Post)
 		g.DELETE("/atoms/{id}", atom.Delete)
+	}
+
+	// jobs
+	{
+		g.GET("/jobs", job.List)
+		g.GET("/jobs/{id}", job.Get)
+		g.POST("/jobs", job.Post)
+		g.DELETE("/jobs/{id}", job.Delete)
 	}
 }
 
@@ -38,4 +47,5 @@ func DB(g *echo.Group) {
 	g.POST("/query", db.Query)
 	g.GET("/backup", db.Backup)
 	g.POST("/load", db.Load)
+	g.POST("/migrate", db.Migrate)
 }
