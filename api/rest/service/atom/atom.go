@@ -6,10 +6,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
+	"github.com/caesium-cloud/caesium/db/query"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/doug-martin/goqu/v9"
 	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
 )
 
 type Atom interface {
@@ -41,33 +42,39 @@ type ListRequest struct {
 }
 
 func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
-	q := goqu.From(models.AtomTable)
+	q := query.Session()
 
 	if req.Engine != "" {
-		q = q.Where(goqu.Ex{"engine": req.Engine})
+		q = q.Where("engine = ?", req.Engine)
 	}
 
 	if len(req.OrderBy) > 0 {
 		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
+			q = q.Order(
+				clause.OrderByColumn{
+					Column: clause.Column{Name: col},
+				},
+			)
 		}
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := q.Find(&models.Atoms{}).Statement
 
 	resp, err := a.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -77,16 +84,17 @@ func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
 }
 
 func (a *atomService) Get(id uuid.UUID) (*models.Atom, error) {
-	q := goqu.From(models.AtomTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := query.Session().
+		First(&models.Atom{}, "id = ?", id.String()).
+		Statement
 
 	resp, err := a.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -117,6 +125,7 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 	var (
 		id        = uuid.New()
 		createdAt = time.Now()
+		q         = query.Session()
 	)
 
 	cmd, err := req.CommandString()
@@ -124,24 +133,24 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 		return nil, err
 	}
 
-	q := goqu.Insert(models.AtomTable).Rows(
-		models.Atom{
-			ID:        id,
-			Engine:    models.AtomEngine(req.Engine),
-			Image:     req.Image,
-			Command:   cmd,
-			CreatedAt: createdAt,
-			UpdatedAt: createdAt,
-		},
-	)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
+	atom := &models.Atom{
+		ID:        id,
+		Engine:    models.AtomEngine(req.Engine),
+		Image:     req.Image,
+		Command:   cmd,
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
 	}
 
+	stmt := q.Create(atom).Statement
+
 	resp, err := a.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
 	switch {
@@ -150,22 +159,22 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 	case resp.Results[0].Error != "":
 		return nil, errors.New(resp.Results[0].Error)
 	default:
-		return a.Get(id)
+		atom, err = a.Get(id)
+		return atom, err
 	}
 }
 
-func (a *atomService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.AtomTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
+func (a *atomService) Delete(id uuid.UUID) (err error) {
+	stmt := query.Session().Delete(&models.Atom{}, id.String()).Statement
 
 	_, err = a.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
-	return err
+	return
 }

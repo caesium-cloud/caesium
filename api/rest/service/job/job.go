@@ -5,10 +5,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
+	"github.com/caesium-cloud/caesium/db/query"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/doug-martin/goqu/v9"
 	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
 )
 
 type Job interface {
@@ -40,37 +41,43 @@ type ListRequest struct {
 }
 
 func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
-	q := goqu.From(models.JobTable)
+	q := query.Session()
 
 	if req.TriggerID != "" {
 		if _, err := uuid.Parse(req.TriggerID); err != nil {
 			return nil, err
 		}
 
-		q = q.Where(goqu.Ex{"trigger_id": req.TriggerID})
+		q = q.Where("trigger_id = ?", req.TriggerID)
 	}
 
 	if len(req.OrderBy) > 0 {
 		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
+			q = q.Order(
+				clause.OrderByColumn{
+					Column: clause.Column{Name: col},
+				},
+			)
 		}
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := q.Find(&models.Job{}).Statement
 
 	resp, err := j.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -80,16 +87,17 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 }
 
 func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
-	q := goqu.From(models.JobTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := query.Session().
+		First(&models.Atom{}, "id = ?", id.String()).
+		Statement
 
 	resp, err := j.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -113,24 +121,25 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 	var (
 		id        = uuid.New()
 		createdAt = time.Now()
+		q         = query.Session()
 	)
 
-	q := goqu.Insert(models.JobTable).Rows(
-		models.Job{
-			ID:        id,
-			TriggerID: uuid.MustParse(req.TriggerID),
-			CreatedAt: createdAt,
-			UpdatedAt: createdAt,
-		},
-	)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
+	job := &models.Job{
+		ID:        id,
+		TriggerID: uuid.MustParse(req.TriggerID),
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
 	}
 
+	stmt := q.Create(job).Statement
+
 	resp, err := j.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
 	switch {
@@ -143,18 +152,17 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 	}
 }
 
-func (j *jobService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.JobTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
+func (j *jobService) Delete(id uuid.UUID) (err error) {
+	stmt := query.Session().Delete(&models.Job{}, id.String()).Statement
 
 	_, err = j.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
-	return err
+	return
 }

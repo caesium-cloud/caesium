@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/db"
-	"github.com/caesium-cloud/caesium/pkg/compare"
 	"github.com/google/uuid"
 )
 
@@ -29,12 +28,12 @@ const (
 )
 
 type Atom struct {
-	ID        uuid.UUID  `db:"id"`
-	Engine    AtomEngine `db:"engine"`
-	Image     string     `db:"image"`
-	Command   string     `db:"command"`
-	CreatedAt time.Time  `db:"created_at"`
-	UpdatedAt time.Time  `db:"updated_at"`
+	ID        uuid.UUID `gorm:"primaryKey"`
+	Engine    AtomEngine
+	Image     string
+	Command   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 func (a *Atom) Cmd() []string {
@@ -44,10 +43,6 @@ func (a *Atom) Cmd() []string {
 }
 
 func NewAtom(columns []string, values []interface{}) (*Atom, error) {
-	if err := compare.StringSlice(columns, AtomColumns); err != nil {
-		return nil, err
-	}
-
 	id, err := uuid.Parse(values[0].(string))
 	if err != nil {
 		return nil, err

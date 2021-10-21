@@ -12,12 +12,12 @@ import (
 
 func Migrate(c echo.Context) error {
 	resp, err := db.Service().Query(&db.QueryRequest{
-		Queries: []string{
-			models.AtomCreate,
-			models.TriggerCreate,
-			models.TaskCreate,
-			models.JobCreate,
-			models.CallbackCreate,
+		Statements: []*db.Statement{
+			{Sql: models.AtomCreate},
+			{Sql: models.TriggerCreate},
+			{Sql: models.TaskCreate},
+			{Sql: models.JobCreate},
+			{Sql: models.CallbackCreate},
 		},
 	})
 

@@ -37,8 +37,9 @@ func (s *AtomTestSuite) SetupTest() {
 	assert.Nil(s.T(), err)
 
 	database := db.Service().WithStore(tmpStore)
+
 	resp, err := database.Execute(&db.ExecuteRequest{
-		Statements: []string{models.AtomCreate},
+		Statements: []*db.Statement{{Sql: models.AtomCreate}},
 	})
 	assert.Nil(s.T(), err)
 	assert.Empty(s.T(), resp.Results[0].Error)

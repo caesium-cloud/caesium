@@ -5,10 +5,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
+	"github.com/caesium-cloud/caesium/db/query"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/doug-martin/goqu/v9"
 	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
 )
 
 type Task interface {
@@ -42,14 +43,14 @@ type ListRequest struct {
 }
 
 func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
-	q := goqu.From(models.TaskTable)
+	q := query.Session()
 
 	if req.JobID != "" {
 		if _, err := uuid.Parse(req.JobID); err != nil {
 			return nil, err
 		}
 
-		q = q.Where(goqu.Ex{"job_id": req.JobID})
+		q = q.Where("job_id = ?", req.JobID)
 	}
 
 	if req.AtomID != "" {
@@ -57,7 +58,7 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 			return nil, err
 		}
 
-		q = q.Where(goqu.Ex{"atom_id": req.AtomID})
+		q = q.Where("atom_id = ?", req.AtomID)
 	}
 
 	if req.NextID != "" {
@@ -65,30 +66,36 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 			return nil, err
 		}
 
-		q = q.Where(goqu.Ex{"next_id": req.NextID})
+		q = q.Where("next_id = ?", req.NextID)
 	}
 
 	if len(req.OrderBy) > 0 {
 		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
+			q = q.Order(
+				clause.OrderByColumn{
+					Column: clause.Column{Name: col},
+				},
+			)
 		}
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := q.Find(&models.Task{}).Statement
 
 	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -98,16 +105,17 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 }
 
 func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {
-	q := goqu.From(models.TaskTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := query.Session().
+		First(&models.Task{}, "id = ?", id.String()).
+		Statement
 
 	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -133,9 +141,10 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	var (
 		id        = uuid.New()
 		createdAt = time.Now()
+		q         = query.Session()
 	)
 
-	m := models.Task{
+	task := models.Task{
 		ID:        id,
 		JobID:     uuid.MustParse(req.JobID),
 		AtomID:    uuid.MustParse(req.AtomID),
@@ -149,18 +158,18 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 			return nil, err
 		}
 
-		m.NextID = &id
+		task.NextID = &id
 	}
 
-	q := goqu.Insert(models.TaskTable).Rows(m)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := q.Create(task).Statement
 
 	resp, err := t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
 	switch {
@@ -173,18 +182,17 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	}
 }
 
-func (t *taskService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.TaskTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
+func (t *taskService) Delete(id uuid.UUID) (err error) {
+	stmt := query.Session().Delete(&models.Task{}, id.String()).Statement
 
 	_, err = t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
-	return err
+	return
 }

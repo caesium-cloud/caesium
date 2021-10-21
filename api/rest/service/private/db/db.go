@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"io"
 	"strings"
 	"time"
@@ -34,12 +35,48 @@ func (d *dbService) WithStore(s *store.Store) Database {
 	return d
 }
 
+type Statement struct {
+	Sql        string        `json:"sql"`
+	Parameters []interface{} `json:"parameters"`
+}
+
+func (s *Statement) CommandParameters() []*command.Parameter {
+	params := make([]*command.Parameter, len(s.Parameters))
+
+	for i, p := range s.Parameters {
+		switch v := p.(type) {
+		case int64:
+			params[i] = &command.Parameter{Value: &command.Parameter_I{I: v}}
+		case float64:
+			params[i] = &command.Parameter{Value: &command.Parameter_D{D: v}}
+		case bool:
+			params[i] = &command.Parameter{Value: &command.Parameter_B{B: v}}
+		case []byte:
+			params[i] = &command.Parameter{Value: &command.Parameter_Y{Y: v}}
+		case time.Time:
+			params[i] = &command.Parameter{
+				Value: &command.Parameter_S{
+					S: v.Format(time.RFC3339),
+				},
+			}
+		default:
+			params[i] = &command.Parameter{
+				Value: &command.Parameter_S{
+					S: fmt.Sprintf("%v", v),
+				},
+			}
+		}
+	}
+
+	return params
+}
+
 type QueryRequest struct {
 	Transaction bool                       `json:"transaction"`
 	Timings     bool                       `json:"timings"`
 	Level       command.QueryRequest_Level `json:"level"`
 	Freshness   time.Duration              `json:"freshness"`
-	Queries     []string                   `json:"queries"`
+	Statements  []*Statement               `json:"statements"`
 }
 
 type QueryResponse struct {
@@ -48,16 +85,19 @@ type QueryResponse struct {
 }
 
 func (d *dbService) Query(req *QueryRequest) (*QueryResponse, error) {
-	statements := make([]*command.Statement, len(req.Queries))
+	statements := make([]*command.Statement, len(req.Statements))
 
-	for i, q := range req.Queries {
-		if !strings.HasSuffix(q, ";") {
-			q += ";"
+	for i, s := range req.Statements {
+		if !strings.HasSuffix(s.Sql, ";") {
+			s.Sql += ";"
 		}
 
-		log.Debug("db query", "statement", q)
+		log.Debug("db query", "statement", s.Sql)
 
-		statements[i] = &command.Statement{Sql: q}
+		statements[i] = &command.Statement{
+			Sql:        s.Sql,
+			Parameters: s.CommandParameters(),
+		}
 	}
 
 	cmd := &command.QueryRequest{
@@ -88,10 +128,10 @@ func (d *dbService) Query(req *QueryRequest) (*QueryResponse, error) {
 }
 
 type ExecuteRequest struct {
-	Transaction bool     `json:"transaction"`
-	Timings     bool     `json:"timings"`
-	Statements  []string `json:"statements"`
-	AllOrNone   bool     `json:"all_or_none"`
+	Transaction bool         `json:"transaction"`
+	Timings     bool         `json:"timings"`
+	Statements  []*Statement `json:"statements"`
+	AllOrNone   bool         `json:"all_or_none"`
 }
 
 type ExecuteResponse struct {
@@ -103,13 +143,16 @@ func (d *dbService) Execute(req *ExecuteRequest) (*ExecuteResponse, error) {
 	statements := make([]*command.Statement, len(req.Statements))
 
 	for i, s := range req.Statements {
-		if !strings.HasSuffix(s, ";") {
-			s += ";"
+		if !strings.HasSuffix(s.Sql, ";") {
+			s.Sql += ";"
 		}
 
 		log.Debug("db execution", "statement", s)
 
-		statements[i] = &command.Statement{Sql: s}
+		statements[i] = &command.Statement{
+			Sql:        s.Sql,
+			Parameters: s.CommandParameters(),
+		}
 	}
 
 	cmd := &command.ExecuteRequest{

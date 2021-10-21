@@ -6,11 +6,12 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
+	"github.com/caesium-cloud/caesium/db/query"
 	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/doug-martin/goqu/v9"
 	"github.com/google/uuid"
+	"gorm.io/gorm/clause"
 )
 
 type Trigger interface {
@@ -42,33 +43,39 @@ type ListRequest struct {
 }
 
 func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
-	q := goqu.From(models.TriggerTable)
+	q := query.Session()
 
 	if req.Type != "" {
-		q = q.Where(goqu.Ex{"type": req.Type})
+		q = q.Where("type = ?", req.Type)
 	}
 
 	if len(req.OrderBy) > 0 {
 		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
+			q = q.Order(
+				clause.OrderByColumn{
+					Column: clause.Column{Name: col},
+				},
+			)
 		}
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := q.Find(&models.Trigger{}).Statement
 
 	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -78,16 +85,17 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 }
 
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
-	q := goqu.From(models.TriggerTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
+	stmt := query.Session().
+		First(&models.Trigger{}, "id = ?", id.String()).
+		Statement
 
 	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
@@ -117,6 +125,7 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 	var (
 		id        = uuid.New()
 		createdAt = time.Now()
+		q         = query.Session()
 	)
 
 	cfg, err := req.ConfigurationString()
@@ -124,23 +133,23 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 		return nil, err
 	}
 
-	q := goqu.Insert(models.TriggerTable).Rows(
-		models.Trigger{
-			ID:            id.String(),
-			Type:          models.TriggerType(req.Type),
-			Configuration: cfg,
-			CreatedAt:     createdAt,
-			UpdatedAt:     createdAt,
-		},
-	)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
+	trigger := &models.Trigger{
+		ID:            id.String(),
+		Type:          models.TriggerType(req.Type),
+		Configuration: cfg,
+		CreatedAt:     createdAt,
+		UpdatedAt:     createdAt,
 	}
 
+	stmt := q.Create(trigger).Statement
+
 	resp, err := t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
 	switch {
@@ -159,18 +168,17 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 	}
 }
 
-func (t *triggerService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.TriggerTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
+func (t *triggerService) Delete(id uuid.UUID) (err error) {
+	stmt := query.Session().Delete(&models.Trigger{}, id.String()).Statement
 
 	_, err = t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
+		Statements: []*db.Statement{
+			{
+				Sql:        stmt.SQL.String(),
+				Parameters: stmt.Vars,
+			},
+		},
 	})
 
-	return err
+	return
 }
