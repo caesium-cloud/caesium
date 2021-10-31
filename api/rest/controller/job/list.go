@@ -15,7 +15,7 @@ func List(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	jobs, err := job.Service().List(req)
+	jobs, err := job.Service(c.Request().Context()).List(req)
 	if err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}

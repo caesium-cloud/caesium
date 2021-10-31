@@ -14,7 +14,7 @@ func Delete(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	if err := atom.Service().Delete(id); err != nil {
+	if err := atom.Service(c.Request().Context()).Delete(id); err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 

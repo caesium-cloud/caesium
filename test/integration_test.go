@@ -31,7 +31,7 @@ func (s *IntegrationTestSuite) SetupTest() {
 		nil,
 	)
 	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+	assert.Equal(s.T(), http.StatusNoContent, resp.StatusCode)
 }
 
 func (s *IntegrationTestSuite) TestHealth() {

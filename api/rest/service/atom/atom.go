@@ -1,19 +1,17 @@
 package atom
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
-	"time"
 
-	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
-	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/doug-martin/goqu/v9"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Atom interface {
-	WithStore(*store.Store) Atom
+	WithDatabase(*gorm.DB) Atom
 	List(*ListRequest) (models.Atoms, error)
 	Get(uuid.UUID) (*models.Atom, error)
 	Create(*CreateRequest) (*models.Atom, error)
@@ -21,15 +19,19 @@ type Atom interface {
 }
 
 type atomService struct {
-	db db.Database
+	ctx context.Context
+	db  *gorm.DB
 }
 
-func Service() Atom {
-	return &atomService{db: db.Service()}
+func Service(ctx context.Context) Atom {
+	return &atomService{
+		ctx: ctx,
+		db:  db.Connection(),
+	}
 }
 
-func (a *atomService) WithStore(s *store.Store) Atom {
-	a.db = db.Service().WithStore(s)
+func (a *atomService) WithDatabase(conn *gorm.DB) Atom {
+	a.db = conn
 	return a
 }
 
@@ -41,65 +43,37 @@ type ListRequest struct {
 }
 
 func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
-	q := goqu.From(models.AtomTable)
+	var (
+		atoms = make(models.Atoms, 0)
+		q     = a.db.WithContext(a.ctx)
+	)
 
 	if req.Engine != "" {
-		q = q.Where(goqu.Ex{"engine": req.Engine})
+		q = q.Where("enging = ?", req.Engine)
 	}
 
-	if len(req.OrderBy) > 0 {
-		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
-		}
+	for _, orderBy := range req.OrderBy {
+		q = q.Order(orderBy)
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := a.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return models.NewAtoms(resp.Results[0])
+	return atoms, q.Find(atoms).Error
 }
 
 func (a *atomService) Get(id uuid.UUID) (*models.Atom, error) {
-	q := goqu.From(models.AtomTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := a.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(resp.Results[0].Values) == 0 {
-		return nil, nil
-	}
-
-	return models.NewAtom(
-		resp.Results[0].Columns,
-		resp.Results[0].Values[0],
+	var (
+		atom = new(models.Atom)
+		q    = a.db.WithContext(a.ctx)
 	)
+
+	return atom, q.First(atom, id).Error
 }
 
 type CreateRequest struct {
@@ -115,8 +89,8 @@ func (r *CreateRequest) CommandString() (string, error) {
 
 func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 	var (
-		id        = uuid.New()
-		createdAt = time.Now()
+		id = uuid.New()
+		q  = a.db.WithContext(a.ctx)
 	)
 
 	cmd, err := req.CommandString()
@@ -124,48 +98,20 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 		return nil, err
 	}
 
-	q := goqu.Insert(models.AtomTable).Rows(
-		models.Atom{
-			ID:        id,
-			Engine:    models.AtomEngine(req.Engine),
-			Image:     req.Image,
-			Command:   cmd,
-			CreatedAt: createdAt,
-			UpdatedAt: createdAt,
-		},
-	)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
+	atom := &models.Atom{
+		ID:      id,
+		Engine:  models.AtomEngine(req.Engine),
+		Image:   req.Image,
+		Command: cmd,
 	}
 
-	resp, err := a.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
-	})
-
-	switch {
-	case err != nil:
-		return nil, err
-	case resp.Results[0].Error != "":
-		return nil, errors.New(resp.Results[0].Error)
-	default:
-		return a.Get(id)
-	}
+	return atom, q.Create(atom).Error
 }
 
 func (a *atomService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.AtomTable).
-		Where(goqu.Ex{"id": id.String()})
+	var (
+		q = a.db.WithContext(a.ctx)
+	)
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
-
-	_, err = a.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
-	})
-
-	return err
+	return q.Delete(&models.Job{}, id).Error
 }

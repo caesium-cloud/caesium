@@ -47,7 +47,7 @@ func Start(ctx context.Context) error {
 }
 
 func queueTriggers(ctx context.Context, req *trigger.ListRequest, e Executor) error {
-	triggers, err := trigger.Service().List(req)
+	triggers, err := trigger.Service(ctx).List(req)
 	if err != nil {
 		return err
 	}

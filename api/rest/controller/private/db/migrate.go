@@ -3,30 +3,25 @@ package db
 import (
 	"net/http"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/private/cluster"
-	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
-	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/labstack/echo/v4"
 )
 
 func Migrate(c echo.Context) error {
-	resp, err := db.Service().Query(&db.QueryRequest{
-		Queries: []string{
-			models.AtomCreate,
-			models.TriggerCreate,
-			models.TaskCreate,
-			models.JobCreate,
-			models.CallbackCreate,
-		},
-	})
+	database := db.Connection()
 
-	switch err {
-	case nil:
-		return c.JSON(http.StatusOK, resp)
-	case store.ErrNotLeader:
-		return cluster.Redirect(c)
-	default:
-		return echo.ErrInternalServerError.SetInternal(err)
+	for _, mod := range []interface{}{
+		&models.Atom{},
+		&models.Callback{},
+		&models.Job{},
+		&models.Task{},
+		&models.Trigger{},
+	} {
+		if err := database.AutoMigrate(mod); err != nil {
+			return echo.ErrInternalServerError.SetInternal(err)
+		}
 	}
+
+	return c.JSON(http.StatusNoContent, nil)
 }

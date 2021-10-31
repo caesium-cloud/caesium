@@ -11,7 +11,7 @@ import (
 func Get(c echo.Context) error {
 	id := uuid.MustParse(c.Param("id"))
 
-	j, err := job.Service().Get(id)
+	j, err := job.Service(c.Request().Context()).Get(id)
 
 	switch {
 	case err != nil:

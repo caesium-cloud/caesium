@@ -1,20 +1,17 @@
 package trigger
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
-	"time"
 
-	"github.com/caesium-cloud/caesium/api/rest/service/private/db"
-	"github.com/caesium-cloud/caesium/db/store"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/doug-martin/goqu/v9"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Trigger interface {
-	WithStore(*store.Store) Trigger
+	WithDatabase(*gorm.DB) Trigger
 	List(*ListRequest) (models.Triggers, error)
 	Get(uuid.UUID) (*models.Trigger, error)
 	Create(*CreateRequest) (*models.Trigger, error)
@@ -22,15 +19,19 @@ type Trigger interface {
 }
 
 type triggerService struct {
-	db db.Database
+	ctx context.Context
+	db  *gorm.DB
 }
 
-func Service() Trigger {
-	return &triggerService{db: db.Service()}
+func Service(ctx context.Context) Trigger {
+	return &triggerService{
+		ctx: ctx,
+		db:  db.Connection(),
+	}
 }
 
-func (t *triggerService) WithStore(s *store.Store) Trigger {
-	t.db = db.Service().WithStore(s)
+func (t *triggerService) WithDatabase(conn *gorm.DB) Trigger {
+	t.db = conn
 	return t
 }
 
@@ -42,65 +43,37 @@ type ListRequest struct {
 }
 
 func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
-	q := goqu.From(models.TriggerTable)
+	var (
+		triggers = make(models.Triggers, 0)
+		q        = t.db.WithContext(t.ctx)
+	)
 
 	if req.Type != "" {
-		q = q.Where(goqu.Ex{"type": req.Type})
+		q = q.Where("type = ?", req.Type)
 	}
 
-	if len(req.OrderBy) > 0 {
-		for _, col := range req.OrderBy {
-			q = q.OrderAppend(goqu.C(col).Asc())
-		}
+	for _, orderBy := range req.OrderBy {
+		q = q.Order(orderBy)
 	}
 
 	if req.Limit > 0 {
-		q = q.Limit(uint(req.Limit))
+		q = q.Limit(int(req.Limit))
 	}
 
 	if req.Offset > 0 {
-		q = q.Offset(uint(req.Offset))
+		q = q.Offset(int(req.Offset))
 	}
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	return models.NewTriggers(resp.Results[0])
+	return triggers, q.Find(triggers).Error
 }
 
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
-	q := goqu.From(models.TriggerTable).
-		Where(goqu.Ex{"id": id.String()})
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := t.db.Query(&db.QueryRequest{
-		Queries: []string{sql},
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	if len(resp.Results[0].Values) == 0 {
-		return nil, nil
-	}
-
-	return models.NewTrigger(
-		resp.Results[0].Columns,
-		resp.Results[0].Values[0],
+	var (
+		trigger = new(models.Trigger)
+		q       = t.db.WithContext(t.ctx)
 	)
+
+	return trigger, q.First(trigger, id).Error
 }
 
 type CreateRequest struct {
@@ -115,8 +88,8 @@ func (r *CreateRequest) ConfigurationString() (string, error) {
 
 func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 	var (
-		id        = uuid.New()
-		createdAt = time.Now()
+		id = uuid.New()
+		q  = t.db.WithContext(t.ctx)
 	)
 
 	cfg, err := req.ConfigurationString()
@@ -124,53 +97,19 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 		return nil, err
 	}
 
-	q := goqu.Insert(models.TriggerTable).Rows(
-		models.Trigger{
-			ID:            id.String(),
-			Type:          models.TriggerType(req.Type),
-			Configuration: cfg,
-			CreatedAt:     createdAt,
-			UpdatedAt:     createdAt,
-		},
-	)
-
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return nil, err
+	trigger := &models.Trigger{
+		ID:            id.String(),
+		Type:          models.TriggerType(req.Type),
+		Configuration: cfg,
 	}
 
-	resp, err := t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
-	})
-
-	switch {
-	case err != nil:
-		log.Error("create trigger failure", "error", err)
-
-		return nil, err
-	case resp.Results[0].Error != "":
-		err = errors.New(resp.Results[0].Error)
-
-		log.Error("create trigger failure", "error", err)
-
-		return nil, err
-	default:
-		return t.Get(id)
-	}
+	return trigger, q.Create(trigger).Error
 }
 
 func (t *triggerService) Delete(id uuid.UUID) error {
-	q := goqu.Delete(models.TriggerTable).
-		Where(goqu.Ex{"id": id.String()})
+	var (
+		q = t.db.WithContext(t.ctx)
+	)
 
-	sql, _, err := q.ToSQL()
-	if err != nil {
-		return err
-	}
-
-	_, err = t.db.Execute(&db.ExecuteRequest{
-		Statements: []string{sql},
-	})
-
-	return err
+	return q.Delete(&models.Trigger{}, id).Error
 }

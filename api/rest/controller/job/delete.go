@@ -14,7 +14,7 @@ func Delete(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	if err := job.Service().Delete(id); err != nil {
+	if err := job.Service(c.Request().Context()).Delete(id); err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
