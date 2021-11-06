@@ -6,7 +6,6 @@ require (
 	github.com/c-bata/go-prompt v0.2.6
 	github.com/dgraph-io/badger/v3 v3.2103.2
 	github.com/docker/docker v20.10.10+incompatible
-	github.com/doug-martin/goqu/v9 v9.18.0
 	github.com/golang/protobuf v1.5.2
 	github.com/golang/snappy v0.0.4
 	github.com/google/uuid v1.3.0
@@ -14,6 +13,7 @@ require (
 	github.com/graphql-go/handler v0.2.3
 	github.com/hashicorp/go-hclog v1.0.0
 	github.com/hashicorp/raft v1.3.2
+	github.com/jackc/pgx/v4 v4.13.0
 	github.com/jedib0t/go-pretty/v6 v6.2.4
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/labstack/echo-contrib v0.11.0
@@ -27,6 +27,8 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.3.5
 	go.uber.org/zap v1.19.1
 	google.golang.org/protobuf v1.27.1
+	gorm.io/driver/postgres v1.2.1
+	gorm.io/gorm v1.22.2
 	k8s.io/api v0.22.3
 	k8s.io/apimachinery v0.22.3
 	k8s.io/client-go v0.22.3
@@ -61,6 +63,15 @@ require (
 	github.com/hashicorp/golang-lru v0.5.1 // indirect
 	github.com/imdario/mergo v0.3.12 // indirect
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
+	github.com/jackc/chunkreader/v2 v2.0.1 // indirect
+	github.com/jackc/pgconn v1.10.0 // indirect
+	github.com/jackc/pgio v1.0.0 // indirect
+	github.com/jackc/pgpassfile v1.0.0 // indirect
+	github.com/jackc/pgproto3/v2 v2.1.1 // indirect
+	github.com/jackc/pgservicefile v0.0.0-20200714003250-2b9c44734f2b // indirect
+	github.com/jackc/pgtype v1.8.1 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
+	github.com/jinzhu/now v1.1.2 // indirect
 	github.com/json-iterator/go v1.1.11 // indirect
 	github.com/klauspost/compress v1.12.3 // indirect
 	github.com/labstack/gommon v0.3.0 // indirect
@@ -89,7 +100,7 @@ require (
 	go.opencensus.io v0.23.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.6.0 // indirect
-	golang.org/x/crypto v0.0.0-20210817164053-32db794688a5 // indirect
+	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519 // indirect
 	golang.org/x/net v0.0.0-20210913180222-943fd674d43e // indirect
 	golang.org/x/oauth2 v0.0.0-20210402161424-2e8d93401602 // indirect
 	golang.org/x/sys v0.0.0-20210910150752-751e447fb3d0 // indirect

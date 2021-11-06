@@ -15,8 +15,8 @@ import (
 func Post(c echo.Context) error {
 	var (
 		req  = &PostRequest{}
-		tsvc = task.Service()
-		asvc = atom.Service()
+		tsvc = task.Service(c.Request().Context())
+		asvc = atom.Service(c.Request().Context())
 	)
 
 	if err := c.Bind(req); err != nil {
@@ -32,7 +32,7 @@ func Post(c echo.Context) error {
 		"type", req.Trigger.Type,
 		"config", req.Trigger.Configuration)
 
-	trig, err := trigger.Service().Create(req.Trigger)
+	trig, err := trigger.Service(c.Request().Context()).Create(req.Trigger)
 	if err != nil {
 		log.Error("failed to create trigger", "error", err)
 		return echo.ErrInternalServerError.SetInternal(err)
@@ -40,7 +40,7 @@ func Post(c echo.Context) error {
 
 	log.Info("creating job", "alias", req.Alias)
 
-	j, err := job.Service().Create(&job.CreateRequest{
+	j, err := job.Service(c.Request().Context()).Create(&job.CreateRequest{
 		TriggerID: trig.ID,
 	})
 	if err != nil {

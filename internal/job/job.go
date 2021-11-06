@@ -36,7 +36,7 @@ type atomRunner struct {
 }
 
 func (j *job) Run(ctx context.Context) error {
-	tasks, err := task.Service().List(&task.ListRequest{OrderBy: []string{"next_id"}})
+	tasks, err := task.Service(ctx).List(&task.ListRequest{OrderBy: []string{"next_id"}})
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func (j *job) Run(ctx context.Context) error {
 
 	m := make(map[uuid.UUID]*atomRunner, len(tasks))
 
-	svc := asvc.Service()
+	svc := asvc.Service(ctx)
 
 	for _, t := range tasks {
 		a, err := svc.Get(t.AtomID)

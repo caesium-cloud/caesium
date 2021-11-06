@@ -14,7 +14,7 @@ func Post(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	a, err := atom.Service().Create(&req)
+	a, err := atom.Service(c.Request().Context()).Create(&req)
 	if err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}

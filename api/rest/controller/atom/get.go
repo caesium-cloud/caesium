@@ -11,7 +11,7 @@ import (
 func Get(c echo.Context) error {
 	id := uuid.MustParse(c.Param("id"))
 
-	a, err := atom.Service().Get(id)
+	a, err := atom.Service(c.Request().Context()).Get(id)
 
 	switch {
 	case err != nil:

@@ -24,16 +24,14 @@ steps:
   - name: deps
     path: /go
   commands: [go build]
-  depends_on:
-    - dependencies
+  depends_on: [dependencies]
 
 - name: coverage
   image: plugins/codecov
   settings:
     token:
       from_secret: codecov_token
-  depends_on:
-    - unit test
+  depends_on: [unit test]
 
 - name: containerize
   image: plugins/docker
@@ -45,17 +43,14 @@ steps:
       from_secret: docker_username
     password:
       from_secret: docker_password
-  depends_on:
-    - build
-    - unit test
+  depends_on: [dependencies]
 
 - name: caesium
   image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
   commands:
     - caesium start
   detach: true
-  depends_on:
-    - containerize
+  depends_on: [containerize]
 
 - name: integration test
   image: golang
@@ -67,8 +62,15 @@ steps:
     - go test ./test/ -tags=integration
   environment:
     CAESIUM_HOST: caesium
-  depends_on:
-    - caesium
+  depends_on: [caesium]
+
+services:
+  - name: postgres
+    image: postgres
+    environment:
+      POSTGRES_DB: caesium
+      POSTGRES_USER: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
 
 volumes:
 - name: deps

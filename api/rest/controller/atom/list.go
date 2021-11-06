@@ -15,7 +15,7 @@ func List(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	atoms, err := atom.Service().List(req)
+	atoms, err := atom.Service(c.Request().Context()).List(req)
 	if err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
@@ -29,7 +29,7 @@ func parseListRequest(c echo.Context) (req *atom.ListRequest, err error) {
 	}
 
 	if limit := c.QueryParam("limit"); limit != "" {
-		if req.Limit, err = strconv.ParseUint(limit, 10, 64); err != nil {
+		if req.Limit, err = strconv.ParseUint(limit, 10, 32); err != nil {
 			return nil, err
 		}
 	}

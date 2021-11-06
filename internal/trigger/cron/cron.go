@@ -59,7 +59,7 @@ func (c *Cron) Fire(ctx context.Context) error {
 
 	req := &jsvc.ListRequest{TriggerID: c.id.String()}
 
-	jobs, err := jsvc.Service().List(req)
+	jobs, err := jsvc.Service(ctx).List(req)
 	if err != nil {
 		return err
 	}

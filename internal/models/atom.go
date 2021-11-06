@@ -4,21 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	"github.com/caesium-cloud/caesium/db"
-	"github.com/caesium-cloud/caesium/pkg/compare"
 	"github.com/google/uuid"
-)
-
-var (
-	AtomColumns = []string{}
-	AtomTable   = "atoms"
-	AtomCreate  = `CREATE TABLE IF NOT EXISTS atoms (
-		id 			TEXT		PRIMARY KEY,
-		engine 		TEXT,
-		image		TEXT,
-		command		TEXT,
-		created_at 	TIMESTAMP,
-		updated_at 	TIMESTAMP);`
 )
 
 type AtomEngine string
@@ -29,12 +15,12 @@ const (
 )
 
 type Atom struct {
-	ID        uuid.UUID  `db:"id"`
-	Engine    AtomEngine `db:"engine"`
-	Image     string     `db:"image"`
-	Command   string     `db:"command"`
-	CreatedAt time.Time  `db:"created_at"`
-	UpdatedAt time.Time  `db:"updated_at"`
+	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	Engine    AtomEngine `gorm:"index;not null"`
+	Image     string     `gorm:"index;not null"`
+	Command   string     `gorm:"command"`
+	CreatedAt time.Time  `gorm:"not null"`
+	UpdatedAt time.Time  `gorm:"not null"`
 }
 
 func (a *Atom) Cmd() []string {
@@ -43,36 +29,4 @@ func (a *Atom) Cmd() []string {
 	return cmd
 }
 
-func NewAtom(columns []string, values []interface{}) (*Atom, error) {
-	if err := compare.StringSlice(columns, AtomColumns); err != nil {
-		return nil, err
-	}
-
-	id, err := uuid.Parse(values[0].(string))
-	if err != nil {
-		return nil, err
-	}
-
-	return &Atom{
-		ID:        id,
-		Engine:    AtomEngine(values[1].(string)),
-		Image:     values[2].(string),
-		Command:   values[3].(string),
-		CreatedAt: values[4].(time.Time),
-		UpdatedAt: values[5].(time.Time),
-	}, nil
-}
-
 type Atoms []*Atom
-
-func NewAtoms(rows *db.Rows) (atoms Atoms, err error) {
-	atoms = make(Atoms, len(rows.Values))
-
-	for i := range atoms {
-		if atoms[i], err = NewAtom(rows.Columns, rows.Values[i]); err != nil {
-			return nil, err
-		}
-	}
-
-	return
-}
