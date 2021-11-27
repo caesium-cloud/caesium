@@ -10,28 +10,25 @@ steps:
     path: /go
   commands: [go get -v -t -d ./...]
 
+- name: build
+  image: plugins/docker
+  settings:
+    repo: caesiumcloud/caesium-builder
+    tags: ${DRONE_COMMIT_SHA:0:7}
+    dockerfile: build/Dockerfile.build
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+  depends_on: [dependencies]
+
 - name: unit test
-  image: golang
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
   volumes:
   - name: deps
     path: /go
   commands: [go test -race -coverprofile=coverage.txt -covermode=atomic ./...]
-  depends_on: [dependencies]
-
-- name: build
-  image: golang
-  volumes:
-  - name: deps
-    path: /go
-  commands: [go build]
-  depends_on: [dependencies]
-
-- name: coverage
-  image: plugins/codecov
-  settings:
-    token:
-      from_secret: codecov_token
-  depends_on: [unit test]
+  depends_on: [build]
 
 - name: containerize
   image: plugins/docker
@@ -39,11 +36,20 @@ steps:
     repo: caesiumcloud/caesium
     tags: ${DRONE_COMMIT_SHA:0:7}
     dockerfile: build/Dockerfile
+    build_args:
+      - BUILDER_TAG=${DRONE_COMMIT_SHA:0:7}
     username:
       from_secret: docker_username
     password:
       from_secret: docker_password
-  depends_on: [dependencies]
+  depends_on: [unit test]
+
+- name: coverage
+  image: plugins/codecov
+  settings:
+    token:
+      from_secret: codecov_token
+  depends_on: [unit test]
 
 - name: caesium
   image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
