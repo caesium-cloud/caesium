@@ -59,7 +59,7 @@ steps:
   depends_on: [containerize]
 
 - name: integration-test-internal
-  image: golang
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
   volumes:
   - name: deps
     path: /go
@@ -80,7 +80,7 @@ steps:
   depends_on: [containerize]
 
 - name: integration-test-postgres
-  image: golang
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
   volumes:
   - name: deps
     path: /go
