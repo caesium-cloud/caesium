@@ -3,6 +3,7 @@ package db
 import (
 	"log"
 
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	_ "github.com/jackc/pgx/v4"
 	"gorm.io/driver/postgres"
@@ -11,6 +12,7 @@ import (
 
 func init() {
 }
+
 func Connection() *gorm.DB {
 	var (
 		gdb *gorm.DB
@@ -21,6 +23,15 @@ func Connection() *gorm.DB {
 	case "postgres":
 		gdb, err = gorm.Open(
 			postgres.Open(env.Variables().DatabaseDSN),
+			&gorm.Config{},
+		)
+	case "internal":
+		fallthrough
+	case "dqlite":
+		fallthrough
+	default:
+		gdb, err = gorm.Open(
+			dqlite.Open(""),
 			&gorm.Config{},
 		)
 	}

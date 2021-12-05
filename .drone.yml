@@ -51,14 +51,14 @@ steps:
       from_secret: codecov_token
   depends_on: [unit test]
 
-- name: caesium
+- name: caesium-internal
   image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
   commands:
     - caesium start
   detach: true
   depends_on: [containerize]
 
-- name: integration test
+- name: integration-test-internal
   image: golang
   volumes:
   - name: deps
@@ -67,8 +67,29 @@ steps:
     - sleep 5
     - go test ./test/ -tags=integration
   environment:
-    CAESIUM_HOST: caesium
-  depends_on: [caesium]
+    CAESIUM_HOST: caesium-internal
+  depends_on: [caesium-internal]
+
+- name: caesium-postgres
+  image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
+  commands:
+    - caesium start
+  environment:
+    CAESIUM_DATABASE_TYPE: postgres
+  detach: true
+  depends_on: [containerize]
+
+- name: integration-test-postgres
+  image: golang
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+    - sleep 5
+    - go test ./test/ -tags=integration
+  environment:
+    CAESIUM_HOST: caesium-postgres
+  depends_on: [caesium-postgres]
 
 services:
   - name: postgres

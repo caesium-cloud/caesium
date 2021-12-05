@@ -61,6 +61,6 @@ type Environment struct {
 	RaftLogLevel           string        `default:"INFO"`
 	CompressionSize        int           `default:"150"`
 	CompressionBatch       int           `default:"5"`
-	DatabaseType           string        `default:"postgres"`
+	DatabaseType           string        `default:"internal"`
 	DatabaseDSN            string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable"`
 }
