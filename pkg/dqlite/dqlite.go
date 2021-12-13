@@ -6,14 +6,13 @@ import (
 	"strconv"
 	"strings"
 
-	"gorm.io/gorm/callbacks"
-
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/canonical/go-dqlite/app"
 	"github.com/canonical/go-dqlite/client"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
+	"gorm.io/gorm/callbacks"
 	"gorm.io/gorm/clause"
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/migrator"
@@ -46,16 +45,26 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ConnPool = dialector.Conn
 	} else {
 		logFunc := func(l client.LogLevel, format string, a ...interface{}) {
-			log.Info(fmt.Sprintf("%s: %s: %s\n", env.Variables().NodeAddress, l.String(), format), a...)
-		}
+			// log info by default
+			fn := log.Info
 
-		fmt.Println("NODE ID: ", env.Variables().NodeAddress)
-		fmt.Println("DATABASE NODES: ", env.Variables().DatabaseNodes)
+			switch l {
+			case client.LogDebug:
+				fn = log.Debug
+			case client.LogInfo:
+			case client.LogWarn:
+				fn = log.Warn
+			case client.LogError:
+				fn = log.Error
+			}
+
+			fn("internal db", "log", fmt.Sprintf(format, a...))
+		}
 
 		app, err := app.New(
 			env.Variables().DatabasePath,
 			app.WithAddress(env.Variables().NodeAddress),
-			// app.WithCluster(env.Variables().DatabaseNodes),
+			app.WithCluster(env.Variables().DatabaseNodes),
 			app.WithLogFunc(logFunc),
 		)
 		if err != nil {
