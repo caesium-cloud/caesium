@@ -3,28 +3,38 @@ type: docker
 name: default
 
 steps:
-- name: dependencies
-  image: golang
-  volumes:
-  - name: deps
-    path: /go
-  commands: [go get -v -t -d ./...]
+- name: build
+  image: plugins/docker
+  settings:
+    repo: caesiumcloud/caesium-builder
+    tags: ${DRONE_COMMIT_SHA:0:7}
+    dockerfile: build/Dockerfile.build
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
 
 - name: unit test
-  image: golang
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
   volumes:
   - name: deps
     path: /go
   commands: [go test -race -coverprofile=coverage.txt -covermode=atomic ./...]
-  depends_on: [dependencies]
+  depends_on: [build]
 
-- name: build
-  image: golang
-  volumes:
-  - name: deps
-    path: /go
-  commands: [go build]
-  depends_on: [dependencies]
+- name: containerize
+  image: plugins/docker
+  settings:
+    repo: caesiumcloud/caesium
+    tags: ${DRONE_COMMIT_SHA:0:7}
+    dockerfile: build/Dockerfile
+    build_args:
+      - BUILDER_TAG=${DRONE_COMMIT_SHA:0:7}
+    username:
+      from_secret: docker_username
+    password:
+      from_secret: docker_password
+  depends_on: [unit test]
 
 - name: coverage
   image: plugins/codecov
@@ -33,27 +43,15 @@ steps:
       from_secret: codecov_token
   depends_on: [unit test]
 
-- name: containerize
-  image: plugins/docker
-  settings:
-    repo: caesiumcloud/caesium
-    tags: ${DRONE_COMMIT_SHA:0:7}
-    dockerfile: build/Dockerfile
-    username:
-      from_secret: docker_username
-    password:
-      from_secret: docker_password
-  depends_on: [dependencies]
-
-- name: caesium
+- name: caesium-internal
   image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
   commands:
     - caesium start
   detach: true
   depends_on: [containerize]
 
-- name: integration test
-  image: golang
+- name: integration-test-internal
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
   volumes:
   - name: deps
     path: /go
@@ -61,8 +59,29 @@ steps:
     - sleep 5
     - go test ./test/ -tags=integration
   environment:
-    CAESIUM_HOST: caesium
-  depends_on: [caesium]
+    CAESIUM_HOST: caesium-internal
+  depends_on: [caesium-internal]
+
+- name: caesium-postgres
+  image: caesiumcloud/caesium:${DRONE_COMMIT_SHA:0:7}
+  commands:
+    - caesium start
+  environment:
+    CAESIUM_DATABASE_TYPE: postgres
+  detach: true
+  depends_on: [containerize]
+
+- name: integration-test-postgres
+  image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}
+  volumes:
+  - name: deps
+    path: /go
+  commands:
+    - sleep 5
+    - go test ./test/ -tags=integration
+  environment:
+    CAESIUM_HOST: caesium-postgres
+  depends_on: [caesium-postgres]
 
 services:
   - name: postgres
