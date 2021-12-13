@@ -1,10 +1,9 @@
 package db
 
 import (
-	"log"
-
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	_ "github.com/jackc/pgx/v4"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
