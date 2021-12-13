@@ -2,14 +2,6 @@ kind: pipeline
 type: docker
 name: default
 
-steps:
-- name: dependencies
-  image: golang
-  volumes:
-  - name: deps
-    path: /go
-  commands: [go get -v -t -d ./...]
-
 - name: build
   image: plugins/docker
   settings:
@@ -20,7 +12,6 @@ steps:
       from_secret: docker_username
     password:
       from_secret: docker_password
-  depends_on: [dependencies]
 
 - name: unit test
   image: caesiumcloud/caesium-builder:${DRONE_COMMIT_SHA:0:7}

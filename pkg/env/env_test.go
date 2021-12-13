@@ -24,7 +24,7 @@ func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
 }
 
 func (s *EnvTestSuite) TestProcessInvalidLogLevelFailure() {
-	os.Setenv("CAESIUM_LOGLEVEL", "bogus")
+	os.Setenv("CAESIUM_LOG_LEVEL", "bogus")
 	assert.NotNil(s.T(), Process())
 }
 
