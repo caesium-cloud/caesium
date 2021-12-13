@@ -53,7 +53,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		fmt.Println("DATABASE NODES: ", env.Variables().DatabaseNodes)
 
 		app, err := app.New(
-			env.Variables().DBPath,
+			env.Variables().DatabasePath,
 			app.WithAddress(env.Variables().NodeAddress),
 			// app.WithCluster(env.Variables().DatabaseNodes),
 			app.WithLogFunc(logFunc),
