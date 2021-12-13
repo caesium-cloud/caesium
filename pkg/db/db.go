@@ -15,11 +15,14 @@ func init() {
 
 func Connection() *gorm.DB {
 	var (
-		gdb *gorm.DB
-		err error
+		gdb    *gorm.DB
+		err    error
+		dbType = env.Variables().DatabaseType
 	)
 
-	switch env.Variables().DatabaseType {
+	log.Info("establishing db connection", "type", dbType)
+
+	switch dbType {
 	case "postgres":
 		gdb, err = gorm.Open(
 			postgres.Open(env.Variables().DatabaseDSN),

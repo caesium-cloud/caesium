@@ -34,7 +34,7 @@ type Environment struct {
 	Port                int      `default:"8080"`
 	KubernetesConfig    string   `default:""`
 	KubernetesNamespace string   `default:"default"`
-	NodeID              string   `default:""`
+	NodeAddress         string   `default:"127.0.0.1:9001"`
 	DatabaseNodes       []string `default:""`
 	DBPath              string   `default:"/tmp"`
 	DatabaseType        string   `default:"internal"`

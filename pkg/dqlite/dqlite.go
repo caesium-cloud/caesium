@@ -46,13 +46,16 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ConnPool = dialector.Conn
 	} else {
 		logFunc := func(l client.LogLevel, format string, a ...interface{}) {
-			log.Info(fmt.Sprintf("%s: %s: %s\n", env.Variables().NodeID, l.String(), format), a...)
+			log.Info(fmt.Sprintf("%s: %s: %s\n", env.Variables().NodeAddress, l.String(), format), a...)
 		}
+
+		fmt.Println("NODE ID: ", env.Variables().NodeAddress)
+		fmt.Println("DATABASE NODES: ", env.Variables().DatabaseNodes)
 
 		app, err := app.New(
 			env.Variables().DBPath,
-			app.WithAddress(env.Variables().NodeID),
-			app.WithCluster(env.Variables().DatabaseNodes),
+			app.WithAddress(env.Variables().NodeAddress),
+			// app.WithCluster(env.Variables().DatabaseNodes),
 			app.WithLogFunc(logFunc),
 		)
 		if err != nil {
