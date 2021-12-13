@@ -3,7 +3,6 @@ package env
 import (
 	"os"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -17,7 +16,6 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Nil(s.T(), Process())
 	assert.NotNil(s.T(), Variables())
 	assert.Equal(s.T(), "info", Variables().LogLevel)
-	assert.Equal(s.T(), 5*time.Second, Variables().JoinInterval)
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
@@ -26,7 +24,7 @@ func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
 }
 
 func (s *EnvTestSuite) TestProcessInvalidLogLevelFailure() {
-	os.Setenv("CAESIUM_LOGLEVEL", "bogus")
+	os.Setenv("CAESIUM_LOG_LEVEL", "bogus")
 	assert.NotNil(s.T(), Process())
 }
 

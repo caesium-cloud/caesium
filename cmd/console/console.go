@@ -1,11 +1,9 @@
 package console
 
 import (
-	"os"
+	"fmt"
 
 	"github.com/c-bata/go-prompt"
-	"github.com/caesium-cloud/caesium/pkg/client"
-	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 )
 
@@ -32,31 +30,7 @@ var (
 )
 
 func executor(in string) {
-	cli := client.Client()
-
-	resp, err := cli.Query(in)
-	if err != nil {
-		panic(err)
-	}
-
-	results := resp.Results[0]
-
-	header := make(table.Row, len(results.Columns))
-	for i := range header {
-		header[i] = results.Columns[i]
-	}
-
-	t := table.NewWriter()
-	t.SetOutputMirror(os.Stdout)
-	t.AppendHeader(header)
-
-	rows := make([]table.Row, len(results.Values))
-	for i := range rows {
-		rows[i] = results.Values[i]
-	}
-
-	t.AppendRows(rows)
-	t.Render()
+	fmt.Println("console under construction")
 }
 
 func completer(in prompt.Document) []prompt.Suggest {
