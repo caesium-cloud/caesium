@@ -12,14 +12,15 @@ import (
 )
 
 var (
-	gdb    *gorm.DB
-	err    error
-	dbType = env.Variables().DatabaseType
-	once   sync.Once
+	once sync.Once
+	gdb  *gorm.DB
+	err  error
 )
 
 func Connection() *gorm.DB {
 	once.Do(func() {
+		dbType := env.Variables().DatabaseType
+
 		log.Info("establishing db connection", "type", dbType)
 
 		switch dbType {
