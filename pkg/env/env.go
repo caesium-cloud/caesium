@@ -30,13 +30,13 @@ func Variables() Environment {
 // Environment defines the environment variables used
 // by caesium.
 type Environment struct {
-	LogLevel            string   `default:"info"`
+	LogLevel            string   `default:"info" split_words:"true"`
 	Port                int      `default:"8080"`
-	KubernetesConfig    string   `default:""`
-	KubernetesNamespace string   `default:"default"`
-	NodeAddress         string   `default:"127.0.0.1:9001"`
-	DatabaseNodes       []string `default:""`
-	DBPath              string   `default:"/tmp"`
-	DatabaseType        string   `default:"internal"`
-	DatabaseDSN         string   `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable"`
+	KubernetesConfig    string   `default:"" split_words:"true"`
+	KubernetesNamespace string   `default:"default" split_words:"true"`
+	NodeAddress         string   `default:"127.0.0.1:9001" split_words:"true"`
+	DatabaseNodes       []string `default:"" split_words:"true"`
+	DatabasePath        string   `default:"/tmp" split_words:"true"`
+	DatabaseType        string   `default:"internal" split_words:"true"`
+	DatabaseDSN         string   `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
 }
