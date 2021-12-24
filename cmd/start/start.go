@@ -9,6 +9,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api"
 	"github.com/caesium-cloud/caesium/internal/executor"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/spf13/cobra"
 )
@@ -57,6 +58,11 @@ func start(cmd *cobra.Command, args []string) error {
 		errs = make(chan error)
 		ctx  = context.Background()
 	)
+
+	log.Info("migrating database")
+	if err := db.Migrate(); err != nil {
+		log.Fatal("database migration failure", "error", err)
+	}
 
 	go func() {
 		log.Info("spinning up api")

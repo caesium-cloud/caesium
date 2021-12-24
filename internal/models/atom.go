@@ -12,6 +12,7 @@ type AtomEngine string
 const (
 	AtomEngineDocker     AtomEngine = "docker"
 	AtomEngineKubernetes AtomEngine = "kubernetes"
+	AtomEnginePodman     AtomEngine = "podman"
 )
 
 type Atom struct {

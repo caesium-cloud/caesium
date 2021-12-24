@@ -3,6 +3,7 @@ package db
 import (
 	"sync"
 
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -31,7 +32,7 @@ func Connection() *gorm.DB {
 			)
 		case "internal":
 			fallthrough
-		case "dqlite":
+		case dqlite.DriverName:
 			fallthrough
 		default:
 			gdb, err = gorm.Open(
@@ -46,4 +47,13 @@ func Connection() *gorm.DB {
 	})
 
 	return gdb
+}
+
+func Migrate() (err error) {
+	for _, model := range models.All {
+		if err = Connection().AutoMigrate(model); err != nil {
+			return
+		}
+	}
+	return
 }

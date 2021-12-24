@@ -85,7 +85,7 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 		q = q.Offset(int(req.Offset))
 	}
 
-	return tasks, q.Find(tasks).Error
+	return tasks, q.Find(&tasks).Error
 }
 
 func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {

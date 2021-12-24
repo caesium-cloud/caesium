@@ -17,21 +17,12 @@ type IntegrationTestSuite struct {
 	caesiumURL string
 }
 
-func (s *IntegrationTestSuite) SetupTest() {
+func (s *IntegrationTestSuite) SetupSuite() {
 	host := os.Getenv("CAESIUM_HOST")
 	if host == "" {
 		host = "localhost"
 	}
 	s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
-
-	// migrate DB
-	resp, err := http.Post(
-		fmt.Sprintf("%v/v1/private/db/migrate", s.caesiumURL),
-		"application/json",
-		nil,
-	)
-	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusNoContent, resp.StatusCode)
 }
 
 func (s *IntegrationTestSuite) TestHealth() {

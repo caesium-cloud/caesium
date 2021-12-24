@@ -12,17 +12,6 @@ import (
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
-type dockerBackend interface {
-	ContainerInspect(context.Context, string) (types.ContainerJSON, error)
-	ContainerList(context.Context, types.ContainerListOptions) ([]types.Container, error)
-	ContainerCreate(context.Context, *containertypes.Config, *containertypes.HostConfig, *networktypes.NetworkingConfig, *specs.Platform, string) (containertypes.ContainerCreateCreatedBody, error)
-	ContainerStart(context.Context, string, types.ContainerStartOptions) error
-	ContainerStop(context.Context, string, *time.Duration) error
-	ContainerRemove(context.Context, string, types.ContainerRemoveOptions) error
-	ContainerLogs(context.Context, string, types.ContainerLogsOptions) (io.ReadCloser, error)
-	ImagePull(context.Context, string, types.ImagePullOptions) (io.ReadCloser, error)
-}
-
 var (
 	stateMap = map[string]atom.State{
 		"created":    atom.Created,
@@ -43,3 +32,14 @@ var (
 		143: atom.Terminated,
 	}
 )
+
+type dockerBackend interface {
+	ContainerInspect(context.Context, string) (types.ContainerJSON, error)
+	ContainerList(context.Context, types.ContainerListOptions) ([]types.Container, error)
+	ContainerCreate(context.Context, *containertypes.Config, *containertypes.HostConfig, *networktypes.NetworkingConfig, *specs.Platform, string) (containertypes.ContainerCreateCreatedBody, error)
+	ContainerStart(context.Context, string, types.ContainerStartOptions) error
+	ContainerStop(context.Context, string, *time.Duration) error
+	ContainerRemove(context.Context, string, types.ContainerRemoveOptions) error
+	ContainerLogs(context.Context, string, types.ContainerLogsOptions) (io.ReadCloser, error)
+	ImagePull(context.Context, string, types.ImagePullOptions) (io.ReadCloser, error)
+}

@@ -64,7 +64,7 @@ func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
 		q = q.Offset(int(req.Offset))
 	}
 
-	return atoms, q.Find(atoms).Error
+	return atoms, q.Find(&atoms).Error
 }
 
 func (a *atomService) Get(id uuid.UUID) (*models.Atom, error) {

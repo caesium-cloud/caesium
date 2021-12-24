@@ -56,7 +56,6 @@ steps:
   - name: deps
     path: /go
   commands:
-    - sleep 5
     - go test ./test/ -tags=integration
   environment:
     CAESIUM_HOST: caesium-internal
@@ -77,7 +76,6 @@ steps:
   - name: deps
     path: /go
   commands:
-    - sleep 5
     - go test ./test/ -tags=integration
   environment:
     CAESIUM_HOST: caesium-postgres

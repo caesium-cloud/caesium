@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
+	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -66,6 +67,8 @@ func (j *job) Run(ctx context.Context) error {
 			runner.engine = docker.NewEngine(ctx)
 		case models.AtomEngineKubernetes:
 			runner.engine = kubernetes.NewEngine(ctx)
+		case models.AtomEnginePodman:
+			runner.engine = podman.NewEngine(ctx)
 		default:
 			return fmt.Errorf("unable to run atom with engine: %v", a.Engine)
 		}

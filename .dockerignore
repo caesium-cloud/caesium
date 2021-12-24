@@ -1,0 +1,12 @@
+Makefile
+README.md
+LICENSE
+
+docs
+build
+tools
+**/*_test.go
+
+.github
+.drone.yml
+.gitignore
