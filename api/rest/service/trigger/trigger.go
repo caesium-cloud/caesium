@@ -64,7 +64,7 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 		q = q.Offset(int(req.Offset))
 	}
 
-	return triggers, q.Find(triggers).Error
+	return triggers, q.Find(&triggers).Error
 }
 
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {

@@ -67,7 +67,7 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 		q = q.Offset(int(req.Offset))
 	}
 
-	return jobs, q.Find(jobs).Error
+	return jobs, q.Find(&jobs).Error
 }
 
 func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {

@@ -16,6 +16,12 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+var (
+	testAtomID        = "test_id"
+	testContainerName = "test_atom"
+	testImage         = "caesiumcloud/caesium"
+)
+
 type DockerTestSuite struct {
 	suite.Suite
 	engine *dockerEngine
@@ -104,12 +110,6 @@ func (m *mockDockerBackend) ImagePull(ctx context.Context, image string, options
 	}
 	return ioutil.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
-
-var (
-	testAtomID        = "test_id"
-	testContainerName = "test_atom"
-	testImage         = "caesiumcloud/caesium"
-)
 
 func newContainer(id string, state *types.ContainerState) types.ContainerJSON {
 	return types.ContainerJSON{
