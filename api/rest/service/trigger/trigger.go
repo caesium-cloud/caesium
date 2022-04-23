@@ -14,6 +14,7 @@ type Trigger interface {
 	WithDatabase(*gorm.DB) Trigger
 	List(*ListRequest) (models.Triggers, error)
 	Get(uuid.UUID) (*models.Trigger, error)
+	GetByAlias(string) (*models.Trigger, error)
 	Create(*CreateRequest) (*models.Trigger, error)
 	Delete(uuid.UUID) error
 }
@@ -74,6 +75,15 @@ func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 	)
 
 	return trigger, q.First(trigger, id).Error
+}
+
+func (t *triggerService) GetByAlias(alias string) (*models.Trigger, error) {
+	var (
+		trigger = new(models.Trigger)
+		q       = t.db.WithContext(t.ctx)
+	)
+
+	return trigger, q.Where("alias = ?", alias).First(trigger).Error
 }
 
 type CreateRequest struct {

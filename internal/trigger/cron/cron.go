@@ -42,7 +42,7 @@ func New(t *models.Trigger) (*Cron, error) {
 }
 
 func (c *Cron) Listen(ctx context.Context) {
-	log.Info("triger listening", "id", c.id)
+	log.Info("trigger listening", "id", c.id)
 
 	select {
 	case <-time.After(time.Until(c.schedule.Next(time.Now()))):
@@ -55,26 +55,7 @@ func (c *Cron) Listen(ctx context.Context) {
 }
 
 func (c *Cron) Fire(ctx context.Context) error {
-	log.Info("firing trigger", "id", c.id)
-
-	req := &jsvc.ListRequest{TriggerID: c.id.String()}
-
-	jobs, err := jsvc.Service(ctx).List(req)
-	if err != nil {
-		return err
-	}
-
-	log.Info("running jobs", "count", len(jobs))
-
-	for _, j := range jobs {
-		go func() {
-			if err = job.New(j).Run(ctx); err != nil {
-				log.Error("job run failure", "id", j.ID, "error", err)
-			}
-		}()
-	}
-
-	return nil
+	return trigger.Fire(ctx, c.id)
 }
 
 func (c *Cron) ID() uuid.UUID {
