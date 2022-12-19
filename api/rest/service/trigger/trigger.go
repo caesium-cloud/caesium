@@ -77,6 +77,7 @@ func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 }
 
 type CreateRequest struct {
+	Alias         string                 `json:"alias"`
 	Type          string                 `json:"type"`
 	Configuration map[string]interface{} `json:"configuration"`
 }
@@ -99,6 +100,7 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 
 	trigger := &models.Trigger{
 		ID:            id.String(),
+		Alias:         req.Alias,
 		Type:          models.TriggerType(req.Type),
 		Configuration: cfg,
 	}

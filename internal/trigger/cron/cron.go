@@ -23,7 +23,10 @@ type Cron struct {
 
 func New(t *models.Trigger) (*Cron, error) {
 	if t.Type != models.TriggerTypeCron {
-		return nil, fmt.Errorf("trigger is %v not %v", t.Type, models.TriggerTypeCron)
+		return nil, fmt.Errorf(
+			"trigger is %v not %v",
+			t.Type,
+			models.TriggerTypeCron)
 	}
 
 	m := map[string]interface{}{}
@@ -32,7 +35,14 @@ func New(t *models.Trigger) (*Cron, error) {
 		return nil, err
 	}
 
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	parser := cron.NewParser(
+		cron.Minute |
+			cron.Hour |
+			cron.Dom |
+			cron.Month |
+			cron.Dow,
+	)
+
 	sched, err := parser.Parse(m["expression"].(string))
 	if err != nil {
 		return nil, err
@@ -42,7 +52,11 @@ func New(t *models.Trigger) (*Cron, error) {
 }
 
 func (c *Cron) Listen(ctx context.Context) {
-	log.Info("triger listening", "id", c.id)
+	log.Info(
+		"trigger listening",
+		"id", c.id,
+		"type", models.TriggerTypeCron,
+	)
 
 	select {
 	case <-time.After(time.Until(c.schedule.Next(time.Now()))):
@@ -55,7 +69,11 @@ func (c *Cron) Listen(ctx context.Context) {
 }
 
 func (c *Cron) Fire(ctx context.Context) error {
-	log.Info("firing trigger", "id", c.id)
+	log.Info(
+		"trigger firing",
+		"id", c.id,
+		"type", models.TriggerTypeCron,
+	)
 
 	req := &jsvc.ListRequest{TriggerID: c.id.String()}
 
