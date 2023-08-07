@@ -1,0 +1,23 @@
+jobs:
+  build:
+    working_directory: /home/circleci/caesium
+    machine:
+      image: ubuntu-2204:2022.04.2
+      docker_layer_caching: true
+    steps:
+      - checkout
+      - run:
+          name: dependencies
+          command: |
+            sudo apt update
+            sudo apt install git snapd
+            sudo snap install just --edge --classic
+      - run:
+          name: build
+          command: just tag=$CIRCLE_SHA1 build
+      - run:
+          name: unit test
+          command: just tag=$CIRCLE_SHA1 unit-test
+      - run:
+          name: integration test
+          command: just tag=$CIRCLE_SHA1 integration-test
