@@ -8,7 +8,7 @@ import (
 
 // Trigger
 type Trigger interface {
-	Listen(ctx context.Context) <-chan struct{}
-	Fire() error
+	Listen(ctx context.Context)
+	Fire(ctx context.Context) error
 	ID() uuid.UUID
 }

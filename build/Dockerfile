@@ -13,7 +13,7 @@ RUN ldd caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
     xargs -I % sh -c 'mkdir -p $(dirname ./%); cp % ./%;'
 
 # Package for lightweight deployment
-FROM alpine
+FROM docker:24.0.5-dind-alpine3.18
 RUN mkdir -p /opt/caesium/dqlite
 COPY --chown=0:0 --from=builder /dist/caesium /bin/caesium
 COPY --chown=0:0 --from=builder /dist/usr/lib/* /usr/lib/

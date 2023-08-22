@@ -8,10 +8,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/containers/podman/v2/libpod/define"
-	"github.com/containers/podman/v2/pkg/bindings/containers"
-	"github.com/containers/podman/v2/pkg/domain/entities"
-	"github.com/containers/podman/v2/pkg/specgen"
+	"github.com/containers/podman/v4/libpod/define"
+	"github.com/containers/podman/v4/pkg/bindings/containers"
+	"github.com/containers/podman/v4/pkg/bindings/images"
+	"github.com/containers/podman/v4/pkg/domain/entities"
+	"github.com/containers/podman/v4/pkg/specgen"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
 )
@@ -100,7 +101,7 @@ func (m *mockPodmanBackend) ContainerLogs(id string, opts containers.LogOptions)
 	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
-func (m *mockPodmanBackend) ImagePull(image string, opts entities.ImagePullOptions) (io.ReadCloser, error) {
+func (m *mockPodmanBackend) ImagePull(image string, opts images.PullOptions) (io.ReadCloser, error) {
 	args := m.Called(image)
 	if image == "" {
 		return nil, args.Error(0)

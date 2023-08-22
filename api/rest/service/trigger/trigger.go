@@ -69,14 +69,15 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 	var (
-		trigger = new(models.Trigger)
+		trigger = &models.Trigger{ID: id}
 		q       = t.db.WithContext(t.ctx)
 	)
 
-	return trigger, q.First(trigger, id).Error
+	return trigger, q.First(trigger).Error
 }
 
 type CreateRequest struct {
+	Alias         string                 `json:"alias"`
 	Type          string                 `json:"type"`
 	Configuration map[string]interface{} `json:"configuration"`
 }
@@ -98,7 +99,8 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 	}
 
 	trigger := &models.Trigger{
-		ID:            id.String(),
+		ID:            id,
+		Alias:         req.Alias,
 		Type:          models.TriggerType(req.Type),
 		Configuration: cfg,
 	}
