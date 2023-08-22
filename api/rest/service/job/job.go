@@ -72,15 +72,15 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 
 func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 	var (
-		job = new(models.Job)
+		job = &models.Job{ID: id}
 		q   = j.db.WithContext(j.ctx)
 	)
 
-	return job, q.First(job, id).Error
+	return job, q.First(job).Error
 }
 
 type CreateRequest struct {
-	TriggerID string `json:"trigger_id"`
+	TriggerID uuid.UUID `json:"trigger_id"`
 }
 
 func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
@@ -91,7 +91,7 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 
 	job := &models.Job{
 		ID:        id,
-		TriggerID: uuid.MustParse(req.TriggerID),
+		TriggerID: req.TriggerID,
 	}
 
 	return job, q.Create(job).Error

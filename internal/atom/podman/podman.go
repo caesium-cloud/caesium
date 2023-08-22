@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/containers/podman/v2/libpod/define"
-	"github.com/containers/podman/v2/pkg/bindings/containers"
-	"github.com/containers/podman/v2/pkg/bindings/images"
-	"github.com/containers/podman/v2/pkg/domain/entities"
-	"github.com/containers/podman/v2/pkg/specgen"
+	"github.com/containers/podman/v4/libpod/define"
+	"github.com/containers/podman/v4/pkg/bindings/containers"
+	"github.com/containers/podman/v4/pkg/bindings/images"
+	"github.com/containers/podman/v4/pkg/domain/entities"
+	"github.com/containers/podman/v4/pkg/specgen"
 )
 
 var (
@@ -43,7 +43,7 @@ type podmanBackend interface {
 	ContainerStop(string, *time.Duration) error
 	ContainerRemove(string, *bool, *bool) error
 	ContainerLogs(string, containers.LogOptions) (io.ReadCloser, error)
-	ImagePull(string, entities.ImagePullOptions) (io.ReadCloser, error)
+	ImagePull(string, images.PullOptions) (io.ReadCloser, error)
 }
 
 type podmanClient struct {
@@ -55,11 +55,11 @@ func (cli *podmanClient) ContainerInspect(id string) (*define.InspectContainerDa
 }
 
 func (cli *podmanClient) ContainerList(filters map[string][]string, all bool) ([]entities.ListContainer, error) {
-	return containers.List(cli.ctx, filters, &all, nil, nil, nil, nil)
+	return containers.List(cli.ctx, &containers.ListOptions{All: &all, Filters: filters})
 }
 
 func (cli *podmanClient) ContainerCreate(spec *specgen.SpecGenerator) (entities.ContainerCreateResponse, error) {
-	return containers.CreateWithSpec(cli.ctx, spec)
+	return containers.CreateWithSpec(cli.ctx, spec, nil)
 }
 
 func (cli *podmanClient) ContainerStart(id string) error {
@@ -72,11 +72,15 @@ func (cli *podmanClient) ContainerStop(id string, timeout *time.Duration) error 
 	if timeout != nil {
 		t = uint(timeout.Seconds())
 	}
-	return containers.Stop(cli.ctx, id, &t)
+	return containers.Stop(cli.ctx, id, &containers.StopOptions{Timeout: &t})
 }
 
 func (cli *podmanClient) ContainerRemove(id string, force *bool, removeVolumes *bool) error {
-	return containers.Remove(cli.ctx, id, force, removeVolumes)
+	_, err := containers.Remove(cli.ctx, id, &containers.RemoveOptions{
+		Force:   force,
+		Volumes: removeVolumes,
+	})
+	return err
 }
 
 func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (io.ReadCloser, error) {
@@ -89,7 +93,7 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 	err := containers.Logs(
 		cli.ctx,
 		id,
-		containers.LogOptions{},
+		&containers.LogOptions{},
 		stdout,
 		stderr,
 	)
@@ -122,8 +126,8 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 	return pr, nil
 }
 
-func (cli *podmanClient) ImagePull(image string, opts entities.ImagePullOptions) (io.ReadCloser, error) {
-	if _, err := images.Pull(cli.ctx, image, opts); err != nil {
+func (cli *podmanClient) ImagePull(image string, opts images.PullOptions) (io.ReadCloser, error) {
+	if _, err := images.Pull(cli.ctx, image, &opts); err != nil {
 		return nil, err
 	}
 

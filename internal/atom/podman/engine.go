@@ -9,10 +9,10 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/containers/podman/v2/pkg/bindings"
-	"github.com/containers/podman/v2/pkg/bindings/containers"
-	"github.com/containers/podman/v2/pkg/domain/entities"
-	"github.com/containers/podman/v2/pkg/specgen"
+	"github.com/containers/podman/v4/pkg/bindings"
+	"github.com/containers/podman/v4/pkg/bindings/containers"
+	"github.com/containers/podman/v4/pkg/bindings/images"
+	"github.com/containers/podman/v4/pkg/specgen"
 )
 
 type Engine interface {
@@ -78,7 +78,7 @@ func (e *podmanEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	log.Info("pulling podman image", "image", req.Image)
 
-	r, err := e.backend.ImagePull(req.Image, entities.ImagePullOptions{})
+	r, err := e.backend.ImagePull(req.Image, images.PullOptions{})
 	if err != nil {
 		return nil, err
 	}

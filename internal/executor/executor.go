@@ -5,29 +5,37 @@ import (
 	"sync"
 	"time"
 
-	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	svc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/internal/trigger/cron"
 	"github.com/caesium-cloud/caesium/pkg/log"
+)
+
+var (
+	exec Executor
 )
 
 type Executor struct {
 	m sync.Map
 }
 
-func (e *Executor) Queue(ctx context.Context, c *cron.Cron) {
+func Queue(ctx context.Context, t trigger.Trigger) {
+	exec.queue(ctx, t)
+}
+
+func (e *Executor) queue(ctx context.Context, t trigger.Trigger) {
 	triggerCtx, cancel := context.WithCancel(ctx)
-	_, loaded := e.m.LoadOrStore(c.ID(), cancel)
+	_, loaded := e.m.LoadOrStore(t.ID(), cancel)
 	if !loaded {
-		go c.Listen(triggerCtx)
+		go t.Listen(triggerCtx)
 	}
 }
 
 func Start(ctx context.Context) error {
 	var (
-		e   Executor
 		t   = time.NewTicker(time.Minute)
-		req = &trigger.ListRequest{
+		req = &svc.ListRequest{
 			Type: string(models.TriggerTypeCron),
 		}
 	)
@@ -35,7 +43,7 @@ func Start(ctx context.Context) error {
 	for {
 		select {
 		case <-t.C:
-			if err := queueTriggers(ctx, req, e); err != nil {
+			if err := queueTriggers(ctx, req); err != nil {
 				log.Error("trigger queue failure", "error", err)
 				return err
 			}
@@ -46,8 +54,8 @@ func Start(ctx context.Context) error {
 	}
 }
 
-func queueTriggers(ctx context.Context, req *trigger.ListRequest, e Executor) error {
-	triggers, err := trigger.Service(ctx).List(req)
+func queueTriggers(ctx context.Context, req *svc.ListRequest) error {
+	triggers, err := svc.Service(ctx).List(req)
 	if err != nil {
 		return err
 	}
@@ -56,7 +64,7 @@ func queueTriggers(ctx context.Context, req *trigger.ListRequest, e Executor) er
 
 	for _, trig := range triggers {
 		if c, err := cron.New(trig); err == nil {
-			e.Queue(ctx, c)
+			exec.queue(ctx, c)
 		} else {
 			return err
 		}

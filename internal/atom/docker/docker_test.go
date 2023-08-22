@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	containertypes "github.com/docker/docker/api/types/container"
 	networktypes "github.com/docker/docker/api/types/network"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -58,16 +59,16 @@ func (m *mockDockerBackend) ContainerList(ctx context.Context, options types.Con
 	}, nil
 }
 
-func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *containertypes.Config, hostConfig *containertypes.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (containertypes.ContainerCreateCreatedBody, error) {
+func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *containertypes.Config, hostConfig *containertypes.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
 	args := m.Called(containerName)
 
 	switch containerName {
 	case "fail":
-		return containertypes.ContainerCreateCreatedBody{}, args.Error(0)
+		return container.CreateResponse{}, args.Error(0)
 	case "":
-		return containertypes.ContainerCreateCreatedBody{ID: ""}, nil
+		return container.CreateResponse{ID: ""}, nil
 	default:
-		return containertypes.ContainerCreateCreatedBody{ID: testAtomID}, nil
+		return container.CreateResponse{ID: testAtomID}, nil
 	}
 }
 
@@ -79,7 +80,7 @@ func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string, timeout *time.Duration) error {
+func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string, options container.StopOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)

@@ -138,7 +138,8 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 	log.Info("stopping docker container", "id", req.ID)
 
-	if err := e.backend.ContainerStop(e.ctx, req.ID, &req.Timeout); err != nil {
+	timeout := int(req.Timeout.Seconds())
+	if err := e.backend.ContainerStop(e.ctx, req.ID, container.StopOptions{Timeout: &timeout}); err != nil {
 		return err
 	}
 

@@ -90,11 +90,11 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 
 func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {
 	var (
-		task = new(models.Task)
+		task = &models.Task{ID: id}
 		q    = t.db.WithContext(t.ctx)
 	)
 
-	return task, q.First(task, id).Error
+	return task, q.First(task).Error
 }
 
 type CreateRequest struct {

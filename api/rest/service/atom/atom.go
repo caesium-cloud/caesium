@@ -69,11 +69,11 @@ func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
 
 func (a *atomService) Get(id uuid.UUID) (*models.Atom, error) {
 	var (
-		atom = new(models.Atom)
+		atom = &models.Atom{ID: id}
 		q    = a.db.WithContext(a.ctx)
 	)
 
-	return atom, q.First(atom, id).Error
+	return atom, q.First(atom).Error
 }
 
 type CreateRequest struct {
