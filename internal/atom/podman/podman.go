@@ -43,7 +43,7 @@ type podmanBackend interface {
 	ContainerStop(string, *time.Duration) error
 	ContainerRemove(string, *bool, *bool) error
 	ContainerLogs(string, containers.LogOptions) (io.ReadCloser, error)
-	ImagePull(string, images.PullOptions) (io.ReadCloser, error)
+	ImagePull(string, *images.PullOptions) (io.ReadCloser, error)
 }
 
 type podmanClient struct {
@@ -126,8 +126,8 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 	return pr, nil
 }
 
-func (cli *podmanClient) ImagePull(image string, opts images.PullOptions) (io.ReadCloser, error) {
-	if _, err := images.Pull(cli.ctx, image, &opts); err != nil {
+func (cli *podmanClient) ImagePull(image string, opts *images.PullOptions) (io.ReadCloser, error) {
+	if _, err := images.Pull(cli.ctx, image, opts); err != nil {
 		return nil, err
 	}
 

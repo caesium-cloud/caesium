@@ -78,7 +78,7 @@ func (e *podmanEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	log.Info("pulling podman image", "image", req.Image)
 
-	r, err := e.backend.ImagePull(req.Image, images.PullOptions{})
+	r, err := e.backend.ImagePull(req.Image, &images.PullOptions{})
 	if err != nil {
 		return nil, err
 	}
