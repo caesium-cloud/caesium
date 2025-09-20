@@ -7,6 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -34,11 +35,11 @@ var (
 
 type dockerBackend interface {
 	ContainerInspect(context.Context, string) (types.ContainerJSON, error)
-	ContainerList(context.Context, types.ContainerListOptions) ([]types.Container, error)
+	ContainerList(context.Context, container.ListOptions) ([]types.Container, error)
 	ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error)
-	ContainerStart(context.Context, string, types.ContainerStartOptions) error
+	ContainerStart(context.Context, string, container.StartOptions) error
 	ContainerStop(context.Context, string, container.StopOptions) error
-	ContainerRemove(context.Context, string, types.ContainerRemoveOptions) error
-	ContainerLogs(context.Context, string, types.ContainerLogsOptions) (io.ReadCloser, error)
-	ImagePull(context.Context, string, types.ImagePullOptions) (io.ReadCloser, error)
+	ContainerRemove(context.Context, string, container.RemoveOptions) error
+	ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error)
+	ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error)
 }

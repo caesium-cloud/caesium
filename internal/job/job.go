@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
@@ -37,9 +38,36 @@ type atomRunner struct {
 }
 
 func (j *job) Run(ctx context.Context) error {
+	store := run.Default()
+	var runID uuid.UUID
+	var runErr error
+
+	if id, ok := run.FromContext(ctx); ok {
+		runID = id
+		if _, exists := store.Get(runID); !exists {
+			snapshot := store.Start(j.id)
+			runID = snapshot.ID
+			ctx = run.WithContext(ctx, runID)
+		}
+	} else {
+		snapshot := store.Start(j.id)
+		runID = snapshot.ID
+		ctx = run.WithContext(ctx, runID)
+	}
+
+	defer func() {
+		store.Complete(runID, runErr)
+	}()
+
 	tasks, err := task.Service(ctx).List(&task.ListRequest{OrderBy: []string{"next_id"}})
 	if err != nil {
+		runErr = err
 		return err
+	}
+
+	if len(tasks) == 0 {
+		runErr = fmt.Errorf("job %s has no tasks", j.id)
+		return runErr
 	}
 
 	log.Info("running tasks", "count", len(tasks))
@@ -49,20 +77,23 @@ func (j *job) Run(ctx context.Context) error {
 	svc := asvc.Service(ctx)
 
 	for _, t := range tasks {
-		a, err := svc.Get(t.AtomID)
+		modelAtom, err := svc.Get(t.AtomID)
 		if err != nil {
+			runErr = err
 			return err
 		}
 
+		store.RegisterTask(runID, t, modelAtom)
+
 		runner := &atomRunner{
-			image:   a.Image,
-			command: a.Cmd(),
+			image:   modelAtom.Image,
+			command: modelAtom.Cmd(),
 			nextID:  t.NextID,
 		}
 
-		log.Info("evaluating task atom", "engine", a.Engine, "id", a.ID)
+		log.Info("evaluating task atom", "engine", modelAtom.Engine, "id", modelAtom.ID)
 
-		switch a.Engine {
+		switch modelAtom.Engine {
 		case models.AtomEngineDocker:
 			runner.engine = docker.NewEngine(ctx)
 		case models.AtomEngineKubernetes:
@@ -70,7 +101,8 @@ func (j *job) Run(ctx context.Context) error {
 		case models.AtomEnginePodman:
 			runner.engine = podman.NewEngine(ctx)
 		default:
-			return fmt.Errorf("unable to run atom with engine: %v", a.Engine)
+			runErr = fmt.Errorf("unable to run atom with engine: %v", modelAtom.Engine)
+			return runErr
 		}
 
 		m[t.ID] = runner
@@ -89,8 +121,12 @@ func (j *job) Run(ctx context.Context) error {
 			Command: r.command,
 		})
 		if err != nil {
+			store.FailTask(runID, taskID, err)
+			runErr = err
 			return err
 		}
+
+		store.StartTask(runID, taskID, a.ID())
 
 		// TODO: stream logs somewhere
 		// r.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
@@ -126,14 +162,17 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		if err = f(); err != nil {
+			store.FailTask(runID, taskID, err)
+			runErr = err
 			return err
 		}
 
+		store.CompleteTask(runID, taskID, string(a.Result()))
+
 		if r.nextID == nil {
 			break
-		} else {
-			taskID = *r.nextID
 		}
+		taskID = *r.nextID
 	}
 
 	return nil

@@ -42,6 +42,7 @@ func Post(c echo.Context) error {
 
 	j, err := job.Service(c.Request().Context()).Create(&job.CreateRequest{
 		TriggerID: trig.ID,
+		Alias:     req.Alias,
 	})
 	if err != nil {
 		log.Error("failed to create job", "error", err)

@@ -11,6 +11,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	containertypes "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/mock"
@@ -42,7 +43,7 @@ func (m *mockDockerBackend) ContainerInspect(ctx context.Context, container stri
 	return newContainer(container, &types.ContainerState{}), nil
 }
 
-func (m *mockDockerBackend) ContainerList(ctx context.Context, options types.ContainerListOptions) ([]types.Container, error) {
+func (m *mockDockerBackend) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
 	args := m.Called()
 	if options.Since != "" {
 		return nil, args.Error(0)
@@ -72,7 +73,7 @@ func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *contain
 	}
 }
 
-func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options types.ContainerStartOptions) error {
+func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options container.StartOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)
@@ -88,7 +89,7 @@ func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string,
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container string, options types.ContainerRemoveOptions) error {
+func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container string, options container.RemoveOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)
@@ -96,7 +97,7 @@ func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container strin
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string, options types.ContainerLogsOptions) (io.ReadCloser, error) {
+func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error) {
 	args := m.Called(container)
 	if container == "" {
 		return nil, args.Error(0)
@@ -104,7 +105,7 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string,
 	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
-func (m *mockDockerBackend) ImagePull(ctx context.Context, image string, options types.ImagePullOptions) (io.ReadCloser, error) {
+func (m *mockDockerBackend) ImagePull(ctx context.Context, image string, options image.PullOptions) (io.ReadCloser, error) {
 	args := m.Called(image)
 	if image == "" {
 		return nil, args.Error(0)

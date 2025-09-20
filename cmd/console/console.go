@@ -1,53 +1,41 @@
 package console
 
 import (
-	"fmt"
-
-	"github.com/c-bata/go-prompt"
+	"github.com/caesium-cloud/caesium/cmd/console/api"
+	"github.com/caesium-cloud/caesium/cmd/console/app"
+	"github.com/caesium-cloud/caesium/cmd/console/config"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
 
 const (
 	usage   = "console"
-	short   = "Open a console session to query Caesium"
-	long    = "This command initiates an interactive console session to query Caesium"
+	short   = "Open a console session to inspect Caesium"
+	long    = "This command starts the interactive Caesium console"
 	example = "caesium console"
 )
 
-var (
-	// Cmd is the start command.
-	Cmd = &cobra.Command{
-		Use:        usage,
-		Short:      short,
-		Long:       long,
-		Aliases:    []string{"c"},
-		SuggestFor: []string{"query", "terminal", "connect", "exec"},
-		Example:    example,
-		RunE:       console,
-	}
-
-	suggestions = []prompt.Suggest{}
-)
-
-func executor(in string) {
-	fmt.Println("console under construction")
+// Cmd is the Cobra command entrypoint.
+var Cmd = &cobra.Command{
+	Use:        usage,
+	Short:      short,
+	Long:       long,
+	Aliases:    []string{"c"},
+	SuggestFor: []string{"tui", "terminal", "ui"},
+	Example:    example,
+	RunE:       run,
 }
 
-func completer(in prompt.Document) []prompt.Suggest {
-	w := in.GetWordBeforeCursor()
-	if w == "" {
-		return []prompt.Suggest{}
+func run(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
 	}
-	return prompt.FilterHasPrefix(suggestions, w, true)
-}
 
-func console(cmd *cobra.Command, args []string) error {
-	prompt.New(
-		executor,
-		completer,
-		prompt.OptionPrefix("caesium> "),
-		prompt.OptionTitle("caesium"),
-	).Run()
+	client := api.New(cfg)
+	model := app.New(client)
 
-	return nil
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	_, err = p.Run()
+	return err
 }

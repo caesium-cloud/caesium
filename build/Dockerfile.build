@@ -1,22 +1,19 @@
-FROM golang:1.21.6-alpine3.19
+FROM golang:1.25.1-alpine3.22
 
 # Update & install OS dependencies
 WORKDIR /bld
-RUN apk update 
-RUN apk add --no-cache ca-certificates git \
-    dumb-init autoconf automake libtool libuv-dev \
-    lz4-dev make gcc musl-dev linux-headers g++ \
-    gpgme-dev btrfs-progs-dev lvm2-dev
+RUN apk add --no-cache \
+    ca-certificates git dumb-init \
+    autoconf automake libtool \
+    libuv-dev lz4-dev \
+    make gcc g++ musl-dev linux-headers \
+    gpgme-dev btrfs-progs-dev lvm2-dev \
+    sqlite-dev
 
-# Compile & install
-RUN git clone https://github.com/canonical/raft 
-WORKDIR /bld/raft
-RUN autoreconf -i && \
-    ./configure --enable-uv --prefix=/usr && \
-    make -j4 install
+# Compile & install (raft is now bundled in dqlite >= v1.18.1)
 WORKDIR /bld
-RUN apk add sqlite-dev
-RUN git clone https://github.com/canonical/dqlite
+ARG DQLITE_REF=v1.18.2
+RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
 RUN autoreconf -i && ./configure --prefix=/usr && make -j4 install
 

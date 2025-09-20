@@ -1,21 +1,36 @@
 ARG BUILDER_TAG
-FROM caesiumcloud/caesium-builder:${BUILDER_TAG} as builder
+FROM caesiumcloud/caesium-builder:${BUILDER_TAG} AS builder
 
-# Build binary
+# Build binary with minimal size and prep runtime deps
 WORKDIR /bld/caesium
 COPY . .
-RUN go build
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    --mount=type=cache,target=/go/pkg/mod \
+    go build -trimpath -ldflags="-s -w" -o /dist/bin/caesium ./
 
-# Link for CGO
+# Collect dynamically linked libraries
 WORKDIR /dist
-RUN cp /bld/caesium/caesium .
-RUN ldd caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
+RUN ldd /dist/bin/caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
     xargs -I % sh -c 'mkdir -p $(dirname ./%); cp % ./%;'
 
-# Package for lightweight deployment
-FROM docker:24.0.5-dind-alpine3.18
-RUN mkdir -p /opt/caesium/dqlite
-COPY --chown=0:0 --from=builder /dist/caesium /bin/caesium
-COPY --chown=0:0 --from=builder /dist/usr/lib/* /usr/lib/
-COPY --chown=0:0 --from=builder /lib/* /lib/
+# -------- Release image (no DinD) --------
+FROM alpine:3.22 AS release
+RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs && \
+    adduser -D -H -u 10001 caesium && \
+    mkdir -p /var/lib/caesium/dqlite && \
+    chown 10001:10001 /var/lib/caesium/dqlite
+COPY --chown=0:0 --from=builder /dist/ /
+USER 10001:10001
 ENTRYPOINT ["/bin/caesium"]
+
+# -------- Test image (DinD for integration) --------
+FROM docker:28.4.0-dind-alpine3.22 AS test
+RUN apk add --no-cache libuv lz4-libs sqlite-libs && \
+    mkdir -p /var/lib/caesium/dqlite && \
+    chown 10001:10001 /var/lib/caesium/dqlite
+COPY --chown=0:0 --from=builder /dist/ /
+
+# Wrapper to start dockerd (DinD) and then the app
+RUN printf '#!/bin/sh\nset -e\n\n# start docker daemon in background\n dockerd-entrypoint.sh dockerd &\n\n# wait for docker to be ready\ntries=0\nuntil docker info >/dev/null 2>&1; do\n  tries=$((tries+1))\n  if [ "$tries" -gt 60 ]; then\n    echo "Docker daemon did not become ready in time" >&2\n    exit 1\n  fi\n  sleep 1\ndone\n\n# run caesium\nexec /bin/caesium "$@"\n' > /usr/local/bin/start-caesium.sh && chmod +x /usr/local/bin/start-caesium.sh
+
+ENTRYPOINT ["/usr/local/bin/start-caesium.sh"]
