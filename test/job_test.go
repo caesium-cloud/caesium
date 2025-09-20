@@ -19,7 +19,7 @@ import (
 
 func (s *IntegrationTestSuite) TestCronJob() {
 	req := job.PostRequest{
-		Alias: "test_job",
+		Alias: "test_cron_job",
 		Trigger: &trigger.CreateRequest{
 			Type: string(models.TriggerTypeCron),
 			Configuration: map[string]interface{}{
@@ -63,7 +63,7 @@ func (s *IntegrationTestSuite) TestCronJob() {
 func (s *IntegrationTestSuite) TestHTTPJob() {
 	// create job
 	req := job.PostRequest{
-		Alias: "test_job",
+		Alias: "test_http_job",
 		Trigger: &trigger.CreateRequest{
 			Type:          string(models.TriggerTypeHTTP),
 			Configuration: map[string]interface{}{},

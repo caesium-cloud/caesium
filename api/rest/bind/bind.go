@@ -3,6 +3,7 @@ package bind
 import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
+	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/labstack/echo/v4"
 )
@@ -24,6 +25,12 @@ func Public(g *echo.Group) {
 	{
 		g.GET("/jobs", job.List)
 		g.GET("/jobs/:id", job.Get)
+		g.GET("/jobs/:id/tasks", job.Tasks)
+		g.GET("/jobs/:id/dag", job.DAG)
+		g.GET("/jobs/:id/runs", run.List)
+		g.GET("/jobs/:id/runs/:run_id", run.Get)
+		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
+		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
 		g.DELETE("/jobs/:id", job.Delete)
 	}

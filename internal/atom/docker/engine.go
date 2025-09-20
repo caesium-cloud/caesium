@@ -8,9 +8,9 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
 )
 
@@ -56,7 +56,7 @@ func (e *dockerEngine) Get(req *atom.EngineGetRequest) (atom.Atom, error) {
 // This should be fine since DockerEngine.List should only really
 // be needed on start-up or in the event of a crash.
 func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
-	opts := types.ContainerListOptions{
+	opts := container.ListOptions{
 		All:     true,
 		Filters: filters.NewArgs(filters.KeyValuePair{Key: atom.Label}),
 	}
@@ -92,7 +92,7 @@ func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	log.Info("pulling docker image", "image", req.Image)
 
-	r, err := e.backend.ImagePull(e.ctx, req.Image, types.ImagePullOptions{})
+	r, err := e.backend.ImagePull(e.ctx, req.Image, image.PullOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -115,7 +115,7 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		return nil, err
 	}
 
-	opts := types.ContainerStartOptions{}
+	opts := container.StartOptions{}
 
 	log.Info(
 		"starting docker container",
@@ -145,7 +145,7 @@ func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 
 	log.Info("removing docker container", "id", req.ID)
 
-	opts := types.ContainerRemoveOptions{
+	opts := container.RemoveOptions{
 		Force:         req.Force,
 		RemoveVolumes: true,
 	}
@@ -156,7 +156,7 @@ func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 // Logs streams the log output from a Caesium Docker container
 // based on the request input.
 func (e *dockerEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
-	opts := types.ContainerLogsOptions{
+	opts := container.LogsOptions{
 		ShowStdout: true,
 		ShowStderr: true,
 		Timestamps: true,

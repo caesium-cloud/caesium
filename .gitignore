@@ -22,3 +22,8 @@ coverage.txt
 
 # Development tools
 .devcontainer
+.vscode
+
+# LLMs
+.crush
+

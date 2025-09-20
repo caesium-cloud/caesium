@@ -81,6 +81,7 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 
 type CreateRequest struct {
 	TriggerID uuid.UUID `json:"trigger_id"`
+	Alias     string    `json:"alias"`
 }
 
 func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
@@ -92,6 +93,7 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 	job := &models.Job{
 		ID:        id,
 		TriggerID: req.TriggerID,
+		Alias:     req.Alias,
 	}
 
 	return job, q.Create(job).Error
