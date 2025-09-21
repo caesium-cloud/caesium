@@ -153,7 +153,7 @@ func writeCountTable(b *strings.Builder, counts map[string]int) {
 	b.WriteString("| Value | Count |\n")
 	b.WriteString("|-------|-------|\n")
 	for _, key := range keys {
-		b.WriteString(fmt.Sprintf("| %s | %d |\n", key, counts[key]))
+		fmt.Fprintf(b, "| %s | %d |\n", key, counts[key])
 	}
 	b.WriteString("\n")
 }

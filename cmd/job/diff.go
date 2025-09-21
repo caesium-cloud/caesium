@@ -2,6 +2,7 @@ package job
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 
@@ -43,35 +44,35 @@ func printDiff(cmd *cobra.Command, diff jobdiff.Diff) {
 	out := cmd.OutOrStdout()
 
 	if diff.Empty() {
-		fmt.Fprintln(out, "No changes detected.")
+		writeLine(cmd, out, "No changes detected.\n")
 		return
 	}
 
 	if len(diff.Creates) > 0 {
-		fmt.Fprintln(out, "Creates:")
+		writeLine(cmd, out, "Creates:\n")
 		sort.Slice(diff.Creates, func(i, j int) bool { return diff.Creates[i].Alias < diff.Creates[j].Alias })
 		for _, spec := range diff.Creates {
-			fmt.Fprintf(out, "  - %s\n", spec.Alias)
+			writeLine(cmd, out, "  - %s\n", spec.Alias)
 		}
-		fmt.Fprintln(out)
+		writeLine(cmd, out, "\n")
 	}
 
 	if len(diff.Updates) > 0 {
-		fmt.Fprintln(out, "Updates:")
+		writeLine(cmd, out, "Updates:\n")
 		sort.Slice(diff.Updates, func(i, j int) bool { return diff.Updates[i].Alias < diff.Updates[j].Alias })
 		for _, upd := range diff.Updates {
-			fmt.Fprintf(out, "  - %s\n", upd.Alias)
+			writeLine(cmd, out, "  - %s\n", upd.Alias)
 			diffText := indent(upd.Diff, "    ")
-			fmt.Fprintln(out, diffText)
+			writeLine(cmd, out, "%s\n", diffText)
 		}
-		fmt.Fprintln(out)
+		writeLine(cmd, out, "\n")
 	}
 
 	if len(diff.Deletes) > 0 {
-		fmt.Fprintln(out, "Deletes:")
+		writeLine(cmd, out, "Deletes:\n")
 		sort.Slice(diff.Deletes, func(i, j int) bool { return diff.Deletes[i].Alias < diff.Deletes[j].Alias })
 		for _, spec := range diff.Deletes {
-			fmt.Fprintf(out, "  - %s\n", spec.Alias)
+			writeLine(cmd, out, "  - %s\n", spec.Alias)
 		}
 	}
 }
@@ -82,4 +83,10 @@ func indent(s, prefix string) string {
 		lines[i] = prefix + lines[i]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func writeLine(cmd *cobra.Command, w io.Writer, format string, args ...any) {
+	if _, err := fmt.Fprintf(w, format, args...); err != nil {
+		cmd.PrintErrf("write output: %v\n", err)
+	}
 }

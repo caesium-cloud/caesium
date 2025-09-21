@@ -31,7 +31,9 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 		if len(defs) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No job definitions found.")
+			if _, err := fmt.Fprintln(cmd.OutOrStdout(), "No job definitions found."); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -39,7 +41,9 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Applied %d job definition(s)\n", len(defs))
+		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied %d job definition(s)\n", len(defs)); err != nil {
+			return err
+		}
 		return nil
 	},
 }
@@ -126,7 +130,9 @@ func sendApplyRequest(server string, defs []schema.Definition) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		_ = resp.Body.Close()
+	}()
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		body, _ := io.ReadAll(resp.Body)

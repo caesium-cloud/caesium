@@ -108,6 +108,6 @@ func writePlainCounts(b *strings.Builder, counts map[string]int) {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		b.WriteString(fmt.Sprintf("  - %s: %d\n", key, counts[key]))
+		fmt.Fprintf(b, "  - %s: %d\n", key, counts[key])
 	}
 }
