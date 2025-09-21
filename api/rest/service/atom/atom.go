@@ -2,10 +2,10 @@ package atom
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -83,8 +83,7 @@ type CreateRequest struct {
 }
 
 func (r *CreateRequest) CommandString() (string, error) {
-	buf, err := json.Marshal(r.Command)
-	return string(buf), err
+	return jsonutil.MarshalSliceString(r.Command)
 }
 
 func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {

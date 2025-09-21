@@ -35,7 +35,7 @@ var (
 )
 
 func start(cmd *cobra.Command, args []string) error {
-	signalChan := make(chan os.Signal)
+	signalChan := make(chan os.Signal, 1)
 
 	go func() {
 		for s := range signalChan {
@@ -51,8 +51,7 @@ func start(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	signal.Notify(signalChan, syscall.SIGUSR1)
-	signal.Notify(signalChan, syscall.SIGINT)
+	signal.Notify(signalChan, syscall.SIGUSR1, syscall.SIGINT)
 
 	var (
 		errs = make(chan error)

@@ -96,3 +96,14 @@ integration-up: build-test
 
 integration-down:
     docker rm -f {{it_container}}
+
+lint: builder
+    docker run --rm --platform {{platform}} \
+        -v {{repo_dir}}:{{bld_dir}} \
+        -w {{bld_dir}} \
+        -e GOFLAGS=-buildvcs=false \
+        {{repo}}/{{builder_image}}:{{tag}} \
+        sh -c 'set -euo pipefail; \
+            go fmt .; \
+            go vet ./...; \
+            golangci-lint run ./...'
