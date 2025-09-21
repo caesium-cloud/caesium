@@ -16,6 +16,7 @@ import (
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/transport"
@@ -100,7 +101,11 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 			return err
 		}
 		cloneDir = dir
-		cleanup = func() { os.RemoveAll(cloneDir) }
+		cleanup = func() {
+			if err := os.RemoveAll(cloneDir); err != nil {
+				log.Error("cleanup watch clone", "dir", cloneDir, "error", err)
+			}
+		}
 	}
 	defer cleanup()
 
@@ -167,24 +172,28 @@ func (s *Source) cloneRepo(ctx context.Context) (string, string, func(), error) 
 
 	cloneOpts, authCleanup, err := s.cloneOptions(ctx)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return "", "", nil, err
 	}
 	defer authCleanup()
 
 	repo, err := ensureRepo(ctx, dir, cloneOpts, nil)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return "", "", nil, err
 	}
 
 	hash, err := headHash(repo)
 	if err != nil {
-		os.RemoveAll(dir)
+		_ = os.RemoveAll(dir)
 		return "", "", nil, err
 	}
 
-	cleanup := func() { os.RemoveAll(dir) }
+	cleanup := func() {
+		if err := os.RemoveAll(dir); err != nil {
+			log.Error("cleanup clone dir", "dir", dir, "error", err)
+		}
+	}
 	return dir, hash, cleanup, nil
 }
 
@@ -414,17 +423,25 @@ func (s *Source) sshKnownHosts(ctx context.Context, endpoint *transport.Endpoint
 			data += "\n"
 		}
 		if _, err := file.WriteString(data); err != nil {
-			file.Close()
-			os.Remove(file.Name())
+			if closeErr := file.Close(); closeErr != nil {
+				err = errors.Join(err, closeErr)
+			}
+			if removeErr := os.Remove(file.Name()); removeErr != nil {
+				log.Error("remove temp known_hosts", "file", file.Name(), "error", removeErr)
+			}
 			return sshauth.HostKeyCallbackHelper{}, noopCleanup, err
 		}
 		if err := file.Close(); err != nil {
-			os.Remove(file.Name())
+			if removeErr := os.Remove(file.Name()); removeErr != nil {
+				log.Error("remove temp known_hosts", "file", file.Name(), "error", removeErr)
+			}
 			return sshauth.HostKeyCallbackHelper{}, noopCleanup, err
 		}
 		addPath(file.Name())
 		cleanup = func() {
-			_ = os.Remove(file.Name())
+			if err := os.Remove(file.Name()); err != nil {
+				log.Error("remove temp known_hosts", "file", file.Name(), "error", err)
+			}
 		}
 	}
 

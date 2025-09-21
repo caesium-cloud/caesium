@@ -265,7 +265,7 @@ func (s *GitSyncSuite) TestCloneOptionsSSHWithSecrets() {
 	s.Require().True(ok)
 	s.Equal("git", pk.User)
 	s.NotNil(pk.Signer)
-	s.NotNil(pk.HostKeyCallbackHelper.HostKeyCallback)
+	s.NotNil(pk.HostKeyCallback)
 }
 
 func (s *GitSyncSuite) TestCloneOptionsSSHKnownHostsPath() {
@@ -288,7 +288,7 @@ func (s *GitSyncSuite) TestCloneOptionsSSHKnownHostsPath() {
 
 	pk, ok := opts.Auth.(*sshauth.PublicKeys)
 	s.Require().True(ok)
-	s.NotNil(pk.HostKeyCallbackHelper.HostKeyCallback)
+	s.NotNil(pk.HostKeyCallback)
 
 	_, statErr := os.Stat(knownPath)
 	s.NoError(statErr)

@@ -3,7 +3,7 @@ package docker
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -220,7 +220,7 @@ func (s *DockerTestSuite) TestLogs() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), logs)
 
-	buf, err := ioutil.ReadAll(logs)
+	buf, err := io.ReadAll(logs)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), "logs", string(buf))
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())

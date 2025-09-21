@@ -4,13 +4,10 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -31,16 +28,15 @@ type DockerTestSuite struct {
 
 type mockDockerBackend struct {
 	mock.Mock
-	dockerBackend
 }
 
-func (m *mockDockerBackend) ContainerInspect(ctx context.Context, container string) (types.ContainerJSON, error) {
-	args := m.Called(container)
-	if container == "" {
-		return types.ContainerJSON{}, args.Error(0)
+func (m *mockDockerBackend) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
+	args := m.Called(containerID)
+	if containerID == "" {
+		return container.InspectResponse{}, args.Error(0)
 	}
 
-	return newContainer(container, &types.ContainerState{}), nil
+	return newContainer(containerID, &container.State{}), nil
 }
 
 func (m *mockDockerBackend) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
@@ -50,17 +46,17 @@ func (m *mockDockerBackend) ContainerList(ctx context.Context, options container
 	}
 
 	if options.Before != "" {
-		return []types.Container{{ID: ""}}, nil
+		return []container.Summary{{ID: ""}}, nil
 	}
 
-	return []types.Container{
+	return []container.Summary{
 		{
 			ID: testAtomID,
 		},
 	}, nil
 }
 
-func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *containertypes.Config, hostConfig *containertypes.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
+func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
 	args := m.Called(containerName)
 
 	switch containerName {
@@ -97,25 +93,25 @@ func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container strin
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerLogs(ctx context.Context, container string, options container.LogsOptions) (io.ReadCloser, error) {
-	args := m.Called(container)
-	if container == "" {
+func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID string, options container.LogsOptions) (io.ReadCloser, error) {
+	args := m.Called(containerID)
+	if containerID == "" {
 		return nil, args.Error(0)
 	}
-	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
+	return io.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
-func (m *mockDockerBackend) ImagePull(ctx context.Context, image string, options image.PullOptions) (io.ReadCloser, error) {
-	args := m.Called(image)
-	if image == "" {
+func (m *mockDockerBackend) ImagePull(ctx context.Context, imageRef string, options image.PullOptions) (io.ReadCloser, error) {
+	args := m.Called(imageRef)
+	if imageRef == "" {
 		return nil, args.Error(0)
 	}
-	return ioutil.NopCloser(bytes.NewReader([]byte("pull"))), nil
+	return io.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
 
-func newContainer(id string, state *types.ContainerState) types.ContainerJSON {
-	return types.ContainerJSON{
-		ContainerJSONBase: &types.ContainerJSONBase{
+func newContainer(id string, state *container.State) container.InspectResponse {
+	return container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{
 			ID:      id,
 			State:   state,
 			Created: time.Now().Format(time.RFC3339Nano),

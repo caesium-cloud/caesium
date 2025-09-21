@@ -42,7 +42,11 @@ func start(cmd *cobra.Command, args []string) error {
 			switch s {
 			case syscall.SIGUSR1:
 				log.Info("dumping stack traces due to SIGUSR1 signal")
-				pprof.Lookup("goroutine").WriteTo(os.Stdout, 1)
+				if profile := pprof.Lookup("goroutine"); profile != nil {
+					if err := profile.WriteTo(os.Stdout, 1); err != nil {
+						log.Error("write goroutine profile", "error", err)
+					}
+				}
 			case syscall.SIGINT:
 				log.Info("gracefully shutting down due to SIGINT signal")
 				shutdown()
@@ -79,5 +83,7 @@ func start(cmd *cobra.Command, args []string) error {
 }
 
 func shutdown() {
-	api.Shutdown()
+	if err := api.Shutdown(); err != nil {
+		log.Error("api shutdown failure", "error", err)
+	}
 }

@@ -28,9 +28,11 @@ func (m *Migrator) RunWithoutForeignKey(fc func() error) error {
 
 func (m Migrator) HasTable(value interface{}) bool {
 	var count int
-	m.Migrator.RunWithValue(value, func(stmt *gorm.Statement) error {
+	if err := m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		return m.DB.Raw("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", stmt.Table).Row().Scan(&count)
-	})
+	}); err != nil {
+		return false
+	}
 	return count > 0
 }
 
@@ -53,7 +55,7 @@ func (m Migrator) DropTable(values ...interface{}) error {
 
 func (m Migrator) HasColumn(value interface{}, name string) bool {
 	var count int
-	m.Migrator.RunWithValue(value, func(stmt *gorm.Statement) error {
+	if err := m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if stmt.Schema != nil {
 			if field := stmt.Schema.LookUpField(name); field != nil {
 				name = field.DBName
@@ -61,13 +63,15 @@ func (m Migrator) HasColumn(value interface{}, name string) bool {
 		}
 
 		if name != "" {
-			m.DB.Raw(
+			return m.DB.Raw(
 				"SELECT count(*) FROM sqlite_master WHERE type = ? AND tbl_name = ? AND (sql LIKE ? OR sql LIKE ? OR sql LIKE ?)",
 				"table", stmt.Table, `%"`+name+`" %`, `%`+name+` %`, "%`"+name+"`%",
 			).Row().Scan(&count)
 		}
 		return nil
-	})
+	}); err != nil {
+		return false
+	}
 	return count > 0
 }
 
@@ -110,7 +114,17 @@ func (m Migrator) DropColumn(value interface{}, name string) error {
 
 func (m Migrator) CreateConstraint(value interface{}, name string) error {
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
+		constraintIfc, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		var (
+			constraint *schema.Constraint
+			chk        *schema.CheckConstraint
+		)
+		switch v := constraintIfc.(type) {
+		case *schema.Constraint:
+			constraint = v
+		case *schema.CheckConstraint:
+			chk = v
+		}
 
 		return m.recreateTable(value, &table,
 			func(rawDDL string, stmt *gorm.Statement) (sql string, sqlArgs []interface{}, err error) {
@@ -145,7 +159,17 @@ func (m Migrator) CreateConstraint(value interface{}, name string) error {
 
 func (m Migrator) DropConstraint(value interface{}, name string) error {
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
+		constraintIfc, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		var (
+			constraint *schema.Constraint
+			chk        *schema.CheckConstraint
+		)
+		switch v := constraintIfc.(type) {
+		case *schema.Constraint:
+			constraint = v
+		case *schema.CheckConstraint:
+			chk = v
+		}
 		if constraint != nil {
 			name = constraint.Name
 		} else if chk != nil {
@@ -168,28 +192,40 @@ func (m Migrator) DropConstraint(value interface{}, name string) error {
 
 func (m Migrator) HasConstraint(value interface{}, name string) bool {
 	var count int64
-	m.RunWithValue(value, func(stmt *gorm.Statement) error {
-		constraint, chk, table := m.GuessConstraintAndTable(stmt, name)
+	if err := m.RunWithValue(value, func(stmt *gorm.Statement) error {
+		constraintIfc, table := m.GuessConstraintInterfaceAndTable(stmt, name)
+		var (
+			constraint *schema.Constraint
+			chk        *schema.CheckConstraint
+		)
+		switch v := constraintIfc.(type) {
+		case *schema.Constraint:
+			constraint = v
+		case *schema.CheckConstraint:
+			chk = v
+		}
 		if constraint != nil {
 			name = constraint.Name
 		} else if chk != nil {
 			name = chk.Name
 		}
 
-		m.DB.Raw(
+		return m.DB.Raw(
 			"SELECT count(*) FROM sqlite_master WHERE type = ? AND tbl_name = ? AND (sql LIKE ? OR sql LIKE ? OR sql LIKE ?)",
 			"table", table, `%CONSTRAINT "`+name+`" %`, `%CONSTRAINT `+name+` %`, "%CONSTRAINT `"+name+"`%",
 		).Row().Scan(&count)
 
-		return nil
-	})
-
+	}); err != nil {
+		return false
+	}
 	return count > 0
 }
 
 func (m Migrator) CurrentDatabase() (name string) {
 	var null interface{}
-	m.DB.Raw("PRAGMA database_list").Row().Scan(&null, &name, &null)
+	if err := m.DB.Raw("PRAGMA database_list").Row().Scan(&null, &name, &null); err != nil {
+		return ""
+	}
 	return
 }
 
@@ -242,25 +278,29 @@ func (m Migrator) CreateIndex(value interface{}, name string) error {
 
 func (m Migrator) HasIndex(value interface{}, name string) bool {
 	var count int
-	m.RunWithValue(value, func(stmt *gorm.Statement) error {
+	if err := m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		if idx := stmt.Schema.LookIndex(name); idx != nil {
 			name = idx.Name
 		}
 
 		if name != "" {
-			m.DB.Raw(
+			return m.DB.Raw(
 				"SELECT count(*) FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, name,
 			).Row().Scan(&count)
 		}
 		return nil
-	})
+	}); err != nil {
+		return false
+	}
 	return count > 0
 }
 
 func (m Migrator) RenameIndex(value interface{}, oldName, newName string) error {
 	return m.RunWithValue(value, func(stmt *gorm.Statement) error {
 		var sql string
-		m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql)
+		if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "index", stmt.Table, oldName).Row().Scan(&sql); err != nil {
+			return err
+		}
 		if sql != "" {
 			return m.DB.Exec(strings.Replace(sql, oldName, newName, 1)).Error
 		}
@@ -302,10 +342,8 @@ func buildConstraint(constraint *schema.Constraint) (sql string, results []inter
 
 func (m Migrator) getRawDDL(table string) (string, error) {
 	var createSQL string
-	m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "table", table, table).Row().Scan(&createSQL)
-
-	if m.DB.Error != nil {
-		return "", m.DB.Error
+	if err := m.DB.Raw("SELECT sql FROM sqlite_master WHERE type = ? AND tbl_name = ? AND name = ?", "table", table, table).Row().Scan(&createSQL); err != nil {
+		return "", err
 	}
 	return createSQL, nil
 }

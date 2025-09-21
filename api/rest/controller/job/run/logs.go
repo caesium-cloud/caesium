@@ -71,7 +71,11 @@ func Logs(c echo.Context) error {
 	if err != nil {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
-	defer reader.Close()
+	defer func() {
+		if closeErr := reader.Close(); closeErr != nil {
+			log.Error("close log reader", "error", closeErr)
+		}
+	}()
 
 	res := c.Response()
 	res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")

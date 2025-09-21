@@ -19,12 +19,12 @@ func (s *EnvTestSuite) TestProcess() {
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
-	os.Setenv("CAESIUM_PORT", "not_a_port")
+	s.Require().NoError(os.Setenv("CAESIUM_PORT", "not_a_port"))
 	assert.NotNil(s.T(), Process())
 }
 
 func (s *EnvTestSuite) TestProcessInvalidLogLevelFailure() {
-	os.Setenv("CAESIUM_LOG_LEVEL", "bogus")
+	s.Require().NoError(os.Setenv("CAESIUM_LOG_LEVEL", "bogus"))
 	assert.NotNil(s.T(), Process())
 }
 

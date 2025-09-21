@@ -3,7 +3,6 @@ package docker
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -96,8 +95,13 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Error("close docker pull reader", "error", err)
+		}
+	}()
 
-	if _, err = ioutil.ReadAll(r); err != nil {
+	if _, err = io.ReadAll(r); err != nil {
 		return nil, err
 	}
 

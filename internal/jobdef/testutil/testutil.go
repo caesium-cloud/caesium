@@ -59,7 +59,9 @@ func CloseDB(db *gorm.DB) {
 		return
 	}
 	if sqlDB, err := db.DB(); err == nil {
-		sqlDB.Close()
+		if err := sqlDB.Close(); err != nil {
+			panic(err)
+		}
 	}
 }
 

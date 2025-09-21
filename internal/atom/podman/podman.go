@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
@@ -106,18 +107,27 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 		for {
 			select {
 			case line, ok := <-stdout:
-				pw.Write([]byte(line))
+				if _, err := pw.Write([]byte(line)); err != nil {
+					pw.CloseWithError(err)
+					return
+				}
 				if !ok {
 					stdout = nil
 				}
 			case line, ok := <-stderr:
-				pw.Write([]byte(line))
+				if _, err := pw.Write([]byte(line)); err != nil {
+					pw.CloseWithError(err)
+					return
+				}
 				if !ok {
 					stderr = nil
 				}
 			}
 
-			if stdout == nil && stderr != nil {
+			if stdout == nil && stderr == nil {
+				if err := pw.Close(); err != nil {
+					log.Error("close podman pipe", "error", err)
+				}
 				return
 			}
 		}

@@ -112,13 +112,25 @@ func (dialector Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {
 		"INSERT": func(c clause.Clause, builder clause.Builder) {
 			if insert, ok := c.Expression.(clause.Insert); ok {
 				if stmt, ok := builder.(*gorm.Statement); ok {
-					stmt.WriteString("INSERT ")
+					if _, err := stmt.WriteString("INSERT "); err != nil {
+						_ = stmt.AddError(err)
+						return
+					}
 					if insert.Modifier != "" {
-						stmt.WriteString(insert.Modifier)
-						stmt.WriteByte(' ')
+						if _, err := stmt.WriteString(insert.Modifier); err != nil {
+							_ = stmt.AddError(err)
+							return
+						}
+						if err := stmt.WriteByte(' '); err != nil {
+							_ = stmt.AddError(err)
+							return
+						}
 					}
 
-					stmt.WriteString("INTO ")
+					if _, err := stmt.WriteString("INTO "); err != nil {
+						_ = stmt.AddError(err)
+						return
+					}
 					if insert.Table.Name == "" {
 						stmt.WriteQuoted(stmt.Table)
 					} else {
@@ -137,10 +149,16 @@ func (dialector Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {
 						i := -1
 						limit.Limit = &i
 					}
-					builder.WriteString("LIMIT " + strconv.Itoa(*limit.Limit))
+					if _, err := builder.WriteString("LIMIT " + strconv.Itoa(*limit.Limit)); err != nil {
+						_ = builder.AddError(err)
+						return
+					}
 				}
 				if limit.Offset > 0 {
-					builder.WriteString(" OFFSET " + strconv.Itoa(limit.Offset))
+					if _, err := builder.WriteString(" OFFSET " + strconv.Itoa(limit.Offset)); err != nil {
+						_ = builder.AddError(err)
+						return
+					}
 				}
 			}
 		},
@@ -172,22 +190,36 @@ func (dialector Dialector) Migrator(db *gorm.DB) gorm.Migrator {
 }
 
 func (dialector Dialector) BindVarTo(writer clause.Writer, stmt *gorm.Statement, v interface{}) {
-	writer.WriteByte('?')
+	if err := writer.WriteByte('?'); err != nil {
+		panic(err)
+	}
 }
 
 func (dialector Dialector) QuoteTo(writer clause.Writer, str string) {
-	writer.WriteByte('`')
+	if err := writer.WriteByte('`'); err != nil {
+		panic(err)
+	}
 	if strings.Contains(str, ".") {
 		for idx, str := range strings.Split(str, ".") {
 			if idx > 0 {
-				writer.WriteString(".`")
+				if _, err := writer.WriteString(".`"); err != nil {
+					panic(err)
+				}
 			}
-			writer.WriteString(str)
-			writer.WriteByte('`')
+			if _, err := writer.WriteString(str); err != nil {
+				panic(err)
+			}
+			if err := writer.WriteByte('`'); err != nil {
+				panic(err)
+			}
 		}
 	} else {
-		writer.WriteString(str)
-		writer.WriteByte('`')
+		if _, err := writer.WriteString(str); err != nil {
+			panic(err)
+		}
+		if err := writer.WriteByte('`'); err != nil {
+			panic(err)
+		}
 	}
 }
 

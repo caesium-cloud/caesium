@@ -26,7 +26,9 @@ type Atom struct {
 
 func (a *Atom) Cmd() []string {
 	cmd := []string{}
-	json.Unmarshal([]byte(a.Command), &cmd)
+	if err := json.Unmarshal([]byte(a.Command), &cmd); err != nil {
+		return nil
+	}
 	return cmd
 }
 
