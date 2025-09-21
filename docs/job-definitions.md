@@ -108,6 +108,7 @@ steps:
 - Duplicate aliases are rejected to prevent accidental overwrites (future work: allow `--force`).
 - A `Watch` helper reuses a local working clone and performs periodic `fetch/pull` cycles. Configure `WatchOptions{Interval, Once}` to control frequency, optionally providing `Source.LocalDir` when you want to persist the checkout. Provide `Source.SourceID` to tag imported jobs with provenance metadata, and configure either Basic Auth credentials or SSH credentials backed by a secret resolver for private remotes.
 - Imported jobs persist provenance information (source ID, repository URL, ref, commit, and manifest path) which will power future drift detection and pruning workflows.
+- Triggers and atoms inherit the same provenance metadata; step-level records append `#step/<name>` and the trigger appends `#trigger` to the manifest path for precise drift tracking.
 
 ## Diffing Job Definitions
 
@@ -116,4 +117,51 @@ steps:
 - Updated jobs include a unified diff showing the fields that will change.
 - Run the diff command before applying changes to confirm the preview matches the expected plan.
 
-Future work will expose CLI entrypoints (`caesium job apply`, `caesium job lint`) and optional REST endpoints once the Git sync workflow is battle-tested.
+## Secret References
+
+- Sensitive values should be referenced using `secret://` URIs rather than inlining credentials inside manifests.
+- Environment variables: `secret://env/VAR_NAME` (or `secret://env/path/to/name`, which expands to `path_to_name`). Use the `name` query parameter to override the derived variable name (`secret://env/foo?name=MY_VAR`).
+- Kubernetes Secrets: `secret://k8s/<secret>/<key>` uses the default namespace; include the namespace as the first segment to target another namespace (`secret://k8s/infra/git-creds/token`). Query parameters `namespace`, `name`, and `key` override each component when needed.
+- Vault KV paths: `secret://vault/<path>?field=<key>` resolves using the configured Vault client. If `field` is omitted, the final path segment is treated as the key (e.g. `secret://vault/secret/legacy/password`). Both KV v1 and v2 responses are supported.
+- Secret resolvers are pluggable; Git sync and CLI tooling load values via the configured resolver chain so credentials never persist inside job manifests.
+
+## Linting Definitions
+
+- Run `caesium job lint --path <dir>` to validate manifests locally using the same semantic checks as the importer.
+- Add `--check-secrets` to resolve every `secret://` reference using the configured resolvers. The command returns a non-zero exit code if any secret cannot be resolved.
+- Secret resolution includes environment variables by default. Provide Kubernetes context through `--enable-kubernetes`/`--kubeconfig` (or `KUBECONFIG`) and Vault connectivity using `--vault-address`, `--vault-token`, and related flags or matching environment variables.
+- Use the lint command in CI to gate manifest changes before pushing them to Git sync or applying them directly.
+- Reference manifests live under `docs/examples/`; conformance tests load these files to ensure the documentation stays in sync with the schema.
+
+The CLI surfaces both `caesium job apply` and `caesium job lint`; REST endpoints for automation will follow once the Git sync workflow is battle-tested.
+
+## Schema Tooling
+
+- Run `caesium job schema --doc` to print the generated schema reference (also stored in `docs/job-schema-reference.md`).
+- Append `--summary --path <dir>` to produce a conformance report that aggregates trigger types, engines, and callbacks used in the supplied manifests. Add `--markdown` to emit the report as Markdown for CI artifacts.
+
+## Git Sync Configuration
+
+- Enable continuous Git ingestion by setting `CAESIUM_JOBDEF_GIT_ENABLED=true` in the scheduler environment.
+- Describe repositories via `CAESIUM_JOBDEF_GIT_SOURCES`, which accepts a JSON array of objects matching the importer fields (example below). Each entry supports optional per-source `interval` and `once` overrides, path filtering (`globs`), and credential configuration (`auth` for HTTPS, `ssh` for SSH remotes). When unspecified, `CAESIUM_JOBDEF_GIT_INTERVAL` (default `1m`) and `CAESIUM_JOBDEF_GIT_ONCE` provide global defaults.
+- Secret providers are configured through dedicated variables: enable environment lookup with `CAESIUM_JOBDEF_SECRETS_ENABLE_ENV` (`true` by default), Kubernetes secrets with `CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES` plus optional `CAESIUM_JOBDEF_SECRETS_KUBECONFIG`/`CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE`, and Vault with `CAESIUM_JOBDEF_SECRETS_VAULT_ADDRESS` / `CAESIUM_JOBDEF_SECRETS_VAULT_TOKEN` / `CAESIUM_JOBDEF_SECRETS_VAULT_NAMESPACE` / `CAESIUM_JOBDEF_SECRETS_VAULT_CA_CERT` / `CAESIUM_JOBDEF_SECRETS_VAULT_SKIP_VERIFY`.
+- Example `CAESIUM_JOBDEF_GIT_SOURCES` payload:
+
+```json
+[
+  {
+    "url": "https://github.com/yourorg/caesium-jobs.git",
+    "ref": "refs/heads/main",
+    "path": "jobs",
+    "globs": ["**/*.job.yaml"],
+    "source_id": "jobs-main",
+    "interval": "2m",
+    "auth": {
+      "username_ref": "secret://env/GIT_USERNAME",
+      "password_ref": "secret://vault/secret/data/git?field=password"
+    }
+  }
+]
+```
+
+The scheduler now bootstraps the Git watcher automatically using these settings, reusing the same resolver chain as the CLI lint command so secret references remain out of manifests.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -66,7 +67,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			return fmt.Errorf("%w: %s", ErrDuplicateJob, alias)
 		}
 
-		trig, err := i.createTrigger(tx, alias, &def.Trigger)
+		trig, err := i.createTrigger(tx, alias, &def.Trigger, opts)
 		if err != nil {
 			return err
 		}
@@ -91,7 +92,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			return err
 		}
 
-		entries, taskByName, err := i.createAtomsAndTasks(tx, jobModel, def.Steps)
+		entries, taskByName, err := i.createAtomsAndTasks(tx, jobModel, def.Steps, opts)
 		if err != nil {
 			return err
 		}
@@ -115,7 +116,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	return result, nil
 }
 
-func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger) (*models.Trigger, error) {
+func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger, opts *ApplyOptions) (*models.Trigger, error) {
 	cfg, err := jsonutil.MarshalMapString(trig.Configuration)
 	if err != nil {
 		return nil, err
@@ -126,6 +127,10 @@ func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger
 		Alias:         alias,
 		Type:          models.TriggerType(trig.Type),
 		Configuration: cfg,
+	}
+
+	if opts != nil && opts.Provenance != nil {
+		copyProvenance(&model.ProvenanceSourceID, &model.ProvenanceRepo, &model.ProvenanceRef, &model.ProvenanceCommit, &model.ProvenancePath, opts.Provenance, "trigger")
 	}
 
 	if err := tx.Create(model).Error; err != nil {
@@ -139,7 +144,7 @@ type stepEntry struct {
 	task *models.Task
 }
 
-func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []schema.Step) ([]*stepEntry, map[string]*models.Task, error) {
+func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []schema.Step, opts *ApplyOptions) ([]*stepEntry, map[string]*models.Task, error) {
 	entries := make([]*stepEntry, 0, len(steps))
 	taskByName := make(map[string]*models.Task, len(steps))
 
@@ -156,6 +161,11 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			Engine:  models.AtomEngine(step.Engine),
 			Image:   step.Image,
 			Command: command,
+		}
+
+		if opts != nil && opts.Provenance != nil {
+			suffix := fmt.Sprintf("step/%s", url.PathEscape(step.Name))
+			copyProvenance(&atom.ProvenanceSourceID, &atom.ProvenanceRepo, &atom.ProvenanceRef, &atom.ProvenanceCommit, &atom.ProvenancePath, opts.Provenance, suffix)
 		}
 		if atom.Engine == "" {
 			atom.Engine = models.AtomEngine(schema.EngineDocker)
@@ -180,6 +190,32 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 	}
 
 	return entries, taskByName, nil
+}
+
+func copyProvenance(sourceID, repo, ref, commit, path *string, prov *Provenance, suffix string) {
+	if prov == nil {
+		return
+	}
+
+	*sourceID = strings.TrimSpace(prov.SourceID)
+	*repo = strings.TrimSpace(prov.Repo)
+	*ref = strings.TrimSpace(prov.Ref)
+	*commit = strings.TrimSpace(prov.Commit)
+	basePath := strings.TrimSpace(prov.Path)
+	if basePath == "" {
+		*path = ""
+		return
+	}
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" {
+		*path = basePath
+		return
+	}
+	if strings.HasPrefix(suffix, "#") {
+		*path = basePath + suffix
+		return
+	}
+	*path = basePath + "#" + suffix
 }
 
 func (i *Importer) linkTasks(tx *gorm.DB, entries []*stepEntry, taskByName map[string]*models.Task) error {

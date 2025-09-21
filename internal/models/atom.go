@@ -16,12 +16,17 @@ const (
 )
 
 type Atom struct {
-	ID        uuid.UUID  `gorm:"type:uuid;primaryKey"`
-	Engine    AtomEngine `gorm:"index;not null"`
-	Image     string     `gorm:"index;not null"`
-	Command   string     `gorm:"command"`
-	CreatedAt time.Time  `gorm:"not null"`
-	UpdatedAt time.Time  `gorm:"not null"`
+	ID                 uuid.UUID  `gorm:"type:uuid;primaryKey"`
+	Engine             AtomEngine `gorm:"index;not null"`
+	Image              string     `gorm:"index;not null"`
+	Command            string     `gorm:"command"`
+	ProvenanceSourceID string     `gorm:"index"`
+	ProvenanceRepo     string
+	ProvenanceRef      string
+	ProvenanceCommit   string
+	ProvenancePath     string
+	CreatedAt          time.Time `gorm:"not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
 }
 
 func (a *Atom) Cmd() []string {

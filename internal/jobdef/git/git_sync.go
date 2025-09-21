@@ -15,6 +15,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/go-git/go-git/v5"
@@ -33,7 +34,7 @@ type Source struct {
 	Path     string
 	Auth     *BasicAuth
 	SSH      *SSHAuth
-	Resolver SecretResolver
+	Resolver secret.Resolver
 	SourceID string
 	Globs    []string
 	LocalDir string
@@ -59,11 +60,6 @@ type SSHAuth struct {
 	KnownHostsRef   string
 	KnownHostsPath  string
 	KnownHostsPaths []string
-}
-
-// SecretResolver resolves secret references (e.g. secret:// URIs).
-type SecretResolver interface {
-	Resolve(ctx context.Context, ref string) (string, error)
 }
 
 // Sync clones/fetches the repository and applies manifests via the importer.

@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,6 +175,31 @@ func (s *GitSyncSuite) TestSyncRecordsProvenance() {
 	s.Equal("master", job.ProvenanceRef)
 	s.Equal(hash, job.ProvenanceCommit)
 	s.Equal("jobs/sample.yaml", job.ProvenancePath)
+
+	var trigger models.Trigger
+	s.Require().NoError(db.Where("alias = ?", "csv-to-parquet").First(&trigger).Error)
+	s.Equal("git-sync", trigger.ProvenanceSourceID)
+	s.Equal(repoDir, trigger.ProvenanceRepo)
+	s.Equal("master", trigger.ProvenanceRef)
+	s.Equal(hash, trigger.ProvenanceCommit)
+	s.Equal("jobs/sample.yaml#trigger", trigger.ProvenancePath)
+
+	var atoms []models.Atom
+	s.Require().NoError(db.Find(&atoms).Error)
+	s.Len(atoms, 3)
+	names := make(map[string]struct{}, len(atoms))
+	for _, atom := range atoms {
+		s.Equal("git-sync", atom.ProvenanceSourceID)
+		s.Equal(repoDir, atom.ProvenanceRepo)
+		s.Equal("master", atom.ProvenanceRef)
+		s.Equal(hash, atom.ProvenanceCommit)
+		s.True(strings.HasPrefix(atom.ProvenancePath, "jobs/sample.yaml#step/"))
+		nameEnc := strings.TrimPrefix(atom.ProvenancePath, "jobs/sample.yaml#step/")
+		name, err := url.PathUnescape(nameEnc)
+		s.Require().NoError(err)
+		names[name] = struct{}{}
+	}
+	s.Equal(map[string]struct{}{"list": {}, "convert": {}, "publish": {}}, names)
 }
 
 func (s *GitSyncSuite) TestSyncPathGlobs() {
@@ -203,15 +229,15 @@ func (s *GitSyncSuite) TestSyncPathGlobs() {
 
 func (s *GitSyncSuite) TestCloneOptionsBasicAuthSecrets() {
 	resolver := staticResolver{
-		"secret://user": "git-user",
-		"secret://pass": "top-secret",
+		"secret://env/GIT_USERNAME": "git-user",
+		"secret://env/GIT_PASSWORD": "top-secret",
 	}
 
 	source := Source{
 		URL: "https://example.com/repo.git",
 		Auth: &BasicAuth{
-			UsernameRef: "secret://user",
-			PasswordRef: "secret://pass",
+			UsernameRef: "secret://env/GIT_USERNAME",
+			PasswordRef: "secret://env/GIT_PASSWORD",
 		},
 		Resolver: resolver,
 	}
@@ -241,17 +267,17 @@ func (s *GitSyncSuite) TestCloneOptionsBasicAuthMissingResolver() {
 func (s *GitSyncSuite) TestCloneOptionsSSHWithSecrets() {
 	key := mustGeneratePrivateKey(s.T())
 	resolver := staticResolver{
-		"secret://ssh-user": "git",
-		"secret://ssh-key":  key,
-		"secret://known":    githubKnownHostEntry(),
+		"secret://env/SSH_USERNAME": "git",
+		"secret://env/SSH_KEY":      key,
+		"secret://env/SSH_KNOWN":    githubKnownHostEntry(),
 	}
 
 	source := Source{
 		URL: "git@github.com:caesium/test.git",
 		SSH: &SSHAuth{
-			UsernameRef:   "secret://ssh-user",
-			PrivateKeyRef: "secret://ssh-key",
-			KnownHostsRef: "secret://known",
+			UsernameRef:   "secret://env/SSH_USERNAME",
+			PrivateKeyRef: "secret://env/SSH_KEY",
+			KnownHostsRef: "secret://env/SSH_KNOWN",
 		},
 		Resolver: resolver,
 	}
@@ -305,6 +331,27 @@ func (s *GitSyncSuite) TestCloneOptionsSSHWithoutKnownHosts() {
 	_, _, err := source.cloneOptions(context.Background())
 	s.Require().Error(err)
 	s.Contains(err.Error(), "known hosts")
+}
+
+func (s *GitSyncSuite) TestResolveSecretSuccess() {
+	source := Source{Resolver: staticResolver{"secret://env/USER": "robot"}}
+	value, err := source.resolveSecret(context.Background(), "secret://env/USER")
+	s.Require().NoError(err)
+	s.Equal("robot", value)
+}
+
+func (s *GitSyncSuite) TestResolveSecretMissingResolver() {
+	source := Source{}
+	_, err := source.resolveSecret(context.Background(), "secret://env/USER")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "secret resolver not configured")
+}
+
+func (s *GitSyncSuite) TestResolveSecretResolverError() {
+	source := Source{Resolver: staticResolver{}}
+	_, err := source.resolveSecret(context.Background(), "secret://env/MISSING")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "secret://env/MISSING")
 }
 
 func (s *GitSyncSuite) initRepo(files map[string]string) string {

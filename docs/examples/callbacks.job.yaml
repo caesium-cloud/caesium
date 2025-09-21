@@ -1,0 +1,31 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: csv-to-parquet
+  labels:
+    team: data
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+    timezone: "America/New_York"
+callbacks:
+  - type: notification
+    configuration:
+      webhook_url: "https://hooks.slack.com/services/T000/B000/XYZ"
+      channel: "#data-pipelines"
+      mention: "@oncall"
+steps:
+  - name: list
+    engine: docker
+    image: ghcr.io/yourorg/s3ls:1.2
+    command: ["s3ls", "s3://demo/csv/*.csv", "--out", "/out/files.json"]
+  - name: convert
+    engine: docker
+    image: ghcr.io/yourorg/csv2pq:0.5
+    command: ["csv2pq", "--in", "/in/files.json", "--out", "/out/manifest.json"]
+  - name: publish
+    engine: docker
+    image: ghcr.io/yourorg/uploader:0.3
+    command: ["upload", "--manifest", "/out/manifest.json", "--dest", "s3://demo/parquet/"]

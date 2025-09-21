@@ -1,0 +1,20 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: nightly-etl
+trigger:
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    image: ghcr.io/yourorg/extract:2.0
+    command: ["extract"]
+  - name: transform
+    image: ghcr.io/yourorg/transform:1.7
+    command: ["transform"]
+  - name: load
+    image: ghcr.io/yourorg/load:0.9
+    command: ["load"]
