@@ -4,7 +4,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -14,7 +14,7 @@ func (s *DockerTestSuite) TestAtom() {
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,
-				&types.ContainerState{
+				&container.State{
 					Status:     dockerState,
 					StartedAt:  time.Now().Format(time.RFC3339Nano),
 					FinishedAt: time.Now().Format(time.RFC3339Nano),
@@ -33,7 +33,7 @@ func (s *DockerTestSuite) TestAtom() {
 	c := &Atom{
 		metadata: newContainer(
 			testAtomID,
-			&types.ContainerState{
+			&container.State{
 				Status: "invalid",
 			},
 		),
@@ -46,7 +46,7 @@ func (s *DockerTestSuite) TestAtom() {
 		c := &Atom{
 			metadata: newContainer(
 				testAtomID,
-				&types.ContainerState{
+				&container.State{
 					ExitCode: dockerResult,
 				},
 			),
@@ -62,7 +62,7 @@ func (s *DockerTestSuite) TestAtom() {
 	c = &Atom{
 		metadata: newContainer(
 			testAtomID,
-			&types.ContainerState{
+			&container.State{
 				ExitCode: -1,
 			},
 		),

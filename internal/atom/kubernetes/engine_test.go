@@ -3,7 +3,7 @@ package kubernetes
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"strings"
 	"time"
 
@@ -150,7 +150,7 @@ func (s *KubernetesTestSuite) TestLogs() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), logs)
 
-	buf, err := ioutil.ReadAll(logs)
+	buf, err := io.ReadAll(logs)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), "logs", string(buf))
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())

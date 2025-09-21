@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,12 +47,18 @@ func (c *Client) resolve(path string, queries ...string) string {
 }
 
 func decodeBody(body io.ReadCloser, target any) error {
-	defer body.Close()
-
 	decoder := json.NewDecoder(body)
 	decoder.DisallowUnknownFields()
 
-	return decoder.Decode(target)
+	decodeErr := decoder.Decode(target)
+	closeErr := body.Close()
+	if decodeErr != nil {
+		if closeErr != nil {
+			return errors.Join(decodeErr, closeErr)
+		}
+		return decodeErr
+	}
+	return closeErr
 }
 
 func (c *Client) do(ctx context.Context, method, path string, v any) error {
@@ -66,13 +73,15 @@ func (c *Client) do(ctx context.Context, method, path string, v any) error {
 	}
 
 	if resp.StatusCode >= http.StatusBadRequest {
-		defer resp.Body.Close()
-		return fmt.Errorf("request failed: %s", resp.Status)
+		errStatus := fmt.Errorf("request failed: %s", resp.Status)
+		if err := resp.Body.Close(); err != nil {
+			return errors.Join(errStatus, err)
+		}
+		return errStatus
 	}
 
 	if v == nil {
-		resp.Body.Close()
-		return nil
+		return resp.Body.Close()
 	}
 
 	return decodeBody(resp.Body, v)

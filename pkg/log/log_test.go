@@ -80,7 +80,9 @@ func capture(logFunc func(string, ...interface{}), msg string, kv ...interface{}
 	))
 
 	logFunc(msg, kv...)
-	writer.Flush()
+	if err := writer.Flush(); err != nil {
+		panic(err)
+	}
 
 	zap.ReplaceGlobals(oldLogger.Desugar())
 

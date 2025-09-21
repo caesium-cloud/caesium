@@ -27,7 +27,7 @@ func Health(c echo.Context) error {
 		http.StatusOK,
 		HealthResponse{
 			Status: Healthy,
-			Uptime: time.Now().Sub(startedAt),
+			Uptime: time.Since(startedAt),
 		},
 	)
 }

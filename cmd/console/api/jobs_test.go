@@ -25,10 +25,12 @@ func TestJobsList(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`[
+		if _, err := w.Write([]byte(`[
 			{"id":"1","alias":"job-a","created_at":"2024-01-01T00:00:00Z"},
 			{"id":"2","alias":"job-b","created_at":"2024-01-02T00:00:00Z"}
-		]`))
+		]`)); err != nil {
+			t.Fatalf("write response: %v", err)
+		}
 	}))
 
 	defer ts.Close()

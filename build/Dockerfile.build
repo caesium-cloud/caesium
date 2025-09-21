@@ -5,10 +5,11 @@ WORKDIR /bld
 RUN apk add --no-cache \
     ca-certificates git dumb-init \
     autoconf automake libtool \
-    libuv-dev lz4-dev \
+    libuv-dev lz4-dev curl \
     make gcc g++ musl-dev linux-headers \
     gpgme-dev btrfs-progs-dev lvm2-dev \
     sqlite-dev
+RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
 
 # Compile & install (raft is now bundled in dqlite >= v1.18.1)
 WORKDIR /bld

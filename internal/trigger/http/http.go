@@ -31,7 +31,9 @@ func (h *HTTP) Listen(ctx context.Context) {
 		"id", h.id,
 		"type", models.TriggerTypeHTTP)
 
-	h.Fire(ctx)
+	if err := h.Fire(ctx); err != nil {
+		log.Error("trigger fire failure", "id", h.id, "error", err)
+	}
 }
 
 func (h *HTTP) Fire(ctx context.Context) error {

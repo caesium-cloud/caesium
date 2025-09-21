@@ -4,14 +4,14 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 )
 
 // Atom defines the interface for treating
 // Docker containers as Caesium Atoms.
 type Atom struct {
 	atom.Atom
-	metadata types.ContainerJSON
+	metadata container.InspectResponse
 }
 
 // ID returns the ID of the Atom. This ID is identical

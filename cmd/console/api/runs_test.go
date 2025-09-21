@@ -17,13 +17,17 @@ func TestRunsListAndGet(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/123/runs":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`[
+			if _, err := w.Write([]byte(`[
 				{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[]}
-			]`))
+			]`)); err != nil {
+				t.Fatalf("write response: %v", err)
+			}
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/jobs/123/runs/r1":
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte(`{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[]}`))
+			if _, err := w.Write([]byte(`{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[]}`)); err != nil {
+				t.Fatalf("write response: %v", err)
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"testing"
 	"time"
 
@@ -30,7 +29,6 @@ type PodmanTestSuite struct {
 
 type mockPodmanBackend struct {
 	mock.Mock
-	podmanBackend
 }
 
 func (m *mockPodmanBackend) ContainerInspect(container string) (*define.InspectContainerData, error) {
@@ -98,7 +96,7 @@ func (m *mockPodmanBackend) ContainerLogs(id string, opts containers.LogOptions)
 	if id == "" {
 		return nil, args.Error(0)
 	}
-	return ioutil.NopCloser(bytes.NewReader([]byte("logs"))), nil
+	return io.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
 func (m *mockPodmanBackend) ImagePull(image string, opts *images.PullOptions) (io.ReadCloser, error) {

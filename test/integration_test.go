@@ -3,14 +3,14 @@
 package test
 
 import (
-    "fmt"
-    "net/http"
-    "os"
-    "testing"
-    "time"
+	"fmt"
+	"net/http"
+	"os"
+	"testing"
+	"time"
 
-    "github.com/stretchr/testify/assert"
-    "github.com/stretchr/testify/suite"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/suite"
 )
 
 type IntegrationTestSuite struct {
@@ -19,29 +19,29 @@ type IntegrationTestSuite struct {
 }
 
 func (s *IntegrationTestSuite) SetupSuite() {
-    host := os.Getenv("CAESIUM_HOST")
-    if host == "" {
-        host = "localhost"
-    }
-    s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
+	host := os.Getenv("CAESIUM_HOST")
+	if host == "" {
+		host = "localhost"
+	}
+	s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
 
-    deadline := time.Now().Add(2 * time.Minute)
-    for {
-        if time.Now().After(deadline) {
-            s.T().Fatal("timeout waiting for caesium /health to be ready")
-        }
+	deadline := time.Now().Add(2 * time.Minute)
+	for {
+		if time.Now().After(deadline) {
+			s.T().Fatal("timeout waiting for caesium /health to be ready")
+		}
 
-        resp, err := http.Get(fmt.Sprintf("%v/health", s.caesiumURL))
-        if err == nil && resp != nil {
-            if resp.Body != nil {
-                _ = resp.Body.Close()
-            }
-            if resp.StatusCode == http.StatusOK {
-                break
-            }
-        }
-        time.Sleep(time.Second)
-    }
+		resp, err := http.Get(fmt.Sprintf("%v/health", s.caesiumURL))
+		if err == nil && resp != nil {
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(time.Second)
+	}
 }
 
 func (s *IntegrationTestSuite) TestHealth() {

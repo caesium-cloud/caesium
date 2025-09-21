@@ -83,7 +83,9 @@ func (m *mockKubernetesBackend) GetLogs(name string, opts *v1.PodLogOptions) *re
 	}
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, "logs")
+		if _, err := fmt.Fprint(w, "logs"); err != nil {
+			panic(err)
+		}
 	}))
 
 	u, _ := url.Parse(ts.URL)
@@ -98,9 +100,8 @@ func (m *mockKubernetesBackend) GetLogs(name string, opts *v1.PodLogOptions) *re
 }
 
 var (
-	testAtomID  = "test_id"
-	testPodName = "test_atom"
-	testImage   = "caesiumcloud/caesium"
+	testAtomID = "test_id"
+	testImage  = "caesiumcloud/caesium"
 )
 
 func newPod(name string, status v1.PodStatus, createdAt, deletedAt time.Time) *v1.Pod {

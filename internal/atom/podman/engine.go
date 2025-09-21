@@ -3,7 +3,6 @@ package podman
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -25,8 +24,8 @@ type podmanEngine struct {
 }
 
 func NewEngine(ctx context.Context) Engine {
-	ctx, err := bindings.NewConnection(
-		context.Background(),
+	conn, err := bindings.NewConnection(
+		ctx,
 		env.Variables().PodmanURI,
 	)
 	if err != nil {
@@ -34,8 +33,8 @@ func NewEngine(ctx context.Context) Engine {
 	}
 
 	return &podmanEngine{
-		ctx:     ctx,
-		backend: &podmanClient{ctx: ctx},
+		ctx:     conn,
+		backend: &podmanClient{ctx: conn},
 	}
 }
 
@@ -82,8 +81,13 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Error("close podman pull reader", "error", err)
+		}
+	}()
 
-	if _, err = ioutil.ReadAll(r); err != nil {
+	if _, err = io.ReadAll(r); err != nil {
 		return nil, err
 	}
 

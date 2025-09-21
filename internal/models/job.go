@@ -8,11 +8,16 @@ import (
 )
 
 type Job struct {
-	ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Alias     string    `gorm:"index"`
-	TriggerID uuid.UUID `gorm:"type:uuid;index;not null"`
-	CreatedAt time.Time `gorm:"not null"`
-	UpdatedAt time.Time `gorm:"not null"`
+	ID                 uuid.UUID `gorm:"type:uuid;primaryKey"`
+	Alias              string    `gorm:"index"`
+	TriggerID          uuid.UUID `gorm:"type:uuid;index;not null"`
+	ProvenanceSourceID string    `gorm:"index"`
+	ProvenanceRepo     string
+	ProvenanceRef      string
+	ProvenanceCommit   string
+	ProvenancePath     string
+	CreatedAt          time.Time `gorm:"not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
 }
 
 func (j *Job) String() string {

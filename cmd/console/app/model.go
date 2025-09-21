@@ -41,7 +41,7 @@ func (s section) prev() section {
 var (
 	barStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1)
 	boxStyle     = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-	activeBox    = boxStyle.Copy().BorderForeground(lipgloss.Color("63"))
+	activeBox    = boxStyle.BorderForeground(lipgloss.Color("63"))
 	tabActive    = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57")).Bold(true)
 	tabInactive  = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("240"))
 	sectionNames = map[section]string{
