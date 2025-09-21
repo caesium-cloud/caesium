@@ -10,6 +10,7 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -71,9 +72,11 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 		}
 
 		jobModel := &models.Job{
-			ID:        uuid.New(),
-			Alias:     alias,
-			TriggerID: trig.ID,
+			ID:          uuid.New(),
+			Alias:       alias,
+			TriggerID:   trig.ID,
+			Labels:      mapToJSONMap(def.Metadata.Labels),
+			Annotations: mapToJSONMap(def.Metadata.Annotations),
 		}
 
 		if opts != nil && opts.Provenance != nil {
@@ -227,4 +230,15 @@ func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []sch
 		}
 	}
 	return nil
+}
+
+func mapToJSONMap(in map[string]string) datatypes.JSONMap {
+	if in == nil {
+		return datatypes.JSONMap{}
+	}
+	out := datatypes.JSONMap{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

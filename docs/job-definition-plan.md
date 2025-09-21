@@ -25,7 +25,7 @@
 - [ ] Implement safe update semantics with provenance enforcement and optional `--force` override (requires DB columns: jobs.provenance_source_id, jobs.deleted_at).
 - [ ] Implement pruning workflow (`--prune`, protect labels, soft delete/GC) leveraging provenance metadata.
 - [ ] *(Deferred)* Add CLI commands:
-  - [ ] `caesium job apply` to push definitions from file/dir/stdin.
+  - [x] `caesium job apply` to push definitions from file/dir/stdin.
   - [ ] `caesium job lint` for validation.
 - [ ] *(Deferred)* Expose REST endpoint `POST /v1/jobdefs/apply` for automation.
 
@@ -40,8 +40,8 @@
 - [x] Persist imported provenance metadata onto jobs for Git-sourced definitions (triggers/atoms TBD).
 
 ### Phase 3 – Enhancements
-- [ ] Add diff/preview tooling (`caesium job diff`) and status reporting.
-- [ ] Persist metadata labels and annotations (DB migrations and API updates).
+- [x] Add diff/preview tooling (`caesium job diff`) and status reporting.
+- [x] Persist metadata labels and annotations (DB migrations and API updates).
 - [ ] Integrate imported job metadata into console UI.
 - [ ] Add secret resolver implementations (k8s/vault/env) with optional `--check-secrets` lint mode.
 - [ ] Wire a production-ready `SecretResolver` into Git sync configuration (env/config plumbing).

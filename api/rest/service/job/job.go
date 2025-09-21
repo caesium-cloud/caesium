@@ -6,6 +6,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -80,8 +81,10 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 }
 
 type CreateRequest struct {
-	TriggerID uuid.UUID `json:"trigger_id"`
-	Alias     string    `json:"alias"`
+	TriggerID   uuid.UUID         `json:"trigger_id"`
+	Alias       string            `json:"alias"`
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
 func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
@@ -91,9 +94,11 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 	)
 
 	job := &models.Job{
-		ID:        id,
-		TriggerID: req.TriggerID,
-		Alias:     req.Alias,
+		ID:          id,
+		TriggerID:   req.TriggerID,
+		Alias:       req.Alias,
+		Labels:      stringMapToJSON(req.Labels),
+		Annotations: stringMapToJSON(req.Annotations),
 	}
 
 	return job, q.Create(job).Error
@@ -105,4 +110,15 @@ func (j *jobService) Delete(id uuid.UUID) error {
 	)
 
 	return q.Delete(&models.Job{}, id).Error
+}
+
+func stringMapToJSON(in map[string]string) datatypes.JSONMap {
+	if len(in) == 0 {
+		return datatypes.JSONMap{}
+	}
+	out := datatypes.JSONMap{}
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }

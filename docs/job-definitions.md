@@ -98,6 +98,7 @@ steps:
 - `engine` defaults to `docker` if omitted.
 - `next` links are optional; if absent, the importer links each step to the next item in the list.
 - `callbacks.configuration` is stored as JSON and surfaced to callback handlers unchanged.
+- `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 
 ## Git-Based Synchronisation (Phase 2)
 
@@ -107,5 +108,12 @@ steps:
 - Duplicate aliases are rejected to prevent accidental overwrites (future work: allow `--force`).
 - A `Watch` helper reuses a local working clone and performs periodic `fetch/pull` cycles. Configure `WatchOptions{Interval, Once}` to control frequency, optionally providing `Source.LocalDir` when you want to persist the checkout. Provide `Source.SourceID` to tag imported jobs with provenance metadata, and configure either Basic Auth credentials or SSH credentials backed by a secret resolver for private remotes.
 - Imported jobs persist provenance information (source ID, repository URL, ref, commit, and manifest path) which will power future drift detection and pruning workflows.
+
+## Diffing Job Definitions
+
+- Use `caesium job diff --path <dir>` to preview creates, updates, and deletes between local manifests and the database.
+- Use `caesium job apply --path <dir>` to persist definitions into the database.
+- Updated jobs include a unified diff showing the fields that will change.
+- Run the diff command before applying changes to confirm the preview matches the expected plan.
 
 Future work will expose CLI entrypoints (`caesium job apply`, `caesium job lint`) and optional REST endpoints once the Git sync workflow is battle-tested.

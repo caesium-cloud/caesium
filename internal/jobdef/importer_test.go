@@ -38,6 +38,8 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	job, err := s.importer.Apply(ctx, def)
 	s.Require().NoError(err)
 	s.Equal("csv-to-parquet", job.Alias)
+	s.Equal("data", job.Labels["team"])
+	s.Equal("etl", job.Annotations["owner"])
 
 	testutil.AssertCount(s.T(), s.db, &models.Trigger{}, 1)
 	testutil.AssertCount(s.T(), s.db, &models.Atom{}, 3)
@@ -88,4 +90,6 @@ func (s *ImporterTestSuite) TestApplyWithProvenance() {
 	s.Equal(prov.Ref, job.ProvenanceRef)
 	s.Equal(prov.Commit, job.ProvenanceCommit)
 	s.Equal(prov.Path, job.ProvenancePath)
+	s.Equal("data", job.Labels["team"])
+	s.Equal("etl", job.Annotations["owner"])
 }

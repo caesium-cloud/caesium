@@ -41,8 +41,10 @@ func Post(c echo.Context) error {
 	log.Info("creating job", "alias", req.Alias)
 
 	j, err := job.Service(c.Request().Context()).Create(&job.CreateRequest{
-		TriggerID: trig.ID,
-		Alias:     req.Alias,
+		TriggerID:   trig.ID,
+		Alias:       req.Alias,
+		Labels:      metadataLabels(req.Metadata),
+		Annotations: metadataAnnotations(req.Metadata),
 	})
 	if err != nil {
 		log.Error("failed to create job", "error", err)
@@ -88,11 +90,31 @@ func Post(c echo.Context) error {
 	return c.JSON(http.StatusCreated, j)
 }
 
+func metadataLabels(md *MetadataRequest) map[string]string {
+	if md == nil {
+		return nil
+	}
+	return md.Labels
+}
+
+func metadataAnnotations(md *MetadataRequest) map[string]string {
+	if md == nil {
+		return nil
+	}
+	return md.Annotations
+}
+
 type PostRequest struct {
-	Alias   string                 `json:"alias"`
-	Trigger *trigger.CreateRequest `json:"trigger"`
-	Tasks   []struct {
+	Alias    string                 `json:"alias"`
+	Metadata *MetadataRequest       `json:"metadata,omitempty"`
+	Trigger  *trigger.CreateRequest `json:"trigger"`
+	Tasks    []struct {
 		Atom   *atom.CreateRequest `json:"atom"`
 		NextID *string             `json:"next_id"`
 	} `json:"tasks"`
+}
+
+type MetadataRequest struct {
+	Labels      map[string]string `json:"labels,omitempty"`
+	Annotations map[string]string `json:"annotations,omitempty"`
 }

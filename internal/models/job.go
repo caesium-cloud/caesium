@@ -5,13 +5,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 )
 
 type Job struct {
-	ID                 uuid.UUID `gorm:"type:uuid;primaryKey"`
-	Alias              string    `gorm:"index"`
-	TriggerID          uuid.UUID `gorm:"type:uuid;index;not null"`
-	ProvenanceSourceID string    `gorm:"index"`
+	ID                 uuid.UUID         `gorm:"type:uuid;primaryKey"`
+	Alias              string            `gorm:"index"`
+	TriggerID          uuid.UUID         `gorm:"type:uuid;index;not null"`
+	Labels             datatypes.JSONMap `gorm:"type:json"`
+	Annotations        datatypes.JSONMap `gorm:"type:json"`
+	ProvenanceSourceID string            `gorm:"index"`
 	ProvenanceRepo     string
 	ProvenanceRef      string
 	ProvenanceCommit   string

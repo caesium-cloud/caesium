@@ -4,6 +4,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
+	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/labstack/echo/v4"
 )
@@ -33,6 +34,11 @@ func Public(g *echo.Group) {
 		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
 		g.DELETE("/jobs/:id", job.Delete)
+	}
+
+	// job definitions
+	{
+		g.POST("/jobdefs/apply", jobdef.Apply)
 	}
 
 	// triggers

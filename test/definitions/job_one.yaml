@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: integration-job-one
+  labels:
+    env: test
+trigger:
+  type: cron
+  configuration:
+    expression: "*/10 * * * *"
+steps:
+  - name: fetch
+    image: alpine
+    command: ["sh", "-c", "echo fetch"]
+  - name: process
+    image: alpine
+    command: ["sh", "-c", "echo process"]
