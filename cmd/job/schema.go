@@ -26,13 +26,15 @@ func newSchemaCommand() *cobra.Command {
 				opts.doc = true
 			}
 
-			out := cmd.OutOrStdout()
-
 			if opts.doc {
 				if opts.summary {
-					fmt.Fprintln(out, "# Schema Overview")
+					if err := writeCmdOut(cmd, "# Schema Overview\n"); err != nil {
+						return err
+					}
 				}
-				fmt.Fprintln(out, report.Markdown())
+				if err := writeCmdOut(cmd, "%s\n", report.Markdown()); err != nil {
+					return err
+				}
 			}
 
 			if opts.summary {
@@ -41,17 +43,23 @@ func newSchemaCommand() *cobra.Command {
 					return err
 				}
 				if len(defs) == 0 {
-					fmt.Fprintln(out, "No job definitions found for summary.")
+					if err := writeCmdOut(cmd, "No job definitions found for summary.\n"); err != nil {
+						return err
+					}
 					return nil
 				}
 
 				summary := report.Analyze(defs)
 				if opts.markdown {
-					fmt.Fprintln(out, report.RenderSummaryMarkdown(summary))
+					if err := writeCmdOut(cmd, "%s\n", report.RenderSummaryMarkdown(summary)); err != nil {
+						return err
+					}
 					return nil
 				}
 
-				fmt.Fprintln(out, renderPlainSummary(summary))
+				if err := writeCmdOut(cmd, "%s\n", renderPlainSummary(summary)); err != nil {
+					return err
+				}
 			}
 
 			return nil

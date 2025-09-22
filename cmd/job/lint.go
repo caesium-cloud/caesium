@@ -34,7 +34,9 @@ var lintCmd = &cobra.Command{
 			return err
 		}
 		if len(defs) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No job definitions found.")
+			if err := writeCmdOut(cmd, "No job definitions found.\n"); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -45,7 +47,9 @@ var lintCmd = &cobra.Command{
 		}
 
 		if !lintCheckSecrets {
-			fmt.Fprintf(cmd.OutOrStdout(), "Validated %d job definition(s)\n", len(defs))
+			if err := writeCmdOut(cmd, "Validated %d job definition(s)\n", len(defs)); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -64,7 +68,9 @@ var lintCmd = &cobra.Command{
 			return fmt.Errorf("secret checks failed:\n%s", strings.Join(errs, "\n"))
 		}
 
-		fmt.Fprintf(cmd.OutOrStdout(), "Validated %d job definition(s) with secrets\n", len(defs))
+		if err := writeCmdOut(cmd, "Validated %d job definition(s) with secrets\n", len(defs)); err != nil {
+			return err
+		}
 		return nil
 	},
 }
