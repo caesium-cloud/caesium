@@ -6,8 +6,9 @@ import (
 	"net/http"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/job"
-	runstore "github.com/caesium-cloud/caesium/internal/run"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -31,10 +32,13 @@ func Post(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	r := runstore.Default().Start(j.ID)
+	r, err := runsvc.New(ctx).Start(j.ID)
+	if err != nil {
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
 
 	go func() {
-		runCtx := runstore.WithContext(context.Background(), r.ID)
+		runCtx := runstorage.WithContext(context.Background(), r.ID)
 		if err := job.New(j).Run(runCtx); err != nil {
 			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}

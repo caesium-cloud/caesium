@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
-	runstore "github.com/caesium-cloud/caesium/internal/run"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -32,8 +32,15 @@ func Get(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	runEntry, ok := runstore.Default().Get(runID)
-	if !ok || runEntry.JobID != jobID {
+	runEntry, err := runsvc.New(ctx).Get(runID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return echo.ErrNotFound
+		}
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
+
+	if runEntry.JobID != jobID {
 		return echo.ErrNotFound
 	}
 

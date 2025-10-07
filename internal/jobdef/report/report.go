@@ -93,14 +93,15 @@ func Markdown() string {
 	b.WriteString("Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.\n\n")
 
 	b.WriteString("## Steps\n\n")
-	b.WriteString("Every step represents a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted and automatically link to the next step unless `next` is specified.\n\n")
+	b.WriteString("Each step represents a DAG node backed by a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted. When neither `next` nor `dependsOn` is provided, the importer links steps sequentially.\n\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
 	b.WriteString("| `name` | string | required | Unique within the job; used for DAG references. |\n")
 	b.WriteString("| `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |\n")
 	b.WriteString("| `image` | string | required | Container image reference. |\n")
 	b.WriteString("| `command` | array[string] | optional | Executed command; defaults to entrypoint. |\n")
-	b.WriteString("| `next` | string | optional | Explicit link to another step. |\n\n")
+	b.WriteString("| `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |\n")
+	b.WriteString("| `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |\n\n")
 
 	b.WriteString("## Secret References\n\n")
 	b.WriteString("Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.\n")

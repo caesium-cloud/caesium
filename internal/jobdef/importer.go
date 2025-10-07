@@ -92,12 +92,12 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			return err
 		}
 
-		entries, taskByName, err := i.createAtomsAndTasks(tx, jobModel, def.Steps, opts)
+		taskByName, err := i.createAtomsAndTasks(tx, jobModel, def.Steps, opts)
 		if err != nil {
 			return err
 		}
 
-		if err := i.linkTasks(tx, entries, taskByName); err != nil {
+		if err := i.createEdges(tx, jobModel, def.Steps, taskByName, opts); err != nil {
 			return err
 		}
 
@@ -139,13 +139,7 @@ func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger
 	return model, nil
 }
 
-type stepEntry struct {
-	def  *schema.Step
-	task *models.Task
-}
-
-func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []schema.Step, opts *ApplyOptions) ([]*stepEntry, map[string]*models.Task, error) {
-	entries := make([]*stepEntry, 0, len(steps))
+func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []schema.Step, opts *ApplyOptions) (map[string]*models.Task, error) {
 	taskByName := make(map[string]*models.Task, len(steps))
 
 	for idx := range steps {
@@ -153,7 +147,7 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 
 		command, err := jsonutil.MarshalSliceString(step.Command)
 		if err != nil {
-			return nil, nil, fmt.Errorf("step %s: %w", step.Name, err)
+			return nil, fmt.Errorf("step %s: %w", step.Name, err)
 		}
 
 		atom := &models.Atom{
@@ -172,7 +166,7 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 		}
 
 		if err := tx.Create(atom).Error; err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		task := &models.Task{
@@ -182,14 +176,13 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 		}
 
 		if err := tx.Create(task).Error; err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
-		entries = append(entries, &stepEntry{def: step, task: task})
 		taskByName[step.Name] = task
 	}
 
-	return entries, taskByName, nil
+	return taskByName, nil
 }
 
 func copyProvenance(sourceID, repo, ref, commit, path *string, prov *Provenance, suffix string) {
@@ -218,33 +211,53 @@ func copyProvenance(sourceID, repo, ref, commit, path *string, prov *Provenance,
 	*path = basePath + "#" + suffix
 }
 
-func (i *Importer) linkTasks(tx *gorm.DB, entries []*stepEntry, taskByName map[string]*models.Task) error {
-	for idx, entry := range entries {
-		step := entry.def
+func (i *Importer) createEdges(tx *gorm.DB, job *models.Job, steps []schema.Step, taskByName map[string]*models.Task, opts *ApplyOptions) error {
+	successors, err := schema.DeriveStepSuccessors(steps)
+	if err != nil {
+		return err
+	}
 
-		var nextName string
-		if step.Next != "" {
-			nextName = step.Next
-		} else if idx+1 < len(entries) {
-			nextName = entries[idx+1].def.Name
-		}
+	totalEdges := 0
+	for _, succs := range successors {
+		totalEdges += len(succs)
+	}
 
-		if nextName == "" {
-			continue
-		}
+	edges := make([]*models.TaskEdge, 0, totalEdges)
 
-		nextTask, ok := taskByName[nextName]
+	for fromName, succs := range successors {
+		fromTask, ok := taskByName[fromName]
 		if !ok {
-			return fmt.Errorf("step %s references unknown next step %s", step.Name, nextName)
+			return fmt.Errorf("step %s missing task mapping", fromName)
 		}
+		for _, toName := range succs {
+			toTask, ok := taskByName[toName]
+			if !ok {
+				return fmt.Errorf("step %s successor %s missing task mapping", fromName, toName)
+			}
 
-		if err := tx.Model(&models.Task{}).
-			Where("id = ?", entry.task.ID).
-			Update("next_id", nextTask.ID).Error; err != nil {
+			edge := &models.TaskEdge{
+				ID:         uuid.New(),
+				JobID:      job.ID,
+				FromTaskID: fromTask.ID,
+				ToTaskID:   toTask.ID,
+			}
+
+			if opts != nil && opts.Provenance != nil {
+				suffix := fmt.Sprintf("edge/%s->%s", url.PathEscape(fromName), url.PathEscape(toName))
+				copyProvenance(&edge.ProvenanceSourceID, &edge.ProvenanceRepo, &edge.ProvenanceRef, &edge.ProvenanceCommit, &edge.ProvenancePath, opts.Provenance, suffix)
+			}
+
+			edges = append(edges, edge)
+		}
+	}
+
+	if len(edges) > 0 {
+		if err := tx.Create(&edges).Error; err != nil {
 			return err
 		}
 	}
-	return nil
+
+	return i.backfillLegacyNext(tx, successors, taskByName)
 }
 
 func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []schema.Callback) error {
@@ -277,4 +290,28 @@ func mapToJSONMap(in map[string]string) datatypes.JSONMap {
 		out[k] = v
 	}
 	return out
+}
+
+func (i *Importer) backfillLegacyNext(tx *gorm.DB, successors map[string][]string, taskByName map[string]*models.Task) error {
+	for fromName, succs := range successors {
+		if len(succs) != 1 {
+			continue
+		}
+
+		fromTask, ok := taskByName[fromName]
+		if !ok {
+			return fmt.Errorf("missing task for step %s", fromName)
+		}
+		toTask, ok := taskByName[succs[0]]
+		if !ok {
+			return fmt.Errorf("missing task for successor step %s", succs[0])
+		}
+
+		if err := tx.Model(&models.Task{}).
+			Where("id = ?", fromTask.ID).
+			Update("next_id", toTask.ID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }

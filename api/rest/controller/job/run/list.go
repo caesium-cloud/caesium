@@ -5,7 +5,7 @@ import (
 	"net/http"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
-	runstore "github.com/caesium-cloud/caesium/internal/run"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -27,7 +27,10 @@ func List(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	runs := runstore.Default().List(id)
+	runs, err := runsvc.New(ctx).List(id)
+	if err != nil {
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
 
 	return c.JSON(http.StatusOK, runs)
 }

@@ -7,15 +7,17 @@ import (
 	"io"
 	"net/http"
 
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/models"
-	runstore "github.com/caesium-cloud/caesium/internal/run"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
 func Logs(c echo.Context) error {
@@ -41,12 +43,19 @@ func Logs(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	runEntry, ok := runstore.Default().Get(runID)
-	if !ok || runEntry.JobID != jobID {
+	runEntry, err := runsvc.New(ctx).Get(runID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return echo.ErrNotFound
+		}
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
+
+	if runEntry.JobID != jobID {
 		return echo.ErrNotFound
 	}
 
-	var taskEntry *runstore.Task
+	var taskEntry *runstorage.TaskRun
 	for _, task := range runEntry.Tasks {
 		if task != nil && task.ID == taskID {
 			taskEntry = task

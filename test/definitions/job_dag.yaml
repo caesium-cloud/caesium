@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: integration-job-dag
+trigger:
+  type: cron
+  configuration:
+    expression: "*/5 * * * *"
+steps:
+  - name: start
+    image: alpine
+    command: ["sh", "-c", "echo start"]
+    next:
+      - fanout-a
+      - fanout-b
+  - name: fanout-a
+    image: alpine
+    command: ["sh", "-c", "echo fanout-a"]
+    dependsOn: start
+  - name: fanout-b
+    image: alpine
+    command: ["sh", "-c", "echo fanout-b"]
+    dependsOn: start
+  - name: join
+    image: alpine
+    command: ["sh", "-c", "echo join"]
+    dependsOn:
+      - fanout-a
+      - fanout-b

@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/gorm"
 )
@@ -46,6 +47,7 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	testutil.AssertCount(s.T(), s.db, &models.Trigger{}, 1)
 	testutil.AssertCount(s.T(), s.db, &models.Atom{}, 3)
 	testutil.AssertCount(s.T(), s.db, &models.Task{}, 3)
+	testutil.AssertCount(s.T(), s.db, &models.TaskEdge{}, 2)
 	testutil.AssertCount(s.T(), s.db, &models.Callback{}, 1)
 
 	var trigger models.Trigger
@@ -77,6 +79,22 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 		}
 	}
 	s.Equal(2, withNext)
+
+	var edges []models.TaskEdge
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&edges).Error)
+	s.Len(edges, 2)
+
+	edgeTargets := make(map[uuid.UUID]uuid.UUID, len(edges))
+	for _, edge := range edges {
+		edgeTargets[edge.FromTaskID] = edge.ToTaskID
+	}
+
+	for _, task := range tasks {
+		if task.NextID == nil {
+			continue
+		}
+		s.Equal(*task.NextID, edgeTargets[task.ID])
+	}
 }
 
 func (s *ImporterTestSuite) TestDuplicateAliasFails() {
@@ -138,4 +156,78 @@ func (s *ImporterTestSuite) TestApplyWithProvenance() {
 		seen[name] = struct{}{}
 	}
 	s.Equal(map[string]struct{}{"list": {}, "convert": {}, "publish": {}}, seen)
+}
+
+func (s *ImporterTestSuite) TestApplyCreatesDAGEdges() {
+	const dagManifest = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: fanout-job
+trigger:
+  type: cron
+  configuration:
+    cron: "* * * * *"
+steps:
+  - name: start
+    image: repo/start
+  - name: branch-a
+    image: repo/branch-a
+    dependsOn: start
+  - name: branch-b
+    image: repo/branch-b
+    dependsOn: start
+  - name: join
+    image: repo/join
+    dependsOn:
+      - branch-a
+      - branch-b
+`
+
+	def, err := schema.Parse([]byte(dagManifest))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	testutil.AssertCount(s.T(), s.db, &models.Task{}, 4)
+	testutil.AssertCount(s.T(), s.db, &models.TaskEdge{}, 4)
+
+	var tasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&tasks).Error)
+	s.Len(tasks, 4)
+
+	imageByTask := make(map[uuid.UUID]string, len(tasks))
+	for _, task := range tasks {
+		var atom models.Atom
+		s.Require().NoError(s.db.First(&atom, "id = ?", task.AtomID).Error)
+		imageByTask[task.ID] = atom.Image
+	}
+
+	var edges []models.TaskEdge
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&edges).Error)
+	s.Len(edges, 4)
+
+	adj := make(map[string][]string)
+	for _, edge := range edges {
+		from := imageByTask[edge.FromTaskID]
+		to := imageByTask[edge.ToTaskID]
+		adj[from] = append(adj[from], to)
+	}
+
+	s.ElementsMatch([]string{"repo/branch-a", "repo/branch-b"}, adj["repo/start"])
+	s.ElementsMatch([]string{"repo/join"}, adj["repo/branch-a"])
+	s.ElementsMatch([]string{"repo/join"}, adj["repo/branch-b"])
+
+	for _, task := range tasks {
+		switch imageByTask[task.ID] {
+		case "repo/start":
+			s.Nil(task.NextID)
+		case "repo/branch-a", "repo/branch-b":
+			s.NotNil(task.NextID)
+		case "repo/join":
+			s.Nil(task.NextID)
+		}
+	}
 }

@@ -27,8 +27,8 @@
    - ✅ Build reusable tabbed table panes for jobs, triggers, and atoms with shared layout primitives and column auto-sizing.
    - ✅ Wire up asynchronous loading commands and maintain shared selection state across panes (keyboard shortcuts for quick switching).
 4. **Phase 3 – Detail + DAG View**
-   - Implement a detail pane that fetches job information, associated trigger, and DAG structure.
-   - Render the DAG via a graph abstraction derived from `NextID` relationships using Lip Gloss for visualization, and allow navigation between nodes.
+   - Implement a detail pane that fetches job information, associated trigger, full DAG topology, and latest run metadata.
+   - Render the DAG using the persisted edge set (multi-successor aware) so the UI can visualise branches/fan-ins with Lip Gloss layouts, highlight the selected node, and show successor/predecessor badges for navigation.
 5. **Phase 4 – Actions and Workflows**
    - Hook keybindings to call trigger/run endpoints, display confirmation modals, surface action results in a status bar, and refresh affected views.
    - Handle optimistic updates and unified error reporting.
@@ -43,9 +43,10 @@
 - Ensure the API client respects future auth/session requirements (headers, TLS) and expose knobs through environment variables (e.g., `CAESIUM_CONSOLE_API`).
 - Logging endpoints should stream efficiently and close cleanly; align interfaces with existing engine `Logs` contracts to minimize duplication.
 - Provide graceful degradation when the API or scheduler is unavailable: show inline errors, retry with backoff, and allow offline browsing of cached data.
+- Ensure the DAG view clearly communicates parallel branches (fan-out/fan-in) and exposes keybindings to jump between sibling/parent nodes without losing context.
 - Validate UX with unit tests for reducers and integration tests using a mocked API server, and document the console workflow/keybindings in `docs/`.
 
 ## Suggested Next Steps
 1. Scope and merge the API extensions in small PRs (tasks, runs, logs).
 2. Scaffold the `cmd/console` package with Bubble Tea plumbing and a mocked API client.
-3. Iterate on list/detail views before tackling live logs to confirm the navigation model.
+3. Iterate on list/detail views, including the branched DAG viewport, before tackling live logs to confirm the navigation model.
