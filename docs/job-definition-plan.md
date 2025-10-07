@@ -25,8 +25,8 @@
 - [ ] Implement safe update semantics with provenance enforcement and optional `--force` override (requires DB columns: jobs.provenance_source_id, jobs.deleted_at).
 - [ ] Implement pruning workflow (`--prune`, protect labels, soft delete/GC) leveraging provenance metadata.
 - [ ] *(Deferred)* Add CLI commands:
-  - [ ] `caesium job apply` to push definitions from file/dir/stdin.
-  - [ ] `caesium job lint` for validation.
+  - [x] `caesium job apply` to push definitions from file/dir/stdin.
+  - [x] `caesium job lint` for validation.
 - [ ] *(Deferred)* Expose REST endpoint `POST /v1/jobdefs/apply` for automation.
 
 ### Phase 2 – Git Source Integration (Optional)
@@ -34,27 +34,27 @@
 - [x] Walk manifests and apply them via the importer with deterministic ordering and per-document transactions.
 - [x] Support configuration for credentials, polling interval, one-time sync, persistent working directory, and HTTPS Basic Auth.
 - [x] Add secret resolver integration for Git credentials (PAT/SSH) and known_hosts enforcement.
-- [ ] Expose secret resolver configuration through runtime wiring (env/config) so Git sync can resolve secrets in production deployments.
+- [x] Expose secret resolver configuration through runtime wiring (env/config) so Git sync can resolve secrets in production deployments.
 - [ ] Explore webhook-triggered sync to complement polling (GitHub/GitLab/Bitbucket signatures).
 - [x] Support path globs (e.g., `**/*.job.yaml`) and provenance recording (repo/ref/commit/path/source_id).
 - [x] Persist imported provenance metadata onto jobs for Git-sourced definitions (triggers/atoms TBD).
 
 ### Phase 3 – Enhancements
-- [ ] Add diff/preview tooling (`caesium job diff`) and status reporting.
-- [ ] Persist metadata labels and annotations (DB migrations and API updates).
-- [ ] Integrate imported job metadata into console UI.
-- [ ] Add secret resolver implementations (k8s/vault/env) with optional `--check-secrets` lint mode.
-- [ ] Wire a production-ready `SecretResolver` into Git sync configuration (env/config plumbing).
-- [ ] Extend provenance persistence to triggers/atoms once relevant drift tooling is in place.
-- [ ] Schema conformance reporting & documentation generation.
+- [x] Add diff/preview tooling (`caesium job diff`) and status reporting.
+- [x] Persist metadata labels and annotations (DB migrations and API updates).
+- [x] Integrate imported job metadata into console UI.
+- [x] Add secret resolver implementations (k8s/vault/env) with optional `--check-secrets` lint mode.
+- [x] Wire a production-ready `SecretResolver` into Git sync configuration (env/config plumbing).
+- [x] Extend provenance persistence to triggers/atoms once relevant drift tooling is in place.
+- [x] Schema conformance reporting & documentation generation.
 
 ## Validation & Testing
 - [x] Unit tests for parsing and validation.
 - [x] Integration tests for importer verifying DB state.
 - [x] Git sync suites covering single/multi-doc imports, watch loop, and update detection.
-- [ ] CLI lint command tests.
-- [ ] Schema conformance tests against example manifests.
-- [ ] Secret resolver mock tests and provenance/prune integration tests (once implemented).
+- [x] CLI lint command tests.
+- [x] Schema conformance tests against example manifests.
+- [x] Secret resolver mock tests and provenance/prune integration tests (once implemented).
 
 ## Open Questions & Decisions
 - [x] Update vs replace strategy: default safe update with provenance/exec drift guards, `--force` override.

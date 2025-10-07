@@ -1,0 +1,25 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: explicit-links
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/run"
+    secret: "redacted"
+steps:
+  - name: build
+    engine: docker
+    image: ghcr.io/yourorg/build:1.0
+    command: ["make", "build"]
+    next: "test"
+  - name: publish
+    engine: docker
+    image: ghcr.io/yourorg/publish:1.0
+    command: ["publish"]
+  - name: test
+    engine: docker
+    image: ghcr.io/yourorg/test:1.0
+    command: ["make", "test"]
+    next: "publish"

@@ -26,7 +26,7 @@ func TestJobsList(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`[
-			{"id":"1","alias":"job-a","created_at":"2024-01-01T00:00:00Z"},
+			{"id":"1","alias":"job-a","labels":{"env":"prod"},"annotations":{"owner":"ops"},"created_at":"2024-01-01T00:00:00Z"},
 			{"id":"2","alias":"job-b","created_at":"2024-01-02T00:00:00Z"}
 		]`)); err != nil {
 			t.Fatalf("write response: %v", err)
@@ -49,6 +49,14 @@ func TestJobsList(t *testing.T) {
 
 	if jobs[0].Alias != "job-a" {
 		t.Fatalf("expected first alias job-a, got %s", jobs[0].Alias)
+	}
+
+	if got := jobs[0].Labels["env"]; got != "prod" {
+		t.Fatalf("expected label env=prod, got %s", got)
+	}
+
+	if got := jobs[0].Annotations["owner"]; got != "ops" {
+		t.Fatalf("expected annotation owner=ops, got %s", got)
 	}
 }
 

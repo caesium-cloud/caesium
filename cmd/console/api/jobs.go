@@ -10,9 +10,11 @@ import (
 
 // Job represents the API projection of a job record.
 type Job struct {
-	ID        string    `json:"id"`
-	Alias     string    `json:"alias"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string            `json:"id"`
+	Alias       string            `json:"alias"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	CreatedAt   time.Time         `json:"created_at"`
 }
 
 // JobsResponse wraps the job list payload.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -51,8 +52,8 @@ var (
 	}
 	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingRight(1)
 
-	jobColumnTitles      = []string{"Alias", "ID", "Created"}
-	jobColumnWeights     = []int{3, 4, 3}
+	jobColumnTitles      = []string{"Alias", "Labels", "Annotations", "ID", "Created"}
+	jobColumnWeights     = []int{3, 4, 4, 3, 3}
 	triggerColumnTitles  = []string{"Alias", "Type", "ID"}
 	triggerColumnWeights = []int{3, 2, 4}
 	atomColumnTitles     = []string{"Image", "Engine", "ID"}
@@ -77,7 +78,7 @@ func New(client *api.Client) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
-	jobs := createTable(jobColumnTitles, []int{20, 20, 20}, true)
+	jobs := createTable(jobColumnTitles, []int{20, 24, 24, 20, 20}, true)
 	triggers := createTable(triggerColumnTitles, []int{20, 12, 20}, false)
 	atoms := createTable(atomColumnTitles, []int{24, 12, 20}, false)
 
@@ -212,9 +213,34 @@ func renderPane(tbl table.Model, active bool) string {
 func jobsToRows(jobs []api.Job) []table.Row {
 	rows := make([]table.Row, len(jobs))
 	for i, job := range jobs {
-		rows[i] = table.Row{job.Alias, job.ID, job.CreatedAt.Format(time.RFC3339)}
+		rows[i] = table.Row{
+			job.Alias,
+			formatStringMap(job.Labels),
+			formatStringMap(job.Annotations),
+			job.ID,
+			job.CreatedAt.Format(time.RFC3339),
+		}
 	}
 	return rows
+}
+
+func formatStringMap(values map[string]string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 func triggersToRows(triggers []api.Trigger) []table.Row {

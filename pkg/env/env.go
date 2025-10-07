@@ -1,6 +1,8 @@
 package env
 
 import (
+	"time"
+
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/pkg/errors"
@@ -30,15 +32,28 @@ func Variables() Environment {
 // Environment defines the environment variables used
 // by caesium.
 type Environment struct {
-	LogLevel            string   `default:"info" split_words:"true"`
-	Port                int      `default:"8080"`
-	DockerHost          string   `default:"" split_words:"true"`
-	KubernetesConfig    string   `default:"" split_words:"true"`
-	KubernetesNamespace string   `default:"default" split_words:"true"`
-	PodmanURI           string   `default:"" split_words:"true"`
-	NodeAddress         string   `default:"127.0.0.1:9001" split_words:"true"`
-	DatabaseNodes       []string `default:"" split_words:"true"`
-	DatabasePath        string   `default:"/var/lib/caesium/dqlite" split_words:"true"`
-	DatabaseType        string   `default:"internal" split_words:"true"`
-	DatabaseDSN         string   `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
+	LogLevel                      string        `default:"info" split_words:"true"`
+	Port                          int           `default:"8080"`
+	DockerHost                    string        `default:"" split_words:"true"`
+	KubernetesConfig              string        `default:"" split_words:"true"`
+	KubernetesNamespace           string        `default:"default" split_words:"true"`
+	PodmanURI                     string        `default:"" split_words:"true"`
+	NodeAddress                   string        `default:"127.0.0.1:9001" split_words:"true"`
+	DatabaseNodes                 []string      `default:"" split_words:"true"`
+	DatabasePath                  string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
+	DatabaseType                  string        `default:"internal" split_words:"true"`
+	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
+	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
+	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
+	JobdefGitInterval             time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`
+	JobdefGitSources              GitSources    `envconfig:"JOBDEF_GIT_SOURCES"`
+	JobdefSecretsEnableEnv        bool          `envconfig:"JOBDEF_SECRETS_ENABLE_ENV" default:"true"`
+	JobdefSecretsEnableKubernetes bool          `envconfig:"JOBDEF_SECRETS_ENABLE_KUBERNETES" default:"false"`
+	JobdefSecretsKubeConfig       string        `envconfig:"JOBDEF_SECRETS_KUBECONFIG"`
+	JobdefSecretsKubeNamespace    string        `envconfig:"JOBDEF_SECRETS_KUBE_NAMESPACE" default:"default"`
+	JobdefSecretsVaultAddress     string        `envconfig:"JOBDEF_SECRETS_VAULT_ADDRESS"`
+	JobdefSecretsVaultToken       string        `envconfig:"JOBDEF_SECRETS_VAULT_TOKEN"`
+	JobdefSecretsVaultNamespace   string        `envconfig:"JOBDEF_SECRETS_VAULT_NAMESPACE"`
+	JobdefSecretsVaultCACert      string        `envconfig:"JOBDEF_SECRETS_VAULT_CA_CERT"`
+	JobdefSecretsVaultSkipVerify  bool          `envconfig:"JOBDEF_SECRETS_VAULT_SKIP_VERIFY" default:"false"`
 }

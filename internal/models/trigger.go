@@ -14,12 +14,17 @@ const (
 )
 
 type Trigger struct {
-	ID            uuid.UUID   `gorm:"type:uuid;primaryKey"`
-	Alias         string      `gorm:"index"`
-	Type          TriggerType `gorm:"index;not null"`
-	Configuration string
-	CreatedAt     time.Time `gorm:"not null"`
-	UpdatedAt     time.Time `gorm:"not null"`
+	ID                 uuid.UUID   `gorm:"type:uuid;primaryKey"`
+	Alias              string      `gorm:"index"`
+	Type               TriggerType `gorm:"index;not null"`
+	Configuration      string
+	ProvenanceSourceID string `gorm:"index"`
+	ProvenanceRepo     string
+	ProvenanceRef      string
+	ProvenanceCommit   string
+	ProvenancePath     string
+	CreatedAt          time.Time `gorm:"not null"`
+	UpdatedAt          time.Time `gorm:"not null"`
 }
 
 type Triggers []*Trigger

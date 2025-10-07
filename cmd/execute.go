@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"github.com/caesium-cloud/caesium/cmd/console"
+	"github.com/caesium-cloud/caesium/cmd/job"
 	"github.com/caesium-cloud/caesium/cmd/start"
 	"github.com/spf13/cobra"
 )
@@ -9,6 +10,7 @@ import (
 var cmds = []*cobra.Command{
 	start.Cmd,
 	console.Cmd,
+	job.Cmd,
 }
 
 // Execute builds the command tree and executes commands.

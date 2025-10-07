@@ -15,6 +15,10 @@ apiVersion: v1
 kind: Job
 metadata:
   alias: csv-to-parquet
+  labels:
+    team: data
+  annotations:
+    owner: etl
 trigger:
   type: cron
   configuration:

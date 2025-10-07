@@ -6,9 +6,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
@@ -18,102 +20,222 @@ import (
 )
 
 func (s *IntegrationTestSuite) TestCronJob() {
-	req := job.PostRequest{
-		Alias: "test_cron_job",
-		Trigger: &trigger.CreateRequest{
-			Type: string(models.TriggerTypeCron),
-			Configuration: map[string]interface{}{
-				"expression": "* * * * *",
-			},
-		},
-		Tasks: []struct {
-			Atom   *atom.CreateRequest `json:"atom"`
-			NextID *string             `json:"next_id"`
-		}{
-			{
-				Atom: &atom.CreateRequest{
-					Engine:  string(models.AtomEngineDocker),
-					Image:   "alpine",
-					Command: []string{"/bin/sh", "-c", "echo", "$USER"},
-				},
-			},
-		},
-	}
-
-	buf, err := json.Marshal(req)
-	assert.Nil(s.T(), err)
-
-	resp, err := http.Post(
-		fmt.Sprintf("%v/v1/jobs", s.caesiumURL),
-		"application/json",
-		bytes.NewBuffer(buf),
-	)
-	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusCreated, resp.StatusCode)
-
-	j := &models.Job{}
-
-	buf, err = ioutil.ReadAll(resp.Body)
-	assert.Nil(s.T(), err)
-
-	assert.Nil(s.T(), json.Unmarshal(buf, j))
-	assert.NotNil(s.T(), j)
+	job := s.createJob("test_cron_job", nil)
+	assert.NotNil(s.T(), job)
 }
 
 func (s *IntegrationTestSuite) TestHTTPJob() {
-	// create job
+	job := s.createJobWithTrigger("test_http_job", nil, models.TriggerTypeHTTP)
+	assert.NotNil(s.T(), job)
+
+	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v", s.caesiumURL, job.TriggerID))
+	assert.Nil(s.T(), err)
+
+	resp, err := http.DefaultClient.Do(&http.Request{Method: http.MethodPut, URL: u})
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+}
+
+func (s *IntegrationTestSuite) TestJobMetadataAndTasks() {
+	created := s.createJob("test_job_metadata", &job.MetadataRequest{
+		Labels:      map[string]string{"team": "data"},
+		Annotations: map[string]string{"owner": "qa"},
+	})
+
+	s.validateCreatedMetadata(created, "data", "qa")
+
+	detail := s.jobDetailByAlias("test_job_metadata")
+	labels := mapFromMap(detail, "labels")
+	annotations := mapFromMap(detail, "annotations")
+	assert.Equal(s.T(), "data", labels["team"])
+	assert.Equal(s.T(), "qa", annotations["owner"])
+
+	tasks := s.jobTasks(stringFromMap(detail, "id"))
+	assert.Len(s.T(), tasks, 2)
+}
+
+func (s *IntegrationTestSuite) TestJobListFilterByTrigger() {
+	created := s.createJob("test_job_filter", nil)
+
+	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs?trigger_id=%s", s.caesiumURL, created.TriggerID.String()))
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+
+	var jobs []models.Job
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&jobs))
+	assert.Len(s.T(), jobs, 1)
+	assert.Equal(s.T(), created.ID, jobs[0].ID)
+}
+
+func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
+	created := s.createJob("test_job_delete", nil)
+
+	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()), nil)
+	assert.Nil(s.T(), err)
+	resp, err := http.DefaultClient.Do(req)
+	assert.Nil(s.T(), err)
+	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+
+	resp, err = http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()))
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusNotFound, resp.StatusCode)
+}
+
+func (s *IntegrationTestSuite) TestJobApplyCommand() {
+	cmd := exec.Command(s.cliPath, "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
+	cmd.Dir = s.projectRoot
+	output, err := cmd.CombinedOutput()
+	assert.Nil(s.T(), err, string(output))
+
+	detail := s.jobDetailByAlias("integration-job-one")
+	labels := mapFromMap(detail, "labels")
+	assert.Equal(s.T(), "test", labels["env"])
+
+	tasks := s.jobTasks(stringFromMap(detail, "id"))
+	assert.Len(s.T(), tasks, 2)
+}
+
+func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {
+	return s.createJobWithTrigger(alias, metadata, models.TriggerTypeCron)
+}
+
+func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.MetadataRequest, trigType models.TriggerType) *models.Job {
+	config := map[string]any{}
+	switch trigType {
+	case models.TriggerTypeCron:
+		config["expression"] = "* * * * *"
+	case models.TriggerTypeHTTP:
+		config["path"] = fmt.Sprintf("/jobs/%s", alias)
+	default:
+		config["expression"] = "* * * * *"
+	}
+
 	req := job.PostRequest{
-		Alias: "test_http_job",
+		Alias:    alias,
+		Metadata: metadata,
 		Trigger: &trigger.CreateRequest{
-			Type:          string(models.TriggerTypeHTTP),
-			Configuration: map[string]interface{}{},
+			Type:          string(trigType),
+			Configuration: config,
 		},
 		Tasks: []struct {
 			Atom   *atom.CreateRequest `json:"atom"`
 			NextID *string             `json:"next_id"`
 		}{
-			{
-				Atom: &atom.CreateRequest{
-					Engine:  string(models.AtomEngineDocker),
-					Image:   "alpine",
-					Command: []string{"/bin/sh", "-c", "echo", "$USER"},
-				},
-			},
+			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngineDocker), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-1"}}},
+			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngineDocker), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-2"}}},
 		},
 	}
 
 	buf, err := json.Marshal(req)
 	assert.Nil(s.T(), err)
 
-	resp, err := http.Post(
-		fmt.Sprintf("%v/v1/jobs", s.caesiumURL),
-		"application/json",
-		bytes.NewBuffer(buf),
-	)
+	resp, err := http.Post(fmt.Sprintf("%v/v1/jobs", s.caesiumURL), "application/json", bytes.NewBuffer(buf))
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusCreated, resp.StatusCode)
+	defer resp.Body.Close()
 
-	j := &models.Job{}
+	var created models.Job
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&created))
+	return &created
+}
 
-	buf, err = ioutil.ReadAll(resp.Body)
+func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {
+	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs", s.caesiumURL))
 	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 
-	assert.Nil(s.T(), json.Unmarshal(buf, j))
-	assert.NotNil(s.T(), j)
+	var jobs []map[string]any
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&jobs))
+	for _, job := range jobs {
+		aliasVal := stringFromMap(job, "alias")
+		if aliasVal == alias {
+			id := stringFromMap(job, "id")
+			resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, id))
+			assert.Nil(s.T(), err)
+			defer resp.Body.Close()
+			assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+			var detail map[string]any
+			assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&detail))
+			return detail
+		}
+	}
+	s.T().Fatalf("job with alias %s not found", alias)
+	return nil
+}
 
-	// trigger job
-	u, err := url.Parse(fmt.Sprintf(
-		"%v/v1/triggers/%v",
-		s.caesiumURL,
-		j.TriggerID,
-	))
+func stringFromMap(m map[string]any, key string) string {
+	if v := valueFromMap(m, key); v != nil {
+		if str, ok := v.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
 
+func mapFromMap(m map[string]any, key string) map[string]any {
+	if v := valueFromMap(m, key); v != nil {
+		if mm, ok := convertToStringMap(v); ok {
+			return mm
+		}
+	}
+	return map[string]any{}
+}
+
+func valueFromMap(m map[string]any, key string) any {
+	if v, ok := m[key]; ok {
+		return v
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return nil
+}
+
+func convertToStringMap(v any) (map[string]any, bool) {
+	if mm, ok := v.(map[string]any); ok {
+		return mm, true
+	}
+	mi, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]any, len(mi))
+	for k, val := range mi {
+		out[k] = val
+	}
+	return out, true
+}
+
+func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {
+	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s/tasks", s.caesiumURL, jobID))
 	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+	var tasks []map[string]any
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&tasks))
+	return tasks
+}
 
-	resp, err = http.DefaultClient.Do(&http.Request{
-		Method: http.MethodPut,
-		URL:    u,
-	})
-	assert.Nil(s.T(), err)
-	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
+func (s *IntegrationTestSuite) validateCreatedMetadata(job *models.Job, label, annotation string) {
+	if job.Labels != nil {
+		if team, ok := job.Labels["team"].(string); label != "" && ok {
+			assert.Equal(s.T(), label, team)
+		}
+	}
+	if job.Annotations != nil {
+		if owner, ok := job.Annotations["owner"].(string); annotation != "" && ok {
+			assert.Equal(s.T(), annotation, owner)
+		}
+	}
 }
