@@ -1,6 +1,7 @@
 package trigger
 
 import (
+	"context"
 	"fmt"
 	codes "net/http"
 
@@ -14,7 +15,7 @@ import (
 
 func Put(c echo.Context) error {
 	var (
-		ctx = c.Request().Context()
+		ctx = context.Background()
 		id  = uuid.MustParse(c.Param("id"))
 		svc = trigger.Service(ctx)
 	)

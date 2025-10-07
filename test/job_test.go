@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
@@ -25,7 +25,7 @@ func (s *IntegrationTestSuite) TestCronJob() {
 }
 
 func (s *IntegrationTestSuite) TestHTTPJob() {
-	job := s.createJob("test_http_job", nil)
+	job := s.createJobWithTrigger("test_http_job", nil, models.TriggerTypeHTTP)
 	assert.NotNil(s.T(), job)
 
 	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v", s.caesiumURL, job.TriggerID))
@@ -48,12 +48,12 @@ func (s *IntegrationTestSuite) TestJobMetadataAndTasks() {
 	s.validateCreatedMetadata(created, "data", "qa")
 
 	detail := s.jobDetailByAlias("test_job_metadata")
-	labels := detail["Labels"].(map[string]any)
-	annotations := detail["Annotations"].(map[string]any)
+	labels := mapFromMap(detail, "labels")
+	annotations := mapFromMap(detail, "annotations")
 	assert.Equal(s.T(), "data", labels["team"])
 	assert.Equal(s.T(), "qa", annotations["owner"])
 
-	tasks := s.jobTasks(detail["ID"].(string))
+	tasks := s.jobTasks(stringFromMap(detail, "id"))
 	assert.Len(s.T(), tasks, 2)
 }
 
@@ -90,26 +90,40 @@ func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
 }
 
 func (s *IntegrationTestSuite) TestJobApplyCommand() {
-	cmd := exec.Command("caesium", "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
-	cmd.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
+	cmd := exec.Command(s.cliPath, "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
+	cmd.Dir = s.projectRoot
 	output, err := cmd.CombinedOutput()
 	assert.Nil(s.T(), err, string(output))
 
 	detail := s.jobDetailByAlias("integration-job-one")
-	labels := detail["Labels"].(map[string]any)
+	labels := mapFromMap(detail, "labels")
 	assert.Equal(s.T(), "test", labels["env"])
 
-	tasks := s.jobTasks(detail["ID"].(string))
+	tasks := s.jobTasks(stringFromMap(detail, "id"))
 	assert.Len(s.T(), tasks, 2)
 }
 
 func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {
+	return s.createJobWithTrigger(alias, metadata, models.TriggerTypeCron)
+}
+
+func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.MetadataRequest, trigType models.TriggerType) *models.Job {
+	config := map[string]any{}
+	switch trigType {
+	case models.TriggerTypeCron:
+		config["expression"] = "* * * * *"
+	case models.TriggerTypeHTTP:
+		config["path"] = fmt.Sprintf("/jobs/%s", alias)
+	default:
+		config["expression"] = "* * * * *"
+	}
+
 	req := job.PostRequest{
 		Alias:    alias,
 		Metadata: metadata,
 		Trigger: &trigger.CreateRequest{
-			Type:          string(models.TriggerTypeCron),
-			Configuration: map[string]interface{}{"expression": "* * * * *"},
+			Type:          string(trigType),
+			Configuration: config,
 		},
 		Tasks: []struct {
 			Atom   *atom.CreateRequest `json:"atom"`
@@ -142,8 +156,10 @@ func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {
 	var jobs []map[string]any
 	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&jobs))
 	for _, job := range jobs {
-		if job["alias"].(string) == alias {
-			resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, job["id"].(string)))
+		aliasVal := stringFromMap(job, "alias")
+		if aliasVal == alias {
+			id := stringFromMap(job, "id")
+			resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, id))
 			assert.Nil(s.T(), err)
 			defer resp.Body.Close()
 			assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -154,6 +170,51 @@ func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {
 	}
 	s.T().Fatalf("job with alias %s not found", alias)
 	return nil
+}
+
+func stringFromMap(m map[string]any, key string) string {
+	if v := valueFromMap(m, key); v != nil {
+		if str, ok := v.(string); ok {
+			return str
+		}
+	}
+	return ""
+}
+
+func mapFromMap(m map[string]any, key string) map[string]any {
+	if v := valueFromMap(m, key); v != nil {
+		if mm, ok := convertToStringMap(v); ok {
+			return mm
+		}
+	}
+	return map[string]any{}
+}
+
+func valueFromMap(m map[string]any, key string) any {
+	if v, ok := m[key]; ok {
+		return v
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, key) {
+			return v
+		}
+	}
+	return nil
+}
+
+func convertToStringMap(v any) (map[string]any, bool) {
+	if mm, ok := v.(map[string]any); ok {
+		return mm, true
+	}
+	mi, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, false
+	}
+	out := make(map[string]any, len(mi))
+	for k, val := range mi {
+		out[k] = val
+	}
+	return out, true
 }
 
 func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {
