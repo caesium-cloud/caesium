@@ -3,9 +3,11 @@ package job
 import (
 	"errors"
 	"net/http"
+	"sort"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
+	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -18,9 +20,10 @@ type DAGResponse struct {
 }
 
 type DAGNode struct {
-	ID     uuid.UUID  `json:"id"`
-	AtomID uuid.UUID  `json:"atom_id"`
-	NextID *uuid.UUID `json:"next_id,omitempty"`
+	ID         uuid.UUID   `json:"id"`
+	AtomID     uuid.UUID   `json:"atom_id"`
+	NextID     *uuid.UUID  `json:"next_id,omitempty"`
+	Successors []uuid.UUID `json:"successors"`
 }
 
 type DAGEdge struct {
@@ -52,22 +55,79 @@ func DAG(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
+	rawEdges, err := taskedge.Service(ctx).List(&taskedge.ListRequest{
+		JobID:   id.String(),
+		OrderBy: []string{"created_at"},
+	})
+	if err != nil {
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
+
+	edgeSet := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
+	addEdge := func(from, to uuid.UUID) {
+		targets, ok := edgeSet[from]
+		if !ok {
+			targets = make(map[uuid.UUID]struct{})
+			edgeSet[from] = targets
+		}
+		targets[to] = struct{}{}
+	}
+
+	for _, edge := range rawEdges {
+		addEdge(edge.FromTaskID, edge.ToTaskID)
+	}
+
+	if len(rawEdges) == 0 {
+		for _, t := range tasks {
+			if t.NextID == nil {
+				continue
+			}
+			addEdge(t.ID, *t.NextID)
+		}
+	}
+
 	nodes := make([]DAGNode, 0, len(tasks))
 	edges := make([]DAGEdge, 0, len(tasks))
 
 	for _, t := range tasks {
-		nodes = append(nodes, DAGNode{
-			ID:     t.ID,
-			AtomID: t.AtomID,
-			NextID: t.NextID,
-		})
+		successors := make([]uuid.UUID, 0)
+		if targets, ok := edgeSet[t.ID]; ok {
+			for to := range targets {
+				successors = append(successors, to)
+			}
+		}
 
-		if t.NextID != nil {
-			edges = append(edges, DAGEdge{
-				From: t.ID,
-				To:   *t.NextID,
+		if len(successors) > 1 {
+			sort.Slice(successors, func(i, j int) bool {
+				return successors[i].String() < successors[j].String()
 			})
 		}
+
+		for _, to := range successors {
+			edges = append(edges, DAGEdge{
+				From: t.ID,
+				To:   to,
+			})
+		}
+
+		var nextID *uuid.UUID
+		switch len(successors) {
+		case 0:
+			if t.NextID != nil {
+				val := *t.NextID
+				nextID = &val
+			}
+		case 1:
+			val := successors[0]
+			nextID = &val
+		}
+
+		nodes = append(nodes, DAGNode{
+			ID:         t.ID,
+			AtomID:     t.AtomID,
+			NextID:     nextID,
+			Successors: successors,
+		})
 	}
 
 	resp := &DAGResponse{

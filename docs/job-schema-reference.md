@@ -45,7 +45,7 @@ Currently the `notification` callback is supported. Custom handlers consume the 
 
 ## Steps
 
-Every step represents a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted and automatically link to the next step unless `next` is specified.
+Each step represents a DAG node backed by a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted. When neither `next` nor `dependsOn` is provided, the importer links steps sequentially.
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -53,7 +53,8 @@ Every step represents a task/atom pair. Steps default to the Docker engine when 
 | `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |
 | `image` | string | required | Container image reference. |
 | `command` | array[string] | optional | Executed command; defaults to entrypoint. |
-| `next` | string | optional | Explicit link to another step. |
+| `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
+| `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
 
 ## Secret References
 

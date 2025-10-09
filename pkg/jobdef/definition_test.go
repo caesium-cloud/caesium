@@ -54,8 +54,35 @@ steps:
     command: ["load"]
 `
 
+var dagExample = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: branchy-job
+trigger:
+  type: cron
+  configuration: { cron: "*/5 * * * *", timezone: "UTC" }
+steps:
+  - name: start
+    image: alpine:3
+    command: ["echo", "start"]
+    next:
+      - fanout-a
+      - fanout-b
+  - name: fanout-a
+    image: alpine:3
+    command: ["echo", "a"]
+  - name: fanout-b
+    image: alpine:3
+    command: ["echo", "b"]
+  - name: join
+    image: alpine:3
+    command: ["echo", "done"]
+    dependsOn: ["fanout-a", "fanout-b"]
+`
+
 func TestParseValidDefinitions(t *testing.T) {
-	defs := []string{example1, example2}
+	defs := []string{example1, example2, dagExample}
 
 	for idx, src := range defs {
 		def, err := Parse([]byte(src))
@@ -75,6 +102,26 @@ func TestParseValidDefinitions(t *testing.T) {
 		for _, step := range def.Steps {
 			if step.Engine == "" {
 				t.Fatalf("example %d step %s engine is empty", idx+1, step.Name)
+			}
+		}
+
+		if def.Metadata.Alias == "branchy-job" {
+			var (
+				start Step
+				found bool
+			)
+			for _, step := range def.Steps {
+				if step.Name == "start" {
+					start = step
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("branchy job start step not found")
+			}
+			if len(start.Next) != 2 {
+				t.Fatalf("branchy job should have two successors, got %d", len(start.Next))
 			}
 		}
 	}
@@ -128,6 +175,33 @@ trigger:
 steps:
   - name: build
     image: example
+`,
+		"unknown dependsOn": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    dependsOn: ["missing"]
+`,
+		"cycle": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    next: deploy
+  - name: deploy
+    image: example
+    next: build
 `,
 	}
 

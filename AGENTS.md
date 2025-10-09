@@ -18,7 +18,7 @@
 - `just console` – open the interactive console.
 - `just unit-test` – run unit tests with race + coverage.
 - `just integration-test` – run tests in `./test` with `-tags=integration`.
-- Local Go fallback: `go build ./...`, `go test -race ./...`, `go vet ./...`.
+- Containerized builds are required: use `just build` (or `just builder` + `just run`). Avoid invoking `go build` directly on the host so the toolchain and CGO deps stay consistent.
 
 ## Coding Style & Naming Conventions
 - Go formatting: run `go fmt ./...` (CI expects formatted code).

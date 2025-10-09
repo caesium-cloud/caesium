@@ -10,6 +10,14 @@ callbacks:
     configuration:
       url: "https://example"
 steps:
-  - name: single
+  - name: build
     image: alpine
-    command: ["sh", "-c", "echo single"]
+    command: ["sh", "-c", "echo build"]
+    next: test
+  - name: test
+    image: alpine
+    command: ["sh", "-c", "echo test"]
+    next: package
+  - name: package
+    image: alpine
+    command: ["sh", "-c", "echo package"]

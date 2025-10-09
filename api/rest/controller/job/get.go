@@ -5,9 +5,10 @@ import (
 	"net/http"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	tsvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/internal/run"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	"gorm.io/gorm"
@@ -15,8 +16,8 @@ import (
 
 type JobResponse struct {
 	*models.Job
-	Trigger   *models.Trigger `json:"trigger,omitempty"`
-	LatestRun *run.Run        `json:"latest_run,omitempty"`
+	Trigger   *models.Trigger    `json:"trigger,omitempty"`
+	LatestRun *runstorage.JobRun `json:"latest_run,omitempty"`
 }
 
 func Get(c echo.Context) error {
@@ -44,7 +45,11 @@ func Get(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	resp.LatestRun = run.Default().Latest(j.ID)
+	latest, err := runsvc.New(ctx).Latest(j.ID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return echo.ErrInternalServerError.SetInternal(err)
+	}
+	resp.LatestRun = latest
 
 	return c.JSON(http.StatusOK, resp)
 }

@@ -1,11 +1,15 @@
 package run
 
 import (
+	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type Status string
@@ -25,254 +29,314 @@ const (
 	TaskStatusFailed    TaskStatus = "failed"
 )
 
-type Task struct {
-	ID          uuid.UUID         `json:"id"`
-	AtomID      uuid.UUID         `json:"atom_id"`
-	Engine      models.AtomEngine `json:"engine"`
-	Image       string            `json:"image"`
-	Command     []string          `json:"command"`
-	RuntimeID   string            `json:"runtime_id,omitempty"`
-	Status      TaskStatus        `json:"status"`
-	Result      string            `json:"result,omitempty"`
-	StartedAt   *time.Time        `json:"started_at,omitempty"`
-	CompletedAt *time.Time        `json:"completed_at,omitempty"`
-	Error       string            `json:"error,omitempty"`
+type TaskRun struct {
+	ID                      uuid.UUID         `json:"id"`
+	AtomID                  uuid.UUID         `json:"atom_id"`
+	Engine                  models.AtomEngine `json:"engine"`
+	Image                   string            `json:"image"`
+	Command                 []string          `json:"command"`
+	RuntimeID               string            `json:"runtime_id,omitempty"`
+	Status                  TaskStatus        `json:"status"`
+	Result                  string            `json:"result,omitempty"`
+	StartedAt               *time.Time        `json:"started_at,omitempty"`
+	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
+	Error                   string            `json:"error,omitempty"`
+	OutstandingPredecessors int               `json:"outstanding_predecessors"`
 }
 
-type Run struct {
+type JobRun struct {
 	ID          uuid.UUID  `json:"id"`
 	JobID       uuid.UUID  `json:"job_id"`
 	Status      Status     `json:"status"`
 	StartedAt   time.Time  `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	Error       string     `json:"error,omitempty"`
-	Tasks       []*Task    `json:"tasks"`
+	Tasks       []*TaskRun `json:"tasks"`
 }
 
 type Store struct {
-	mu       sync.RWMutex
-	runs     map[uuid.UUID]*Run
-	jobIndex map[uuid.UUID][]uuid.UUID
+	db *gorm.DB
 }
 
-var defaultStore = NewStore()
+var (
+	defaultStore     *Store
+	defaultStoreOnce sync.Once
+)
 
-func NewStore() *Store {
-	return &Store{
-		runs:     make(map[uuid.UUID]*Run),
-		jobIndex: make(map[uuid.UUID][]uuid.UUID),
+func NewStore(conn *gorm.DB) *Store {
+	if conn == nil {
+		panic("run store requires database connection")
 	}
+	return &Store{db: conn}
 }
 
 func Default() *Store {
+	defaultStoreOnce.Do(func() {
+		defaultStore = NewStore(db.Connection())
+	})
 	return defaultStore
 }
 
-func (s *Store) Start(jobID uuid.UUID) *Run {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run := &Run{
+func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
+	model := &models.JobRun{
 		ID:        uuid.New(),
 		JobID:     jobID,
-		Status:    StatusRunning,
+		Status:    string(StatusRunning),
 		StartedAt: time.Now().UTC(),
-		Tasks:     make([]*Task, 0),
 	}
 
-	s.runs[run.ID] = run
-	s.jobIndex[jobID] = append(s.jobIndex[jobID], run.ID)
+	if err := s.db.Create(model).Error; err != nil {
+		return nil, err
+	}
 
-	return copyRun(run)
+	return s.loadRun(model.ID)
 }
 
-func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return
+func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
+	if task == nil || atom == nil {
+		return errors.New("run: task and atom must be provided")
 	}
 
-	run.Tasks = append(run.Tasks, &Task{
-		ID:      task.ID,
-		AtomID:  task.AtomID,
-		Engine:  atom.Engine,
-		Image:   atom.Image,
-		Command: atom.Cmd(),
-		Status:  TaskStatusPending,
+	var existing models.TaskRun
+	err := s.db.Where("job_run_id = ? AND task_id = ?", runID, task.ID).First(&existing).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+
+	command := atom.Command
+	if command == "" {
+		if cmd := atom.Cmd(); len(cmd) > 0 {
+			if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
+				command = string(encoded)
+			}
+		}
+	}
+
+	record := &models.TaskRun{
+		ID:                      uuid.New(),
+		JobRunID:                runID,
+		TaskID:                  task.ID,
+		AtomID:                  task.AtomID,
+		Engine:                  atom.Engine,
+		Image:                   atom.Image,
+		Command:                 command,
+		Status:                  string(TaskStatusPending),
+		OutstandingPredecessors: outstanding,
+	}
+
+	return s.db.Create(record).Error
+}
+
+func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
+	now := time.Now().UTC()
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Updates(map[string]interface{}{
+			"status":     string(TaskStatusRunning),
+			"runtime_id": runtimeID,
+			"started_at": now,
+		}).Error
+}
+
+func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		if err := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID).
+			Updates(map[string]interface{}{
+				"status":       string(TaskStatusSucceeded),
+				"completed_at": now,
+				"result":       result,
+			}).Error; err != nil {
+			return err
+		}
+
+		var edges []models.TaskEdge
+		if err := tx.Where("from_task_id = ?", taskID).Find(&edges).Error; err != nil {
+			return err
+		}
+
+		for _, edge := range edges {
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
+				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
 	})
 }
 
-func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return
-	}
-
-	if task := run.task(taskID); task != nil {
-		now := time.Now().UTC()
-		task.RuntimeID = runtimeID
-		task.Status = TaskStatusRunning
-		task.StartedAt = &now
-	}
-}
-
-func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return
-	}
-
-	if task := run.task(taskID); task != nil {
-		now := time.Now().UTC()
-		task.CompletedAt = &now
-		task.Status = TaskStatusSucceeded
-		task.Result = result
-	}
-}
-
-func (s *Store) FailTask(runID, taskID uuid.UUID, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return
-	}
-
-	if task := run.task(taskID); task != nil {
-		now := time.Now().UTC()
-		task.CompletedAt = &now
-		task.Status = TaskStatusFailed
-		if err != nil {
-			task.Error = err.Error()
-		}
-	}
-}
-
-func (s *Store) Complete(runID uuid.UUID, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return
-	}
-
+func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
 	now := time.Now().UTC()
-	run.CompletedAt = &now
+	errMsg := ""
+	if failure != nil {
+		errMsg = failure.Error()
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Updates(map[string]interface{}{
+			"status":       string(TaskStatusFailed),
+			"completed_at": now,
+			"error":        errMsg,
+		}).Error
+}
 
+func (s *Store) Complete(runID uuid.UUID, result error) error {
+	now := time.Now().UTC()
+	status := StatusSucceeded
+	errMsg := ""
+	if result != nil {
+		status = StatusFailed
+		errMsg = result.Error()
+	}
+
+	return s.db.Model(&models.JobRun{}).
+		Where("id = ?", runID).
+		Updates(map[string]interface{}{
+			"status":       string(status),
+			"completed_at": now,
+			"error":        errMsg,
+		}).Error
+}
+
+func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
+		Updates(map[string]interface{}{
+			"status":     string(TaskStatusPending),
+			"runtime_id": "",
+			"started_at": nil,
+		}).Error
+}
+
+func (s *Store) FindRunning(jobID uuid.UUID) (*JobRun, error) {
+	var model models.JobRun
+	err := s.db.Where("job_id = ? AND status = ?", jobID, string(StatusRunning)).
+		Order("started_at DESC").
+		First(&model).Error
 	if err != nil {
-		run.Status = StatusFailed
-		run.Error = err.Error()
-	} else {
-		run.Status = StatusSucceeded
-		run.Error = ""
+		return nil, err
 	}
+	return s.loadRun(model.ID)
 }
 
-func (s *Store) Get(runID uuid.UUID) (*Run, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	run, ok := s.runs[runID]
-	if !ok {
-		return nil, false
-	}
-
-	return copyRun(run), true
+func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
+	return s.loadRun(runID)
 }
 
-func (s *Store) List(jobID uuid.UUID) []*Run {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
+	var modelsRuns []models.JobRun
+	if err := s.db.Where("job_id = ?", jobID).
+		Order("started_at ASC").
+		Preload("Tasks").
+		Find(&modelsRuns).Error; err != nil {
+		return nil, err
+	}
 
-	ids := s.jobIndex[jobID]
-	runs := make([]*Run, 0, len(ids))
-
-	for _, id := range ids {
-		if run, ok := s.runs[id]; ok {
-			runs = append(runs, copyRun(run))
+	runs := make([]*JobRun, 0, len(modelsRuns))
+	for idx := range modelsRuns {
+		runModel := &modelsRuns[idx]
+		runValue, err := convertRunModel(runModel)
+		if err != nil {
+			return nil, err
 		}
+		runs = append(runs, runValue)
 	}
 
-	return runs
+	return runs, nil
 }
 
-func (s *Store) Latest(jobID uuid.UUID) *Run {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	ids := s.jobIndex[jobID]
-	if len(ids) == 0 {
-		return nil
+func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
+	var model models.JobRun
+	err := s.db.Where("job_id = ?", jobID).
+		Order("started_at DESC").
+		First(&model).Error
+	if err != nil {
+		return nil, err
 	}
-
-	run, ok := s.runs[ids[len(ids)-1]]
-	if !ok {
-		return nil
-	}
-
-	return copyRun(run)
+	return s.loadRun(model.ID)
 }
 
-func (r *Run) task(id uuid.UUID) *Task {
-	for _, task := range r.Tasks {
-		if task.ID == id {
-			return task
-		}
+func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
+	var model models.JobRun
+	if err := s.db.Preload("Tasks").
+		First(&model, "id = ?", runID).Error; err != nil {
+		return nil, err
 	}
-
-	return nil
+	return convertRunModel(&model)
 }
 
-func copyRun(src *Run) *Run {
-	if src == nil {
-		return nil
+func convertRunModel(model *models.JobRun) (*JobRun, error) {
+	if model == nil {
+		return nil, nil
 	}
 
-	dst := &Run{
-		ID:        src.ID,
-		JobID:     src.JobID,
-		Status:    src.Status,
-		StartedAt: src.StartedAt,
-		Error:     src.Error,
+	runValue := &JobRun{
+		ID:        model.ID,
+		JobID:     model.JobID,
+		Status:    Status(model.Status),
+		StartedAt: model.StartedAt,
+		Error:     model.Error,
 	}
 
-	if src.CompletedAt != nil {
-		completed := *src.CompletedAt
-		dst.CompletedAt = &completed
+	if model.CompletedAt != nil {
+		completed := *model.CompletedAt
+		runValue.CompletedAt = &completed
 	}
 
-	if len(src.Tasks) > 0 {
-		dst.Tasks = make([]*Task, len(src.Tasks))
-		for i, task := range src.Tasks {
+	if len(model.Tasks) > 0 {
+		runValue.Tasks = make([]*TaskRun, 0, len(model.Tasks))
+		for _, task := range model.Tasks {
 			if task == nil {
 				continue
 			}
-
-			copied := *task
-			if task.StartedAt != nil {
-				started := *task.StartedAt
-				copied.StartedAt = &started
-			}
-			if task.CompletedAt != nil {
-				finished := *task.CompletedAt
-				copied.CompletedAt = &finished
-			}
-			dst.Tasks[i] = &copied
+			runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
 		}
 	} else {
-		dst.Tasks = make([]*Task, 0)
+		runValue.Tasks = make([]*TaskRun, 0)
 	}
 
-	return dst
+	return runValue, nil
+}
+
+func convertRunTaskModel(model *models.TaskRun) *TaskRun {
+	if model == nil {
+		return nil
+	}
+
+	var command []string
+	if model.Command != "" {
+		if err := json.Unmarshal([]byte(model.Command), &command); err != nil {
+			command = []string{model.Command}
+		}
+	}
+
+	task := &TaskRun{
+		ID:                      model.TaskID,
+		AtomID:                  model.AtomID,
+		Engine:                  model.Engine,
+		Image:                   model.Image,
+		Command:                 command,
+		RuntimeID:               model.RuntimeID,
+		Status:                  TaskStatus(model.Status),
+		Result:                  model.Result,
+		Error:                   model.Error,
+		OutstandingPredecessors: model.OutstandingPredecessors,
+	}
+
+	if model.StartedAt != nil {
+		started := *model.StartedAt
+		task.StartedAt = &started
+	}
+	if model.CompletedAt != nil {
+		completed := *model.CompletedAt
+		task.CompletedAt = &completed
+	}
+
+	return task
 }

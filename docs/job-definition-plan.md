@@ -9,7 +9,7 @@
 ## Source Format
 - [x] YAML documents conforming to the v1 schema with fields: `$schema`, `apiVersion`, `kind`, `metadata`, `trigger`, `callbacks`, `steps`.
 - [x] Steps define DAGs of Atoms and Tasks with fields: `engine` (default: docker), `command` (JSON-encoded), and optional `next`.
-- [ ] Metadata labels and annotations captured for future use.
+- [x] Metadata labels and annotations captured for future use.
 
 ## Implementation Phases
 
@@ -47,6 +47,39 @@
 - [x] Wire a production-ready `SecretResolver` into Git sync configuration (env/config plumbing).
 - [x] Extend provenance persistence to triggers/atoms once relevant drift tooling is in place.
 - [x] Schema conformance reporting & documentation generation.
+
+### Phase 4 – DAG Execution
+
+*Objective:* upgrade the job engine from linear `next` chains to full DAG semantics so definitions can express fan-out, fan-in, and conditional branches while preserving provenance guarantees.
+
+#### Schema & Validation
+- [x] Update the v1 schema to allow multiple successors (`next`) and an explicit `dependsOn` list; keep backward compatibility with string `next`.
+ - [x] Regenerate schema tooling and docs (`pkg/jobdef`, `cmd/job/schema.go`, `docs/job-definitions.md`) to surface the new shape.
+- [x] Extend validation to detect cycles, missing dependencies, duplicate edges, and mixed fan-in/fan-out hazards.
+
+#### Storage Model
+- [x] Design and apply migrations introducing an edge table (e.g., `job_task_edges`) or adjacency representation that supports many-to-many relationships.
+- [x] Update ORM/query helpers in `pkg/db` and related models to fetch DAGs efficiently with provenance metadata.
+
+#### Importer & Provenance
+- [x] Teach `internal/jobdef/importer` to materialize the expanded graph, creating edge records and validating joins atomically.
+- [x] Ensure provenance columns capture edge-level source data so drift detection can reason about DAG shape.
+- [x] Add unit tests covering multi-branch manifests and failure cases (cycle, orphan, duplicate).
+
+#### Execution Engine
+- [x] Update task scheduling (podman/docker engines) to respect dependency counts, enqueue successors only when all predecessors succeed, and record join failures.
+- [x] Persist runtime state necessary to resume DAG execution after restarts (e.g., outstanding predecessor counts).
+- [x] Persist `job_runs`/`task_runs` tables and a run service so restart-safe history can be queried via the API.
+- [x] Cover new behaviour with executor-focused unit tests and integration scenarios.
+
+#### API, CLI, & Console
+- [x] Expose DAG structure via REST (`/v1/jobs/:id/tasks`, `/v1/jobs/:id/runs/:run_id/tasks`) and ensure CLI output (`caesium job get`, `caesium console`) reflects branching-specific successors and run history.
+- [ ] Add serializer helpers so clients can render adjacency information cleanly (e.g., topological order, grouped successors).
+- [ ] Update console UI planning docs and Bubble Tea surfaces to visualise branches.
+
+- [x] Extend integration tests to import, execute, and verify multi-branch jobs (parallel success, join wait, failure short-circuit).
+- [ ] Add scenario coverage for Git-sourced definitions to ensure DAG edges survive sync/diff workflows.
+- [x] Document authoring patterns (fan-out, join, conditional) with YAML examples and executor guarantees.
 
 ## Validation & Testing
 - [x] Unit tests for parsing and validation.

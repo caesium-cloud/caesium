@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
@@ -101,6 +102,29 @@ func (s *IntegrationTestSuite) TestJobApplyCommand() {
 
 	tasks := s.jobTasks(stringFromMap(detail, "id"))
 	assert.Len(s.T(), tasks, 2)
+
+	dagDetail := s.jobDetailByAlias("integration-job-two")
+	dagID := stringFromMap(dagDetail, "id")
+	dagTasks := s.jobTasks(dagID)
+	assert.Len(s.T(), dagTasks, 3)
+	expectedLinear := map[string][]string{
+		"build":   []string{"test"},
+		"test":    []string{"package"},
+		"package": []string{},
+	}
+	assert.Equal(s.T(), expectedLinear, s.describeDAG(dagID))
+
+	branchDetail := s.jobDetailByAlias("integration-job-dag")
+	branchID := stringFromMap(branchDetail, "id")
+	branchTasks := s.jobTasks(branchID)
+	assert.Len(s.T(), branchTasks, 4)
+	expectedBranch := map[string][]string{
+		"start":    []string{"fanout-a", "fanout-b"},
+		"fanout-a": []string{"join"},
+		"fanout-b": []string{"join"},
+		"join":     []string{},
+	}
+	assert.Equal(s.T(), expectedBranch, s.describeDAG(branchID))
 }
 
 func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {
@@ -225,6 +249,120 @@ func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {
 	var tasks []map[string]any
 	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&tasks))
 	return tasks
+}
+
+func (s *IntegrationTestSuite) atomDetail(atomID string) map[string]any {
+	resp, err := http.Get(fmt.Sprintf("%v/v1/atoms/%s", s.caesiumURL, atomID))
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+	var detail map[string]any
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&detail))
+	return detail
+}
+
+func (s *IntegrationTestSuite) describeDAG(jobID string) map[string][]string {
+	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s/dag", s.caesiumURL, jobID))
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
+
+	var dag struct {
+		Nodes []struct {
+			ID         string   `json:"id"`
+			AtomID     string   `json:"atom_id"`
+			Successors []string `json:"successors"`
+		} `json:"nodes"`
+	}
+	assert.Nil(s.T(), json.NewDecoder(resp.Body).Decode(&dag))
+
+	nodes := make(map[string]struct {
+		AtomID     string
+		Successors []string
+	}, len(dag.Nodes))
+
+	for _, node := range dag.Nodes {
+		nodes[node.ID] = struct {
+			AtomID     string
+			Successors []string
+		}{
+			AtomID:     node.AtomID,
+			Successors: append([]string(nil), node.Successors...),
+		}
+	}
+
+	commandCache := make(map[string]string)
+	commandFor := func(atomID string) string {
+		if cmd, ok := commandCache[atomID]; ok {
+			return cmd
+		}
+		atom := s.atomDetail(atomID)
+		cmd := lastCommandWord(atom)
+		commandCache[atomID] = cmd
+		return cmd
+	}
+
+	transitions := make(map[string][]string, len(dag.Nodes))
+	for _, node := range nodes {
+		step := commandFor(node.AtomID)
+		nextSteps := make([]string, 0, len(node.Successors))
+		for _, successorID := range node.Successors {
+			successor, ok := nodes[successorID]
+			if !ok {
+				continue
+			}
+			nextSteps = append(nextSteps, commandFor(successor.AtomID))
+		}
+		if len(nextSteps) > 1 {
+			sort.Strings(nextSteps)
+		}
+		transitions[step] = nextSteps
+	}
+
+	return transitions
+}
+
+func lastCommandWord(atom map[string]any) string {
+	raw := valueFromMap(atom, "command")
+	if raw == nil {
+		return ""
+	}
+	var parts []string
+	switch cmd := raw.(type) {
+	case []any:
+		for _, v := range cmd {
+			if str, ok := v.(string); ok {
+				parts = append(parts, str)
+			}
+		}
+	case []string:
+		parts = append(parts, cmd...)
+	case string:
+		cmd = strings.TrimSpace(cmd)
+		if cmd == "" {
+			break
+		}
+		if strings.HasPrefix(cmd, "[") {
+			var arr []string
+			if err := json.Unmarshal([]byte(cmd), &arr); err == nil {
+				parts = append(parts, arr...)
+				break
+			}
+		}
+		parts = append(parts, cmd)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	last := strings.TrimSpace(parts[len(parts)-1])
+	if last == "" {
+		return ""
+	}
+	fields := strings.Fields(last)
+	if len(fields) == 0 {
+		return last
+	}
+	return fields[len(fields)-1]
 }
 
 func (s *IntegrationTestSuite) validateCreatedMetadata(job *models.Job, label, annotation string) {

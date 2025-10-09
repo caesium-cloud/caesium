@@ -61,34 +61,44 @@ steps:
     command: ["upload", "--manifest", "/out/manifest.json", "--dest", "s3://demo/parquet/"]
 ```
 
-## Explicit `next` Links
+## DAG Branching & Joins
 
 ```yaml
 $schema: https://yourorg.io/schemas/job.v1.json
 apiVersion: v1
 kind: Job
 metadata:
-  alias: explicit-links
+  alias: fanout-job
 trigger:
   type: http
   configuration:
     path: "/hooks/run"
     secret: "redacted"
 steps:
-  - name: build
+  - name: start
     engine: docker
-    image: ghcr.io/yourorg/build:1.0
-    command: ["make", "build"]
-    next: "test"
-  - name: publish
+    image: ghcr.io/yourorg/run:1.0
+    command: ["run"]
+    next:
+      - branch-a
+      - branch-b
+  - name: branch-a
     engine: docker
-    image: ghcr.io/yourorg/publish:1.0
-    command: ["publish"]
-  - name: test
+    image: ghcr.io/yourorg/task-a:1.0
+    command: ["do-a"]
+    dependsOn: start
+  - name: branch-b
     engine: docker
-    image: ghcr.io/yourorg/test:1.0
-    command: ["make", "test"]
-    next: "publish"
+    image: ghcr.io/yourorg/task-b:1.0
+    command: ["do-b"]
+    dependsOn: start
+  - name: join
+    engine: docker
+    image: ghcr.io/yourorg/join:1.0
+    command: ["finalise"]
+    dependsOn:
+      - branch-a
+      - branch-b
 ```
 
 ## Authoring Guidelines
@@ -96,7 +106,8 @@ steps:
 - `apiVersion`/`kind` are fixed (`v1`, `Job`).
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
-- `next` links are optional; if absent, the importer links each step to the next item in the list.
+- `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
+- When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - `callbacks.configuration` is stored as JSON and surfaced to callback handlers unchanged.
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 
