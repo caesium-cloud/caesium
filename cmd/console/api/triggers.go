@@ -10,12 +10,17 @@ import (
 
 // Trigger represents a trigger resource in the API response.
 type Trigger struct {
-	ID            string    `json:"id"`
-	Alias         string    `json:"alias"`
-	Type          string    `json:"type"`
-	Configuration string    `json:"configuration"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                 string    `json:"id"`
+	Alias              string    `json:"alias"`
+	Type               string    `json:"type"`
+	Configuration      string    `json:"configuration"`
+	ProvenanceSourceID string    `json:"provenance_source_id"`
+	ProvenanceRepo     string    `json:"provenance_repo"`
+	ProvenanceRef      string    `json:"provenance_ref"`
+	ProvenanceCommit   string    `json:"provenance_commit"`
+	ProvenancePath     string    `json:"provenance_path"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // TriggersResponse wraps the trigger list payload.

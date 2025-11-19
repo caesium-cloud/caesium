@@ -10,11 +10,18 @@ import (
 
 // Job represents the API projection of a job record.
 type Job struct {
-	ID          string            `json:"id"`
-	Alias       string            `json:"alias"`
-	Labels      map[string]string `json:"labels"`
-	Annotations map[string]string `json:"annotations"`
-	CreatedAt   time.Time         `json:"created_at"`
+	ID                 string            `json:"id"`
+	Alias              string            `json:"alias"`
+	TriggerID          string            `json:"trigger_id"`
+	Labels             map[string]string `json:"labels"`
+	Annotations        map[string]string `json:"annotations"`
+	ProvenanceSourceID string            `json:"provenance_source_id"`
+	ProvenanceRepo     string            `json:"provenance_repo"`
+	ProvenanceRef      string            `json:"provenance_ref"`
+	ProvenanceCommit   string            `json:"provenance_commit"`
+	ProvenancePath     string            `json:"provenance_path"`
+	CreatedAt          time.Time         `json:"created_at"`
+	UpdatedAt          time.Time         `json:"updated_at"`
 }
 
 // JobsResponse wraps the job list payload.

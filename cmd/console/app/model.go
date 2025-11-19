@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
+	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
+	"github.com/caesium-cloud/caesium/cmd/console/ui/detail"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -71,6 +73,18 @@ type Model struct {
 	triggers      table.Model
 	atoms         table.Model
 	viewportWidth int
+	selectedJobID string
+	jobDetail     *api.JobDetail
+	graph         *dag.Graph
+	focusedNodeID string
+	dagErr        error
+	detailErr     error
+	atomDetails   map[string]*api.Atom
+	atomErr       error
+	loadingAtomID string
+	atomIndex     map[string]api.Atom
+	showDetail    bool
+	detailLoading bool
 }
 
 // New creates the root model with dependency references.
@@ -83,13 +97,15 @@ func New(client *api.Client) Model {
 	atoms := createTable(atomColumnTitles, []int{24, 12, 20}, false)
 
 	return Model{
-		client:   client,
-		spinner:  sp,
-		state:    statusLoading,
-		active:   sectionJobs,
-		jobs:     jobs,
-		triggers: triggers,
-		atoms:    atoms,
+		client:      client,
+		spinner:     sp,
+		state:       statusLoading,
+		active:      sectionJobs,
+		jobs:        jobs,
+		triggers:    triggers,
+		atoms:       atoms,
+		atomDetails: make(map[string]*api.Atom),
+		atomIndex:   make(map[string]api.Atom),
 	}
 }
 
@@ -100,15 +116,42 @@ func (m Model) Init() tea.Cmd {
 
 // Update handles Bubble Tea messages.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
+			if m.showDetail {
+				m.showDetail = false
+				m.detailLoading = false
+				return m, nil
+			}
 			return m, tea.Quit
+		case "esc":
+			if m.showDetail {
+				m.showDetail = false
+				m.detailLoading = false
+				return m, nil
+			}
 		case "r":
 			m.state = statusLoading
 			m.err = nil
-			return m, tea.Batch(m.spinner.Tick, fetchData(m.client))
+			m.jobs.SetRows(nil)
+			m.triggers.SetRows(nil)
+			m.atoms.SetRows(nil)
+			m.selectedJobID = ""
+			m.jobDetail = nil
+			m.graph = nil
+			m.focusedNodeID = ""
+			m.dagErr = nil
+			m.detailErr = nil
+			m.atomDetails = make(map[string]*api.Atom)
+			m.atomErr = nil
+			m.loadingAtomID = ""
+			m.showDetail = false
+			m.detailLoading = false
+			cmds = append(cmds, m.spinner.Tick, fetchData(m.client))
 		case "1":
 			m = m.activate(sectionJobs)
 		case "2":
@@ -119,6 +162,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.activate(m.active.next())
 		case "shift+tab":
 			m = m.activate(m.active.prev())
+		case "right", "l":
+			if m.showDetail {
+				if id := m.nextSuccessor(); id != "" {
+					if cmd := m.setFocusedNode(id); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				}
+			}
+		case "left", "h":
+			if m.showDetail {
+				if id := m.firstPredecessor(); id != "" {
+					if cmd := m.setFocusedNode(id); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				}
+			}
+		case "enter":
+			if m.active == sectionJobs && m.state == statusReady {
+				m.showDetail = true
+				if m.jobDetail == nil {
+					m.detailLoading = true
+					if id := m.currentJobID(); id != "" {
+						cmds = append(cmds, fetchJobDetail(m.client, id, true))
+					}
+				} else {
+					m.detailLoading = false
+				}
+			}
 		}
 	case tea.WindowSizeMsg:
 		height := max(5, msg.Height-7)
@@ -134,7 +205,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		if cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 	case dataLoadedMsg:
 		m.state = statusReady
 		m.err = nil
@@ -142,32 +215,141 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.triggers.SetRows(triggersToRows(msg.triggers))
 		m.atoms.SetRows(atomsToRows(msg.atoms))
 		m = m.activate(sectionJobs)
+		m.detailErr = nil
+		m.atomErr = nil
+		m.atomDetails = make(map[string]*api.Atom)
+		m.loadingAtomID = ""
+		m.atomIndex = make(map[string]api.Atom)
+		for _, atom := range msg.atoms {
+			m.atomIndex[atom.ID] = atom
+		}
+		m.showDetail = false
+		m.detailLoading = false
+		if id := m.currentJobID(); id != "" {
+			m.selectedJobID = id
+			cmds = append(cmds, fetchJobDetail(m.client, id, true))
+		}
+	case jobDetailLoadedMsg:
+		m.jobDetail = msg.detail
+		if msg.detail == nil {
+			m.showDetail = false
+		}
+		m.detailLoading = false
+		m.detailErr = nil
+		m.dagErr = nil
+		m.atomErr = nil
+		m.atomDetails = make(map[string]*api.Atom)
+		m.loadingAtomID = ""
+		if msg.detail != nil && msg.detail.DAG != nil {
+			graph, err := dag.FromJobDAG(msg.detail.DAG)
+			if err != nil {
+				m.graph = nil
+				m.focusedNodeID = ""
+				m.dagErr = err
+			} else {
+				m.graph = graph
+				if root := graph.First(); root != nil {
+					if cmd := m.setFocusedNode(root.ID()); cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+				} else {
+					m.focusedNodeID = ""
+				}
+			}
+		} else {
+			m.graph = nil
+			m.focusedNodeID = ""
+		}
+	case jobDetailErrMsg:
+		m.graph = nil
+		m.focusedNodeID = ""
+		m.dagErr = msg.err
+		m.detailErr = msg.err
+		m.atomDetails = make(map[string]*api.Atom)
+		m.loadingAtomID = ""
+		m.atomErr = nil
+		m.showDetail = false
+		m.detailLoading = false
+	case atomDetailLoadedMsg:
+		if msg.atom != nil {
+			if m.atomDetails == nil {
+				m.atomDetails = make(map[string]*api.Atom)
+			}
+			m.atomDetails[msg.atom.ID] = msg.atom
+		}
+		if m.loadingAtomID == msg.id {
+			m.loadingAtomID = ""
+		}
+		m.atomErr = nil
+	case atomDetailErrMsg:
+		if m.loadingAtomID == msg.id {
+			m.loadingAtomID = ""
+		}
+		m.atomErr = msg.err
 	case errMsg:
 		m.state = statusError
 		m.err = msg
 	}
 
 	if m.state != statusReady {
-		return m, nil
+		return m, tea.Batch(cmds...)
 	}
 
-	var cmd tea.Cmd
 	switch m.active {
 	case sectionJobs:
-		m.jobs, cmd = m.jobs.Update(msg)
+		if !m.showDetail {
+			var tableCmd tea.Cmd
+			m.jobs, tableCmd = m.jobs.Update(msg)
+			if tableCmd != nil {
+				cmds = append(cmds, tableCmd)
+			}
+			if id := m.currentJobID(); id != "" && id != m.selectedJobID {
+				m.selectedJobID = id
+				m.jobDetail = nil
+				m.graph = nil
+				m.focusedNodeID = ""
+				m.dagErr = nil
+				m.detailErr = nil
+				m.atomDetails = make(map[string]*api.Atom)
+				m.atomErr = nil
+				m.loadingAtomID = ""
+				cmds = append(cmds, fetchJobDetail(m.client, id, true))
+			}
+		} else if m.jobDetail == nil {
+			if id := m.currentJobID(); id != "" {
+				cmds = append(cmds, fetchJobDetail(m.client, id, true))
+			}
+		}
 	case sectionTriggers:
-		m.triggers, cmd = m.triggers.Update(msg)
+		var tableCmd tea.Cmd
+		m.triggers, tableCmd = m.triggers.Update(msg)
+		if tableCmd != nil {
+			cmds = append(cmds, tableCmd)
+		}
 	case sectionAtoms:
-		m.atoms, cmd = m.atoms.Update(msg)
+		var tableCmd tea.Cmd
+		m.atoms, tableCmd = m.atoms.Update(msg)
+		if tableCmd != nil {
+			cmds = append(cmds, tableCmd)
+		}
 	}
 
-	return m, cmd
+	return m, tea.Batch(cmds...)
 }
 
 // View renders the interface.
 func (m Model) View() string {
 	tabs := renderTabsBar(m.active, m.viewportWidth)
-	footer := barStyle.Render("[1/2/3] switch  [tab] cycle  [r] reload  [q] quit")
+
+	footerKeys := "[1/2/3] switch  [tab] cycle  [r] reload  [q] quit"
+	if m.active == sectionJobs {
+		if m.showDetail {
+			footerKeys = "[esc/q] back  [←/→] traverse"
+		} else {
+			footerKeys += "  [enter] detail"
+		}
+	}
+	footer := barStyle.Render(footerKeys)
 
 	var body string
 
@@ -177,11 +359,79 @@ func (m Model) View() string {
 	case statusError:
 		body = boxStyle.Render("Failed to load data: " + m.err.Error())
 	case statusReady:
-		activeTable := m.tableFor(m.active)
-		body = renderPane(activeTable, true)
+		switch m.active {
+		case sectionJobs:
+			if m.showDetail {
+				body = m.renderJobDetailScreen()
+			} else {
+				body = m.renderJobsView()
+			}
+		case sectionTriggers:
+			m.jobs.SetWidth(max(20, m.viewportWidth-8))
+			body = renderPane(m.triggers, true)
+		case sectionAtoms:
+			m.jobs.SetWidth(max(20, m.viewportWidth-8))
+			body = renderPane(m.atoms, true)
+		default:
+			activeTable := m.tableFor(m.active)
+			body = renderPane(activeTable, true)
+		}
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, tabs, body, footer)
+}
+
+func (m Model) renderJobsView() string {
+	width := max(20, m.viewportWidth-8)
+	m.jobs.SetWidth(width)
+	return renderPane(m.jobs, true)
+}
+
+func (m Model) renderJobDetailScreen() string {
+	totalWidth := max(40, m.viewportWidth-6)
+
+	var focusedAtom *api.Atom
+	if m.graph != nil && m.focusedNodeID != "" {
+		if node, ok := m.graph.Node(m.focusedNodeID); ok {
+			if atomID := node.AtomID(); atomID != "" {
+				focusedAtom = m.atomDetails[atomID]
+			}
+		}
+	}
+
+	labeler := m.nodeLabeler()
+	vm := detail.ViewModel{
+		Job:           m.jobDetail,
+		Graph:         m.graph,
+		FocusedNode:   m.focusedNodeID,
+		FocusedAtom:   focusedAtom,
+		DetailErr:     m.detailErr,
+		DetailPending: m.detailLoading,
+		GraphErr:      m.dagErr,
+		AtomErr:       m.atomErr,
+		AtomLoading:   m.loadingAtomID != "",
+		AtomLookup:    m.atomIndex,
+		Labeler:       labeler,
+		ViewportWidth: max(20, totalWidth-4),
+	}
+
+	content := detail.Render(vm)
+	body := boxStyle.Width(totalWidth).Render(content)
+
+	return body
+}
+
+func (m Model) nodeLabeler() dag.LabelFunc {
+	atoms := m.atomIndex
+	return func(n *dag.Node) string {
+		if n == nil {
+			return ""
+		}
+		if atom, ok := atoms[n.AtomID()]; ok {
+			return fmt.Sprintf("%s (%s)", shortImage(atom.Image), shortID(n.ID()))
+		}
+		return shortID(n.ID())
+	}
 }
 
 func (m Model) activate(sec section) Model {
@@ -196,8 +446,29 @@ func (m Model) activate(sec section) Model {
 	case sectionAtoms:
 		m.atoms.Focus()
 	}
+	if sec != sectionJobs {
+		m.showDetail = false
+		m.detailLoading = false
+	}
 	m.active = sec
 	return m
+}
+
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
+}
+
+func shortImage(image string) string {
+	if image == "" {
+		return "unknown"
+	}
+	if idx := strings.LastIndex(image, "/"); idx >= 0 && idx < len(image)-1 {
+		image = image[idx+1:]
+	}
+	return image
 }
 
 func renderPane(tbl table.Model, active bool) string {
@@ -208,6 +479,96 @@ func renderPane(tbl table.Model, active bool) string {
 	}
 
 	return style.Render(content)
+}
+
+func (m Model) currentJobID() string {
+	row := m.jobs.SelectedRow()
+	if len(row) < 4 {
+		return ""
+	}
+	return row[3]
+}
+
+func (m Model) nextSuccessor() string {
+	if m.graph == nil {
+		return ""
+	}
+	if m.focusedNodeID == "" {
+		if root := m.graph.First(); root != nil {
+			return root.ID()
+		}
+		return ""
+	}
+	node, ok := m.graph.Node(m.focusedNodeID)
+	if !ok {
+		return ""
+	}
+	successors := node.Successors()
+	if len(successors) == 0 {
+		return ""
+	}
+	return successors[0].ID()
+}
+
+func (m Model) firstPredecessor() string {
+	if m.graph == nil || m.focusedNodeID == "" {
+		return ""
+	}
+	node, ok := m.graph.Node(m.focusedNodeID)
+	if !ok {
+		return ""
+	}
+	predecessors := node.Predecessors()
+	if len(predecessors) == 0 {
+		return ""
+	}
+	return predecessors[0].ID()
+}
+
+func (m *Model) setFocusedNode(id string) tea.Cmd {
+	if m.graph == nil || id == "" {
+		m.focusedNodeID = ""
+		return nil
+	}
+	if _, ok := m.graph.Node(id); !ok {
+		return nil
+	}
+	m.focusedNodeID = id
+	return m.preloadAtomMetadata(id)
+}
+
+func (m *Model) preloadAtomMetadata(id string) tea.Cmd {
+	if m.client == nil || m.graph == nil {
+		return nil
+	}
+
+	node, ok := m.graph.Node(id)
+	if !ok {
+		return nil
+	}
+
+	atomID := node.AtomID()
+	if atomID == "" {
+		m.loadingAtomID = ""
+		m.atomErr = nil
+		return nil
+	}
+
+	if m.atomDetails == nil {
+		m.atomDetails = make(map[string]*api.Atom)
+	}
+
+	if _, ok := m.atomDetails[atomID]; ok {
+		return nil
+	}
+
+	if m.loadingAtomID == atomID {
+		return nil
+	}
+
+	m.atomErr = nil
+	m.loadingAtomID = atomID
+	return fetchAtomDetail(m.client, atomID)
 }
 
 func jobsToRows(jobs []api.Job) []table.Row {
@@ -286,6 +647,32 @@ func (m *Model) resizeColumns(width int) {
 	m.atoms.SetColumns(atomCols)
 }
 
+func fetchAtomDetail(client *api.Client, atomID string) tea.Cmd {
+	return func() tea.Msg {
+		atom, err := client.Atoms().Get(context.Background(), atomID)
+		if err != nil {
+			return atomDetailErrMsg{id: atomID, err: err}
+		}
+		return atomDetailLoadedMsg{id: atomID, atom: atom}
+	}
+}
+
+func fetchJobDetail(client *api.Client, jobID string, includeDAG bool) tea.Cmd {
+	return func() tea.Msg {
+		var opts *api.JobDetailOptions
+		if includeDAG {
+			opts = &api.JobDetailOptions{IncludeDAG: true}
+		}
+
+		detail, err := client.Jobs().Detail(context.Background(), jobID, opts)
+		if err != nil {
+			return jobDetailErrMsg{err: err}
+		}
+
+		return jobDetailLoadedMsg{detail: detail}
+	}
+}
+
 func fetchData(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		params := url.Values{}
@@ -312,6 +699,24 @@ func fetchData(client *api.Client) tea.Cmd {
 			atoms:    atoms,
 		}
 	}
+}
+
+type jobDetailLoadedMsg struct {
+	detail *api.JobDetail
+}
+
+type jobDetailErrMsg struct {
+	err error
+}
+
+type atomDetailLoadedMsg struct {
+	id   string
+	atom *api.Atom
+}
+
+type atomDetailErrMsg struct {
+	id  string
+	err error
 }
 
 type dataLoadedMsg struct {

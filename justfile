@@ -70,7 +70,7 @@ integration-test:
       exit 1; \
     fi
 
-console:
+console: build
     docker run --platform {{platform}} \
         -e TERM=xterm-256color \
         -e CAESIUM_HOST \
@@ -85,6 +85,13 @@ console-integration:
         -it --rm --name caesium-console \
         --network=container:{{it_container}} \
         {{repo}}/{{image}}:{{tag}} console
+
+hydrate:
+    docker run --platform {{platform}} \
+        --rm \
+        --network=host \
+        -v {{repo_dir}}/docs/examples:/examples:ro \
+        {{repo}}/{{image}}:{{tag}} job apply --server http://127.0.0.1:8080 --path /examples
 
 integration-up: build-test
     docker rm -f {{it_container}} >/dev/null 2>&1 || true

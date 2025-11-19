@@ -9,18 +9,18 @@ import (
 )
 
 type Job struct {
-	ID                 uuid.UUID         `gorm:"type:uuid;primaryKey"`
-	Alias              string            `gorm:"index"`
-	TriggerID          uuid.UUID         `gorm:"type:uuid;index;not null"`
-	Labels             datatypes.JSONMap `gorm:"type:json"`
-	Annotations        datatypes.JSONMap `gorm:"type:json"`
-	ProvenanceSourceID string            `gorm:"index"`
-	ProvenanceRepo     string
-	ProvenanceRef      string
-	ProvenanceCommit   string
-	ProvenancePath     string
-	CreatedAt          time.Time `gorm:"not null"`
-	UpdatedAt          time.Time `gorm:"not null"`
+	ID                 uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
+	Alias              string            `gorm:"index" json:"alias"`
+	TriggerID          uuid.UUID         `gorm:"type:uuid;index;not null" json:"trigger_id"`
+	Labels             datatypes.JSONMap `gorm:"type:json" json:"labels"`
+	Annotations        datatypes.JSONMap `gorm:"type:json" json:"annotations"`
+	ProvenanceSourceID string            `gorm:"index" json:"provenance_source_id"`
+	ProvenanceRepo     string            `json:"provenance_repo"`
+	ProvenanceRef      string            `json:"provenance_ref"`
+	ProvenanceCommit   string            `json:"provenance_commit"`
+	ProvenancePath     string            `json:"provenance_path"`
+	CreatedAt          time.Time         `gorm:"not null" json:"created_at"`
+	UpdatedAt          time.Time         `gorm:"not null" json:"updated_at"`
 }
 
 func (j *Job) String() string {

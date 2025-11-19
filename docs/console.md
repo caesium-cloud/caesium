@@ -10,6 +10,16 @@ just console
 
 The command builds the latest console binary and starts it with the appropriate terminal settings. Use `q` or `Ctrl+C` at any time to exit.
 
+### Seeding Sample Data
+
+When the runtime starts from a fresh volume it contains no jobs, so the console tables will appear empty. You can seed a handful of example definitions with:
+
+```sh
+just hydrate
+```
+
+This command assumes `just run` is already managing a local server on `http://127.0.0.1:8080`; it mounts the manifests under `docs/examples/` and applies them via the REST API so the console immediately has jobs, triggers, and atoms to display.
+
 ## Configuration
 
 The console connects to the Caesium API using the following environment variables:
@@ -35,6 +45,8 @@ CAESIUM_BASE_URL="https://caesium.example.com" just console
 | `Tab` / `Shift+Tab` | Cycle forward/backward through tabs |
 | `↑` / `↓` | Navigate within the active table |
 | `r` | Reload data from the API |
+| `Enter` | (Jobs tab) open the detail/DAG screen |
+| `Esc` / `q` | Exit the detail screen; press again to quit the console |
 | `q` or `Ctrl+C` | Quit the console |
 
 ## Development Notes

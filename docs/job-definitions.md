@@ -2,6 +2,14 @@
 
 Caesium jobs can be authored as YAML manifests that follow the `job.v1` schema. Manifest files are typically stored in source control and applied to the platform via the importer tooling (see `internal/jobdef`).
 
+To seed a local development environment with the examples referenced in this guide, start the server (`just run`) and execute:
+
+```sh
+just hydrate
+```
+
+The command mounts `docs/examples/` into a short-lived CLI container and applies each manifest via the REST API.
+
 ## Minimal Example
 
 ```yaml
