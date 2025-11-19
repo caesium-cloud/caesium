@@ -27,8 +27,10 @@
    - ✅ Build reusable tabbed table panes for jobs, triggers, and atoms with shared layout primitives and column auto-sizing.
    - ✅ Wire up asynchronous loading commands and maintain shared selection state across panes (keyboard shortcuts for quick switching).
 4. **Phase 3 – Detail + DAG View**
-   - Implement a detail pane that fetches job information, associated trigger, full DAG topology, and latest run metadata.
-   - Render the DAG using the persisted edge set (multi-successor aware) so the UI can visualise branches/fan-ins with Lip Gloss layouts, highlight the selected node, and show successor/predecessor badges for navigation.
+   - ✅ Introduce a job detail loader that composes job, trigger, and run metadata (including the new `JobRun` / `TaskRun` persistence) into a single state update.
+   - ✅ Build a DAG graph translator that converts `next[]` / `dependsOn` edges into an internal tree/adjacency model with branch awareness and stable node ordering.
+  adicione ✅ Render the detail pane with responsive Lip Gloss layouts: top section for job summary, middle for DAG canvas, bottom for latest run/task status.
+   - ✅ Add keybindings to traverse predecessors/successors, sync selection with the list pane, and preload dependent atom metadata for the focused node.
 5. **Phase 4 – Actions and Workflows**
    - Hook keybindings to call trigger/run endpoints, display confirmation modals, surface action results in a status bar, and refresh affected views.
    - Handle optimistic updates and unified error reporting.
@@ -47,6 +49,6 @@
 - Validate UX with unit tests for reducers and integration tests using a mocked API server, and document the console workflow/keybindings in `docs/`.
 
 ## Suggested Next Steps
-1. Scope and merge the API extensions in small PRs (tasks, runs, logs).
-2. Scaffold the `cmd/console` package with Bubble Tea plumbing and a mocked API client.
-3. Iterate on list/detail views, including the branched DAG viewport, before tackling live logs to confirm the navigation model.
+1. Extract a shared detail fetcher in `cmd/console/api` that hydrates job + trigger + run state in one request cycle.
+2. Prototype the DAG graph translator plus layout primitives behind a feature flag to validate branch rendering with fixture data.
+3. Extend the console model to manage focused node state and keyboard navigation callbacks prior to wiring actions/logs.

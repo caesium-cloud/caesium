@@ -15,7 +15,7 @@ RUN ldd /dist/bin/caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
 
 # -------- Release image (no DinD) --------
 FROM alpine:3.22 AS release
-RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs && \
+RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs tzdata && \
     adduser -D -H -u 10001 caesium && \
     mkdir -p /var/lib/caesium/dqlite && \
     chown 10001:10001 /var/lib/caesium/dqlite
@@ -25,7 +25,7 @@ ENTRYPOINT ["/bin/caesium"]
 
 # -------- Test image (DinD for integration) --------
 FROM docker:28.4.0-dind-alpine3.22 AS test
-RUN apk add --no-cache libuv lz4-libs sqlite-libs && \
+RUN apk add --no-cache libuv lz4-libs sqlite-libs tzdata && \
     mkdir -p /var/lib/caesium/dqlite && \
     chown 10001:10001 /var/lib/caesium/dqlite
 COPY --chown=0:0 --from=builder /dist/ /
