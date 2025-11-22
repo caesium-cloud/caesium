@@ -65,3 +65,19 @@ func (s *RunsService) Get(ctx context.Context, jobID, runID string) (*Run, error
 
 	return &payload, nil
 }
+
+// Trigger manually starts a run for the specified job.
+func (s *RunsService) Trigger(ctx context.Context, jobID string) (*Run, error) {
+	if jobID == "" {
+		return nil, fmt.Errorf("job id is required")
+	}
+
+	endpoint := s.client.resolve(fmt.Sprintf("/v1/jobs/%s/run", jobID))
+
+	var payload Run
+	if err := s.client.do(ctx, http.MethodPost, endpoint, &payload); err != nil {
+		return nil, fmt.Errorf("trigger run: %w", err)
+	}
+
+	return &payload, nil
+}

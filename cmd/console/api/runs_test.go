@@ -28,6 +28,12 @@ func TestRunsListAndGet(t *testing.T) {
 			if _, err := w.Write([]byte(`{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[]}`)); err != nil {
 				t.Fatalf("write response: %v", err)
 			}
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/jobs/123/run":
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			if _, err := w.Write([]byte(`{"id":"r2","job_id":"123","status":"running","started_at":"2024-01-02T00:00:00Z","tasks":[]}`)); err != nil {
+				t.Fatalf("write response: %v", err)
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -53,5 +59,14 @@ func TestRunsListAndGet(t *testing.T) {
 
 	if detail.ID != "r1" {
 		t.Fatalf("unexpected run id %q", detail.ID)
+	}
+
+	triggered, err := client.Runs().Trigger(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("unexpected trigger error: %v", err)
+	}
+
+	if triggered.ID != "r2" {
+		t.Fatalf("unexpected triggered run id %q", triggered.ID)
 	}
 }
