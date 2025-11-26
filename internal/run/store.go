@@ -29,6 +29,23 @@ const (
 	TaskStatusFailed    TaskStatus = "failed"
 )
 
+type CallbackStatus string
+
+const (
+	CallbackStatusRunning   CallbackStatus = "running"
+	CallbackStatusSucceeded CallbackStatus = "succeeded"
+	CallbackStatusFailed    CallbackStatus = "failed"
+)
+
+type CallbackRun struct {
+	ID          uuid.UUID      `json:"id"`
+	CallbackID  uuid.UUID      `json:"callback_id"`
+	Status      CallbackStatus `json:"status"`
+	Error       string         `json:"error,omitempty"`
+	StartedAt   time.Time      `json:"started_at"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+}
+
 type TaskRun struct {
 	ID                      uuid.UUID         `json:"id"`
 	AtomID                  uuid.UUID         `json:"atom_id"`
@@ -45,13 +62,14 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID          uuid.UUID  `json:"id"`
-	JobID       uuid.UUID  `json:"job_id"`
-	Status      Status     `json:"status"`
-	StartedAt   time.Time  `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	Error       string     `json:"error,omitempty"`
-	Tasks       []*TaskRun `json:"tasks"`
+	ID          uuid.UUID      `json:"id"`
+	JobID       uuid.UUID      `json:"job_id"`
+	Status      Status         `json:"status"`
+	StartedAt   time.Time      `json:"started_at"`
+	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	Error       string         `json:"error,omitempty"`
+	Tasks       []*TaskRun     `json:"tasks"`
+	Callbacks   []*CallbackRun `json:"callbacks"`
 }
 
 type Store struct {
@@ -241,7 +259,7 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 	runs := make([]*JobRun, 0, len(modelsRuns))
 	for idx := range modelsRuns {
 		runModel := &modelsRuns[idx]
-		runValue, err := convertRunModel(runModel)
+		runValue, err := s.convertRunModel(runModel)
 		if err != nil {
 			return nil, err
 		}
@@ -268,10 +286,10 @@ func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 		First(&model, "id = ?", runID).Error; err != nil {
 		return nil, err
 	}
-	return convertRunModel(&model)
+	return s.convertRunModel(&model)
 }
 
-func convertRunModel(model *models.JobRun) (*JobRun, error) {
+func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
 	if model == nil {
 		return nil, nil
 	}
@@ -289,17 +307,19 @@ func convertRunModel(model *models.JobRun) (*JobRun, error) {
 		runValue.CompletedAt = &completed
 	}
 
-	if len(model.Tasks) > 0 {
-		runValue.Tasks = make([]*TaskRun, 0, len(model.Tasks))
-		for _, task := range model.Tasks {
-			if task == nil {
-				continue
-			}
-			runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
+	runValue.Tasks = make([]*TaskRun, 0, len(model.Tasks))
+	for _, task := range model.Tasks {
+		if task == nil {
+			continue
 		}
-	} else {
-		runValue.Tasks = make([]*TaskRun, 0)
+		runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
 	}
+
+	callbackRuns, err := s.loadCallbackRuns(model.ID)
+	if err != nil {
+		return nil, err
+	}
+	runValue.Callbacks = callbackRuns
 
 	return runValue, nil
 }
@@ -339,4 +359,34 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	}
 
 	return task
+}
+
+func (s *Store) loadCallbackRuns(runID uuid.UUID) ([]*CallbackRun, error) {
+	var modelRuns []models.CallbackRun
+	if err := s.db.
+		Where("job_run_id = ?", runID).
+		Order("started_at ASC").
+		Find(&modelRuns).Error; err != nil {
+		return nil, err
+	}
+
+	result := make([]*CallbackRun, 0, len(modelRuns))
+	for idx := range modelRuns {
+		result = append(result, convertCallbackRunModel(&modelRuns[idx]))
+	}
+	return result, nil
+}
+
+func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
+	if model == nil {
+		return nil
+	}
+	return &CallbackRun{
+		ID:          model.ID,
+		CallbackID:  model.CallbackID,
+		Status:      CallbackStatus(model.Status),
+		Error:       model.Error,
+		StartedAt:   model.StartedAt,
+		CompletedAt: model.CompletedAt,
+	}
 }
