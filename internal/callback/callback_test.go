@@ -66,7 +66,7 @@ func TestDispatchNotificationSuccess(t *testing.T) {
 	var receivedMeta Metadata
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		received.Store(true)
 		require.Equal(t, "application/json", r.Header.Get("Content-Type"))
 
@@ -183,7 +183,7 @@ func TestRetryFailedCallbacks(t *testing.T) {
 
 	var attempt int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer r.Body.Close()
+		defer func() { _ = r.Body.Close() }()
 		if atomic.AddInt32(&attempt, 1) == 1 {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
