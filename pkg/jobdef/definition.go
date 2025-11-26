@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"gopkg.in/yaml.v3"
 )
 
@@ -54,23 +55,25 @@ type Callback struct {
 
 // Step defines an execution step.
 type Step struct {
-	Name      string   `yaml:"name" json:"name"`
-	Engine    string   `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Image     string   `yaml:"image" json:"image"`
-	Command   []string `yaml:"command,omitempty" json:"command,omitempty"`
-	Next      []string `yaml:"next,omitempty" json:"next,omitempty"`
-	DependsOn []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Name           string   `yaml:"name" json:"name"`
+	Engine         string   `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Image          string   `yaml:"image" json:"image"`
+	Command        []string `yaml:"command,omitempty" json:"command,omitempty"`
+	Next           []string `yaml:"next,omitempty" json:"next,omitempty"`
+	DependsOn      []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	container.Spec `yaml:",inline" json:",inline"`
 }
 
 // UnmarshalYAML sets defaults while deserialising a step.
 func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	type rawStep struct {
-		Name      string      `yaml:"name"`
-		Engine    string      `yaml:"engine"`
-		Image     string      `yaml:"image"`
-		Command   []string    `yaml:"command"`
-		Next      interface{} `yaml:"next"`
-		DependsOn interface{} `yaml:"dependsOn"`
+		Name           string      `yaml:"name"`
+		Engine         string      `yaml:"engine"`
+		Image          string      `yaml:"image"`
+		Command        []string    `yaml:"command"`
+		Next           interface{} `yaml:"next"`
+		DependsOn      interface{} `yaml:"dependsOn"`
+		container.Spec `yaml:",inline"`
 	}
 
 	rs := rawStep{Engine: EngineDocker}
@@ -97,6 +100,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.Command = rs.Command
 	s.Next = nextList
 	s.DependsOn = dependsList
+	s.Spec = rs.Spec
 
 	return nil
 }

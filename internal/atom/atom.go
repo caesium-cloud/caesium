@@ -3,6 +3,8 @@ package atom
 import (
 	"io"
 	"time"
+
+	"github.com/caesium-cloud/caesium/pkg/container"
 )
 
 // Atom defines the interface for interacting with
@@ -48,6 +50,7 @@ type EngineCreateRequest struct {
 	Name    string
 	Image   string
 	Command []string
+	Spec    container.Spec
 }
 
 // EngineStopRequest defines the input paramters to

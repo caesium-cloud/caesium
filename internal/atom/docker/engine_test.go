@@ -7,7 +7,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/container"
+	dockercontainer "github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 func (s *DockerTestSuite) TestNewEngine() {
@@ -104,7 +108,7 @@ func (s *DockerTestSuite) TestCreate() {
 		On("ImagePull", testImage).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerCreate", testContainerName).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, testContainerName).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerStart", testAtomID).
@@ -117,6 +121,59 @@ func (s *DockerTestSuite) TestCreate() {
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
 	assert.Equal(s.T(), testAtomID, c.ID())
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateAppliesSpec() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			Env: map[string]string{
+				"FOO": "bar",
+				"BAR": "baz",
+			},
+			WorkDir: "/workspace",
+			Mounts: []container.Mount{{
+				Type:   container.MountTypeBind,
+				Source: "/host/data",
+				Target: "/data",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
+		Return()
+
+	cfgMatcher := mock.MatchedBy(func(cfg *dockercontainer.Config) bool {
+		return cfg.WorkingDir == "/workspace" &&
+			len(cfg.Env) == 2 &&
+			cfg.Env[0] == "BAR=baz" &&
+			cfg.Env[1] == "FOO=bar"
+	})
+
+	hostMatcher := mock.MatchedBy(func(host *dockercontainer.HostConfig) bool {
+		if host == nil || len(host.Mounts) != 1 {
+			return false
+		}
+		m := host.Mounts[0]
+		return m.Source == "/host/data" && m.Target == "/data" && m.Type == mount.TypeBind
+	})
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", cfgMatcher, hostMatcher, req.Name).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
@@ -148,7 +205,7 @@ func (s *DockerTestSuite) TestCreateError() {
 		On("ImagePull", req.Image).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerCreate", req.Name).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).
 		Return(fmt.Errorf("invalid container image"))
 
 	c, err := s.engine.Create(req)
@@ -167,7 +224,7 @@ func (s *DockerTestSuite) TestCreateStartError() {
 		On("ImagePull", req.Image).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
-		On("ContainerCreate", req.Name).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, req.Name).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerStart", req.Name).

@@ -53,8 +53,20 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |
 | `image` | string | required | Container image reference. |
 | `command` | array[string] | optional | Executed command; defaults to entrypoint. |
+| `env` | map[string]string | optional | Environment variables injected into the container. |
+| `workdir` | string | optional | Working directory set for the container process. |
+| `mounts` | array[Mount] | optional | Bind mounts that make host paths available inside the container. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
+
+### Mount
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `type` | string | optional | Currently `bind` is supported (default). |
+| `source` | string | required | Host path exposed to the container. |
+| `target` | string | required | Mount point inside the container. |
+| `readOnly` | bool | optional | When true, the container receives a read-only view. |
 
 ## Secret References
 

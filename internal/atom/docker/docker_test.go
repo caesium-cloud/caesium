@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/container"
+	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
@@ -30,46 +30,46 @@ type mockDockerBackend struct {
 	mock.Mock
 }
 
-func (m *mockDockerBackend) ContainerInspect(ctx context.Context, containerID string) (container.InspectResponse, error) {
+func (m *mockDockerBackend) ContainerInspect(ctx context.Context, containerID string) (dockercontainer.InspectResponse, error) {
 	args := m.Called(containerID)
 	if containerID == "" {
-		return container.InspectResponse{}, args.Error(0)
+		return dockercontainer.InspectResponse{}, args.Error(0)
 	}
 
-	return newContainer(containerID, &container.State{}), nil
+	return newContainer(containerID, &dockercontainer.State{}), nil
 }
 
-func (m *mockDockerBackend) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
+func (m *mockDockerBackend) ContainerList(ctx context.Context, options dockercontainer.ListOptions) ([]dockercontainer.Summary, error) {
 	args := m.Called()
 	if options.Since != "" {
 		return nil, args.Error(0)
 	}
 
 	if options.Before != "" {
-		return []container.Summary{{ID: ""}}, nil
+		return []dockercontainer.Summary{{ID: ""}}, nil
 	}
 
-	return []container.Summary{
+	return []dockercontainer.Summary{
 		{
 			ID: testAtomID,
 		},
 	}, nil
 }
 
-func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (container.CreateResponse, error) {
-	args := m.Called(containerName)
+func (m *mockDockerBackend) ContainerCreate(ctx context.Context, config *dockercontainer.Config, hostConfig *dockercontainer.HostConfig, networkingConfig *networktypes.NetworkingConfig, platform *specs.Platform, containerName string) (dockercontainer.CreateResponse, error) {
+	args := m.Called(config, hostConfig, containerName)
 
 	switch containerName {
 	case "fail":
-		return container.CreateResponse{}, args.Error(0)
+		return dockercontainer.CreateResponse{}, args.Error(0)
 	case "":
-		return container.CreateResponse{ID: ""}, nil
+		return dockercontainer.CreateResponse{ID: ""}, nil
 	default:
-		return container.CreateResponse{ID: testAtomID}, nil
+		return dockercontainer.CreateResponse{ID: testAtomID}, nil
 	}
 }
 
-func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options container.StartOptions) error {
+func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string, options dockercontainer.StartOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)
@@ -77,7 +77,7 @@ func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string, options container.StopOptions) error {
+func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string, options dockercontainer.StopOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)
@@ -85,7 +85,7 @@ func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string,
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container string, options container.RemoveOptions) error {
+func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container string, options dockercontainer.RemoveOptions) error {
 	args := m.Called(container)
 	if container == "" {
 		return args.Error(0)
@@ -93,7 +93,7 @@ func (m *mockDockerBackend) ContainerRemove(ctx context.Context, container strin
 	return nil
 }
 
-func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID string, options container.LogsOptions) (io.ReadCloser, error) {
+func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID string, options dockercontainer.LogsOptions) (io.ReadCloser, error) {
 	args := m.Called(containerID)
 	if containerID == "" {
 		return nil, args.Error(0)
@@ -109,9 +109,9 @@ func (m *mockDockerBackend) ImagePull(ctx context.Context, imageRef string, opti
 	return io.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
 
-func newContainer(id string, state *container.State) container.InspectResponse {
-	return container.InspectResponse{
-		ContainerJSONBase: &container.ContainerJSONBase{
+func newContainer(id string, state *dockercontainer.State) dockercontainer.InspectResponse {
+	return dockercontainer.InspectResponse{
+		ContainerJSONBase: &dockercontainer.ContainerJSONBase{
 			ID:      id,
 			State:   state,
 			Created: time.Now().Format(time.RFC3339Nano),

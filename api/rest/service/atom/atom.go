@@ -2,11 +2,14 @@ package atom
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -77,13 +80,25 @@ func (a *atomService) Get(id uuid.UUID) (*models.Atom, error) {
 }
 
 type CreateRequest struct {
-	Engine  string   `json:"engine"`
-	Image   string   `json:"image"`
-	Command []string `json:"command"`
+	Engine  string         `json:"engine"`
+	Image   string         `json:"image"`
+	Command []string       `json:"command"`
+	Spec    container.Spec `json:"spec"`
 }
 
 func (r *CreateRequest) CommandString() (string, error) {
 	return jsonutil.MarshalSliceString(r.Command)
+}
+
+func (r *CreateRequest) SpecJSON() (datatypes.JSON, error) {
+	if r.Spec.Env == nil && r.Spec.WorkDir == "" && len(r.Spec.Mounts) == 0 {
+		return datatypes.JSON([]byte("{}")), nil
+	}
+	data, err := json.Marshal(r.Spec)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(data), nil
 }
 
 func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
@@ -97,11 +112,17 @@ func (a *atomService) Create(req *CreateRequest) (*models.Atom, error) {
 		return nil, err
 	}
 
+	specJSON, err := req.SpecJSON()
+	if err != nil {
+		return nil, err
+	}
+
 	atom := &models.Atom{
 		ID:      id,
 		Engine:  models.AtomEngine(req.Engine),
 		Image:   req.Image,
 		Command: cmd,
+		Spec:    specJSON,
 	}
 
 	return atom, q.Create(atom).Error
