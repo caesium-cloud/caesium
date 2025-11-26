@@ -116,7 +116,9 @@ steps:
 - `engine` defaults to `docker` if omitted.
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
-- `callbacks.configuration` is stored as JSON and surfaced to callback handlers unchanged.
+- `callbacks.configuration` is stored as JSON. The built-in `notification` callback accepts `url`/`webhook_url` plus optional `headers` and `user_agent` keys.
+- Callback payloads POST a JSON body containing job/run metadata (`job_id`, `job_alias`, `run_id`, `status`, `error`, `started_at`, `completed_at`) and task entries (`task_id`, `engine`, `image`, `command`, `status`, `runtime_id`, `error`).
+- Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 - Steps can set container options directly on the manifest via `env`, `workdir`, and `mounts`. Environment values are passed to every runtime, while bind mounts map host paths (`source`) into the container at `target` (set `readOnly: true` when needed). These fields are optional and default to the runtime image configuration.
 

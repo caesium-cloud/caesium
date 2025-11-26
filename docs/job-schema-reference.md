@@ -41,7 +41,7 @@ Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map
 
 ## Callbacks
 
-Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.
+Currently the `notification` callback is supported. It accepts `url`/`webhook_url` targets with optional `headers` and `user_agent` fields, posting a JSON payload that includes job/run metadata plus task states. Callback attempts are persisted with status, error, and timestamps; failed attempts can be retried.
 
 ## Steps
 

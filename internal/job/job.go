@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
+	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -84,6 +85,10 @@ func (j *job) Run(ctx context.Context) error {
 	defer func() {
 		if err := store.Complete(runID, runErr); err != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", err)
+		}
+		dispatchCtx := context.WithoutCancel(ctx)
+		if err := callback.Default().Dispatch(dispatchCtx, j.id, runID, runErr); err != nil {
+			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
 		}
 	}()
 

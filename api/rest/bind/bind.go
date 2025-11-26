@@ -31,6 +31,7 @@ func Public(g *echo.Group) {
 		g.GET("/jobs/:id/runs", run.List)
 		g.GET("/jobs/:id/runs/:run_id", run.Get)
 		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
+		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
 		g.DELETE("/jobs/:id", job.Delete)
