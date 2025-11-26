@@ -2,6 +2,7 @@ package jobdef
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -150,11 +151,17 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			return nil, fmt.Errorf("step %s: %w", step.Name, err)
 		}
 
+		specJSON, err := json.Marshal(step.Spec)
+		if err != nil {
+			return nil, fmt.Errorf("step %s: %w", step.Name, err)
+		}
+
 		atom := &models.Atom{
 			ID:      uuid.New(),
 			Engine:  models.AtomEngine(step.Engine),
 			Image:   step.Image,
 			Command: command,
+			Spec:    datatypes.JSON(specJSON),
 		}
 
 		if opts != nil && opts.Provenance != nil {

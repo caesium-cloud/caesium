@@ -6,12 +6,14 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
 	"github.com/containers/podman/v5/pkg/specgen"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 type Engine interface {
@@ -97,10 +99,17 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		ContainerBasicConfig: specgen.ContainerBasicConfig{
 			Name:    req.Name,
 			Command: req.Command,
+			Env:     req.Spec.Env,
 		},
 		ContainerStorageConfig: specgen.ContainerStorageConfig{
 			Image: req.Image,
 		},
+	}
+	if req.Spec.WorkDir != "" {
+		spec.WorkDir = req.Spec.WorkDir
+	}
+	if mounts := convertPodmanMounts(req.Spec.Mounts); len(mounts) > 0 {
+		spec.Mounts = mounts
 	}
 
 	created, err := e.backend.ContainerCreate(spec)
@@ -152,4 +161,29 @@ func (e *podmanEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) 
 	}
 
 	return e.backend.ContainerLogs(req.ID, opts)
+}
+
+func convertPodmanMounts(specMounts []container.Mount) []specs.Mount {
+	if len(specMounts) == 0 {
+		return nil
+	}
+	result := make([]specs.Mount, 0, len(specMounts))
+	for _, mnt := range specMounts {
+		if mnt.Source == "" || mnt.Target == "" {
+			continue
+		}
+		switch mnt.Type {
+		case container.MountTypeBind, "":
+			mount := specs.Mount{
+				Type:        string(container.MountTypeBind),
+				Source:      mnt.Source,
+				Destination: mnt.Target,
+			}
+			if mnt.ReadOnly {
+				mount.Options = append(mount.Options, "ro")
+			}
+			result = append(result, mount)
+		}
+	}
+	return result
 }

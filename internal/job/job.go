@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -37,6 +38,7 @@ func New(j *models.Job) Job {
 type atomRunner struct {
 	image   string
 	command []string
+	spec    container.Spec
 	engine  atom.Engine
 }
 
@@ -121,6 +123,7 @@ func (j *job) Run(ctx context.Context) error {
 		runner := &atomRunner{
 			image:   modelAtom.Image,
 			command: modelAtom.Cmd(),
+			spec:    modelAtom.ContainerSpec(),
 		}
 
 		log.Info("evaluating task atom", "job_id", j.id, "task_id", t.ID, "engine", modelAtom.Engine, "atom_id", modelAtom.ID)
@@ -275,6 +278,7 @@ func (j *job) Run(ctx context.Context) error {
 			Name:    taskID.String(),
 			Image:   runner.image,
 			Command: runner.command,
+			Spec:    runner.spec,
 		})
 		if err != nil {
 			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {

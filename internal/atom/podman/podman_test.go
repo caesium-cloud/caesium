@@ -55,7 +55,7 @@ func (m *mockPodmanBackend) ContainerList(filters map[string][]string, all bool)
 }
 
 func (m *mockPodmanBackend) ContainerCreate(spec *specgen.SpecGenerator) (entities.ContainerCreateResponse, error) {
-	args := m.Called(spec.Name)
+	args := m.Called(spec)
 
 	switch spec.Name {
 	case "fail":

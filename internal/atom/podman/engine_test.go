@@ -6,7 +6,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 )
 
 // func (s *PodmanTestSuite) TestNewEngine() {
@@ -103,7 +106,7 @@ func (s *PodmanTestSuite) TestCreate() {
 		On("ImagePull", testImage).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
-		On("ContainerCreate", testContainerName).
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
 		On("ContainerStart", testAtomID).
@@ -119,6 +122,50 @@ func (s *PodmanTestSuite) TestCreate() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+func (s *PodmanTestSuite) TestCreateAppliesSpec() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			Env:     map[string]string{"FOO": "bar"},
+			WorkDir: "/app",
+			Mounts: []container.Mount{{
+				Type:   container.MountTypeBind,
+				Source: "/host",
+				Target: "/data",
+			}},
+		},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImagePull", req.Image).
+		Return()
+
+	specMatcher := mock.MatchedBy(func(spec *specgen.SpecGenerator) bool {
+		return spec.WorkDir == "/app" &&
+			len(spec.Env) == 1 &&
+			spec.Env["FOO"] == "bar" &&
+			len(spec.Mounts) == 1 &&
+			spec.Mounts[0].Source == "/host" &&
+			spec.Mounts[0].Destination == "/data"
+	})
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", specMatcher).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestCreateError() {
 	req := &atom.EngineCreateRequest{
 		Name:    "fail",
@@ -130,7 +177,7 @@ func (s *PodmanTestSuite) TestCreateError() {
 		On("ImagePull", req.Image).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
-		On("ContainerCreate", req.Name).
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
 		Return(fmt.Errorf("invalid container image"))
 
 	c, err := s.engine.Create(req)
@@ -166,7 +213,7 @@ func (s *PodmanTestSuite) TestCreateStartError() {
 		On("ImagePull", req.Image).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
-		On("ContainerCreate", req.Name).
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
 		On("ContainerStart", req.Name).

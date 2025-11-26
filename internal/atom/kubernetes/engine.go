@@ -6,8 +6,11 @@ import (
 	"io"
 	"os/user"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
@@ -98,6 +101,9 @@ func (e *kubernetesEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error
 // Create a Caesium Kubernetes pod. Currently every pod that
 // Caesium creates has exactly one pod.
 func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	volumeMounts, volumes := convertKubernetesMounts(req.Name, req.Spec.Mounts)
+	envVars := convertEnvVars(req.Spec.Env)
+
 	spec := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf("%s-%s", req.Name, uuid.New()),
@@ -110,9 +116,13 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 					Name:            req.Name,
 					Image:           req.Image,
 					Command:         req.Command,
+					Env:             envVars,
+					WorkingDir:      req.Spec.WorkDir,
+					VolumeMounts:    volumeMounts,
 					ImagePullPolicy: v1.PullAlways,
 				},
 			},
+			Volumes:       volumes,
 			RestartPolicy: v1.RestartPolicyNever,
 		},
 	}
@@ -166,4 +176,55 @@ func (e *kubernetesEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, err
 	}
 
 	return logs.Stream(e.ctx)
+}
+
+func convertEnvVars(env map[string]string) []v1.EnvVar {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	vars := make([]v1.EnvVar, 0, len(keys))
+	for _, k := range keys {
+		vars = append(vars, v1.EnvVar{Name: k, Value: env[k]})
+	}
+	return vars
+}
+
+func convertKubernetesMounts(baseName string, mounts []container.Mount) ([]v1.VolumeMount, []v1.Volume) {
+	if len(mounts) == 0 {
+		return nil, nil
+	}
+	volumeMounts := make([]v1.VolumeMount, 0, len(mounts))
+	volumes := make([]v1.Volume, 0, len(mounts))
+	for idx, m := range mounts {
+		if m.Source == "" || m.Target == "" {
+			continue
+		}
+		name := sanitizeVolumeName(fmt.Sprintf("%s-mnt-%d", baseName, idx))
+		volumeMounts = append(volumeMounts, v1.VolumeMount{
+			Name:      name,
+			MountPath: m.Target,
+			ReadOnly:  m.ReadOnly,
+		})
+		volumes = append(volumes, v1.Volume{
+			Name: name,
+			VolumeSource: v1.VolumeSource{
+				HostPath: &v1.HostPathVolumeSource{Path: m.Source},
+			},
+		})
+	}
+	return volumeMounts, volumes
+}
+
+func sanitizeVolumeName(value string) string {
+	value = strings.ToLower(value)
+	value = strings.ReplaceAll(value, "_", "-")
+	if len(value) > 63 {
+		return value[:63]
+	}
+	return value
 }

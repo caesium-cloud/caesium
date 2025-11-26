@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -68,13 +71,52 @@ func (s *KubernetesTestSuite) TestCreate() {
 	}
 
 	s.engine.backend.(*mockKubernetesBackend).
-		On("Create").
+		On("Create", mock.AnythingOfType("*v1.Pod")).
 		Return()
 
 	c, err := s.engine.Create(req)
 	assert.Nil(s.T(), err)
 	assert.NotNil(s.T(), c)
 	assert.True(s.T(), strings.HasPrefix(c.ID(), testAtomID))
+	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+}
+
+func (s *KubernetesTestSuite) TestCreateAppliesSpec() {
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test"},
+		Spec: container.Spec{
+			Env:     map[string]string{"FOO": "bar"},
+			WorkDir: "/app",
+			Mounts: []container.Mount{{
+				Type:   container.MountTypeBind,
+				Source: "/host",
+				Target: "/data",
+			}},
+		},
+	}
+
+	podMatcher := mock.MatchedBy(func(pod *v1.Pod) bool {
+		c := pod.Spec.Containers[0]
+		if c.WorkingDir != "/app" || len(c.Env) != 1 || c.Env[0].Name != "FOO" || c.Env[0].Value != "bar" {
+			return false
+		}
+		if len(c.VolumeMounts) != 1 || c.VolumeMounts[0].MountPath != "/data" {
+			return false
+		}
+		if len(pod.Spec.Volumes) != 1 || pod.Spec.Volumes[0].HostPath == nil || pod.Spec.Volumes[0].HostPath.Path != "/host" {
+			return false
+		}
+		return true
+	})
+
+	s.engine.backend.(*mockKubernetesBackend).
+		On("Create", podMatcher).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 
@@ -86,7 +128,7 @@ func (s *KubernetesTestSuite) TestCreateError() {
 	}
 
 	s.engine.backend.(*mockKubernetesBackend).
-		On("Create").
+		On("Create", mock.AnythingOfType("*v1.Pod")).
 		Return(fmt.Errorf("invalid pod name"))
 
 	c, err := s.engine.Create(req)

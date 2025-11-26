@@ -64,6 +64,7 @@ func Post(c echo.Context) error {
 			Engine:  t.Atom.Engine,
 			Image:   t.Atom.Image,
 			Command: t.Atom.Command,
+			Spec:    t.Atom.Spec,
 		})
 		if err != nil {
 			log.Error("failed to create atom", "error", err)

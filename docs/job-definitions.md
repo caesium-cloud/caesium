@@ -118,6 +118,7 @@ steps:
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - `callbacks.configuration` is stored as JSON and surfaced to callback handlers unchanged.
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
+- Steps can set container options directly on the manifest via `env`, `workdir`, and `mounts`. Environment values are passed to every runtime, while bind mounts map host paths (`source`) into the container at `target` (set `readOnly: true` when needed). These fields are optional and default to the runtime image configuration.
 
 ## Git-Based Synchronisation (Phase 2)
 
