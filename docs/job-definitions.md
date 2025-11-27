@@ -25,14 +25,14 @@ trigger:
     timezone: "UTC"
 steps:
   - name: extract
-    image: ghcr.io/yourorg/extract:2.0
-    command: ["extract"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo extracting data"]
   - name: transform
-    image: ghcr.io/yourorg/transform:1.7
-    command: ["transform"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo transforming data"]
   - name: load
-    image: ghcr.io/yourorg/load:0.9
-    command: ["load"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo loading data"]
 ```
 
 ## Explicit DAG with Callbacks
@@ -57,16 +57,16 @@ callbacks:
 steps:
   - name: list
     engine: docker
-    image: ghcr.io/yourorg/s3ls:1.2
-    command: ["s3ls", "s3://demo/csv/*.csv", "--out", "/out/files.json"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo listing s3://demo/csv/*.csv > /out/files.json"]
   - name: convert
     engine: docker
-    image: ghcr.io/yourorg/csv2pq:0.5
-    command: ["csv2pq", "--in", "/in/files.json", "--out", "/out/manifest.json"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo converting /in/files.json > /out/manifest.json"]
   - name: publish
     engine: docker
-    image: ghcr.io/yourorg/uploader:0.3
-    command: ["upload", "--manifest", "/out/manifest.json", "--dest", "s3://demo/parquet/"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo publishing /out/manifest.json to s3://demo/parquet/"]
 ```
 
 ## DAG Branching & Joins
@@ -85,25 +85,25 @@ trigger:
 steps:
   - name: start
     engine: docker
-    image: ghcr.io/yourorg/run:1.0
-    command: ["run"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo run"]
     next:
       - branch-a
       - branch-b
   - name: branch-a
     engine: docker
-    image: ghcr.io/yourorg/task-a:1.0
-    command: ["do-a"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo task a"]
     dependsOn: start
   - name: branch-b
     engine: docker
-    image: ghcr.io/yourorg/task-b:1.0
-    command: ["do-b"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo task b"]
     dependsOn: start
   - name: join
     engine: docker
-    image: ghcr.io/yourorg/join:1.0
-    command: ["finalise"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo join"]
     dependsOn:
       - branch-a
       - branch-b

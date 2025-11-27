@@ -51,6 +51,9 @@ run: build
     docker run --platform {{platform}} \
         -d --name caesium-server \
         --network=host \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
         {{repo}}/{{image}}:{{tag}} start
 
 rm:
@@ -98,6 +101,9 @@ integration-up: build-test
     docker run -d --platform {{platform}} \
         --name {{it_container}} \
         --privileged \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
         -e CAESIUM_LOG_LEVEL=debug \
         {{repo}}/{{image}}:{{tag}}-test start
 

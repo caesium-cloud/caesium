@@ -10,13 +10,14 @@ import (
 
 // Run represents a job execution run.
 type Run struct {
-	ID          string     `json:"id"`
-	JobID       string     `json:"job_id"`
-	Status      string     `json:"status"`
-	StartedAt   time.Time  `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	Error       string     `json:"error"`
-	Tasks       []RunTask  `json:"tasks"`
+	ID          string        `json:"id"`
+	JobID       string        `json:"job_id"`
+	Status      string        `json:"status"`
+	StartedAt   time.Time     `json:"started_at"`
+	CompletedAt *time.Time    `json:"completed_at"`
+	Error       string        `json:"error"`
+	Tasks       []RunTask     `json:"tasks"`
+	Callbacks   []RunCallback `json:"callbacks"`
 }
 
 // RunTask contains per-task execution detail.
@@ -32,6 +33,18 @@ type RunTask struct {
 	StartedAt   *time.Time `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at"`
 	Error       string     `json:"error"`
+	// OutstandingPredecessors captures how many predecessor tasks were incomplete when this task started.
+	OutstandingPredecessors int `json:"outstanding_predecessors,omitempty"`
+}
+
+// RunCallback contains per-callback execution detail.
+type RunCallback struct {
+	ID          string     `json:"id"`
+	CallbackID  string     `json:"callback_id"`
+	Status      string     `json:"status"`
+	Error       string     `json:"error"`
+	StartedAt   time.Time  `json:"started_at"`
+	CompletedAt *time.Time `json:"completed_at"`
 }
 
 // RunsResponse wraps a list of runs.

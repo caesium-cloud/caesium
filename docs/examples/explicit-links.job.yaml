@@ -11,15 +11,15 @@ trigger:
 steps:
   - name: build
     engine: docker
-    image: ghcr.io/yourorg/build:1.0
-    command: ["make", "build"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo build step"]
     next: "test"
   - name: publish
     engine: docker
-    image: ghcr.io/yourorg/publish:1.0
-    command: ["publish"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo publish step"]
   - name: test
     engine: docker
-    image: ghcr.io/yourorg/test:1.0
-    command: ["make", "test"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo test step"]
     next: "publish"

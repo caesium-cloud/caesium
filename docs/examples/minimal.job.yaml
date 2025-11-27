@@ -10,11 +10,11 @@ trigger:
     timezone: "UTC"
 steps:
   - name: extract
-    image: ghcr.io/yourorg/extract:2.0
-    command: ["extract"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo extracting data"]
   - name: transform
-    image: ghcr.io/yourorg/transform:1.7
-    command: ["transform"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo transforming data"]
   - name: load
-    image: ghcr.io/yourorg/load:0.9
-    command: ["load"]
+    image: alpine:3.20
+    command: ["sh", "-c", "echo loading data"]
