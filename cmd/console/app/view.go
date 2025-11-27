@@ -14,7 +14,6 @@ import (
 var (
 	barStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1)
 	boxStyle     = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-	activeBox    = boxStyle.BorderForeground(lipgloss.Color("63"))
 	tabActive    = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57")).Bold(true)
 	tabInactive  = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("240"))
 	sectionNames = map[section]string{
@@ -32,7 +31,7 @@ func (m Model) View() string {
 	footerKeys := "[1/2/3] switch  [tab] cycle  [r] reload  [q] quit"
 	if m.active == sectionJobs {
 		if m.showDetail {
-			footerKeys = "[esc/q] back  [←/→] traverse  [t] trigger"
+			footerKeys = "[esc/q] back  [←/→] traverse  [tab/shift+tab] cycle  [↑/↓] scroll  [f] focus path  [t] trigger"
 		} else {
 			footerKeys += "  [enter] detail  [t] trigger"
 		}
@@ -58,14 +57,12 @@ func (m Model) View() string {
 				body = m.renderJobsView()
 			}
 		case sectionTriggers:
-			m.jobs.SetWidth(max(m.viewportWidth-8, 20))
-			body = renderPane(m.triggers, true)
+			body = m.renderTablePane(&m.triggers, true)
 		case sectionAtoms:
-			m.jobs.SetWidth(max(m.viewportWidth-8, 20))
-			body = renderPane(m.atoms, true)
+			body = m.renderTablePane(&m.atoms, true)
 		default:
 			activeTable := m.tableFor(m.active)
-			body = renderPane(activeTable, true)
+			body = m.renderTablePane(&activeTable, true)
 		}
 	}
 
@@ -73,9 +70,7 @@ func (m Model) View() string {
 }
 
 func (m Model) renderJobsView() string {
-	width := max(m.viewportWidth-8, 20)
-	m.jobs.SetWidth(width)
-	return renderPane(m.jobs, true)
+	return m.renderTablePane(&m.jobs, true)
 }
 
 func (m Model) renderJobDetailScreen() string {
@@ -94,6 +89,9 @@ func (m Model) renderJobDetailScreen() string {
 	vm := detail.ViewModel{
 		Job:           m.jobDetail,
 		Graph:         m.graph,
+		GraphLayout:   m.dagLayout,
+		GraphViewport: &m.dagViewport,
+		FocusPath:     m.dagFocusPath,
 		FocusedNode:   m.focusedNodeID,
 		FocusedAtom:   focusedAtom,
 		DetailErr:     m.detailErr,
@@ -112,6 +110,29 @@ func (m Model) renderJobDetailScreen() string {
 	return body
 }
 
+func (m Model) renderTablePane(tbl *table.Model, active bool) string {
+	available := m.viewportWidth
+	if available <= 0 {
+		available = 80
+	}
+
+	border := lipgloss.NewStyle().
+		Border(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240"))
+	if active {
+		border = border.BorderForeground(lipgloss.Color("63"))
+	}
+
+	frame := border.GetHorizontalFrameSize()
+	innerWidth := max(available-frame, 20)
+	tbl.SetWidth(innerWidth)
+
+	content := lipgloss.NewStyle().MaxWidth(innerWidth).Render(tbl.View())
+	outerWidth := max(available, frame+innerWidth)
+
+	return border.Width(outerWidth).MaxWidth(outerWidth).Render(content)
+}
+
 func (m Model) nodeLabeler() dag.LabelFunc {
 	atoms := m.atomIndex
 	return func(n *dag.Node) string {
@@ -123,16 +144,6 @@ func (m Model) nodeLabeler() dag.LabelFunc {
 		}
 		return shortID(n.ID())
 	}
-}
-
-func renderPane(tbl table.Model, active bool) string {
-	content := tbl.View()
-	style := boxStyle
-	if active {
-		style = activeBox
-	}
-
-	return style.Render(content)
 }
 
 func (m Model) actionStatusText() string {
