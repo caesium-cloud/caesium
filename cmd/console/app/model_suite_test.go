@@ -129,6 +129,7 @@ func (s *ModelSuite) TestResetDetailViewResetsFields() {
 	model.resetDetailView(errors.New("detail"), errors.New("dag"), true)
 	s.Nil(model.graph)
 	s.Empty(model.focusedNodeID)
+	s.Empty(model.dagLayout)
 	s.NotNil(model.detailErr)
 	s.NotNil(model.dagErr)
 	s.Empty(model.atomDetails)
@@ -144,6 +145,27 @@ func (s *ModelSuite) TestResetDetailViewKeepsDetailVisibleWhenRequested() {
 	model.resetDetailView(nil, nil, false)
 	s.True(model.showDetail)
 	s.True(model.detailLoading)
+}
+
+func (s *ModelSuite) TestCycleFocusedNodeTraversesLevels() {
+	model := s.newReadyModel()
+	graph, err := dag.FromJobDAG(&api.JobDAG{
+		Nodes: []api.JobDAGNode{
+			{ID: "task-a", Successors: []string{"task-b"}},
+			{ID: "task-b"},
+		},
+	})
+	s.Require().NoError(err)
+	model.graph = graph
+
+	model.cycleFocusedNode(1)
+	s.Equal("task-a", model.focusedNodeID)
+
+	model.cycleFocusedNode(1)
+	s.Equal("task-b", model.focusedNodeID)
+
+	model.cycleFocusedNode(-1)
+	s.Equal("task-a", model.focusedNodeID)
 }
 
 func (s *ModelSuite) TestClearTriggeringJob() {

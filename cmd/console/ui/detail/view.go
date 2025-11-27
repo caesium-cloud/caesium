@@ -8,12 +8,14 @@ import (
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
+	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 )
 
 var (
-	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("229"))
-	sectionTitleStyle = lipgloss.NewStyle().Bold(true).MarginTop(1)
+	accentColor       = lipgloss.Color("99")
+	headerStyle       = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	sectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor).MarginTop(1)
 	labelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	valueStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("253"))
 	errorStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
@@ -25,6 +27,9 @@ var (
 type ViewModel struct {
 	Job           *api.JobDetail
 	Graph         *dag.Graph
+	GraphLayout   string
+	GraphViewport *viewport.Model
+	FocusPath     bool
 	FocusedNode   string
 	FocusedAtom   *api.Atom
 	DetailErr     error
@@ -59,7 +64,7 @@ func Render(vm ViewModel) string {
 		renderHeader(vm.Job),
 		renderMetadata(vm.Job),
 		renderRunSection(vm.Job),
-		renderGraph(vm.Graph, vm.GraphErr, vm.FocusedNode, vm.Labeler),
+		renderGraph(vm.Graph, vm.GraphErr, vm.GraphLayout, vm.GraphViewport, vm.FocusPath, vm.Labeler),
 		renderNode(vm.Graph, vm.FocusedNode, vm.Labeler),
 		renderAtom(vm.Graph, vm.FocusedNode, vm.FocusedAtom, vm.AtomErr, vm.AtomLoading, vm.AtomLookup),
 	}
@@ -74,6 +79,43 @@ func Render(vm ViewModel) string {
 	}
 
 	return strings.TrimSpace(strings.Join(output, "\n"))
+}
+
+func renderGraph(graph *dag.Graph, graphErr error, layout string, vp *viewport.Model, focusPath bool, labeler dag.LabelFunc) string {
+	switch {
+	case graphErr != nil:
+		return renderSection("DAG", errorStyle.Render("Failed to load DAG: "+graphErr.Error()))
+	case graph == nil:
+		return renderSection("DAG", placeholderStyle.Render("DAG layout unavailable"))
+	default:
+		view := strings.TrimSpace(layout)
+		if view == "" {
+			view = dag.Render(graph, dag.RenderOptions{
+				FocusedID: "",
+				Labeler:   labeler,
+				FocusPath: focusPath,
+			})
+		}
+		if strings.TrimSpace(view) == "" {
+			return renderSection("DAG", placeholderStyle.Render("No DAG nodes registered for this job"))
+		}
+		if vp != nil && layout != "" {
+			view = vp.View()
+		}
+
+		if meta := graphMeta(focusPath); meta != "" {
+			view = lipgloss.JoinVertical(lipgloss.Left, meta, view)
+		}
+
+		return renderSection("DAG", view)
+	}
+}
+
+func graphMeta(focusPath bool) string {
+	if !focusPath {
+		return ""
+	}
+	return valueStyle.Render("Path focus")
 }
 
 func renderHeader(detail *api.JobDetail) string {
@@ -112,21 +154,6 @@ func renderRunSection(detail *api.JobDetail) string {
 	}
 
 	return renderSection("Latest Run", strings.Join(lines, "\n"))
-}
-
-func renderGraph(graph *dag.Graph, graphErr error, focused string, labeler dag.LabelFunc) string {
-	switch {
-	case graphErr != nil:
-		return renderSection("DAG", errorStyle.Render("Failed to load DAG: "+graphErr.Error()))
-	case graph == nil:
-		return renderSection("DAG", placeholderStyle.Render("DAG layout unavailable"))
-	default:
-		view := dag.Render(graph, focused, labeler)
-		if strings.TrimSpace(view) == "" {
-			return renderSection("DAG", placeholderStyle.Render("No DAG nodes registered for this job"))
-		}
-		return renderSection("DAG", view)
-	}
 }
 
 func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc) string {

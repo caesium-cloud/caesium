@@ -24,18 +24,25 @@ func TestRenderRendersLevels(t *testing.T) {
 		return strings.ToUpper(n.ID())
 	}
 
-	output := Render(graph, "task-b", labeler)
+	output := Render(graph, RenderOptions{
+		FocusedID: "task-b",
+		Labeler:   labeler,
+	})
 	if output == "" {
 		t.Fatal("expected non-empty layout output")
 	}
 
-	if !strings.Contains(output, "TASK-A") || !strings.Contains(output, "↳ TASK-B") {
+	if !strings.Contains(output, "TASK-A") || !strings.Contains(output, "TASK-B") {
 		t.Fatalf("layout missing formatted identifiers: %q", output)
+	}
+
+	if !strings.Contains(output, "▶ TASK-B") {
+		t.Fatalf("expected focused marker arrow in layout: %q", output)
 	}
 }
 
 func TestRenderHandlesNilGraph(t *testing.T) {
-	if got := Render(nil, "task-a", nil); got != "" {
+	if got := Render(nil, RenderOptions{FocusedID: "task-a"}); got != "" {
 		t.Fatalf("expected empty layout for nil graph, got %q", got)
 	}
 }

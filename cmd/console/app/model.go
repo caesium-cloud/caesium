@@ -7,6 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -45,10 +46,14 @@ type Model struct {
 	triggers        table.Model
 	atoms           table.Model
 	viewportWidth   int
+	viewportHeight  int
 	selectedJobID   string
 	jobDetail       *api.JobDetail
 	graph           *dag.Graph
 	focusedNodeID   string
+	dagLayout       string
+	dagFocusPath    bool
+	dagViewport     viewport.Model
 	dagErr          error
 	detailErr       error
 	atomDetails     map[string]*api.Atom
@@ -67,6 +72,8 @@ func New(client *api.Client) Model {
 	sp := spinner.New()
 	sp.Spinner = spinner.Dot
 
+	dagViewport := viewport.New(60, 12)
+
 	jobs := createTable(jobColumnTitles, []int{20, 24, 24, 20, 20}, true)
 	triggers := createTable(triggerColumnTitles, []int{20, 12, 20}, false)
 	atoms := createTable(atomColumnTitles, []int{24, 12, 20}, false)
@@ -79,6 +86,7 @@ func New(client *api.Client) Model {
 		jobs:        jobs,
 		triggers:    triggers,
 		atoms:       atoms,
+		dagViewport: dagViewport,
 		atomDetails: make(map[string]*api.Atom),
 		atomIndex:   make(map[string]api.Atom),
 	}
@@ -128,9 +136,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "3":
 			m = m.activate(sectionAtoms)
 		case "tab":
-			m = m.activate(m.active.next())
+			if m.showDetail {
+				if cmd := m.cycleFocusedNode(1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			} else {
+				m = m.activate(m.active.next())
+			}
 		case "shift+tab":
-			m = m.activate(m.active.prev())
+			if m.showDetail {
+				if cmd := m.cycleFocusedNode(-1); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
+			} else {
+				m = m.activate(m.active.prev())
+			}
 		case "right", "l":
 			if m.showDetail {
 				if id := m.nextSuccessor(); id != "" {
@@ -146,6 +166,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						cmds = append(cmds, cmd)
 					}
 				}
+			}
+		case "up", "k":
+			if m.showDetail {
+				m.dagViewport.ScrollUp(1)
+			}
+		case "down", "j":
+			if m.showDetail {
+				m.dagViewport.ScrollDown(1)
+			}
+		case "f":
+			if m.showDetail {
+				m.dagFocusPath = !m.dagFocusPath
+				m.refreshDAGLayout(false)
 			}
 		case "enter":
 			if m.active == sectionJobs && m.state == statusReady {
@@ -168,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		height := max(5, msg.Height-7)
 		width := max(20, msg.Width-8)
 		m.viewportWidth = msg.Width
+		m.viewportHeight = msg.Height
 		m.jobs.SetHeight(height)
 		m.triggers.SetHeight(height)
 		m.atoms.SetHeight(height)
@@ -175,6 +209,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.triggers.SetWidth(width)
 		m.atoms.SetWidth(width)
 		m.resizeColumns(max(10, width-2))
+		m.resizeDAGViewport()
+		if m.graph != nil {
+			m.refreshDAGLayout(false)
+		}
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
@@ -225,6 +263,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.graph = nil
 			m.focusedNodeID = ""
 		}
+		m.refreshDAGLayout(true)
 	case jobDetailErrMsg:
 		m.resetDetailView(msg.err, msg.err, true)
 	case atomDetailLoadedMsg:
@@ -343,6 +382,8 @@ func (m Model) currentJobAlias() string {
 func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
 	m.graph = nil
 	m.focusedNodeID = ""
+	m.dagLayout = ""
+	m.dagViewport.SetContent("")
 	m.detailErr = detailErr
 	m.dagErr = dagErr
 	m.atomDetails = make(map[string]*api.Atom)
@@ -428,12 +469,14 @@ func (m Model) firstPredecessor() string {
 func (m *Model) setFocusedNode(id string) tea.Cmd {
 	if m.graph == nil || id == "" {
 		m.focusedNodeID = ""
+		m.refreshDAGLayout(false)
 		return nil
 	}
 	if _, ok := m.graph.Node(id); !ok {
 		return nil
 	}
 	m.focusedNodeID = id
+	m.refreshDAGLayout(false)
 	return m.preloadAtomMetadata(id)
 }
 
@@ -469,4 +512,86 @@ func (m *Model) preloadAtomMetadata(id string) tea.Cmd {
 	m.atomErr = nil
 	m.loadingAtomID = atomID
 	return fetchAtomDetail(m.client, atomID)
+}
+
+func (m *Model) refreshDAGLayout(resetScroll bool) {
+	if m.graph == nil {
+		m.dagLayout = ""
+		m.dagViewport.SetContent("")
+		if resetScroll {
+			m.dagViewport.GotoTop()
+		}
+		return
+	}
+
+	opts := dag.RenderOptions{
+		FocusedID: m.focusedNodeID,
+		Labeler:   m.nodeLabeler(),
+		FocusPath: m.dagFocusPath,
+		MaxWidth:  m.dagViewport.Width,
+	}
+
+	layout := dag.Render(m.graph, opts)
+	m.dagLayout = layout
+	m.dagViewport.SetContent(layout)
+	if resetScroll {
+		m.dagViewport.GotoTop()
+	}
+}
+
+func (m *Model) resizeDAGViewport() {
+	width := m.dagViewport.Width
+	if m.viewportWidth > 0 {
+		width = max(m.viewportWidth-12, 30)
+	}
+	height := m.dagViewport.Height
+	if m.viewportHeight > 0 {
+		height = max(8, m.viewportHeight/3)
+	}
+	m.dagViewport.Width = width
+	m.dagViewport.Height = height
+	m.dagViewport.SetContent(m.dagLayout)
+}
+
+func (m Model) orderedNodeIDs() []string {
+	if m.graph == nil {
+		return nil
+	}
+	levels := m.graph.Levels()
+	count := 0
+	for _, level := range levels {
+		count += len(level)
+	}
+	ids := make([]string, 0, count)
+	for _, level := range levels {
+		for _, node := range level {
+			if node != nil {
+				ids = append(ids, node.ID())
+			}
+		}
+	}
+	return ids
+}
+
+func (m *Model) cycleFocusedNode(delta int) tea.Cmd {
+	ids := m.orderedNodeIDs()
+	if len(ids) == 0 {
+		return nil
+	}
+	if m.focusedNodeID == "" {
+		if delta < 0 {
+			return m.setFocusedNode(ids[len(ids)-1])
+		}
+		return m.setFocusedNode(ids[0])
+	}
+
+	index := 0
+	for i, id := range ids {
+		if id == m.focusedNodeID {
+			index = i
+			break
+		}
+	}
+	index = (index + delta + len(ids)) % len(ids)
+	return m.setFocusedNode(ids[index])
 }
