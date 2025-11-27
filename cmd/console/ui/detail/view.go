@@ -168,7 +168,7 @@ func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc) string 
 
 	label := nodeLabel(node, labeler)
 	lines := []string{
-		fmt.Sprintf("Node: %s", valueStyle.Render(label)),
+		fmt.Sprintf("ID: %s", valueStyle.Render(label)),
 	}
 
 	successors := node.Successors()
@@ -220,7 +220,7 @@ func renderAtom(graph *dag.Graph, focused string, atom *api.Atom, atomErr error,
 	}
 
 	lines := []string{
-		fmt.Sprintf("Atom ID: %s", valueStyle.Render(atom.ID)),
+		fmt.Sprintf("ID: %s", valueStyle.Render(atom.ID)),
 		fmt.Sprintf("Engine: %s", valueStyle.Render(atom.Engine)),
 		fmt.Sprintf("Image: %s", valueStyle.Render(atom.Image)),
 	}

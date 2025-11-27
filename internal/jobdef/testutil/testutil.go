@@ -30,14 +30,14 @@ callbacks:
       url: "https://example"
 steps:
   - name: list
-    image: ghcr.io/yourorg/s3ls:1.2
-    command: ["s3ls"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo list"]
   - name: convert
-    image: ghcr.io/yourorg/csv2pq:0.5
-    command: ["csv2pq"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo convert"]
   - name: publish
-    image: ghcr.io/yourorg/uploader:0.3
-    command: ["upload"]
+    image: busybox:1.36
+    command: ["sh", "-c", "echo publish"]
 `
 
 // OpenTestDB returns an in-memory sqlite DB with migrations applied.
