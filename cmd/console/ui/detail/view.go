@@ -32,12 +32,14 @@ type ViewModel struct {
 	FocusPath     bool
 	FocusedNode   string
 	FocusedAtom   *api.Atom
+	TaskStatus    map[string]api.RunTask
 	DetailErr     error
 	DetailPending bool
 	GraphErr      error
 	AtomErr       error
 	AtomLoading   bool
 	AtomLookup    map[string]api.Atom
+	Spinner       string
 	Labeler       dag.LabelFunc
 	ViewportWidth int
 }
@@ -63,9 +65,9 @@ func Render(vm ViewModel) string {
 	sections := []string{
 		renderHeader(vm.Job),
 		renderMetadata(vm.Job),
-		renderRunSection(vm.Job),
+		renderRunSection(vm.Job, vm.Spinner),
 		renderGraph(vm.Graph, vm.GraphErr, vm.GraphLayout, vm.GraphViewport, vm.FocusPath, vm.Labeler),
-		renderNode(vm.Graph, vm.FocusedNode, vm.Labeler),
+		renderNode(vm.Graph, vm.FocusedNode, vm.Labeler, vm.TaskStatus, vm.Spinner),
 		renderAtom(vm.Graph, vm.FocusedNode, vm.FocusedAtom, vm.AtomErr, vm.AtomLoading, vm.AtomLookup),
 	}
 
@@ -136,14 +138,15 @@ func renderMetadata(detail *api.JobDetail) string {
 	return renderSection("Metadata", strings.Join(items, "\n"))
 }
 
-func renderRunSection(detail *api.JobDetail) string {
-	if detail.LatestRun == nil {
+func renderRunSection(detail *api.JobDetail, spinnerFrame string) string {
+	if detail == nil || detail.LatestRun == nil {
 		return renderSection("Latest Run", placeholderStyle.Render("No runs recorded"))
 	}
 
 	run := detail.LatestRun
+	status := statusBadge(run.Status, spinnerFrame, false)
 	lines := []string{
-		fmt.Sprintf("%s  •  Status: %s", labelStyle.Render(run.ID), valueStyle.Render(strings.ToUpper(run.Status))),
+		fmt.Sprintf("%s  •  Status: %s", labelStyle.Render(run.ID), valueStyle.Render(status)),
 		fmt.Sprintf("Started: %s", run.StartedAt.Format(time.RFC3339)),
 	}
 	if run.CompletedAt != nil {
@@ -152,11 +155,14 @@ func renderRunSection(detail *api.JobDetail) string {
 	if strings.TrimSpace(run.Error) != "" {
 		lines = append(lines, errorStyle.Render(run.Error))
 	}
+	if summary := taskSummary(run.Tasks, spinnerFrame); summary != "" {
+		lines = append(lines, summary)
+	}
 
 	return renderSection("Latest Run", strings.Join(lines, "\n"))
 }
 
-func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc) string {
+func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc, tasks map[string]api.RunTask, spinnerFrame string) string {
 	if graph == nil || focused == "" {
 		return renderSection("Node", placeholderStyle.Render("Navigate the DAG to inspect node metadata."))
 	}
@@ -169,6 +175,13 @@ func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc) string 
 	label := nodeLabel(node, labeler)
 	lines := []string{
 		fmt.Sprintf("ID: %s", valueStyle.Render(label)),
+	}
+
+	if task, ok := tasks[node.ID()]; ok {
+		taskStatus := statusBadge(task.Status, spinnerFrame, true)
+		if strings.TrimSpace(taskStatus) != "" {
+			lines = append(lines, fmt.Sprintf("Status: %s", valueStyle.Render(taskStatus)))
+		}
 	}
 
 	successors := node.Successors()
@@ -262,6 +275,79 @@ func formatKVPairs(label string, values map[string]string) string {
 	}
 
 	return fmt.Sprintf("%s: %s", labelStyle.Render(label), valueStyle.Render(strings.Join(parts, ", ")))
+}
+
+func statusBadge(status, spinnerFrame string, compact bool) string {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	label := titleCase(normalized)
+	switch normalized {
+	case "running", "pending":
+		if spinnerFrame != "" {
+			return fmt.Sprintf("%s %s", spinnerFrame, label)
+		}
+		return label
+	case "succeeded":
+		if compact {
+			return "✓"
+		}
+		return "✓ Succeeded"
+	case "failed":
+		if compact {
+			return "✗"
+		}
+		return "✗ Failed"
+	default:
+		if label == "" {
+			return "-"
+		}
+		if compact {
+			return label
+		}
+		return strings.ToUpper(status)
+	}
+}
+
+func taskSummary(tasks []api.RunTask, spinnerFrame string) string {
+	if len(tasks) == 0 {
+		return ""
+	}
+	var running, pending int
+	for _, task := range tasks {
+		switch strings.ToLower(strings.TrimSpace(task.Status)) {
+		case "running":
+			running++
+		case "pending":
+			pending++
+		}
+	}
+	if running == 0 && pending == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, 2)
+	if running > 0 {
+		label := fmt.Sprintf("%d running", running)
+		if spinnerFrame != "" {
+			label = fmt.Sprintf("%s %s", spinnerFrame, label)
+		}
+		parts = append(parts, label)
+	}
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", pending))
+	}
+
+	return fmt.Sprintf("Tasks: %s", strings.Join(parts, "  "))
+}
+
+func titleCase(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) == 1 {
+		return strings.ToUpper(value)
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func nodeLabel(node *dag.Node, labeler dag.LabelFunc) string {

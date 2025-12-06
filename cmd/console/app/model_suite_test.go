@@ -93,7 +93,7 @@ func (s *ModelSuite) TestEnterActivatesDetailView() {
 
 func (s *ModelSuite) TestEnterTriggersDetailFetchWhenMissing() {
 	model := s.newReadyModel()
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "job-1", ""}})
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
 
 	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	s.NotNil(cmd)
@@ -186,7 +186,7 @@ func (s *ModelSuite) TestSetActionStatus() {
 
 func (s *ModelSuite) TestTriggerSelectedJobSetsState() {
 	model := s.newReadyModel()
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "job-1", ""}})
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
 	cmd := model.triggerSelectedJob()
 	s.NotNil(cmd)
 	s.Equal("job-1", model.triggeringJobID)
@@ -195,7 +195,7 @@ func (s *ModelSuite) TestTriggerSelectedJobSetsState() {
 
 func (s *ModelSuite) TestTriggerCommandsUpdateActionStatus() {
 	model := s.newReadyModel()
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "job-1", ""}})
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
 	model.triggeringJobID = "job-1"
 
 	res, _ := model.Update(jobTriggeredMsg{jobID: "job-1", run: &api.Run{ID: "abcdefghijk"}})
