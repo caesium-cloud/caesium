@@ -1,10 +1,13 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -77,6 +80,48 @@ func (s *RunsService) Get(ctx context.Context, jobID, runID string) (*Run, error
 	}
 
 	return &payload, nil
+}
+
+// Logs streams task logs for a given run and task.
+func (s *RunsService) Logs(ctx context.Context, jobID, runID, taskID string, since time.Time) (io.ReadCloser, error) {
+	if jobID == "" || runID == "" || taskID == "" {
+		return nil, fmt.Errorf("job id, run id, and task id are required")
+	}
+
+	params := url.Values{}
+	params.Set("task_id", taskID)
+	if !since.IsZero() {
+		params.Set("since", since.Format(time.RFC3339Nano))
+	}
+	endpoint := s.client.resolve(fmt.Sprintf("/v1/jobs/%s/runs/%s/logs", jobID, runID), params.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.client.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			_ = resp.Body.Close()
+			return io.NopCloser(bytes.NewReader(nil)), nil
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			msg = resp.Status
+		} else {
+			msg = fmt.Sprintf("%s: %s", resp.Status, msg)
+		}
+		return nil, fmt.Errorf("stream logs: %s", msg)
+	}
+
+	return resp.Body, nil
 }
 
 // Trigger manually starts a run for the specified job.

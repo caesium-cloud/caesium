@@ -29,11 +29,12 @@ func (s *TableSuite) TestJobsToRowsIncludesMetadata() {
 		},
 	}}
 
-	rows := jobsToRows(jobs)
+	rows := jobsToRows(jobs, nil, "")
 	s.Require().Len(rows, 1)
 	row := rows[0]
-	s.Equal("env=prod, team=data", row[1])
-	s.Equal("owner=ops", row[2])
+	s.Equal("-", row[1])
+	s.Equal("env=prod, team=data", row[2])
+	s.Equal("owner=ops", row[3])
 }
 
 func (s *TableSuite) TestFormatStringMapEmpty() {

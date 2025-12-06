@@ -2,7 +2,10 @@ package app
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/url"
+	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,6 +47,16 @@ func fetchJobDetail(client *api.Client, jobID string, includeDAG bool) tea.Cmd {
 	}
 }
 
+func fetchLatestRun(client *api.Client, jobID string) tea.Cmd {
+	return func() tea.Msg {
+		detail, err := client.Jobs().Detail(context.Background(), jobID, nil)
+		if err != nil {
+			return jobStatusErrMsg{jobID: jobID, err: err}
+		}
+		return jobStatusLoadedMsg{jobID: jobID, run: detail.LatestRun}
+	}
+}
+
 func fetchData(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		params := url.Values{}
@@ -80,6 +93,31 @@ type jobDetailErrMsg struct {
 	err error
 }
 
+type jobStatusLoadedMsg struct {
+	jobID string
+	run   *api.Run
+}
+
+type jobStatusErrMsg struct {
+	jobID string
+	err   error
+}
+
+type logsOpenedMsg struct {
+	ctx    context.Context
+	reader io.ReadCloser
+}
+
+type logChunkMsg struct {
+	ctx    context.Context
+	reader io.ReadCloser
+	data   string
+}
+
+type logsClosedMsg struct {
+	err error
+}
+
 type atomDetailLoadedMsg struct {
 	id   string
 	atom *api.Atom
@@ -107,3 +145,43 @@ type dataLoadedMsg struct {
 }
 
 type errMsg error
+
+func openLogStream(ctx context.Context, client *api.Client, jobID, runID, taskID string, since time.Time) tea.Cmd {
+	return func() tea.Msg {
+		reader, err := client.Runs().Logs(ctx, jobID, runID, taskID, since)
+		if err != nil {
+			return logsClosedMsg{err: err}
+		}
+		return logsOpenedMsg{ctx: ctx, reader: reader}
+	}
+}
+
+func readLogChunk(ctx context.Context, reader io.ReadCloser) tea.Cmd {
+	return func() tea.Msg {
+		if reader == nil {
+			return logsClosedMsg{}
+		}
+
+		select {
+		case <-ctx.Done():
+			return logsClosedMsg{}
+		default:
+		}
+
+		buf := make([]byte, 2048)
+		n, err := reader.Read(buf)
+
+		if n > 0 {
+			return logChunkMsg{ctx: ctx, reader: reader, data: string(buf[:n])}
+		}
+
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return logsClosedMsg{}
+			}
+			return logsClosedMsg{err: err}
+		}
+
+		return logsClosedMsg{}
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -43,6 +44,18 @@ func Logs(c echo.Context) error {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
+	var since time.Time
+	if sinceParam := c.QueryParam("since"); sinceParam != "" {
+		since, err = time.Parse(time.RFC3339Nano, sinceParam)
+		if err != nil {
+			if parsed, parseErr := time.Parse(time.RFC3339, sinceParam); parseErr == nil {
+				since = parsed
+			} else {
+				return echo.ErrBadRequest.SetInternal(err)
+			}
+		}
+	}
+
 	runEntry, err := runsvc.New(ctx).Get(runID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -76,9 +89,13 @@ func Logs(c echo.Context) error {
 		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	reader, err := engine.Logs(&atom.EngineLogsRequest{ID: taskEntry.RuntimeID})
+	reader, err := engine.Logs(&atom.EngineLogsRequest{ID: taskEntry.RuntimeID, Since: since})
 	if err != nil {
-		return echo.ErrInternalServerError.SetInternal(err)
+		status := http.StatusInternalServerError
+		if runEntry.CompletedAt != nil {
+			status = http.StatusGone
+		}
+		return echo.NewHTTPError(status, "log stream unavailable").SetInternal(err)
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {

@@ -12,19 +12,21 @@ import (
 )
 
 var (
-	jobColumnTitles      = []string{"Alias", "Labels", "Annotations", "ID", "Created"}
-	jobColumnWeights     = []int{3, 4, 4, 3, 3}
+	jobColumnTitles      = []string{"Alias", "Status", "Labels", "Annotations", "ID", "Created"}
+	jobColumnWeights     = []int{3, 2, 4, 4, 3, 3}
 	triggerColumnTitles  = []string{"Alias", "Type", "ID"}
 	triggerColumnWeights = []int{3, 2, 4}
 	atomColumnTitles     = []string{"Image", "Engine", "ID"}
 	atomColumnWeights    = []int{4, 2, 4}
 )
 
-func jobsToRows(jobs []api.Job) []table.Row {
+func jobsToRows(jobs []api.Job, statuses map[string]*api.Run, spinnerFrame string) []table.Row {
 	rows := make([]table.Row, len(jobs))
 	for i, job := range jobs {
+		status := formatRunStatus(statuses[job.ID], spinnerFrame)
 		rows[i] = table.Row{
 			job.Alias,
+			status,
 			formatStringMap(job.Labels),
 			formatStringMap(job.Annotations),
 			job.ID,
@@ -32,6 +34,39 @@ func jobsToRows(jobs []api.Job) []table.Row {
 		}
 	}
 	return rows
+}
+
+func formatRunStatus(run *api.Run, spinnerFrame string) string {
+	if run == nil {
+		return "-"
+	}
+
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	label := titleCase(status)
+	switch status {
+	case "running", "pending":
+		if spinnerFrame != "" {
+			return fmt.Sprintf("%s %s", spinnerFrame, label)
+		}
+		return label
+	case "succeeded":
+		return "✓ Succeeded"
+	case "failed":
+		return "✗ Failed"
+	default:
+		return strings.ToUpper(run.Status)
+	}
+}
+
+func titleCase(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if len(value) == 1 {
+		return strings.ToUpper(value)
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func formatStringMap(values map[string]string) string {
@@ -67,20 +102,6 @@ func atomsToRows(atoms []api.Atom) []table.Row {
 		rows[i] = table.Row{atom.Image, atom.Engine, atom.ID}
 	}
 	return rows
-}
-
-func (m *Model) resizeColumns(width int) {
-	if width <= 0 {
-		return
-	}
-	jobsCols := buildColumns(jobColumnTitles, distributeWidths(width, jobColumnWeights))
-	m.jobs.SetColumns(jobsCols)
-
-	triggerCols := buildColumns(triggerColumnTitles, distributeWidths(width, triggerColumnWeights))
-	m.triggers.SetColumns(triggerCols)
-
-	atomCols := buildColumns(atomColumnTitles, distributeWidths(width, atomColumnWeights))
-	m.atoms.SetColumns(atomCols)
 }
 
 func createTable(titles []string, widths []int, focused bool) table.Model {
