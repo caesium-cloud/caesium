@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -266,16 +267,16 @@ func (j *job) Run(ctx context.Context) error {
 
 	executed := totalCompleted
 
-	for len(queue) > 0 {
-		taskID := queue[0]
-		queue = queue[1:]
-		delete(inQueue, taskID)
+	type taskResult struct {
+		id  uuid.UUID
+		err error
+	}
 
-		if processed[taskID] {
-			continue
-		}
-
+	runTask := func(taskID uuid.UUID) error {
 		runner := runners[taskID]
+		if runner == nil {
+			return fmt.Errorf("missing runner for task %s", taskID)
+		}
 
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command)
 
@@ -289,12 +290,10 @@ func (j *job) Run(ctx context.Context) error {
 			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
 				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 			}
-			runErr = err
 			return err
 		}
 
 		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			runErr = err
 			return err
 		}
 
@@ -328,29 +327,86 @@ func (j *job) Run(ctx context.Context) error {
 			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
 				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 			}
-			runErr = err
 			return err
 		}
 
 		if err := store.CompleteTask(runID, taskID, string(a.Result())); err != nil {
-			runErr = err
 			return err
 		}
 
-		processed[taskID] = true
-		executed++
+		return nil
+	}
 
-		for _, successor := range adjacency[taskID] {
-			if _, ok := indegree[successor]; !ok {
+	maxParallel := env.Variables().MaxParallelTasks
+	if maxParallel < 1 {
+		maxParallel = 1
+	}
+
+	results := make(chan taskResult)
+	active := 0
+	halt := false
+
+	dispatch := func(taskID uuid.UUID) {
+		active++
+		go func(id uuid.UUID) {
+			results <- taskResult{id: id, err: runTask(id)}
+		}(taskID)
+	}
+
+	for len(queue) > 0 || active > 0 {
+		for !halt && active < maxParallel && len(queue) > 0 {
+			taskID := queue[0]
+			queue = queue[1:]
+			delete(inQueue, taskID)
+
+			if processed[taskID] {
 				continue
 			}
-			if indegree[successor] > 0 {
-				indegree[successor]--
+
+			dispatch(taskID)
+		}
+
+		if active == 0 {
+			break
+		}
+
+		result := <-results
+		active--
+
+		if processed[result.id] {
+			continue
+		}
+
+		processed[result.id] = true
+
+		if result.err != nil {
+			if runErr == nil {
+				runErr = result.err
 			}
-			if indegree[successor] == 0 {
-				push(successor)
+			halt = true
+			queue = queue[:0]
+			continue
+		}
+
+		if !halt {
+			executed++
+
+			for _, successor := range adjacency[result.id] {
+				if _, ok := indegree[successor]; !ok {
+					continue
+				}
+				if indegree[successor] > 0 {
+					indegree[successor]--
+				}
+				if indegree[successor] == 0 {
+					push(successor)
+				}
 			}
 		}
+	}
+
+	if runErr != nil {
+		return runErr
 	}
 
 	if executed != len(tasks) {

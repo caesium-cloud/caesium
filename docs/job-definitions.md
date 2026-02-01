@@ -155,7 +155,7 @@ steps:
 - Use the lint command in CI to gate manifest changes before pushing them to Git sync or applying them directly.
 - Reference manifests live under `docs/examples/`; conformance tests load these files to ensure the documentation stays in sync with the schema.
 
-The CLI surfaces both `caesium job apply` and `caesium job lint`; REST endpoints for automation will follow once the Git sync workflow is battle-tested.
+The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`.
 
 ## Schema Tooling
 

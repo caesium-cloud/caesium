@@ -12,6 +12,7 @@ import (
 type TaskEdge interface {
 	WithDatabase(*gorm.DB) TaskEdge
 	List(*ListRequest) (models.TaskEdges, error)
+	Create(*CreateRequest) (*models.TaskEdge, error)
 }
 
 type taskEdgeService struct {
@@ -78,4 +79,39 @@ func (t *taskEdgeService) List(req *ListRequest) (models.TaskEdges, error) {
 	}
 
 	return edges, q.Find(&edges).Error
+}
+
+type CreateRequest struct {
+	JobID      string `json:"job_id"`
+	FromTaskID string `json:"from_task_id"`
+	ToTaskID   string `json:"to_task_id"`
+}
+
+func (t *taskEdgeService) Create(req *CreateRequest) (*models.TaskEdge, error) {
+	var (
+		id = uuid.New()
+		q  = t.db.WithContext(t.ctx)
+	)
+
+	jobID, err := uuid.Parse(req.JobID)
+	if err != nil {
+		return nil, err
+	}
+	fromID, err := uuid.Parse(req.FromTaskID)
+	if err != nil {
+		return nil, err
+	}
+	toID, err := uuid.Parse(req.ToTaskID)
+	if err != nil {
+		return nil, err
+	}
+
+	edge := &models.TaskEdge{
+		ID:         id,
+		JobID:      jobID,
+		FromTaskID: fromID,
+		ToTaskID:   toID,
+	}
+
+	return edge, q.Create(edge).Error
 }

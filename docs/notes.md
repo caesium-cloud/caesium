@@ -1,5 +1,7 @@
 # Thoughts On Schedulers
 
+Note: these are historical design notes. For current behavior and roadmap, see `docs/job-definition-plan.md` and `docs/console-tui-plan.md`.
+
 ## What a Good Scheduler Should Do
 * Run jobs as DAGS. 
 Dependency managment for the win. 
@@ -90,5 +92,4 @@ Literally runs on top of Argo.
 * Not maintained.
 
 It should also be noted that of these options AirFlow - and to a lesser extend Luigi - are the only ones with any real maturity or traction. 
-
 

@@ -1,5 +1,7 @@
 # Primitives
 
+Note: this document captures early design intent. For current behavior and schema, see `docs/job-definitions.md` and `docs/job-definition-plan.md`.
+
 Caesium's primary function is a job scheduler and executor. As such, the design and implementation of this process will revolve around a set of primitives which aid in defining the lifcycle of a job. Below is an outline of how the primitives will be structured and implemented. Note that this is not a detailed implementation proposal, but rather meant merely as a holistic, pre-implementation guide for how Caesium's internals will be structured.
 
 ## `Job`
