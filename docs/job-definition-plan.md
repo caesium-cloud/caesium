@@ -1,10 +1,10 @@
 # Job Definition Ingestion Roadmap & Checklist
 
 ## Goals
-- [ ] Support authoring, validation, and storage of job definitions in YAML format.
-- [ ] Provide user-friendly tooling (CLI/API) for pushing and managing job definitions.
-- [ ] Enable Git-based synchronization of job definitions.
-- [ ] Deliver metadata support for filtering and UI integration.
+- [x] Support authoring, validation, and storage of job definitions in YAML format.
+- [x] Provide user-friendly tooling (CLI/API) for pushing and managing job definitions.
+- [x] Enable Git-based synchronization of job definitions.
+- [x] Deliver metadata support for filtering and UI integration.
 
 ## Source Format
 - [x] YAML documents conforming to the v1 schema with fields: `$schema`, `apiVersion`, `kind`, `metadata`, `trigger`, `callbacks`, `steps`.
@@ -24,10 +24,10 @@
 - [x] Document usage and extend schema examples in `docs/job-definitions.md`.
 - [ ] Implement safe update semantics with provenance enforcement and optional `--force` override (requires DB columns: jobs.provenance_source_id, jobs.deleted_at).
 - [ ] Implement pruning workflow (`--prune`, protect labels, soft delete/GC) leveraging provenance metadata.
-- [ ] *(Deferred)* Add CLI commands:
+- [x] Add CLI commands:
   - [x] `caesium job apply` to push definitions from file/dir/stdin.
   - [x] `caesium job lint` for validation.
-- [ ] *(Deferred)* Expose REST endpoint `POST /v1/jobdefs/apply` for automation.
+- [x] Expose REST endpoint `POST /v1/jobdefs/apply` for automation.
 
 ### Phase 2 – Git Source Integration (Optional)
 - [x] Implement Git sync (`internal/jobdef/git.Source`) maintaining a working clone.
@@ -37,7 +37,7 @@
 - [x] Expose secret resolver configuration through runtime wiring (env/config) so Git sync can resolve secrets in production deployments.
 - [ ] Explore webhook-triggered sync to complement polling (GitHub/GitLab/Bitbucket signatures).
 - [x] Support path globs (e.g., `**/*.job.yaml`) and provenance recording (repo/ref/commit/path/source_id).
-- [x] Persist imported provenance metadata onto jobs for Git-sourced definitions (triggers/atoms TBD).
+- [x] Persist imported provenance metadata onto jobs for Git-sourced definitions.
 
 ### Phase 3 – Enhancements
 - [x] Add diff/preview tooling (`caesium job diff`) and status reporting.
@@ -78,7 +78,7 @@
 - [ ] Update console UI planning docs and Bubble Tea surfaces to visualise branches.
 
 - [x] Extend integration tests to import, execute, and verify multi-branch jobs (parallel success, join wait, failure short-circuit).
-- [ ] Add scenario coverage for Git-sourced definitions to ensure DAG edges survive sync/diff workflows.
+- [x] Add scenario coverage for Git-sourced definitions to ensure DAG edges survive sync/diff workflows.
 - [x] Document authoring patterns (fan-out, join, conditional) with YAML examples and executor guarantees.
 
 ## Validation & Testing

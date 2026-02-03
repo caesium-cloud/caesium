@@ -37,13 +37,20 @@ func (c *Atom) State() atom.State {
 // Result returns the result of the Atom. This function
 // maps pod container exit codes to Caesium Atom results.
 func (c *Atom) Result() atom.Result {
-	container := c.metadata.Status.ContainerStatuses[0]
-
-	if result, ok := resultMap[container.State.Terminated.ExitCode]; ok {
-		return result
+	if term := terminatedState(c.metadata); term != nil {
+		if result, ok := resultMap[term.ExitCode]; ok {
+			return result
+		}
+		return atom.Unknown
 	}
-
-	return atom.Unknown
+	switch c.metadata.Status.Phase {
+	case v1.PodSucceeded:
+		return atom.Success
+	case v1.PodFailed:
+		return atom.Failure
+	default:
+		return atom.Unknown
+	}
 }
 
 // CreatedAt returns the UTC time the Atom was created.
@@ -61,5 +68,36 @@ func (c *Atom) StartedAt() time.Time {
 
 // StoppedAt returns the UTC time the Atom was stopped.
 func (c *Atom) StoppedAt() time.Time {
-	return c.metadata.DeletionTimestamp.Time
+	if c.metadata.DeletionTimestamp != nil && !c.metadata.DeletionTimestamp.Time.IsZero() {
+		return c.metadata.DeletionTimestamp.Time
+	}
+	if term := terminatedState(c.metadata); term != nil {
+		if !term.FinishedAt.IsZero() {
+			return term.FinishedAt.Time
+		}
+		if !term.StartedAt.IsZero() {
+			return term.StartedAt.Time
+		}
+	}
+	switch c.metadata.Status.Phase {
+	case v1.PodSucceeded, v1.PodFailed:
+		if c.metadata.Status.StartTime != nil {
+			return c.metadata.Status.StartTime.Time
+		}
+		return c.metadata.CreationTimestamp.Time
+	default:
+		return time.Time{}
+	}
+}
+
+func terminatedState(pod *v1.Pod) *v1.ContainerStateTerminated {
+	if pod == nil {
+		return nil
+	}
+	for _, status := range pod.Status.ContainerStatuses {
+		if status.State.Terminated != nil {
+			return status.State.Terminated
+		}
+	}
+	return nil
 }

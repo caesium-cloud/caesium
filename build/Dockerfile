@@ -24,7 +24,7 @@ USER 10001:10001
 ENTRYPOINT ["/bin/caesium"]
 
 # -------- Test image (DinD for integration) --------
-FROM docker:28.4.0-dind-alpine3.22 AS test
+FROM docker:29.2.0-alpine3.23 AS test
 RUN apk add --no-cache libuv lz4-libs sqlite-libs tzdata && \
     mkdir -p /var/lib/caesium/dqlite && \
     chown 10001:10001 /var/lib/caesium/dqlite

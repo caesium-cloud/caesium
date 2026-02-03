@@ -176,6 +176,35 @@ func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
 		if err := tx.Where("from_task_id = ?", taskID).Find(&edges).Error; err != nil {
 			return err
 		}
+		if len(edges) == 0 {
+			var task models.Task
+			if err := tx.First(&task, "id = ?", taskID).Error; err != nil {
+				return err
+			}
+			var jobEdgeCount int64
+			if err := tx.Model(&models.TaskEdge{}).
+				Where("job_id = ?", task.JobID).
+				Limit(1).
+				Count(&jobEdgeCount).Error; err != nil {
+				return err
+			}
+			if jobEdgeCount > 0 {
+				return nil
+			}
+			if task.NextID != nil {
+				edges = append(edges, models.TaskEdge{ToTaskID: *task.NextID})
+			} else {
+				var next models.Task
+				err := tx.Where("job_id = ? AND created_at > ?", task.JobID, task.CreatedAt).
+					Order("created_at asc").
+					First(&next).Error
+				if err == nil {
+					edges = append(edges, models.TaskEdge{ToTaskID: next.ID})
+				} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+					return err
+				}
+			}
+		}
 
 		for _, edge := range edges {
 			if err := tx.Model(&models.TaskRun{}).

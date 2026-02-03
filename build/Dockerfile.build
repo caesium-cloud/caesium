@@ -1,4 +1,4 @@
-FROM golang:1.25.1-alpine3.22
+FROM golang:1.25.6-alpine3.23
 
 # Update & install OS dependencies
 WORKDIR /bld
@@ -13,10 +13,10 @@ RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/ins
 
 # Compile & install (raft is now bundled in dqlite >= v1.18.1)
 WORKDIR /bld
-ARG DQLITE_REF=v1.18.2
+ARG DQLITE_REF=v1.18.5
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
-RUN autoreconf -i && ./configure --prefix=/usr && make -j4 install
+RUN autoreconf -i && CFLAGS="-Wno-error=maybe-musttail-local-addr" CXXFLAGS="-Wno-error=maybe-musttail-local-addr" ./configure --disable-backtrace --prefix=/usr && make -j4 install
 
 # Go build environment & dependencies
 WORKDIR /bld/caesium

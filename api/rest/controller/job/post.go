@@ -7,6 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
+	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v4"
@@ -14,9 +15,11 @@ import (
 
 func Post(c echo.Context) error {
 	var (
-		req  = &PostRequest{}
-		tsvc = task.Service(c.Request().Context())
-		asvc = atom.Service(c.Request().Context())
+		req           = &PostRequest{}
+		tsvc          = task.Service(c.Request().Context())
+		asvc          = atom.Service(c.Request().Context())
+		createdTasks  []string
+		explicitEdges []edgeSpec
 	)
 
 	if err := c.Bind(req); err != nil {
@@ -78,13 +81,48 @@ func Post(c echo.Context) error {
 			"next_id", t.NextID,
 		)
 
-		if _, err = tsvc.Create(&task.CreateRequest{
+		taskModel, err := tsvc.Create(&task.CreateRequest{
 			JobID:  j.ID.String(),
 			AtomID: a.ID.String(),
 			NextID: t.NextID,
-		}); err != nil {
+		})
+		if err != nil {
 			log.Error("failed to create task", "error", err)
 			return echo.ErrInternalServerError.SetInternal(err)
+		}
+
+		createdTasks = append(createdTasks, taskModel.ID.String())
+		if t.NextID != nil && *t.NextID != "" {
+			explicitEdges = append(explicitEdges, edgeSpec{
+				from: taskModel.ID.String(),
+				to:   *t.NextID,
+			})
+		}
+	}
+
+	edgeSvc := taskedge.Service(c.Request().Context())
+	switch {
+	case len(explicitEdges) > 0:
+		for _, edge := range explicitEdges {
+			if _, err := edgeSvc.Create(&taskedge.CreateRequest{
+				JobID:      j.ID.String(),
+				FromTaskID: edge.from,
+				ToTaskID:   edge.to,
+			}); err != nil {
+				log.Error("failed to create task edge", "error", err)
+				return echo.ErrInternalServerError.SetInternal(err)
+			}
+		}
+	case len(createdTasks) > 1:
+		for idx := 0; idx < len(createdTasks)-1; idx++ {
+			if _, err := edgeSvc.Create(&taskedge.CreateRequest{
+				JobID:      j.ID.String(),
+				FromTaskID: createdTasks[idx],
+				ToTaskID:   createdTasks[idx+1],
+			}); err != nil {
+				log.Error("failed to create task edge", "error", err)
+				return echo.ErrInternalServerError.SetInternal(err)
+			}
 		}
 	}
 
@@ -113,6 +151,11 @@ type PostRequest struct {
 		Atom   *atom.CreateRequest `json:"atom"`
 		NextID *string             `json:"next_id"`
 	} `json:"tasks"`
+}
+
+type edgeSpec struct {
+	from string
+	to   string
 }
 
 type MetadataRequest struct {

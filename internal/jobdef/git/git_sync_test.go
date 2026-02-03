@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef"
+	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/go-git/go-git/v5"
@@ -200,6 +201,80 @@ func (s *GitSyncSuite) TestSyncRecordsProvenance() {
 		names[name] = struct{}{}
 	}
 	s.Equal(map[string]struct{}{"list": {}, "convert": {}, "publish": {}}, names)
+}
+
+func (s *GitSyncSuite) TestSyncDagEdgesSurviveDiff() {
+	manifest := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: git-dag
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+steps:
+  - name: start
+    image: alpine:3.20
+    command: ["sh", "-c", "echo start"]
+    next:
+      - branch-a
+      - branch-b
+  - name: branch-a
+    image: alpine:3.20
+    command: ["sh", "-c", "echo branch-a"]
+    dependsOn: start
+  - name: branch-b
+    image: alpine:3.20
+    command: ["sh", "-c", "echo branch-b"]
+    dependsOn: start
+  - name: join
+    image: alpine:3.20
+    command: ["sh", "-c", "echo join"]
+    dependsOn:
+      - branch-a
+      - branch-b
+`
+
+	repoDir := s.initRepo(map[string]string{
+		"jobs/dag.yaml": strings.TrimSpace(manifest) + "\n",
+	})
+
+	db := testutil.OpenTestDB(s.T())
+	s.T().Cleanup(func() { testutil.CloseDB(db) })
+
+	importer := jobdef.NewImporter(db)
+	source := Source{URL: repoDir, Ref: "master", Path: "jobs", SourceID: "git-sync"}
+
+	s.Require().NoError(source.Sync(context.Background(), importer))
+
+	var edges []models.TaskEdge
+	s.Require().NoError(db.Find(&edges).Error)
+	s.Len(edges, 4)
+
+	paths := make(map[string]struct{}, len(edges))
+	for _, edge := range edges {
+		s.Equal("git-sync", edge.ProvenanceSourceID)
+		s.Equal(repoDir, edge.ProvenanceRepo)
+		s.Equal("master", edge.ProvenanceRef)
+		s.NotEmpty(edge.ProvenanceCommit)
+		paths[edge.ProvenancePath] = struct{}{}
+	}
+
+	expectedPaths := map[string]struct{}{
+		"jobs/dag.yaml#edge/start->branch-a": {},
+		"jobs/dag.yaml#edge/start->branch-b": {},
+		"jobs/dag.yaml#edge/branch-a->join":  {},
+		"jobs/dag.yaml#edge/branch-b->join":  {},
+	}
+	s.Equal(expectedPaths, paths)
+
+	desired, err := jobdiff.LoadDefinitions([]string{filepath.Join(repoDir, "jobs")})
+	s.Require().NoError(err)
+	actual, err := jobdiff.LoadDatabaseSpecs(context.Background(), db)
+	s.Require().NoError(err)
+	diff := jobdiff.Compare(desired, actual)
+	s.True(diff.Empty(), "unexpected diff: %+v", diff)
 }
 
 func (s *GitSyncSuite) TestSyncPathGlobs() {

@@ -29,7 +29,7 @@
 4. **Phase 3 – Detail + DAG View**
    - ✅ Introduce a job detail loader that composes job, trigger, and run metadata (including the new `JobRun` / `TaskRun` persistence) into a single state update.
    - ✅ Build a DAG graph translator that converts `next[]` / `dependsOn` edges into an internal tree/adjacency model with branch awareness and stable node ordering.
-  adicione ✅ Render the detail pane with responsive Lip Gloss layouts: top section for job summary, middle for DAG canvas, bottom for latest run/task status.
+   - ✅ Render the detail pane with responsive Lip Gloss layouts: top section for job summary, middle for DAG canvas, bottom for latest run/task status.
    - ✅ Add keybindings to traverse predecessors/successors, sync selection with the list pane, and preload dependent atom metadata for the focused node.
 5. **Phase 4 – Actions and Workflows**
    - Hook keybindings to call trigger/run endpoints, display confirmation modals, surface action results in a status bar, and refresh affected views.

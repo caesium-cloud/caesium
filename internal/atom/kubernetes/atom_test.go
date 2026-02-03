@@ -71,7 +71,7 @@ func (s *KubernetesTestSuite) TestAtom() {
 		assert.Equal(s.T(), atomResult, c.Result())
 		assert.NotZero(s.T(), c.CreatedAt())
 		assert.Zero(s.T(), c.StartedAt())
-		assert.Zero(s.T(), c.StoppedAt())
+		assert.NotZero(s.T(), c.StoppedAt())
 	}
 
 	// unknown result

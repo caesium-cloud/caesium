@@ -18,7 +18,7 @@ import (
 func (s *KubernetesTestSuite) TestNewEngine() {
 	engine := NewEngine(
 		context.Background(),
-		fake.NewSimpleClientset().CoreV1(),
+		fake.NewClientset().CoreV1(),
 	)
 	assert.NotNil(s.T(), engine)
 }

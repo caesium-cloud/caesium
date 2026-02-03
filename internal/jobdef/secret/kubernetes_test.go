@@ -19,7 +19,7 @@ func TestKubernetesResolverSuite(t *testing.T) {
 }
 
 func (s *KubernetesResolverSuite) TestResolveDefaultNamespace() {
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	client := fake.NewClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "jobs"},
 		Data:       map[string][]byte{"password": []byte("hunter2")},
 	})
@@ -31,7 +31,7 @@ func (s *KubernetesResolverSuite) TestResolveDefaultNamespace() {
 }
 
 func (s *KubernetesResolverSuite) TestResolveExplicitNamespace() {
-	client := fake.NewSimpleClientset(&corev1.Secret{
+	client := fake.NewClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "infra"},
 		Data:       map[string][]byte{"token": []byte("abc")},
 	})
@@ -43,7 +43,7 @@ func (s *KubernetesResolverSuite) TestResolveExplicitNamespace() {
 }
 
 func (s *KubernetesResolverSuite) TestMissingSecretFails() {
-	client := fake.NewSimpleClientset()
+	client := fake.NewClientset()
 	r := NewKubernetesResolverWithClient(client, "default")
 	_, err := r.Resolve(context.Background(), "secret://k8s/missing/password")
 	s.Require().Error(err)
