@@ -46,7 +46,9 @@ CAESIUM_BASE_URL="https://caesium.example.com" just console
 | `↑` / `↓` | Navigate within the active table |
 | `r` | Reload data from the API |
 | `Enter` | (Jobs tab) open the detail/DAG screen |
+| `u` | (Jobs detail) open the run selector |
 | `t` | (Jobs tab) trigger the selected job manually |
+| `Space` | (Logs modal) toggle follow/pause |
 | `Esc` / `q` | Exit the detail screen; press again to quit the console |
 | `q` or `Ctrl+C` | Quit the console |
 

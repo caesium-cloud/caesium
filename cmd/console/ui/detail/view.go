@@ -26,6 +26,7 @@ var (
 // ViewModel captures the data required to render the job detail pane.
 type ViewModel struct {
 	Job           *api.JobDetail
+	ActiveRun     *api.Run
 	Graph         *dag.Graph
 	GraphLayout   string
 	GraphViewport *viewport.Model
@@ -65,7 +66,7 @@ func Render(vm ViewModel) string {
 	sections := []string{
 		renderHeader(vm.Job),
 		renderMetadata(vm.Job),
-		renderRunSection(vm.Job, vm.Spinner),
+		renderRunSection(vm.Job, vm.ActiveRun, vm.Spinner),
 		renderGraph(vm.Graph, vm.GraphErr, vm.GraphLayout, vm.GraphViewport, vm.FocusPath, vm.Labeler),
 		renderNode(vm.Graph, vm.FocusedNode, vm.Labeler, vm.TaskStatus, vm.Spinner),
 		renderAtom(vm.Graph, vm.FocusedNode, vm.FocusedAtom, vm.AtomErr, vm.AtomLoading, vm.AtomLookup),
@@ -138,12 +139,20 @@ func renderMetadata(detail *api.JobDetail) string {
 	return renderSection("Metadata", strings.Join(items, "\n"))
 }
 
-func renderRunSection(detail *api.JobDetail, spinnerFrame string) string {
-	if detail == nil || detail.LatestRun == nil {
+func renderRunSection(detail *api.JobDetail, active *api.Run, spinnerFrame string) string {
+	if detail == nil || (detail.LatestRun == nil && active == nil) {
 		return renderSection("Latest Run", placeholderStyle.Render("No runs recorded"))
 	}
 
-	run := detail.LatestRun
+	run := active
+	if run == nil {
+		run = detail.LatestRun
+	}
+	latest := detail.LatestRun
+	title := "Latest Run"
+	if latest != nil && run != nil && run.ID != latest.ID {
+		title = "Selected Run"
+	}
 	status := statusBadge(run.Status, spinnerFrame, false)
 	lines := []string{
 		fmt.Sprintf("%s  •  Status: %s", labelStyle.Render(run.ID), valueStyle.Render(status)),
@@ -158,8 +167,11 @@ func renderRunSection(detail *api.JobDetail, spinnerFrame string) string {
 	if summary := taskSummary(run.Tasks, spinnerFrame); summary != "" {
 		lines = append(lines, summary)
 	}
+	if latest != nil && run != nil && run.ID != latest.ID {
+		lines = append(lines, fmt.Sprintf("Latest: %s", valueStyle.Render(shortID(latest.ID))))
+	}
 
-	return renderSection("Latest Run", strings.Join(lines, "\n"))
+	return renderSection(title, strings.Join(lines, "\n"))
 }
 
 func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc, tasks map[string]api.RunTask, spinnerFrame string) string {
@@ -256,6 +268,13 @@ func renderSection(title, body string) string {
 		sectionTitleStyle.Render(title),
 		body,
 	)
+}
+
+func shortID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func formatKVPairs(label string, values map[string]string) string {

@@ -57,6 +57,16 @@ func fetchLatestRun(client *api.Client, jobID string) tea.Cmd {
 	}
 }
 
+func fetchRuns(client *api.Client, jobID string) tea.Cmd {
+	return func() tea.Msg {
+		runs, err := client.Runs().List(context.Background(), jobID, url.Values{})
+		if err != nil {
+			return runsErrMsg{jobID: jobID, err: err}
+		}
+		return runsLoadedMsg{jobID: jobID, runs: runs}
+	}
+}
+
 func fetchData(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
 		params := url.Values{}
@@ -134,6 +144,16 @@ type jobTriggeredMsg struct {
 }
 
 type jobTriggerErrMsg struct {
+	jobID string
+	err   error
+}
+
+type runsLoadedMsg struct {
+	jobID string
+	runs  []api.Run
+}
+
+type runsErrMsg struct {
 	jobID string
 	err   error
 }

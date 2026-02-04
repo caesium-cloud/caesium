@@ -18,6 +18,8 @@ var (
 	triggerColumnWeights = []int{3, 2, 4}
 	atomColumnTitles     = []string{"Image", "Engine", "ID"}
 	atomColumnWeights    = []int{4, 2, 4}
+	runColumnTitles      = []string{"Run", "Status", "Started", "Completed"}
+	runColumnWeights     = []int{3, 2, 4, 4}
 )
 
 func jobsToRows(jobs []api.Job, statuses map[string]*api.Run, spinnerFrame string) []table.Row {
@@ -100,6 +102,23 @@ func atomsToRows(atoms []api.Atom) []table.Row {
 	rows := make([]table.Row, len(atoms))
 	for i, atom := range atoms {
 		rows[i] = table.Row{atom.Image, atom.Engine, atom.ID}
+	}
+	return rows
+}
+
+func runsToRows(runs []api.Run, spinnerFrame string) []table.Row {
+	rows := make([]table.Row, len(runs))
+	for i, run := range runs {
+		completed := "-"
+		if run.CompletedAt != nil {
+			completed = run.CompletedAt.Format(time.RFC3339)
+		}
+		rows[i] = table.Row{
+			run.ID,
+			formatRunStatus(&run, spinnerFrame),
+			run.StartedAt.Format(time.RFC3339),
+			completed,
+		}
 	}
 	return rows
 }

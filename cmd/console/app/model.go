@@ -63,10 +63,19 @@ type Model struct {
 	dagViewport     viewport.Model
 	dagErr          error
 	detailErr       error
+	runsTable       table.Model
+	runs            []api.Run
+	runsJobID       string
+	runsLoading     bool
+	runsErr         error
+	showRunsModal   bool
+	activeRunID     string
+	followLatestRun bool
 	logCtx          context.Context
 	logCancel       context.CancelFunc
 	logStream       io.ReadCloser
 	logTaskID       string
+	logRunID        string
 	showLogsModal   bool
 	logsViewport    viewport.Model
 	logsLoading     bool
@@ -75,6 +84,7 @@ type Model struct {
 	logCache        map[string]string
 	logSince        map[string]time.Time
 	logLastLine     map[string]string
+	logsFollow      bool
 	atomDetails     map[string]*api.Atom
 	atomErr         error
 	loadingAtomID   string
@@ -97,24 +107,28 @@ func New(client *api.Client) Model {
 	jobs := createTable(jobColumnTitles, []int{18, 12, 22, 22, 20, 20}, true)
 	triggers := createTable(triggerColumnTitles, []int{20, 12, 20}, false)
 	atoms := createTable(atomColumnTitles, []int{24, 12, 20}, false)
+	runsTable := createTable(runColumnTitles, []int{16, 12, 22, 22}, false)
 
 	return Model{
-		client:        client,
-		spinner:       sp,
-		state:         statusLoading,
-		active:        sectionJobs,
-		jobs:          jobs,
-		triggers:      triggers,
-		atoms:         atoms,
-		dagViewport:   dagViewport,
-		logsViewport:  logsViewport,
-		jobRunStatus:  make(map[string]*api.Run),
-		logCache:      make(map[string]string),
-		logSince:      make(map[string]time.Time),
-		logLastLine:   make(map[string]string),
-		atomDetails:   make(map[string]*api.Atom),
-		atomIndex:     make(map[string]api.Atom),
-		taskRunStatus: make(map[string]api.RunTask),
+		client:          client,
+		spinner:         sp,
+		state:           statusLoading,
+		active:          sectionJobs,
+		jobs:            jobs,
+		triggers:        triggers,
+		atoms:           atoms,
+		runsTable:       runsTable,
+		dagViewport:     dagViewport,
+		logsViewport:    logsViewport,
+		jobRunStatus:    make(map[string]*api.Run),
+		logCache:        make(map[string]string),
+		logSince:        make(map[string]time.Time),
+		logLastLine:     make(map[string]string),
+		logsFollow:      true,
+		atomDetails:     make(map[string]*api.Atom),
+		atomIndex:       make(map[string]api.Atom),
+		taskRunStatus:   make(map[string]api.RunTask),
+		followLatestRun: true,
 	}
 }
 
@@ -129,24 +143,56 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.showRunsModal {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc":
+				m.showRunsModal = false
+				return m, nil
+			case "enter":
+				m.selectRunFromModal()
+				m.showRunsModal = false
+				return m, nil
+			case "r":
+				if cmd := m.reloadRuns(); cmd != nil {
+					return m, cmd
+				}
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.runsTable, cmd = m.runsTable.Update(msg)
+			return m, cmd
+		}
 		if m.showLogsModal {
 			switch msg.String() {
 			case "ctrl+c", "q", "esc", "g":
 				m.stopLogStream(true)
 				m.showLogsModal = false
 				return m, nil
+			case " ":
+				m.logsFollow = !m.logsFollow
+				if m.logsFollow {
+					m.logsViewport.GotoBottom()
+				}
+				return m, nil
 			case "up", "k":
 				m.logsViewport.ScrollUp(1)
+				m.logsFollow = false
 				return m, nil
 			case "down", "j":
 				m.logsViewport.ScrollDown(1)
+				if m.logsViewport.AtBottom() {
+					m.logsFollow = true
+				}
 				return m, nil
 			case "pgup":
 				m.logsViewport.ScrollUp(m.logsViewport.Height / 2)
+				m.logsFollow = false
 				return m, nil
 			case "pgdown":
 				m.logsViewport.ScrollDown(m.logsViewport.Height / 2)
-				m.logsViewport.GotoBottom()
+				if m.logsViewport.AtBottom() {
+					m.logsFollow = true
+				}
 				return m, nil
 			}
 		}
@@ -156,6 +202,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showDetail = false
 				m.detailLoading = false
 				m.stopLogStream(false)
+				m.showRunsModal = false
 				return m, nil
 			}
 			return m, tea.Quit
@@ -164,6 +211,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showDetail = false
 				m.detailLoading = false
 				m.stopLogStream(false)
+				m.showRunsModal = false
 				return m, nil
 			}
 		case "r":
@@ -176,6 +224,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.jobRunStatus = make(map[string]*api.Run)
 			m.selectedJobID = ""
 			m.jobDetail = nil
+			m.runs = nil
+			m.runsTable.SetRows(nil)
+			m.runsJobID = ""
+			m.runsLoading = false
+			m.runsErr = nil
+			m.showRunsModal = false
+			m.activeRunID = ""
+			m.followLatestRun = true
 			m.resetDetailView(nil, nil, true)
 			m.taskRunStatus = make(map[string]api.RunTask)
 			m.stopLogStream(false)
@@ -210,6 +266,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if cmd := m.setFocusedNode(id); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
+				} else if cmd := m.cycleFocusedNode(1); cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 			}
 		case "left", "h":
@@ -218,6 +276,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					if cmd := m.setFocusedNode(id); cmd != nil {
 						cmds = append(cmds, cmd)
 					}
+				} else if cmd := m.cycleFocusedNode(-1); cmd != nil {
+					cmds = append(cmds, cmd)
 				}
 			}
 		case "up", "k":
@@ -232,6 +292,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showDetail {
 				m.dagFocusPath = !m.dagFocusPath
 				m.refreshDAGLayout(false)
+			}
+		case "u":
+			if m.showDetail {
+				if cmd := m.toggleRuns(); cmd != nil {
+					cmds = append(cmds, cmd)
+				}
 			}
 		case "g":
 			if m.showDetail {
@@ -281,6 +347,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.hasAnimatedTaskStatus() && m.graph != nil {
 			m.refreshDAGLayout(false)
 		}
+		if m.showRunsModal && len(m.runs) > 0 {
+			m.runsTable.SetRows(runsToRows(m.runs, m.spinner.View()))
+		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
 		}
@@ -312,15 +381,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetDetailView(nil, nil, true)
 			break
 		}
+		previousJobID := ""
+		if m.jobDetail != nil {
+			previousJobID = m.jobDetail.Job.ID
+		}
 		m.jobDetail = msg.detail
+		if msg.detail.Job.ID != previousJobID {
+			m.runsJobID = msg.detail.Job.ID
+			m.runs = nil
+			m.runsTable.SetRows(nil)
+			m.runsErr = nil
+			m.showRunsModal = false
+			m.activeRunID = ""
+			m.followLatestRun = true
+		} else if m.runsJobID == "" {
+			m.runsJobID = msg.detail.Job.ID
+		}
+		if m.runsJobID != "" {
+			m.runsLoading = true
+			cmds = append(cmds, fetchRuns(m.client, m.runsJobID))
+		}
 		m.resetDetailView(nil, nil, false)
 		m.setJobStatus(msg.detail.Job.ID, msg.detail.LatestRun)
-		m.taskRunStatus = make(map[string]api.RunTask)
-		if msg.detail.LatestRun != nil {
-			for _, task := range msg.detail.LatestRun.Tasks {
-				m.taskRunStatus[task.ID] = task
-			}
+		if msg.detail.LatestRun != nil && (m.followLatestRun || m.activeRunID == "") {
+			m.activeRunID = msg.detail.LatestRun.ID
+			m.followLatestRun = true
 		}
+		m.applyRun(m.activeRun())
 
 		if msg.detail.DAG != nil {
 			graph, err := dag.FromJobDAG(msg.detail.DAG)
@@ -344,18 +431,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobDetailErrMsg:
 		m.resetDetailView(msg.err, msg.err, true)
 	case jobStatusLoadedMsg:
+		prevRunID := m.activeRunID
 		m.setJobStatus(msg.jobID, msg.run)
 		if msg.run != nil && m.jobDetail != nil && m.jobDetail.Job.ID == msg.jobID {
-			m.taskRunStatus = make(map[string]api.RunTask)
-			for _, task := range msg.run.Tasks {
-				m.taskRunStatus[task.ID] = task
+			m.jobDetail.LatestRun = msg.run
+			if m.followLatestRun || m.activeRunID == "" {
+				m.activeRunID = msg.run.ID
+				m.followLatestRun = true
+				m.applyRun(msg.run)
+				if m.graph != nil {
+					m.refreshDAGLayout(false)
+				}
 			}
-			if m.graph != nil {
-				m.refreshDAGLayout(false)
-			}
+		}
+		if cmd := m.maybeRestartLogStream(prevRunID, m.activeRunID); cmd != nil {
+			cmds = append(cmds, cmd)
 		}
 	case jobStatusErrMsg:
 		m.setJobStatus(msg.jobID, nil)
+	case runsLoadedMsg:
+		if msg.jobID != m.runsJobID {
+			break
+		}
+		m.runsLoading = false
+		m.runsErr = nil
+		m.runs = orderRunsDesc(msg.runs)
+		m.runsTable.SetRows(runsToRows(m.runs, m.spinner.View()))
+		m.syncRunCursor()
+		prevRunID := m.activeRunID
+		if m.followLatestRun || m.activeRunID == "" {
+			if latest := m.latestRun(); latest != nil {
+				m.activeRunID = latest.ID
+				m.followLatestRun = true
+				m.applyRun(latest)
+				if m.graph != nil {
+					m.refreshDAGLayout(false)
+				}
+			}
+		} else {
+			if run := m.runByID(m.activeRunID); run != nil {
+				m.applyRun(run)
+				if m.graph != nil {
+					m.refreshDAGLayout(false)
+				}
+			} else if latest := m.latestRun(); latest != nil {
+				m.activeRunID = latest.ID
+				m.followLatestRun = true
+				m.applyRun(latest)
+				if m.graph != nil {
+					m.refreshDAGLayout(false)
+				}
+			}
+		}
+		if cmd := m.maybeRestartLogStream(prevRunID, m.activeRunID); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
+	case runsErrMsg:
+		if msg.jobID != m.runsJobID {
+			break
+		}
+		m.runsLoading = false
+		m.runsErr = msg.err
 	case logsOpenedMsg:
 		m.logsLoading = false
 		m.logsErr = nil
@@ -474,6 +610,7 @@ func (m Model) activate(sec section) Model {
 		m.detailLoading = false
 		m.stopLogStream(false)
 		m.showLogsModal = false
+		m.showRunsModal = false
 	}
 	m.active = sec
 	return m
@@ -622,7 +759,8 @@ func (m *Model) toggleLogs() tea.Cmd {
 func (m *Model) startLogStream(taskID string) tea.Cmd {
 	m.stopLogStream(false)
 
-	if m.jobDetail == nil || m.jobDetail.LatestRun == nil {
+	run := m.activeRun()
+	if m.jobDetail == nil || run == nil {
 		m.logsErr = fmt.Errorf("no runs available for this job")
 		m.showLogsModal = true
 		return nil
@@ -638,9 +776,10 @@ func (m *Model) startLogStream(taskID string) tea.Cmd {
 	m.logCtx = ctx
 	m.logCancel = cancel
 	m.logTaskID = taskID
+	m.logRunID = run.ID
 	m.logsLoading = true
 	m.logsErr = nil
-	key := logKey(m.jobDetail.LatestRun.ID, taskID)
+	key := logKey(run.ID, taskID)
 	if cached, ok := m.logCache[key]; ok {
 		m.logContent = cached
 	} else {
@@ -653,7 +792,8 @@ func (m *Model) startLogStream(taskID string) tea.Cmd {
 		delete(m.logLastLine, key)
 	}
 	m.logsViewport.SetContent(m.logContent)
-	m.logsViewport.GotoTop()
+	m.logsFollow = true
+	m.logsViewport.GotoBottom()
 	m.showLogsModal = true
 	m.resizeLogViewport()
 
@@ -665,7 +805,7 @@ func (m *Model) startLogStream(taskID string) tea.Cmd {
 		m.logSince[key] = since
 	}
 
-	return openLogStream(ctx, m.client, m.jobDetail.Job.ID, m.jobDetail.LatestRun.ID, taskID, since)
+	return openLogStream(ctx, m.client, m.jobDetail.Job.ID, run.ID, taskID, since)
 }
 
 func (m *Model) stopLogStream(preserveContent bool) {
@@ -682,6 +822,7 @@ func (m *Model) stopLogStream(preserveContent bool) {
 	m.logsLoading = false
 	if !preserveContent {
 		m.logTaskID = ""
+		m.logRunID = ""
 		m.logsErr = nil
 		m.logContent = ""
 		m.logsViewport.SetContent("")
@@ -696,10 +837,7 @@ func (m *Model) appendLogs(chunk string) {
 	if chunk == "" {
 		return
 	}
-	key := ""
-	if m.jobDetail != nil && m.jobDetail.LatestRun != nil && m.logTaskID != "" {
-		key = logKey(m.jobDetail.LatestRun.ID, m.logTaskID)
-	}
+	key := m.logCacheKey()
 
 	// Deduplicate consecutive identical lines to avoid replays when resubscribing.
 	if key != "" {
@@ -732,14 +870,16 @@ func (m *Model) appendLogs(chunk string) {
 	m.storeLogCache()
 	m.updateLogCursor(chunk)
 	m.logsViewport.SetContent(strings.TrimPrefix(m.logContent, "\n"))
-	m.logsViewport.GotoBottom()
+	if m.logsFollow {
+		m.logsViewport.GotoBottom()
+	}
 }
 
 func (m *Model) storeLogCache() {
-	if m.jobDetail == nil || m.jobDetail.LatestRun == nil || m.logTaskID == "" {
+	key := m.logCacheKey()
+	if key == "" {
 		return
 	}
-	key := logKey(m.jobDetail.LatestRun.ID, m.logTaskID)
 	if m.logCache == nil {
 		m.logCache = make(map[string]string)
 	}
@@ -747,10 +887,10 @@ func (m *Model) storeLogCache() {
 }
 
 func (m *Model) updateLogCursor(chunk string) {
-	if m.jobDetail == nil || m.jobDetail.LatestRun == nil || m.logTaskID == "" {
+	key := m.logCacheKey()
+	if key == "" {
 		return
 	}
-	key := logKey(m.jobDetail.LatestRun.ID, m.logTaskID)
 	ts := extractLastTimestamp(chunk)
 	if ts.IsZero() {
 		return
@@ -761,6 +901,35 @@ func (m *Model) updateLogCursor(chunk string) {
 	if existing, ok := m.logSince[key]; !ok || ts.After(existing) {
 		m.logSince[key] = ts.Add(time.Nanosecond)
 	}
+}
+
+func (m *Model) logCacheKey() string {
+	if m.jobDetail == nil || m.logTaskID == "" {
+		return ""
+	}
+	runID := m.logRunID
+	if runID == "" {
+		if run := m.activeRun(); run != nil {
+			runID = run.ID
+		}
+	}
+	if runID == "" {
+		return ""
+	}
+	return logKey(runID, m.logTaskID)
+}
+
+func (m *Model) maybeRestartLogStream(prevID, nextID string) tea.Cmd {
+	if prevID == "" || nextID == "" || prevID == nextID {
+		return nil
+	}
+	if !m.showLogsModal || !m.followLatestRun || m.logTaskID == "" {
+		return nil
+	}
+	if m.logStream == nil && !m.logsLoading {
+		return nil
+	}
+	return m.startLogStream(m.logTaskID)
 }
 
 func (m *Model) triggerSelectedJob() tea.Cmd {
@@ -922,6 +1091,9 @@ func (m *Model) resizeLogViewport() {
 	m.logsViewport.Width = width
 	m.logsViewport.Height = height
 	m.logsViewport.SetContent(m.logContent)
+	if m.logsFollow {
+		m.logsViewport.GotoBottom()
+	}
 }
 
 func (m Model) orderedNodeIDs() []string {
@@ -965,4 +1137,147 @@ func (m *Model) cycleFocusedNode(delta int) tea.Cmd {
 	}
 	index = (index + delta + len(ids)) % len(ids)
 	return m.setFocusedNode(ids[index])
+}
+
+func (m *Model) toggleRuns() tea.Cmd {
+	if m.client == nil || m.jobDetail == nil {
+		return nil
+	}
+	if m.showRunsModal {
+		m.showRunsModal = false
+		return nil
+	}
+	m.showRunsModal = true
+	m.runsTable.Focus()
+	if m.runsJobID != m.jobDetail.Job.ID {
+		m.runsJobID = m.jobDetail.Job.ID
+		m.runsLoading = true
+		m.runsErr = nil
+		return fetchRuns(m.client, m.runsJobID)
+	}
+	if len(m.runs) == 0 && !m.runsLoading {
+		m.runsLoading = true
+		m.runsErr = nil
+		return fetchRuns(m.client, m.runsJobID)
+	}
+	m.syncRunCursor()
+	return nil
+}
+
+func (m *Model) reloadRuns() tea.Cmd {
+	if m.client == nil || m.runsJobID == "" {
+		return nil
+	}
+	m.runsLoading = true
+	m.runsErr = nil
+	return fetchRuns(m.client, m.runsJobID)
+}
+
+func (m *Model) selectRunFromModal() {
+	row := m.runsTable.SelectedRow()
+	if len(row) == 0 {
+		return
+	}
+	m.setActiveRunID(row[0])
+}
+
+func (m *Model) setActiveRunID(runID string) {
+	if runID == "" {
+		return
+	}
+	run := m.runByID(runID)
+	if run == nil {
+		return
+	}
+	m.activeRunID = run.ID
+	m.followLatestRun = m.isLatestRunID(run.ID)
+	m.applyRun(run)
+	m.syncRunCursor()
+	if m.graph != nil {
+		m.refreshDAGLayout(false)
+	}
+	m.stopLogStream(false)
+	m.showLogsModal = false
+}
+
+func (m *Model) syncRunCursor() {
+	if len(m.runs) == 0 {
+		m.runsTable.SetCursor(0)
+		return
+	}
+	target := m.activeRunID
+	if target == "" {
+		if latest := m.latestRun(); latest != nil {
+			target = latest.ID
+		}
+	}
+	if target == "" {
+		return
+	}
+	for i, run := range m.runs {
+		if run.ID == target {
+			m.runsTable.SetCursor(i)
+			return
+		}
+	}
+}
+
+func (m *Model) applyRun(run *api.Run) {
+	m.taskRunStatus = make(map[string]api.RunTask)
+	if run == nil {
+		return
+	}
+	for _, task := range run.Tasks {
+		m.taskRunStatus[task.ID] = task
+	}
+}
+
+func (m *Model) activeRun() *api.Run {
+	if m.activeRunID != "" {
+		if run := m.runByID(m.activeRunID); run != nil {
+			return run
+		}
+	}
+	return m.latestRun()
+}
+
+func (m *Model) latestRun() *api.Run {
+	if m.jobDetail == nil {
+		return nil
+	}
+	return m.jobDetail.LatestRun
+}
+
+func (m *Model) isLatestRunID(runID string) bool {
+	latest := m.latestRun()
+	if latest == nil {
+		return false
+	}
+	return latest.ID == runID
+}
+
+func (m *Model) runByID(runID string) *api.Run {
+	if runID == "" {
+		return nil
+	}
+	for i := range m.runs {
+		if m.runs[i].ID == runID {
+			return &m.runs[i]
+		}
+	}
+	if m.jobDetail != nil && m.jobDetail.LatestRun != nil && m.jobDetail.LatestRun.ID == runID {
+		return m.jobDetail.LatestRun
+	}
+	return nil
+}
+
+func orderRunsDesc(runs []api.Run) []api.Run {
+	if len(runs) < 2 {
+		return runs
+	}
+	ordered := make([]api.Run, len(runs))
+	for i := range runs {
+		ordered[len(runs)-1-i] = runs[i]
+	}
+	return ordered
 }
