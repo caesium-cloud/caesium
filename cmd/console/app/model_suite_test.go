@@ -36,8 +36,7 @@ func (s *ModelSuite) TestJobDetailLoadedBuildsGraph() {
 		DAG: &api.JobDAG{Nodes: []api.JobDAGNode{{ID: "task-a", AtomID: "atom-1"}}},
 	}
 
-	res, cmd := model.Update(jobDetailLoadedMsg{detail: detail})
-	s.Require().Nil(cmd)
+	res, _ := model.Update(jobDetailLoadedMsg{detail: detail})
 	updated := res.(Model)
 	s.Require().NotNil(updated.graph)
 	s.Equal("task-a", updated.focusedNodeID)

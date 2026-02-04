@@ -19,6 +19,7 @@ var (
 	tabInactive  = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("240"))
 	modalStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 2)
 	modalTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	modalHint    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	sectionNames = map[section]string{
 		sectionJobs:     "Jobs",
 		sectionTriggers: "Triggers",
@@ -31,18 +32,26 @@ var (
 func (m Model) View() string {
 	tabs := renderTabsBar(m.active, m.viewportWidth)
 
-	footerKeys := "[1/2/3] switch  [tab] cycle  [r] reload  [q] quit"
+	footerKeys := []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[q] quit"}
 	if m.active == sectionJobs {
 		if m.showDetail {
-			footerKeys = "[esc/q] back  [←/→] traverse  [tab/shift+tab] cycle  [↑/↓] scroll  [f] focus path  [t] trigger  [g] logs  [pgup/pgdn] log scroll"
+			footerKeys = []string{
+				"[esc/q] back",
+				"[←/→] traverse",
+				"[tab/shift+tab] cycle",
+				"[↑/↓] scroll",
+				"[f] focus path",
+				"[u] runs",
+				"[t] trigger",
+				"[g] logs",
+				"[space] follow",
+				"[pgup/pgdn] log scroll",
+			}
 		} else {
-			footerKeys += "  [enter] detail  [t] trigger"
+			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger")
 		}
 	}
-	footer := barStyle.Render(footerKeys)
-	if status := strings.TrimSpace(m.actionStatusText()); status != "" {
-		footer = lipgloss.JoinHorizontal(lipgloss.Top, footer, barStyle.Render(status))
-	}
+	footer := renderFooter(footerKeys, m.actionStatusText(), m.viewportWidth)
 
 	var body string
 
@@ -70,6 +79,9 @@ func (m Model) View() string {
 	}
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, tabs, body, footer)
+	if m.showRunsModal {
+		return m.renderRunsModal(screen)
+	}
 	if m.showLogsModal {
 		return m.renderLogsModal(screen)
 	}
@@ -95,6 +107,7 @@ func (m Model) renderJobDetailScreen() string {
 	labeler := m.nodeLabeler()
 	vm := detail.ViewModel{
 		Job:           m.jobDetail,
+		ActiveRun:     m.activeRun(),
 		Graph:         m.graph,
 		GraphLayout:   m.dagLayout,
 		GraphViewport: &m.dagViewport,
@@ -323,20 +336,160 @@ func (m Model) renderLogsModal(background string) string {
 	m.logsViewport.SetContent(strings.TrimSuffix(m.logContent, "\n"))
 
 	title := "Task Logs"
-	if m.focusedNodeID != "" {
-		title = fmt.Sprintf("Task Logs (%s)", shortID(m.focusedNodeID))
+	var labels []string
+	runID := m.logRunID
+	if runID == "" {
+		if run := m.activeRun(); run != nil {
+			runID = run.ID
+		}
 	}
+	if runID != "" {
+		labels = append(labels, fmt.Sprintf("run %s", shortID(runID)))
+	}
+	if m.focusedNodeID != "" {
+		labels = append(labels, fmt.Sprintf("task %s", shortID(m.focusedNodeID)))
+	}
+	if len(labels) > 0 {
+		title = fmt.Sprintf("Task Logs (%s)", strings.Join(labels, ", "))
+	}
+	followState := "following"
+	if !m.logsFollow {
+		followState = "paused"
+	}
+	hint := modalHint.Render(fmt.Sprintf("follow: %s  •  space to toggle", followState))
 
 	var body string
 	switch {
 	case m.logsErr != nil:
-		body = fmt.Sprintf("%s\n\n%s", modalTitle.Render(title), boxStyle.Render(fmt.Sprintf("Error: %s", m.logsErr.Error())))
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, boxStyle.Render(fmt.Sprintf("Error: %s", m.logsErr.Error())))
 	case m.logsLoading:
-		body = fmt.Sprintf("%s\n\n%s", modalTitle.Render(title), centerText(fmt.Sprintf("%s Streaming logs…", m.spinner.View())))
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, centerText(fmt.Sprintf("%s Streaming logs…", m.spinner.View())))
 	case strings.TrimSpace(m.logContent) == "":
-		body = fmt.Sprintf("%s\n\n%s", modalTitle.Render(title), placeholder.Render("Press g to stream logs for the focused task."))
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render("Press g to stream logs for the focused task."))
 	default:
-		body = fmt.Sprintf("%s\n\n%s", modalTitle.Render(title), m.logsViewport.View())
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, m.logsViewport.View())
+	}
+
+	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
+
+	return lipgloss.Place(width, height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func renderFooter(keys []string, status string, width int) string {
+	lines := wrapKeys(keys, width)
+	footer := styleFooterLines(lines)
+	status = strings.TrimSpace(status)
+	if status != "" {
+		status = truncateText(status, width)
+		if footer != "" {
+			footer = lipgloss.JoinVertical(lipgloss.Left, footer, barStyle.Render(status))
+		} else {
+			footer = barStyle.Render(status)
+		}
+	}
+	return footer
+}
+
+func wrapKeys(keys []string, width int) string {
+	if len(keys) == 0 {
+		return ""
+	}
+	if width <= 0 {
+		return strings.Join(keys, "  ")
+	}
+	lines := []string{}
+	line := ""
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if line == "" {
+			line = key
+			continue
+		}
+		candidate := line + "  " + key
+		if lipgloss.Width(candidate) > width {
+			lines = append(lines, line)
+			line = key
+			continue
+		}
+		line = candidate
+	}
+	if line != "" {
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func styleFooterLines(lines string) string {
+	if lines == "" {
+		return ""
+	}
+	parts := strings.Split(lines, "\n")
+	for i, part := range parts {
+		parts[i] = barStyle.Render(part)
+	}
+	return strings.Join(parts, "\n")
+}
+
+func truncateText(value string, width int) string {
+	value = strings.TrimSpace(value)
+	if width <= 0 || lipgloss.Width(value) <= width {
+		return value
+	}
+	if width <= 3 {
+		return value[:width]
+	}
+	runes := []rune(value)
+	if len(runes) <= width {
+		return value
+	}
+	return string(runes[:width-3]) + "..."
+}
+
+func (m Model) renderRunsModal(background string) string {
+	width := m.viewportWidth
+	height := m.viewportHeight
+	if width <= 0 {
+		width = lipgloss.Width(background)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(background)
+	}
+
+	modalWidth := max(50, width-10)
+	if modalWidth > width-4 {
+		modalWidth = width - 4
+	}
+	modalHeight := max(12, height-6)
+	if modalHeight > height-2 {
+		modalHeight = height - 2
+	}
+
+	contentWidth := max(modalWidth-4, 20)
+	contentHeight := max(modalHeight-6, 6)
+
+	title := "Select Run"
+	hint := modalHint.Render("enter to select  •  r refresh  •  esc to close")
+
+	var body string
+	switch {
+	case m.runsErr != nil:
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, boxStyle.Render(fmt.Sprintf("Error: %s", m.runsErr.Error())))
+	case m.runsLoading:
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, centerText(fmt.Sprintf("%s Loading runs…", m.spinner.View())))
+	case len(m.runs) == 0:
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render("No runs recorded yet."))
+	default:
+		table := m.runsTable
+		table.SetColumns(adjustColumnsToWidth(buildColumns(runColumnTitles, distributeWidths(contentWidth, runColumnWeights)), contentWidth))
+		table.SetWidth(contentWidth)
+		table.SetHeight(contentHeight)
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, table.View())
 	}
 
 	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
