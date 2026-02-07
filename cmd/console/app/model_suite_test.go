@@ -3,6 +3,8 @@ package app
 import (
 	"errors"
 	"net/url"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -167,13 +169,15 @@ func (s *ModelSuite) TestCycleFocusedNodeTraversesLevels() {
 	s.Equal("task-a", model.focusedNodeID)
 }
 
-func (s *ModelSuite) TestClearTriggeringJob() {
+func (s *ModelSuite) TestClearPendingAction() {
 	model := s.newReadyModel()
-	model.triggeringJobID = "job-1"
-	model.clearTriggeringJob("job-2")
-	s.Equal("job-1", model.triggeringJobID)
-	model.clearTriggeringJob("job-1")
-	s.Empty(model.triggeringJobID)
+	model.actionPending = &actionRequest{kind: actionTrigger, jobID: "job-1"}
+	req := model.clearPendingAction("job-2")
+	s.Nil(req)
+	s.NotNil(model.actionPending)
+	req = model.clearPendingAction("job-1")
+	s.NotNil(req)
+	s.Nil(model.actionPending)
 }
 
 func (s *ModelSuite) TestSetActionStatus() {
@@ -187,25 +191,99 @@ func (s *ModelSuite) TestTriggerSelectedJobSetsState() {
 	model := s.newReadyModel()
 	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
 	cmd := model.triggerSelectedJob()
+	s.Nil(cmd)
+	s.NotNil(model.confirmAction)
+	s.Equal("job-1", model.confirmAction.jobID)
+	s.Equal(actionTrigger, model.confirmAction.kind)
+	s.Contains(model.confirmAction.label, "alias")
+}
+
+func (s *ModelSuite) TestConfirmActionStartsTrigger() {
+	cfg := &config.Config{BaseURL: s.mustParseURL("http://example.com"), HTTPTimeout: time.Second}
+	model := New(api.New(cfg))
+	model.state = statusReady
+	model.active = sectionJobs
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
+	model.triggerSelectedJob()
+	s.NotNil(model.confirmAction)
+
+	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated := res.(Model)
 	s.NotNil(cmd)
-	s.Equal("job-1", model.triggeringJobID)
-	s.Contains(model.actionNotice, "alias")
+	s.Nil(updated.confirmAction)
+	s.NotNil(updated.actionPending)
+	s.Equal(actionTrigger, updated.actionPending.kind)
+	s.Contains(updated.actionNotice, "Triggering")
+}
+
+func (s *ModelSuite) TestConfirmActionCancelClearsRequest() {
+	model := s.newReadyModel()
+	model.confirmAction = &actionRequest{kind: actionTrigger, jobID: "job-1", label: "alias"}
+
+	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	updated := res.(Model)
+	s.Nil(cmd)
+	s.Nil(updated.confirmAction)
+}
+
+func (s *ModelSuite) TestRunsModalRerunConfirmStartsAction() {
+	cfg := &config.Config{BaseURL: s.mustParseURL("http://example.com"), HTTPTimeout: time.Second}
+	model := New(api.New(cfg))
+	model.state = statusReady
+	model.active = sectionJobs
+	model.showRunsModal = true
+	model.runs = []api.Run{{ID: "run-1", JobID: "job-1"}}
+	model.runsTable.SetRows(runsToRows(model.runs, ""))
+	model.runsTable.SetCursor(0)
+
+	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'R'}})
+	s.Nil(cmd)
+	updated := res.(Model)
+	s.NotNil(updated.confirmAction)
+	s.Equal(actionRerun, updated.confirmAction.kind)
+	s.Equal("run-1", updated.confirmAction.runID)
+
+	res, cmd = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = res.(Model)
+	s.NotNil(cmd)
+	s.Nil(updated.confirmAction)
+	s.NotNil(updated.actionPending)
+	s.Equal(actionRerun, updated.actionPending.kind)
+	s.Contains(updated.actionNotice, "Re-running")
 }
 
 func (s *ModelSuite) TestTriggerCommandsUpdateActionStatus() {
 	model := s.newReadyModel()
 	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
-	model.triggeringJobID = "job-1"
+	model.actionPending = &actionRequest{kind: actionTrigger, jobID: "job-1"}
 
 	res, _ := model.Update(jobTriggeredMsg{jobID: "job-1", run: &api.Run{ID: "abcdefghijk"}})
 	updated := res.(Model)
-	s.Empty(updated.triggeringJobID)
+	s.Nil(updated.actionPending)
 	s.Contains(updated.actionNotice, "Run abcdefgh")
 	s.NoError(updated.actionErr)
 
+	updated.actionPending = &actionRequest{kind: actionTrigger, jobID: "job-1"}
 	res, _ = updated.Update(jobTriggerErrMsg{jobID: "job-1", err: errors.New("bad")})
 	updated = res.(Model)
-	s.Empty(updated.actionNotice)
+	s.Contains(updated.actionNotice, "Trigger failed")
+	s.Error(updated.actionErr)
+}
+
+func (s *ModelSuite) TestRerunCommandsUpdateActionStatus() {
+	model := s.newReadyModel()
+	model.actionPending = &actionRequest{kind: actionRerun, jobID: "job-1", runID: "source-123"}
+
+	res, _ := model.Update(jobTriggeredMsg{jobID: "job-1", run: &api.Run{ID: "rerun-456"}})
+	updated := res.(Model)
+	s.Nil(updated.actionPending)
+	s.Contains(updated.actionNotice, "Re-run from "+shortID("source-123")+" accepted as "+shortID("rerun-456"))
+	s.NoError(updated.actionErr)
+
+	updated.actionPending = &actionRequest{kind: actionRerun, jobID: "job-1", runID: "source-123"}
+	res, _ = updated.Update(jobTriggerErrMsg{jobID: "job-1", err: errors.New("bad")})
+	updated = res.(Model)
+	s.Contains(updated.actionNotice, "Re-run failed")
 	s.Error(updated.actionErr)
 }
 
@@ -215,6 +293,124 @@ func (s *ModelSuite) TestActionStatusText() {
 	s.Equal("pending", model.actionStatusText())
 	model.actionErr = errors.New("boom")
 	s.Contains(model.actionStatusText(), "boom")
+}
+
+func (s *ModelSuite) TestRequestRerunSelectedRunOpensConfirm() {
+	model := s.newReadyModel()
+	model.runs = []api.Run{{ID: "run-1", JobID: "job-1"}}
+	model.runsTable.SetRows(runsToRows(model.runs, ""))
+	model.runsTable.SetCursor(0)
+
+	cmd := model.requestRerunSelectedRun()
+	s.Nil(cmd)
+	s.NotNil(model.confirmAction)
+	s.Equal(actionRerun, model.confirmAction.kind)
+	s.Equal("job-1", model.confirmAction.jobID)
+	s.Equal("run-1", model.confirmAction.runID)
+}
+
+func (s *ModelSuite) TestFilteredLogContentAppliesQuery() {
+	model := s.newReadyModel()
+	model.logContent = "alpha\nbeta\ngamma\n"
+	model.logFilter = "bet"
+	s.Equal("beta", model.filteredLogContent())
+}
+
+func (s *ModelSuite) TestLogsModalFilterInputFlow() {
+	model := s.newReadyModel()
+	model.showLogsModal = true
+	model.logContent = "alpha\nbeta\n"
+	model.refreshLogsViewport()
+
+	res, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	updated := res.(Model)
+	s.True(updated.logFilterInput)
+
+	res, _ = updated.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
+	updated = res.(Model)
+	s.Equal("b", updated.logFilter)
+	s.True(updated.logFilterInput)
+	s.Equal("beta", strings.TrimSpace(updated.filteredLogContent()))
+
+	res, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated = res.(Model)
+	s.False(updated.logFilterInput)
+}
+
+func (s *ModelSuite) TestExportFilteredLogsWritesFile() {
+	model := s.newReadyModel()
+	model.logContent = "alpha\nbeta\ngamma\n"
+	model.logFilter = "bet"
+	model.logRunID = "run-1"
+	model.logTaskID = "task-1"
+
+	cmd := model.exportFilteredLogs()
+	s.Require().NotNil(cmd)
+	msg := cmd()
+
+	exported, ok := msg.(logsExportedMsg)
+	s.Require().True(ok)
+	s.T().Cleanup(func() { _ = os.Remove(exported.path) })
+
+	data, err := os.ReadFile(exported.path)
+	s.Require().NoError(err)
+	content := string(data)
+	s.Contains(content, "run_id=run-1")
+	s.Contains(content, "task_id=task-1")
+	s.Contains(content, "beta")
+	s.NotContains(content, "alpha")
+}
+
+func (s *ModelSuite) TestHelpOverlayToggle() {
+	model := s.newReadyModel()
+
+	res, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'?'}})
+	updated := res.(Model)
+	s.True(updated.showHelp)
+
+	res, _ = updated.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	updated = res.(Model)
+	s.False(updated.showHelp)
+}
+
+func (s *ModelSuite) TestThemeCycleHotkey() {
+	model := s.newReadyModel()
+	initial := model.themeName
+
+	res, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'T'}})
+	updated := res.(Model)
+	s.NotEmpty(updated.themeName)
+	s.NotEqual(initial, updated.themeName)
+	s.Contains(updated.actionNotice, "Theme switched")
+}
+
+func (s *ModelSuite) TestHealthCheckUpdatesDiagnostics() {
+	model := s.newReadyModel()
+	checkedAt := time.Now()
+
+	res, _ := model.Update(healthCheckedMsg{
+		ok:        true,
+		latency:   42 * time.Millisecond,
+		checkedAt: checkedAt,
+	})
+	updated := res.(Model)
+	s.True(updated.apiHealthy)
+	s.Equal(42*time.Millisecond, updated.apiLatency)
+	s.True(updated.apiCheckedAt.Equal(checkedAt))
+	s.Contains(updated.actionNotice, "Health check passed")
+}
+
+func (s *ModelSuite) TestDiagnosticsStatusTextIncludesRetries() {
+	model := s.newReadyModel()
+	model.apiCheckedAt = time.Now()
+	model.apiHealthy = true
+	model.apiLatency = 15 * time.Millisecond
+	model.lastLoadLatency = 90 * time.Millisecond
+	model.lastLoadRetries = 2
+
+	text := model.diagnosticsStatusText()
+	s.Contains(text, "api:healthy")
+	s.Contains(text, "retries:2")
 }
 
 func (s *ModelSuite) mustParseURL(raw string) *url.URL {

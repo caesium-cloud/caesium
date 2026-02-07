@@ -19,6 +19,8 @@ type status int
 
 type section int
 
+type actionKind int
+
 const (
 	statusLoading status = iota
 	statusReady
@@ -30,6 +32,19 @@ const (
 	sectionTriggers
 	sectionAtoms
 )
+
+const (
+	actionNone actionKind = iota
+	actionTrigger
+	actionRerun
+)
+
+type actionRequest struct {
+	kind  actionKind
+	jobID string
+	runID string
+	label string
+}
 
 func (s section) next() section {
 	return section((int(s) + 1) % 3)
@@ -85,13 +100,26 @@ type Model struct {
 	logSince        map[string]time.Time
 	logLastLine     map[string]string
 	logsFollow      bool
+	logFilter       string
+	logFilterInput  bool
 	atomDetails     map[string]*api.Atom
 	atomErr         error
 	loadingAtomID   string
 	atomIndex       map[string]api.Atom
 	showDetail      bool
 	detailLoading   bool
-	triggeringJobID string
+	showHelp        bool
+	themeIndex      int
+	themeName       string
+	apiHealthy      bool
+	apiHealthErr    error
+	apiLatency      time.Duration
+	apiCheckedAt    time.Time
+	lastLoadAt      time.Time
+	lastLoadLatency time.Duration
+	lastLoadRetries int
+	confirmAction   *actionRequest
+	actionPending   *actionRequest
 	actionNotice    string
 	actionErr       error
 }
@@ -109,7 +137,7 @@ func New(client *api.Client) Model {
 	atoms := createTable(atomColumnTitles, []int{24, 12, 20}, false)
 	runsTable := createTable(runColumnTitles, []int{16, 12, 22, 22}, false)
 
-	return Model{
+	m := Model{
 		client:          client,
 		spinner:         sp,
 		state:           statusLoading,
@@ -130,6 +158,8 @@ func New(client *api.Client) Model {
 		taskRunStatus:   make(map[string]api.RunTask),
 		followLatestRun: true,
 	}
+	m.setTheme(0)
+	return m
 }
 
 // Init bootstraps async fetch and spinner tick.
@@ -143,6 +173,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.confirmAction != nil {
+			switch msg.String() {
+			case "enter", "y":
+				cmd := m.confirmActionNow()
+				return m, cmd
+			case "ctrl+c", "q", "esc", "n":
+				m.confirmAction = nil
+				return m, nil
+			}
+			return m, nil
+		}
+		if m.showHelp {
+			switch msg.String() {
+			case "ctrl+c", "q", "esc", "?":
+				m.showHelp = false
+				return m, nil
+			}
+			return m, nil
+		}
+		if !m.logFilterInput {
+			switch msg.String() {
+			case "?":
+				m.showHelp = true
+				return m, nil
+			case "T":
+				m.cycleTheme()
+				return m, nil
+			case "p":
+				if m.client != nil {
+					return m, pingHealth(m.client)
+				}
+				m.setActionStatus("Health check failed", fmt.Errorf("api client not configured"))
+				return m, nil
+			}
+		}
 		if m.showRunsModal {
 			switch msg.String() {
 			case "ctrl+c", "q", "esc":
@@ -151,6 +216,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				m.selectRunFromModal()
 				m.showRunsModal = false
+				return m, nil
+			case "R":
+				if cmd := m.requestRerunSelectedRun(); cmd != nil {
+					return m, cmd
+				}
 				return m, nil
 			case "r":
 				if cmd := m.reloadRuns(); cmd != nil {
@@ -163,10 +233,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		if m.showLogsModal {
+			if m.logFilterInput {
+				switch msg.String() {
+				case "enter":
+					m.logFilterInput = false
+					m.refreshLogsViewport()
+				case "esc":
+					m.logFilterInput = false
+				case "backspace", "ctrl+h":
+					if m.logFilter != "" {
+						runes := []rune(m.logFilter)
+						m.logFilter = string(runes[:len(runes)-1])
+						m.refreshLogsViewport()
+					}
+				case "ctrl+u":
+					m.logFilter = ""
+					m.refreshLogsViewport()
+				default:
+					if msg.Type == tea.KeyRunes {
+						m.logFilter += string(msg.Runes)
+						m.refreshLogsViewport()
+					}
+				}
+				return m, nil
+			}
 			switch msg.String() {
 			case "ctrl+c", "q", "esc", "g":
 				m.stopLogStream(true)
 				m.showLogsModal = false
+				return m, nil
+			case "/":
+				m.logFilterInput = true
+				return m, nil
+			case "c":
+				m.logFilter = ""
+				m.logFilterInput = false
+				m.refreshLogsViewport()
+				return m, nil
+			case "e":
+				if cmd := m.exportFilteredLogs(); cmd != nil {
+					return m, cmd
+				}
 				return m, nil
 			case " ":
 				m.logsFollow = !m.logsFollow
@@ -235,7 +342,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.resetDetailView(nil, nil, true)
 			m.taskRunStatus = make(map[string]api.RunTask)
 			m.stopLogStream(false)
-			m.clearTriggeringJob("")
+			m.confirmAction = nil
+			m.actionPending = nil
+			m.showHelp = false
 			m.setActionStatus("", nil)
 			cmds = append(cmds, m.spinner.Tick, fetchData(m.client))
 		case "1":
@@ -356,6 +465,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dataLoadedMsg:
 		m.state = statusReady
 		m.err = nil
+		m.updateDiagnostics(msg.healthOK, msg.healthErr, msg.healthLatency, msg.healthCheckedAt, msg.fetchDuration, msg.attempts)
 		m.jobRecords = msg.jobs
 		m.jobRunStatus = make(map[string]*api.Run)
 		m.refreshJobRows()
@@ -499,6 +609,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.logCtx == nil {
 			m.logCtx = msg.ctx
 		}
+		m.refreshLogsViewport()
 		if msg.reader != nil && m.logCtx != nil {
 			cmds = append(cmds, readLogChunk(m.logCtx, msg.reader))
 		}
@@ -515,6 +626,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.logsErr = msg.err
 		}
 		m.stopLogStream(true)
+	case logsExportedMsg:
+		m.setActionStatus(fmt.Sprintf("Logs exported: %s", msg.path), nil)
+	case logsExportErrMsg:
+		m.setActionStatus("Log export failed", msg.err)
 	case atomDetailLoadedMsg:
 		if msg.atom != nil {
 			if m.atomDetails == nil {
@@ -532,11 +647,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.atomErr = msg.err
 	case jobTriggeredMsg:
-		m.clearTriggeringJob(msg.jobID)
-		notice := "Run accepted"
-		if msg.run != nil {
-			notice = fmt.Sprintf("Run %s accepted", shortID(msg.run.ID))
-		}
+		req := m.clearPendingAction(msg.jobID)
+		notice := actionAcceptedNotice(req, msg.run)
 		m.setJobStatus(msg.jobID, msg.run)
 		m.setActionStatus(notice, nil)
 		if m.state == statusReady {
@@ -546,8 +658,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case jobTriggerErrMsg:
-		m.clearTriggeringJob(msg.jobID)
-		m.setActionStatus("", msg.err)
+		req := m.clearPendingAction(msg.jobID)
+		m.setActionStatus(actionFailureTitle(req), msg.err)
+	case healthCheckedMsg:
+		m.apiHealthy = msg.ok
+		m.apiHealthErr = msg.err
+		m.apiLatency = msg.latency
+		m.apiCheckedAt = msg.checkedAt
+		if msg.ok {
+			m.setActionStatus("Health check passed", nil)
+		} else {
+			m.setActionStatus("Health check failed", msg.err)
+		}
+	case dataLoadErrMsg:
+		m.state = statusError
+		m.err = msg.err
+		m.updateDiagnostics(msg.healthOK, msg.healthErr, msg.healthLatency, msg.healthCheckedAt, msg.fetchDuration, msg.attempts)
 	case errMsg:
 		m.state = statusError
 		m.err = msg
@@ -630,6 +756,34 @@ func (m Model) currentJobAlias() string {
 		return ""
 	}
 	return row[0]
+}
+
+func (m Model) jobAliasByID(jobID string) string {
+	if jobID == "" {
+		return ""
+	}
+	if m.jobDetail != nil && m.jobDetail.Job.ID == jobID && m.jobDetail.Job.Alias != "" {
+		return m.jobDetail.Job.Alias
+	}
+	for _, job := range m.jobRecords {
+		if job.ID == jobID && job.Alias != "" {
+			return job.Alias
+		}
+	}
+	return ""
+}
+
+func (m Model) jobLabel(jobID string) string {
+	row := m.jobs.SelectedRow()
+	if len(row) >= 5 && row[4] == jobID {
+		if alias := strings.TrimSpace(row[0]); alias != "" {
+			return alias
+		}
+	}
+	if alias := m.jobAliasByID(jobID); alias != "" {
+		return alias
+	}
+	return shortID(jobID)
 }
 
 func (m *Model) setJobStatus(jobID string, run *api.Run) {
@@ -727,15 +881,78 @@ func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
 	}
 }
 
-func (m *Model) clearTriggeringJob(jobID string) {
-	if jobID == "" || m.triggeringJobID == jobID {
-		m.triggeringJobID = ""
+func (m *Model) clearPendingAction(jobID string) *actionRequest {
+	if m.actionPending == nil {
+		return nil
 	}
+	if jobID == "" || m.actionPending.jobID == jobID {
+		req := m.actionPending
+		m.actionPending = nil
+		return req
+	}
+	return nil
 }
 
 func (m *Model) setActionStatus(notice string, err error) {
 	m.actionNotice = notice
 	m.actionErr = err
+}
+
+func (m *Model) updateDiagnostics(healthy bool, healthErr error, healthLatency time.Duration, checkedAt time.Time, fetchLatency time.Duration, attempts int) {
+	m.apiHealthy = healthy
+	m.apiHealthErr = healthErr
+	m.apiLatency = healthLatency
+	m.apiCheckedAt = checkedAt
+	m.lastLoadAt = checkedAt
+	m.lastLoadLatency = fetchLatency
+	if attempts > 0 {
+		m.lastLoadRetries = attempts - 1
+	}
+}
+
+func actionVerb(kind actionKind) string {
+	switch kind {
+	case actionTrigger:
+		return "Triggering"
+	case actionRerun:
+		return "Re-running"
+	default:
+		return "Working"
+	}
+}
+
+func actionFailureTitle(req *actionRequest) string {
+	if req == nil {
+		return "Action failed"
+	}
+	switch req.kind {
+	case actionTrigger:
+		return "Trigger failed"
+	case actionRerun:
+		return "Re-run failed"
+	default:
+		return "Action failed"
+	}
+}
+
+func actionAcceptedNotice(req *actionRequest, run *api.Run) string {
+	if run == nil {
+		if req != nil && req.kind == actionRerun {
+			return "Re-run accepted"
+		}
+		return "Run accepted"
+	}
+	if req != nil && req.kind == actionRerun {
+		source := ""
+		if req.runID != "" {
+			source = shortID(req.runID)
+		}
+		if source != "" {
+			return fmt.Sprintf("Re-run from %s accepted as %s", source, shortID(run.ID))
+		}
+		return fmt.Sprintf("Re-run %s accepted", shortID(run.ID))
+	}
+	return fmt.Sprintf("Run %s accepted", shortID(run.ID))
 }
 
 func (m *Model) toggleLogs() tea.Cmd {
@@ -792,6 +1009,7 @@ func (m *Model) startLogStream(taskID string) tea.Cmd {
 		delete(m.logLastLine, key)
 	}
 	m.logsViewport.SetContent(m.logContent)
+	m.refreshLogsViewport()
 	m.logsFollow = true
 	m.logsViewport.GotoBottom()
 	m.showLogsModal = true
@@ -825,7 +1043,7 @@ func (m *Model) stopLogStream(preserveContent bool) {
 		m.logRunID = ""
 		m.logsErr = nil
 		m.logContent = ""
-		m.logsViewport.SetContent("")
+		m.refreshLogsViewport()
 		m.logLastLine = make(map[string]string)
 	}
 	if !preserveContent {
@@ -869,10 +1087,7 @@ func (m *Model) appendLogs(chunk string) {
 	m.logContent += chunk
 	m.storeLogCache()
 	m.updateLogCursor(chunk)
-	m.logsViewport.SetContent(strings.TrimPrefix(m.logContent, "\n"))
-	if m.logsFollow {
-		m.logsViewport.GotoBottom()
-	}
+	m.refreshLogsViewport()
 }
 
 func (m *Model) storeLogCache() {
@@ -936,24 +1151,76 @@ func (m *Model) triggerSelectedJob() tea.Cmd {
 	if m.state != statusReady || m.active != sectionJobs {
 		return nil
 	}
-	if m.triggeringJobID != "" {
+	if m.actionPending != nil || m.confirmAction != nil {
 		return nil
 	}
 	jobID := m.currentJobID()
 	if jobID == "" {
 		return nil
 	}
-	alias := m.currentJobAlias()
-	if alias == "" && m.jobDetail != nil && m.jobDetail.Job.ID == jobID {
-		alias = m.jobDetail.Job.Alias
+	label := m.jobLabel(jobID)
+	m.confirmAction = &actionRequest{
+		kind:  actionTrigger,
+		jobID: jobID,
+		label: label,
 	}
-	if alias == "" {
-		alias = shortID(jobID)
+	return nil
+}
+
+func (m *Model) requestRerunSelectedRun() tea.Cmd {
+	if m.actionPending != nil || m.confirmAction != nil {
+		return nil
 	}
-	m.triggeringJobID = jobID
+	run := m.selectedRun()
+	if run == nil {
+		return nil
+	}
+	jobID := run.JobID
+	if jobID == "" && m.jobDetail != nil {
+		jobID = m.jobDetail.Job.ID
+	}
+	if jobID == "" {
+		return nil
+	}
+	label := fmt.Sprintf("run %s", shortID(run.ID))
+	m.confirmAction = &actionRequest{
+		kind:  actionRerun,
+		jobID: jobID,
+		runID: run.ID,
+		label: label,
+	}
+	return nil
+}
+
+func (m *Model) confirmActionNow() tea.Cmd {
+	if m.confirmAction == nil {
+		return nil
+	}
+	req := *m.confirmAction
+	m.confirmAction = nil
+	return m.startAction(req)
+}
+
+func (m *Model) startAction(req actionRequest) tea.Cmd {
+	if m.client == nil || req.jobID == "" {
+		return nil
+	}
+	if m.actionPending != nil {
+		return nil
+	}
+	m.actionPending = &req
 	m.actionErr = nil
-	m.actionNotice = fmt.Sprintf("Triggering %s…", alias)
-	return triggerJob(m.client, jobID)
+	if req.label != "" {
+		m.actionNotice = fmt.Sprintf("%s %s…", actionVerb(req.kind), req.label)
+	} else {
+		m.actionNotice = fmt.Sprintf("%s…", actionVerb(req.kind))
+	}
+	switch req.kind {
+	case actionRerun:
+		return rerunJob(m.client, req.jobID, req.runID)
+	default:
+		return triggerJob(m.client, req.jobID)
+	}
 }
 
 func (m Model) nextSuccessor() string {
@@ -1090,10 +1357,42 @@ func (m *Model) resizeLogViewport() {
 	}
 	m.logsViewport.Width = width
 	m.logsViewport.Height = height
-	m.logsViewport.SetContent(m.logContent)
+	m.refreshLogsViewport()
+}
+
+func (m *Model) refreshLogsViewport() {
+	m.logsViewport.SetContent(strings.TrimSuffix(m.filteredLogContent(), "\n"))
 	if m.logsFollow {
 		m.logsViewport.GotoBottom()
 	}
+}
+
+func (m Model) filteredLogContent() string {
+	content := strings.TrimPrefix(m.logContent, "\n")
+	query := strings.ToLower(strings.TrimSpace(m.logFilter))
+	if query == "" {
+		return content
+	}
+	if strings.TrimSpace(content) == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	filtered := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.Contains(strings.ToLower(line), query) {
+			filtered = append(filtered, line)
+		}
+	}
+	return strings.Join(filtered, "\n")
+}
+
+func (m *Model) exportFilteredLogs() tea.Cmd {
+	content := strings.TrimSpace(m.filteredLogContent())
+	if content == "" {
+		m.setActionStatus("Log export failed", fmt.Errorf("no log content to export"))
+		return nil
+	}
+	return exportLogSnippet(content, m.logRunID, m.logTaskID, m.logFilter)
 }
 
 func (m Model) orderedNodeIDs() []string {
@@ -1179,6 +1478,14 @@ func (m *Model) selectRunFromModal() {
 		return
 	}
 	m.setActiveRunID(row[0])
+}
+
+func (m *Model) selectedRun() *api.Run {
+	row := m.runsTable.SelectedRow()
+	if len(row) == 0 {
+		return nil
+	}
+	return m.runByID(row[0])
 }
 
 func (m *Model) setActiveRunID(runID string) {

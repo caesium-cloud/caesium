@@ -106,3 +106,48 @@ func (c *Client) Atoms() *AtomsService {
 func (c *Client) Runs() *RunsService {
 	return &RunsService{client: c}
 }
+
+type healthResponse struct {
+	Status string `json:"status"`
+}
+
+// Ping verifies the API health endpoint responds with a healthy status.
+func (c *Client) Ping(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolve("/health"), nil)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("health check failed: %w", err)
+	}
+
+	if resp.StatusCode >= http.StatusBadRequest {
+		errStatus := fmt.Errorf("health check failed: request failed: %s", resp.Status)
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return errors.Join(errStatus, closeErr)
+		}
+		return errStatus
+	}
+
+	// Keep health parsing permissive so extra payload fields don't break diagnostics.
+	decoder := json.NewDecoder(resp.Body)
+	var payload healthResponse
+	decodeErr := decoder.Decode(&payload)
+	closeErr := resp.Body.Close()
+	if decodeErr != nil {
+		if closeErr != nil {
+			return fmt.Errorf("health check failed: %w", errors.Join(decodeErr, closeErr))
+		}
+		return fmt.Errorf("health check failed: %w", decodeErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("health check failed: %w", closeErr)
+	}
+
+	if strings.ToLower(strings.TrimSpace(payload.Status)) != "healthy" {
+		return fmt.Errorf("health check failed: status=%q", payload.Status)
+	}
+	return nil
+}

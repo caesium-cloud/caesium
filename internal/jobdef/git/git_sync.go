@@ -108,20 +108,29 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 	var repo *git.Repository
 	lastHash := ""
 
-	syncOnce := func() error {
-		cloneOpts, authCleanup, err := opts.Source.cloneOptions(ctx)
+	syncOnce := func(syncCtx context.Context) error {
+		if err := syncCtx.Err(); err != nil {
+			return context.Cause(syncCtx)
+		}
+		cloneOpts, authCleanup, err := opts.Source.cloneOptions(syncCtx)
 		if err != nil {
 			return err
 		}
 		defer authCleanup()
 
-		repo, err = ensureRepo(ctx, cloneDir, cloneOpts, repo)
+		repo, err = ensureRepo(syncCtx, cloneDir, cloneOpts, repo)
 		if err != nil {
+			if syncCtx.Err() != nil {
+				return context.Cause(syncCtx)
+			}
 			return err
 		}
 
 		hash, err := headHash(repo)
 		if err != nil {
+			if syncCtx.Err() != nil {
+				return context.Cause(syncCtx)
+			}
 			return err
 		}
 
@@ -129,7 +138,10 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 			return nil
 		}
 
-		if err := opts.Source.applyDir(ctx, importer, cloneDir, hash); err != nil {
+		if err := opts.Source.applyDir(syncCtx, importer, cloneDir, hash); err != nil {
+			if syncCtx.Err() != nil {
+				return context.Cause(syncCtx)
+			}
 			return err
 		}
 
@@ -137,7 +149,7 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 		return nil
 	}
 
-	if err := syncOnce(); err != nil {
+	if err := syncOnce(context.WithoutCancel(ctx)); err != nil {
 		return err
 	}
 
@@ -153,7 +165,10 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 		case <-ctx.Done():
 			return context.Cause(ctx)
 		case <-ticker.C:
-			if err := syncOnce(); err != nil {
+			if err := syncOnce(ctx); err != nil {
+				if ctx.Err() != nil {
+					return context.Cause(ctx)
+				}
 				return err
 			}
 		}
