@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
@@ -30,9 +31,9 @@ var (
 
 // View renders the interface.
 func (m Model) View() string {
-	tabs := renderTabsBar(m.active, m.viewportWidth)
+	tabs := renderTabsBar(m.active, m.viewportWidth, m.themeName)
 
-	footerKeys := []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[q] quit"}
+	footerKeys := []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[T] theme", "[?] help", "[q] quit"}
 	if m.active == sectionJobs {
 		if m.showDetail {
 			footerKeys = []string{
@@ -45,7 +46,13 @@ func (m Model) View() string {
 				"[t] trigger",
 				"[g] logs",
 				"[space] follow",
+				"[/] filter",
+				"[c] clear",
+				"[e] export",
 				"[pgup/pgdn] log scroll",
+				"[p] ping",
+				"[T] theme",
+				"[?] help",
 			}
 		} else {
 			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger")
@@ -80,10 +87,16 @@ func (m Model) View() string {
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, tabs, body, footer)
 	if m.showRunsModal {
-		return m.renderRunsModal(screen)
+		screen = m.renderRunsModal(screen)
 	}
 	if m.showLogsModal {
-		return m.renderLogsModal(screen)
+		screen = m.renderLogsModal(screen)
+	}
+	if m.confirmAction != nil {
+		screen = m.renderConfirmModal(screen)
+	}
+	if m.showHelp {
+		screen = m.renderHelpModal(screen)
 	}
 	return screen
 }
@@ -225,10 +238,47 @@ func (m Model) nodeLabeler() dag.LabelFunc {
 }
 
 func (m Model) actionStatusText() string {
+	diagnostics := m.diagnosticsStatusText()
 	if m.actionErr != nil {
-		return fmt.Sprintf("Trigger failed: %s", m.actionErr.Error())
+		title := strings.TrimSpace(m.actionNotice)
+		if title == "" {
+			title = "Action failed"
+		}
+		msg := fmt.Sprintf("%s: %s", title, m.actionErr.Error())
+		if diagnostics != "" {
+			return msg + "  |  " + diagnostics
+		}
+		return msg
 	}
-	return m.actionNotice
+	notice := strings.TrimSpace(m.actionNotice)
+	if notice == "" {
+		return diagnostics
+	}
+	if diagnostics == "" {
+		return notice
+	}
+	return notice + "  |  " + diagnostics
+}
+
+func (m Model) diagnosticsStatusText() string {
+	if m.apiCheckedAt.IsZero() {
+		return ""
+	}
+	health := "api:healthy"
+	if !m.apiHealthy {
+		health = "api:degraded"
+	}
+	parts := []string{
+		health,
+		fmt.Sprintf("ping:%s", m.apiLatency.Round(time.Millisecond)),
+		fmt.Sprintf("load:%s", m.lastLoadLatency.Round(time.Millisecond)),
+		fmt.Sprintf("retries:%d", m.lastLoadRetries),
+		fmt.Sprintf("checked:%s", m.apiCheckedAt.Format("15:04:05")),
+	}
+	if m.apiHealthErr != nil {
+		parts = append(parts, fmt.Sprintf("err:%s", m.apiHealthErr.Error()))
+	}
+	return strings.Join(parts, "  ")
 }
 
 func statusBadge(status, spinnerFrame string, compact bool) string {
@@ -276,9 +326,13 @@ func renderTabs(active section) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 
-func renderTabsBar(active section, totalWidth int) string {
+func renderTabsBar(active section, totalWidth int, themeName string) string {
 	tabs := renderTabs(active)
 	logo := logoStyle.Render("┌────┐\n│ Cs │\n└────┘")
+	if trimmed := strings.TrimSpace(themeName); trimmed != "" {
+		tag := truncateText(trimmed, 4)
+		logo = logoStyle.Render(fmt.Sprintf("┌────┐\n│%4s│\n└────┘", tag))
+	}
 	if totalWidth <= 0 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, tabs, logo)
 	}
@@ -333,7 +387,7 @@ func (m Model) renderLogsModal(background string) string {
 	contentHeight := max(modalHeight-4, 8)
 	m.logsViewport.Width = contentWidth
 	m.logsViewport.Height = contentHeight
-	m.logsViewport.SetContent(strings.TrimSuffix(m.logContent, "\n"))
+	m.logsViewport.SetContent(strings.TrimSuffix(m.filteredLogContent(), "\n"))
 
 	title := "Task Logs"
 	var labels []string
@@ -356,7 +410,14 @@ func (m Model) renderLogsModal(background string) string {
 	if !m.logsFollow {
 		followState = "paused"
 	}
-	hint := modalHint.Render(fmt.Sprintf("follow: %s  •  space to toggle", followState))
+	filterState := "filter off"
+	if query := strings.TrimSpace(m.logFilter); query != "" {
+		filterState = fmt.Sprintf("filter: %q", query)
+	}
+	if m.logFilterInput {
+		filterState = fmt.Sprintf("filter: %q (editing)", m.logFilter)
+	}
+	hint := modalHint.Render(fmt.Sprintf("follow: %s  •  %s  •  / edit  •  c clear  •  e export", followState, filterState))
 
 	var body string
 	switch {
@@ -366,8 +427,18 @@ func (m Model) renderLogsModal(background string) string {
 		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, centerText(fmt.Sprintf("%s Streaming logs…", m.spinner.View())))
 	case strings.TrimSpace(m.logContent) == "":
 		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render("Press g to stream logs for the focused task."))
+	case strings.TrimSpace(m.filteredLogContent()) == "":
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render(fmt.Sprintf("No log lines match %q.", m.logFilter)))
 	default:
-		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, m.logsViewport.View())
+		filterPrompt := ""
+		if m.logFilterInput {
+			filterPrompt = modalHint.Render(fmt.Sprintf("Filter query: %s_", m.logFilter))
+		}
+		if filterPrompt != "" {
+			body = fmt.Sprintf("%s\n%s\n%s\n\n%s", modalTitle.Render(title), hint, filterPrompt, m.logsViewport.View())
+		} else {
+			body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, m.logsViewport.View())
+		}
 	}
 
 	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
@@ -377,6 +448,112 @@ func (m Model) renderLogsModal(background string) string {
 		modal,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func (m Model) renderConfirmModal(background string) string {
+	req := m.confirmAction
+	if req == nil {
+		return background
+	}
+	width := m.viewportWidth
+	height := m.viewportHeight
+	if width <= 0 {
+		width = lipgloss.Width(background)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(background)
+	}
+
+	modalWidth := max(40, width-14)
+	if modalWidth > width-4 {
+		modalWidth = width - 4
+	}
+	modalHeight := max(10, height-8)
+	if modalHeight > height-2 {
+		modalHeight = height - 2
+	}
+
+	title, prompt := actionConfirmCopy(req, m.jobLabel(req.jobID))
+	hint := modalHint.Render("enter/y confirm  •  esc/n cancel")
+
+	body := fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, boxStyle.Render(prompt))
+	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
+
+	return lipgloss.Place(width, height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func (m Model) renderHelpModal(background string) string {
+	width := m.viewportWidth
+	height := m.viewportHeight
+	if width <= 0 {
+		width = lipgloss.Width(background)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(background)
+	}
+
+	modalWidth := max(64, width-12)
+	if modalWidth > width-4 {
+		modalWidth = width - 4
+	}
+	modalHeight := max(18, height-6)
+	if modalHeight > height-2 {
+		modalHeight = height - 2
+	}
+
+	body := strings.Join([]string{
+		modalTitle.Render("Console Help"),
+		modalHint.Render("esc / q / ? close"),
+		"",
+		"Global",
+		"  1/2/3 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
+		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
+		"",
+		"Jobs Detail",
+		"  enter detail  •  t trigger  •  u runs  •  g logs",
+		"  left/right traverse DAG  •  f focus path",
+		"",
+		"Runs + Logs",
+		"  Runs: R re-run  •  Logs: space follow/pause  •  / filter",
+		"  Logs: c clear filter  •  e export snippet  •  pgup/pgdn scroll",
+	}, "\n")
+
+	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
+	return lipgloss.Place(width, height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func actionConfirmCopy(req *actionRequest, jobLabel string) (string, string) {
+	if req == nil {
+		return "Confirm Action", "Proceed?"
+	}
+	label := strings.TrimSpace(req.label)
+	if jobLabel == "" {
+		jobLabel = "job"
+	}
+	switch req.kind {
+	case actionTrigger:
+		title := "Trigger Job"
+		if label == "" {
+			label = jobLabel
+		}
+		return title, fmt.Sprintf("Trigger %s now?", label)
+	case actionRerun:
+		title := "Re-run Job"
+		if label == "" {
+			label = "selected run"
+		}
+		return title, fmt.Sprintf("Re-run %s for %s?", label, jobLabel)
+	default:
+		return "Confirm Action", "Proceed?"
+	}
 }
 
 func renderFooter(keys []string, status string, width int) string {
@@ -474,7 +651,7 @@ func (m Model) renderRunsModal(background string) string {
 	contentHeight := max(modalHeight-6, 6)
 
 	title := "Select Run"
-	hint := modalHint.Render("enter to select  •  r refresh  •  esc to close")
+	hint := modalHint.Render("enter select  •  r refresh  •  R re-run  •  esc close")
 
 	var body string
 	switch {

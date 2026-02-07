@@ -3,12 +3,20 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	tea "github.com/charmbracelet/bubbletea"
+)
+
+const (
+	maxFetchAttempts = 3
+	retryBackoffStep = 150 * time.Millisecond
 )
 
 func fetchAtomDetail(client *api.Client, atomID string) tea.Cmd {
@@ -23,6 +31,17 @@ func fetchAtomDetail(client *api.Client, atomID string) tea.Cmd {
 
 func triggerJob(client *api.Client, jobID string) tea.Cmd {
 	return func() tea.Msg {
+		run, err := client.Runs().Trigger(context.Background(), jobID)
+		if err != nil {
+			return jobTriggerErrMsg{jobID: jobID, err: err}
+		}
+		return jobTriggeredMsg{jobID: jobID, run: run}
+	}
+}
+
+func rerunJob(client *api.Client, jobID, runID string) tea.Cmd {
+	return func() tea.Msg {
+		// A dedicated rerun endpoint is not available yet; start a new run for the same job.
 		run, err := client.Runs().Trigger(context.Background(), jobID)
 		if err != nil {
 			return jobTriggerErrMsg{jobID: jobID, err: err}
@@ -69,28 +88,97 @@ func fetchRuns(client *api.Client, jobID string) tea.Cmd {
 
 func fetchData(client *api.Client) tea.Cmd {
 	return func() tea.Msg {
+		if client == nil {
+			return dataLoadErrMsg{err: fmt.Errorf("api client not configured")}
+		}
+		startedAt := time.Now()
+		healthCheckedAt := time.Now()
+		healthStarted := time.Now()
+		healthErr := client.Ping(context.Background())
+		healthLatency := time.Since(healthStarted)
+		healthOK := healthErr == nil
+
 		params := url.Values{}
 		params.Set("order_by", "created_at desc")
 
-		jobs, err := client.Jobs().List(context.Background(), params)
-		if err != nil {
-			return errMsg(err)
+		attempts := 0
+		for attempts < maxFetchAttempts {
+			attempts++
+			jobs, err := client.Jobs().List(context.Background(), params)
+			if err != nil {
+				err = fmt.Errorf("fetch jobs: %w", err)
+				if attempts >= maxFetchAttempts {
+					return dataLoadErrMsg{
+						err:             err,
+						attempts:        attempts,
+						fetchDuration:   time.Since(startedAt),
+						healthCheckedAt: healthCheckedAt,
+						healthLatency:   healthLatency,
+						healthOK:        healthOK,
+						healthErr:       healthErr,
+					}
+				}
+				time.Sleep(time.Duration(attempts) * retryBackoffStep)
+				continue
+			}
+
+			triggers, err := client.Triggers().List(context.Background(), url.Values{})
+			if err != nil {
+				err = fmt.Errorf("fetch triggers: %w", err)
+				if attempts >= maxFetchAttempts {
+					return dataLoadErrMsg{
+						err:             err,
+						attempts:        attempts,
+						fetchDuration:   time.Since(startedAt),
+						healthCheckedAt: healthCheckedAt,
+						healthLatency:   healthLatency,
+						healthOK:        healthOK,
+						healthErr:       healthErr,
+					}
+				}
+				time.Sleep(time.Duration(attempts) * retryBackoffStep)
+				continue
+			}
+
+			atoms, err := client.Atoms().List(context.Background(), url.Values{})
+			if err != nil {
+				err = fmt.Errorf("fetch atoms: %w", err)
+				if attempts >= maxFetchAttempts {
+					return dataLoadErrMsg{
+						err:             err,
+						attempts:        attempts,
+						fetchDuration:   time.Since(startedAt),
+						healthCheckedAt: healthCheckedAt,
+						healthLatency:   healthLatency,
+						healthOK:        healthOK,
+						healthErr:       healthErr,
+					}
+				}
+				time.Sleep(time.Duration(attempts) * retryBackoffStep)
+				continue
+			}
+
+			return dataLoadedMsg{
+				jobs:            jobs,
+				triggers:        triggers,
+				atoms:           atoms,
+				attempts:        attempts,
+				fetchDuration:   time.Since(startedAt),
+				healthCheckedAt: healthCheckedAt,
+				healthLatency:   healthLatency,
+				healthOK:        healthOK,
+				healthErr:       healthErr,
+			}
 		}
 
-		triggers, err := client.Triggers().List(context.Background(), url.Values{})
-		if err != nil {
-			return errMsg(err)
-		}
-
-		atoms, err := client.Atoms().List(context.Background(), url.Values{})
-		if err != nil {
-			return errMsg(err)
-		}
-
-		return dataLoadedMsg{
-			jobs:     jobs,
-			triggers: triggers,
-			atoms:    atoms,
+		return dataLoadErrMsg{
+			err:             fmt.Errorf("failed to fetch data"),
+			attempts:        attempts,
+			fetchDuration:   time.Since(startedAt),
+			healthCheckedAt: healthCheckedAt,
+			healthLatency:   healthLatency,
+			healthOK:        healthOK,
+			healthErr:       healthErr,
 		}
 	}
 }
@@ -128,6 +216,14 @@ type logsClosedMsg struct {
 	err error
 }
 
+type logsExportedMsg struct {
+	path string
+}
+
+type logsExportErrMsg struct {
+	err error
+}
+
 type atomDetailLoadedMsg struct {
 	id   string
 	atom *api.Atom
@@ -158,13 +254,49 @@ type runsErrMsg struct {
 	err   error
 }
 
+type healthCheckedMsg struct {
+	ok        bool
+	latency   time.Duration
+	checkedAt time.Time
+	err       error
+}
+
 type dataLoadedMsg struct {
-	jobs     []api.Job
-	triggers []api.Trigger
-	atoms    []api.Atom
+	jobs            []api.Job
+	triggers        []api.Trigger
+	atoms           []api.Atom
+	attempts        int
+	fetchDuration   time.Duration
+	healthCheckedAt time.Time
+	healthLatency   time.Duration
+	healthOK        bool
+	healthErr       error
+}
+
+type dataLoadErrMsg struct {
+	err             error
+	attempts        int
+	fetchDuration   time.Duration
+	healthCheckedAt time.Time
+	healthLatency   time.Duration
+	healthOK        bool
+	healthErr       error
 }
 
 type errMsg error
+
+func pingHealth(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		started := time.Now()
+		err := client.Ping(context.Background())
+		return healthCheckedMsg{
+			ok:        err == nil,
+			latency:   time.Since(started),
+			checkedAt: time.Now(),
+			err:       err,
+		}
+	}
+}
 
 func openLogStream(ctx context.Context, client *api.Client, jobID, runID, taskID string, since time.Time) tea.Cmd {
 	return func() tea.Msg {
@@ -203,5 +335,40 @@ func readLogChunk(ctx context.Context, reader io.ReadCloser) tea.Cmd {
 		}
 
 		return logsClosedMsg{}
+	}
+}
+
+func exportLogSnippet(content, runID, taskID, filter string) tea.Cmd {
+	return func() tea.Msg {
+		content = strings.TrimSpace(content)
+		if content == "" {
+			return logsExportErrMsg{err: fmt.Errorf("no log content to export")}
+		}
+
+		file, err := os.CreateTemp("", "caesium-log-*.txt")
+		if err != nil {
+			return logsExportErrMsg{err: err}
+		}
+
+		defer func() {
+			_ = file.Close()
+		}()
+
+		header := []string{
+			fmt.Sprintf("exported_at=%s", time.Now().Format(time.RFC3339Nano)),
+			fmt.Sprintf("run_id=%s", strings.TrimSpace(runID)),
+			fmt.Sprintf("task_id=%s", strings.TrimSpace(taskID)),
+		}
+		if q := strings.TrimSpace(filter); q != "" {
+			header = append(header, fmt.Sprintf("filter=%q", q))
+		}
+		header = append(header, "")
+		header = append(header, content)
+
+		if _, err := file.WriteString(strings.Join(header, "\n") + "\n"); err != nil {
+			return logsExportErrMsg{err: err}
+		}
+
+		return logsExportedMsg{path: file.Name()}
 	}
 }

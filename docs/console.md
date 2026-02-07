@@ -45,12 +45,30 @@ CAESIUM_BASE_URL="https://caesium.example.com" just console
 | `Tab` / `Shift+Tab` | Cycle forward/backward through tabs |
 | `↑` / `↓` | Navigate within the active table |
 | `r` | Reload data from the API |
+| `p` | Run an API health ping (`/health`) and update diagnostics |
+| `T` | Cycle console themes |
+| `?` | Open/close the help overlay |
 | `Enter` | (Jobs tab) open the detail/DAG screen |
 | `u` | (Jobs detail) open the run selector |
 | `t` | (Jobs tab) trigger the selected job manually |
+| `g` | (Jobs detail) open/close task log streaming for the focused DAG node |
+| `R` | (Run selector) request re-run confirmation for the selected run |
 | `Space` | (Logs modal) toggle follow/pause |
+| `/` | (Logs modal) start editing a log filter query |
+| `c` | (Logs modal) clear the current log filter |
+| `e` | (Logs modal) export the current filtered log snippet to a temp file |
+| `Enter` / `y` | (Confirm modal) accept action |
+| `Esc` / `n` | (Confirm modal) cancel action |
 | `Esc` / `q` | Exit the detail screen; press again to quit the console |
 | `q` or `Ctrl+C` | Quit the console |
+
+When exporting logs, the console writes a snippet file to your OS temp directory and reports the full path in the status bar.
+
+## Diagnostics and Resilience
+
+- Startup loads now include bounded retry/backoff for jobs/triggers/atoms fetches.
+- The status line shows API health and timing diagnostics: ping latency, load latency, retry count, and check timestamp.
+- Use `p` anytime to force a fresh health ping and update the diagnostics state immediately.
 
 ## Development Notes
 
