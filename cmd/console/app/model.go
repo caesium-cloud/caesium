@@ -750,14 +750,6 @@ func (m Model) currentJobID() string {
 	return row[4]
 }
 
-func (m Model) currentJobAlias() string {
-	row := m.jobs.SelectedRow()
-	if len(row) == 0 {
-		return ""
-	}
-	return row[0]
-}
-
 func (m Model) jobAliasByID(jobID string) string {
 	if jobID == "" {
 		return ""
