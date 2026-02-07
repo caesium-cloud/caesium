@@ -149,7 +149,7 @@ func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) er
 		return nil
 	}
 
-	if err := syncOnce(context.WithoutCancel(ctx)); err != nil {
+	if err := syncOnce(ctx); err != nil {
 		return err
 	}
 
