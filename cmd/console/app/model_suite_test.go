@@ -309,6 +309,19 @@ func (s *ModelSuite) TestRequestRerunSelectedRunOpensConfirm() {
 	s.Equal("run-1", model.confirmAction.runID)
 }
 
+func (s *ModelSuite) TestRequestRerunSelectedRunRejectsRunningRun() {
+	model := s.newReadyModel()
+	model.runs = []api.Run{{ID: "run-1", JobID: "job-1", Status: "running"}}
+	model.runsTable.SetRows(runsToRows(model.runs, ""))
+	model.runsTable.SetCursor(0)
+
+	cmd := model.requestRerunSelectedRun()
+	s.Nil(cmd)
+	s.Nil(model.confirmAction)
+	s.Contains(model.actionNotice, "Re-run unavailable")
+	s.NoError(model.actionErr)
+}
+
 func (s *ModelSuite) TestFilteredLogContentAppliesQuery() {
 	model := s.newReadyModel()
 	model.logContent = "alpha\nbeta\ngamma\n"

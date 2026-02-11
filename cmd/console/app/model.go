@@ -1167,6 +1167,14 @@ func (m *Model) requestRerunSelectedRun() tea.Cmd {
 	if run == nil {
 		return nil
 	}
+	if !runIsRerunnable(run.Status) {
+		status := titleCase(strings.ToLower(strings.TrimSpace(run.Status)))
+		if status == "" {
+			status = "In Progress"
+		}
+		m.setActionStatus(fmt.Sprintf("Re-run unavailable: run %s is %s", shortID(run.ID), status), nil)
+		return nil
+	}
 	jobID := run.JobID
 	if jobID == "" && m.jobDetail != nil {
 		jobID = m.jobDetail.Job.ID
@@ -1579,4 +1587,13 @@ func orderRunsDesc(runs []api.Run) []api.Run {
 		ordered[len(runs)-1-i] = runs[i]
 	}
 	return ordered
+}
+
+func runIsRerunnable(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "pending", "queued", "starting":
+		return false
+	default:
+		return true
+	}
 }
