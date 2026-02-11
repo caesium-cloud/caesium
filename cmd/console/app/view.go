@@ -33,27 +33,10 @@ var (
 func (m Model) View() string {
 	tabs := renderTabsBar(m.active, m.viewportWidth, m.themeName)
 
-	footerKeys := []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[T] theme", "[?] help", "[q] quit"}
+	footerKeys := globalFooterKeys()
 	if m.active == sectionJobs {
 		if m.showDetail {
-			footerKeys = []string{
-				"[esc/q] back",
-				"[←/→] traverse",
-				"[tab/shift+tab] cycle",
-				"[↑/↓] scroll",
-				"[f] focus path",
-				"[u] runs",
-				"[t] trigger",
-				"[g] logs",
-				"[space] follow",
-				"[/] filter",
-				"[c] clear",
-				"[e] export",
-				"[pgup/pgdn] log scroll",
-				"[p] ping",
-				"[T] theme",
-				"[?] help",
-			}
+			footerKeys = jobsDetailFooterKeys(m.showLogsModal)
 		} else {
 			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger")
 		}
@@ -99,6 +82,37 @@ func (m Model) View() string {
 		screen = m.renderHelpModal(screen)
 	}
 	return screen
+}
+
+func globalFooterKeys() []string {
+	return []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+}
+
+func jobsDetailFooterKeys(showLogs bool) []string {
+	keys := []string{
+		"[esc/q] back",
+		"[←/→] traverse",
+		"[tab/shift+tab] cycle",
+		"[↑/↓] scroll",
+		"[f] focus path",
+		"[u] runs",
+		"[t] trigger",
+		"[g] logs",
+		"[p] ping",
+		"[q] quit",
+		"[T] theme",
+		"[?] help",
+	}
+	if showLogs {
+		keys = append(keys,
+			"[space] follow",
+			"[/] filter",
+			"[c] clear",
+			"[e] export",
+			"[pgup/pgdn] log scroll",
+		)
+	}
+	return keys
 }
 
 func (m Model) renderJobsView() string {
@@ -330,7 +344,7 @@ func renderTabsBar(active section, totalWidth int, themeName string) string {
 	tabs := renderTabs(active)
 	logo := logoStyle.Render("┌────┐\n│ Cs │\n└────┘")
 	if trimmed := strings.TrimSpace(themeName); trimmed != "" {
-		tag := truncateText(trimmed, 4)
+		tag := themeBadgeLabel(trimmed)
 		logo = logoStyle.Render(fmt.Sprintf("┌────┐\n│%4s│\n└────┘", tag))
 	}
 	if totalWidth <= 0 {
@@ -417,7 +431,13 @@ func (m Model) renderLogsModal(background string) string {
 	if m.logFilterInput {
 		filterState = fmt.Sprintf("filter: %q (editing)", m.logFilter)
 	}
-	hint := modalHint.Render(fmt.Sprintf("follow: %s  •  %s  •  / edit  •  c clear  •  e export", followState, filterState))
+	hint := renderModalHint([]string{
+		fmt.Sprintf("follow: %s", followState),
+		filterState,
+		"/ edit",
+		"c clear",
+		"e export",
+	}, contentWidth)
 
 	var body string
 	switch {
@@ -426,7 +446,11 @@ func (m Model) renderLogsModal(background string) string {
 	case m.logsLoading:
 		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, centerText(fmt.Sprintf("%s Streaming logs…", m.spinner.View())))
 	case strings.TrimSpace(m.logContent) == "":
-		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render("Press g to stream logs for the focused task."))
+		msg := "No log lines received yet for this task."
+		if strings.TrimSpace(m.logTaskID) == "" {
+			msg = "Select a task to stream logs."
+		}
+		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render(msg))
 	case strings.TrimSpace(m.filteredLogContent()) == "":
 		body = fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, placeholder.Render(fmt.Sprintf("No log lines match %q.", m.logFilter)))
 	default:
@@ -557,11 +581,12 @@ func actionConfirmCopy(req *actionRequest, jobLabel string) (string, string) {
 }
 
 func renderFooter(keys []string, status string, width int) string {
-	lines := wrapKeys(keys, width)
+	contentWidth := footerContentWidth(width)
+	lines := fitWrappedKeys(keys, contentWidth, 2)
 	footer := styleFooterLines(lines)
 	status = strings.TrimSpace(status)
 	if status != "" {
-		status = truncateText(status, width)
+		status = truncateStatus(status, contentWidth)
 		if footer != "" {
 			footer = lipgloss.JoinVertical(lipgloss.Left, footer, barStyle.Render(status))
 		} else {
@@ -571,27 +596,138 @@ func renderFooter(keys []string, status string, width int) string {
 	return footer
 }
 
-func wrapKeys(keys []string, width int) string {
-	if len(keys) == 0 {
-		return ""
-	}
+func footerContentWidth(width int) int {
 	if width <= 0 {
-		return strings.Join(keys, "  ")
+		return 78
 	}
-	lines := []string{}
-	line := ""
+	return max(width-barStyle.GetHorizontalFrameSize(), 1)
+}
+
+func fitWrappedKeys(keys []string, width, maxLines int) []string {
+	if len(keys) == 0 {
+		return nil
+	}
+	filtered := make([]string, 0, len(keys))
 	for _, key := range keys {
+		key = strings.TrimSpace(key)
 		if key == "" {
 			continue
 		}
-		if line == "" {
-			line = key
+		if width > 0 && lipgloss.Width(key) > width {
+			key = truncateText(key, width)
+		}
+		filtered = append(filtered, key)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	for len(filtered) > 0 {
+		lines := wrapTokens(filtered, width, "  ")
+		if maxLines <= 0 || len(lines) <= maxLines {
+			return lines
+		}
+		filtered = filtered[:len(filtered)-1]
+	}
+	return nil
+}
+
+func styleFooterLines(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(lines))
+	for _, line := range lines {
+		parts = append(parts, barStyle.Render(line))
+	}
+	return strings.Join(parts, "\n")
+}
+
+func truncateStatus(value string, width int) string {
+	value = strings.TrimSpace(value)
+	if width <= 0 || lipgloss.Width(value) <= width {
+		return value
+	}
+	parts := strings.Split(value, "  ")
+	if len(parts) <= 1 {
+		return truncateText(value, width)
+	}
+	kept := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
 			continue
 		}
-		candidate := line + "  " + key
+		candidate := part
+		if len(kept) > 0 {
+			candidate = strings.Join(append(append([]string{}, kept...), part), "  ")
+		}
+		if lipgloss.Width(candidate) > width {
+			break
+		}
+		kept = append(kept, part)
+	}
+	if len(kept) == 0 {
+		return truncateText(value, width)
+	}
+	result := strings.Join(kept, "  ")
+	if len(kept) < len(parts) {
+		withEllipsis := result + "  ..."
+		if lipgloss.Width(withEllipsis) <= width {
+			return withEllipsis
+		}
+	}
+	return result
+}
+
+func truncateText(value string, width int) string {
+	value = strings.TrimSpace(value)
+	runes := []rune(value)
+	if width <= 0 || len(runes) <= width {
+		return value
+	}
+	if width <= 3 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-3]) + "..."
+}
+
+func renderModalHint(tokens []string, width int) string {
+	lines := wrapTokens(tokens, width, "  •  ")
+	if len(lines) == 0 {
+		return ""
+	}
+	styled := make([]string, 0, len(lines))
+	for _, line := range lines {
+		styled = append(styled, modalHint.Render(line))
+	}
+	return strings.Join(styled, "\n")
+}
+
+func wrapTokens(tokens []string, width int, sep string) []string {
+	if len(tokens) == 0 {
+		return nil
+	}
+	if width <= 0 {
+		width = 80
+	}
+	lines := make([]string, 0, 2)
+	line := ""
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			continue
+		}
+		if lipgloss.Width(token) > width {
+			token = truncateText(token, width)
+		}
+		if line == "" {
+			line = token
+			continue
+		}
+		candidate := line + sep + token
 		if lipgloss.Width(candidate) > width {
 			lines = append(lines, line)
-			line = key
+			line = token
 			continue
 		}
 		line = candidate
@@ -599,33 +735,19 @@ func wrapKeys(keys []string, width int) string {
 	if line != "" {
 		lines = append(lines, line)
 	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
-func styleFooterLines(lines string) string {
-	if lines == "" {
-		return ""
+func themeBadgeLabel(themeName string) string {
+	name := strings.ToUpper(strings.TrimSpace(themeName))
+	if name == "" {
+		return "CS"
 	}
-	parts := strings.Split(lines, "\n")
-	for i, part := range parts {
-		parts[i] = barStyle.Render(part)
+	runes := []rune(name)
+	if len(runes) > 4 {
+		runes = runes[:4]
 	}
-	return strings.Join(parts, "\n")
-}
-
-func truncateText(value string, width int) string {
-	value = strings.TrimSpace(value)
-	if width <= 0 || lipgloss.Width(value) <= width {
-		return value
-	}
-	if width <= 3 {
-		return value[:width]
-	}
-	runes := []rune(value)
-	if len(runes) <= width {
-		return value
-	}
-	return string(runes[:width-3]) + "..."
+	return string(runes)
 }
 
 func (m Model) renderRunsModal(background string) string {
@@ -651,7 +773,11 @@ func (m Model) renderRunsModal(background string) string {
 	contentHeight := max(modalHeight-6, 6)
 
 	title := "Select Run"
-	hint := modalHint.Render("enter select  •  r refresh  •  R re-run  •  esc close")
+	rerunHint := "R re-run"
+	if run := m.selectedRun(); run != nil && !runIsRerunnable(run.Status) {
+		rerunHint = "R re-run (terminal only)"
+	}
+	hint := renderModalHint([]string{"enter select", "r refresh", rerunHint, "esc close"}, contentWidth)
 
 	var body string
 	switch {
