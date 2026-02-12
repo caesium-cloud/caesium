@@ -31,7 +31,7 @@ var (
 
 // View renders the interface.
 func (m Model) View() string {
-	tabs := renderTabsBar(m.active, m.viewportWidth, m.themeName)
+	tabs := renderTabsBar(m.active, m.viewportWidth)
 
 	footerKeys := globalFooterKeys()
 	if m.active == sectionJobs {
@@ -341,13 +341,9 @@ func renderTabs(active section) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 
-func renderTabsBar(active section, totalWidth int, themeName string) string {
+func renderTabsBar(active section, totalWidth int) string {
 	tabs := renderTabs(active)
 	logo := logoStyle.Render("┌────┐\n│ Cs │\n└────┘")
-	if trimmed := strings.TrimSpace(themeName); trimmed != "" {
-		tag := themeBadgeLabel(trimmed)
-		logo = logoStyle.Render(fmt.Sprintf("┌────┐\n│%4s│\n└────┘", tag))
-	}
 	if totalWidth <= 0 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, tabs, logo)
 	}
@@ -882,18 +878,6 @@ func wrapTokens(tokens []string, width int, sep string) []string {
 		lines = append(lines, line)
 	}
 	return lines
-}
-
-func themeBadgeLabel(themeName string) string {
-	name := strings.ToUpper(strings.TrimSpace(themeName))
-	if name == "" {
-		return "CS"
-	}
-	runes := []rune(name)
-	if len(runes) > 4 {
-		runes = runes[:4]
-	}
-	return string(runes)
 }
 
 func (m Model) renderRunsModal(background string) string {

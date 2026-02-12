@@ -75,6 +75,13 @@ type JobRun struct {
 
 type Store struct {
 	db *gorm.DB
+
+	// startedMu guards startedRuns.
+	startedMu sync.Mutex
+	// startedRuns tracks run IDs that were started via Start() in this
+	// process so that Complete() only decrements the active-jobs gauge
+	// for runs it actually incremented.
+	startedRuns map[uuid.UUID]struct{}
 }
 
 var (
@@ -86,7 +93,7 @@ func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
 	}
-	return &Store{db: conn}
+	return &Store{db: conn, startedRuns: make(map[uuid.UUID]struct{})}
 }
 
 func Default() *Store {
@@ -109,6 +116,9 @@ func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
 	}
 
 	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	s.startedMu.Lock()
+	s.startedRuns[model.ID] = struct{}{}
+	s.startedMu.Unlock()
 
 	return s.loadRun(model.ID)
 }
@@ -282,7 +292,16 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	if err := s.db.First(&run, "id = ?", runID).Error; err == nil {
 		jobID := run.JobID.String()
 		metrics.JobRunsTotal.WithLabelValues(jobID, string(status)).Inc()
-		metrics.JobsActive.WithLabelValues(jobID).Dec()
+		// Only decrement the active gauge if this process incremented it.
+		s.startedMu.Lock()
+		_, started := s.startedRuns[runID]
+		if started {
+			delete(s.startedRuns, runID)
+		}
+		s.startedMu.Unlock()
+		if started {
+			metrics.JobsActive.WithLabelValues(jobID).Dec()
+		}
 		duration := now.Sub(run.StartedAt).Seconds()
 		metrics.JobRunDurationSeconds.WithLabelValues(jobID, string(status)).Observe(duration)
 	}

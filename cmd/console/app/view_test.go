@@ -51,16 +51,10 @@ func TestRenderLogsModalEmptyStateCopy(t *testing.T) {
 	}
 }
 
-func TestThemeBadgeLabelUsesStableTag(t *testing.T) {
-	if got := themeBadgeLabel("Ocean"); got != "OCEA" {
-		t.Fatalf("expected OCEA theme tag, got %q", got)
-	}
-	bar := renderTabsBar(sectionJobs, 80, "Ocean")
-	if strings.Contains(bar, "O...") {
-		t.Fatalf("unexpected ellipsis in theme badge: %q", bar)
-	}
-	if !strings.Contains(bar, "OCEA") {
-		t.Fatalf("expected OCEA label in theme badge: %q", bar)
+func TestTabsBarAlwaysShowsCsLogo(t *testing.T) {
+	bar := renderTabsBar(sectionJobs, 80)
+	if !strings.Contains(bar, "Cs") {
+		t.Fatalf("expected Cs logo in tabs bar, got: %q", bar)
 	}
 }
 

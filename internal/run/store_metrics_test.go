@@ -157,6 +157,36 @@ func (s *StoreMetricsSuite) TestFailTaskRecordsMetrics() {
 	s.Equal(uint64(1), count)
 }
 
+func (s *StoreMetricsSuite) TestCompleteResumedRunDoesNotDecrementGauge() {
+	jobID := uuid.New()
+
+	// Simulate a run that was started by a previous process: insert directly
+	// into the DB without going through Start().
+	runID := uuid.New()
+	s.Require().NoError(s.db.Create(&models.JobRun{
+		ID:        runID,
+		JobID:     jobID,
+		Status:    string(StatusRunning),
+		StartedAt: time.Now().UTC().Add(-30 * time.Second),
+	}).Error)
+
+	// Gauge should be at zero since Start() was never called.
+	val := s.gaugeValue(metrics.JobsActive, jobID.String())
+	s.Equal(float64(0), val)
+
+	// Complete the resumed run.
+	err := s.store.Complete(runID, nil)
+	s.Require().NoError(err)
+
+	// Gauge must remain at zero, not go negative.
+	val = s.gaugeValue(metrics.JobsActive, jobID.String())
+	s.Equal(float64(0), val)
+
+	// Counter should still record the completion.
+	ctr := s.counterValue(metrics.JobRunsTotal, jobID.String(), "succeeded")
+	s.Equal(float64(1), ctr)
+}
+
 func (s *StoreMetricsSuite) counterValue(vec *prometheus.CounterVec, labels ...string) float64 {
 	var m dto.Metric
 	counter, err := vec.GetMetricWithLabelValues(labels...)

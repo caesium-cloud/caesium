@@ -50,9 +50,20 @@ func New(ctx context.Context) *Service {
 	return &Service{ctx: ctx, db: db.Connection()}
 }
 
+// durationExpr returns a SQL expression computing the difference in seconds
+// between completed_at and started_at. The expression is dialect-aware:
+// Postgres uses EXTRACT(EPOCH FROM ...), SQLite/DQLite uses JULIANDAY arithmetic.
+func (s *Service) durationExpr() string {
+	if s.db.Dialector.Name() == "postgres" {
+		return "EXTRACT(EPOCH FROM (completed_at - started_at))"
+	}
+	return "(JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400"
+}
+
 // Get computes aggregate statistics from job_runs and task_runs.
 func (s *Service) Get() (*StatsResponse, error) {
 	resp := &StatsResponse{}
+	durExpr := s.durationExpr()
 
 	// Total distinct jobs
 	s.db.WithContext(s.ctx).Model(&models.Job{}).Count(&resp.Jobs.Total)
@@ -79,7 +90,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	// Average duration of completed runs
 	var avgResult struct{ Avg float64 }
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("AVG(JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400 as avg").
+		Select("AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL").
 		Scan(&avgResult)
 	resp.Jobs.AvgDurationSeconds = avgResult.Avg
@@ -117,7 +128,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	}
 	var slowRows []slowRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("job_id, AVG(JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400 as avg").
+		Select("job_id, AVG("+durExpr+") as avg").
 		Where("completed_at IS NOT NULL").
 		Group("job_id").
 		Order("avg DESC").
