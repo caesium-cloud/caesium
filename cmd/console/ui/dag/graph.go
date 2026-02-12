@@ -189,6 +189,26 @@ func (g *Graph) Levels() [][]*Node {
 	return out
 }
 
+// NodeCount returns the total number of nodes in the graph.
+func (g *Graph) NodeCount() int {
+	if g == nil {
+		return 0
+	}
+	return len(g.nodes)
+}
+
+// AllNodes returns all nodes in level order.
+func (g *Graph) AllNodes() []*Node {
+	if g == nil {
+		return nil
+	}
+	var out []*Node
+	for _, level := range g.levels {
+		out = append(out, level...)
+	}
+	return out
+}
+
 // First returns the first root node, if present.
 func (g *Graph) First() *Node {
 	if g == nil || len(g.roots) == 0 {
