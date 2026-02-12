@@ -69,11 +69,6 @@ func renderBoxDAG(g *Graph, opts RenderOptions) string {
 		return ""
 	}
 
-	maxWidth := opts.MaxWidth
-	if maxWidth <= 0 {
-		maxWidth = 80
-	}
-
 	pathNodes := make(map[string]bool)
 	if opts.FocusPath && opts.FocusedID != "" {
 		pathNodes = collectPath(g, opts.FocusedID)
@@ -512,13 +507,6 @@ func truncateCommand(s string, maxWidth int) string {
 		return string(r[:maxWidth])
 	}
 	return string(r[:maxWidth-1]) + "…"
-}
-
-func shortNodeID(id string) string {
-	if len(id) <= 8 {
-		return id
-	}
-	return id[:8]
 }
 
 func stripStatusPrefix(label string) string {
