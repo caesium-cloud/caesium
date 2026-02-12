@@ -49,24 +49,37 @@ func (s *IntegrationTestSuite) SetupSuite() {
 
 	host := os.Getenv("CAESIUM_HOST")
 	if host == "" {
-		host = "localhost"
+		host = "127.0.0.1"
 	}
 	s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
 
+	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(2 * time.Minute)
+	var (
+		lastErr    error
+		lastStatus int
+	)
 	for {
 		if time.Now().After(deadline) {
-			s.T().Fatal("timeout waiting for caesium /health to be ready")
+			s.T().Fatalf(
+				"timeout waiting for caesium /health to be ready (url=%s, last_status=%d, last_error=%v)",
+				s.caesiumURL,
+				lastStatus,
+				lastErr,
+			)
 		}
 
-		resp, err := http.Get(fmt.Sprintf("%v/health", s.caesiumURL))
+		resp, err := client.Get(fmt.Sprintf("%v/health", s.caesiumURL))
 		if err == nil && resp != nil {
+			lastStatus = resp.StatusCode
 			if resp.Body != nil {
 				_ = resp.Body.Close()
 			}
 			if resp.StatusCode == http.StatusOK {
 				break
 			}
+		} else {
+			lastErr = err
 		}
 		time.Sleep(time.Second)
 	}
