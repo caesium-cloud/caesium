@@ -1,7 +1,7 @@
 version: 2.1
 
 jobs:
-  build:
+  builder:
     machine:
       image: ubuntu-2404:current
       docker_layer_caching: true
@@ -10,19 +10,75 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install dependencies
-          command: |
-            sudo apt-get update
-            sudo apt-get install -y git just
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Build builder image
+          command: just tag=$CIRCLE_SHA1 builder
+      - run:
+          name: Save builder image
+          command: docker save caesiumcloud/caesium-builder:$CIRCLE_SHA1 | gzip > /tmp/builder.tar.gz
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - builder.tar.gz
+
+  lint:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
       - run:
           name: Lint
           command: just tag=$CIRCLE_SHA1 lint
+
+  unit-test:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
       - run:
-          name: Build
-          command: just tag=$CIRCLE_SHA1 build
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
       - run:
           name: Unit tests
           command: just tag=$CIRCLE_SHA1 unit-test
+
+  build-and-integration-test:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
+      - run:
+          name: Build release image
+          command: just tag=$CIRCLE_SHA1 build
       - run:
           name: Integration tests
           command: just tag=$CIRCLE_SHA1 integration-test
@@ -30,4 +86,13 @@ jobs:
 workflows:
   ci:
     jobs:
-      - build
+      - builder
+      - lint:
+          requires:
+            - builder
+      - unit-test:
+          requires:
+            - builder
+      - build-and-integration-test:
+          requires:
+            - builder
