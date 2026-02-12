@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/detail"
 	"github.com/charmbracelet/bubbles/table"
@@ -69,6 +68,9 @@ func (m Model) View() string {
 	}
 
 	screen := lipgloss.JoinVertical(lipgloss.Left, tabs, body, footer)
+	if m.showNodeDetail {
+		screen = m.renderNodeDetailModal(screen)
+	}
 	if m.showRunsModal {
 		screen = m.renderRunsModal(screen)
 	}
@@ -91,6 +93,7 @@ func globalFooterKeys() []string {
 func jobsDetailFooterKeys(showLogs bool) []string {
 	keys := []string{
 		"[esc/q] back",
+		"[enter] node info",
 		"[←/→] traverse",
 		"[tab/shift+tab] cycle",
 		"[↑/↓] scroll",
@@ -122,15 +125,6 @@ func (m Model) renderJobsView() string {
 func (m Model) renderJobDetailScreen() string {
 	totalWidth := max(m.viewportWidth-6, 40)
 
-	var focusedAtom *api.Atom
-	if m.graph != nil && m.focusedNodeID != "" {
-		if node, ok := m.graph.Node(m.focusedNodeID); ok {
-			if atomID := node.AtomID(); atomID != "" {
-				focusedAtom = m.atomDetails[atomID]
-			}
-		}
-	}
-
 	labeler := m.nodeLabeler()
 	vm := detail.ViewModel{
 		Job:           m.jobDetail,
@@ -139,15 +133,9 @@ func (m Model) renderJobDetailScreen() string {
 		GraphLayout:   m.dagLayout,
 		GraphViewport: &m.dagViewport,
 		FocusPath:     m.dagFocusPath,
-		FocusedNode:   m.focusedNodeID,
-		FocusedAtom:   focusedAtom,
-		TaskStatus:    m.taskRunStatus,
 		DetailErr:     m.detailErr,
 		DetailPending: m.detailLoading,
 		GraphErr:      m.dagErr,
-		AtomErr:       m.atomErr,
-		AtomLoading:   m.loadingAtomID != "",
-		AtomLookup:    m.atomIndex,
 		Labeler:       labeler,
 		Spinner:       m.spinner.View(),
 		ViewportWidth: max(totalWidth-4, 20),
@@ -538,7 +526,7 @@ func (m Model) renderHelpModal(background string) string {
 		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
 		"",
 		"Jobs Detail",
-		"  enter detail  •  t trigger  •  u runs  •  g logs",
+		"  enter detail/node info  •  t trigger  •  u runs  •  g logs",
 		"  left/right traverse DAG  •  f focus path",
 		"",
 		"Runs + Logs",
@@ -552,6 +540,151 @@ func (m Model) renderHelpModal(background string) string {
 		modal,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func (m Model) renderNodeDetailModal(background string) string {
+	if m.graph == nil || m.focusedNodeID == "" {
+		return background
+	}
+	node, ok := m.graph.Node(m.focusedNodeID)
+	if !ok {
+		return background
+	}
+
+	width := m.viewportWidth
+	height := m.viewportHeight
+	if width <= 0 {
+		width = lipgloss.Width(background)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(background)
+	}
+
+	modalWidth := max(50, width-12)
+	if modalWidth > width-4 {
+		modalWidth = width - 4
+	}
+	modalHeight := max(14, height-6)
+	if modalHeight > height-2 {
+		modalHeight = height - 2
+	}
+
+	label := strings.TrimSpace(m.nodeLabeler()(node))
+	if label == "" {
+		label = node.ID()
+	}
+	title := fmt.Sprintf("Node: %s (%s)", label, shortID(node.ID()))
+
+	var lines []string
+
+	// Status
+	if task, ok := m.taskRunStatus[node.ID()]; ok {
+		badge := statusBadge(task.Status, m.spinner.View(), false)
+		lines = append(lines, fmt.Sprintf("  Status      %s", badge))
+
+		if task.Image != "" {
+			lines = append(lines, fmt.Sprintf("  Image       %s", task.Image))
+		}
+		if task.Engine != "" {
+			lines = append(lines, fmt.Sprintf("  Engine      %s", task.Engine))
+		}
+		if len(task.Command) > 0 {
+			lines = append(lines, fmt.Sprintf("  Command     %s", strings.Join(task.Command, " ")))
+		}
+		if task.StartedAt != nil {
+			lines = append(lines, fmt.Sprintf("  Started     %s", task.StartedAt.Format(time.RFC3339)))
+		}
+		dur := formatTaskDuration(task)
+		if dur != "" {
+			lines = append(lines, fmt.Sprintf("  Duration    %s", dur))
+		}
+	} else {
+		lines = append(lines, "  Status      pending")
+	}
+
+	lines = append(lines, "")
+
+	// Predecessors
+	preds := node.Predecessors()
+	if len(preds) == 0 {
+		lines = append(lines, "  Predecessors  (none)")
+	} else {
+		predLabels := make([]string, len(preds))
+		for i, p := range preds {
+			predLabels[i] = fmt.Sprintf("%s (%s)", m.nodeDisplayLabel(p), shortID(p.ID()))
+		}
+		lines = append(lines, fmt.Sprintf("  Predecessors  %s", strings.Join(predLabels, ", ")))
+	}
+
+	// Successors
+	succs := node.Successors()
+	if len(succs) == 0 {
+		lines = append(lines, "  Successors    (none)")
+	} else {
+		succLabels := make([]string, len(succs))
+		for i, s := range succs {
+			succLabels[i] = fmt.Sprintf("%s (%s)", m.nodeDisplayLabel(s), shortID(s.ID()))
+		}
+		lines = append(lines, fmt.Sprintf("  Successors    %s", strings.Join(succLabels, ", ")))
+	}
+
+	lines = append(lines, "")
+
+	// Atom info
+	atomID := node.AtomID()
+	if atomID != "" {
+		lines = append(lines, fmt.Sprintf("  Atom ID     %s", atomID))
+		if atom, ok := m.atomDetails[atomID]; ok && atom != nil {
+			if atom.ProvenanceSourceID != "" {
+				lines = append(lines, fmt.Sprintf("  Source      %s", atom.ProvenanceSourceID))
+			}
+		} else if cached, ok := m.atomIndex[atomID]; ok {
+			if cached.ProvenanceSourceID != "" {
+				lines = append(lines, fmt.Sprintf("  Source      %s", cached.ProvenanceSourceID))
+			}
+		}
+	}
+
+	hint := modalHint.Render("[g] logs  [esc] close")
+
+	body := fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, strings.Join(lines, "\n"))
+	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
+
+	return lipgloss.Place(width, height,
+		lipgloss.Center, lipgloss.Center,
+		modal,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+}
+
+func (m Model) nodeDisplayLabel(node *dag.Node) string {
+	if node == nil {
+		return ""
+	}
+	labeler := m.nodeLabeler()
+	label := strings.TrimSpace(labeler(node))
+	if label == "" {
+		return shortID(node.ID())
+	}
+	// Strip status prefix for display
+	label = stripNodeStatusPrefix(label)
+	return label
+}
+
+func stripNodeStatusPrefix(label string) string {
+	prefixes := []string{"✓ ", "✗ ", "· "}
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(label, prefix) {
+			return label[len(prefix):]
+		}
+	}
+	if len(label) > 0 {
+		r := []rune(label)
+		if len(r) >= 2 && r[0] >= 0x2800 && r[0] <= 0x28FF && r[1] == ' ' {
+			return string(r[2:])
+		}
+	}
+	return label
 }
 
 func actionConfirmCopy(req *actionRequest, jobLabel string) (string, string) {

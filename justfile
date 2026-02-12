@@ -69,6 +69,8 @@ integration-test:
         sh -c 'go test ./test/ -tags=integration'; then \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
     else \
+      echo "integration tests failed; caesium server logs:"; \
+      docker logs {{it_container}} || true; \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
       exit 1; \
     fi

@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 
+	"github.com/caesium-cloud/caesium/cmd/console/ui/detail"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -15,6 +16,10 @@ type themePalette struct {
 	TabActiveFG    string
 	TabInactiveFG  string
 	WhitespaceTint string
+	SuccessColor   string
+	ErrorColor     string
+	RunningColor   string
+	PendingColor   string
 }
 
 var palettes = []themePalette{
@@ -27,6 +32,10 @@ var palettes = []themePalette{
 		TabActiveFG:    "230",
 		TabInactiveFG:  "240",
 		WhitespaceTint: "235",
+		SuccessColor:   "42",
+		ErrorColor:     "196",
+		RunningColor:   "214",
+		PendingColor:   "240",
 	},
 	{
 		Name:           "Forest",
@@ -37,6 +46,10 @@ var palettes = []themePalette{
 		TabActiveFG:    "230",
 		TabInactiveFG:  "108",
 		WhitespaceTint: "236",
+		SuccessColor:   "76",
+		ErrorColor:     "160",
+		RunningColor:   "178",
+		PendingColor:   "242",
 	},
 	{
 		Name:           "Amber",
@@ -47,6 +60,10 @@ var palettes = []themePalette{
 		TabActiveFG:    "232",
 		TabInactiveFG:  "179",
 		WhitespaceTint: "236",
+		SuccessColor:   "114",
+		ErrorColor:     "203",
+		RunningColor:   "220",
+		PendingColor:   "243",
 	},
 }
 
@@ -67,6 +84,22 @@ func (m *Model) cycleTheme() {
 	m.setActionStatus(fmt.Sprintf("Theme switched to %s", m.themeName), nil)
 }
 
+// StatusColors holds the current theme's status color values for use by the DAG renderer.
+type StatusColors struct {
+	Success string
+	Error   string
+	Running string
+	Pending string
+	Accent  string
+}
+
+var currentStatusColors StatusColors
+
+// CurrentStatusColors returns the active theme's status colors.
+func CurrentStatusColors() StatusColors {
+	return currentStatusColors
+}
+
 func applyPalette(p themePalette) {
 	barStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.BorderColor)).Padding(0, 1)
 	boxStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder()).BorderForeground(lipgloss.Color(p.BorderColor)).Padding(0, 1)
@@ -77,4 +110,12 @@ func applyPalette(p themePalette) {
 	modalTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.AccentColor))
 	modalHint = lipgloss.NewStyle().Foreground(lipgloss.Color(p.MutedColor))
 	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.BorderColor)).PaddingRight(1)
+	currentStatusColors = StatusColors{
+		Success: p.SuccessColor,
+		Error:   p.ErrorColor,
+		Running: p.RunningColor,
+		Pending: p.PendingColor,
+		Accent:  p.AccentColor,
+	}
+	detail.SetAccentColor(p.AccentColor)
 }

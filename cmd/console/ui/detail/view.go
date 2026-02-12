@@ -23,6 +23,16 @@ var (
 	blockStyle        = lipgloss.NewStyle().MarginTop(1)
 )
 
+// SetAccentColor updates the detail view's accent color to match the current theme.
+func SetAccentColor(color string) {
+	if color == "" {
+		return
+	}
+	accentColor = lipgloss.Color(color)
+	headerStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor)
+	sectionTitleStyle = lipgloss.NewStyle().Bold(true).Foreground(accentColor).MarginTop(1)
+}
+
 // ViewModel captures the data required to render the job detail pane.
 type ViewModel struct {
 	Job           *api.JobDetail
@@ -31,15 +41,9 @@ type ViewModel struct {
 	GraphLayout   string
 	GraphViewport *viewport.Model
 	FocusPath     bool
-	FocusedNode   string
-	FocusedAtom   *api.Atom
-	TaskStatus    map[string]api.RunTask
 	DetailErr     error
 	DetailPending bool
 	GraphErr      error
-	AtomErr       error
-	AtomLoading   bool
-	AtomLookup    map[string]api.Atom
 	Spinner       string
 	Labeler       dag.LabelFunc
 	ViewportWidth int
@@ -67,9 +71,8 @@ func Render(vm ViewModel) string {
 		renderHeader(vm.Job),
 		renderMetadata(vm.Job),
 		renderRunSection(vm.Job, vm.ActiveRun, vm.Spinner),
+		renderRunProgress(vm.ActiveRun),
 		renderGraph(vm.Graph, vm.GraphErr, vm.GraphLayout, vm.GraphViewport, vm.FocusPath, vm.Labeler),
-		renderNode(vm.Graph, vm.FocusedNode, vm.Labeler, vm.TaskStatus, vm.Spinner),
-		renderAtom(vm.Graph, vm.FocusedNode, vm.FocusedAtom, vm.AtomErr, vm.AtomLoading, vm.AtomLookup),
 	}
 
 	output := make([]string, 0, len(sections))
@@ -174,89 +177,32 @@ func renderRunSection(detail *api.JobDetail, active *api.Run, spinnerFrame strin
 	return renderSection(title, strings.Join(lines, "\n"))
 }
 
-func renderNode(graph *dag.Graph, focused string, labeler dag.LabelFunc, tasks map[string]api.RunTask, spinnerFrame string) string {
-	if graph == nil || focused == "" {
-		return renderSection("Node", placeholderStyle.Render("Navigate the DAG to inspect node metadata."))
-	}
-
-	node, ok := graph.Node(focused)
-	if !ok {
-		return renderSection("Node", placeholderStyle.Render("Selected node not found in DAG."))
-	}
-
-	label := nodeLabel(node, labeler)
-	lines := []string{
-		fmt.Sprintf("ID: %s", valueStyle.Render(label)),
-	}
-
-	if task, ok := tasks[node.ID()]; ok {
-		taskStatus := statusBadge(task.Status, spinnerFrame, true)
-		if strings.TrimSpace(taskStatus) != "" {
-			lines = append(lines, fmt.Sprintf("Status: %s", valueStyle.Render(taskStatus)))
-		}
-	}
-
-	successors := node.Successors()
-	if len(successors) > 0 {
-		list := make([]string, 0, len(successors))
-		for _, succ := range successors {
-			list = append(list, nodeLabel(succ, labeler))
-		}
-		lines = append(lines, fmt.Sprintf("Successors: %s", valueStyle.Render(strings.Join(list, ", "))))
-	}
-
-	predecessors := node.Predecessors()
-	if len(predecessors) > 0 {
-		list := make([]string, 0, len(predecessors))
-		for _, pred := range predecessors {
-			list = append(list, nodeLabel(pred, labeler))
-		}
-		lines = append(lines, fmt.Sprintf("Predecessors: %s", valueStyle.Render(strings.Join(list, ", "))))
-	}
-
-	return renderSection("Node", strings.Join(lines, "\n"))
-}
-
-func renderAtom(graph *dag.Graph, focused string, atom *api.Atom, atomErr error, loading bool, lookup map[string]api.Atom) string {
-	if graph == nil || focused == "" {
+func renderRunProgress(run *api.Run) string {
+	if run == nil || len(run.Tasks) == 0 {
 		return ""
 	}
-	node, ok := graph.Node(focused)
-	if !ok || node.AtomID() == "" {
-		return renderSection("Atom", placeholderStyle.Render("No atom metadata linked to this node."))
-	}
-
-	if atomErr != nil {
-		return renderSection("Atom", errorStyle.Render("Failed to load atom metadata: "+atomErr.Error()))
-	}
-
-	if loading && atom == nil {
-		return renderSection("Atom", placeholderStyle.Render("Loading atom metadata…"))
-	}
-
-	if atom == nil && lookup != nil {
-		if cached, ok := lookup[node.AtomID()]; ok {
-			atom = &cached
+	total := len(run.Tasks)
+	completed := 0
+	for _, task := range run.Tasks {
+		status := strings.ToLower(strings.TrimSpace(task.Status))
+		if status == "succeeded" || status == "failed" {
+			completed++
 		}
 	}
-
-	if atom == nil {
-		return renderSection("Atom", placeholderStyle.Render("Atom metadata unavailable."))
+	if total == 0 {
+		return ""
 	}
-
-	lines := []string{
-		fmt.Sprintf("ID: %s", valueStyle.Render(atom.ID)),
-		fmt.Sprintf("Engine: %s", valueStyle.Render(atom.Engine)),
-		fmt.Sprintf("Image: %s", valueStyle.Render(atom.Image)),
+	ratio := float64(completed) / float64(total)
+	barWidth := 20
+	filled := int(ratio * float64(barWidth))
+	if filled > barWidth {
+		filled = barWidth
 	}
-	if len(atom.Command) > 0 {
-		lines = append(lines, fmt.Sprintf("Command: %s", valueStyle.Render(strings.Join(atom.Command, " "))))
-	}
-	if atom.ProvenanceSourceID != "" {
-		lines = append(lines, fmt.Sprintf("Source: %s", valueStyle.Render(atom.ProvenanceSourceID)))
-	}
-
-	return renderSection("Atom", strings.Join(lines, "\n"))
+	empty := barWidth - filled
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", empty)
+	pct := int(ratio * 100)
+	label := fmt.Sprintf("Run Progress  %s  %d/%d tasks  %d%%", bar, completed, total, pct)
+	return renderSection("", labelStyle.Render(label))
 }
 
 func renderSection(title, body string) string {
@@ -369,14 +315,3 @@ func titleCase(value string) string {
 	return strings.ToUpper(value[:1]) + value[1:]
 }
 
-func nodeLabel(node *dag.Node, labeler dag.LabelFunc) string {
-	if labeler != nil {
-		if label := strings.TrimSpace(labeler(node)); label != "" {
-			return label
-		}
-	}
-	if node == nil {
-		return ""
-	}
-	return node.ID()
-}

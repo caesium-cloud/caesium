@@ -107,6 +107,8 @@ type Model struct {
 	loadingAtomID   string
 	atomIndex       map[string]api.Atom
 	showDetail      bool
+	showNodeDetail  bool
+	lastStatusPoll  time.Time
 	detailLoading   bool
 	showHelp        bool
 	themeIndex      int
@@ -306,6 +308,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if m.showDetail {
+				if m.showNodeDetail {
+					m.showNodeDetail = false
+					return m, nil
+				}
 				m.showDetail = false
 				m.detailLoading = false
 				m.stopLogStream(false)
@@ -315,6 +321,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if m.showDetail {
+				if m.showNodeDetail {
+					m.showNodeDetail = false
+					return m, nil
+				}
 				m.showDetail = false
 				m.detailLoading = false
 				m.stopLogStream(false)
@@ -410,20 +420,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "g":
 			if m.showDetail {
+				if m.showNodeDetail {
+					m.showNodeDetail = false
+				}
 				if cmd := m.toggleLogs(); cmd != nil {
 					cmds = append(cmds, cmd)
 				}
 			}
 		case "enter":
 			if m.active == sectionJobs && m.state == statusReady {
-				m.showDetail = true
-				if m.jobDetail == nil {
-					m.detailLoading = true
-					if id := m.currentJobID(); id != "" {
-						cmds = append(cmds, fetchJobDetail(m.client, id, true))
+				if m.showDetail {
+					if m.focusedNodeID != "" && m.graph != nil {
+						m.showNodeDetail = !m.showNodeDetail
 					}
 				} else {
-					m.detailLoading = false
+					m.showDetail = true
+					if m.jobDetail == nil {
+						m.detailLoading = true
+						if id := m.currentJobID(); id != "" {
+							cmds = append(cmds, fetchJobDetail(m.client, id, true))
+						}
+					} else {
+						m.detailLoading = false
+					}
 				}
 			}
 		case "t":
@@ -458,6 +477,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.showRunsModal && len(m.runs) > 0 {
 			m.runsTable.SetRows(runsToRows(m.runs, m.spinner.View()))
+		}
+		if pollCmd := m.maybeAutoRefreshRunStatus(); pollCmd != nil {
+			cmds = append(cmds, pollCmd)
 		}
 		if cmd != nil {
 			cmds = append(cmds, cmd)
@@ -545,6 +567,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.setJobStatus(msg.jobID, msg.run)
 		if msg.run != nil && m.jobDetail != nil && m.jobDetail.Job.ID == msg.jobID {
 			m.jobDetail.LatestRun = msg.run
+			m.updateRunsEntry(msg.run)
 			if m.followLatestRun || m.activeRunID == "" {
 				m.activeRunID = msg.run.ID
 				m.followLatestRun = true
@@ -854,6 +877,29 @@ func extractLastTimestamp(chunk string) time.Time {
 	return latest
 }
 
+const statusPollInterval = 2 * time.Second
+
+func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
+	if m.client == nil || !m.showDetail || m.jobDetail == nil {
+		return nil
+	}
+	// Only poll when the active run is in a non-terminal state
+	run := m.activeRun()
+	if run == nil {
+		return nil
+	}
+	status := strings.ToLower(strings.TrimSpace(run.Status))
+	if status != "running" && status != "pending" && status != "queued" && status != "starting" {
+		return nil
+	}
+	now := time.Now()
+	if now.Sub(m.lastStatusPoll) < statusPollInterval {
+		return nil
+	}
+	m.lastStatusPoll = now
+	return fetchLatestRun(m.client, m.jobDetail.Job.ID)
+}
+
 func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
 	m.graph = nil
 	m.focusedNodeID = ""
@@ -864,6 +910,7 @@ func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
 	m.dagErr = dagErr
 	m.stopLogStream(false)
 	m.showLogsModal = false
+	m.showNodeDetail = false
 	m.atomDetails = make(map[string]*api.Atom)
 	m.atomErr = nil
 	m.loadingAtomID = ""
@@ -1262,6 +1309,7 @@ func (m Model) firstPredecessor() string {
 func (m *Model) setFocusedNode(id string) tea.Cmd {
 	if m.graph == nil || id == "" {
 		m.focusedNodeID = ""
+		m.showNodeDetail = false
 		m.refreshDAGLayout(false)
 		return nil
 	}
@@ -1269,6 +1317,7 @@ func (m *Model) setFocusedNode(id string) tea.Cmd {
 		return nil
 	}
 	m.focusedNodeID = id
+	m.showNodeDetail = false
 	m.refreshDAGLayout(false)
 	return m.preloadAtomMetadata(id)
 }
@@ -1318,10 +1367,12 @@ func (m *Model) refreshDAGLayout(resetScroll bool) {
 	}
 
 	opts := dag.RenderOptions{
-		FocusedID: m.focusedNodeID,
-		Labeler:   m.nodeLabeler(),
-		FocusPath: m.dagFocusPath,
-		MaxWidth:  m.dagViewport.Width,
+		FocusedID:  m.focusedNodeID,
+		Labeler:    m.nodeLabeler(),
+		FocusPath:  m.dagFocusPath,
+		MaxWidth:   m.dagViewport.Width,
+		TaskStatus: m.buildTaskInfo(),
+		Colors:     m.dagStatusColors(),
 	}
 
 	layout := dag.Render(m.graph, opts)
@@ -1329,6 +1380,60 @@ func (m *Model) refreshDAGLayout(resetScroll bool) {
 	m.dagViewport.SetContent(layout)
 	if resetScroll {
 		m.dagViewport.GotoTop()
+	}
+}
+
+func (m *Model) buildTaskInfo() map[string]dag.TaskInfo {
+	if len(m.taskRunStatus) == 0 {
+		return nil
+	}
+	info := make(map[string]dag.TaskInfo, len(m.taskRunStatus))
+	spin := m.spinner.View()
+	for id, task := range m.taskRunStatus {
+		ti := dag.TaskInfo{
+			Status:       task.Status,
+			SpinnerFrame: spin,
+			Image:        task.Image,
+			Engine:       task.Engine,
+			Command:      task.Command,
+		}
+		ti.Duration = formatTaskDuration(task)
+		info[id] = ti
+	}
+	return info
+}
+
+func formatTaskDuration(task api.RunTask) string {
+	if task.StartedAt == nil {
+		return ""
+	}
+	var dur time.Duration
+	if task.CompletedAt != nil {
+		dur = task.CompletedAt.Sub(*task.StartedAt)
+	} else {
+		dur = time.Since(*task.StartedAt)
+	}
+	if dur < time.Second {
+		ms := dur.Milliseconds()
+		if ms <= 0 {
+			return ""
+		}
+		return fmt.Sprintf("%dms", ms)
+	}
+	if dur < time.Minute {
+		return fmt.Sprintf("%.1fs", dur.Seconds())
+	}
+	return fmt.Sprintf("%.1fm", dur.Minutes())
+}
+
+func (m *Model) dagStatusColors() dag.StatusColors {
+	sc := CurrentStatusColors()
+	return dag.StatusColors{
+		Success: sc.Success,
+		Error:   sc.Error,
+		Running: sc.Running,
+		Pending: sc.Pending,
+		Accent:  sc.Accent,
 	}
 }
 
@@ -1524,6 +1629,18 @@ func (m *Model) syncRunCursor() {
 	for i, run := range m.runs {
 		if run.ID == target {
 			m.runsTable.SetCursor(i)
+			return
+		}
+	}
+}
+
+func (m *Model) updateRunsEntry(run *api.Run) {
+	if run == nil {
+		return
+	}
+	for i := range m.runs {
+		if m.runs[i].ID == run.ID {
+			m.runs[i] = *run
 			return
 		}
 	}
