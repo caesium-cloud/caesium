@@ -59,14 +59,8 @@ func Health(c echo.Context) error {
 	// Active runs (informational)
 	checks.ActiveRuns = checkActiveRuns()
 
-	// Trigger count
+	// Trigger count (informational, does not affect overall status)
 	checks.Triggers = checkTriggers()
-	if checks.Triggers.Count == 0 {
-		if overall == Healthy {
-			// No triggers is a warning but we keep status as healthy
-			// unless there's a harder failure.
-		}
-	}
 
 	code := http.StatusOK
 	if overall == Degraded {
