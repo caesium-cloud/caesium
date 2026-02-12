@@ -24,6 +24,7 @@ var (
 		sectionJobs:     "Jobs",
 		sectionTriggers: "Triggers",
 		sectionAtoms:    "Atoms",
+		sectionStats:    "Stats",
 	}
 	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingRight(1)
 )
@@ -61,6 +62,8 @@ func (m Model) View() string {
 			body = m.renderTablePane(&m.triggers, true)
 		case sectionAtoms:
 			body = m.renderTablePane(&m.atoms, true)
+		case sectionStats:
+			body = m.renderStatsSection()
 		default:
 			activeTable := m.tableFor(m.active)
 			body = m.renderTablePane(&activeTable, true)
@@ -87,7 +90,17 @@ func (m Model) View() string {
 }
 
 func globalFooterKeys() []string {
-	return []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+	return []string{"[1/2/3/4] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+}
+
+func (m Model) renderStatsSection() string {
+	if m.statsLoading {
+		return centerText(fmt.Sprintf("%s Loading stats…", m.spinner.View()))
+	}
+	if m.statsErr != nil {
+		return boxStyle.Render("Failed to load stats: " + m.statsErr.Error())
+	}
+	return renderStatsView(m.statsData, m.viewportWidth)
 }
 
 func jobsDetailFooterKeys(showLogs bool) []string {
@@ -314,7 +327,7 @@ func statusBadge(status, spinnerFrame string, compact bool) string {
 }
 
 func renderTabs(active section) string {
-	sections := []section{sectionJobs, sectionTriggers, sectionAtoms}
+	sections := []section{sectionJobs, sectionTriggers, sectionAtoms, sectionStats}
 	tabs := make([]string, len(sections))
 	for i, sec := range sections {
 		label := fmt.Sprintf("%d %s", i+1, sectionNames[sec])
@@ -522,7 +535,7 @@ func (m Model) renderHelpModal(background string) string {
 		modalHint.Render("esc / q / ? close"),
 		"",
 		"Global",
-		"  1/2/3 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
+		"  1/2/3/4 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
 		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
 		"",
 		"Jobs Detail",

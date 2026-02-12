@@ -283,7 +283,25 @@ type dataLoadErrMsg struct {
 	healthErr       error
 }
 
+type statsLoadedMsg struct {
+	stats *api.StatsResponse
+}
+
+type statsErrMsg struct {
+	err error
+}
+
 type errMsg error
+
+func fetchStats(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		stats, err := client.Stats().Get(context.Background())
+		if err != nil {
+			return statsErrMsg{err: err}
+		}
+		return statsLoadedMsg{stats: stats}
+	}
+}
 
 func pingHealth(client *api.Client) tea.Cmd {
 	return func() tea.Msg {

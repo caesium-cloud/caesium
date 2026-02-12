@@ -426,6 +426,117 @@ func (s *ModelSuite) TestDiagnosticsStatusTextIncludesRetries() {
 	s.Contains(text, "retries:2")
 }
 
+func (s *ModelSuite) TestStatsTabActivation() {
+	model := s.newReadyModel()
+	model = model.activate(sectionStats)
+	s.Equal(sectionStats, model.active)
+	s.False(model.showDetail)
+}
+
+func (s *ModelSuite) TestKeyFourSwitchesToStats() {
+	model := s.newReadyModel()
+	res, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	updated := res.(Model)
+	s.Equal(sectionStats, updated.active)
+}
+
+func (s *ModelSuite) TestStatsLoadedMsgUpdatesState() {
+	model := s.newReadyModel()
+	model.statsLoading = true
+
+	stats := &api.StatsResponse{
+		Jobs: api.JobStats{Total: 5, RecentRuns: 10, SuccessRate: 0.8},
+	}
+	res, _ := model.Update(statsLoadedMsg{stats: stats})
+	updated := res.(Model)
+	s.False(updated.statsLoading)
+	s.Nil(updated.statsErr)
+	s.NotNil(updated.statsData)
+	s.Equal(int64(5), updated.statsData.Jobs.Total)
+}
+
+func (s *ModelSuite) TestStatsErrMsgUpdatesState() {
+	model := s.newReadyModel()
+	model.statsLoading = true
+
+	res, _ := model.Update(statsErrMsg{err: errors.New("fail")})
+	updated := res.(Model)
+	s.False(updated.statsLoading)
+	s.Error(updated.statsErr)
+	s.Nil(updated.statsData)
+}
+
+func (s *ModelSuite) TestReloadClearsStatsData() {
+	model := s.newReadyModel()
+	model.statsData = &api.StatsResponse{Jobs: api.JobStats{Total: 5}}
+	model.statsLoading = true
+	model.statsErr = errors.New("old error")
+
+	res, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	updated := res.(Model)
+	s.Nil(updated.statsData)
+	s.False(updated.statsLoading)
+	s.Nil(updated.statsErr)
+}
+
+func (s *ModelSuite) TestStatsSectionTriggersLoad() {
+	cfg := &config.Config{BaseURL: s.mustParseURL("http://example.com"), HTTPTimeout: time.Second}
+	model := New(api.New(cfg))
+	model.state = statusReady
+	model.active = sectionJobs
+
+	// Switch to stats via key '4'; Update should trigger the load.
+	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	updated := res.(Model)
+	s.Equal(sectionStats, updated.active)
+	s.NotNil(cmd)
+	s.True(updated.statsLoading)
+}
+
+func (s *ModelSuite) TestSectionCyclesIncludeStats() {
+	s.Equal(sectionTriggers, sectionJobs.next())
+	s.Equal(sectionAtoms, sectionTriggers.next())
+	s.Equal(sectionStats, sectionAtoms.next())
+	s.Equal(sectionJobs, sectionStats.next())
+
+	s.Equal(sectionStats, sectionJobs.prev())
+	s.Equal(sectionJobs, sectionTriggers.prev())
+}
+
+func (s *ModelSuite) TestRenderStatsSectionLoading() {
+	model := s.newReadyModel()
+	model.active = sectionStats
+	model.statsLoading = true
+	model.viewportWidth = 80
+	model.viewportHeight = 40
+
+	out := model.renderStatsSection()
+	s.Contains(out, "Loading stats")
+}
+
+func (s *ModelSuite) TestRenderStatsSectionError() {
+	model := s.newReadyModel()
+	model.active = sectionStats
+	model.statsErr = errors.New("connection refused")
+
+	out := model.renderStatsSection()
+	s.Contains(out, "Failed to load stats")
+	s.Contains(out, "connection refused")
+}
+
+func (s *ModelSuite) TestRenderStatsSectionWithData() {
+	model := s.newReadyModel()
+	model.active = sectionStats
+	model.viewportWidth = 100
+	model.statsData = &api.StatsResponse{
+		Jobs: api.JobStats{Total: 3, SuccessRate: 1.0, RecentRuns: 7},
+	}
+
+	out := model.renderStatsSection()
+	s.Contains(out, "Overview")
+	s.Contains(out, "3")
+}
+
 func (s *ModelSuite) mustParseURL(raw string) *url.URL {
 	u, err := url.Parse(raw)
 	s.Require().NoError(err)

@@ -6,6 +6,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/gql"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo-contrib/prometheus"
 	"github.com/labstack/echo/v4"
@@ -23,6 +24,7 @@ func Start(ctx context.Context) error {
 	e.GET("/health", Health)
 
 	// metrics
+	metrics.Register()
 	prometheus.NewPrometheus("caesium", nil).Use(e)
 
 	// REST
