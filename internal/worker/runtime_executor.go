@@ -23,6 +23,8 @@ import (
 const (
 	taskFailurePolicyHalt     = "halt"
 	taskFailurePolicyContinue = "continue"
+	defaultLeaseRenewInterval = 5 * time.Second
+	minLeaseRenewInterval     = 1 * time.Second
 )
 
 type runtimeExecutor struct {
@@ -127,7 +129,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 }
 
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) error {
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(leaseRenewInterval(e.workerLeaseTTL))
 	defer ticker.Stop()
 
 	for {
@@ -167,6 +169,18 @@ func (e *runtimeExecutor) renewLease(taskRun *models.TaskRun) error {
 	return e.store.DB().Model(&models.TaskRun{}).
 		Where("id = ? AND claimed_by = ?", taskRun.ID, taskRun.ClaimedBy).
 		Update("claim_expires_at", nextExpiry).Error
+}
+
+func leaseRenewInterval(leaseTTL time.Duration) time.Duration {
+	if leaseTTL <= 0 {
+		return defaultLeaseRenewInterval
+	}
+
+	interval := leaseTTL / 2
+	if interval < minLeaseRenewInterval {
+		return minLeaseRenewInterval
+	}
+	return interval
 }
 
 func newEngine(ctx context.Context, engineType models.AtomEngine) (atom.Engine, error) {

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
 type TaskClaimer interface {
@@ -56,7 +57,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		if reclaimer, ok := w.claimer.(ExpiredReclaimer); ok {
-			_ = reclaimer.ReclaimExpired(ctx)
+			if err := reclaimer.ReclaimExpired(ctx); err != nil && ctx.Err() == nil {
+				log.Error("failed to reclaim expired tasks", "error", err)
+			}
 		}
 
 		task, err := w.claimer.ClaimNext(ctx)
@@ -65,13 +68,10 @@ func (w *Worker) Run(ctx context.Context) error {
 				w.pool.Wait()
 				return nil
 			}
-			if sleepErr := sleepWithContext(ctx, w.pollInterval); sleepErr != nil {
-				w.pool.Wait()
-				return nil
-			}
-			continue
+			log.Error("failed to claim next task", "error", err)
 		}
-		if task == nil {
+
+		if err != nil || task == nil {
 			if sleepErr := sleepWithContext(ctx, w.pollInterval); sleepErr != nil {
 				w.pool.Wait()
 				return nil

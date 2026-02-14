@@ -244,7 +244,7 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	if executionMode == executionModeDistributed {
-		runErr = waitForRunCompletion(ctx, store, runID, len(tasks), continueOnFailure)
+		runErr = waitForRunCompletion(ctx, store, runID, len(tasks), continueOnFailure, vars.WorkerPollInterval)
 		return runErr
 	}
 
@@ -508,12 +508,16 @@ func normalizeExecutionMode(value string) string {
 	}
 }
 
-func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID, taskCount int, continueOnFailure bool) error {
+func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID, taskCount int, continueOnFailure bool, pollInterval time.Duration) error {
 	if taskCount <= 0 {
 		return nil
 	}
 
-	ticker := time.NewTicker(5 * time.Second)
+	if pollInterval <= 0 {
+		pollInterval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
 	for {
