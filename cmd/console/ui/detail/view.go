@@ -185,7 +185,7 @@ func renderRunProgress(run *api.Run) string {
 	completed := 0
 	for _, task := range run.Tasks {
 		status := strings.ToLower(strings.TrimSpace(task.Status))
-		if status == "succeeded" || status == "failed" {
+		if status == "succeeded" || status == "failed" || status == "skipped" {
 			completed++
 		}
 	}
@@ -261,6 +261,11 @@ func statusBadge(status, spinnerFrame string, compact bool) string {
 			return "✗"
 		}
 		return "✗ Failed"
+	case "skipped":
+		if compact {
+			return "↷"
+		}
+		return "↷ Skipped"
 	default:
 		if label == "" {
 			return "-"
@@ -314,4 +319,3 @@ func titleCase(value string) string {
 	}
 	return strings.ToUpper(value[:1]) + value[1:]
 }
-

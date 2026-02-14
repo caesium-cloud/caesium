@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -223,17 +224,24 @@ func (j *job) Run(ctx context.Context) error {
 		return err
 	}
 
+	failurePolicy := normalizeTaskFailurePolicy(env.Variables().TaskFailurePolicy)
+	continueOnFailure := failurePolicy == taskFailurePolicyContinue
+	taskTimeout := env.Variables().TaskTimeout
+
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
 	processed := make(map[uuid.UUID]bool, len(tasks))
-	totalCompleted := 0
+	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
 		indegree[taskState.ID] = taskState.OutstandingPredecessors
 		switch taskState.Status {
 		case run.TaskStatusSucceeded:
 			processed[taskState.ID] = true
-			totalCompleted++
+			terminalTasks++
+		case run.TaskStatusSkipped:
+			processed[taskState.ID] = true
+			terminalTasks++
 		case run.TaskStatusFailed:
 			runErr = fmt.Errorf("task %s previously failed", taskState.ID)
 			return runErr
@@ -260,12 +268,10 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}
 
-	if len(queue) == 0 && totalCompleted < len(tasks) {
+	if len(queue) == 0 && terminalTasks < len(tasks) {
 		runErr = fmt.Errorf("job %s has no runnable tasks (verify DAG configuration)", j.id)
 		return runErr
 	}
-
-	executed := totalCompleted
 
 	type taskResult struct {
 		id  uuid.UUID
@@ -277,6 +283,13 @@ func (j *job) Run(ctx context.Context) error {
 		if runner == nil {
 			return fmt.Errorf("missing runner for task %s", taskID)
 		}
+
+		taskCtx := ctx
+		cancel := func() {}
+		if taskTimeout > 0 {
+			taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
+		}
+		defer cancel()
 
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command)
 
@@ -298,11 +311,23 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		monitor := func() error {
+			ticker := time.NewTicker(5 * time.Second)
+			defer ticker.Stop()
+
 			for {
 				select {
-				case <-ctx.Done():
-					return nil
-				case <-time.After(5 * time.Second):
+				case <-taskCtx.Done():
+					if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+						if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+							ID:    a.ID(),
+							Force: true,
+						}); stopErr != nil {
+							return fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+						}
+						return fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+					}
+					return taskCtx.Err()
+				case <-ticker.C:
 					var fetchErr error
 					a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
 					if fetchErr != nil {
@@ -342,15 +367,21 @@ func (j *job) Run(ctx context.Context) error {
 		maxParallel = 1
 	}
 
+	taskPool := worker.NewPool(maxParallel)
+
 	results := make(chan taskResult)
 	active := 0
 	halt := false
 
-	dispatch := func(taskID uuid.UUID) {
+	dispatch := func(taskID uuid.UUID) error {
 		active++
-		go func(id uuid.UUID) {
-			results <- taskResult{id: id, err: runTask(id)}
-		}(taskID)
+		if err := taskPool.Submit(ctx, func() {
+			results <- taskResult{id: taskID, err: runTask(taskID)}
+		}); err != nil {
+			active--
+			return err
+		}
+		return nil
 	}
 
 	for len(queue) > 0 || active > 0 {
@@ -363,7 +394,14 @@ func (j *job) Run(ctx context.Context) error {
 				continue
 			}
 
-			dispatch(taskID)
+			if err := dispatch(taskID); err != nil {
+				if runErr == nil {
+					runErr = err
+				}
+				halt = true
+				queue = queue[:0]
+				break
+			}
 		}
 
 		if active == 0 {
@@ -378,19 +416,41 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		processed[result.id] = true
+		terminalTasks++
 
 		if result.err != nil {
 			if runErr == nil {
 				runErr = result.err
 			}
-			halt = true
-			queue = queue[:0]
+			if !continueOnFailure {
+				halt = true
+				queue = queue[:0]
+				continue
+			}
+
+			descendants := collectDescendants(adjacency, result.id)
+			skipReason := fmt.Sprintf("skipped due to failed dependency task %s", result.id)
+			for _, id := range descendants {
+				if processed[id] {
+					continue
+				}
+				if err := store.SkipTask(runID, id, skipReason); err != nil {
+					log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
+					if runErr == nil {
+						runErr = err
+					}
+					halt = true
+					queue = queue[:0]
+					break
+				}
+				processed[id] = true
+				terminalTasks++
+				delete(inQueue, id)
+			}
 			continue
 		}
 
 		if !halt {
-			executed++
-
 			for _, successor := range adjacency[result.id] {
 				if _, ok := indegree[successor]; !ok {
 					continue
@@ -405,12 +465,12 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}
 
-	if runErr != nil {
+	if terminalTasks != len(tasks) {
+		runErr = fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, terminalTasks, len(tasks))
 		return runErr
 	}
 
-	if executed != len(tasks) {
-		runErr = fmt.Errorf("job %s executed %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, executed, len(tasks))
+	if runErr != nil {
 		return runErr
 	}
 

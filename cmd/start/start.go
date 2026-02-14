@@ -73,6 +73,15 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	vars := env.Variables()
+	log.Info(
+		"execution configuration",
+		"max_parallel_tasks",
+		vars.MaxParallelTasks,
+		"task_failure_policy",
+		vars.TaskFailurePolicy,
+		"task_timeout",
+		vars.TaskTimeout,
+	)
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
 	if err != nil {

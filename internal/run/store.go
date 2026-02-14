@@ -28,6 +28,7 @@ const (
 	TaskStatusRunning   TaskStatus = "running"
 	TaskStatusSucceeded TaskStatus = "succeeded"
 	TaskStatusFailed    TaskStatus = "failed"
+	TaskStatusSkipped   TaskStatus = "skipped"
 )
 
 type CallbackStatus string
@@ -275,6 +276,17 @@ func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
 			"status":       string(TaskStatusFailed),
 			"completed_at": now,
 			"error":        errMsg,
+		}).Error
+}
+
+func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
+	now := time.Now().UTC()
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
+		Updates(map[string]interface{}{
+			"status":       string(TaskStatusSkipped),
+			"completed_at": now,
+			"error":        reason,
 		}).Error
 }
 

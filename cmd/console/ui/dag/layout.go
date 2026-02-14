@@ -221,6 +221,12 @@ func statusIconAndColor(status string, info TaskInfo, colors StatusColors) (stri
 			color = "196"
 		}
 		return "✗", color
+	case "skipped":
+		color := colors.Pending
+		if color == "" {
+			color = "240"
+		}
+		return "↷", color
 	case "running":
 		color := colors.Running
 		if color == "" {
@@ -242,7 +248,7 @@ func statusIconAndColor(status string, info TaskInfo, colors StatusColors) (stri
 
 func durationLabel(status string, info TaskInfo) string {
 	switch status {
-	case "succeeded", "failed":
+	case "succeeded", "failed", "skipped":
 		if info.Duration != "" {
 			return info.Duration
 		}
