@@ -17,6 +17,9 @@ var (
 	placeholder  = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	tabActive    = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("57")).Bold(true)
 	tabInactive  = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color("240"))
+	tabBarStyle  = lipgloss.NewStyle().BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderBottomForeground(lipgloss.Color("240")).PaddingBottom(0).MarginBottom(0)
+	summaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Padding(0, 2)
+	filterStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Padding(0, 2)
 	modalStyle   = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(1, 2)
 	modalTitle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
 	modalHint    = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
@@ -26,7 +29,8 @@ var (
 		sectionAtoms:    "Atoms",
 		sectionStats:    "Stats",
 	}
-	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingRight(1)
+	logoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Bold(true).PaddingRight(1)
+	logoDimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 // View renders the interface.
@@ -38,7 +42,7 @@ func (m Model) View() string {
 		if m.showDetail {
 			footerKeys = jobsDetailFooterKeys(m.showLogsModal)
 		} else {
-			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger")
+			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger", "[/] filter")
 		}
 	}
 	footer := renderFooter(footerKeys, m.actionStatusText(), m.viewportWidth)
@@ -132,7 +136,80 @@ func jobsDetailFooterKeys(showLogs bool) []string {
 }
 
 func (m Model) renderJobsView() string {
-	return m.renderTablePane(&m.jobs, true)
+	summary := m.renderJobsSummaryStrip()
+	parts := []string{summary}
+
+	if m.jobFilterInput || m.jobFilter != "" {
+		var filterLine string
+		if m.jobFilterInput {
+			filterLine = filterStyle.Render(fmt.Sprintf("🔍 %s▏", m.jobFilter))
+		} else {
+			filterLine = filterStyle.Render(fmt.Sprintf("🔍 %q  (/ edit, esc clear)", m.jobFilter))
+		}
+		parts = append(parts, filterLine)
+	}
+
+	if len(m.jobRecords) == 0 {
+		msg := placeholder.Padding(1, 2).Render("No jobs found. Create a job definition to get started.")
+		parts = append(parts, msg)
+		return lipgloss.JoinVertical(lipgloss.Left, parts...)
+	}
+
+	tbl := m.renderTablePane(&m.jobs, true)
+	parts = append(parts, tbl)
+	return lipgloss.JoinVertical(lipgloss.Left, parts...)
+}
+
+func (m Model) renderJobsSummaryStrip() string {
+	total := len(m.jobRecords)
+	var running, succeeded, failed, pending, noRuns int
+	for _, job := range m.jobRecords {
+		run, ok := m.jobRunStatus[job.ID]
+		if !ok || run == nil {
+			noRuns++
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(run.Status)) {
+		case "running":
+			running++
+		case "succeeded":
+			succeeded++
+		case "failed":
+			failed++
+		case "pending":
+			pending++
+		default:
+			noRuns++
+		}
+	}
+
+	sc := CurrentStatusColors()
+	totalLabel := lipgloss.NewStyle().Bold(true).Render(fmt.Sprintf("%d jobs", total))
+	parts := []string{totalLabel}
+
+	divider := logoDimStyle.Render("│")
+
+	if succeeded > 0 {
+		parts = append(parts, divider,
+			lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Success)).Render(fmt.Sprintf("✓ %d succeeded", succeeded)))
+	}
+	if running > 0 {
+		parts = append(parts, divider,
+			lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Running)).Render(fmt.Sprintf("%s %d running", m.spinner.View(), running)))
+	}
+	if failed > 0 {
+		parts = append(parts, divider,
+			lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Error)).Render(fmt.Sprintf("✗ %d failed", failed)))
+	}
+	if pending > 0 {
+		parts = append(parts, divider,
+			lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Pending)).Render(fmt.Sprintf("· %d pending", pending)))
+	}
+	if noRuns > 0 {
+		parts = append(parts, divider,
+			logoDimStyle.Render(fmt.Sprintf("– %d idle", noRuns)))
+	}
+	return summaryStyle.Render(strings.Join(parts, " "))
 }
 
 func (m Model) renderJobDetailScreen() string {
@@ -165,11 +242,12 @@ func (m Model) renderTablePane(tbl *table.Model, active bool) string {
 	if available <= 0 {
 		available = 80
 	}
-	available = max(20, available-2) // leave a small buffer but stay wide
+	available = max(20, available-4) // leave buffer for margins
 
 	border := lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder()).
-		BorderForeground(lipgloss.Color("240"))
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("240")).
+		MarginLeft(1).MarginRight(1)
 	if active {
 		border = border.BorderForeground(lipgloss.Color("63"))
 	}
@@ -330,7 +408,7 @@ func renderTabs(active section) string {
 	sections := []section{sectionJobs, sectionTriggers, sectionAtoms, sectionStats}
 	tabs := make([]string, len(sections))
 	for i, sec := range sections {
-		label := fmt.Sprintf("%d %s", i+1, sectionNames[sec])
+		label := fmt.Sprintf(" %d %s ", i+1, sectionNames[sec])
 		if sec == active {
 			tabs[i] = tabActive.Render(label)
 		} else {
@@ -343,15 +421,17 @@ func renderTabs(active section) string {
 
 func renderTabsBar(active section, totalWidth int) string {
 	tabs := renderTabs(active)
-	logo := logoStyle.Render("┌────┐\n│ Cs │\n└────┘")
+	logo := logoStyle.Render("Cs") + logoDimStyle.Render("·caesium")
 	if totalWidth <= 0 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, tabs, logo)
+		bar := lipgloss.JoinHorizontal(lipgloss.Top, tabs, "  ", logo)
+		return tabBarStyle.Render(bar)
 	}
 
 	logoWidth := lipgloss.Width(logo)
-	leftWidth := max(totalWidth-logoWidth, 0)
+	leftWidth := max(totalWidth-logoWidth-2, 0)
 	left := lipgloss.NewStyle().Width(leftWidth).MaxWidth(leftWidth).Render(tabs)
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, logo)
+	bar := lipgloss.JoinHorizontal(lipgloss.Top, left, logo)
+	return tabBarStyle.Width(totalWidth).Render(bar)
 }
 
 func (m Model) tableFor(sec section) table.Model {
@@ -534,8 +614,11 @@ func (m Model) renderHelpModal(background string) string {
 		"  1/2/3/4 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
 		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
 		"",
+		"Jobs List",
+		"  enter detail  •  t trigger  •  / filter jobs  •  esc clear filter",
+		"",
 		"Jobs Detail",
-		"  enter detail/node info  •  t trigger  •  u runs  •  g logs",
+		"  enter node info  •  t trigger  •  u runs  •  g logs",
 		"  left/right traverse DAG  •  f focus path",
 		"",
 		"Runs + Logs",
@@ -729,10 +812,11 @@ func renderFooter(keys []string, status string, width int) string {
 	status = strings.TrimSpace(status)
 	if status != "" {
 		status = truncateStatus(status, contentWidth)
+		statusLine := logoDimStyle.Padding(0, 1).Render(status)
 		if footer != "" {
-			footer = lipgloss.JoinVertical(lipgloss.Left, footer, barStyle.Render(status))
+			footer = lipgloss.JoinVertical(lipgloss.Left, footer, statusLine)
 		} else {
-			footer = barStyle.Render(status)
+			footer = statusLine
 		}
 	}
 	return footer
@@ -779,7 +863,7 @@ func styleFooterLines(lines []string) string {
 	}
 	parts := make([]string, 0, len(lines))
 	for _, line := range lines {
-		parts = append(parts, barStyle.Render(line))
+		parts = append(parts, modalHint.Padding(0, 1).Render(line))
 	}
 	return strings.Join(parts, "\n")
 }

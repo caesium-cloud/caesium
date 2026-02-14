@@ -111,7 +111,8 @@ type Model struct {
 	atomIndex       map[string]api.Atom
 	showDetail      bool
 	showNodeDetail  bool
-	lastStatusPoll  time.Time
+	lastStatusPoll    time.Time
+	statusPollActive  bool
 	detailLoading   bool
 	showHelp        bool
 	themeIndex      int
@@ -127,9 +128,12 @@ type Model struct {
 	actionPending   *actionRequest
 	actionNotice    string
 	actionErr       error
-	statsData       *api.StatsResponse
-	statsLoading    bool
-	statsErr        error
+	statsData          *api.StatsResponse
+	statsLoading       bool
+	statsErr           error
+	jobFilter          string
+	jobFilterInput     bool
+	filteredJobIndices []int
 }
 
 // New creates the root model with dependency references.
@@ -311,6 +315,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
+		if m.jobFilterInput {
+			switch msg.String() {
+			case "enter":
+				m.jobFilterInput = false
+				m.refreshJobRows()
+			case "esc":
+				m.jobFilter = ""
+				m.jobFilterInput = false
+				m.filteredJobIndices = nil
+				m.refreshJobRows()
+			case "backspace", "ctrl+h":
+				if m.jobFilter != "" {
+					runes := []rune(m.jobFilter)
+					m.jobFilter = string(runes[:len(runes)-1])
+					m.refreshJobRows()
+				}
+			case "ctrl+u":
+				m.jobFilter = ""
+				m.refreshJobRows()
+			default:
+				if msg.Type == tea.KeyRunes {
+					m.jobFilter += string(msg.Runes)
+					m.refreshJobRows()
+				}
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "q":
 			if m.showDetail {
@@ -326,6 +357,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		case "esc":
+			if m.jobFilter != "" && m.active == sectionJobs && !m.showDetail {
+				m.jobFilter = ""
+				m.filteredJobIndices = nil
+				m.refreshJobRows()
+				return m, nil
+			}
 			if m.showDetail {
 				if m.showNodeDetail {
 					m.showNodeDetail = false
@@ -364,6 +401,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.confirmAction = nil
 			m.actionPending = nil
 			m.showHelp = false
+			m.jobFilter = ""
+			m.jobFilterInput = false
+			m.filteredJobIndices = nil
 			m.setActionStatus("", nil)
 			cmds = append(cmds, m.spinner.Tick, fetchData(m.client))
 		case "1":
@@ -460,9 +500,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.triggerSelectedJob(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+		case "/":
+			if m.active == sectionJobs && !m.showDetail {
+				m.jobFilterInput = true
+				return m, nil
+			}
 		}
 	case tea.WindowSizeMsg:
-		height := max(5, msg.Height-7)
+		height := max(5, msg.Height-10)
 		width := max(20, msg.Width-8)
 		m.viewportWidth = msg.Width
 		m.viewportHeight = msg.Height
@@ -574,6 +619,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobDetailErrMsg:
 		m.resetDetailView(msg.err, msg.err, true)
 	case jobStatusLoadedMsg:
+		m.statusPollActive = false
 		prevRunID := m.activeRunID
 		m.setJobStatus(msg.jobID, msg.run)
 		if msg.run != nil && m.jobDetail != nil && m.jobDetail.Job.ID == msg.jobID {
@@ -592,7 +638,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case jobStatusErrMsg:
+		m.statusPollActive = false
 		m.setJobStatus(msg.jobID, nil)
+	case jobStatusBatchMsg:
+		m.statusPollActive = false
+		for jobID, run := range msg.statuses {
+			m.setJobStatus(jobID, run)
+		}
 	case runsLoadedMsg:
 		if msg.jobID != m.runsJobID {
 			break
@@ -799,11 +851,21 @@ func (m *Model) loadStatsIfNeeded() tea.Cmd {
 }
 
 func (m Model) currentJobID() string {
-	row := m.jobs.SelectedRow()
-	if len(row) < 5 {
+	cursor := m.jobs.Cursor()
+	if m.filteredJobIndices != nil {
+		if cursor < 0 || cursor >= len(m.filteredJobIndices) {
+			return ""
+		}
+		idx := m.filteredJobIndices[cursor]
+		if idx < 0 || idx >= len(m.jobRecords) {
+			return ""
+		}
+		return m.jobRecords[idx].ID
+	}
+	if cursor < 0 || cursor >= len(m.jobRecords) {
 		return ""
 	}
-	return row[4]
+	return m.jobRecords[cursor].ID
 }
 
 func (m Model) jobAliasByID(jobID string) string {
@@ -823,7 +885,7 @@ func (m Model) jobAliasByID(jobID string) string {
 
 func (m Model) jobLabel(jobID string) string {
 	row := m.jobs.SelectedRow()
-	if len(row) >= 5 && row[4] == jobID {
+	if len(row) > 0 {
 		if alias := strings.TrimSpace(row[0]); alias != "" {
 			return alias
 		}
@@ -852,7 +914,31 @@ func (m *Model) setJobStatus(jobID string, run *api.Run) {
 }
 
 func (m *Model) refreshJobRows() {
-	m.jobs.SetRows(jobsToRows(m.jobRecords, m.jobRunStatus, m.spinner.View()))
+	prevSelectedID := m.currentJobID()
+
+	if m.jobFilter == "" {
+		m.filteredJobIndices = nil
+		m.jobs.SetRows(jobsToRows(m.jobRecords, m.jobRunStatus, m.spinner.View()))
+	} else {
+		query := strings.ToLower(m.jobFilter)
+		var filtered []api.Job
+		var indices []int
+		for i, job := range m.jobRecords {
+			if strings.Contains(strings.ToLower(job.Alias), query) || mapContainsValue(job.Labels, query) {
+				filtered = append(filtered, job)
+				indices = append(indices, i)
+			}
+		}
+		m.filteredJobIndices = indices
+		m.jobs.SetRows(jobsToRows(filtered, m.jobRunStatus, m.spinner.View()))
+	}
+
+	// Invalidate cached detail if the selected job changed after row rebuild.
+	if newID := m.currentJobID(); newID != prevSelectedID {
+		m.selectedJobID = ""
+		m.jobDetail = nil
+		m.resetDetailView(nil, nil, true)
+	}
 }
 
 func (m Model) hasAnimatedJobStatus() bool {
@@ -913,24 +999,47 @@ func extractLastTimestamp(chunk string) time.Time {
 const statusPollInterval = 2 * time.Second
 
 func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
-	if m.client == nil || !m.showDetail || m.jobDetail == nil {
+	if m.client == nil || m.statusPollActive {
 		return nil
 	}
-	// Only poll when the active run is in a non-terminal state
-	run := m.activeRun()
-	if run == nil {
-		return nil
-	}
-	status := strings.ToLower(strings.TrimSpace(run.Status))
-	if status != "running" && status != "pending" && status != "queued" && status != "starting" {
-		return nil
-	}
+
 	now := time.Now()
 	if now.Sub(m.lastStatusPoll) < statusPollInterval {
 		return nil
 	}
+
+	// Detail view: poll the active run for the viewed job.
+	if m.showDetail && m.jobDetail != nil {
+		run := m.activeRun()
+		if run == nil {
+			return nil
+		}
+		status := strings.ToLower(strings.TrimSpace(run.Status))
+		if status != "running" && status != "pending" && status != "queued" && status != "starting" {
+			return nil
+		}
+		m.lastStatusPoll = now
+		m.statusPollActive = true
+		return fetchLatestRun(m.client, m.jobDetail.Job.ID)
+	}
+
+	// List view: poll every job that has a running/pending status.
+	var ids []string
+	for jobID, run := range m.jobRunStatus {
+		if run == nil {
+			continue
+		}
+		status := strings.ToLower(strings.TrimSpace(run.Status))
+		if status == "running" || status == "pending" || status == "queued" || status == "starting" {
+			ids = append(ids, jobID)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
 	m.lastStatusPoll = now
-	return fetchLatestRun(m.client, m.jobDetail.Job.ID)
+	m.statusPollActive = true
+	return fetchJobStatuses(m.client, ids)
 }
 
 func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {

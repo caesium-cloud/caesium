@@ -76,6 +76,20 @@ func fetchLatestRun(client *api.Client, jobID string) tea.Cmd {
 	}
 }
 
+func fetchJobStatuses(client *api.Client, jobIDs []string) tea.Cmd {
+	return func() tea.Msg {
+		results := make(map[string]*api.Run, len(jobIDs))
+		for _, id := range jobIDs {
+			detail, err := client.Jobs().Detail(context.Background(), id, nil)
+			if err != nil {
+				continue
+			}
+			results[id] = detail.LatestRun
+		}
+		return jobStatusBatchMsg{statuses: results}
+	}
+}
+
 func fetchRuns(client *api.Client, jobID string) tea.Cmd {
 	return func() tea.Msg {
 		runs, err := client.Runs().List(context.Background(), jobID, url.Values{})
@@ -199,6 +213,10 @@ type jobStatusLoadedMsg struct {
 type jobStatusErrMsg struct {
 	jobID string
 	err   error
+}
+
+type jobStatusBatchMsg struct {
+	statuses map[string]*api.Run
 }
 
 type logsOpenedMsg struct {

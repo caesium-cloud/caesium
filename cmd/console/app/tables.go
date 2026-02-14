@@ -12,8 +12,8 @@ import (
 )
 
 var (
-	jobColumnTitles      = []string{"Alias", "Status", "Labels", "Annotations", "ID", "Created"}
-	jobColumnWeights     = []int{3, 2, 4, 4, 3, 3}
+	jobColumnTitles      = []string{"Alias", "Status", "Last Run", "Duration", "Labels", "ID"}
+	jobColumnWeights     = []int{3, 2, 3, 2, 3, 2}
 	triggerColumnTitles  = []string{"Alias", "Type", "ID"}
 	triggerColumnWeights = []int{3, 2, 4}
 	atomColumnTitles     = []string{"Image", "Engine", "ID"}
@@ -25,14 +25,21 @@ var (
 func jobsToRows(jobs []api.Job, statuses map[string]*api.Run, spinnerFrame string) []table.Row {
 	rows := make([]table.Row, len(jobs))
 	for i, job := range jobs {
-		status := formatRunStatus(statuses[job.ID], spinnerFrame)
+		run := statuses[job.ID]
+		status := formatRunStatus(run, spinnerFrame)
+		lastRun := "-"
+		duration := "-"
+		if run != nil {
+			lastRun = relativeTime(run.StartedAt)
+			duration = formatRunDuration(run)
+		}
 		rows[i] = table.Row{
 			job.Alias,
 			status,
+			lastRun,
+			duration,
 			formatStringMap(job.Labels),
-			formatStringMap(job.Annotations),
-			job.ID,
-			job.CreatedAt.Format(time.RFC3339),
+			shortID(job.ID),
 		}
 	}
 	return rows
@@ -43,18 +50,26 @@ func formatRunStatus(run *api.Run, spinnerFrame string) string {
 		return "-"
 	}
 
+	sc := CurrentStatusColors()
 	status := strings.ToLower(strings.TrimSpace(run.Status))
 	label := titleCase(status)
 	switch status {
-	case "running", "pending":
+	case "running":
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Running))
 		if spinnerFrame != "" {
-			return fmt.Sprintf("%s %s", spinnerFrame, label)
+			return style.Render(fmt.Sprintf("%s %s", spinnerFrame, label))
 		}
-		return label
+		return style.Render(label)
+	case "pending":
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Pending))
+		if spinnerFrame != "" {
+			return style.Render(fmt.Sprintf("%s %s", spinnerFrame, label))
+		}
+		return style.Render(label)
 	case "succeeded":
-		return "✓ Succeeded"
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Success)).Render("✓ Succeeded")
 	case "failed":
-		return "✗ Failed"
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Error)).Render("✗ Failed")
 	default:
 		return strings.ToUpper(run.Status)
 	}
@@ -196,4 +211,34 @@ func distributeWidths(total int, weights []int) []int {
 	}
 
 	return widths
+}
+
+func relativeTime(t time.Time) string {
+	if t.IsZero() {
+		return "-"
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds ago", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+func formatRunDuration(run *api.Run) string {
+	if run == nil {
+		return "-"
+	}
+	if run.CompletedAt != nil {
+		return formatDuration(run.CompletedAt.Sub(run.StartedAt).Seconds())
+	}
+	if strings.ToLower(strings.TrimSpace(run.Status)) == "running" {
+		return formatDuration(time.Since(run.StartedAt).Seconds())
+	}
+	return "-"
 }

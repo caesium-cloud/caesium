@@ -25,3 +25,12 @@ func max(a, b int) int {
 	}
 	return b
 }
+
+func mapContainsValue(m map[string]string, query string) bool {
+	for k, v := range m {
+		if strings.Contains(strings.ToLower(k), query) || strings.Contains(strings.ToLower(v), query) {
+			return true
+		}
+	}
+	return false
+}

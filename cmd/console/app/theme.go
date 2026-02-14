@@ -106,10 +106,14 @@ func applyPalette(p themePalette) {
 	placeholder = lipgloss.NewStyle().Foreground(lipgloss.Color(p.BorderColor))
 	tabActive = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color(p.TabActiveFG)).Background(lipgloss.Color(p.TabActiveBG)).Bold(true)
 	tabInactive = lipgloss.NewStyle().Padding(0, 2).Foreground(lipgloss.Color(p.TabInactiveFG))
+	tabBarStyle = lipgloss.NewStyle().BorderBottom(true).BorderStyle(lipgloss.NormalBorder()).BorderBottomForeground(lipgloss.Color(p.BorderColor)).PaddingBottom(0).MarginBottom(0)
+	summaryStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Padding(0, 2)
+	filterStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.RunningColor)).Padding(0, 2)
 	modalStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color(p.AccentColor)).Padding(1, 2)
 	modalTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(p.AccentColor))
 	modalHint = lipgloss.NewStyle().Foreground(lipgloss.Color(p.MutedColor))
-	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.BorderColor)).PaddingRight(1)
+	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.AccentColor)).Bold(true).PaddingRight(1)
+	logoDimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color(p.MutedColor))
 	currentStatusColors = StatusColors{
 		Success: p.SuccessColor,
 		Error:   p.ErrorColor,
