@@ -111,7 +111,8 @@ type Model struct {
 	atomIndex       map[string]api.Atom
 	showDetail      bool
 	showNodeDetail  bool
-	lastStatusPoll  time.Time
+	lastStatusPoll    time.Time
+	statusPollActive  bool
 	detailLoading   bool
 	showHelp        bool
 	themeIndex      int
@@ -618,6 +619,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobDetailErrMsg:
 		m.resetDetailView(msg.err, msg.err, true)
 	case jobStatusLoadedMsg:
+		m.statusPollActive = false
 		prevRunID := m.activeRunID
 		m.setJobStatus(msg.jobID, msg.run)
 		if msg.run != nil && m.jobDetail != nil && m.jobDetail.Job.ID == msg.jobID {
@@ -636,8 +638,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, cmd)
 		}
 	case jobStatusErrMsg:
+		m.statusPollActive = false
 		m.setJobStatus(msg.jobID, nil)
 	case jobStatusBatchMsg:
+		m.statusPollActive = false
 		for jobID, run := range msg.statuses {
 			m.setJobStatus(jobID, run)
 		}
@@ -910,22 +914,31 @@ func (m *Model) setJobStatus(jobID string, run *api.Run) {
 }
 
 func (m *Model) refreshJobRows() {
+	prevSelectedID := m.currentJobID()
+
 	if m.jobFilter == "" {
 		m.filteredJobIndices = nil
 		m.jobs.SetRows(jobsToRows(m.jobRecords, m.jobRunStatus, m.spinner.View()))
-		return
-	}
-	query := strings.ToLower(m.jobFilter)
-	var filtered []api.Job
-	var indices []int
-	for i, job := range m.jobRecords {
-		if strings.Contains(strings.ToLower(job.Alias), query) || mapContainsValue(job.Labels, query) {
-			filtered = append(filtered, job)
-			indices = append(indices, i)
+	} else {
+		query := strings.ToLower(m.jobFilter)
+		var filtered []api.Job
+		var indices []int
+		for i, job := range m.jobRecords {
+			if strings.Contains(strings.ToLower(job.Alias), query) || mapContainsValue(job.Labels, query) {
+				filtered = append(filtered, job)
+				indices = append(indices, i)
+			}
 		}
+		m.filteredJobIndices = indices
+		m.jobs.SetRows(jobsToRows(filtered, m.jobRunStatus, m.spinner.View()))
 	}
-	m.filteredJobIndices = indices
-	m.jobs.SetRows(jobsToRows(filtered, m.jobRunStatus, m.spinner.View()))
+
+	// Invalidate cached detail if the selected job changed after row rebuild.
+	if newID := m.currentJobID(); newID != prevSelectedID {
+		m.selectedJobID = ""
+		m.jobDetail = nil
+		m.resetDetailView(nil, nil, true)
+	}
 }
 
 func (m Model) hasAnimatedJobStatus() bool {
@@ -986,7 +999,7 @@ func extractLastTimestamp(chunk string) time.Time {
 const statusPollInterval = 2 * time.Second
 
 func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
-	if m.client == nil {
+	if m.client == nil || m.statusPollActive {
 		return nil
 	}
 
@@ -1006,6 +1019,7 @@ func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
 			return nil
 		}
 		m.lastStatusPoll = now
+		m.statusPollActive = true
 		return fetchLatestRun(m.client, m.jobDetail.Job.ID)
 	}
 
@@ -1024,6 +1038,7 @@ func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
 		return nil
 	}
 	m.lastStatusPoll = now
+	m.statusPollActive = true
 	return fetchJobStatuses(m.client, ids)
 }
 
