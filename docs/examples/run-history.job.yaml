@@ -1,0 +1,44 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: cron-success-fast
+  labels:
+    team: qa
+    scenario: run-history-success
+trigger:
+  type: cron
+  configuration:
+    cron: "*/2 * * * *"
+    timezone: "UTC"
+steps:
+  - name: collect
+    image: alpine:3.20
+    command: ["sh", "-c", "echo collecting fixtures"]
+  - name: verify
+    image: alpine:3.20
+    command: ["sh", "-c", "echo verifying fixtures"]
+  - name: publish
+    image: alpine:3.20
+    command: ["sh", "-c", "echo publish complete"]
+---
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: cron-failure-fast
+  labels:
+    team: qa
+    scenario: run-history-failure
+trigger:
+  type: cron
+  configuration:
+    cron: "*/2 * * * *"
+    timezone: "UTC"
+steps:
+  - name: start
+    image: alpine:3.20
+    command: ["sh", "-c", "echo start failing pipeline"]
+  - name: fail
+    image: alpine:3.20
+    command: ["sh", "-c", "echo intentional failure for TUI status surfaces; exit 1"]

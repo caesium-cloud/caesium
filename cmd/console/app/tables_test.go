@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
@@ -33,11 +34,11 @@ func (s *TableSuite) TestJobsToRowsIncludesMetadata() {
 	s.Require().Len(rows, 1)
 	row := rows[0]
 	s.Equal("nightly", row[0])
-	s.Equal("-", row[1])           // status (no run)
-	s.Equal("-", row[2])           // last run
-	s.Equal("-", row[3])           // duration
+	s.Equal("-", row[1])                   // status (no run)
+	s.Equal("-", row[2])                   // last run
+	s.Equal("-", row[3])                   // duration
 	s.Equal("env=prod, team=data", row[4]) // labels
-	s.Equal("job-1234", row[5])    // short ID
+	s.Equal("job-1234", row[5])            // short ID
 }
 
 func (s *TableSuite) TestFormatStringMapEmpty() {
@@ -64,4 +65,37 @@ func (s *TableSuite) TestDistributeWidthsRespectsMinimums() {
 	s.GreaterOrEqual(widths[2], 10)
 	widths = distributeWidths(0, []int{1})
 	s.Equal([]int{12}, widths)
+}
+
+func (s *TableSuite) TestFormatRunStatusUsesPlainTextWithoutANSI() {
+	run := &api.Run{Status: "succeeded"}
+	s.Equal("✅ Succeeded", formatRunStatus(run, ""))
+	s.False(strings.Contains(formatRunStatus(run, ""), "\x1b"))
+
+	run = &api.Run{Status: "failed"}
+	s.Equal("❌ Failed", formatRunStatus(run, ""))
+	s.False(strings.Contains(formatRunStatus(run, ""), "\x1b"))
+
+	run = &api.Run{Status: "running"}
+	s.Equal("⠋ Running", formatRunStatus(run, "⠋"))
+	s.False(strings.Contains(formatRunStatus(run, "⠋"), "\x1b"))
+
+	run = &api.Run{Status: "pending"}
+	s.Equal("⠋ Pending", formatRunStatus(run, "⠋"))
+	s.False(strings.Contains(formatRunStatus(run, "⠋"), "\x1b"))
+}
+
+func (s *TableSuite) TestAdjustColumnsToWidthFitsTarget() {
+	cols := []table.Column{
+		{Title: "A", Width: 40},
+		{Title: "B", Width: 40},
+		{Title: "C", Width: 40},
+	}
+	adjusted := adjustColumnsToWidth(cols, 80)
+	total := 0
+	for _, col := range adjusted {
+		total += col.Width
+	}
+	total += len(adjusted) * 2 // table cell/header horizontal padding frame
+	s.LessOrEqual(total, 80)
 }

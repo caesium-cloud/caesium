@@ -11,6 +11,12 @@
 
 Caesium is an open source distributed scheduling system that is currently a work in progress.
 
+## Documentation
+
+- Docs index: [docs/README.md](docs/README.md)
+- Console guide: [docs/console.md](docs/console.md)
+- Job manifest guide: [docs/job-definitions.md](docs/job-definitions.md)
+
 [Pkg]: https://pkg.go.dev/github.com/caesium-cloud/caesium
 [Pkg Widget]: https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg
 [Drone CI]: https://cloud.drone.io/caesium-cloud/caesium

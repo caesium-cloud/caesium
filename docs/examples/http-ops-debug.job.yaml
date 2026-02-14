@@ -1,0 +1,50 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: http-ops-debug
+  labels:
+    team: sre
+    scenario: manual-http
+  annotations:
+    owner: sre-oncall
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/ops/debug"
+    secret: "debug-secret"
+steps:
+  - name: capture-input
+    engine: docker
+    image: busybox:1.36
+    command: ["sh", "-c", "echo capturing request context; env | sort | head -n 8"]
+    env:
+      REQUEST_SOURCE: hydrate
+      FEATURE_FLAG: ops-debug
+    next:
+      - sanity-check
+      - format-report
+  - name: sanity-check
+    engine: docker
+    image: busybox:1.36
+    command: ["sh", "-c", "echo sanity checks passed"]
+    dependsOn: capture-input
+    next: ship-report
+  - name: format-report
+    engine: docker
+    image: busybox:1.36
+    command: ["sh", "-c", "echo formatting report output"]
+    dependsOn: capture-input
+    next: ship-report
+  - name: ship-report
+    engine: docker
+    image: busybox:1.36
+    command: ["sh", "-c", "echo report shipped"]
+    dependsOn:
+      - sanity-check
+      - format-report
+    mounts:
+      - type: bind
+        source: /tmp
+        target: /tmp
+        readOnly: true

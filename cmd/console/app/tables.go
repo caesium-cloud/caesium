@@ -50,28 +50,24 @@ func formatRunStatus(run *api.Run, spinnerFrame string) string {
 		return "-"
 	}
 
-	sc := CurrentStatusColors()
 	status := strings.ToLower(strings.TrimSpace(run.Status))
-	label := titleCase(status)
 	switch status {
 	case "running":
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Running))
 		if spinnerFrame != "" {
-			return style.Render(fmt.Sprintf("%s %s", spinnerFrame, label))
+			return fmt.Sprintf("%s Running", spinnerFrame)
 		}
-		return style.Render(label)
+		return "Running"
 	case "pending":
-		style := lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Pending))
 		if spinnerFrame != "" {
-			return style.Render(fmt.Sprintf("%s %s", spinnerFrame, label))
+			return fmt.Sprintf("%s Pending", spinnerFrame)
 		}
-		return style.Render(label)
+		return "Pending"
 	case "succeeded":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Success)).Render("✓ Succeeded")
+		return "✅ Succeeded"
 	case "failed":
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Error)).Render("✗ Failed")
+		return "❌ Failed"
 	default:
-		return strings.ToUpper(run.Status)
+		return titleCase(run.Status)
 	}
 }
 
@@ -185,6 +181,13 @@ func distributeWidths(total int, weights []int) []int {
 		total = len(weights) * 12
 	}
 
+	// Reserve one character gap between columns so assigned widths align
+	// with table inner content width instead of overflowing by gap count.
+	contentTotal := total - (len(weights) - 1)
+	if contentTotal < len(weights)*10 {
+		contentTotal = len(weights) * 10
+	}
+
 	sum := 0
 	for _, w := range weights {
 		sum += w
@@ -192,7 +195,7 @@ func distributeWidths(total int, weights []int) []int {
 
 	minWidth := 10
 	widths := make([]int, len(weights))
-	remaining := total
+	remaining := contentTotal
 
 	for i, weight := range weights {
 		if i == len(weights)-1 {
@@ -200,7 +203,7 @@ func distributeWidths(total int, weights []int) []int {
 			break
 		}
 
-		portion := max(weight*total/sum, minWidth)
+		portion := max(weight*contentTotal/sum, minWidth)
 		minRemaining := minWidth * (len(weights) - i - 1)
 		if remaining-portion < minRemaining {
 			portion = max(remaining-minRemaining, minWidth)

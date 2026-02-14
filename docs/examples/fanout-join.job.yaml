@@ -1,0 +1,57 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: fanout-join-demo
+  labels:
+    team: platform
+    scenario: dag-join
+  annotations:
+    owner: platform-oncall
+    purpose: "Exercise fan-out/fan-in DAG rendering in the console"
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+    timezone: "UTC"
+steps:
+  - name: bootstrap
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo bootstrap && date"]
+    env:
+      PIPELINE_ID: fanout-join-demo
+      RUN_MODE: hydrated
+    workdir: /workspace
+    mounts:
+      - type: bind
+        source: /tmp
+        target: /workspace/tmp
+    next:
+      - lint
+      - unit-test
+  - name: lint
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo lint branch"]
+    dependsOn: bootstrap
+    next: package
+  - name: unit-test
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo unit-test branch"]
+    dependsOn: bootstrap
+    next: package
+  - name: package
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo packaging build artifacts"]
+    dependsOn:
+      - lint
+      - unit-test
+    next: publish
+  - name: publish
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo publishing artifacts"]
+    dependsOn: package

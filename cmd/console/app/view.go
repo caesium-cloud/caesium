@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/console/ui/detail"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -31,6 +32,14 @@ var (
 	}
 	logoStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("63")).Bold(true).PaddingRight(1)
 	logoDimStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+)
+
+type tableKind int
+
+const (
+	tableKindJobs tableKind = iota
+	tableKindTriggers
+	tableKindAtoms
 )
 
 // View renders the interface.
@@ -63,14 +72,14 @@ func (m Model) View() string {
 				body = m.renderJobsView()
 			}
 		case sectionTriggers:
-			body = m.renderTablePane(&m.triggers, true)
+			body = m.renderTablePane(&m.triggers, true, tableKindTriggers)
 		case sectionAtoms:
-			body = m.renderTablePane(&m.atoms, true)
+			body = m.renderTablePane(&m.atoms, true, tableKindAtoms)
 		case sectionStats:
 			body = m.renderStatsSection()
 		default:
 			activeTable := m.tableFor(m.active)
-			body = m.renderTablePane(&activeTable, true)
+			body = m.renderTablePane(&activeTable, true, tableKindForSection(m.active))
 		}
 	}
 
@@ -155,7 +164,7 @@ func (m Model) renderJobsView() string {
 		return lipgloss.JoinVertical(lipgloss.Left, parts...)
 	}
 
-	tbl := m.renderTablePane(&m.jobs, true)
+	tbl := m.renderTablePane(&m.jobs, true, tableKindJobs)
 	parts = append(parts, tbl)
 	return lipgloss.JoinVertical(lipgloss.Left, parts...)
 }
@@ -237,7 +246,7 @@ func (m Model) renderJobDetailScreen() string {
 	return body
 }
 
-func (m Model) renderTablePane(tbl *table.Model, active bool) string {
+func (m Model) renderTablePane(tbl *table.Model, active bool, kind tableKind) string {
 	available := m.viewportWidth
 	if available <= 0 {
 		available = 80
@@ -256,7 +265,7 @@ func (m Model) renderTablePane(tbl *table.Model, active bool) string {
 	outerWidth := available
 	innerWidth := max(outerWidth-frame, 20)
 
-	m.resizeColumnsToWidth(innerWidth, tbl)
+	m.resizeColumnsToWidth(innerWidth, tbl, kind)
 	tbl.SetWidth(innerWidth)
 
 	content := lipgloss.NewStyle().
@@ -267,17 +276,31 @@ func (m Model) renderTablePane(tbl *table.Model, active bool) string {
 	return border.Width(outerWidth).Render(content)
 }
 
-func (m *Model) resizeColumnsToWidth(width int, tbl *table.Model) {
+func (m *Model) resizeColumnsToWidth(width int, tbl *table.Model, kind tableKind) {
 	if width <= 0 || tbl == nil {
 		return
 	}
-	switch tbl {
-	case &m.jobs:
+	switch kind {
+	case tableKindJobs:
 		m.jobs.SetColumns(adjustColumnsToWidth(buildColumns(jobColumnTitles, distributeWidths(width, jobColumnWeights)), width))
-	case &m.triggers:
+		tbl.SetColumns(adjustColumnsToWidth(buildColumns(jobColumnTitles, distributeWidths(width, jobColumnWeights)), width))
+	case tableKindTriggers:
 		m.triggers.SetColumns(adjustColumnsToWidth(buildColumns(triggerColumnTitles, distributeWidths(width, triggerColumnWeights)), width))
-	case &m.atoms:
+		tbl.SetColumns(adjustColumnsToWidth(buildColumns(triggerColumnTitles, distributeWidths(width, triggerColumnWeights)), width))
+	case tableKindAtoms:
 		m.atoms.SetColumns(adjustColumnsToWidth(buildColumns(atomColumnTitles, distributeWidths(width, atomColumnWeights)), width))
+		tbl.SetColumns(adjustColumnsToWidth(buildColumns(atomColumnTitles, distributeWidths(width, atomColumnWeights)), width))
+	}
+}
+
+func tableKindForSection(sec section) tableKind {
+	switch sec {
+	case sectionTriggers:
+		return tableKindTriggers
+	case sectionAtoms:
+		return tableKindAtoms
+	default:
+		return tableKindJobs
 	}
 }
 
@@ -285,16 +308,60 @@ func adjustColumnsToWidth(cols []table.Column, target int) []table.Column {
 	if target <= 0 || len(cols) == 0 {
 		return cols
 	}
+
+	// Bubble table cells are rendered with horizontal padding on each column
+	// (`table.DefaultStyles().Cell` and Header both use Padding(0, 1)),
+	// so we must reserve that frame width before distributing content widths.
+	const perColumnFrame = 2 // left+right padding
+	targetContent := target - (len(cols) * perColumnFrame)
+	if targetContent < len(cols) {
+		targetContent = len(cols)
+	}
+
 	sum := 0
 	for _, c := range cols {
 		sum += c.Width
 	}
-	// account for spacing between columns (one space per gap)
-	sum += len(cols) - 1
-	if sum < target {
-		extra := target - sum
+
+	if sum < targetContent {
+		extra := targetContent - sum
 		last := len(cols) - 1
 		cols[last].Width += extra
+		return cols
+	}
+	if sum == targetContent {
+		return cols
+	}
+
+	// Shrink from right to left first so primary identifiers (left columns)
+	// retain readability when space is constrained.
+	reduce := sum - targetContent
+	const minColumnWidth = 6
+	for i := len(cols) - 1; i >= 0 && reduce > 0; i-- {
+		available := cols[i].Width - minColumnWidth
+		if available <= 0 {
+			continue
+		}
+		delta := available
+		if delta > reduce {
+			delta = reduce
+		}
+		cols[i].Width -= delta
+		reduce -= delta
+	}
+
+	// If the minimum width guard prevented full fit, force down to width 1.
+	for i := len(cols) - 1; i >= 0 && reduce > 0; i-- {
+		available := cols[i].Width - 1
+		if available <= 0 {
+			continue
+		}
+		delta := available
+		if delta > reduce {
+			delta = reduce
+		}
+		cols[i].Width -= delta
+		reduce -= delta
 	}
 	return cols
 }
@@ -565,26 +632,154 @@ func (m Model) renderConfirmModal(background string) string {
 		height = lipgloss.Height(background)
 	}
 
-	modalWidth := max(40, width-14)
-	if modalWidth > width-4 {
-		modalWidth = width - 4
-	}
-	modalHeight := max(10, height-8)
-	if modalHeight > height-2 {
-		modalHeight = height - 2
-	}
-
 	title, prompt := actionConfirmCopy(req, m.jobLabel(req.jobID))
-	hint := modalHint.Render("enter/y confirm  •  esc/n cancel")
+	modalWidth, modalHeight := confirmModalDimensions(width, height, title, prompt)
+	contentWidth := max(modalWidth-6, 16)
+	hint := renderModalHint([]string{"enter/y confirm", "esc/n cancel"}, contentWidth)
+	promptBody := lipgloss.NewStyle().
+		Width(contentWidth).
+		MaxWidth(contentWidth).
+		Align(lipgloss.Center).
+		Render(prompt)
 
-	body := fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, boxStyle.Render(prompt))
+	body := fmt.Sprintf("%s\n%s\n\n%s", modalTitle.Render(title), hint, promptBody)
 	modal := modalStyle.Width(modalWidth).Height(modalHeight).Render(body)
 
-	return lipgloss.Place(width, height,
-		lipgloss.Center, lipgloss.Center,
-		modal,
-		lipgloss.WithWhitespaceChars(" "),
-		lipgloss.WithWhitespaceForeground(lipgloss.Color("235")))
+	return overlayCentered(background, modal, width, height)
+}
+
+func confirmModalDimensions(viewWidth, viewHeight int, title, prompt string) (int, int) {
+	if viewWidth <= 0 {
+		viewWidth = 80
+	}
+	if viewHeight <= 0 {
+		viewHeight = 24
+	}
+
+	// Keep confirm dialogs intentionally compact; they should feel like a prompt,
+	// not a full-screen page.
+	const minModalWidth = 36
+	const maxModalWidth = 72
+	maxAllowed := viewWidth - 4
+	if maxAllowed < minModalWidth {
+		maxAllowed = minModalWidth
+	}
+
+	base := max(lipgloss.Width(title), lipgloss.Width(prompt))
+	width := base + 8 // border/padding breathing room
+	if width < minModalWidth {
+		width = minModalWidth
+	}
+	if width > maxModalWidth {
+		width = maxModalWidth
+	}
+	if width > maxAllowed {
+		width = maxAllowed
+	}
+
+	contentWidth := max(width-6, 12)
+	promptLines := wrapTokens([]string{prompt}, contentWidth, " ")
+	lineCount := len(promptLines)
+	if lineCount == 0 {
+		lineCount = 1
+	}
+	height := 7 + lineCount // title + hint + spacing + prompt + frame/padding
+	if height < 8 {
+		height = 8
+	}
+	if height > 12 {
+		height = 12
+	}
+	maxHeight := viewHeight - 2
+	if maxHeight < 8 {
+		maxHeight = 8
+	}
+	if height > maxHeight {
+		height = maxHeight
+	}
+
+	return width, height
+}
+
+func overlayCentered(background, overlay string, width, height int) string {
+	if width <= 0 {
+		width = lipgloss.Width(background)
+	}
+	if height <= 0 {
+		height = lipgloss.Height(background)
+	}
+	if width <= 0 || height <= 0 {
+		return background
+	}
+
+	canvas := normalizeCanvas(background, width, height)
+	overlayLines := strings.Split(overlay, "\n")
+	if len(overlayLines) == 0 {
+		return strings.Join(canvas, "\n")
+	}
+
+	overlayWidth := 0
+	for _, line := range overlayLines {
+		if w := ansi.StringWidth(line); w > overlayWidth {
+			overlayWidth = w
+		}
+	}
+	if overlayWidth <= 0 {
+		return strings.Join(canvas, "\n")
+	}
+
+	startX := max((width-overlayWidth)/2, 0)
+	startY := max((height-len(overlayLines))/2, 0)
+
+	for idx, line := range overlayLines {
+		row := startY + idx
+		if row < 0 || row >= len(canvas) {
+			continue
+		}
+		if startX >= width {
+			continue
+		}
+
+		segment := line
+		segmentWidth := ansi.StringWidth(segment)
+		if segmentWidth <= 0 {
+			continue
+		}
+		if startX+segmentWidth > width {
+			segment = ansi.Cut(segment, 0, width-startX)
+			segmentWidth = ansi.StringWidth(segment)
+		}
+		if segmentWidth <= 0 {
+			continue
+		}
+
+		base := canvas[row]
+		prefix := ansi.Cut(base, 0, startX)
+		suffix := ansi.Cut(base, startX+segmentWidth, width)
+		canvas[row] = prefix + segment + suffix
+	}
+
+	return strings.Join(canvas, "\n")
+}
+
+func normalizeCanvas(background string, width, height int) []string {
+	lines := strings.Split(background, "\n")
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	for i, line := range lines {
+		lineWidth := ansi.StringWidth(line)
+		switch {
+		case lineWidth > width:
+			lines[i] = ansi.Cut(line, 0, width)
+		case lineWidth < width:
+			lines[i] = line + strings.Repeat(" ", width-lineWidth)
+		}
+	}
+	return lines
 }
 
 func (m Model) renderHelpModal(background string) string {

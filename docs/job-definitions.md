@@ -154,6 +154,14 @@ steps:
 - Secret resolution includes environment variables by default. Provide Kubernetes context through `--enable-kubernetes`/`--kubeconfig` (or `KUBECONFIG`) and Vault connectivity using `--vault-address`, `--vault-token`, and related flags or matching environment variables.
 - Use the lint command in CI to gate manifest changes before pushing them to Git sync or applying them directly.
 - Reference manifests live under `docs/examples/`; conformance tests load these files to ensure the documentation stays in sync with the schema.
+- Example scenarios under `docs/examples/` include:
+  - Minimal sequential Cron pipeline (`minimal.job.yaml`).
+  - Callback-enabled workflow (`callbacks.job.yaml`).
+  - Explicit edge wiring (`explicit-links.job.yaml`).
+  - Fan-out/fan-in DAG (`fanout-join.job.yaml`).
+  - HTTP-triggered debugging workflow (`http-ops-debug.job.yaml`).
+  - Multi-document run history samples with success and failure cases (`run-history.job.yaml`).
+  - Callback failure handling (`callback-failure.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`.
 
