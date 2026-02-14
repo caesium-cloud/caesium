@@ -20,7 +20,7 @@ RUN autoreconf -i && CFLAGS="-Wno-error=maybe-musttail-local-addr" CXXFLAGS="-Wn
 
 # Go build environment & dependencies
 WORKDIR /bld/caesium
-ARG TARGETARCH=amd64
+ARG TARGETARCH
 ENV CGO_ENABLED=1 \
     CGO_LDFLAGS_ALLOW="-Wl,-z,now" \
     GOOS=linux \

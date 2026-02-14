@@ -3,6 +3,8 @@ image			:= "caesium"
 builder_image	:= image + "-builder"
 tag 			:= "latest"
 dockerfile 		:= "build/Dockerfile"
+# Auto-detect host architecture for supported targets (amd64/arm64).
+# For other architectures, set CAESIUM_PLATFORM explicitly to a supported value.
 docker_arch     := if arch() == "aarch64" { "arm64" } else if arch() == "x86_64" { "amd64" } else { arch() }
 platform        := env("CAESIUM_PLATFORM", "linux/" + docker_arch)
 target_arch     := if platform == "linux/arm64" { "arm64" } else if platform == "linux/amd64" { "amd64" } else { docker_arch }
@@ -10,7 +12,13 @@ bld_dir         := "/bld/caesium"
 repo_dir        := `pwd`
 it_container    := "caesium-server-test"
 
-builder:
+validate-platform:
+    @if [ "{{platform}}" != "linux/amd64" ] && [ "{{platform}}" != "linux/arm64" ]; then \
+      echo "Unsupported CAESIUM_PLATFORM '{{platform}}' (supported: linux/amd64, linux/arm64)"; \
+      exit 1; \
+    fi
+
+builder: validate-platform
     docker build --platform {{platform}} \
         --build-arg TARGETARCH={{target_arch}} \
         -t {{repo}}/{{builder_image}}:{{tag}} \
