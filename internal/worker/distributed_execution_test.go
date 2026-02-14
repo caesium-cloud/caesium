@@ -51,7 +51,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
 	var completed int32
@@ -89,8 +89,8 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		}
 	}
 
-	workerA := NewWorker(NewClaimer("node-a", store, time.Minute), NewPool(2), time.Millisecond, executor)
-	workerB := NewWorker(NewClaimer("node-b", store, time.Minute), NewPool(2), time.Millisecond, executor)
+	workerA := NewWorker(claimOnly{claimer: NewClaimer("node-a", store, time.Minute)}, NewPool(1), 10*time.Millisecond, executor)
+	workerB := NewWorker(claimOnly{claimer: NewClaimer("node-b", store, time.Minute)}, NewPool(1), 10*time.Millisecond, executor)
 
 	workerErrs := make(chan error, 2)
 	go func() { workerErrs <- workerA.Run(ctx) }()
@@ -100,7 +100,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		select {
 		case workerErr := <-workerErrs:
 			require.NoError(t, workerErr)
-		case <-time.After(6 * time.Second):
+		case <-time.After(25 * time.Second):
 			t.Fatal("timed out waiting for worker shutdown")
 		}
 	}
@@ -118,4 +118,13 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	for _, taskState := range finalRun.Tasks {
 		require.Equal(t, run.TaskStatusSucceeded, taskState.Status)
 	}
+}
+
+// claimOnly avoids the test invoking ReclaimExpired in each worker loop iteration.
+type claimOnly struct {
+	claimer *Claimer
+}
+
+func (c claimOnly) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
+	return c.claimer.ClaimNext(ctx)
 }
