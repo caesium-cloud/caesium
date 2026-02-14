@@ -2,7 +2,9 @@
 
 ## Status
 
-Draft
+Implemented
+
+Implemented by PR [#74](https://github.com/caesium-cloud/caesium/pull/74) (plus follow-up review fixes on that branch).
 
 ## Problem
 

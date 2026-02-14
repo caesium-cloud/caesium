@@ -13,15 +13,45 @@ jobs:
           name: Install just
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
-          name: Build builder image
-          command: just tag=$CIRCLE_SHA1 builder
+          name: Build builder image (amd64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG builder
       - run:
-          name: Save builder image
-          command: docker save caesiumcloud/caesium-builder:$CIRCLE_SHA1 | gzip > /tmp/builder.tar.gz
+          name: Save builder image (amd64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            docker save caesiumcloud/caesium-builder:$IMAGE_TAG | gzip > /tmp/builder-amd64.tar.gz
       - persist_to_workspace:
           root: /tmp
           paths:
-            - builder.tar.gz
+            - builder-amd64.tar.gz
+
+  builder-arm64:
+    machine:
+      image: ubuntu-2404:current
+      docker_layer_caching: true
+    resource_class: arm.medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Build builder image (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            just tag=$IMAGE_TAG builder
+      - run:
+          name: Save builder image (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            docker save caesiumcloud/caesium-builder:$IMAGE_TAG | gzip > /tmp/builder-arm64.tar.gz
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - builder-arm64.tar.gz
 
   lint:
     machine:
@@ -37,10 +67,12 @@ jobs:
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
           name: Load builder image
-          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
+          command: gunzip -c /tmp/workspace/builder-amd64.tar.gz | docker load
       - run:
           name: Lint
-          command: just tag=$CIRCLE_SHA1 lint
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG lint
 
   unit-test:
     machine:
@@ -56,10 +88,33 @@ jobs:
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
           name: Load builder image
-          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
+          command: gunzip -c /tmp/workspace/builder-amd64.tar.gz | docker load
       - run:
           name: Unit tests
-          command: just tag=$CIRCLE_SHA1 unit-test
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG unit-test
+
+  unit-test-arm64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder-arm64.tar.gz | docker load
+      - run:
+          name: Unit tests (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            just tag=$IMAGE_TAG unit-test
 
   build-and-integration-test:
     machine:
@@ -75,24 +130,155 @@ jobs:
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
           name: Load builder image
-          command: gunzip -c /tmp/workspace/builder.tar.gz | docker load
+          command: gunzip -c /tmp/workspace/builder-amd64.tar.gz | docker load
       - run:
-          name: Build release image
-          command: just tag=$CIRCLE_SHA1 build
+          name: Build release image (amd64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG build
       - run:
-          name: Integration tests
-          command: just tag=$CIRCLE_SHA1 integration-test
+          name: Integration tests (amd64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG integration-test
+      - run:
+          name: Save release image (amd64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            docker save caesiumcloud/caesium:$IMAGE_TAG | gzip > /tmp/release-amd64.tar.gz
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - release-amd64.tar.gz
+
+  build-and-integration-test-arm64:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: arm.medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder-arm64.tar.gz | docker load
+      - run:
+          name: Build release image (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            just tag=$IMAGE_TAG build
+      - run:
+          name: Integration tests (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            just tag=$IMAGE_TAG integration-test
+      - run:
+          name: Save release image (arm64)
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
+            docker save caesiumcloud/caesium:$IMAGE_TAG | gzip > /tmp/release-arm64.tar.gz
+      - persist_to_workspace:
+          root: /tmp
+          paths:
+            - release-arm64.tar.gz
+
+  publish:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Load release images
+          command: |
+            gunzip -c /tmp/workspace/release-amd64.tar.gz | docker load
+            gunzip -c /tmp/workspace/release-arm64.tar.gz | docker load
+      - run:
+          name: Login to Docker Hub
+          command: echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+      - run:
+          name: Push multi-arch manifest
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}
+            export DOCKER_CLI_EXPERIMENTAL=enabled
+            docker push caesiumcloud/caesium:${IMAGE_TAG}-amd64
+            docker push caesiumcloud/caesium:${IMAGE_TAG}-arm64
+            docker manifest create caesiumcloud/caesium:${IMAGE_TAG} \
+              caesiumcloud/caesium:${IMAGE_TAG}-amd64 \
+              caesiumcloud/caesium:${IMAGE_TAG}-arm64
+            docker manifest push caesiumcloud/caesium:${IMAGE_TAG}
 
 workflows:
   ci:
     jobs:
-      - builder
+      - builder:
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
+      - builder-arm64:
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - lint:
           requires:
             - builder
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - unit-test:
           requires:
             - builder
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
+      - unit-test-arm64:
+          requires:
+            - builder-arm64
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - build-and-integration-test:
           requires:
             - builder
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
+      - build-and-integration-test-arm64:
+          requires:
+            - builder-arm64
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
+      - publish:
+          requires:
+            - lint
+            - unit-test
+            - unit-test-arm64
+            - build-and-integration-test
+            - build-and-integration-test-arm64
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v.*/
