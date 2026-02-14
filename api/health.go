@@ -1,7 +1,6 @@
 package api
 
 import (
-	"database/sql"
 	"net/http"
 	"time"
 
@@ -78,12 +77,8 @@ func checkDatabase() *CheckResult {
 	conn := db.Connection()
 	start := time.Now()
 
-	sqlDB, err := conn.DB()
-	if err != nil {
-		return &CheckResult{Status: Degraded, LatencyMs: time.Since(start).Milliseconds()}
-	}
-
-	err = sqlDB.QueryRow("SELECT 1").Scan(new(sql.RawBytes))
+	var result int
+	err := conn.Raw("SELECT 1").Scan(&result).Error
 	latency := time.Since(start)
 
 	if err != nil || latency > time.Second {

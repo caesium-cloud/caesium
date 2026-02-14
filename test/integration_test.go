@@ -72,12 +72,15 @@ func (s *IntegrationTestSuite) SetupSuite() {
 		resp, err := client.Get(fmt.Sprintf("%v/health", s.caesiumURL))
 		if err == nil && resp != nil {
 			lastStatus = resp.StatusCode
+			var body []byte
 			if resp.Body != nil {
+				body, _ = io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
 			}
 			if resp.StatusCode == http.StatusOK {
 				break
 			}
+			lastErr = fmt.Errorf("body: %s", string(body))
 		} else {
 			lastErr = err
 		}
