@@ -122,10 +122,12 @@ The core idea: instead of the leader executing all tasks locally, the leader (or
 ```sql
 ALTER TABLE task_runs ADD COLUMN claimed_by TEXT DEFAULT '';
 ALTER TABLE task_runs ADD COLUMN claim_expires_at TIMESTAMP;
+ALTER TABLE task_runs ADD COLUMN claim_attempt INTEGER DEFAULT 0;
 ```
 
 - `claimed_by` — node address (`CAESIUM_NODE_ADDRESS`) of the node executing this task, empty if unclaimed.
 - `claim_expires_at` — lease expiry to handle node failures.
+- `claim_attempt` — monotonically increasing attempt counter, incremented on each claim. Used to generate unique container names (`taskID-attemptN`) so reclaimed tasks don't collide with containers from a previous (possibly still-running) attempt.
 
 **New file:** `internal/worker/claimer.go`
 
@@ -138,11 +140,25 @@ type Claimer struct {
 }
 
 // ClaimNext atomically claims an unclaimed, ready (predecessors=0, status=pending) task.
+// Uses a two-step SELECT-then-UPDATE pattern because SQLite/dqlite does not support
+// LIMIT on UPDATE statements.
 func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
-    // UPDATE task_runs SET claimed_by = ?, claim_expires_at = ?, status = 'running'
-    // WHERE status = 'pending' AND outstanding_predecessors = 0
-    //   AND (claimed_by = '' OR claim_expires_at < NOW())
-    // LIMIT 1 RETURNING *
+    // Step 1: SELECT a single candidate row ID.
+    //   SELECT id FROM task_runs
+    //   WHERE status = 'pending' AND outstanding_predecessors = 0
+    //     AND (claimed_by = '' OR claim_expires_at < NOW())
+    //   ORDER BY created_at ASC
+    //   LIMIT 1
+    //
+    // Step 2: Atomically UPDATE only that row, re-checking conditions to
+    // guard against races (another node may have claimed it between steps).
+    //   UPDATE task_runs
+    //   SET claimed_by = ?, claim_expires_at = ?, status = 'running'
+    //   WHERE id = ? AND status = 'pending'
+    //     AND (claimed_by = '' OR claim_expires_at < NOW())
+    //   RETURNING *
+    //
+    // If the UPDATE affects 0 rows, another node won the race — retry or back off.
 }
 ```
 
@@ -283,13 +299,14 @@ New environment variables:
 
 ### Phase 2 — Multi-Node Distributed Execution
 
-- [ ] **2.1** Add `claimed_by` and `claim_expires_at` columns to `task_runs` (DB migration)
-- [ ] **2.2** Add `TaskRun` model fields for `ClaimedBy` and `ClaimExpiresAt` (`internal/models/`)
+- [ ] **2.1** Add `claimed_by`, `claim_expires_at`, and `claim_attempt` columns to `task_runs` (DB migration)
+- [ ] **2.2** Add `TaskRun` model fields for `ClaimedBy`, `ClaimExpiresAt`, and `ClaimAttempt` (`internal/models/`)
 - [ ] **2.3** Create `internal/worker/claimer.go` — atomic task claiming with lease
 - [ ] **2.4** Create `internal/worker/worker.go` — per-node worker loop
-- [ ] **2.5** Add worker env vars to `pkg/env/env.go`
+- [ ] **2.5** Add worker env vars to `pkg/env/env.go` (including `CAESIUM_EXECUTION_MODE`: `local`/`distributed`)
 - [ ] **2.6** Launch worker loop in `cmd/start/start.go` on every node
-- [ ] **2.7** Refactor `internal/job/job.go` `Run()` — split into "enqueue" (register tasks) and "wait for completion"
+- [ ] **2.7** Refactor `internal/job/job.go` `Run()` — split into "enqueue" (register tasks) and "wait for completion"; gate on `CAESIUM_EXECUTION_MODE`
+- [ ] **2.7a** Use attempt-suffixed container names (`taskID-attemptN`) in task execution to prevent name collisions on reclaim
 - [ ] **2.8** Implement lease renewal and expired-lease recovery in claimer
 - [ ] **2.9** Add distributed execution tests (multi-node simulation)
 - [ ] **2.10** Update run store methods to be claim-aware (respect `claimed_by` in status queries)
@@ -307,13 +324,17 @@ New environment variables:
 | Risk | Mitigation |
 |---|---|
 | Claim contention under high load | Jittered poll intervals; dqlite serializes writes so correctness is guaranteed |
-| Expired leases causing duplicate execution | Tasks are idempotent (container create is keyed by task ID); `engine.Stop()` on reclaim |
+| Expired leases causing duplicate execution | Container names use task ID today (`Name: taskID.String()`), so a reclaimed task collides with a still-running container from the original worker. To fix: include an **attempt counter** (`claim_attempt` column, incremented on each claim) in the container name (`taskID-attemptN`). On reclaim, the recovery goroutine first calls `engine.Stop()` on the old container name before resetting the task to pending. Workers always create containers with the current attempt suffix, avoiding name collisions. |
 | Dqlite write forwarding latency | Workers poll on interval; 2s default is generous. Monitor and tune. |
-| Breaking change for existing single-node users | Phase 1 is backward compatible. Phase 2 defaults to `WORKER_ENABLED=true` but works fine on single node. |
+| Breaking change for existing single-node users | Phase 1 is backward compatible. Phase 2 defaults to `EXECUTION_MODE=local` (current behavior); operators opt in to distributed mode after all nodes are upgraded. |
 | Container engine availability varies per node | Workers only claim tasks for engines they can reach (future: engine capability advertisement) |
 
 ## Migration Path
 
 - **Phase 1** is a drop-in improvement. Operators just set `CAESIUM_MAX_PARALLEL_TASKS` > 1.
-- **Phase 2** requires a DB migration (two new columns). Rolling upgrade works: old nodes ignore the new columns; new nodes start claiming tasks.
+- **Phase 2** requires a DB migration (new columns) and a **coordinated cutover**, not a rolling upgrade:
+  1. Add a `CAESIUM_EXECUTION_MODE` env var with values `"local"` (default, current behavior) and `"distributed"`.
+  2. Deploy new binary to all nodes with `EXECUTION_MODE=local`. The DB migration runs (adds columns), but all nodes continue using the existing local dispatch loop. No behavioral change.
+  3. Once all nodes are running the new binary, switch to `EXECUTION_MODE=distributed` (via config change + rolling restart, or a future runtime toggle API). This activates the worker claim loop and disables the local dispatch loop.
+  4. **Why not rolling upgrade?** During a mixed-version window, old nodes still run the local dispatch loop while new nodes claim from the shared queue. A pending task could be executed by both the old node's local dispatcher and a new node's claim worker simultaneously. The feature flag ensures all nodes agree on the execution model before distributed claims are enabled.
 - No breaking API changes in either phase.
