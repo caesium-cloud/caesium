@@ -8,6 +8,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
+	"github.com/caesium-cloud/caesium/cmd/console/ui/status"
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -184,8 +185,7 @@ func renderRunProgress(run *api.Run) string {
 	total := len(run.Tasks)
 	completed := 0
 	for _, task := range run.Tasks {
-		status := strings.ToLower(strings.TrimSpace(task.Status))
-		if status == "succeeded" || status == "failed" {
+		if status.IsTerminal(task.Status) {
 			completed++
 		}
 	}
@@ -242,25 +242,30 @@ func formatKVPairs(label string, values map[string]string) string {
 	return fmt.Sprintf("%s: %s", labelStyle.Render(label), valueStyle.Render(strings.Join(parts, ", ")))
 }
 
-func statusBadge(status, spinnerFrame string, compact bool) string {
-	normalized := strings.ToLower(strings.TrimSpace(status))
+func statusBadge(rawStatus, spinnerFrame string, compact bool) string {
+	normalized := status.Normalize(rawStatus)
 	label := titleCase(normalized)
 	switch normalized {
-	case "running", "pending":
+	case status.Running, status.Pending:
 		if spinnerFrame != "" {
 			return fmt.Sprintf("%s %s", spinnerFrame, label)
 		}
 		return label
-	case "succeeded":
+	case status.Succeeded:
 		if compact {
 			return "✓"
 		}
 		return "✓ Succeeded"
-	case "failed":
+	case status.Failed:
 		if compact {
 			return "✗"
 		}
 		return "✗ Failed"
+	case status.Skipped:
+		if compact {
+			return "↷"
+		}
+		return "↷ Skipped"
 	default:
 		if label == "" {
 			return "-"
@@ -268,7 +273,7 @@ func statusBadge(status, spinnerFrame string, compact bool) string {
 		if compact {
 			return label
 		}
-		return strings.ToUpper(status)
+		return strings.ToUpper(normalized)
 	}
 }
 
@@ -278,10 +283,10 @@ func taskSummary(tasks []api.RunTask, spinnerFrame string) string {
 	}
 	var running, pending int
 	for _, task := range tasks {
-		switch strings.ToLower(strings.TrimSpace(task.Status)) {
-		case "running":
+		switch status.Normalize(task.Status) {
+		case status.Running:
 			running++
-		case "pending":
+		case status.Pending:
 			pending++
 		}
 	}
@@ -314,4 +319,3 @@ func titleCase(value string) string {
 	}
 	return strings.ToUpper(value[:1]) + value[1:]
 }
-

@@ -2,7 +2,21 @@
 
 ## Status
 
-Draft
+In Progress
+
+## Progress Update (2026-02-14)
+
+Implemented on branch `codex/parallel-exec-phase1a`:
+
+- Phase 1.1 startup execution config logging (`max_parallel_tasks`).
+- Phase 1.2 worker pool (`internal/worker/pool.go`) with unit tests.
+- Phase 1.3 failure policy (`halt`/`continue`) with dependent-task skip behavior.
+- Phase 1.4 task timeout (`CAESIUM_TASK_TIMEOUT`) with forced stop + persisted task failure.
+- TUI support for skipped task state in DAG and detail views.
+
+Not yet complete:
+
+- Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
 
 ## Problem
 
@@ -289,13 +303,13 @@ New environment variables:
 
 ### Phase 1 — Single-Node Parallelism
 
-- [ ] **1.1** Log `MaxParallelTasks` at startup (`cmd/start/start.go`)
-- [ ] **1.2** Create `internal/worker/pool.go` — bounded worker pool
-- [ ] **1.3** Refactor `internal/job/job.go` dispatch loop to use worker pool
-- [ ] **1.4** Add `TaskFailurePolicy` env var and implement `"continue"` mode in job.go
-- [ ] **1.5** Add `TaskTimeout` env var and implement per-task timeouts in job.go
+- [x] **1.1** Log `MaxParallelTasks` at startup (`cmd/start/start.go`)
+- [x] **1.2** Create `internal/worker/pool.go` — bounded worker pool
+- [x] **1.3** Refactor `internal/job/job.go` dispatch loop to use worker pool
+- [x] **1.4** Add `TaskFailurePolicy` env var and implement `"continue"` mode in job.go
+- [x] **1.5** Add `TaskTimeout` env var and implement per-task timeouts in job.go
 - [ ] **1.6** Add tests for parallel task execution, failure policies, and timeouts
-- [ ] **1.7** Update default `MaxParallelTasks` to 4 (or document the knob in startup logs)
+- [x] **1.7** Update default `MaxParallelTasks` to 4 (or document the knob in startup logs)
 
 ### Phase 2 — Multi-Node Distributed Execution
 

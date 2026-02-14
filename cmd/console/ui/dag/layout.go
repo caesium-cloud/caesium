@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/console/ui/status"
 	"github.com/charmbracelet/lipgloss"
 )
 
@@ -151,7 +152,7 @@ func renderNodeBox(node *Node, opts RenderOptions, pathNodes map[string]bool) st
 	}
 
 	info := opts.TaskStatus[node.ID()]
-	status := strings.ToLower(strings.TrimSpace(info.Status))
+	status := status.Normalize(info.Status)
 	isFocused := opts.FocusedID != "" && node.ID() == opts.FocusedID
 	isDimmed := opts.FocusPath && len(pathNodes) > 0 && !pathNodes[node.ID()]
 
@@ -207,21 +208,27 @@ func renderNodeBox(node *Node, opts RenderOptions, pathNodes map[string]bool) st
 	return style.Render(content)
 }
 
-func statusIconAndColor(status string, info TaskInfo, colors StatusColors) (string, string) {
-	switch status {
-	case "succeeded":
+func statusIconAndColor(taskStatus string, info TaskInfo, colors StatusColors) (string, string) {
+	switch taskStatus {
+	case status.Succeeded:
 		color := colors.Success
 		if color == "" {
 			color = "42"
 		}
 		return "✓", color
-	case "failed":
+	case status.Failed:
 		color := colors.Error
 		if color == "" {
 			color = "196"
 		}
 		return "✗", color
-	case "running":
+	case status.Skipped:
+		color := colors.Pending
+		if color == "" {
+			color = "240"
+		}
+		return "↷", color
+	case status.Running:
 		color := colors.Running
 		if color == "" {
 			color = "214"
@@ -240,20 +247,20 @@ func statusIconAndColor(status string, info TaskInfo, colors StatusColors) (stri
 	}
 }
 
-func durationLabel(status string, info TaskInfo) string {
-	switch status {
-	case "succeeded", "failed":
+func durationLabel(taskStatus string, info TaskInfo) string {
+	switch taskStatus {
+	case status.Succeeded, status.Failed, status.Skipped:
 		if info.Duration != "" {
 			return info.Duration
 		}
-		return status
-	case "running":
+		return taskStatus
+	case status.Running:
 		if info.Duration != "" {
 			return info.Duration + "…"
 		}
-		return "running"
+		return status.Running
 	default:
-		return "pending"
+		return status.Pending
 	}
 }
 

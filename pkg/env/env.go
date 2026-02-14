@@ -44,6 +44,8 @@ type Environment struct {
 	DatabaseType                  string        `default:"internal" split_words:"true"`
 	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
 	MaxParallelTasks              int           `default:"1" split_words:"true"`
+	TaskFailurePolicy             string        `default:"halt" split_words:"true"`
+	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
 	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
 	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
 	JobdefGitInterval             time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`
