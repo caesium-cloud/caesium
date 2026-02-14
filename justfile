@@ -3,13 +3,16 @@ image			:= "caesium"
 builder_image	:= image + "-builder"
 tag 			:= "latest"
 dockerfile 		:= "build/Dockerfile"
-platform        := "linux/amd64"
+docker_arch     := if arch() == "aarch64" { "arm64" } else if arch() == "x86_64" { "amd64" } else { arch() }
+platform        := env("CAESIUM_PLATFORM", "linux/" + docker_arch)
+target_arch     := if platform == "linux/arm64" { "arm64" } else if platform == "linux/amd64" { "amd64" } else { docker_arch }
 bld_dir         := "/bld/caesium"
 repo_dir        := `pwd`
 it_container    := "caesium-server-test"
 
 builder:
     docker build --platform {{platform}} \
+        --build-arg TARGETARCH={{target_arch}} \
         -t {{repo}}/{{builder_image}}:{{tag}} \
         -f {{dockerfile}}.build .
 
@@ -19,6 +22,28 @@ build: builder
         --target release \
         -t {{repo}}/{{image}}:{{tag}} \
         -f {{dockerfile}} .
+
+# Build for a specific platform (requires buildx + QEMU for cross-platform)
+build-cross target_platform:
+    docker buildx build --platform {{target_platform}} \
+        -t {{repo}}/{{builder_image}}:{{tag}} \
+        -f {{dockerfile}}.build --load .
+    docker buildx build --platform {{target_platform}} \
+        --build-arg BUILDER_TAG={{tag}} \
+        --target release \
+        -t {{repo}}/{{image}}:{{tag}} \
+        -f {{dockerfile}} --load .
+
+# Build and push multi-arch images for both builder and runtime
+build-multiarch:
+    docker buildx build --platform linux/amd64,linux/arm64 \
+        -t {{repo}}/{{builder_image}}:{{tag}} \
+        -f {{dockerfile}}.build --push .
+    docker buildx build --platform linux/amd64,linux/arm64 \
+        --build-arg BUILDER_TAG={{tag}} \
+        --target release \
+        -t {{repo}}/{{image}}:{{tag}} \
+        -f {{dockerfile}} --push .
 
 build-release: builder
     docker build --platform {{platform}} \
@@ -39,6 +64,14 @@ push:
 
 push-test:
 	docker push {{repo}}/{{image}}:{{tag}}-test
+
+push-multiarch:
+    docker push {{repo}}/{{image}}:{{tag}}-amd64
+    docker push {{repo}}/{{image}}:{{tag}}-arm64
+    docker manifest create {{repo}}/{{image}}:{{tag}} \
+        {{repo}}/{{image}}:{{tag}}-amd64 \
+        {{repo}}/{{image}}:{{tag}}-arm64
+    docker manifest push {{repo}}/{{image}}:{{tag}}
 
 unit-test: builder
     docker run --rm --platform {{platform}} \

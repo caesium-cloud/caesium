@@ -16,13 +16,14 @@ WORKDIR /bld
 ARG DQLITE_REF=v1.18.5
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
-RUN autoreconf -i && CFLAGS="-Wno-error=maybe-musttail-local-addr" CXXFLAGS="-Wno-error=maybe-musttail-local-addr" ./configure --disable-backtrace --prefix=/usr && make -j4 install
+RUN autoreconf -i && CFLAGS="-Wno-error=maybe-musttail-local-addr" CXXFLAGS="-Wno-error=maybe-musttail-local-addr" ./configure --disable-backtrace --prefix=/usr && make -j$(nproc) install
 
 # Go build environment & dependencies
 WORKDIR /bld/caesium
+ARG TARGETARCH=amd64
 ENV CGO_ENABLED=1 \
     CGO_LDFLAGS_ALLOW="-Wl,-z,now" \
     GOOS=linux \
-    GOARCH=amd64
+    GOARCH=${TARGETARCH}
 COPY go.mod go.sum ./
 RUN go mod download

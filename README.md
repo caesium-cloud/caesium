@@ -11,6 +11,26 @@
 
 Caesium is an open source distributed scheduling system that is currently a work in progress.
 
+## Supported Architectures
+
+- `linux/amd64`
+- `linux/arm64`
+
+Runtime images are published as multi-arch Docker manifests so `docker pull caesiumcloud/caesium:<tag>` resolves to the native architecture automatically.
+
+## Building by Architecture
+
+- Host-default platform (auto-detected): `just build`
+- Override target platform: `CAESIUM_PLATFORM=linux/arm64 just build`
+- Cross-build one platform with buildx: `just build-cross linux/arm64`
+- Build and push multi-arch images: `just build-multiarch tag=<tag>`
+
+## Mixed-Arch Cluster Notes
+
+- Mixed `amd64`/`arm64` caesium clusters are supported when all nodes run compatible versions.
+- Task container images must support the architecture of the node that runs them.
+- On Docker/Kubernetes/Podman, multi-arch task images are pulled automatically when manifests include both architectures.
+
 ## Documentation
 
 - Docs index: [docs/README.md](docs/README.md)
