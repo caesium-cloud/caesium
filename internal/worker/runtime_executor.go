@@ -56,13 +56,21 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	if err == nil {
 		return
 	}
+	if errors.Is(err, run.ErrTaskClaimMismatch) {
+		log.Info("worker task claim changed; skipping execution result", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+		return
+	}
 
 	if errors.Is(err, context.Canceled) {
 		log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 		return
 	}
 
-	if persistErr := e.store.FailTask(taskRun.JobRunID, taskRun.TaskID, err); persistErr != nil {
+	if persistErr := e.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, err, taskRun.ClaimedBy); persistErr != nil {
+		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+			return
+		}
 		log.Error("failed to persist worker task failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
 	}
 
@@ -113,7 +121,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	if err := e.store.StartTask(taskRun.JobRunID, taskRun.TaskID, a.ID()); err != nil {
+	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.TaskID, a.ID(), taskRun.ClaimedBy); err != nil {
 		return err
 	}
 
@@ -121,7 +129,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	if err := e.store.CompleteTask(taskRun.JobRunID, taskRun.TaskID, string(a.Result())); err != nil {
+	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy); err != nil {
 		return err
 	}
 

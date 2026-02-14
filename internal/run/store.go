@@ -93,6 +93,8 @@ var (
 	defaultStoreOnce sync.Once
 )
 
+var ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
+
 func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
@@ -180,13 +182,42 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		}).Error
 }
 
+func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
+	now := time.Now().UTC()
+	result := s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
+		Updates(map[string]interface{}{
+			"runtime_id": runtimeID,
+			"started_at": now,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrTaskClaimMismatch
+	}
+	return nil
+}
+
 func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
+	return s.completeTask(runID, taskID, result, "", false)
+}
+
+func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string) error {
+	return s.completeTask(runID, taskID, result, claimedBy, true)
+}
+
+func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
 		// Capture task metadata for metrics before updating.
 		var taskRun models.TaskRun
-		if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil {
+		taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
+		if enforceClaim {
+			taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+		}
+		if err := taskQuery.First(&taskRun).Error; err == nil {
 			var jobRun models.JobRun
 			if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
 				jobID := jobRun.JobID.String()
@@ -197,16 +228,26 @@ func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
 					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusSucceeded)).Observe(duration)
 				}
 			}
+		} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
+			return ErrTaskClaimMismatch
 		}
 
-		if err := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		updateQuery := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+		if enforceClaim {
+			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+		}
+		resultUpdate := updateQuery.
 			Updates(map[string]interface{}{
 				"status":       string(TaskStatusSucceeded),
 				"completed_at": now,
 				"result":       result,
-			}).Error; err != nil {
-			return err
+			})
+		if resultUpdate.Error != nil {
+			return resultUpdate.Error
+		}
+		if enforceClaim && resultUpdate.RowsAffected == 0 {
+			return ErrTaskClaimMismatch
 		}
 
 		var edges []models.TaskEdge
@@ -256,6 +297,14 @@ func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
 }
 
 func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
+	return s.failTask(runID, taskID, failure, "", false)
+}
+
+func (s *Store) FailTaskClaimed(runID, taskID uuid.UUID, failure error, claimedBy string) error {
+	return s.failTask(runID, taskID, failure, claimedBy, true)
+}
+
+func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy string, enforceClaim bool) error {
 	now := time.Now().UTC()
 	errMsg := ""
 	if failure != nil {
@@ -264,7 +313,11 @@ func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
 
 	// Record task failure metrics.
 	var taskRun models.TaskRun
-	if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil {
+	taskQuery := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID)
+	if enforceClaim {
+		taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+	}
+	if err := taskQuery.First(&taskRun).Error; err == nil {
 		var jobRun models.JobRun
 		if err := s.db.First(&jobRun, "id = ?", runID).Error; err == nil {
 			jobID := jobRun.JobID.String()
@@ -275,15 +328,28 @@ func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
 				metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusFailed)).Observe(duration)
 			}
 		}
+	} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
+		return ErrTaskClaimMismatch
 	}
 
-	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+	updateQuery := s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID)
+	if enforceClaim {
+		updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+	}
+	resultUpdate := updateQuery.
 		Updates(map[string]interface{}{
 			"status":       string(TaskStatusFailed),
 			"completed_at": now,
 			"error":        errMsg,
-		}).Error
+		})
+	if resultUpdate.Error != nil {
+		return resultUpdate.Error
+	}
+	if enforceClaim && resultUpdate.RowsAffected == 0 {
+		return ErrTaskClaimMismatch
+	}
+	return nil
 }
 
 func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
