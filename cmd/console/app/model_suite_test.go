@@ -94,7 +94,8 @@ func (s *ModelSuite) TestEnterActivatesDetailView() {
 
 func (s *ModelSuite) TestEnterTriggersDetailFetchWhenMissing() {
 	model := s.newReadyModel()
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
+	model.jobRecords = []api.Job{{ID: "job-1", Alias: "alias"}}
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "-", "job-1"}})
 
 	res, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	s.NotNil(cmd)
@@ -189,7 +190,8 @@ func (s *ModelSuite) TestSetActionStatus() {
 
 func (s *ModelSuite) TestTriggerSelectedJobSetsState() {
 	model := s.newReadyModel()
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
+	model.jobRecords = []api.Job{{ID: "job-1", Alias: "alias"}}
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "-", "job-1"}})
 	cmd := model.triggerSelectedJob()
 	s.Nil(cmd)
 	s.NotNil(model.confirmAction)
@@ -203,7 +205,8 @@ func (s *ModelSuite) TestConfirmActionStartsTrigger() {
 	model := New(api.New(cfg))
 	model.state = statusReady
 	model.active = sectionJobs
-	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "job-1", ""}})
+	model.jobRecords = []api.Job{{ID: "job-1", Alias: "alias"}}
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "-", "job-1"}})
 	model.triggerSelectedJob()
 	s.NotNil(model.confirmAction)
 

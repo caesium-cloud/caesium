@@ -19,7 +19,7 @@ func TestTableSuite(t *testing.T) {
 func (s *TableSuite) TestJobsToRowsIncludesMetadata() {
 	jobs := []api.Job{{
 		Alias: "nightly",
-		ID:    "job-123",
+		ID:    "job-12345678-abcd",
 		Labels: map[string]string{
 			"env":  "prod",
 			"team": "data",
@@ -32,9 +32,12 @@ func (s *TableSuite) TestJobsToRowsIncludesMetadata() {
 	rows := jobsToRows(jobs, nil, "")
 	s.Require().Len(rows, 1)
 	row := rows[0]
-	s.Equal("-", row[1])
-	s.Equal("env=prod, team=data", row[2])
-	s.Equal("owner=ops", row[3])
+	s.Equal("nightly", row[0])
+	s.Equal("-", row[1])           // status (no run)
+	s.Equal("-", row[2])           // last run
+	s.Equal("-", row[3])           // duration
+	s.Equal("env=prod, team=data", row[4]) // labels
+	s.Equal("job-1234", row[5])    // short ID
 }
 
 func (s *TableSuite) TestFormatStringMapEmpty() {
