@@ -27,6 +27,9 @@ type TaskRun struct {
 	Image                   string     `gorm:"not null"`
 	Command                 string     `gorm:"not null"`
 	Status                  string     `gorm:"type:text;index;not null"`
+	ClaimedBy               string     `gorm:"type:text;index;not null;default:''"`
+	ClaimExpiresAt          *time.Time `gorm:"index"`
+	ClaimAttempt            int        `gorm:"not null;default:0"`
 	Result                  string
 	Error                   string
 	RuntimeID               string

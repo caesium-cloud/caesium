@@ -56,6 +56,9 @@ type TaskRun struct {
 	Command                 []string          `json:"command"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	Status                  TaskStatus        `json:"status"`
+	ClaimedBy               string            `json:"claimed_by,omitempty"`
+	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
+	ClaimAttempt            int               `json:"claim_attempt"`
 	Result                  string            `json:"result,omitempty"`
 	StartedAt               *time.Time        `json:"started_at,omitempty"`
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
@@ -102,6 +105,10 @@ func Default() *Store {
 		defaultStore = NewStore(db.Connection())
 	})
 	return defaultStore
+}
+
+func (s *Store) DB() *gorm.DB {
+	return s.db
 }
 
 func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
@@ -449,6 +456,8 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Command:                 command,
 		RuntimeID:               model.RuntimeID,
 		Status:                  TaskStatus(model.Status),
+		ClaimedBy:               model.ClaimedBy,
+		ClaimAttempt:            model.ClaimAttempt,
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,
@@ -457,6 +466,10 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	if model.StartedAt != nil {
 		started := *model.StartedAt
 		task.StartedAt = &started
+	}
+	if model.ClaimExpiresAt != nil {
+		expiresAt := *model.ClaimExpiresAt
+		task.ClaimExpiresAt = &expiresAt
 	}
 	if model.CompletedAt != nil {
 		completed := *model.CompletedAt
