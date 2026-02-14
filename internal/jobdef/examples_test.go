@@ -23,9 +23,13 @@ func TestExamplesSuite(t *testing.T) {
 
 func (s *ExamplesSuite) TestExampleManifestsConformToSchema() {
 	testCases := map[string][]string{
-		"minimal.job.yaml":        {"nightly-etl"},
-		"callbacks.job.yaml":      {"csv-to-parquet"},
-		"explicit-links.job.yaml": {"explicit-links"},
+		"minimal.job.yaml":          {"nightly-etl"},
+		"callbacks.job.yaml":        {"csv-to-parquet"},
+		"explicit-links.job.yaml":   {"explicit-links"},
+		"fanout-join.job.yaml":      {"fanout-join-demo"},
+		"http-ops-debug.job.yaml":   {"http-ops-debug"},
+		"callback-failure.job.yaml": {"callback-failure-demo"},
+		"run-history.job.yaml":      {"cron-success-fast", "cron-failure-fast"},
 	}
 
 	root := filepath.Join("..", "..", "docs", "examples")

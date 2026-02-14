@@ -74,28 +74,74 @@ func renderBoxDAG(g *Graph, opts RenderOptions) string {
 		pathNodes = collectPath(g, opts.FocusedID)
 	}
 
-	var rows []string
+	type renderedLevel struct {
+		nodes  []*Node
+		boxes  []string
+		row    string
+		width  int
+		offset int
+	}
+
+	rendered := make([]renderedLevel, len(levels))
+	graphWidth := 0
 
 	for levelIdx, level := range levels {
-		// Render each node as a box
 		boxes := make([]string, len(level))
 		for i, node := range level {
 			boxes[i] = renderNodeBox(node, opts, pathNodes)
 		}
 
-		// Join boxes side-by-side for this level
 		row := lipgloss.JoinHorizontal(lipgloss.Top, interleave(boxes, boxGap)...)
+		width := lipgloss.Width(row)
+		if width > graphWidth {
+			graphWidth = width
+		}
+
+		rendered[levelIdx] = renderedLevel{
+			nodes: level,
+			boxes: boxes,
+			row:   row,
+			width: width,
+		}
+	}
+
+	if graphWidth <= 0 {
+		return ""
+	}
+
+	for i := range rendered {
+		if graphWidth > rendered[i].width {
+			rendered[i].offset = (graphWidth - rendered[i].width) / 2
+		}
+	}
+
+	rows := make([]string, 0, len(levels)*2-1)
+	for levelIdx := range rendered {
+		level := rendered[levelIdx]
+		row := level.row
+		if level.offset > 0 {
+			row = prefixMultiline(row, level.offset)
+		}
 		rows = append(rows, row)
 
-		// Draw connectors between this level and the next
-		if levelIdx < len(levels)-1 {
-			connector := renderConnectors(level, levels[levelIdx+1], boxes, opts)
+		if levelIdx < len(rendered)-1 {
+			next := rendered[levelIdx+1]
+			connector := renderConnectors(
+				level.nodes,
+				next.nodes,
+				level.boxes,
+				next.boxes,
+				level.offset,
+				next.offset,
+				graphWidth,
+			)
 			if connector != "" {
 				rows = append(rows, connector)
 			}
 		}
 	}
 
+	rows = centerRows(rows, opts.MaxWidth)
 	return strings.Join(rows, "\n")
 }
 
@@ -211,33 +257,22 @@ func durationLabel(status string, info TaskInfo) string {
 	}
 }
 
-func renderConnectors(parents []*Node, children []*Node, parentBoxes []string, opts RenderOptions) string {
-	if len(parents) == 0 || len(children) == 0 {
+func renderConnectors(
+	parents []*Node,
+	children []*Node,
+	parentBoxes []string,
+	childBoxes []string,
+	parentOffset int,
+	childOffset int,
+	canvasWidth int,
+) string {
+	if len(parents) == 0 || len(children) == 0 || canvasWidth <= 0 {
 		return ""
 	}
 
-	// Calculate center position of each parent box
-	parentCenters := make([]int, len(parentBoxes))
-	offset := 0
-	for i, box := range parentBoxes {
-		w := lipgloss.Width(box)
-		parentCenters[i] = offset + w/2
-		offset += w + boxGap
-	}
-	totalWidth := offset - boxGap
-	if totalWidth < 1 {
-		totalWidth = 1
-	}
+	parentCenters := boxCenters(parentBoxes, parentOffset)
+	childCenters := boxCenters(childBoxes, childOffset)
 
-	// For simple linear chains (1 parent -> 1 child), just draw a vertical line
-	if len(parents) == 1 && len(children) == 1 {
-		center := parentCenters[0]
-		line := strings.Repeat(" ", center) + "│"
-		return line
-	}
-
-	// Build a character grid for the connector row
-	// Find which parents connect to which children
 	type edge struct {
 		parentIdx int
 		childIdx  int
@@ -252,7 +287,7 @@ func renderConnectors(parents []*Node, children []*Node, parentBoxes []string, o
 	for pi, parent := range parents {
 		for _, succ := range parent.Successors() {
 			if ci, ok := childOrder[succ.ID()]; ok {
-				edges = append(edges, edge{pi, ci})
+				edges = append(edges, edge{parentIdx: pi, childIdx: ci})
 			}
 		}
 	}
@@ -261,156 +296,120 @@ func renderConnectors(parents []*Node, children []*Node, parentBoxes []string, o
 		return ""
 	}
 
-	// Calculate child box centers (we need to render child boxes to know widths)
-	pathNodes := make(map[string]bool)
-	if opts.FocusPath && opts.FocusedID != "" {
-		pathNodes = collectPath(nil, "") // empty - we just need width estimation
-	}
-
-	childBoxes := make([]string, len(children))
-	for i, node := range children {
-		childBoxes[i] = renderNodeBox(node, opts, pathNodes)
-	}
-	childCenters := make([]int, len(childBoxes))
-	cOffset := 0
-	// Center the child row relative to the parent row
-	childTotalWidth := 0
-	for i, box := range childBoxes {
-		w := lipgloss.Width(box)
-		if i > 0 {
-			childTotalWidth += boxGap
-		}
-		childTotalWidth += w
-	}
-	childStart := 0
-	if childTotalWidth < totalWidth {
-		childStart = (totalWidth - childTotalWidth) / 2
-	}
-	cOffset = childStart
-	for i, box := range childBoxes {
-		w := lipgloss.Width(box)
-		childCenters[i] = cOffset + w/2
-		cOffset += w + boxGap
-	}
-
-	// Build connector lines
-	gridWidth := max(totalWidth, cOffset) + 2
-	if gridWidth < 1 {
-		gridWidth = 1
-	}
-
-	// Line 1: vertical drops from parents
-	line1 := make([]byte, gridWidth)
+	line1 := make([]rune, canvasWidth)
+	line2 := make([]rune, canvasWidth)
+	line3 := make([]rune, canvasWidth)
 	for i := range line1 {
 		line1[i] = ' '
-	}
-	for _, e := range edges {
-		pos := parentCenters[e.parentIdx]
-		if pos < gridWidth {
-			line1[pos] = '|'
-		}
-	}
-
-	// Line 2: horizontal bar connecting all branches
-	line2 := make([]byte, gridWidth)
-	for i := range line2 {
 		line2[i] = ' '
-	}
-
-	// Find the range of columns that need horizontal lines
-	minCol, maxCol := gridWidth, 0
-	usedParents := make(map[int]bool)
-	usedChildren := make(map[int]bool)
-	for _, e := range edges {
-		pc := parentCenters[e.parentIdx]
-		cc := childCenters[e.childIdx]
-		usedParents[e.parentIdx] = true
-		usedChildren[e.childIdx] = true
-		lo, hi := pc, cc
-		if lo > hi {
-			lo, hi = hi, lo
-		}
-		if lo < minCol {
-			minCol = lo
-		}
-		if hi > maxCol {
-			maxCol = hi
-		}
-	}
-
-	// Only draw horizontal line if there's actual fan-out/fan-in
-	if maxCol > minCol {
-		for i := minCol; i <= maxCol && i < gridWidth; i++ {
-			line2[i] = '-'
-		}
-		// Place junction markers
-		for _, e := range edges {
-			pc := parentCenters[e.parentIdx]
-			if pc < gridWidth {
-				line2[pc] = '+'
-			}
-			cc := childCenters[e.childIdx]
-			if cc < gridWidth {
-				line2[cc] = '+'
-			}
-		}
-	} else {
-		// Single vertical path
-		if minCol < gridWidth {
-			line2[minCol] = '|'
-		}
-	}
-
-	// Line 3: vertical drops to children
-	line3 := make([]byte, gridWidth)
-	for i := range line3 {
 		line3[i] = ' '
 	}
+
+	parentCols := make(map[int]struct{}, len(parents))
+	childCols := make(map[int]struct{}, len(children))
+	minCol, maxCol := canvasWidth-1, 0
 	for _, e := range edges {
-		pos := childCenters[e.childIdx]
-		if pos < gridWidth {
-			line3[pos] = '|'
+		pc := clampCol(parentCenters[e.parentIdx], canvasWidth)
+		cc := clampCol(childCenters[e.childIdx], canvasWidth)
+		parentCols[pc] = struct{}{}
+		childCols[cc] = struct{}{}
+
+		if pc < minCol {
+			minCol = pc
+		}
+		if cc < minCol {
+			minCol = cc
+		}
+		if pc > maxCol {
+			maxCol = pc
+		}
+		if cc > maxCol {
+			maxCol = cc
 		}
 	}
 
-	// Convert to proper box-drawing characters
-	result := []string{
-		convertConnectorLine(string(line1), "drop"),
-		convertConnectorLine(string(line2), "horizontal"),
-		convertConnectorLine(string(line3), "rise"),
+	for col := range parentCols {
+		line1[col] = '│'
+	}
+	for col := range childCols {
+		line3[col] = '│'
 	}
 
+	if maxCol > minCol {
+		for i := minCol; i <= maxCol; i++ {
+			line2[i] = '─'
+		}
+		for col := range parentCols {
+			line2[col] = mergeConnectorRune(line2[col], '┴')
+		}
+		for col := range childCols {
+			line2[col] = mergeConnectorRune(line2[col], '┬')
+		}
+	} else {
+		line2[minCol] = '│'
+	}
+
+	result := []string{
+		trimRightRunes(line1),
+		trimRightRunes(line2),
+		trimRightRunes(line3),
+	}
 	return strings.Join(result, "\n")
 }
 
-func convertConnectorLine(line, kind string) string {
-	r := []rune(line)
-	for i, ch := range r {
-		switch ch {
-		case '|':
-			r[i] = '│'
-		case '-':
-			r[i] = '─'
-		case '+':
-			// Determine junction type based on context
-			hasLeft := i > 0 && (r[i-1] == '─' || r[i-1] == '+')
-			hasRight := i < len(r)-1 && (line[i+1] == '-' || line[i+1] == '+')
-			switch kind {
-			case "horizontal":
-				switch {
-				case hasLeft && hasRight:
-					r[i] = '┼'
-				case hasLeft:
-					r[i] = '┤'
-				case hasRight:
-					r[i] = '├'
-				default:
-					r[i] = '│'
-				}
-			}
-		}
+func boxCenters(boxes []string, start int) []int {
+	centers := make([]int, len(boxes))
+	offset := start
+	for i, box := range boxes {
+		w := lipgloss.Width(box)
+		centers[i] = offset + w/2
+		offset += w + boxGap
 	}
-	return strings.TrimRight(string(r), " ")
+	return centers
+}
+
+func clampCol(col, width int) int {
+	if width <= 0 {
+		return 0
+	}
+	if col < 0 {
+		return 0
+	}
+	if col >= width {
+		return width - 1
+	}
+	return col
+}
+
+func mergeConnectorRune(current, junction rune) rune {
+	switch current {
+	case ' ':
+		return junction
+	case '─':
+		return junction
+	case '┴':
+		if junction == '┬' {
+			return '┼'
+		}
+		return '┴'
+	case '┬':
+		if junction == '┴' {
+			return '┼'
+		}
+		return '┬'
+	case '┼':
+		return '┼'
+	default:
+		return junction
+	}
+}
+
+func trimRightRunes(line []rune) string {
+	end := len(line)
+	for end > 0 && line[end-1] == ' ' {
+		end--
+	}
+	return string(line[:end])
 }
 
 func interleave(items []string, gap int) []string {
@@ -537,9 +536,41 @@ func maxLen(lines ...string) int {
 	return m
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+func centerRows(rows []string, maxWidth int) []string {
+	if len(rows) == 0 || maxWidth <= 0 {
+		return rows
 	}
-	return b
+
+	graphWidth := 0
+	for _, row := range rows {
+		if w := lipgloss.Width(row); w > graphWidth {
+			graphWidth = w
+		}
+	}
+	if graphWidth <= 0 || graphWidth >= maxWidth {
+		return rows
+	}
+
+	padding := (maxWidth - graphWidth) / 2
+	if padding <= 0 {
+		return rows
+	}
+
+	out := make([]string, len(rows))
+	for i, row := range rows {
+		out[i] = prefixMultiline(row, padding)
+	}
+	return out
+}
+
+func prefixMultiline(s string, spaces int) string {
+	if spaces <= 0 || s == "" {
+		return s
+	}
+	prefix := strings.Repeat(" ", spaces)
+	lines := strings.Split(s, "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
 }

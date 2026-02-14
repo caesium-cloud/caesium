@@ -1,0 +1,25 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: callback-failure-demo
+  labels:
+    team: platform
+    scenario: callback-failure
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/callback/failure"
+    secret: "callback-secret"
+callbacks:
+  - type: notification
+    configuration:
+      url: "http://127.0.0.1:65535/hooks/caesium"
+      user_agent: "caesium-hydrate-demo"
+steps:
+  - name: prepare
+    image: busybox:1.36
+    command: ["sh", "-c", "echo preparing callback payload"]
+  - name: complete
+    image: busybox:1.36
+    command: ["sh", "-c", "echo callback will run after this step"]

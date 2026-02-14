@@ -20,6 +20,13 @@ just hydrate
 
 This command assumes `just run` is already managing a local server on `http://127.0.0.1:8080`; it mounts the manifests under `docs/examples/` and applies them via the REST API so the console immediately has jobs, triggers, and atoms to display.
 
+The hydration set now includes richer scenarios for TUI validation:
+
+- DAG fan-out/fan-in with explicit `next`/`dependsOn` edges (`fanout-join.job.yaml`).
+- HTTP-triggered operational workflows for manual triggering from the Jobs tab (`http-ops-debug.job.yaml`).
+- Mixed run-history cases (success + intentional failure) in a multi-document manifest (`run-history.job.yaml`).
+- Callback failure surfaces for run/callback status inspection (`callback-failure.job.yaml`).
+
 ## Configuration
 
 The console connects to the Caesium API using the following environment variables:

@@ -91,3 +91,69 @@ func TestRenderRunsModalHintShowsTerminalOnlyForRunning(t *testing.T) {
 		t.Fatalf("expected terminal-only rerun hint for running run, got: %q", out)
 	}
 }
+
+func TestConfirmModalDimensionsStayCompact(t *testing.T) {
+	width, height := confirmModalDimensions(
+		240,
+		80,
+		"Trigger Job",
+		"Trigger fanout-join-demo now?",
+	)
+
+	if width > 72 {
+		t.Fatalf("expected compact modal width <= 72, got %d", width)
+	}
+	if height > 12 {
+		t.Fatalf("expected compact modal height <= 12, got %d", height)
+	}
+	if width < 36 || height < 8 {
+		t.Fatalf("unexpectedly tiny confirm modal size: %dx%d", width, height)
+	}
+}
+
+func TestOverlayCenteredKeepsBackgroundContent(t *testing.T) {
+	background := strings.Join([]string{
+		"TOP-LINE",
+		"AAAAAAAAAA",
+		"AAAAAAAAAA",
+		"BOTTOM-LINE",
+	}, "\n")
+
+	out := overlayCentered(background, "XX", 10, 4)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 lines, got %d", len(lines))
+	}
+	if !strings.Contains(lines[0], "TOP-LINE") {
+		t.Fatalf("expected top line preserved, got %q", lines[0])
+	}
+	if lines[1] != "AAAAXXAAAA" {
+		t.Fatalf("expected centered overlay on line 2, got %q", lines[1])
+	}
+}
+
+func TestRenderConfirmModalOverlaysOnBackground(t *testing.T) {
+	model := New(nil)
+	model.viewportWidth = 80
+	model.viewportHeight = 24
+	model.confirmAction = &actionRequest{
+		kind:  actionTrigger,
+		jobID: "job-1",
+		label: "fanout-join-demo",
+	}
+
+	background := strings.Join([]string{
+		"JOBS-LIST-BACKGROUND",
+		"row one",
+		"row two",
+	}, "\n")
+
+	out := model.renderConfirmModal(background)
+
+	if !strings.Contains(out, "JOBS-LIST-BACKGROUND") {
+		t.Fatalf("expected background content to remain visible, got: %q", out)
+	}
+	if !strings.Contains(out, "Trigger Job") {
+		t.Fatalf("expected confirm modal title in output, got: %q", out)
+	}
+}
