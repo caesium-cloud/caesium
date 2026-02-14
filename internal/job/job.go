@@ -466,8 +466,10 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	if terminalTasks != len(tasks) {
-		runErr = fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, terminalTasks, len(tasks))
-		return runErr
+		if runErr != nil {
+			return runErr
+		}
+		return fmt.Errorf("job %s reached terminal state for %d of %d tasks; remaining tasks may be waiting on unresolved dependencies", j.id, terminalTasks, len(tasks))
 	}
 
 	if runErr != nil {
