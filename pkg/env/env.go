@@ -46,6 +46,11 @@ type Environment struct {
 	MaxParallelTasks              int           `default:"1" split_words:"true"`
 	TaskFailurePolicy             string        `default:"halt" split_words:"true"`
 	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
+	ExecutionMode                 string        `default:"local" split_words:"true"`
+	WorkerEnabled                 bool          `default:"true" split_words:"true"`
+	WorkerPollInterval            time.Duration `default:"2s" split_words:"true"`
+	WorkerLeaseTTL                time.Duration `default:"5m" split_words:"true"`
+	WorkerPoolSize                int           `default:"4" split_words:"true"`
 	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
 	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
 	JobdefGitInterval             time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`

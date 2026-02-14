@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/pprof"
+	"strings"
 	"syscall"
 
 	"github.com/caesium-cloud/caesium/api"
@@ -12,6 +13,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -81,6 +84,16 @@ func start(cmd *cobra.Command, args []string) error {
 		vars.TaskFailurePolicy,
 		"task_timeout",
 		vars.TaskTimeout,
+		"execution_mode",
+		vars.ExecutionMode,
+		"worker_enabled",
+		vars.WorkerEnabled,
+		"worker_pool_size",
+		vars.WorkerPoolSize,
+		"worker_poll_interval",
+		vars.WorkerPollInterval,
+		"worker_lease_ttl",
+		vars.WorkerLeaseTTL,
 	)
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
@@ -114,6 +127,41 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Info("launching execution routine")
 		errs <- executor.Start(ctx)
 	}()
+
+	if vars.WorkerEnabled && strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed") {
+		go func() {
+			poolSize := vars.WorkerPoolSize
+			if poolSize < 1 {
+				poolSize = 1
+			}
+
+			log.Info(
+				"launching distributed worker",
+				"node_address",
+				vars.NodeAddress,
+				"pool_size",
+				poolSize,
+				"poll_interval",
+				vars.WorkerPollInterval,
+				"lease_ttl",
+				vars.WorkerLeaseTTL,
+			)
+
+			store := run.Default()
+			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL)
+			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
+			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn)
+			errs <- w.Run(ctx)
+		}()
+	} else {
+		log.Info(
+			"distributed worker disabled",
+			"worker_enabled",
+			vars.WorkerEnabled,
+			"execution_mode",
+			vars.ExecutionMode,
+		)
+	}
 
 	defer shutdown()
 

@@ -14,9 +14,22 @@ Implemented on branch `codex/parallel-exec-phase1a`:
 - Phase 1.4 task timeout (`CAESIUM_TASK_TIMEOUT`) with forced stop + persisted task failure.
 - TUI support for skipped task state in DAG and detail views.
 
+Implemented on branch `codex/parallel-exec-phase2a`:
+
+- Phase 2.1/2.2 claim metadata added to `task_runs` (`claimed_by`, `claim_expires_at`, `claim_attempt`) via model/automigration updates.
+- Phase 2.3 initial `internal/worker/claimer.go` implementation with atomic claim semantics.
+- Phase 2.4 `internal/worker/worker.go` polling loop abstraction with bounded pool execution.
+- Phase 2.5 worker/execution env variables added to `pkg/env/env.go`.
+- Phase 2.6 worker loop startup wired in `cmd/start/start.go` for distributed mode.
+- Phase 2.7 `internal/job/job.go` now gates local execution vs distributed enqueue+wait path via `CAESIUM_EXECUTION_MODE`.
+- Phase 2.7a attempt-suffixed runtime names added in distributed worker execution.
+- Phase 2.8 initial lease renewal + expired-lease reclaim implemented in worker executor/claimer flow.
+- Added claimer unit tests for ready-task selection, lease-expiry reclaim, and no-work behavior.
+
 Not yet complete:
 
 - Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
+- Phase 2 distributed run lifecycle polish and wider integration tests are still pending.
 
 ## Problem
 
@@ -313,15 +326,15 @@ New environment variables:
 
 ### Phase 2 — Multi-Node Distributed Execution
 
-- [ ] **2.1** Add `claimed_by`, `claim_expires_at`, and `claim_attempt` columns to `task_runs` (DB migration)
-- [ ] **2.2** Add `TaskRun` model fields for `ClaimedBy`, `ClaimExpiresAt`, and `ClaimAttempt` (`internal/models/`)
-- [ ] **2.3** Create `internal/worker/claimer.go` — atomic task claiming with lease
-- [ ] **2.4** Create `internal/worker/worker.go` — per-node worker loop
-- [ ] **2.5** Add worker env vars to `pkg/env/env.go` (including `CAESIUM_EXECUTION_MODE`: `local`/`distributed`)
-- [ ] **2.6** Launch worker loop in `cmd/start/start.go` on every node
-- [ ] **2.7** Refactor `internal/job/job.go` `Run()` — split into "enqueue" (register tasks) and "wait for completion"; gate on `CAESIUM_EXECUTION_MODE`
-- [ ] **2.7a** Use attempt-suffixed container names (`taskID-attemptN`) in task execution to prevent name collisions on reclaim
-- [ ] **2.8** Implement lease renewal and expired-lease recovery in claimer
+- [x] **2.1** Add `claimed_by`, `claim_expires_at`, and `claim_attempt` columns to `task_runs` (DB migration)
+- [x] **2.2** Add `TaskRun` model fields for `ClaimedBy`, `ClaimExpiresAt`, and `ClaimAttempt` (`internal/models/`)
+- [x] **2.3** Create `internal/worker/claimer.go` — atomic task claiming with lease
+- [x] **2.4** Create `internal/worker/worker.go` — per-node worker loop
+- [x] **2.5** Add worker env vars to `pkg/env/env.go` (including `CAESIUM_EXECUTION_MODE`: `local`/`distributed`)
+- [x] **2.6** Launch worker loop in `cmd/start/start.go` on every node
+- [x] **2.7** Refactor `internal/job/job.go` `Run()` — split into "enqueue" (register tasks) and "wait for completion"; gate on `CAESIUM_EXECUTION_MODE`
+- [x] **2.7a** Use attempt-suffixed container names (`taskID-attemptN`) in task execution to prevent name collisions on reclaim
+- [x] **2.8** Implement lease renewal and expired-lease recovery in claimer
 - [ ] **2.9** Add distributed execution tests (multi-node simulation)
 - [ ] **2.10** Update run store methods to be claim-aware (respect `claimed_by` in status queries)
 

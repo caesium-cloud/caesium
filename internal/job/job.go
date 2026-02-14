@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	asvc "github.com/caesium-cloud/caesium/api/rest/service/atom"
@@ -45,8 +46,18 @@ type atomRunner struct {
 	engine  atom.Engine
 }
 
+const (
+	executionModeLocal       = "local"
+	executionModeDistributed = "distributed"
+)
+
 func (j *job) Run(ctx context.Context) error {
 	store := run.Default()
+	vars := env.Variables()
+	executionMode := normalizeExecutionMode(vars.ExecutionMode)
+	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
+	continueOnFailure := failurePolicy == taskFailurePolicyContinue
+	taskTimeout := vars.TaskTimeout
 
 	resolveRun := func() (*run.JobRun, error) {
 		if id, ok := run.FromContext(ctx); ok {
@@ -66,6 +77,10 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		if running != nil {
+			if executionMode == executionModeDistributed {
+				return store.Get(running.ID)
+			}
+
 			if err := store.ResetInFlightTasks(running.ID); err != nil {
 				return nil, err
 			}
@@ -126,6 +141,10 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		atomsByTask[t.ID] = modelAtom
+
+		if executionMode == executionModeDistributed {
+			continue
+		}
 
 		runner := &atomRunner{
 			image:   modelAtom.Image,
@@ -224,9 +243,10 @@ func (j *job) Run(ctx context.Context) error {
 		return err
 	}
 
-	failurePolicy := normalizeTaskFailurePolicy(env.Variables().TaskFailurePolicy)
-	continueOnFailure := failurePolicy == taskFailurePolicyContinue
-	taskTimeout := env.Variables().TaskTimeout
+	if executionMode == executionModeDistributed {
+		runErr = waitForRunCompletion(ctx, store, runID, len(tasks), continueOnFailure)
+		return runErr
+	}
 
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
@@ -362,7 +382,7 @@ func (j *job) Run(ctx context.Context) error {
 		return nil
 	}
 
-	maxParallel := env.Variables().MaxParallelTasks
+	maxParallel := vars.MaxParallelTasks
 	if maxParallel < 1 {
 		maxParallel = 1
 	}
@@ -477,4 +497,67 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func normalizeExecutionMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case executionModeDistributed:
+		return executionModeDistributed
+	default:
+		return executionModeLocal
+	}
+}
+
+func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID, taskCount int, continueOnFailure bool) error {
+	if taskCount <= 0 {
+		return nil
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			snapshot, err := store.Get(runID)
+			if err != nil {
+				return err
+			}
+
+			failed := 0
+			running := 0
+			succeeded := 0
+			skipped := 0
+
+			for _, taskState := range snapshot.Tasks {
+				switch taskState.Status {
+				case run.TaskStatusFailed:
+					failed++
+				case run.TaskStatusRunning:
+					running++
+				case run.TaskStatusSucceeded:
+					succeeded++
+				case run.TaskStatusSkipped:
+					skipped++
+				}
+			}
+
+			terminal := failed + succeeded + skipped
+			if terminal == taskCount {
+				if failed > 0 {
+					return fmt.Errorf("run %s completed with %d failed task(s)", runID, failed)
+				}
+				return nil
+			}
+
+			if failed > 0 && running == 0 {
+				if continueOnFailure {
+					return fmt.Errorf("run %s has %d failed task(s) and %d unresolved pending task(s)", runID, failed, taskCount-terminal)
+				}
+				return fmt.Errorf("run %s halted after %d failed task(s)", runID, failed)
+			}
+		}
+	}
 }
