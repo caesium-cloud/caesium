@@ -536,13 +536,6 @@ func maxLen(lines ...string) int {
 	return m
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func centerRows(rows []string, maxWidth int) []string {
 	if len(rows) == 0 || maxWidth <= 0 {
 		return rows
