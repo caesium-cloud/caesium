@@ -104,15 +104,26 @@ func (s *GitSyncSuite) TestWatchDetectsNewCommit() {
 	done := make(chan error, 1)
 	go func() { done <- Watch(ctx, importer, opts) }()
 
-	// allow initial sync
-	time.Sleep(150 * time.Millisecond)
+	s.Eventually(func() bool {
+		var count int64
+		if err := db.Model(&models.Job{}).Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 1
+	}, 2*time.Second, 20*time.Millisecond, "initial sync did not complete")
 
 	// update repo with new alias
 	s.commit(repoDir, map[string]string{
 		"jobs/sample.yaml": strings.Replace(testutil.SampleJob, "csv-to-parquet", "csv-to-parquet-2", 1),
 	})
 
-	time.Sleep(200 * time.Millisecond)
+	s.Eventually(func() bool {
+		var count int64
+		if err := db.Model(&models.Job{}).Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 2
+	}, 2*time.Second, 20*time.Millisecond, "watch did not observe new commit")
 	cancel()
 
 	err := <-done
@@ -140,7 +151,13 @@ func (s *GitSyncSuite) TestWatchCancel() {
 	done := make(chan error, 1)
 	go func() { done <- Watch(ctx, importer, opts) }()
 
-	time.Sleep(120 * time.Millisecond)
+	s.Eventually(func() bool {
+		var count int64
+		if err := db.Model(&models.Job{}).Count(&count).Error; err != nil {
+			return false
+		}
+		return count == 1
+	}, 2*time.Second, 20*time.Millisecond, "initial sync did not complete")
 	cancel()
 
 	err := <-done
