@@ -24,13 +24,14 @@ var (
 		sectionJobs:     "Jobs",
 		sectionTriggers: "Triggers",
 		sectionAtoms:    "Atoms",
+		sectionStats:    "Stats",
 	}
 	logoStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingRight(1)
 )
 
 // View renders the interface.
 func (m Model) View() string {
-	tabs := renderTabsBar(m.active, m.viewportWidth, m.themeName)
+	tabs := renderTabsBar(m.active, m.viewportWidth)
 
 	footerKeys := globalFooterKeys()
 	if m.active == sectionJobs {
@@ -61,6 +62,8 @@ func (m Model) View() string {
 			body = m.renderTablePane(&m.triggers, true)
 		case sectionAtoms:
 			body = m.renderTablePane(&m.atoms, true)
+		case sectionStats:
+			body = m.renderStatsSection()
 		default:
 			activeTable := m.tableFor(m.active)
 			body = m.renderTablePane(&activeTable, true)
@@ -87,7 +90,17 @@ func (m Model) View() string {
 }
 
 func globalFooterKeys() []string {
-	return []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+	return []string{"[1/2/3/4] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+}
+
+func (m Model) renderStatsSection() string {
+	if m.statsLoading {
+		return centerText(fmt.Sprintf("%s Loading stats…", m.spinner.View()))
+	}
+	if m.statsErr != nil {
+		return boxStyle.Render("Failed to load stats: " + m.statsErr.Error())
+	}
+	return renderStatsView(m.statsData, m.viewportWidth)
 }
 
 func jobsDetailFooterKeys(showLogs bool) []string {
@@ -314,7 +327,7 @@ func statusBadge(status, spinnerFrame string, compact bool) string {
 }
 
 func renderTabs(active section) string {
-	sections := []section{sectionJobs, sectionTriggers, sectionAtoms}
+	sections := []section{sectionJobs, sectionTriggers, sectionAtoms, sectionStats}
 	tabs := make([]string, len(sections))
 	for i, sec := range sections {
 		label := fmt.Sprintf("%d %s", i+1, sectionNames[sec])
@@ -328,13 +341,9 @@ func renderTabs(active section) string {
 	return lipgloss.JoinHorizontal(lipgloss.Top, tabs...)
 }
 
-func renderTabsBar(active section, totalWidth int, themeName string) string {
+func renderTabsBar(active section, totalWidth int) string {
 	tabs := renderTabs(active)
 	logo := logoStyle.Render("┌────┐\n│ Cs │\n└────┘")
-	if trimmed := strings.TrimSpace(themeName); trimmed != "" {
-		tag := themeBadgeLabel(trimmed)
-		logo = logoStyle.Render(fmt.Sprintf("┌────┐\n│%4s│\n└────┘", tag))
-	}
 	if totalWidth <= 0 {
 		return lipgloss.JoinHorizontal(lipgloss.Top, tabs, logo)
 	}
@@ -522,7 +531,7 @@ func (m Model) renderHelpModal(background string) string {
 		modalHint.Render("esc / q / ? close"),
 		"",
 		"Global",
-		"  1/2/3 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
+		"  1/2/3/4 switch tabs  •  tab/shift+tab cycle tabs  •  r reload",
 		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
 		"",
 		"Jobs Detail",
@@ -869,18 +878,6 @@ func wrapTokens(tokens []string, width int, sep string) []string {
 		lines = append(lines, line)
 	}
 	return lines
-}
-
-func themeBadgeLabel(themeName string) string {
-	name := strings.ToUpper(strings.TrimSpace(themeName))
-	if name == "" {
-		return "CS"
-	}
-	runes := []rune(name)
-	if len(runes) > 4 {
-		runes = runes[:4]
-	}
-	return string(runes)
 }
 
 func (m Model) renderRunsModal(background string) string {

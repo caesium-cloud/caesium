@@ -8,7 +8,7 @@ import (
 )
 
 func TestRenderFooterPreservesQuitHint(t *testing.T) {
-	keys := []string{"[1/2/3] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
+	keys := []string{"[1/2/3/4] switch", "[tab] cycle", "[r] reload", "[p] ping", "[q] quit", "[T] theme", "[?] help"}
 	status := "api:healthy  ping:22ms  load:27ms  retries:0  checked:19:48:58"
 
 	footer := renderFooter(keys, status, 80)
@@ -51,16 +51,28 @@ func TestRenderLogsModalEmptyStateCopy(t *testing.T) {
 	}
 }
 
-func TestThemeBadgeLabelUsesStableTag(t *testing.T) {
-	if got := themeBadgeLabel("Ocean"); got != "OCEA" {
-		t.Fatalf("expected OCEA theme tag, got %q", got)
+func TestTabsBarAlwaysShowsCsLogo(t *testing.T) {
+	bar := renderTabsBar(sectionJobs, 80)
+	if !strings.Contains(bar, "Cs") {
+		t.Fatalf("expected Cs logo in tabs bar, got: %q", bar)
 	}
-	bar := renderTabsBar(sectionJobs, 80, "Ocean")
-	if strings.Contains(bar, "O...") {
-		t.Fatalf("unexpected ellipsis in theme badge: %q", bar)
+}
+
+func TestTabBarIncludesStatsTab(t *testing.T) {
+	bar := renderTabs(sectionStats)
+	if !strings.Contains(bar, "Stats") {
+		t.Fatalf("expected Stats tab in tabs bar, got: %q", bar)
 	}
-	if !strings.Contains(bar, "OCEA") {
-		t.Fatalf("expected OCEA label in theme badge: %q", bar)
+	if !strings.Contains(bar, "4 Stats") {
+		t.Fatalf("expected '4 Stats' label, got: %q", bar)
+	}
+}
+
+func TestGlobalFooterKeysInclude4(t *testing.T) {
+	keys := globalFooterKeys()
+	joined := strings.Join(keys, " ")
+	if !strings.Contains(joined, "1/2/3/4") {
+		t.Fatalf("expected [1/2/3/4] in footer keys, got: %q", joined)
 	}
 }
 

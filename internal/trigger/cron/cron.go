@@ -9,6 +9,7 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -97,6 +98,7 @@ func (c *Cron) Fire(ctx context.Context) error {
 	log.Info("running jobs", "count", len(jobs))
 
 	for _, j := range jobs {
+		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
 		go func() {
 			if err = job.New(j).Run(ctx); err != nil {
 				log.Error("job run failure", "id", j.ID, "error", err)

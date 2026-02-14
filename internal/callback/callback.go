@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -297,6 +298,8 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 		status = models.CallbackRunStatusFailed
 		errMsg = err.Error()
 	}
+
+	metrics.CallbackRunsTotal.WithLabelValues(meta.JobID.String(), string(status)).Inc()
 
 	if updateErr := d.completeCallbackRun(ctx, runRecord.ID, status, errMsg); updateErr != nil {
 		return errors.Join(err, updateErr)

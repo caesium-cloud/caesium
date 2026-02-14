@@ -31,7 +31,10 @@ const (
 	sectionJobs section = iota
 	sectionTriggers
 	sectionAtoms
+	sectionStats
 )
+
+const sectionCount = 4
 
 const (
 	actionNone actionKind = iota
@@ -47,11 +50,11 @@ type actionRequest struct {
 }
 
 func (s section) next() section {
-	return section((int(s) + 1) % 3)
+	return section((int(s) + 1) % sectionCount)
 }
 
 func (s section) prev() section {
-	return section((int(s) + 2) % 3)
+	return section((int(s) + sectionCount - 1) % sectionCount)
 }
 
 // Model represents the Bubble Tea program state.
@@ -124,6 +127,9 @@ type Model struct {
 	actionPending   *actionRequest
 	actionNotice    string
 	actionErr       error
+	statsData       *api.StatsResponse
+	statsLoading    bool
+	statsErr        error
 }
 
 // New creates the root model with dependency references.
@@ -351,6 +357,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.followLatestRun = true
 			m.resetDetailView(nil, nil, true)
 			m.taskRunStatus = make(map[string]api.RunTask)
+			m.statsData = nil
+			m.statsLoading = false
+			m.statsErr = nil
 			m.stopLogStream(false)
 			m.confirmAction = nil
 			m.actionPending = nil
@@ -363,6 +372,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.activate(sectionTriggers)
 		case "3":
 			m = m.activate(sectionAtoms)
+		case "4":
+			m = m.activate(sectionStats)
 		case "tab":
 			if m.showDetail {
 				if cmd := m.cycleFocusedNode(1); cmd != nil {
@@ -693,6 +704,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.setActionStatus("Health check failed", msg.err)
 		}
+	case statsLoadedMsg:
+		m.statsLoading = false
+		m.statsErr = nil
+		m.statsData = msg.stats
+	case statsErrMsg:
+		m.statsLoading = false
+		m.statsErr = msg.err
 	case dataLoadErrMsg:
 		m.state = statusError
 		m.err = msg.err
@@ -737,6 +755,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if tableCmd != nil {
 			cmds = append(cmds, tableCmd)
 		}
+	case sectionStats:
+		if m.statsData == nil && !m.statsLoading {
+			if cmd := m.loadStatsIfNeeded(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
+		}
 	}
 
 	return m, tea.Batch(cmds...)
@@ -763,6 +787,15 @@ func (m Model) activate(sec section) Model {
 	}
 	m.active = sec
 	return m
+}
+
+func (m *Model) loadStatsIfNeeded() tea.Cmd {
+	if m.client == nil || m.statsLoading {
+		return nil
+	}
+	m.statsLoading = true
+	m.statsErr = nil
+	return fetchStats(m.client)
 }
 
 func (m Model) currentJobID() string {

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
@@ -74,6 +75,13 @@ type JobRun struct {
 
 type Store struct {
 	db *gorm.DB
+
+	// startedMu guards startedRuns.
+	startedMu sync.Mutex
+	// startedRuns tracks run IDs that were started via Start() in this
+	// process so that Complete() only decrements the active-jobs gauge
+	// for runs it actually incremented.
+	startedRuns map[uuid.UUID]struct{}
 }
 
 var (
@@ -85,7 +93,7 @@ func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
 	}
-	return &Store{db: conn}
+	return &Store{db: conn, startedRuns: make(map[uuid.UUID]struct{})}
 }
 
 func Default() *Store {
@@ -106,6 +114,11 @@ func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
 	if err := s.db.Create(model).Error; err != nil {
 		return nil, err
 	}
+
+	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	s.startedMu.Lock()
+	s.startedRuns[model.ID] = struct{}{}
+	s.startedMu.Unlock()
 
 	return s.loadRun(model.ID)
 }
@@ -162,6 +175,22 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
+
+		// Capture task metadata for metrics before updating.
+		var taskRun models.TaskRun
+		if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil {
+			var jobRun models.JobRun
+			if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
+				jobID := jobRun.JobID.String()
+				engine := string(taskRun.Engine)
+				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusSucceeded)).Inc()
+				if taskRun.StartedAt != nil {
+					duration := now.Sub(*taskRun.StartedAt).Seconds()
+					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusSucceeded)).Observe(duration)
+				}
+			}
+		}
+
 		if err := tx.Model(&models.TaskRun{}).
 			Where("job_run_id = ? AND task_id = ?", runID, taskID).
 			Updates(map[string]interface{}{
@@ -224,6 +253,22 @@ func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
 	if failure != nil {
 		errMsg = failure.Error()
 	}
+
+	// Record task failure metrics.
+	var taskRun models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil {
+		var jobRun models.JobRun
+		if err := s.db.First(&jobRun, "id = ?", runID).Error; err == nil {
+			jobID := jobRun.JobID.String()
+			engine := string(taskRun.Engine)
+			metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusFailed)).Inc()
+			if taskRun.StartedAt != nil {
+				duration := now.Sub(*taskRun.StartedAt).Seconds()
+				metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusFailed)).Observe(duration)
+			}
+		}
+	}
+
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
 		Updates(map[string]interface{}{
@@ -240,6 +285,25 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	if result != nil {
 		status = StatusFailed
 		errMsg = result.Error()
+	}
+
+	// Look up the run to get jobID and startedAt for metrics.
+	var run models.JobRun
+	if err := s.db.First(&run, "id = ?", runID).Error; err == nil {
+		jobID := run.JobID.String()
+		metrics.JobRunsTotal.WithLabelValues(jobID, string(status)).Inc()
+		// Only decrement the active gauge if this process incremented it.
+		s.startedMu.Lock()
+		_, started := s.startedRuns[runID]
+		if started {
+			delete(s.startedRuns, runID)
+		}
+		s.startedMu.Unlock()
+		if started {
+			metrics.JobsActive.WithLabelValues(jobID).Dec()
+		}
+		duration := now.Sub(run.StartedAt).Seconds()
+		metrics.JobRunDurationSeconds.WithLabelValues(jobID, string(status)).Observe(duration)
 	}
 
 	return s.db.Model(&models.JobRun{}).

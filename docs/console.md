@@ -1,6 +1,6 @@
 # Caesium Console
 
-The Caesium console provides a terminal UI for exploring jobs, triggers, and atoms exposed via the REST API. It renders tabbed panes (Jobs/Triggers/Atoms) that occupy the full screen, with keyboard-driven navigation and status feedback.
+The Caesium console provides a terminal UI for exploring jobs, triggers, atoms, and statistics exposed via the REST API. It renders tabbed panes (Jobs/Triggers/Atoms/Stats) that occupy the full screen, with keyboard-driven navigation and status feedback.
 
 ## Running the Console
 
@@ -41,7 +41,7 @@ CAESIUM_BASE_URL="https://caesium.example.com" just console
 
 | Keys | Action |
 | --- | --- |
-| `1` / `2` / `3` | Switch between Jobs, Triggers, and Atoms tabs |
+| `1` / `2` / `3` / `4` | Switch between Jobs, Triggers, Atoms, and Stats tabs |
 | `Tab` / `Shift+Tab` | Cycle forward/backward through tabs |
 | `↑` / `↓` | Navigate within the active table |
 | `r` | Reload data from the API |
