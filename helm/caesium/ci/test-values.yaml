@@ -1,0 +1,25 @@
+replicaCount: 1
+
+image:
+  pullPolicy: IfNotPresent
+
+config:
+  logLevel: info
+  maxParallelTasks: 1
+
+persistence:
+  enabled: false
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: false
+
+ingress:
+  enabled: false

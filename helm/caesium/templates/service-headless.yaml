@@ -1,0 +1,20 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "caesium.headlessServiceName" . }}
+  labels:
+    {{- include "caesium.labels" . | nindent 4 }}
+  {{- with .Values.headlessService.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: dqlite
+      port: {{ .Values.headlessService.port }}
+      targetPort: dqlite
+      protocol: TCP
+  selector:
+    {{- include "caesium.selectorLabels" . | nindent 4 }}

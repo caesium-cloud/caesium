@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Implemented (pending live-cluster validation)
 
 ## Problem
 
@@ -288,14 +288,14 @@ When `replicaCount=1`, the init container still runs but simply produces an empt
 
 > Goal: `helm install caesium ./helm/caesium` works on Docker Desktop Kubernetes
 
-- [ ] **1.1** Create `helm/caesium/Chart.yaml` with chart metadata (name: caesium, version: 0.1.0, appVersion matching latest release tag)
-- [ ] **1.2** Create `helm/caesium/values.yaml` with the defaults defined above
-- [ ] **1.3** Create `helm/caesium/templates/_helpers.tpl` with standard name/label/selector helpers
-- [ ] **1.4** Create `helm/caesium/templates/serviceaccount.yaml`
-- [ ] **1.5** Create `helm/caesium/templates/configmap.yaml` containing the init container peer-discovery script
-- [ ] **1.6** Create `helm/caesium/templates/service.yaml` (ClusterIP, port 8080)
-- [ ] **1.7** Create `helm/caesium/templates/service-headless.yaml` (headless, port 9001, `clusterIP: None`)
-- [ ] **1.8** Create `helm/caesium/templates/statefulset.yaml` with:
+- [x] **1.1** Create `helm/caesium/Chart.yaml` with chart metadata (name: caesium, version: 0.1.0, appVersion matching latest release tag)
+- [x] **1.2** Create `helm/caesium/values.yaml` with the defaults defined above
+- [x] **1.3** Create `helm/caesium/templates/_helpers.tpl` with standard name/label/selector helpers
+- [x] **1.4** Create `helm/caesium/templates/serviceaccount.yaml`
+- [x] **1.5** Create `helm/caesium/templates/configmap.yaml` containing the init container peer-discovery script
+- [x] **1.6** Create `helm/caesium/templates/service.yaml` (ClusterIP, port 8080)
+- [x] **1.7** Create `helm/caesium/templates/service-headless.yaml` (headless, port 9001, `clusterIP: None`)
+- [x] **1.8** Create `helm/caesium/templates/statefulset.yaml` with:
   - Init container running the peer-discovery script
   - Main container with health probes (liveness, readiness, startup)
   - `CAESIUM_NODE_ADDRESS` set via downward API
@@ -303,9 +303,9 @@ When `replicaCount=1`, the init container still runs but simply produces an empt
   - PVC template for dqlite data (when `persistence.enabled=true`)
   - `emptyDir` volumes for `/tmp` and `/etc/caesium`
   - Security contexts matching the non-root Dockerfile user
-- [ ] **1.9** Create `helm/caesium/templates/NOTES.txt` with post-install instructions
-- [ ] **1.10** Create `helm/caesium/templates/tests/test-connection.yaml` (helm test pod that curls `/health`)
-- [ ] **1.11** Run `helm lint ./helm/caesium` to validate
+- [x] **1.9** Create `helm/caesium/templates/NOTES.txt` with post-install instructions
+- [x] **1.10** Create `helm/caesium/templates/tests/test-connection.yaml` (helm test pod that curls `/health`)
+- [x] **1.11** Run `helm lint ./helm/caesium` to validate
 - [ ] **1.12** Test single-node install on Docker Desktop: `helm install caesium ./helm/caesium`
 - [ ] **1.13** Verify `/health` returns 200 via `kubectl port-forward`
 
@@ -316,20 +316,20 @@ When `replicaCount=1`, the init container still runs but simply produces an empt
 - [ ] **2.1** Test 3-node deployment on Docker Desktop (`--set replicaCount=3`)
 - [ ] **2.2** Verify RAFT cluster formation — all 3 pods reach Ready state
 - [ ] **2.3** Validate that data written via the leader is readable from any node (port-forward to different pods)
-- [ ] **2.4** Create `helm/caesium/templates/pdb.yaml` with PodDisruptionBudget (conditional on `podDisruptionBudget.enabled`)
+- [x] **2.4** Create `helm/caesium/templates/pdb.yaml` with PodDisruptionBudget (conditional on `podDisruptionBudget.enabled`)
 - [ ] **2.5** Test pod deletion recovery — kill one pod and verify the cluster re-heals
-- [ ] **2.6** Add `helm/caesium/templates/ingress.yaml` (conditional on `ingress.enabled`)
+- [x] **2.6** Add `helm/caesium/templates/ingress.yaml` (conditional on `ingress.enabled`)
 
 ### Phase 3: CI/CD integration (just-based local workflow)
 
 > Goal: `just helm-lint` and `just helm-test` work locally and in CI
 
-- [ ] **3.1** Add justfile recipes:
+- [x] **3.1** Add justfile recipes:
   - `helm-lint` — runs `helm lint ./helm/caesium`
   - `helm-template` — renders templates to stdout for visual inspection
   - `helm-test` — runs `helm test caesium` (assumes a running cluster)
-- [ ] **3.2** Create `helm/caesium/ci/test-values.yaml` with CI-specific overrides (e.g., `persistence.enabled: false`, reduced resources)
-- [ ] **3.3** Add a `helm-lint` job to `.circleci/config.yml`:
+- [x] **3.2** Create `helm/caesium/ci/test-values.yaml` with CI-specific overrides (e.g., `persistence.enabled: false`, reduced resources)
+- [x] **3.3** Add a `helm-lint` job to `.circleci/config.yml`:
   - Uses a `docker` executor with a Helm image (no Kubernetes cluster needed)
   - Runs `helm lint` and `helm template` to catch template errors
   - Runs on the free tier (no machine executor needed)
@@ -344,7 +344,7 @@ This phase explores whether a full in-CI Kubernetes deployment is feasible. Opti
 
 CircleCI's free tier provides `machine` executors with Docker. [kind](https://kind.sigs.k8s.io/) runs a full Kubernetes cluster inside Docker containers, requiring no cloud resources.
 
-- [ ] **4.1** Add a `helm-integration-test` job to `.circleci/config.yml`:
+- [x] **4.1** Add a `helm-integration-test` job to `.circleci/config.yml`:
   ```yaml
   helm-integration-test:
     machine:
@@ -401,7 +401,7 @@ CircleCI's free tier provides `machine` executors with Docker. [kind](https://ki
             curl -sf http://localhost:8080/health
   ```
 - [ ] **4.2** (Optional) Extend to test `replicaCount=3` in CI if time/resources allow
-- [ ] **4.3** Wire the job into the CircleCI workflow after `build-and-integration-test`
+- [x] **4.3** Wire the job into the CircleCI workflow after `build-and-integration-test`
 
 #### Option B: Remote cluster (not recommended for free tier)
 
@@ -409,7 +409,7 @@ Would require a persistent Kubernetes cluster (e.g., GKE, EKS) and service accou
 
 ### Phase 5: Documentation
 
-- [ ] **5.1** Add a `docs/kubernetes-deployment.md` user guide covering:
+- [x] **5.1** Add a `docs/kubernetes-deployment.md` user guide covering:
   - Prerequisites (Docker Desktop with K8s enabled, or any K8s cluster)
   - Quick start: single-node `helm install`
   - Multi-node: RAFT cluster setup with `replicaCount=3`
@@ -417,7 +417,7 @@ Would require a persistent Kubernetes cluster (e.g., GKE, EKS) and service accou
   - Accessing the API (port-forward, Ingress, LoadBalancer)
   - Persistence and backup considerations
   - Troubleshooting (pod logs, dqlite cluster status)
-- [ ] **5.2** Update the project README to mention Helm/Kubernetes deployment
+- [x] **5.2** Update the project README to mention Helm/Kubernetes deployment
 
 ## Key Design Decisions
 

@@ -35,6 +35,7 @@ Runtime images are published as multi-arch Docker manifests so `docker pull caes
 
 - Docs index: [docs/README.md](docs/README.md)
 - Console guide: [docs/console.md](docs/console.md)
+- Kubernetes + Helm guide: [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md)
 - Job manifest guide: [docs/job-definitions.md](docs/job-definitions.md)
 
 [Pkg]: https://pkg.go.dev/github.com/caesium-cloud/caesium

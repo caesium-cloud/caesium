@@ -74,6 +74,20 @@ jobs:
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
             just tag=$IMAGE_TAG lint
 
+  helm-lint:
+    docker:
+      - image: alpine/helm:3.17.0
+    resource_class: small
+    working_directory: ~/project
+    steps:
+      - checkout
+      - run:
+          name: Helm lint
+          command: helm lint ./helm/caesium
+      - run:
+          name: Helm template
+          command: helm template caesium ./helm/caesium --values ./helm/caesium/ci/test-values.yaml >/tmp/helm-rendered.yaml
+
   unit-test:
     machine:
       image: ubuntu-2404:current
@@ -186,6 +200,72 @@ jobs:
           paths:
             - release-arm64.tar.gz
 
+  helm-integration-test:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Load release image (amd64)
+          command: gunzip -c /tmp/workspace/release-amd64.tar.gz | docker load
+      - run:
+          name: Install kind, kubectl, and helm
+          command: |
+            curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+            chmod +x ./kind
+            sudo mv ./kind /usr/local/bin/kind
+
+            curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x ./kubectl
+            sudo mv ./kubectl /usr/local/bin/kubectl
+
+            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+      - run:
+          name: Create kind cluster
+          command: kind create cluster --wait 120s
+      - run:
+          name: Load Caesium image into kind
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            kind load docker-image caesiumcloud/caesium:$IMAGE_TAG
+      - run:
+          name: Helm install
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            helm install caesium ./helm/caesium \
+              --values ./helm/caesium/ci/test-values.yaml \
+              --set image.tag=$IMAGE_TAG \
+              --set persistence.enabled=false \
+              --wait --timeout 180s
+      - run:
+          name: Helm test
+          command: helm test caesium --timeout 90s
+      - run:
+          name: Verify health endpoint
+          command: |
+            kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+            PORT_FORWARD_PID=$!
+            trap 'kill $PORT_FORWARD_PID' EXIT
+
+            tries=0
+            until curl -sf http://127.0.0.1:8080/health >/dev/null; do
+              tries=$((tries + 1))
+              if [ "$tries" -gt 30 ]; then
+                echo "Port-forward did not become ready in time"
+                cat /tmp/port-forward.log || true
+                kubectl get pods -A || true
+                kubectl describe pods -l app.kubernetes.io/instance=caesium || true
+                exit 1
+              fi
+              sleep 1
+            done
+
+            curl -sf http://127.0.0.1:8080/health
+
   publish:
     machine:
       image: ubuntu-2404:current
@@ -238,6 +318,12 @@ workflows:
               only: /.*/
             tags:
               only: /^v.*/
+      - helm-lint:
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - unit-test:
           requires:
             - builder
@@ -270,13 +356,24 @@ workflows:
               only: /.*/
             tags:
               only: /^v.*/
+      - helm-integration-test:
+          requires:
+            - build-and-integration-test
+            - helm-lint
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - publish:
           requires:
             - lint
+            - helm-lint
             - unit-test
             - unit-test-arm64
             - build-and-integration-test
             - build-and-integration-test-arm64
+            - helm-integration-test
           filters:
             branches:
               ignore: /.*/
