@@ -64,14 +64,21 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 
 	err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var candidates []models.TaskRun
+		runningRunIDs := tx.Model(&models.JobRun{}).
+			Select("id").
+			Where("status = ?", string(run.StatusRunning))
 		err := tx.
+			Table("task_runs AS tr").
+			Select("tr.*").
+			Joins("JOIN job_runs AS jr ON jr.id = tr.job_run_id").
 			Where(
-				"status = ? AND outstanding_predecessors = ? AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)",
+				"jr.status = ? AND tr.status = ? AND tr.outstanding_predecessors = ? AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?)",
+				string(run.StatusRunning),
 				string(run.TaskStatusPending),
 				0,
 				now,
 			).
-			Order("created_at ASC").
+			Order("tr.created_at ASC").
 			Limit(64).
 			Find(&candidates).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -91,8 +98,9 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 
 			result := tx.Model(&models.TaskRun{}).
 				Where(
-					"id = ? AND status = ? AND outstanding_predecessors = ? AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)",
+					"id = ? AND job_run_id IN (?) AND status = ? AND outstanding_predecessors = ? AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)",
 					candidate.ID,
+					runningRunIDs,
 					string(run.TaskStatusPending),
 					0,
 					now,
@@ -136,9 +144,14 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 
 func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 	now := time.Now().UTC()
+	runningRunIDs := c.store.DB().
+		Model(&models.JobRun{}).
+		Select("id").
+		Where("status = ?", string(run.StatusRunning))
+
 	result := c.store.DB().WithContext(ctx).
 		Model(&models.TaskRun{}).
-		Where("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", string(run.TaskStatusRunning), now).
+		Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", runningRunIDs, string(run.TaskStatusRunning), now).
 		Updates(map[string]interface{}{
 			"status":           string(run.TaskStatusPending),
 			"claimed_by":       "",
