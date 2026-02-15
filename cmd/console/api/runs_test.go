@@ -18,7 +18,7 @@ func TestRunsListAndGet(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
 			if _, err := w.Write([]byte(`[
-				{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[]}
+				{"id":"r1","job_id":"123","status":"running","started_at":"2024-01-01T00:00:00Z","tasks":[{"id":"t1","status":"running","claimed_by":"node-a","claim_attempt":2}]}
 			]`)); err != nil {
 				t.Fatalf("write response: %v", err)
 			}
@@ -50,6 +50,12 @@ func TestRunsListAndGet(t *testing.T) {
 
 	if len(list) != 1 {
 		t.Fatalf("expected 1 run, got %d", len(list))
+	}
+	if len(list[0].Tasks) != 1 || list[0].Tasks[0].ClaimedBy != "node-a" {
+		t.Fatalf("expected claimed_by to be decoded, got %#v", list[0].Tasks)
+	}
+	if list[0].Tasks[0].ClaimAttempt != 2 {
+		t.Fatalf("expected claim_attempt=2, got %d", list[0].Tasks[0].ClaimAttempt)
 	}
 
 	detail, err := client.Runs().Get(context.Background(), "123", "r1")

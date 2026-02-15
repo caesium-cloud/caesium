@@ -65,7 +65,7 @@ func TestRenderBoxesContainStatusInfo(t *testing.T) {
 	output := Render(graph, RenderOptions{
 		TaskStatus: map[string]TaskInfo{
 			"node-1": {Status: "succeeded", Duration: "2.3s"},
-			"node-2": {Status: "running", Duration: "1.2s", SpinnerFrame: "⠋"},
+			"node-2": {Status: "running", Duration: "1.2s", SpinnerFrame: "⠋", ClaimedBy: "node-b"},
 		},
 	})
 
@@ -80,6 +80,9 @@ func TestRenderBoxesContainStatusInfo(t *testing.T) {
 	}
 	if !strings.Contains(output, "1.2s") {
 		t.Fatalf("expected running duration in output: %q", output)
+	}
+	if !strings.Contains(output, "node: node-b") {
+		t.Fatalf("expected claimed-by node in output: %q", output)
 	}
 }
 

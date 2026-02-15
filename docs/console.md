@@ -76,6 +76,7 @@ When exporting logs, the console writes a snippet file to your OS temp directory
 - Startup loads now include bounded retry/backoff for jobs/triggers/atoms fetches.
 - The status line shows API health and timing diagnostics: ping latency, load latency, retry count, and check timestamp.
 - Use `p` anytime to force a fresh health ping and update the diagnostics state immediately.
+- In distributed execution mode, DAG task nodes show `node: <address>` when a worker has claimed the task; the node detail modal also exposes `Claimed By`.
 
 ## Development Notes
 

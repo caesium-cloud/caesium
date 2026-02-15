@@ -868,6 +868,9 @@ func (m Model) renderNodeDetailModal(background string) string {
 	if task, ok := m.taskRunStatus[node.ID()]; ok {
 		badge := statusBadge(task.Status, m.spinner.View(), false)
 		lines = append(lines, fmt.Sprintf("  Status      %s", badge))
+		if strings.TrimSpace(task.ClaimedBy) != "" {
+			lines = append(lines, fmt.Sprintf("  Claimed By  %s", task.ClaimedBy))
+		}
 
 		if task.Image != "" {
 			lines = append(lines, fmt.Sprintf("  Image       %s", task.Image))

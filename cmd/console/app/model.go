@@ -1538,6 +1538,7 @@ func (m *Model) buildTaskInfo() map[string]dag.TaskInfo {
 			Image:        task.Image,
 			Engine:       task.Engine,
 			Command:      task.Command,
+			ClaimedBy:    task.ClaimedBy,
 		}
 		ti.Duration = formatTaskDuration(task)
 		info[id] = ti
