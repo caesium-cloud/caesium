@@ -32,11 +32,46 @@ type Job interface {
 }
 
 type job struct {
-	id uuid.UUID
+	id                     uuid.UUID
+	runStoreFactory        func() *run.Store
+	envVariables           func() env.Environment
+	taskServiceFactory     func(context.Context) task.Task
+	atomServiceFactory     func(context.Context) asvc.Atom
+	taskEdgeServiceFactory func(context.Context) taskedge.TaskEdge
+	dispatchRunCallbacks   func(context.Context, uuid.UUID, uuid.UUID, error) error
+	newDockerEngine        func(context.Context) atom.Engine
+	newKubernetesEngine    func(context.Context) atom.Engine
+	newPodmanEngine        func(context.Context) atom.Engine
+	atomPollInterval       time.Duration
 }
 
-func New(j *models.Job) Job {
-	return &job{id: j.ID}
+type jobOption func(*job)
+
+func New(m *models.Job, opts ...jobOption) Job {
+	j := &job{
+		id:                     m.ID,
+		runStoreFactory:        run.Default,
+		envVariables:           env.Variables,
+		taskServiceFactory:     task.Service,
+		atomServiceFactory:     asvc.Service,
+		taskEdgeServiceFactory: taskedge.Service,
+		dispatchRunCallbacks: func(ctx context.Context, jobID, runID uuid.UUID, runErr error) error {
+			return callback.Default().Dispatch(ctx, jobID, runID, runErr)
+		},
+		newDockerEngine:     func(ctx context.Context) atom.Engine { return docker.NewEngine(ctx) },
+		newKubernetesEngine: func(ctx context.Context) atom.Engine { return kubernetes.NewEngine(ctx) },
+		newPodmanEngine:     func(ctx context.Context) atom.Engine { return podman.NewEngine(ctx) },
+		atomPollInterval:    5 * time.Second,
+	}
+
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		opt(j)
+	}
+
+	return j
 }
 
 type atomRunner struct {
@@ -51,9 +86,89 @@ const (
 	executionModeDistributed = "distributed"
 )
 
+func withRunStoreFactory(factory func() *run.Store) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.runStoreFactory = factory
+		}
+	}
+}
+
+func withEnvVariables(variables func() env.Environment) jobOption {
+	return func(j *job) {
+		if variables != nil {
+			j.envVariables = variables
+		}
+	}
+}
+
+func withTaskServiceFactory(factory func(context.Context) task.Task) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.taskServiceFactory = factory
+		}
+	}
+}
+
+func withAtomServiceFactory(factory func(context.Context) asvc.Atom) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.atomServiceFactory = factory
+		}
+	}
+}
+
+func withTaskEdgeServiceFactory(factory func(context.Context) taskedge.TaskEdge) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.taskEdgeServiceFactory = factory
+		}
+	}
+}
+
+func withDispatchRunCallbacks(dispatch func(context.Context, uuid.UUID, uuid.UUID, error) error) jobOption {
+	return func(j *job) {
+		if dispatch != nil {
+			j.dispatchRunCallbacks = dispatch
+		}
+	}
+}
+
+func withDockerEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.newDockerEngine = factory
+		}
+	}
+}
+
+func withKubernetesEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.newKubernetesEngine = factory
+		}
+	}
+}
+
+func withPodmanEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+	return func(j *job) {
+		if factory != nil {
+			j.newPodmanEngine = factory
+		}
+	}
+}
+
+func withAtomPollInterval(interval time.Duration) jobOption {
+	return func(j *job) {
+		if interval > 0 {
+			j.atomPollInterval = interval
+		}
+	}
+}
+
 func (j *job) Run(ctx context.Context) error {
-	store := run.Default()
-	vars := env.Variables()
+	store := j.runStoreFactory()
+	vars := j.envVariables()
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
 	continueOnFailure := failurePolicy == taskFailurePolicyContinue
@@ -104,12 +219,12 @@ func (j *job) Run(ctx context.Context) error {
 			log.Error("run completion persistence failure", "run_id", runID, "error", err)
 		}
 		dispatchCtx := context.WithoutCancel(ctx)
-		if err := callback.Default().Dispatch(dispatchCtx, j.id, runID, runErr); err != nil {
+		if err := j.dispatchRunCallbacks(dispatchCtx, j.id, runID, runErr); err != nil {
 			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
 		}
 	}()
 
-	tasks, err := task.Service(ctx).List(&task.ListRequest{
+	tasks, err := j.taskServiceFactory(ctx).List(&task.ListRequest{
 		JobID:   j.id.String(),
 		OrderBy: []string{"created_at"},
 	})
@@ -125,7 +240,7 @@ func (j *job) Run(ctx context.Context) error {
 
 	log.Info("running job tasks", "job_id", j.id, "count", len(tasks))
 
-	svc := asvc.Service(ctx)
+	svc := j.atomServiceFactory(ctx)
 
 	taskOrder := make(map[uuid.UUID]int, len(tasks))
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
@@ -156,11 +271,11 @@ func (j *job) Run(ctx context.Context) error {
 
 		switch modelAtom.Engine {
 		case models.AtomEngineDocker:
-			runner.engine = docker.NewEngine(ctx)
+			runner.engine = j.newDockerEngine(ctx)
 		case models.AtomEngineKubernetes:
-			runner.engine = kubernetes.NewEngine(ctx)
+			runner.engine = j.newKubernetesEngine(ctx)
 		case models.AtomEnginePodman:
-			runner.engine = podman.NewEngine(ctx)
+			runner.engine = j.newPodmanEngine(ctx)
 		default:
 			runErr = fmt.Errorf("unable to run atom with engine: %v", modelAtom.Engine)
 			return runErr
@@ -169,7 +284,7 @@ func (j *job) Run(ctx context.Context) error {
 		runners[t.ID] = runner
 	}
 
-	edges, err := taskedge.Service(ctx).List(&taskedge.ListRequest{
+	edges, err := j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
 		JobID:   j.id.String(),
 		OrderBy: []string{"created_at"},
 	})
@@ -331,7 +446,7 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		monitor := func() error {
-			ticker := time.NewTicker(5 * time.Second)
+			ticker := time.NewTicker(j.atomPollInterval)
 			defer ticker.Stop()
 
 			for {
