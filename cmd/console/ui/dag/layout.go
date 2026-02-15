@@ -19,6 +19,7 @@ type TaskInfo struct {
 	Image        string
 	Engine       string
 	Command      []string
+	ClaimedBy    string
 }
 
 // StatusColors holds color values for each status type.
@@ -179,9 +180,13 @@ func renderNodeBox(node *Node, opts RenderOptions, pathNodes map[string]bool) st
 
 	// Line 3: duration or status text
 	line3 := " " + durationLabel(status, info)
+	line4 := ""
+	if node := nodeExecutionLabel(info.ClaimedBy); node != "" {
+		line4 = " " + node
+	}
 
 	// Calculate box width
-	contentWidth := maxLen(line1, line2, line3)
+	contentWidth := maxLen(line1, line2, line3, line4)
 	if contentWidth < boxMinWidth-boxPadding*2 {
 		contentWidth = boxMinWidth - boxPadding*2
 	}
@@ -204,7 +209,11 @@ func renderNodeBox(node *Node, opts RenderOptions, pathNodes map[string]bool) st
 		style = style.Foreground(lipgloss.Color("240"))
 	}
 
-	content := lipgloss.JoinVertical(lipgloss.Left, line1, line2, line3)
+	lines := []string{line1, line2, line3}
+	if line4 != "" {
+		lines = append(lines, line4)
+	}
+	content := lipgloss.JoinVertical(lipgloss.Left, lines...)
 	return style.Render(content)
 }
 
@@ -262,6 +271,14 @@ func durationLabel(taskStatus string, info TaskInfo) string {
 	default:
 		return status.Pending
 	}
+}
+
+func nodeExecutionLabel(claimedBy string) string {
+	claimedBy = strings.TrimSpace(claimedBy)
+	if claimedBy == "" {
+		return ""
+	}
+	return "node: " + truncateCommand(claimedBy, 24)
 }
 
 func renderConnectors(

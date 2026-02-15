@@ -2,9 +2,9 @@
 
 ## Status
 
-In Progress
+Complete
 
-## Progress Update (2026-02-14)
+## Progress Update (2026-02-15)
 
 Implemented on branch `codex/parallel-exec-phase1a`:
 
@@ -67,10 +67,19 @@ Implemented on branch `codex/parallel-exec-phase2-hardening`:
   - Expired-lease reclaim now only mutates tasks whose parent run is still `running`.
   - Added claimer regression tests to ensure completed/failed runs are never claimed or reclaimed.
 
+Implemented on branch `codex/phase3-4-3-5-polish`:
+
+- Phase 3.4 TUI node-execution attribution:
+  - Console run-task API model now decodes `claimed_by` and `claim_attempt`.
+  - DAG nodes now render `node: <address>` metadata when a task is claimed by a worker node.
+  - Node detail modal now shows `Claimed By` for the selected task.
+- Phase 3.5 configuration and operations documentation:
+  - Added a dedicated distributed parallel execution operations guide (`docs/parallel-execution-operations.md`).
+  - Updated console docs to clarify that DAG nodes now surface worker-node attribution.
+
 Not yet complete:
 
-- Phase 3.4 TUI node-execution attribution in DAG view.
-- Phase 3.5 configuration and operations documentation updates.
+- None.
 
 ## Problem
 
@@ -385,8 +394,8 @@ New environment variables:
 - [x] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
 - [x] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
 - [x] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
-- [ ] **3.4** Update the console TUI DAG view to show which node is executing each task
-- [ ] **3.5** Document configuration and operational guidance
+- [x] **3.4** Update the console TUI DAG view to show which node is executing each task
+- [x] **3.5** Document configuration and operational guidance
 
 ## Risks and Mitigations
 

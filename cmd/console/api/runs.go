@@ -25,17 +25,19 @@ type Run struct {
 
 // RunTask contains per-task execution detail.
 type RunTask struct {
-	ID          string     `json:"id"`
-	AtomID      string     `json:"atom_id"`
-	Engine      string     `json:"engine"`
-	Image       string     `json:"image"`
-	Command     []string   `json:"command"`
-	RuntimeID   string     `json:"runtime_id"`
-	Status      string     `json:"status"`
-	Result      string     `json:"result"`
-	StartedAt   *time.Time `json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at"`
-	Error       string     `json:"error"`
+	ID           string     `json:"id"`
+	AtomID       string     `json:"atom_id"`
+	Engine       string     `json:"engine"`
+	Image        string     `json:"image"`
+	Command      []string   `json:"command"`
+	RuntimeID    string     `json:"runtime_id"`
+	ClaimedBy    string     `json:"claimed_by,omitempty"`
+	ClaimAttempt int        `json:"claim_attempt,omitempty"`
+	Status       string     `json:"status"`
+	Result       string     `json:"result"`
+	StartedAt    *time.Time `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at"`
+	Error        string     `json:"error"`
 	// OutstandingPredecessors captures how many predecessor tasks were incomplete when this task started.
 	OutstandingPredecessors int `json:"outstanding_predecessors,omitempty"`
 }
