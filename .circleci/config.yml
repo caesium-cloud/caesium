@@ -236,11 +236,19 @@ jobs:
           name: Helm install
           command: |
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
-            helm install caesium ./helm/caesium \
+            if ! helm install caesium ./helm/caesium \
               --values ./helm/caesium/ci/test-values.yaml \
               --set image.tag=$IMAGE_TAG \
               --set persistence.enabled=false \
-              --wait --timeout 180s
+              --wait --timeout 240s; then
+              kubectl get pods -A || true
+              kubectl get events --sort-by=.lastTimestamp -A | tail -n 200 || true
+              kubectl describe statefulset caesium || true
+              kubectl describe pods -l app.kubernetes.io/instance=caesium || true
+              kubectl logs statefulset/caesium -c caesium || true
+              kubectl logs statefulset/caesium -c peer-discovery || true
+              exit 1
+            fi
       - run:
           name: Helm test
           command: helm test caesium --timeout 90s

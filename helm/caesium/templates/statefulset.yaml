@@ -71,7 +71,10 @@ spec:
             - -ec
           args:
             - |
-              export CAESIUM_DATABASE_NODES="$(cat /etc/caesium/database-nodes)"
+              database_nodes="$(tr -d '\n' < /etc/caesium/database-nodes)"
+              if [ -n "${database_nodes}" ]; then
+                export CAESIUM_DATABASE_NODES="${database_nodes}"
+              fi
               exec /bin/caesium start
           ports:
             - name: http
