@@ -21,6 +21,10 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	t.Cleanup(func() {
 		testutil.CloseDB(db)
 	})
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
 
 	store := run.NewStore(db)
 
