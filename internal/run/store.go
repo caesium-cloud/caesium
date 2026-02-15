@@ -3,12 +3,14 @@ package run
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -56,6 +58,7 @@ type TaskRun struct {
 	Command                 []string          `json:"command"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	Status                  TaskStatus        `json:"status"`
+	NodeSelector            map[string]string `json:"node_selector,omitempty"`
 	ClaimedBy               string            `json:"claimed_by,omitempty"`
 	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
 	ClaimAttempt            int               `json:"claim_attempt"`
@@ -165,6 +168,7 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Image:                   atom.Image,
 		Command:                 command,
 		Status:                  string(TaskStatusPending),
+		NodeSelector:            maps.Clone(task.NodeSelector),
 		OutstandingPredecessors: outstanding,
 	}
 
@@ -522,6 +526,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Command:                 command,
 		RuntimeID:               model.RuntimeID,
 		Status:                  TaskStatus(model.Status),
+		NodeSelector:            jsonmap.ToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,
 		Result:                  model.Result,

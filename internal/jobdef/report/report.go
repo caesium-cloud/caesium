@@ -100,6 +100,7 @@ func Markdown() string {
 	b.WriteString("| `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |\n")
 	b.WriteString("| `image` | string | required | Container image reference. |\n")
 	b.WriteString("| `command` | array[string] | optional | Executed command; defaults to entrypoint. |\n")
+	b.WriteString("| `nodeSelector` | map[string]string | optional | Node labels required for claiming this step in distributed mode. |\n")
 	b.WriteString("| `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |\n")
 	b.WriteString("| `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |\n\n")
 

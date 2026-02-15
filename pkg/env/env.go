@@ -39,6 +39,7 @@ type Environment struct {
 	KubernetesNamespace           string        `default:"default" split_words:"true"`
 	PodmanURI                     string        `default:"" split_words:"true"`
 	NodeAddress                   string        `default:"127.0.0.1:9001" split_words:"true"`
+	NodeLabels                    string        `default:"" split_words:"true"`
 	DatabaseNodes                 []string      `default:"" split_words:"true"`
 	DatabasePath                  string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
 	DatabaseType                  string        `default:"internal" split_words:"true"`

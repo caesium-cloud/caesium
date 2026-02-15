@@ -11,6 +11,7 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -230,4 +231,37 @@ steps:
 			s.Nil(task.NextID)
 		}
 	}
+}
+
+func (s *ImporterTestSuite) TestApplyPersistsStepNodeSelector() {
+	const manifest = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: affinity-job
+trigger:
+  type: cron
+  configuration:
+    cron: "* * * * *"
+steps:
+  - name: build
+    image: repo/build
+    nodeSelector:
+      zone: us-west-2
+      disk: ssd
+`
+
+	def, err := schema.Parse([]byte(manifest))
+	s.Require().NoError(err)
+
+	job, err := s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	var tasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&tasks).Error)
+	s.Require().Len(tasks, 1)
+	s.Equal(datatypes.JSONMap{
+		"zone": "us-west-2",
+		"disk": "ssd",
+	}, tasks[0].NodeSelector)
 }

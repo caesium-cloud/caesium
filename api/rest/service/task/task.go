@@ -5,6 +5,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -98,9 +99,10 @@ func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {
 }
 
 type CreateRequest struct {
-	JobID  string  `json:"job_id"`
-	AtomID string  `json:"atom_id"`
-	NextID *string `json:"next_id"`
+	JobID        string            `json:"job_id"`
+	AtomID       string            `json:"atom_id"`
+	NextID       *string           `json:"next_id"`
+	NodeSelector map[string]string `json:"node_selector,omitempty"`
 }
 
 func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
@@ -110,9 +112,10 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	)
 
 	task := &models.Task{
-		ID:     id,
-		JobID:  uuid.MustParse(req.JobID),
-		AtomID: uuid.MustParse(req.AtomID),
+		ID:           id,
+		JobID:        uuid.MustParse(req.JobID),
+		AtomID:       uuid.MustParse(req.AtomID),
+		NodeSelector: jsonmap.FromStringMap(req.NodeSelector),
 	}
 
 	if req.NextID != nil {

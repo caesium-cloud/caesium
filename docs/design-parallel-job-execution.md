@@ -45,6 +45,14 @@ Implemented on branch `codex/parallel-exec-phase3b`:
   - Worker status response now includes claimed-task totals by status, running claims, expired leases, total claim attempts, last activity timestamp, and active running claim details.
   - Added service-level tests for empty and populated worker status views.
 
+Implemented on branch `codex/parallel-exec-phase3c`:
+
+- Phase 3.3 node affinity labels:
+  - Added optional per-step `nodeSelector` support in job definitions.
+  - Persisted `node_selector` on tasks and task runs so distributed claimers can filter tasks by affinity.
+  - Added `CAESIUM_NODE_LABELS` worker/node configuration (`key=value,key2=value2`) and claim-side affinity matching.
+  - Added claimer tests for matching/non-matching selectors and node label parsing.
+
 Not yet complete:
 
 - Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
@@ -330,6 +338,7 @@ New environment variables:
 | `CAESIUM_WORKER_POLL_INTERVAL` | `2s` | How often to poll for claimable tasks |
 | `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks |
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent tasks per node |
+| `CAESIUM_NODE_LABELS` | `""` | Optional comma-separated node labels (`key=value,key2=value2`) used for task affinity matching |
 
 ## Implementation Plan
 
@@ -361,7 +370,7 @@ New environment variables:
 
 - [x] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
 - [x] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
-- [ ] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
+- [x] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
 - [ ] **3.4** Update the console TUI DAG view to show which node is executing each task
 - [ ] **3.5** Document configuration and operational guidance
 

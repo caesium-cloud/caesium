@@ -48,6 +48,7 @@ func (s *ReportSuite) TestMarkdownGeneration() {
 	md := Markdown()
 	s.Contains(md, "# Job Definition Schema")
 	s.Contains(md, "| `engine` | string")
+	s.Contains(md, "| `nodeSelector` | map[string]string")
 	s.Contains(md, "| `dependsOn` | array[string]")
 }
 

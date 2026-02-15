@@ -149,10 +149,7 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 			Type:          string(trigType),
 			Configuration: config,
 		},
-		Tasks: []struct {
-			Atom   *atom.CreateRequest `json:"atom"`
-			NextID *string             `json:"next_id"`
-		}{
+		Tasks: []job.TaskRequest{
 			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngineDocker), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-1"}}},
 			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngineDocker), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-2"}}},
 		},

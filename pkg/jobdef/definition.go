@@ -55,24 +55,26 @@ type Callback struct {
 
 // Step defines an execution step.
 type Step struct {
-	Name           string   `yaml:"name" json:"name"`
-	Engine         string   `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Image          string   `yaml:"image" json:"image"`
-	Command        []string `yaml:"command,omitempty" json:"command,omitempty"`
-	Next           []string `yaml:"next,omitempty" json:"next,omitempty"`
-	DependsOn      []string `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Name           string            `yaml:"name" json:"name"`
+	Engine         string            `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Image          string            `yaml:"image" json:"image"`
+	Command        []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	NodeSelector   map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
+	Next           []string          `yaml:"next,omitempty" json:"next,omitempty"`
+	DependsOn      []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
 // UnmarshalYAML sets defaults while deserialising a step.
 func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	type rawStep struct {
-		Name           string      `yaml:"name"`
-		Engine         string      `yaml:"engine"`
-		Image          string      `yaml:"image"`
-		Command        []string    `yaml:"command"`
-		Next           interface{} `yaml:"next"`
-		DependsOn      interface{} `yaml:"dependsOn"`
+		Name           string            `yaml:"name"`
+		Engine         string            `yaml:"engine"`
+		Image          string            `yaml:"image"`
+		Command        []string          `yaml:"command"`
+		NodeSelector   map[string]string `yaml:"nodeSelector"`
+		Next           interface{}       `yaml:"next"`
+		DependsOn      interface{}       `yaml:"dependsOn"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -98,6 +100,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	}
 	s.Image = rs.Image
 	s.Command = rs.Command
+	s.NodeSelector = rs.NodeSelector
 	s.Next = nextList
 	s.DependsOn = dependsList
 	s.Spec = rs.Spec

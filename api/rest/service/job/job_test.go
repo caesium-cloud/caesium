@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -40,7 +41,7 @@ func TestCreatePersistsMetadata(t *testing.T) {
 	require.Equal(t, "qa", stored.Annotations["owner"])
 }
 
-func TestStringMapToJSONHandlesNil(t *testing.T) {
-	val := stringMapToJSON(nil)
+func TestJSONMapFromStringMapHandlesNil(t *testing.T) {
+	val := jsonmap.FromStringMap(nil)
 	require.Empty(t, val)
 }
