@@ -6,11 +6,10 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"gorm.io/gorm"
 )
-
-const taskStatusRunning = "running"
 
 type Service interface {
 	WithDatabase(*gorm.DB) Service
@@ -93,48 +92,36 @@ func (s *service) Status(address string) (*StatusResponse, error) {
 		resp.TotalClaimedTasks += row.Count
 	}
 
-	resp.RunningClaims = resp.ClaimedByStatus[taskStatusRunning]
+	runningStatus := string(run.TaskStatusRunning)
+	resp.RunningClaims = resp.ClaimedByStatus[runningStatus]
 
+	type aggregatedStats struct {
+		TotalClaimAttempts int64      `gorm:"column:total_claim_attempts"`
+		LastActivityAt     *time.Time `gorm:"column:last_activity_at"`
+		ExpiredLeases      int64      `gorm:"column:expired_leases"`
+	}
+	var stats aggregatedStats
 	if err := s.db.WithContext(s.ctx).
 		Model(&models.TaskRun{}).
-		Where(
-			"claimed_by = ? AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?",
-			address,
-			taskStatusRunning,
+		Select(
+			`COALESCE(SUM(claim_attempt), 0) AS total_claim_attempts,
+			MAX(updated_at) AS last_activity_at,
+			SUM(CASE WHEN status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? THEN 1 ELSE 0 END) AS expired_leases`,
+			runningStatus,
 			now,
 		).
-		Count(&resp.ExpiredLeases).Error; err != nil {
-		return nil, err
-	}
-
-	var attempts struct {
-		Total int64
-	}
-	if err := s.db.WithContext(s.ctx).
-		Model(&models.TaskRun{}).
-		Select("COALESCE(SUM(claim_attempt), 0) as total").
 		Where("claimed_by = ?", address).
-		Scan(&attempts).Error; err != nil {
+		Take(&stats).Error; err != nil {
 		return nil, err
 	}
-	resp.TotalClaimAttempts = attempts.Total
-
-	var lastActivity struct {
-		Last *time.Time
-	}
-	if err := s.db.WithContext(s.ctx).
-		Model(&models.TaskRun{}).
-		Select("MAX(updated_at) as last").
-		Where("claimed_by = ?", address).
-		Scan(&lastActivity).Error; err != nil {
-		return nil, err
-	}
-	resp.LastActivityAt = lastActivity.Last
+	resp.ExpiredLeases = stats.ExpiredLeases
+	resp.TotalClaimAttempts = stats.TotalClaimAttempts
+	resp.LastActivityAt = stats.LastActivityAt
 
 	var active []models.TaskRun
 	if err := s.db.WithContext(s.ctx).
 		Select("job_run_id, task_id, status, claim_attempt, claim_expires_at, updated_at").
-		Where("claimed_by = ? AND status = ?", address, taskStatusRunning).
+		Where("claimed_by = ? AND status = ?", address, runningStatus).
 		Order("updated_at DESC").
 		Limit(50).
 		Find(&active).Error; err != nil {
