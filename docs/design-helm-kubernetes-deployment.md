@@ -89,7 +89,7 @@ dqlite requires `CAESIUM_DATABASE_NODES` to contain the addresses of existing cl
 ```
 Pod: caesium-0  (bootstrap node — DATABASE_NODES left empty)
 Pod: caesium-1  (joins with DATABASE_NODES=caesium-0.caesium-headless:9001)
-Pod: caesium-2  (joins with DATABASE_NODES=caesium-0.caesium-headless:9001)
+Pod: caesium-2  (joins with DATABASE_NODES=caesium-0.caesium-headless:9001,caesium-1.caesium-headless:9001)
 ```
 
 **Init container logic** (shell script in ConfigMap):
@@ -103,9 +103,23 @@ if [ "$ORDINAL" -eq 0 ]; then
   # Bootstrap node — no peers to join
   echo "" > /etc/caesium/database-nodes
 else
-  # Join the bootstrap node
-  echo "${RELEASE_NAME}-0.${HEADLESS_SVC}.${NAMESPACE}.svc.cluster.local:9001" \
-    > /etc/caesium/database-nodes
+  # Build a comma-separated list of ALL lower-ordinal peers.
+  # This avoids a single point of failure on pod-0: if pod-0 is
+  # temporarily unavailable, the joining node can reach any other
+  # existing cluster member. CAESIUM_DATABASE_NODES is a []string,
+  # so dqlite will try each address in turn.
+  PEERS=""
+  i=0
+  while [ "$i" -lt "$ORDINAL" ]; do
+    ADDR="${RELEASE_NAME}-${i}.${HEADLESS_SVC}.${NAMESPACE}.svc.cluster.local:9001"
+    if [ -z "$PEERS" ]; then
+      PEERS="$ADDR"
+    else
+      PEERS="${PEERS},${ADDR}"
+    fi
+    i=$((i + 1))
+  done
+  echo "$PEERS" > /etc/caesium/database-nodes
 fi
 ```
 
@@ -372,7 +386,18 @@ CircleCI's free tier provides `machine` executors with Docker. [kind](https://ki
           name: Verify health endpoint
           command: |
             kubectl port-forward svc/caesium 8080:8080 &
-            sleep 3
+            PORT_FORWARD_PID=$!
+            trap 'kill $PORT_FORWARD_PID' EXIT
+            # Poll until the health endpoint is reachable (or timeout after 15s)
+            tries=0
+            until curl -sf http://localhost:8080/health > /dev/null; do
+              tries=$((tries+1))
+              if [ "$tries" -gt 15 ]; then
+                echo "Port-forward did not become ready in time" >&2
+                exit 1
+              fi
+              sleep 1
+            done
             curl -sf http://localhost:8080/health
   ```
 - [ ] **4.2** (Optional) Extend to test `replicaCount=3` in CI if time/resources allow
@@ -439,7 +464,7 @@ Users who want PostgreSQL can set `config.databaseType: postgres` and `config.da
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| dqlite cluster fails to form on K8s | High | Startup probe gives 150s; init container ensures correct peer addressing; single-node works as fallback |
+| dqlite cluster fails to form on K8s | High | Startup probe gives 150s; init container lists all lower-ordinal peers so join succeeds even if pod-0 is temporarily down; single-node works as fallback |
 | PVC provisioner not available (e.g., bare metal) | Medium | `persistence.enabled: false` allows ephemeral testing; storageClass is configurable |
 | CircleCI free tier limits | Low | Helm lint needs no machine executor; kind tests reuse existing machine executor pattern |
 | Pod rescheduling loses quorum | Medium | PDB ensures majority remains during voluntary disruptions; dqlite handles temporary member loss |
