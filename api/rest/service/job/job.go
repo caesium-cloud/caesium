@@ -5,8 +5,8 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -97,8 +97,8 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 		ID:          id,
 		TriggerID:   req.TriggerID,
 		Alias:       req.Alias,
-		Labels:      stringMapToJSON(req.Labels),
-		Annotations: stringMapToJSON(req.Annotations),
+		Labels:      jsonmap.FromStringMap(req.Labels),
+		Annotations: jsonmap.FromStringMap(req.Annotations),
 	}
 
 	return job, q.Create(job).Error
@@ -110,15 +110,4 @@ func (j *jobService) Delete(id uuid.UUID) error {
 	)
 
 	return q.Delete(&models.Job{}, id).Error
-}
-
-func stringMapToJSON(in map[string]string) datatypes.JSONMap {
-	if len(in) == 0 {
-		return datatypes.JSONMap{}
-	}
-	out := datatypes.JSONMap{}
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }

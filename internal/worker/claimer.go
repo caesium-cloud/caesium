@@ -3,13 +3,14 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
+	"maps"
 	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/mattn/go-sqlite3"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -37,7 +38,10 @@ func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLab
 
 	labels := map[string]string{}
 	if len(nodeLabels) > 0 {
-		labels = copyStringMap(nodeLabels[0])
+		labels = maps.Clone(nodeLabels[0])
+		if labels == nil {
+			labels = map[string]string{}
+		}
 	}
 
 	return &Claimer{
@@ -191,8 +195,8 @@ func matchesNodeSelector(selector datatypes.JSONMap, nodeLabels map[string]strin
 		return true
 	}
 
-	for key, raw := range selector {
-		expected := strings.TrimSpace(fmt.Sprint(raw))
+	for key, raw := range jsonmap.ToStringMap(selector) {
+		expected := strings.TrimSpace(raw)
 		if expected == "" {
 			continue
 		}
@@ -206,17 +210,4 @@ func matchesNodeSelector(selector datatypes.JSONMap, nodeLabels map[string]strin
 		}
 	}
 	return true
-}
-
-func copyStringMap(values map[string]string) map[string]string {
-	if len(values) == 0 {
-		return map[string]string{}
-	}
-
-	out := make(map[string]string, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
-
-	return out
 }

@@ -11,9 +11,9 @@ import (
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -250,7 +250,7 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 		Command:                 `["echo","ok"]`,
 		Status:                  in.status,
 		ClaimedBy:               in.claimedBy,
-		NodeSelector:            toJSONMap(in.nodeSelector),
+		NodeSelector:            jsonmap.FromStringMap(in.nodeSelector),
 		ClaimExpiresAt:          in.claimExpiresAt,
 		ClaimAttempt:            in.claimAttempt,
 		OutstandingPredecessors: in.outstandingPredecessors,
@@ -264,16 +264,4 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
-}
-
-func toJSONMap(values map[string]string) datatypes.JSONMap {
-	if len(values) == 0 {
-		return datatypes.JSONMap{}
-	}
-
-	out := datatypes.JSONMap{}
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
 }

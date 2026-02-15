@@ -5,8 +5,8 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -115,7 +115,7 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 		ID:           id,
 		JobID:        uuid.MustParse(req.JobID),
 		AtomID:       uuid.MustParse(req.AtomID),
-		NodeSelector: mapToJSONMap(req.NodeSelector),
+		NodeSelector: jsonmap.FromStringMap(req.NodeSelector),
 	}
 
 	if req.NextID != nil {
@@ -128,18 +128,6 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	}
 
 	return task, q.Create(task).Error
-}
-
-func mapToJSONMap(values map[string]string) datatypes.JSONMap {
-	if len(values) == 0 {
-		return datatypes.JSONMap{}
-	}
-
-	out := datatypes.JSONMap{}
-	for key, value := range values {
-		out[key] = value
-	}
-	return out
 }
 
 func (t *taskService) Delete(id uuid.UUID) error {

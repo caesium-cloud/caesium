@@ -148,11 +148,13 @@ type PostRequest struct {
 	Alias    string                 `json:"alias"`
 	Metadata *MetadataRequest       `json:"metadata,omitempty"`
 	Trigger  *trigger.CreateRequest `json:"trigger"`
-	Tasks    []struct {
-		Atom         *atom.CreateRequest `json:"atom"`
-		NextID       *string             `json:"next_id"`
-		NodeSelector map[string]string   `json:"node_selector,omitempty"`
-	} `json:"tasks"`
+	Tasks    []TaskRequest          `json:"tasks"`
+}
+
+type TaskRequest struct {
+	Atom         *atom.CreateRequest `json:"atom"`
+	NextID       *string             `json:"next_id"`
+	NodeSelector map[string]string   `json:"node_selector,omitempty"`
 }
 
 type edgeSpec struct {

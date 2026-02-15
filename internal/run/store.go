@@ -3,13 +3,14 @@ package run
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
+	"maps"
 	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -167,7 +168,7 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Image:                   atom.Image,
 		Command:                 command,
 		Status:                  string(TaskStatusPending),
-		NodeSelector:            copyJSONMap(task.NodeSelector),
+		NodeSelector:            maps.Clone(task.NodeSelector),
 		OutstandingPredecessors: outstanding,
 	}
 
@@ -525,7 +526,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Command:                 command,
 		RuntimeID:               model.RuntimeID,
 		Status:                  TaskStatus(model.Status),
-		NodeSelector:            jsonMapToStringMap(model.NodeSelector),
+		NodeSelector:            jsonmap.ToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,
 		Result:                  model.Result,
@@ -577,34 +578,4 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 		StartedAt:   model.StartedAt,
 		CompletedAt: model.CompletedAt,
 	}
-}
-
-func copyJSONMap(values map[string]interface{}) map[string]interface{} {
-	if len(values) == 0 {
-		return map[string]interface{}{}
-	}
-
-	out := make(map[string]interface{}, len(values))
-	for key, value := range values {
-		out[key] = value
-	}
-
-	return out
-}
-
-func jsonMapToStringMap(values map[string]interface{}) map[string]string {
-	if len(values) == 0 {
-		return map[string]string{}
-	}
-
-	out := make(map[string]string, len(values))
-	for key, value := range values {
-		if str, ok := value.(string); ok {
-			out[key] = str
-			continue
-		}
-		out[key] = fmt.Sprint(value)
-	}
-
-	return out
 }

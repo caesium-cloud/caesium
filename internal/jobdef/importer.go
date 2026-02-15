@@ -10,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -77,8 +78,8 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			ID:          uuid.New(),
 			Alias:       alias,
 			TriggerID:   trig.ID,
-			Labels:      mapToJSONMap(def.Metadata.Labels),
-			Annotations: mapToJSONMap(def.Metadata.Annotations),
+			Labels:      jsonmap.FromStringMap(def.Metadata.Labels),
+			Annotations: jsonmap.FromStringMap(def.Metadata.Annotations),
 		}
 
 		if opts != nil && opts.Provenance != nil {
@@ -180,7 +181,7 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			ID:           uuid.New(),
 			JobID:        job.ID,
 			AtomID:       atom.ID,
-			NodeSelector: mapToJSONMap(step.NodeSelector),
+			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
 		}
 
 		if err := tx.Create(task).Error; err != nil {
@@ -287,17 +288,6 @@ func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []sch
 		}
 	}
 	return nil
-}
-
-func mapToJSONMap(in map[string]string) datatypes.JSONMap {
-	if in == nil {
-		return datatypes.JSONMap{}
-	}
-	out := datatypes.JSONMap{}
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }
 
 func (i *Importer) backfillLegacyNext(tx *gorm.DB, successors map[string][]string, taskByName map[string]*models.Task) error {
