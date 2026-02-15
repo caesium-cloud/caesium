@@ -92,12 +92,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
             - name: CAESIUM_LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
             - name: CAESIUM_PORT
               value: {{ .Values.config.port | quote }}
             - name: CAESIUM_NODE_ADDRESS
-              value: "$(POD_NAME).{{ $headlessSvc }}.$(POD_NAMESPACE).svc.cluster.local:{{ .Values.config.dqlitePort }}"
+              value: "$(POD_IP):{{ .Values.config.dqlitePort }}"
             - name: CAESIUM_DATABASE_PATH
               value: /var/lib/caesium/dqlite
             - name: CAESIUM_DATABASE_TYPE
