@@ -53,14 +53,14 @@ func TestRunLocalExecutesParallelBranches(t *testing.T) {
 	engine.runDurationByName[taskB.String()] = 20 * time.Millisecond
 	engine.runDurationByName[taskC.String()] = 20 * time.Millisecond
 
-	withTestDeps(t, store, env.Environment{
+	opts := withTestDeps(store, env.Environment{
 		MaxParallelTasks:  2,
 		TaskFailurePolicy: taskFailurePolicyHalt,
 		ExecutionMode:     executionModeLocal,
 		TaskTimeout:       0,
 	}, taskSvc, atomSvc, edgeSvc, engine)
 
-	err := New(&models.Job{ID: jobID}).Run(context.Background())
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
 	require.NoError(t, err)
 
 	snapshot := latestRunSnapshot(t, store, jobID)
@@ -101,13 +101,13 @@ func TestRunLocalContinuePolicySkipsFailedDescendants(t *testing.T) {
 	engine.createErrByName[taskFailed.String()] = errors.New("create failed")
 	engine.runDurationByName[taskIndependent.String()] = 25 * time.Millisecond
 
-	withTestDeps(t, store, env.Environment{
-		MaxParallelTasks:  2,
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
 		TaskFailurePolicy: taskFailurePolicyContinue,
 		ExecutionMode:     executionModeLocal,
 	}, taskSvc, atomSvc, edgeSvc, engine)
 
-	err := New(&models.Job{ID: jobID}).Run(context.Background())
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "create failed")
 
@@ -143,14 +143,14 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 
 	engine.runDurationByName[taskID.String()] = 10 * time.Second
 
-	withTestDeps(t, store, env.Environment{
+	opts := withTestDeps(store, env.Environment{
 		MaxParallelTasks:  1,
 		TaskFailurePolicy: taskFailurePolicyHalt,
 		ExecutionMode:     executionModeLocal,
 		TaskTimeout:       40 * time.Millisecond,
 	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
 
-	err := New(&models.Job{ID: jobID}).Run(context.Background())
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "timed out")
 
@@ -161,44 +161,25 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 }
 
 func withTestDeps(
-	t *testing.T,
 	store *run.Store,
 	vars env.Environment,
 	taskSvc task.Task,
 	atomSvc asvc.Atom,
 	edgeSvc taskedge.TaskEdge,
 	engine atom.Engine,
-) {
-	t.Helper()
-
-	origStoreFactory := runStoreFactory
-	origEnvVariables := envVariables
-	origTaskServiceFactory := taskServiceFactory
-	origAtomServiceFactory := atomServiceFactory
-	origTaskEdgeServiceFactory := taskEdgeServiceFactory
-	origDispatchRunCallbacks := dispatchRunCallbacks
-	origNewDockerEngine := newDockerEngine
-	origAtomPollInterval := atomPollInterval
-
-	runStoreFactory = func() *run.Store { return store }
-	envVariables = func() env.Environment { return vars }
-	taskServiceFactory = func(context.Context) task.Task { return taskSvc }
-	atomServiceFactory = func(context.Context) asvc.Atom { return atomSvc }
-	taskEdgeServiceFactory = func(context.Context) taskedge.TaskEdge { return edgeSvc }
-	dispatchRunCallbacks = func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }
-	newDockerEngine = func(context.Context) atom.Engine { return engine }
-	atomPollInterval = 5 * time.Millisecond
-
-	t.Cleanup(func() {
-		runStoreFactory = origStoreFactory
-		envVariables = origEnvVariables
-		taskServiceFactory = origTaskServiceFactory
-		atomServiceFactory = origAtomServiceFactory
-		taskEdgeServiceFactory = origTaskEdgeServiceFactory
-		dispatchRunCallbacks = origDispatchRunCallbacks
-		newDockerEngine = origNewDockerEngine
-		atomPollInterval = origAtomPollInterval
-	})
+) []jobOption {
+	return []jobOption{
+		withRunStoreFactory(func() *run.Store { return store }),
+		withEnvVariables(func() env.Environment { return vars }),
+		withTaskServiceFactory(func(context.Context) task.Task { return taskSvc }),
+		withAtomServiceFactory(func(context.Context) asvc.Atom { return atomSvc }),
+		withTaskEdgeServiceFactory(func(context.Context) taskedge.TaskEdge { return edgeSvc }),
+		withDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+		withDockerEngineFactory(func(context.Context) atom.Engine { return engine }),
+		withKubernetesEngineFactory(func(context.Context) atom.Engine { return engine }),
+		withPodmanEngineFactory(func(context.Context) atom.Engine { return engine }),
+		withAtomPollInterval(5 * time.Millisecond),
+	}
 }
 
 func latestRunSnapshot(t *testing.T, store *run.Store, jobID uuid.UUID) *run.JobRun {
