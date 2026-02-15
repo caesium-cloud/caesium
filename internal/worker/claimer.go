@@ -6,8 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
@@ -80,10 +82,14 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 				"status":           string(run.TaskStatusRunning),
 			})
 		if result.Error != nil {
+			if isClaimContentionErr(result.Error) {
+				metrics.WorkerClaimContentionTotal.WithLabelValues(c.nodeID).Inc()
+			}
 			return result.Error
 		}
 		if result.RowsAffected == 0 {
 			// Another node won the race.
+			metrics.WorkerClaimContentionTotal.WithLabelValues(c.nodeID).Inc()
 			return nil
 		}
 
@@ -97,13 +103,16 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	if err != nil {
 		return nil, err
 	}
+	if claimed != nil {
+		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
+	}
 
 	return claimed, nil
 }
 
 func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 	now := time.Now().UTC()
-	return c.store.DB().WithContext(ctx).
+	result := c.store.DB().WithContext(ctx).
 		Model(&models.TaskRun{}).
 		Where("status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", string(run.TaskStatusRunning), now).
 		Updates(map[string]interface{}{
@@ -112,5 +121,24 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			"claim_expires_at": nil,
 			"runtime_id":       "",
 			"started_at":       nil,
-		}).Error
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(result.RowsAffected))
+	}
+	return nil
+}
+
+func isClaimContentionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
+	}
+	return false
 }

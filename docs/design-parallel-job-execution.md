@@ -28,6 +28,15 @@ Implemented on branch `codex/parallel-exec-phase2a`:
 - Phase 2.10 run-store task lifecycle now has claim-aware methods to enforce `claimed_by` ownership during status transitions.
 - Added claimer unit tests for ready-task selection, lease-expiry reclaim, and no-work behavior.
 
+Implemented on branch `codex/parallel-exec-phase3a`:
+
+- Phase 3.1 worker metrics added:
+  - `caesium_worker_claims_total{node_id}` for successful claims per node.
+  - `caesium_worker_claim_contention_total{node_id}` for claim contention events.
+  - `caesium_worker_lease_expirations_total{node_id}` for reclaimed expired leases.
+- Claimer instrumentation now records claim success/contention and expired lease reclaim counts.
+- Metrics and claimer tests expanded to cover the new counters.
+
 Not yet complete:
 
 - Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
@@ -342,7 +351,7 @@ New environment variables:
 
 ### Phase 3 — Observability and Polish
 
-- [ ] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
+- [x] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
 - [ ] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
 - [ ] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
 - [ ] **3.4** Update the console TUI DAG view to show which node is executing each task
