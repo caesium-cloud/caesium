@@ -202,3 +202,68 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 		}
 	}
 }
+
+func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","a"]`,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	task := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atom.ID,
+	}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+
+	claimOwner := "node-a"
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).
+		Updates(map[string]interface{}{
+			"status":           string(TaskStatusRunning),
+			"claimed_by":       claimOwner,
+			"claim_expires_at": time.Now().UTC().Add(1 * time.Minute),
+			"claim_attempt":    1,
+		}).Error)
+
+	err = store.StartTaskClaimed(runRecord.ID, task.ID, "runtime-a", "node-b")
+	require.ErrorIs(t, err, ErrTaskClaimMismatch)
+
+	require.NoError(t, store.StartTaskClaimed(runRecord.ID, task.ID, "runtime-a", claimOwner))
+
+	err = store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", "node-b")
+	require.ErrorIs(t, err, ErrTaskClaimMismatch)
+
+	require.NoError(t, store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", claimOwner))
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	var taskState *TaskRun
+	for _, candidate := range state.Tasks {
+		if candidate.ID == task.ID {
+			taskState = candidate
+			break
+		}
+	}
+	require.NotNil(t, taskState)
+	require.Equal(t, TaskStatusSucceeded, taskState.Status)
+	require.Equal(t, "runtime-a", taskState.RuntimeID)
+	require.Equal(t, claimOwner, taskState.ClaimedBy)
+	require.NotNil(t, taskState.StartedAt)
+}

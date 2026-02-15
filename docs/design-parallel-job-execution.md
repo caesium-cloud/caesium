@@ -24,12 +24,14 @@ Implemented on branch `codex/parallel-exec-phase2a`:
 - Phase 2.7 `internal/job/job.go` now gates local execution vs distributed enqueue+wait path via `CAESIUM_EXECUTION_MODE`.
 - Phase 2.7a attempt-suffixed runtime names added in distributed worker execution.
 - Phase 2.8 initial lease renewal + expired-lease reclaim implemented in worker executor/claimer flow.
+- Phase 2.9 added distributed multi-worker simulation coverage (`internal/worker/distributed_execution_test.go`).
+- Phase 2.10 run-store task lifecycle now has claim-aware methods to enforce `claimed_by` ownership during status transitions.
 - Added claimer unit tests for ready-task selection, lease-expiry reclaim, and no-work behavior.
 
 Not yet complete:
 
 - Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
-- Phase 2 distributed run lifecycle polish and wider integration tests are still pending.
+- Phase 2 distributed run lifecycle polish and production hardening remain pending.
 
 ## Problem
 
@@ -335,8 +337,8 @@ New environment variables:
 - [x] **2.7** Refactor `internal/job/job.go` `Run()` — split into "enqueue" (register tasks) and "wait for completion"; gate on `CAESIUM_EXECUTION_MODE`
 - [x] **2.7a** Use attempt-suffixed container names (`taskID-attemptN`) in task execution to prevent name collisions on reclaim
 - [x] **2.8** Implement lease renewal and expired-lease recovery in claimer
-- [ ] **2.9** Add distributed execution tests (multi-node simulation)
-- [ ] **2.10** Update run store methods to be claim-aware (respect `claimed_by` in status queries)
+- [x] **2.9** Add distributed execution tests (multi-node simulation)
+- [x] **2.10** Update run store methods to be claim-aware (respect `claimed_by` in status queries)
 
 ### Phase 3 — Observability and Polish
 
