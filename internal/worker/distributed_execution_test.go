@@ -21,10 +21,6 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	t.Cleanup(func() {
 		testutil.CloseDB(db)
 	})
-	sqlDB, err := db.DB()
-	require.NoError(t, err)
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
 
 	store := run.NewStore(db)
 
@@ -93,8 +89,8 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		}
 	}
 
-	workerA := NewWorker(claimOnly{claimer: NewClaimer("node-a", store, time.Minute)}, NewPool(1), 10*time.Millisecond, executor)
-	workerB := NewWorker(claimOnly{claimer: NewClaimer("node-b", store, time.Minute)}, NewPool(1), 10*time.Millisecond, executor)
+	workerA := NewWorker(claimOnly{claimer: NewClaimer("node-a", store, time.Minute)}, NewPool(1), 50*time.Millisecond, executor)
+	workerB := NewWorker(claimOnly{claimer: NewClaimer("node-b", store, time.Minute)}, NewPool(1), 50*time.Millisecond, executor)
 
 	workerErrs := make(chan error, 2)
 	go func() { workerErrs <- workerA.Run(ctx) }()

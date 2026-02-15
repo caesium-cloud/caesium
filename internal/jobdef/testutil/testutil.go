@@ -44,7 +44,7 @@ steps:
 func OpenTestDB(tb testing.TB) *gorm.DB {
 	tb.Helper()
 
-	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared"
+	dsn := "file:" + uuid.NewString() + "?mode=memory&cache=shared&_busy_timeout=5000"
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		tb.Fatalf("open sqlite: %v", err)
