@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -176,10 +177,57 @@ END;
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, "node-racer"), float64(1))
 }
 
+func TestClaimerClaimNextRespectsNodeSelector(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	now := time.Now().UTC()
+	_ = seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		outstandingPredecessors: 0,
+		nodeSelector:            map[string]string{"disk": "hdd"},
+		createdAt:               now.Add(-2 * time.Minute),
+	})
+	match := seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		outstandingPredecessors: 0,
+		nodeSelector:            map[string]string{"disk": "ssd"},
+		createdAt:               now.Add(-time.Minute),
+	})
+
+	claimer := NewClaimer("node-ssd", run.NewStore(db), time.Minute, map[string]string{"disk": "ssd"})
+	claimed, err := claimer.ClaimNext(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	require.Equal(t, match.ID, claimed.ID)
+}
+
+func TestClaimerClaimNextReturnsNilWhenNoSelectorMatches(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	_ = seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		outstandingPredecessors: 0,
+		nodeSelector:            map[string]string{"zone": "us-west-2"},
+		createdAt:               time.Now().UTC().Add(-time.Minute),
+	})
+
+	claimer := NewClaimer("node-east", run.NewStore(db), time.Minute, map[string]string{"zone": "us-east-1"})
+	claimed, err := claimer.ClaimNext(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, claimed)
+}
+
 type seedTaskRunInput struct {
 	status                  string
 	outstandingPredecessors int
 	claimedBy               string
+	nodeSelector            map[string]string
 	claimExpiresAt          *time.Time
 	claimAttempt            int
 	createdAt               time.Time
@@ -202,6 +250,7 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 		Command:                 `["echo","ok"]`,
 		Status:                  in.status,
 		ClaimedBy:               in.claimedBy,
+		NodeSelector:            toJSONMap(in.nodeSelector),
 		ClaimExpiresAt:          in.claimExpiresAt,
 		ClaimAttempt:            in.claimAttempt,
 		OutstandingPredecessors: in.outstandingPredecessors,
@@ -215,4 +264,16 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
+}
+
+func toJSONMap(values map[string]string) datatypes.JSONMap {
+	if len(values) == 0 {
+		return datatypes.JSONMap{}
+	}
+
+	out := datatypes.JSONMap{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }

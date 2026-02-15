@@ -3,6 +3,7 @@ package run
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -56,6 +57,7 @@ type TaskRun struct {
 	Command                 []string          `json:"command"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	Status                  TaskStatus        `json:"status"`
+	NodeSelector            map[string]string `json:"node_selector,omitempty"`
 	ClaimedBy               string            `json:"claimed_by,omitempty"`
 	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
 	ClaimAttempt            int               `json:"claim_attempt"`
@@ -165,6 +167,7 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Image:                   atom.Image,
 		Command:                 command,
 		Status:                  string(TaskStatusPending),
+		NodeSelector:            copyJSONMap(task.NodeSelector),
 		OutstandingPredecessors: outstanding,
 	}
 
@@ -522,6 +525,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Command:                 command,
 		RuntimeID:               model.RuntimeID,
 		Status:                  TaskStatus(model.Status),
+		NodeSelector:            jsonMapToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,
 		Result:                  model.Result,
@@ -573,4 +577,34 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 		StartedAt:   model.StartedAt,
 		CompletedAt: model.CompletedAt,
 	}
+}
+
+func copyJSONMap(values map[string]interface{}) map[string]interface{} {
+	if len(values) == 0 {
+		return map[string]interface{}{}
+	}
+
+	out := make(map[string]interface{}, len(values))
+	for key, value := range values {
+		out[key] = value
+	}
+
+	return out
+}
+
+func jsonMapToStringMap(values map[string]interface{}) map[string]string {
+	if len(values) == 0 {
+		return map[string]string{}
+	}
+
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		if str, ok := value.(string); ok {
+			out[key] = str
+			continue
+		}
+		out[key] = fmt.Sprint(value)
+	}
+
+	return out
 }

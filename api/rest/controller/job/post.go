@@ -82,9 +82,10 @@ func Post(c echo.Context) error {
 		)
 
 		taskModel, err := tsvc.Create(&task.CreateRequest{
-			JobID:  j.ID.String(),
-			AtomID: a.ID.String(),
-			NextID: t.NextID,
+			JobID:        j.ID.String(),
+			AtomID:       a.ID.String(),
+			NextID:       t.NextID,
+			NodeSelector: t.NodeSelector,
 		})
 		if err != nil {
 			log.Error("failed to create task", "error", err)
@@ -148,8 +149,9 @@ type PostRequest struct {
 	Metadata *MetadataRequest       `json:"metadata,omitempty"`
 	Trigger  *trigger.CreateRequest `json:"trigger"`
 	Tasks    []struct {
-		Atom   *atom.CreateRequest `json:"atom"`
-		NextID *string             `json:"next_id"`
+		Atom         *atom.CreateRequest `json:"atom"`
+		NextID       *string             `json:"next_id"`
+		NodeSelector map[string]string   `json:"node_selector,omitempty"`
 	} `json:"tasks"`
 }
 

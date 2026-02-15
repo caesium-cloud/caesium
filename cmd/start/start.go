@@ -94,6 +94,8 @@ func start(cmd *cobra.Command, args []string) error {
 		vars.WorkerPollInterval,
 		"worker_lease_ttl",
 		vars.WorkerLeaseTTL,
+		"node_labels",
+		vars.NodeLabels,
 	)
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
@@ -139,6 +141,8 @@ func start(cmd *cobra.Command, args []string) error {
 				"launching distributed worker",
 				"node_address",
 				vars.NodeAddress,
+				"node_labels",
+				vars.NodeLabels,
 				"pool_size",
 				poolSize,
 				"poll_interval",
@@ -148,7 +152,7 @@ func start(cmd *cobra.Command, args []string) error {
 			)
 
 			store := run.Default()
-			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL)
+			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
 			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
 			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn)
 			errs <- w.Run(ctx)

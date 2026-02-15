@@ -6,6 +6,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -98,9 +99,10 @@ func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {
 }
 
 type CreateRequest struct {
-	JobID  string  `json:"job_id"`
-	AtomID string  `json:"atom_id"`
-	NextID *string `json:"next_id"`
+	JobID        string            `json:"job_id"`
+	AtomID       string            `json:"atom_id"`
+	NextID       *string           `json:"next_id"`
+	NodeSelector map[string]string `json:"node_selector,omitempty"`
 }
 
 func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
@@ -110,9 +112,10 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	)
 
 	task := &models.Task{
-		ID:     id,
-		JobID:  uuid.MustParse(req.JobID),
-		AtomID: uuid.MustParse(req.AtomID),
+		ID:           id,
+		JobID:        uuid.MustParse(req.JobID),
+		AtomID:       uuid.MustParse(req.AtomID),
+		NodeSelector: mapToJSONMap(req.NodeSelector),
 	}
 
 	if req.NextID != nil {
@@ -125,6 +128,18 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 	}
 
 	return task, q.Create(task).Error
+}
+
+func mapToJSONMap(values map[string]string) datatypes.JSONMap {
+	if len(values) == 0 {
+		return datatypes.JSONMap{}
+	}
+
+	out := datatypes.JSONMap{}
+	for key, value := range values {
+		out[key] = value
+	}
+	return out
 }
 
 func (t *taskService) Delete(id uuid.UUID) error {

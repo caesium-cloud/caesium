@@ -177,9 +177,10 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 		}
 
 		task := &models.Task{
-			ID:     uuid.New(),
-			JobID:  job.ID,
-			AtomID: atom.ID,
+			ID:           uuid.New(),
+			JobID:        job.ID,
+			AtomID:       atom.ID,
+			NodeSelector: mapToJSONMap(step.NodeSelector),
 		}
 
 		if err := tx.Create(task).Error; err != nil {
