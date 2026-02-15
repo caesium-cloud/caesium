@@ -53,9 +53,15 @@ Implemented on branch `codex/parallel-exec-phase3c`:
   - Added `CAESIUM_NODE_LABELS` worker/node configuration (`key=value,key2=value2`) and claim-side affinity matching.
   - Added claimer tests for matching/non-matching selectors and node label parsing.
 
+Implemented on branch `codex/parallel-exec-phase1-6-tests`:
+
+- Phase 1.6 end-to-end local execution coverage in `internal/job/job_test.go`:
+  - Added a parallel-branch execution test that validates concurrent local dispatch.
+  - Added a `TaskFailurePolicy=continue` test that validates descendant skip semantics.
+  - Added a `TaskTimeout` test that validates forced atom stop and failed task persistence on timeout.
+
 Not yet complete:
 
-- Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
 - Phase 2 distributed run lifecycle polish and production hardening remain pending.
 
 ## Problem
@@ -349,7 +355,7 @@ New environment variables:
 - [x] **1.3** Refactor `internal/job/job.go` dispatch loop to use worker pool
 - [x] **1.4** Add `TaskFailurePolicy` env var and implement `"continue"` mode in job.go
 - [x] **1.5** Add `TaskTimeout` env var and implement per-task timeouts in job.go
-- [ ] **1.6** Add tests for parallel task execution, failure policies, and timeouts
+- [x] **1.6** Add tests for parallel task execution, failure policies, and timeouts
 - [x] **1.7** Update default `MaxParallelTasks` to 4 (or document the knob in startup logs)
 
 ### Phase 2 — Multi-Node Distributed Execution
