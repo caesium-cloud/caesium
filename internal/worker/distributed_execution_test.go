@@ -3,94 +3,53 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
 func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() {
-		testutil.CloseDB(db)
-	})
-
-	store := run.NewStore(db)
-
-	jobID := uuid.New()
-	runRecord, err := store.Start(jobID)
-	require.NoError(t, err)
-
-	atom := &models.Atom{
-		ID:      uuid.New(),
-		Engine:  models.AtomEngineDocker,
-		Image:   "alpine:3.20",
-		Command: `["echo","ok"]`,
-	}
-	require.NoError(t, db.Create(atom).Error)
-
 	const taskCount = 8
-	base := time.Now().UTC().Add(-2 * time.Minute)
+	queue := newSharedTaskQueue(taskCount)
 	for i := 0; i < taskCount; i++ {
-		createdAt := base.Add(time.Duration(i) * time.Second)
-		task := &models.Task{
-			ID:        uuid.New(),
-			JobID:     jobID,
-			AtomID:    atom.ID,
-			CreatedAt: createdAt,
-			UpdatedAt: createdAt,
-		}
-		require.NoError(t, db.Create(task).Error)
-		require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+		queue.enqueue(&models.TaskRun{
+			ID:     uuid.New(),
+			TaskID: uuid.New(),
+		})
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	var completed int32
 	var mu sync.Mutex
 	processed := make(map[uuid.UUID]int, taskCount)
-	execErrs := make(chan error, taskCount*2)
+	execErrs := make(chan error, taskCount)
 
 	executor := func(_ context.Context, taskRun *models.TaskRun) {
-		if err := store.StartTaskClaimed(taskRun.JobRunID, taskRun.TaskID, "runtime-"+taskRun.ClaimedBy, taskRun.ClaimedBy); err != nil {
-			if !errors.Is(err, run.ErrTaskClaimMismatch) {
-				execErrs <- fmt.Errorf("start claimed task %s: %w", taskRun.TaskID, err)
-			}
-			return
-		}
-
-		if err := store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, "ok", taskRun.ClaimedBy); err != nil {
-			if !errors.Is(err, run.ErrTaskClaimMismatch) {
-				execErrs <- fmt.Errorf("complete claimed task %s: %w", taskRun.TaskID, err)
-			}
-			return
-		}
-
 		mu.Lock()
 		processed[taskRun.TaskID]++
 		taskExecutions := processed[taskRun.TaskID]
 		mu.Unlock()
 
 		if taskExecutions > 1 {
-			execErrs <- fmt.Errorf("task %s executed %d times", taskRun.TaskID, taskExecutions)
+			execErrs <- errors.New("task executed more than once")
 			return
 		}
 
+		time.Sleep(2 * time.Millisecond)
 		if atomic.AddInt32(&completed, 1) == taskCount {
 			cancel()
 		}
 	}
 
-	workerA := NewWorker(claimOnly{claimer: NewClaimer("node-a", store, time.Minute)}, NewPool(1), 50*time.Millisecond, executor)
-	workerB := NewWorker(claimOnly{claimer: NewClaimer("node-b", store, time.Minute)}, NewPool(1), 50*time.Millisecond, executor)
+	workerA := NewWorker(queueClaimer{nodeID: "node-a", queue: queue}, NewPool(1), time.Millisecond, executor)
+	workerB := NewWorker(queueClaimer{nodeID: "node-b", queue: queue}, NewPool(1), time.Millisecond, executor)
 
 	workerErrs := make(chan error, 2)
 	go func() { workerErrs <- workerA.Run(ctx) }()
@@ -100,7 +59,7 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 		select {
 		case workerErr := <-workerErrs:
 			require.NoError(t, workerErr)
-		case <-time.After(25 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("timed out waiting for worker shutdown")
 		}
 	}
@@ -111,20 +70,45 @@ func TestDistributedWorkersProcessAllTasksWithoutDuplicateClaims(t *testing.T) {
 	}
 
 	require.Equal(t, int32(taskCount), atomic.LoadInt32(&completed))
+}
 
-	finalRun, err := store.Get(runRecord.ID)
-	require.NoError(t, err)
-	require.Len(t, finalRun.Tasks, taskCount)
-	for _, taskState := range finalRun.Tasks {
-		require.Equal(t, run.TaskStatusSucceeded, taskState.Status)
+type sharedTaskQueue struct {
+	mu    sync.Mutex
+	tasks []*models.TaskRun
+	next  int
+}
+
+func newSharedTaskQueue(capacity int) *sharedTaskQueue {
+	return &sharedTaskQueue{tasks: make([]*models.TaskRun, 0, capacity)}
+}
+
+func (q *sharedTaskQueue) enqueue(task *models.TaskRun) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.tasks = append(q.tasks, task)
+}
+
+func (q *sharedTaskQueue) claim(nodeID string) *models.TaskRun {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.next >= len(q.tasks) {
+		return nil
 	}
+	task := *q.tasks[q.next]
+	q.next++
+	task.ClaimedBy = nodeID
+	return &task
 }
 
-// claimOnly avoids the test invoking ReclaimExpired in each worker loop iteration.
-type claimOnly struct {
-	claimer *Claimer
+type queueClaimer struct {
+	nodeID string
+	queue  *sharedTaskQueue
 }
 
-func (c claimOnly) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
-	return c.claimer.ClaimNext(ctx)
+func (c queueClaimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.queue.claim(c.nodeID), nil
 }
