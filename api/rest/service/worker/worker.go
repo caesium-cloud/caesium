@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +25,6 @@ type service struct {
 func New(ctx context.Context) Service {
 	return &service{
 		ctx: ctx,
-		db:  db.Connection(),
 	}
 }
 
@@ -34,6 +34,13 @@ func (s *service) WithDatabase(conn *gorm.DB) Service {
 	}
 	s.db = conn
 	return s
+}
+
+func (s *service) connection() *gorm.DB {
+	if s.db == nil {
+		s.db = db.Connection()
+	}
+	return s.db
 }
 
 type StatusResponse struct {
@@ -78,7 +85,7 @@ func (s *service) Status(address string) (*StatusResponse, error) {
 	}
 
 	var grouped []countByStatus
-	if err := s.db.WithContext(s.ctx).
+	if err := s.connection().WithContext(s.ctx).
 		Model(&models.TaskRun{}).
 		Select("status, COUNT(*) as count").
 		Where("claimed_by = ?", address).
@@ -95,13 +102,8 @@ func (s *service) Status(address string) (*StatusResponse, error) {
 	runningStatus := string(run.TaskStatusRunning)
 	resp.RunningClaims = resp.ClaimedByStatus[runningStatus]
 
-	type aggregatedStats struct {
-		TotalClaimAttempts int64      `gorm:"column:total_claim_attempts"`
-		LastActivityAt     *time.Time `gorm:"column:last_activity_at"`
-		ExpiredLeases      int64      `gorm:"column:expired_leases"`
-	}
-	var stats aggregatedStats
-	if err := s.db.WithContext(s.ctx).
+	stats := map[string]any{}
+	if err := s.connection().WithContext(s.ctx).
 		Model(&models.TaskRun{}).
 		Select(
 			`COALESCE(SUM(claim_attempt), 0) AS total_claim_attempts,
@@ -114,12 +116,12 @@ func (s *service) Status(address string) (*StatusResponse, error) {
 		Take(&stats).Error; err != nil {
 		return nil, err
 	}
-	resp.ExpiredLeases = stats.ExpiredLeases
-	resp.TotalClaimAttempts = stats.TotalClaimAttempts
-	resp.LastActivityAt = stats.LastActivityAt
+	resp.TotalClaimAttempts = normalizeAggregateInt(stats["total_claim_attempts"])
+	resp.ExpiredLeases = normalizeAggregateInt(stats["expired_leases"])
+	resp.LastActivityAt = normalizeAggregateTime(stats["last_activity_at"])
 
 	var active []models.TaskRun
-	if err := s.db.WithContext(s.ctx).
+	if err := s.connection().WithContext(s.ctx).
 		Select("job_run_id, task_id, status, claim_attempt, claim_expires_at, updated_at").
 		Where("claimed_by = ? AND status = ?", address, runningStatus).
 		Order("updated_at DESC").
@@ -141,4 +143,99 @@ func (s *service) Status(address string) (*StatusResponse, error) {
 	}
 
 	return resp, nil
+}
+
+func normalizeAggregateTime(v any) *time.Time {
+	if v == nil {
+		return nil
+	}
+
+	switch t := v.(type) {
+	case time.Time:
+		tt := t.UTC()
+		return &tt
+	case *time.Time:
+		if t == nil {
+			return nil
+		}
+		tt := t.UTC()
+		return &tt
+	case []byte:
+		return parseAggregateTime(string(t))
+	case string:
+		return parseAggregateTime(t)
+	default:
+		return nil
+	}
+}
+
+func normalizeAggregateInt(v any) int64 {
+	switch t := v.(type) {
+	case nil:
+		return 0
+	case int:
+		return int64(t)
+	case int8:
+		return int64(t)
+	case int16:
+		return int64(t)
+	case int32:
+		return int64(t)
+	case int64:
+		return t
+	case uint:
+		return int64(t)
+	case uint8:
+		return int64(t)
+	case uint16:
+		return int64(t)
+	case uint32:
+		return int64(t)
+	case uint64:
+		return int64(t)
+	case float32:
+		return int64(t)
+	case float64:
+		return int64(t)
+	case []byte:
+		if n, err := strconv.ParseInt(string(t), 10, 64); err == nil {
+			return n
+		}
+		return 0
+	case string:
+		if n, err := strconv.ParseInt(t, 10, 64); err == nil {
+			return n
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func parseAggregateTime(raw string) *time.Time {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+
+	layouts := []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05.999999",
+		"2006-01-02 15:04:05.999",
+		"2006-01-02 15:04:05",
+	}
+
+	for _, layout := range layouts {
+		if ts, err := time.Parse(layout, raw); err == nil {
+			tt := ts.UTC()
+			return &tt
+		}
+		if ts, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			tt := ts.UTC()
+			return &tt
+		}
+	}
+
+	return nil
 }
