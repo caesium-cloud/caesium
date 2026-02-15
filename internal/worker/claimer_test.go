@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -143,6 +144,36 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 	require.Nil(t, stale.ClaimExpiresAt)
 	require.Equal(t, "", stale.RuntimeID)
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerLeaseExpirationsTotal, "node-a"), float64(1))
+}
+
+func TestClaimerClaimNextRecordsClaimContentionMetric(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	task := seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		outstandingPredecessors: 0,
+		createdAt:               time.Now().UTC().Add(-time.Minute),
+	})
+
+	triggerSQL := fmt.Sprintf(`
+CREATE TRIGGER force_claim_conflict
+BEFORE UPDATE OF status,claimed_by,claim_expires_at,claim_attempt ON task_runs
+FOR EACH ROW
+WHEN OLD.id = '%s' AND NEW.status = 'running'
+BEGIN
+	SELECT RAISE(IGNORE);
+END;
+`, task.ID.String())
+	require.NoError(t, db.Exec(triggerSQL).Error)
+
+	claimer := NewClaimer("node-racer", run.NewStore(db), time.Minute)
+	claimed, err := claimer.ClaimNext(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, claimed)
+	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, "node-racer"), float64(1))
 }
 
 type seedTaskRunInput struct {

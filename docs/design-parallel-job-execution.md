@@ -37,6 +37,14 @@ Implemented on branch `codex/parallel-exec-phase3a`:
 - Claimer instrumentation now records claim success/contention and expired lease reclaim counts.
 - Metrics and claimer tests expanded to cover the new counters.
 
+Implemented on branch `codex/parallel-exec-phase3b`:
+
+- Phase 3.2 worker status API:
+  - Added `GET /v1/nodes/:address/workers`.
+  - Added `api/rest/service/worker` status aggregation over claimed tasks by node.
+  - Worker status response now includes claimed-task totals by status, running claims, expired leases, total claim attempts, last activity timestamp, and active running claim details.
+  - Added service-level tests for empty and populated worker status views.
+
 Not yet complete:
 
 - Full Phase 1.6 coverage for end-to-end parallel execution and timeout behavior in `internal/job/job_test.go`.
@@ -352,7 +360,7 @@ New environment variables:
 ### Phase 3 — Observability and Polish
 
 - [x] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
-- [ ] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
+- [x] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
 - [ ] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
 - [ ] **3.4** Update the console TUI DAG view to show which node is executing each task
 - [ ] **3.5** Document configuration and operational guidance
