@@ -27,6 +27,9 @@ func (s *MetricsSuite) SetupTest() {
 		JobsActive,
 		CallbackRunsTotal,
 		TriggerFiresTotal,
+		WorkerClaimsTotal,
+		WorkerClaimContentionTotal,
+		WorkerLeaseExpirationsTotal,
 	)
 }
 
@@ -112,6 +115,28 @@ func (s *MetricsSuite) TestTriggerFiresTotalIncrements() {
 
 	val := s.counterValue(TriggerFiresTotal, "job-1", "cron")
 	s.GreaterOrEqual(val, float64(1))
+}
+
+func (s *MetricsSuite) TestWorkerClaimsTotalIncrements() {
+	WorkerClaimsTotal.WithLabelValues("node-a").Inc()
+
+	val := s.counterValue(WorkerClaimsTotal, "node-a")
+	s.GreaterOrEqual(val, float64(1))
+}
+
+func (s *MetricsSuite) TestWorkerClaimContentionTotalIncrements() {
+	WorkerClaimContentionTotal.WithLabelValues("node-a").Inc()
+	WorkerClaimContentionTotal.WithLabelValues("node-a").Inc()
+
+	val := s.counterValue(WorkerClaimContentionTotal, "node-a")
+	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestWorkerLeaseExpirationsTotalAdds() {
+	WorkerLeaseExpirationsTotal.WithLabelValues("node-a").Add(3)
+
+	val := s.counterValue(WorkerLeaseExpirationsTotal, "node-a")
+	s.GreaterOrEqual(val, float64(3))
 }
 
 func (s *MetricsSuite) counterValue(vec *prometheus.CounterVec, labels ...string) float64 {

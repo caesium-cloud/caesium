@@ -6,9 +6,12 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -46,6 +49,7 @@ func TestClaimerClaimNextClaimsOldestReadyTask(t *testing.T) {
 	require.Equal(t, string(run.TaskStatusRunning), claimed.Status)
 	require.NotNil(t, claimed.ClaimExpiresAt)
 	require.True(t, claimed.ClaimExpiresAt.After(now))
+	require.GreaterOrEqual(t, counterValue(t, metrics.WorkerClaimsTotal, "node-a"), float64(1))
 
 	var persistedBlocked models.TaskRun
 	require.NoError(t, db.First(&persistedBlocked, "id = ?", blocked.ID).Error)
@@ -139,6 +143,7 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 	require.Equal(t, "", stale.ClaimedBy)
 	require.Nil(t, stale.ClaimExpiresAt)
 	require.Equal(t, "", stale.RuntimeID)
+	require.GreaterOrEqual(t, counterValue(t, metrics.WorkerLeaseExpirationsTotal, "node-a"), float64(1))
 }
 
 type seedTaskRunInput struct {
@@ -180,4 +185,14 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
+}
+
+func counterValue(tb testing.TB, vec *prometheus.CounterVec, labels ...string) float64 {
+	tb.Helper()
+
+	var m dto.Metric
+	counter, err := vec.GetMetricWithLabelValues(labels...)
+	require.NoError(tb, err)
+	require.NoError(tb, counter.(prometheus.Metric).Write(&m))
+	return m.GetCounter().GetValue()
 }

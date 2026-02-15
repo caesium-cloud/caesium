@@ -62,6 +62,30 @@ var (
 		},
 		[]string{"job_id", "trigger_type"},
 	)
+
+	WorkerClaimsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_worker_claims_total",
+			Help: "Total number of tasks successfully claimed by worker node.",
+		},
+		[]string{"node_id"},
+	)
+
+	WorkerClaimContentionTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_worker_claim_contention_total",
+			Help: "Total number of worker claim contention events.",
+		},
+		[]string{"node_id"},
+	)
+
+	WorkerLeaseExpirationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_worker_lease_expirations_total",
+			Help: "Total number of expired worker task leases reclaimed by node.",
+		},
+		[]string{"node_id"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -74,5 +98,8 @@ func Register() {
 		JobsActive,
 		CallbackRunsTotal,
 		TriggerFiresTotal,
+		WorkerClaimsTotal,
+		WorkerClaimContentionTotal,
+		WorkerLeaseExpirationsTotal,
 	)
 }
