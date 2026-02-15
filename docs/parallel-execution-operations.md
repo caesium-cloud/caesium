@@ -28,9 +28,8 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 
 1. Deploy the target version to all nodes with `CAESIUM_EXECUTION_MODE=local`.
 2. Verify all nodes are healthy and on the same binary revision.
-3. Enable distributed mode on all nodes (`CAESIUM_EXECUTION_MODE=distributed`).
-4. Restart/redeploy nodes so worker loops are active everywhere.
-5. Validate claims and execution ownership using the checks below.
+3. Enable distributed mode on all nodes (`CAESIUM_EXECUTION_MODE=distributed`) and restart/redeploy them.
+4. Validate claims and execution ownership using the checks below.
 
 Avoid mixed-mode operation (some old local-only schedulers + some distributed claimers), which can lead to duplicate execution windows.
 
@@ -90,4 +89,3 @@ Use metrics:
 
 - Validate `CAESIUM_NODE_LABELS` format (`k=v,k2=v2`) and exact value matching.
 - Confirm job definitions use `nodeSelector` on steps.
-

@@ -51,8 +51,11 @@ func TestRunsListAndGet(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("expected 1 run, got %d", len(list))
 	}
-	if len(list[0].Tasks) != 1 || list[0].Tasks[0].ClaimedBy != "node-a" {
-		t.Fatalf("expected claimed_by to be decoded, got %#v", list[0].Tasks)
+	if len(list[0].Tasks) != 1 {
+		t.Fatalf("expected 1 task, got %d", len(list[0].Tasks))
+	}
+	if list[0].Tasks[0].ClaimedBy != "node-a" {
+		t.Fatalf("expected claimed_by to be 'node-a', got %q", list[0].Tasks[0].ClaimedBy)
 	}
 	if list[0].Tasks[0].ClaimAttempt != 2 {
 		t.Fatalf("expected claim_attempt=2, got %d", list[0].Tasks[0].ClaimAttempt)
