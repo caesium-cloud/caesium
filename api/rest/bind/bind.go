@@ -5,6 +5,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
+	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/labstack/echo/v4"
@@ -53,5 +54,10 @@ func Public(g *echo.Group) {
 	// stats
 	{
 		g.GET("/stats", stats.Get)
+	}
+
+	// nodes
+	{
+		g.GET("/nodes/:address/workers", node.Workers)
 	}
 }
