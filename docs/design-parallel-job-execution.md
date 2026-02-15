@@ -60,9 +60,17 @@ Implemented on branch `codex/parallel-exec-phase1-6-tests`:
   - Added a `TaskFailurePolicy=continue` test that validates descendant skip semantics.
   - Added a `TaskTimeout` test that validates forced atom stop and failed task persistence on timeout.
 
+Implemented on branch `codex/parallel-exec-phase2-hardening`:
+
+- Phase 2 lifecycle hardening:
+  - Worker claim queries now only select tasks whose `job_runs.status = running`.
+  - Expired-lease reclaim now only mutates tasks whose parent run is still `running`.
+  - Added claimer regression tests to ensure completed/failed runs are never claimed or reclaimed.
+
 Not yet complete:
 
-- Phase 2 distributed run lifecycle polish and production hardening remain pending.
+- Phase 3.4 TUI node-execution attribution in DAG view.
+- Phase 3.5 configuration and operations documentation updates.
 
 ## Problem
 

@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +224,57 @@ func TestClaimerClaimNextReturnsNilWhenNoSelectorMatches(t *testing.T) {
 	require.Nil(t, claimed)
 }
 
+func TestClaimerClaimNextIgnoresNonRunningJobRuns(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	task := seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		outstandingPredecessors: 0,
+		jobRunStatus:            string(run.StatusFailed),
+		createdAt:               time.Now().UTC().Add(-time.Minute),
+	})
+
+	claimer := NewClaimer("node-a", run.NewStore(db), time.Minute)
+	claimed, err := claimer.ClaimNext(context.Background())
+	require.NoError(t, err)
+	require.Nil(t, claimed)
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", task.ID).Error)
+	require.Equal(t, string(run.TaskStatusPending), persisted.Status)
+	require.Equal(t, "", persisted.ClaimedBy)
+}
+
+func TestClaimerReclaimExpiredIgnoresNonRunningJobRuns(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	now := time.Now().UTC()
+	expired := seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusRunning),
+		outstandingPredecessors: 0,
+		claimedBy:               "node-old",
+		claimExpiresAt:          ptrTime(now.Add(-time.Minute)),
+		claimAttempt:            2,
+		jobRunStatus:            string(run.StatusFailed),
+		createdAt:               now.Add(-2 * time.Minute),
+	})
+
+	claimer := NewClaimer("node-a", run.NewStore(db), time.Minute)
+	require.NoError(t, claimer.ReclaimExpired(context.Background()))
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", expired.ID).Error)
+	require.Equal(t, string(run.TaskStatusRunning), persisted.Status)
+	require.Equal(t, "node-old", persisted.ClaimedBy)
+	require.NotNil(t, persisted.ClaimExpiresAt)
+}
+
 type seedTaskRunInput struct {
 	status                  string
 	outstandingPredecessors int
@@ -230,6 +282,7 @@ type seedTaskRunInput struct {
 	nodeSelector            map[string]string
 	claimExpiresAt          *time.Time
 	claimAttempt            int
+	jobRunStatus            string
 	createdAt               time.Time
 }
 
@@ -239,10 +292,24 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 	if in.createdAt.IsZero() {
 		in.createdAt = time.Now().UTC()
 	}
+	if strings.TrimSpace(in.jobRunStatus) == "" {
+		in.jobRunStatus = string(run.StatusRunning)
+	}
+
+	jobRunID := uuid.New()
+	jobID := uuid.New()
+	require.NoError(t, db.Create(&models.JobRun{
+		ID:        jobRunID,
+		JobID:     jobID,
+		Status:    in.jobRunStatus,
+		StartedAt: in.createdAt,
+		CreatedAt: in.createdAt,
+		UpdatedAt: in.createdAt,
+	}).Error)
 
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
-		JobRunID:                uuid.New(),
+		JobRunID:                jobRunID,
 		TaskID:                  uuid.New(),
 		AtomID:                  uuid.New(),
 		Engine:                  models.AtomEngineDocker,
