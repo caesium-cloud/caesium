@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
@@ -134,6 +135,10 @@ func isClaimContentionErr(err error) bool {
 	if err == nil {
 		return false
 	}
-	lower := strings.ToLower(err.Error())
-	return strings.Contains(lower, "database table is locked") || strings.Contains(lower, "database is locked")
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
+	}
+	return false
 }

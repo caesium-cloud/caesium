@@ -3,6 +3,7 @@ package metrics
 import (
 	"testing"
 
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/suite"
@@ -38,10 +39,10 @@ func (s *MetricsSuite) TestJobRunsTotalIncrements() {
 	JobRunsTotal.WithLabelValues("job-1", "failed").Inc()
 	JobRunsTotal.WithLabelValues("job-1", "failed").Inc()
 
-	val := s.counterValue(JobRunsTotal, "job-1", "succeeded")
+	val := metrictestutil.CounterValue(s.T(), JobRunsTotal, "job-1", "succeeded")
 	s.GreaterOrEqual(val, float64(1))
 
-	val = s.counterValue(JobRunsTotal, "job-1", "failed")
+	val = metrictestutil.CounterValue(s.T(), JobRunsTotal, "job-1", "failed")
 	s.GreaterOrEqual(val, float64(2))
 }
 
@@ -70,7 +71,7 @@ func (s *MetricsSuite) TestJobRunDurationObserves() {
 func (s *MetricsSuite) TestTaskRunsTotalIncrements() {
 	TaskRunsTotal.WithLabelValues("job-1", "task-1", "docker", "succeeded").Inc()
 
-	val := s.counterValue(TaskRunsTotal, "job-1", "task-1", "docker", "succeeded")
+	val := metrictestutil.CounterValue(s.T(), TaskRunsTotal, "job-1", "task-1", "docker", "succeeded")
 	s.GreaterOrEqual(val, float64(1))
 }
 
@@ -106,21 +107,21 @@ func (s *MetricsSuite) TestJobsActiveGauge() {
 func (s *MetricsSuite) TestCallbackRunsTotalIncrements() {
 	CallbackRunsTotal.WithLabelValues("job-1", "succeeded").Inc()
 
-	val := s.counterValue(CallbackRunsTotal, "job-1", "succeeded")
+	val := metrictestutil.CounterValue(s.T(), CallbackRunsTotal, "job-1", "succeeded")
 	s.GreaterOrEqual(val, float64(1))
 }
 
 func (s *MetricsSuite) TestTriggerFiresTotalIncrements() {
 	TriggerFiresTotal.WithLabelValues("job-1", "cron").Inc()
 
-	val := s.counterValue(TriggerFiresTotal, "job-1", "cron")
+	val := metrictestutil.CounterValue(s.T(), TriggerFiresTotal, "job-1", "cron")
 	s.GreaterOrEqual(val, float64(1))
 }
 
 func (s *MetricsSuite) TestWorkerClaimsTotalIncrements() {
 	WorkerClaimsTotal.WithLabelValues("node-a").Inc()
 
-	val := s.counterValue(WorkerClaimsTotal, "node-a")
+	val := metrictestutil.CounterValue(s.T(), WorkerClaimsTotal, "node-a")
 	s.GreaterOrEqual(val, float64(1))
 }
 
@@ -128,23 +129,15 @@ func (s *MetricsSuite) TestWorkerClaimContentionTotalIncrements() {
 	WorkerClaimContentionTotal.WithLabelValues("node-a").Inc()
 	WorkerClaimContentionTotal.WithLabelValues("node-a").Inc()
 
-	val := s.counterValue(WorkerClaimContentionTotal, "node-a")
+	val := metrictestutil.CounterValue(s.T(), WorkerClaimContentionTotal, "node-a")
 	s.GreaterOrEqual(val, float64(2))
 }
 
 func (s *MetricsSuite) TestWorkerLeaseExpirationsTotalAdds() {
 	WorkerLeaseExpirationsTotal.WithLabelValues("node-a").Add(3)
 
-	val := s.counterValue(WorkerLeaseExpirationsTotal, "node-a")
+	val := metrictestutil.CounterValue(s.T(), WorkerLeaseExpirationsTotal, "node-a")
 	s.GreaterOrEqual(val, float64(3))
-}
-
-func (s *MetricsSuite) counterValue(vec *prometheus.CounterVec, labels ...string) float64 {
-	var m dto.Metric
-	counter, err := vec.GetMetricWithLabelValues(labels...)
-	s.Require().NoError(err)
-	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
-	return m.GetCounter().GetValue()
 }
 
 func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) float64 {
