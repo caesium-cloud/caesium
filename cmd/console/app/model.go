@@ -10,6 +10,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -1062,6 +1063,7 @@ func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
 func (m *Model) handleRunStarted(evt api.Event) {
 	var run api.Run
 	if err := json.Unmarshal(evt.Payload, &run); err != nil {
+		log.Error("[console] failed to unmarshal run payload", "error", err, "run_id", evt.RunID)
 		return
 	}
 
@@ -1088,6 +1090,7 @@ func (m *Model) handleRunCompleted(evt api.Event) {
 func (m *Model) handleTaskUpdate(evt api.Event) {
 	var task api.RunTask
 	if err := json.Unmarshal(evt.Payload, &task); err != nil {
+		log.Error("[console] failed to unmarshal task payload", "error", err, "task_id", evt.TaskID)
 		return
 	}
 

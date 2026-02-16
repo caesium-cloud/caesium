@@ -9,8 +9,10 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"sync"
 )
 
 type Job interface {
@@ -29,10 +31,13 @@ type jobService struct {
 }
 
 var (
-	defaultService *jobService
+	defaultService   *jobService
+	defaultServiceMu sync.Mutex
 )
 
 func Service(ctx context.Context) Job {
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
 	if defaultService != nil {
 		return &jobService{
 			ctx: ctx,
@@ -48,6 +53,8 @@ func Service(ctx context.Context) Job {
 
 func (j *jobService) SetBus(bus event.Bus) {
 	j.bus = bus
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
 	if defaultService == nil {
 		defaultService = &jobService{db: j.db}
 	}
@@ -130,7 +137,9 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 	}
 
 	if j.bus != nil {
-		if payload, err := json.Marshal(job); err == nil {
+		if payload, err := json.Marshal(job); err != nil {
+			log.Error("failed to marshal job created event", "error", err, "job_id", job.ID)
+		} else {
 			j.bus.Publish(event.Event{
 				Type:      event.TypeJobCreated,
 				JobID:     job.ID,

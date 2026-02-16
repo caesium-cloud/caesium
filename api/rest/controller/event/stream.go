@@ -85,6 +85,7 @@ func (ctrl *Controller) Stream(c echo.Context) error {
 
 			data, err := json.Marshal(e)
 			if err != nil {
+				c.Logger().Errorf("failed to marshal event for SSE stream: %v", err)
 				continue
 			}
 

@@ -7,6 +7,7 @@ import (
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"sync"
 )
 
 type Service interface {
@@ -25,10 +26,13 @@ type runService struct {
 }
 
 var (
-	defaultService *runService
+	defaultService   *runService
+	defaultServiceMu sync.Mutex
 )
 
 func New(ctx context.Context) Service {
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
 	if defaultService != nil {
 		return &runService{
 			ctx:   ctx,
@@ -43,6 +47,8 @@ func New(ctx context.Context) Service {
 
 func (r *runService) SetBus(bus event.Bus) {
 	r.store.SetBus(bus)
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
 	if defaultService == nil {
 		defaultService = &runService{store: r.store}
 	}

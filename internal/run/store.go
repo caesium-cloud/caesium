@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -145,7 +146,9 @@ func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
 		if run.JobID == uuid.Nil {
 			run.JobID = jobID
 		}
-		if payload, marshalErr := json.Marshal(run); marshalErr == nil {
+		if payload, marshalErr := json.Marshal(run); marshalErr != nil {
+			log.Error("failed to marshal run started event", "error", marshalErr, "run_id", model.ID)
+		} else {
 			s.bus.Publish(event.Event{
 				Type:      event.TypeRunStarted,
 				JobID:     jobID,
@@ -460,7 +463,9 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 				eventType = event.TypeRunFailed
 			}
 
-			if payload, marshalErr := json.Marshal(run); marshalErr == nil {
+			if payload, marshalErr := json.Marshal(run); marshalErr != nil {
+				log.Error("failed to marshal run completed event", "error", marshalErr, "run_id", runID)
+			} else {
 				s.bus.Publish(event.Event{
 					Type:      eventType,
 					JobID:     run.JobID,
@@ -655,16 +660,19 @@ func (s *Store) publishTaskEvent(eventType event.Type, runID, taskID uuid.UUID) 
 	// Need to fetch JobID for the event
 	var taskRun models.TaskRun
 	if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
 		return
 	}
 
 	var jobRun models.JobRun
 	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+		log.Error("failed to fetch job run for event", "error", err, "run_id", runID)
 		return
 	}
 
 	payload, err := json.Marshal(convertRunTaskModel(&taskRun))
 	if err != nil {
+		log.Error("failed to marshal task run for event", "error", err, "run_id", runID, "task_id", taskID)
 		return
 	}
 

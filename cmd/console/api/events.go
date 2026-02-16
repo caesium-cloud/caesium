@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
 
@@ -93,7 +94,9 @@ func (s *EventsService) Stream(ctx context.Context, jobID, runID string, types [
 			if len(line) == 0 {
 				if currentType != "" && len(currentData) > 0 {
 					var evt Event
-					if err := json.Unmarshal(currentData, &evt); err == nil {
+					if err := json.Unmarshal(currentData, &evt); err != nil {
+						log.Error("[console] failed to unmarshal event from stream", "error", err, "type", currentType)
+					} else {
 						// Ensure type is set if not in payload (though payload usually matches)
 						if evt.Type == "" {
 							evt.Type = currentType
