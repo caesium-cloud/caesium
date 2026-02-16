@@ -7,10 +7,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -81,7 +83,8 @@ type JobRun struct {
 }
 
 type Store struct {
-	db *gorm.DB
+	db  *gorm.DB
+	bus event.Bus
 
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
@@ -112,6 +115,10 @@ func Default() *Store {
 	return defaultStore
 }
 
+func (s *Store) SetBus(bus event.Bus) {
+	s.bus = bus
+}
+
 func (s *Store) DB() *gorm.DB {
 	return s.db
 }
@@ -133,7 +140,26 @@ func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
 	s.startedRuns[model.ID] = struct{}{}
 	s.startedMu.Unlock()
 
-	return s.loadRun(model.ID)
+	run, err := s.loadRun(model.ID)
+	if err == nil && s.bus != nil {
+		// Ensure run object has JobID (it should from loadRun, but let's be safe for the event)
+		if run.JobID == uuid.Nil {
+			run.JobID = jobID
+		}
+		if payload, marshalErr := json.Marshal(run); marshalErr != nil {
+			log.Error("failed to marshal run started event", "error", marshalErr, "run_id", model.ID)
+		} else {
+			s.bus.Publish(event.Event{
+				Type:      event.TypeRunStarted,
+				JobID:     jobID,
+				RunID:     model.ID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			})
+		}
+	}
+
+	return run, err
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
@@ -177,13 +203,19 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 	now := time.Now().UTC()
-	return s.db.Model(&models.TaskRun{}).
+	err := s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
 		Updates(map[string]interface{}{
 			"status":     string(TaskStatusRunning),
 			"runtime_id": runtimeID,
 			"started_at": now,
 		}).Error
+
+	if err == nil && s.bus != nil {
+		s.publishTaskEvent(event.TypeTaskStarted, runID, taskID)
+	}
+
+	return err
 }
 
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
@@ -200,6 +232,11 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 	if result.RowsAffected == 0 {
 		return ErrTaskClaimMismatch
 	}
+
+	if s.bus != nil {
+		s.publishTaskEvent(event.TypeTaskStarted, runID, taskID)
+	}
+
 	return nil
 }
 
@@ -296,6 +333,10 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			}
 		}
 
+		if s.bus != nil {
+			s.publishTaskEvent(event.TypeTaskSucceeded, runID, taskID)
+		}
+
 		return nil
 	})
 }
@@ -353,18 +394,29 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 	if enforceClaim && resultUpdate.RowsAffected == 0 {
 		return ErrTaskClaimMismatch
 	}
+
+	if s.bus != nil {
+		s.publishTaskEvent(event.TypeTaskFailed, runID, taskID)
+	}
+
 	return nil
 }
 
 func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 	now := time.Now().UTC()
-	return s.db.Model(&models.TaskRun{}).
+	err := s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
 		Updates(map[string]interface{}{
 			"status":       string(TaskStatusSkipped),
 			"completed_at": now,
 			"error":        reason,
 		}).Error
+
+	if err == nil && s.bus != nil {
+		s.publishTaskEvent(event.TypeTaskSkipped, runID, taskID)
+	}
+
+	return err
 }
 
 func (s *Store) Complete(runID uuid.UUID, result error) error {
@@ -395,13 +447,37 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		metrics.JobRunDurationSeconds.WithLabelValues(jobID, string(status)).Observe(duration)
 	}
 
-	return s.db.Model(&models.JobRun{}).
+	err := s.db.Model(&models.JobRun{}).
 		Where("id = ?", runID).
 		Updates(map[string]interface{}{
 			"status":       string(status),
 			"completed_at": now,
 			"error":        errMsg,
 		}).Error
+
+	if err == nil && s.bus != nil {
+		run, loadErr := s.loadRun(runID)
+		if loadErr == nil {
+			eventType := event.TypeRunCompleted
+			if status == StatusFailed {
+				eventType = event.TypeRunFailed
+			}
+
+			if payload, marshalErr := json.Marshal(run); marshalErr != nil {
+				log.Error("failed to marshal run completed event", "error", marshalErr, "run_id", runID)
+			} else {
+				s.bus.Publish(event.Event{
+					Type:      eventType,
+					JobID:     run.JobID,
+					RunID:     runID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				})
+			}
+		}
+	}
+
+	return err
 }
 
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
@@ -578,4 +654,34 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 		StartedAt:   model.StartedAt,
 		CompletedAt: model.CompletedAt,
 	}
+}
+
+func (s *Store) publishTaskEvent(eventType event.Type, runID, taskID uuid.UUID) {
+	// Need to fetch JobID for the event
+	var taskRun models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
+		return
+	}
+
+	var jobRun models.JobRun
+	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+		log.Error("failed to fetch job run for event", "error", err, "run_id", runID)
+		return
+	}
+
+	payload, err := json.Marshal(convertRunTaskModel(&taskRun))
+	if err != nil {
+		log.Error("failed to marshal task run for event", "error", err, "run_id", runID, "task_id", taskID)
+		return
+	}
+
+	s.bus.Publish(event.Event{
+		Type:      eventType,
+		JobID:     jobRun.JobID,
+		RunID:     runID,
+		TaskID:    taskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   payload,
+	})
 }

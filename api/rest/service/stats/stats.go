@@ -11,9 +11,9 @@ import (
 
 // StatsResponse is the top-level statistics payload.
 type StatsResponse struct {
-	Jobs        JobStats       `json:"jobs"`
-	TopFailing  []FailingJob   `json:"top_failing"`
-	SlowestJobs []SlowestJob   `json:"slowest_jobs"`
+	Jobs        JobStats     `json:"jobs"`
+	TopFailing  []FailingJob `json:"top_failing"`
+	SlowestJobs []SlowestJob `json:"slowest_jobs"`
 }
 
 // JobStats contains aggregate job statistics.
@@ -90,7 +90,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	// Average duration of completed runs
 	var avgResult struct{ Avg float64 }
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("AVG("+durExpr+") as avg").
+		Select("AVG(" + durExpr + ") as avg").
 		Where("completed_at IS NOT NULL").
 		Scan(&avgResult)
 	resp.Jobs.AvgDurationSeconds = avgResult.Avg
@@ -128,7 +128,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	}
 	var slowRows []slowRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("job_id, AVG("+durExpr+") as avg").
+		Select("job_id, AVG(" + durExpr + ") as avg").
 		Where("completed_at IS NOT NULL").
 		Group("job_id").
 		Order("avg DESC").

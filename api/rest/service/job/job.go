@@ -2,16 +2,22 @@ package job
 
 import (
 	"context"
+	"encoding/json"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"sync"
 )
 
 type Job interface {
 	WithDatabase(*gorm.DB) Job
+	SetBus(event.Bus)
 	List(*ListRequest) (models.Jobs, error)
 	Get(uuid.UUID) (*models.Job, error)
 	Create(*CreateRequest) (*models.Job, error)
@@ -21,13 +27,38 @@ type Job interface {
 type jobService struct {
 	ctx context.Context
 	db  *gorm.DB
+	bus event.Bus
 }
 
+var (
+	defaultService   *jobService
+	defaultServiceMu sync.Mutex
+)
+
 func Service(ctx context.Context) Job {
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
+	if defaultService != nil {
+		return &jobService{
+			ctx: ctx,
+			db:  defaultService.db,
+			bus: defaultService.bus,
+		}
+	}
 	return &jobService{
 		ctx: ctx,
 		db:  db.Connection(),
 	}
+}
+
+func (j *jobService) SetBus(bus event.Bus) {
+	j.bus = bus
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
+	if defaultService == nil {
+		defaultService = &jobService{db: j.db}
+	}
+	defaultService.bus = bus
 }
 
 func (j *jobService) WithDatabase(conn *gorm.DB) Job {
@@ -101,7 +132,24 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 		Annotations: jsonmap.FromStringMap(req.Annotations),
 	}
 
-	return job, q.Create(job).Error
+	if err := q.Create(job).Error; err != nil {
+		return nil, err
+	}
+
+	if j.bus != nil {
+		if payload, err := json.Marshal(job); err != nil {
+			log.Error("failed to marshal job created event", "error", err, "job_id", job.ID)
+		} else {
+			j.bus.Publish(event.Event{
+				Type:      event.TypeJobCreated,
+				JobID:     job.ID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			})
+		}
+	}
+
+	return job, nil
 }
 
 func (j *jobService) Delete(id uuid.UUID) error {
@@ -109,5 +157,17 @@ func (j *jobService) Delete(id uuid.UUID) error {
 		q = j.db.WithContext(j.ctx)
 	)
 
-	return q.Delete(&models.Job{}, id).Error
+	if err := q.Delete(&models.Job{}, id).Error; err != nil {
+		return err
+	}
+
+	if j.bus != nil {
+		j.bus.Publish(event.Event{
+			Type:      event.TypeJobDeleted,
+			JobID:     id,
+			Timestamp: time.Now().UTC(),
+		})
+	}
+
+	return nil
 }

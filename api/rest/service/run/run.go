@@ -3,15 +3,17 @@ package run
 import (
 	"context"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"sync"
 )
 
 type Service interface {
 	WithStore(*runstorage.Store) Service
 	WithDatabase(*gorm.DB) Service
+	SetBus(event.Bus)
 	Start(uuid.UUID) (*runstorage.JobRun, error)
 	Get(uuid.UUID) (*runstorage.JobRun, error)
 	List(uuid.UUID) ([]*runstorage.JobRun, error)
@@ -23,10 +25,32 @@ type runService struct {
 	store *runstorage.Store
 }
 
+var (
+	defaultService   *runService
+	defaultServiceMu sync.Mutex
+)
+
 func New(ctx context.Context) Service {
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
+	if defaultService != nil {
+		return &runService{
+			ctx:   ctx,
+			store: defaultService.store,
+		}
+	}
 	return &runService{
 		ctx:   ctx,
-		store: runstorage.NewStore(db.Connection()),
+		store: runstorage.Default(),
+	}
+}
+
+func (r *runService) SetBus(bus event.Bus) {
+	r.store.SetBus(bus)
+	defaultServiceMu.Lock()
+	defer defaultServiceMu.Unlock()
+	if defaultService == nil {
+		defaultService = &runService{store: r.store}
 	}
 }
 
