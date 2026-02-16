@@ -169,14 +169,14 @@ ui-lint: builder
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
         {{repo}}/{{builder_image}}:{{tag}} \
-        npm run lint
+        sh -c 'npm install && npm run lint'
 
 ui-test: builder
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
         {{repo}}/{{builder_image}}:{{tag}} \
-        npm test
+        sh -c 'npm install && npm test'
 
 helm-lint:
     helm lint ./helm/caesium
