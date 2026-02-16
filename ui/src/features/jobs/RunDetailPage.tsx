@@ -1,6 +1,6 @@
 import { useParams } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Atom } from "@/lib/api";
+import { api, type Atom, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { JobDAG } from "./JobDAG";
 import { LogViewer } from "./LogViewer";
@@ -42,14 +42,35 @@ export function RunDetailPage() {
         events.connect({ job_id: jobId, run_id: runId });
 
         const onEvent = (e: CaesiumEvent) => {
-             // Invalidate run query to fetch latest state
-             queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId] });
-             if (e.type === "run_completed") {
-                toast.success("Run completed");
-             }
-             if (e.type === "run_failed") {
-                toast.error("Run failed");
-             }
+             queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
+                if (!old) return old;
+                
+                const updated = { ...old };
+                
+                if (e.type === "run_completed") {
+                    updated.status = "completed";
+                    toast.success("Run completed");
+                } else if (e.type === "run_failed") {
+                    updated.status = "failed";
+                    toast.error("Run failed");
+                } else if (e.type.startsWith("task_")) {
+                    if (updated.tasks) {
+                        updated.tasks = updated.tasks.map(t => {
+                            if (t.task_id === e.task_id) {
+                                let status = t.status;
+                                if (e.type === "task_started") status = "running";
+                                else if (e.type === "task_succeeded") status = "completed";
+                                else if (e.type === "task_failed") status = "failed";
+                                else if (e.type === "task_skipped") status = "skipped";
+                                return { ...t, status };
+                            }
+                            return t;
+                        });
+                    }
+                }
+                
+                return updated;
+             });
         };
         
         const eventTypes = ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"];

@@ -13,7 +13,7 @@ func RegisterUI(e *echo.Echo) {
 	// Get the sub-filesystem for the dist directory
 	distFS, err := fs.Sub(ui.DistDir, "dist")
 	if err != nil {
-		panic(err)
+		e.Logger.Fatalf("failed to create sub-filesystem for UI: %v", err)
 	}
 
 	fileServer := http.FileServer(http.FS(distFS))
@@ -22,7 +22,7 @@ func RegisterUI(e *echo.Echo) {
 		path := c.Request().URL.Path
 
 		// If it's a request for an API or health, don't handle it here
-		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/gql") || path == "/health" {
+		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/gql") || path == "/health" || path == "/metrics" {
 			return echo.ErrNotFound
 		}
 
