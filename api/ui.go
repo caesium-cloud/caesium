@@ -29,7 +29,7 @@ func RegisterUI(e *echo.Echo) {
 		// Check if the file exists in the embedded FS
 		f, err := distFS.Open(strings.TrimPrefix(path, "/"))
 		if err == nil {
-			f.Close()
+			_ = f.Close()
 			fileServer.ServeHTTP(c.Response(), c.Request())
 			return nil
 		}
