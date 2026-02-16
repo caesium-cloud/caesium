@@ -6,6 +6,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/gql"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo-contrib/prometheus"
@@ -15,7 +16,7 @@ import (
 var e *echo.Echo
 
 // Start launches Caesium's API.
-func Start(ctx context.Context) error {
+func Start(ctx context.Context, bus event.Bus) error {
 	e = echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -28,7 +29,7 @@ func Start(ctx context.Context) error {
 	prometheus.NewPrometheus("caesium", nil).Use(e)
 
 	// REST
-	bind.All(e.Group("/v1"))
+	bind.All(e.Group("/v1"), bus)
 
 	// GraphQL
 	e.GET("/gql", gql.Handler())

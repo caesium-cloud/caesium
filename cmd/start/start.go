@@ -9,6 +9,9 @@ import (
 	"syscall"
 
 	"github.com/caesium-cloud/caesium/api"
+	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
@@ -75,6 +78,11 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Fatal("database migration failure", "error", err)
 	}
 
+	bus := event.New()
+	run.Default().SetBus(bus)
+	jsvc.Service(ctx).SetBus(bus)
+	runsvc.New(ctx).SetBus(bus)
+
 	vars := env.Variables()
 	log.Info(
 		"execution configuration",
@@ -122,7 +130,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx)
+		errs <- api.Start(ctx, bus)
 	}()
 
 	go func() {

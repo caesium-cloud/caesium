@@ -408,3 +408,30 @@ func exportLogSnippet(content, runID, taskID, filter string) tea.Cmd {
 		return logsExportedMsg{path: file.Name()}
 	}
 }
+
+type eventStreamMsg <-chan api.Event
+
+type eventMsg api.Event
+
+func startEventStream(client *api.Client) tea.Cmd {
+	return func() tea.Msg {
+		ch, err := client.Events().Stream(context.Background(), "", "", nil)
+		if err != nil {
+			return errMsg(err)
+		}
+		return eventStreamMsg(ch)
+	}
+}
+
+func waitForEvent(ch <-chan api.Event) tea.Cmd {
+	return func() tea.Msg {
+		if ch == nil {
+			return nil
+		}
+		event, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return eventMsg(event)
+	}
+}

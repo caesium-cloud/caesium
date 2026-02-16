@@ -2,20 +2,28 @@ package bind
 
 import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
+	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
+	internal_event "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/labstack/echo/v4"
 )
 
-func All(g *echo.Group) {
-	Public(g)
+func All(g *echo.Group, bus internal_event.Bus) {
+	Public(g, bus)
 }
 
-func Public(g *echo.Group) {
+func Public(g *echo.Group, bus internal_event.Bus) {
+	// events
+	{
+		ctrl := event.New(bus)
+		g.GET("/events", ctrl.Stream)
+	}
+
 	// atoms
 	{
 		g.GET("/atoms", atom.List)

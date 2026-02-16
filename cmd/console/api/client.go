@@ -107,6 +107,11 @@ func (c *Client) Runs() *RunsService {
 	return &RunsService{client: c}
 }
 
+// Events exposes event stream API helpers.
+func (c *Client) Events() *EventsService {
+	return &EventsService{client: c}
+}
+
 type healthResponse struct {
 	Status string `json:"status"`
 }

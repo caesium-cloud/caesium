@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -59,81 +60,82 @@ func (s section) prev() section {
 
 // Model represents the Bubble Tea program state.
 type Model struct {
-	client          *api.Client
-	spinner         spinner.Model
-	state           status
-	err             error
-	active          section
-	jobs            table.Model
-	triggers        table.Model
-	atoms           table.Model
-	jobRecords      []api.Job
-	jobRunStatus    map[string]*api.Run
-	viewportWidth   int
-	viewportHeight  int
-	selectedJobID   string
-	jobDetail       *api.JobDetail
-	graph           *dag.Graph
-	taskRunStatus   map[string]api.RunTask
-	focusedNodeID   string
-	dagLayout       string
-	dagFocusPath    bool
-	dagViewport     viewport.Model
-	dagErr          error
-	detailErr       error
-	runsTable       table.Model
-	runs            []api.Run
-	runsJobID       string
-	runsLoading     bool
-	runsErr         error
-	showRunsModal   bool
-	activeRunID     string
-	followLatestRun bool
-	logCtx          context.Context
-	logCancel       context.CancelFunc
-	logStream       io.ReadCloser
-	logTaskID       string
-	logRunID        string
-	showLogsModal   bool
-	logsViewport    viewport.Model
-	logsLoading     bool
-	logsErr         error
-	logContent      string
-	logCache        map[string]string
-	logSince        map[string]time.Time
-	logLastLine     map[string]string
-	logsFollow      bool
-	logFilter       string
-	logFilterInput  bool
-	atomDetails     map[string]*api.Atom
-	atomErr         error
-	loadingAtomID   string
-	atomIndex       map[string]api.Atom
-	showDetail      bool
-	showNodeDetail  bool
-	lastStatusPoll    time.Time
-	statusPollActive  bool
-	detailLoading   bool
-	showHelp        bool
-	themeIndex      int
-	themeName       string
-	apiHealthy      bool
-	apiHealthErr    error
-	apiLatency      time.Duration
-	apiCheckedAt    time.Time
-	lastLoadAt      time.Time
-	lastLoadLatency time.Duration
-	lastLoadRetries int
-	confirmAction   *actionRequest
-	actionPending   *actionRequest
-	actionNotice    string
-	actionErr       error
+	client             *api.Client
+	spinner            spinner.Model
+	state              status
+	err                error
+	active             section
+	jobs               table.Model
+	triggers           table.Model
+	atoms              table.Model
+	jobRecords         []api.Job
+	jobRunStatus       map[string]*api.Run
+	viewportWidth      int
+	viewportHeight     int
+	selectedJobID      string
+	jobDetail          *api.JobDetail
+	graph              *dag.Graph
+	taskRunStatus      map[string]api.RunTask
+	focusedNodeID      string
+	dagLayout          string
+	dagFocusPath       bool
+	dagViewport        viewport.Model
+	dagErr             error
+	detailErr          error
+	runsTable          table.Model
+	runs               []api.Run
+	runsJobID          string
+	runsLoading        bool
+	runsErr            error
+	showRunsModal      bool
+	activeRunID        string
+	followLatestRun    bool
+	logCtx             context.Context
+	logCancel          context.CancelFunc
+	logStream          io.ReadCloser
+	logTaskID          string
+	logRunID           string
+	showLogsModal      bool
+	logsViewport       viewport.Model
+	logsLoading        bool
+	logsErr            error
+	logContent         string
+	logCache           map[string]string
+	logSince           map[string]time.Time
+	logLastLine        map[string]string
+	logsFollow         bool
+	logFilter          string
+	logFilterInput     bool
+	atomDetails        map[string]*api.Atom
+	atomErr            error
+	loadingAtomID      string
+	atomIndex          map[string]api.Atom
+	showDetail         bool
+	showNodeDetail     bool
+	lastStatusPoll     time.Time
+	statusPollActive   bool
+	detailLoading      bool
+	showHelp           bool
+	themeIndex         int
+	themeName          string
+	apiHealthy         bool
+	apiHealthErr       error
+	apiLatency         time.Duration
+	apiCheckedAt       time.Time
+	lastLoadAt         time.Time
+	lastLoadLatency    time.Duration
+	lastLoadRetries    int
+	confirmAction      *actionRequest
+	actionPending      *actionRequest
+	actionNotice       string
+	actionErr          error
 	statsData          *api.StatsResponse
 	statsLoading       bool
 	statsErr           error
 	jobFilter          string
 	jobFilterInput     bool
 	filteredJobIndices []int
+	eventChan          <-chan api.Event
 }
 
 // New creates the root model with dependency references.
@@ -176,7 +178,7 @@ func New(client *api.Client) Model {
 
 // Init bootstraps async fetch and spinner tick.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, fetchData(m.client))
+	return tea.Batch(m.spinner.Tick, fetchData(m.client), startEventStream(m.client))
 }
 
 // Update handles Bubble Tea messages.
@@ -763,6 +765,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case statsErrMsg:
 		m.statsLoading = false
 		m.statsErr = msg.err
+	case eventStreamMsg:
+		m.eventChan = msg
+		cmds = append(cmds, waitForEvent(m.eventChan))
+	case eventMsg:
+		cmds = append(cmds, waitForEvent(m.eventChan))
+		switch msg.Type {
+		case api.TypeJobCreated, api.TypeJobDeleted:
+			cmds = append(cmds, fetchData(m.client))
+		case api.TypeRunStarted:
+			m.handleRunStarted(api.Event(msg))
+		case api.TypeRunCompleted, api.TypeRunFailed:
+			m.handleRunCompleted(api.Event(msg))
+		case api.TypeTaskStarted, api.TypeTaskSucceeded, api.TypeTaskFailed, api.TypeTaskSkipped:
+			m.handleTaskUpdate(api.Event(msg))
+		}
 	case dataLoadErrMsg:
 		m.state = statusError
 		m.err = msg.err
@@ -996,7 +1013,7 @@ func extractLastTimestamp(chunk string) time.Time {
 	return latest
 }
 
-const statusPollInterval = 2 * time.Second
+const statusPollInterval = 10 * time.Second
 
 func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
 	if m.client == nil || m.statusPollActive {
@@ -1040,6 +1057,54 @@ func (m *Model) maybeAutoRefreshRunStatus() tea.Cmd {
 	m.lastStatusPoll = now
 	m.statusPollActive = true
 	return fetchJobStatuses(m.client, ids)
+}
+
+func (m *Model) handleRunStarted(evt api.Event) {
+	var run api.Run
+	if err := json.Unmarshal(evt.Payload, &run); err != nil {
+		return
+	}
+
+	m.setJobStatus(run.JobID, &run)
+
+	if m.jobDetail != nil && m.jobDetail.Job.ID == run.JobID {
+		m.jobDetail.LatestRun = &run
+		m.updateRunsEntry(&run)
+		if m.followLatestRun || m.activeRunID == "" {
+			m.activeRunID = run.ID
+			m.followLatestRun = true
+			m.applyRun(&run)
+			if m.graph != nil {
+				m.refreshDAGLayout(false)
+			}
+		}
+	}
+}
+
+func (m *Model) handleRunCompleted(evt api.Event) {
+	m.handleRunStarted(evt)
+}
+
+func (m *Model) handleTaskUpdate(evt api.Event) {
+	var task api.RunTask
+	if err := json.Unmarshal(evt.Payload, &task); err != nil {
+		return
+	}
+
+	if m.activeRunID == "" || evt.RunID.String() != m.activeRunID {
+		return
+	}
+
+	m.taskRunStatus[task.ID] = task
+	if m.graph != nil {
+		m.refreshDAGLayout(false)
+	}
+
+	if strings.ToLower(task.Status) == "running" {
+		if m.logTaskID == task.ID && m.logRunID == evt.RunID.String() {
+			m.maybeRestartLogStream(m.logRunID, m.logRunID)
+		}
+	}
 }
 
 func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
