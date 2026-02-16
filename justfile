@@ -91,7 +91,7 @@ unit-test: builder
 run: build
     docker run --platform {{platform}} \
         -d --name caesium-server \
-        --network=host \
+        -p 8080:8080 \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
