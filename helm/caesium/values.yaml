@@ -1,0 +1,93 @@
+# -- Number of Caesium replicas (1 = standalone, 3+ = RAFT cluster)
+replicaCount: 1
+
+image:
+  repository: caesiumcloud/caesium
+  # -- Overrides the image tag whose default is the chart appVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# -- Caesium application configuration
+config:
+  logLevel: info
+  port: 8080
+  dqlitePort: 9001
+  maxParallelTasks: 1
+  # -- Database backend: "internal" (dqlite) or "postgres"
+  databaseType: internal
+  # -- PostgreSQL DSN (only used when databaseType=postgres)
+  databaseDSN: ""
+  # -- Additional environment variables appended to the container spec
+  extraEnv: []
+
+# -- Persistent storage for dqlite data
+persistence:
+  enabled: true
+  # -- Use cluster default when empty
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+
+service:
+  type: ClusterIP
+  port: 8080
+  annotations: {}
+
+# -- Headless service for StatefulSet peer discovery (always created)
+headlessService:
+  port: 9001
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: caesium.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # limits:
+  #   cpu: 500m
+  #   memory: 256Mi
+
+podAnnotations: {}
+podLabels: {}
+
+podDisruptionBudget:
+  enabled: false
+  # -- Minimum available pods (set to quorum for RAFT, e.g., 2 for a 3-node cluster)
+  minAvailable: ""
+  maxUnavailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Pod-level security context
+podSecurityContext:
+  fsGroup: 10001
+
+# -- Container-level security context
+securityContext:
+  runAsUser: 10001
+  runAsGroup: 10001
+  runAsNonRoot: true
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false

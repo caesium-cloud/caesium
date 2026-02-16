@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "caesium.peerConfigName" . }}
+  labels:
+    {{- include "caesium.labels" . | nindent 4 }}
+data:
+  discover-peers.sh: |-
+    #!/bin/sh
+    set -eu
+
+    ORDINAL="${HOSTNAME##*-}"
+
+    if [ "${ORDINAL}" -eq 0 ]; then
+      echo "" > /etc/caesium/database-nodes
+      exit 0
+    fi
+
+    PEERS=""
+    i=0
+    while [ "${i}" -lt "${ORDINAL}" ]; do
+      ADDR="${RELEASE_NAME}-${i}.${HEADLESS_SVC}.${POD_NAMESPACE}.svc.cluster.local:${DQLITE_PORT}"
+      if [ -z "${PEERS}" ]; then
+        PEERS="${ADDR}"
+      else
+        PEERS="${PEERS},${ADDR}"
+      fi
+      i=$((i + 1))
+    done
+
+    echo "${PEERS}" > /etc/caesium/database-nodes

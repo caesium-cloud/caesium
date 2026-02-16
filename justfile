@@ -163,3 +163,12 @@ lint: builder
             go fmt .; \
             go vet ./...; \
             golangci-lint run ./...'
+
+helm-lint:
+    helm lint ./helm/caesium
+
+helm-template:
+    helm template caesium ./helm/caesium --values ./helm/caesium/ci/test-values.yaml
+
+helm-test:
+    helm test caesium --timeout 120s
