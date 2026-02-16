@@ -159,7 +159,7 @@ lint: builder
         -w {{bld_dir}} \
         -e GOFLAGS=-buildvcs=false \
         {{repo}}/{{builder_image}}:{{tag}} \
-        sh -c 'set -euo pipefail; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && set -euo pipefail; \
             go fmt .; \
             go vet ./...; \
             golangci-lint run ./...'
