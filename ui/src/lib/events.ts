@@ -4,7 +4,7 @@ export interface CaesiumEvent {
   run_id?: string;
   task_id?: string;
   timestamp: string;
-  payload?: any;
+  payload?: unknown;
 }
 
 type EventHandler = (event: CaesiumEvent) => void;

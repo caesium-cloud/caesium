@@ -58,8 +58,8 @@ export function LogViewer({ jobId, runId, taskId, onClose }: LogViewerProps) {
           if (done) break;
           term.write(decoder.decode(value));
         }
-      } catch (err: any) {
-        if (err.name !== "AbortError") {
+      } catch (err: unknown) {
+        if (err instanceof Error && err.name !== "AbortError") {
           term.writeln(`\x1b[31mConnection error: ${err.message}\x1b[0m`);
         }
       }

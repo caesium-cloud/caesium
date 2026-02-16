@@ -2,8 +2,8 @@ export interface Job {
   id: string;
   alias: string;
   trigger_id: string;
-  labels: Record<string, any>;
-  annotations: Record<string, any>;
+  labels: Record<string, unknown>;
+  annotations: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -42,7 +42,7 @@ export interface Atom {
   engine: string;
   image: string;
   command: string;
-  spec: Record<string, any>;
+  spec: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
@@ -61,7 +61,7 @@ export interface JobTask {
   job_id: string;
   atom_id: string;
   next_id?: string;
-  node_selector: Record<string, any>;
+  node_selector: Record<string, unknown>;
   created_at: string;
   updated_at: string;
 }
