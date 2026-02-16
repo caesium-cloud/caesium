@@ -34,6 +34,9 @@ func Start(ctx context.Context, bus event.Bus) error {
 	// GraphQL
 	e.GET("/gql", gql.Handler())
 
+	// UI
+	RegisterUI(e)
+
 	return e.Start(fmt.Sprintf(":%v", env.Variables().Port))
 }
 

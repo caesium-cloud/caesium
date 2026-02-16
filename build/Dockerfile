@@ -1,9 +1,15 @@
 ARG BUILDER_TAG
 FROM caesiumcloud/caesium-builder:${BUILDER_TAG} AS builder
 
-# Build binary with minimal size and prep runtime deps
+# Copy source and build UI
 WORKDIR /bld/caesium
 COPY . .
+
+WORKDIR /bld/caesium/ui
+RUN npm install && npm run build
+
+# Build Go binary (embedding the ui/dist we just built)
+WORKDIR /bld/caesium
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags="-s -w" -o /dist/bin/caesium ./

@@ -86,12 +86,12 @@ unit-test: builder
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
         {{repo}}/{{builder_image}}:{{tag}} \
-        go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...'
 
 run: build
     docker run --platform {{platform}} \
         -d --name caesium-server \
-        --network=host \
+        -p 8080:8080 \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
@@ -107,7 +107,7 @@ integration-test:
         --network=container:{{it_container}} \
         -w {{bld_dir}} \
         {{repo}}/{{builder_image}}:{{tag}} \
-        sh -c 'go test ./test/ -tags=integration'; then \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration'; then \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
     else \
       echo "integration tests failed; caesium server logs:"; \
@@ -159,10 +159,24 @@ lint: builder
         -w {{bld_dir}} \
         -e GOFLAGS=-buildvcs=false \
         {{repo}}/{{builder_image}}:{{tag}} \
-        sh -c 'set -euo pipefail; \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && set -euo pipefail; \
             go fmt .; \
             go vet ./...; \
             golangci-lint run ./...'
+
+ui-lint: builder
+    docker run --rm --platform {{platform}} \
+        -v {{repo_dir}}:{{bld_dir}} \
+        -w {{bld_dir}}/ui \
+        {{repo}}/{{builder_image}}:{{tag}} \
+        sh -c 'npm install && npm run lint'
+
+ui-test: builder
+    docker run --rm --platform {{platform}} \
+        -v {{repo_dir}}:{{bld_dir}} \
+        -w {{bld_dir}}/ui \
+        {{repo}}/{{builder_image}}:{{tag}} \
+        sh -c 'npm install && npm test'
 
 helm-lint:
     helm lint ./helm/caesium

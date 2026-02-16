@@ -130,6 +130,32 @@ jobs:
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
             just tag=$IMAGE_TAG unit-test
 
+  ui-test:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just
+          command: sudo apt-get update && sudo apt-get install -y just
+      - run:
+          name: Load builder image
+          command: gunzip -c /tmp/workspace/builder-amd64.tar.gz | docker load
+      - run:
+          name: UI Lint
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG ui-lint
+      - run:
+          name: UI Unit tests
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            just tag=$IMAGE_TAG ui-test
+
   build-and-integration-test:
     machine:
       image: ubuntu-2404:current
@@ -348,6 +374,14 @@ workflows:
               only: /.*/
             tags:
               only: /^v.*/
+      - ui-test:
+          requires:
+            - builder
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - build-and-integration-test:
           requires:
             - builder
@@ -376,6 +410,7 @@ workflows:
       - publish:
           requires:
             - lint
+            - ui-test
             - helm-lint
             - unit-test
             - unit-test-arm64
