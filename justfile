@@ -86,7 +86,7 @@ unit-test: builder
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
         {{repo}}/{{builder_image}}:{{tag}} \
-        go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...'
 
 run: build
     docker run --platform {{platform}} \
@@ -107,7 +107,7 @@ integration-test:
         --network=container:{{it_container}} \
         -w {{bld_dir}} \
         {{repo}}/{{builder_image}}:{{tag}} \
-        sh -c 'go test ./test/ -tags=integration'; then \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration'; then \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
     else \
       echo "integration tests failed; caesium server logs:"; \
