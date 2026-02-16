@@ -75,14 +75,14 @@ func (s *EventsService) Stream(ctx context.Context, jobID, runID string, types [
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
 	ch := make(chan Event, 100)
 
 	go func() {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		defer close(ch)
 
 		scanner := bufio.NewScanner(resp.Body)

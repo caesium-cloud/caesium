@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
-	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
