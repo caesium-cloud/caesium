@@ -78,6 +78,10 @@ export function RunDetailPage() {
                             status: status || tasks[taskIndex].status 
                         };
                     } else {
+                        // If task not found in current snapshot, trigger a background refetch
+                        // to ensure we get the full task details (atom_id, engine, image, etc.)
+                        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs", runId] });
+                        
                         const baseTask: TaskRun = {
                             id: taskId,
                             job_run_id: runId,

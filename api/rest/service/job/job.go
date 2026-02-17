@@ -96,6 +96,10 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 		q = q.Limit(int(req.Limit))
 	}
 
+	if req.Offset > 0 {
+		q = q.Offset(int(req.Offset))
+	}
+
 	if err := q.Find(&jobs).Error; err != nil {
 		return nil, err
 	}

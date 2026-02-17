@@ -60,6 +60,8 @@ export function JobDetailPage() {
               if (taskIndex > -1) {
                 tasks[taskIndex] = { ...tasks[taskIndex], ...taskPayload };
               } else {
+                // Background refetch if we see an unknown task to get full atom/metadata
+                queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
                 tasks.push(taskPayload);
               }
               return { ...run, tasks };
@@ -78,6 +80,7 @@ export function JobDetailPage() {
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
     queryKey: ["job", jobId, "dag"],
     queryFn: () => api.getJobDAG(jobId),
+    refetchInterval: 30000,
   });
 
   const { data: atoms, isLoading: isLoadingAtoms } = useQuery({
