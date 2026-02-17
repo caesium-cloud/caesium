@@ -106,8 +106,10 @@ spec:
               value: /var/lib/caesium/dqlite
             - name: CAESIUM_DATABASE_TYPE
               value: {{ .Values.config.databaseType | quote }}
+            {{- if .Values.config.maxParallelTasks }}
             - name: CAESIUM_MAX_PARALLEL_TASKS
               value: {{ .Values.config.maxParallelTasks | quote }}
+            {{- end }}
             {{- if .Values.config.databaseDSN }}
             - name: CAESIUM_DATABASE_DSN
               value: {{ .Values.config.databaseDSN | quote }}
