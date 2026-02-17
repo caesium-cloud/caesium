@@ -6,6 +6,7 @@ export interface Job {
   annotations: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+  latest_run?: JobRun;
 }
 
 export interface JobRun {
@@ -27,7 +28,7 @@ export interface TaskRun {
   atom_id: string;
   engine: string;
   image: string;
-  command: string;
+  command: string[];
   status: string;
   result?: string;
   error?: string;
@@ -41,7 +42,7 @@ export interface Atom {
   id: string;
   engine: string;
   image: string;
-  command: string;
+  command: string[];
   spec: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -145,7 +146,7 @@ export const api = {
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
-  triggerJob: (jobId: string) => request<JobRun>(`/jobs/${jobId}/trigger`, { method: "POST" }),
+  triggerJob: (jobId: string) => request<JobRun>(`/jobs/${jobId}/run`, { method: "POST" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getAtoms: () => request<Atom[]>("/atoms"),
   getStats: () => request<StatsResponse>("/stats"),

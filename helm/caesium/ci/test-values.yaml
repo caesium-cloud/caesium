@@ -5,7 +5,7 @@ image:
 
 config:
   logLevel: info
-  maxParallelTasks: 1
+  # maxParallelTasks: 1
 
 persistence:
   enabled: false

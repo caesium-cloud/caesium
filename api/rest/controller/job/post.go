@@ -10,10 +10,10 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
-func Post(c echo.Context) error {
+func Post(c *echo.Context) error {
 	var (
 		req           = &PostRequest{}
 		tsvc          = task.Service(c.Request().Context())
@@ -27,7 +27,7 @@ func Post(c echo.Context) error {
 	}
 
 	if req.Trigger == nil {
-		return echo.ErrBadRequest.SetInternal(fmt.Errorf("trigger is required"))
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(fmt.Errorf("trigger is required"))
 	}
 
 	log.Info(
@@ -38,7 +38,7 @@ func Post(c echo.Context) error {
 	trig, err := trigger.Service(c.Request().Context()).Create(req.Trigger)
 	if err != nil {
 		log.Error("failed to create trigger", "error", err)
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	log.Info("creating job", "alias", req.Alias)
@@ -51,7 +51,7 @@ func Post(c echo.Context) error {
 	})
 	if err != nil {
 		log.Error("failed to create job", "error", err)
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	for _, t := range req.Tasks {
@@ -71,7 +71,7 @@ func Post(c echo.Context) error {
 		})
 		if err != nil {
 			log.Error("failed to create atom", "error", err)
-			return echo.ErrInternalServerError.SetInternal(err)
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
 
 		log.Info(
@@ -89,7 +89,7 @@ func Post(c echo.Context) error {
 		})
 		if err != nil {
 			log.Error("failed to create task", "error", err)
-			return echo.ErrInternalServerError.SetInternal(err)
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
 
 		createdTasks = append(createdTasks, taskModel.ID.String())
@@ -111,7 +111,7 @@ func Post(c echo.Context) error {
 				ToTaskID:   edge.to,
 			}); err != nil {
 				log.Error("failed to create task edge", "error", err)
-				return echo.ErrInternalServerError.SetInternal(err)
+				return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 			}
 		}
 	case len(createdTasks) > 1:
@@ -122,7 +122,7 @@ func Post(c echo.Context) error {
 				ToTaskID:   createdTasks[idx+1],
 			}); err != nil {
 				log.Error("failed to create task edge", "error", err)
-				return echo.ErrInternalServerError.SetInternal(err)
+				return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 			}
 		}
 	}

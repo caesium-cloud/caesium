@@ -6,7 +6,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 var startedAt time.Time
@@ -45,7 +45,7 @@ type HealthResponse struct {
 }
 
 // Health is used to determine if Caesium is healthy.
-func Health(c echo.Context) error {
+func Health(c *echo.Context) error {
 	overall := Healthy
 	checks := &HealthChecks{}
 

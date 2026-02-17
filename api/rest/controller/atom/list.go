@@ -6,24 +6,24 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
-func List(c echo.Context) error {
+func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	atoms, err := atom.Service(c.Request().Context()).List(req)
 	if err != nil {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	return c.JSON(http.StatusOK, atoms)
 }
 
-func parseListRequest(c echo.Context) (req *atom.ListRequest, err error) {
+func parseListRequest(c *echo.Context) (req *atom.ListRequest, err error) {
 	req = &atom.ListRequest{
 		Engine: c.QueryParam("engine"),
 	}

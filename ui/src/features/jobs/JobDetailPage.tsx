@@ -1,19 +1,79 @@
-import { useParams } from "@tanstack/react-router";
-import { useQuery, useMutation } from "@tanstack/react-query";
-import { api, type Atom } from "@/lib/api";
+import { useParams, useNavigate, Link } from "@tanstack/react-router";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type Atom, type JobRun, type TaskRun } from "@/lib/api";
+import { events, type CaesiumEvent } from "@/lib/events";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { JobDAG } from "./JobDAG";
-import { Play } from "lucide-react";
+import { Play, Clock, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
+import { Duration } from "@/components/duration";
+import { RelativeTime } from "@/components/relative-time";
+import { useEffect } from "react";
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
+    refetchInterval: 30000,
   });
+
+  const { data: runs, isLoading: isLoadingRuns } = useQuery({
+    queryKey: ["job", jobId, "runs"],
+    queryFn: () => api.getJobRuns(jobId),
+    refetchInterval: 30000,
+  });
+
+  useEffect(() => {
+    const onEvent = (e: CaesiumEvent) => {
+      if (e.job_id !== jobId) return;
+
+      if (e.type === "run_started" || e.type === "run_completed" || e.type === "run_failed") {
+        const runPayload = e.payload as JobRun;
+        if (!runPayload) return;
+
+        queryClient.setQueryData(["job", jobId, "runs"], (old: JobRun[] | undefined) => {
+          if (!old) return [runPayload];
+          const exists = old.find(r => r.id === runPayload.id);
+          if (exists) {
+            return old.map(r => r.id === runPayload.id ? { ...r, ...runPayload } : r);
+          }
+          return [runPayload, ...old];
+        });
+      }
+
+      if (e.type.startsWith("task_")) {
+        const taskPayload = e.payload as TaskRun;
+        if (!taskPayload) return;
+
+        queryClient.setQueryData(["job", jobId, "runs"], (old: JobRun[] | undefined) => {
+          if (!old) return old;
+          return old.map(run => {
+            if (run.id === taskPayload.job_run_id) {
+              const tasks = [...(run.tasks || [])];
+              const taskIndex = tasks.findIndex(t => t.task_id === taskPayload.task_id);
+              if (taskIndex > -1) {
+                tasks[taskIndex] = { ...tasks[taskIndex], ...taskPayload };
+              } else {
+                tasks.push(taskPayload);
+              }
+              return { ...run, tasks };
+            }
+            return run;
+          });
+        });
+      }
+    };
+
+    const eventTypes = ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"];
+    eventTypes.forEach(t => events.subscribe(t, onEvent));
+    return () => eventTypes.forEach(t => events.unsubscribe(t, onEvent));
+  }, [jobId, queryClient]);
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
     queryKey: ["job", jobId, "dag"],
@@ -32,24 +92,58 @@ export function JobDetailPage() {
 
   const triggerMutation = useMutation({
     mutationFn: api.triggerJob,
-    onSuccess: () => {
+    onSuccess: (run) => {
       toast.success("Job triggered successfully");
+      navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId: run.job_id, runId: run.id } });
     },
     onError: (err) => {
       toast.error(`Failed to trigger job: ${err.message}`);
     },
   });
 
-  if (isLoadingJob || isLoadingDAG || isLoadingAtoms) return <div className="p-8">Loading...</div>;
+  if (isLoadingJob || isLoadingDAG || isLoadingAtoms || isLoadingRuns) return <div className="p-8">Loading...</div>;
 
   if (!job) return <div className="p-8">Job not found</div>;
+
+  const sortedRuns = runs ? [...runs].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()) : [];
+  const latestRun = sortedRuns[0];
+  const taskMetadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string }> = {};
+  latestRun?.tasks?.forEach(t => {
+    taskMetadata[t.task_id] = {
+        status: t.status,
+        started_at: t.started_at,
+        completed_at: t.completed_at,
+        error: t.error
+    };
+  });
 
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
             <h1 className="text-2xl font-bold tracking-tight">{job.alias}</h1>
-            <p className="text-muted-foreground font-mono text-sm">{job.id}</p>
+            <div className="flex items-center gap-2">
+                <p className="text-muted-foreground font-mono text-xs">{job.id}</p>
+                {latestRun && (
+                    <>
+                        <span className="text-muted-foreground">•</span>
+                        <Badge variant={
+                          latestRun.status === "succeeded" || latestRun.status === "completed" 
+                            ? "success" 
+                            : latestRun.status === "failed" 
+                              ? "destructive" 
+                              : latestRun.status === "running"
+                                ? "running"
+                                : "secondary"
+                        } className="text-[10px] h-4">
+                            {latestRun.status}
+                        </Badge>
+                        <span className="text-muted-foreground font-mono text-[10px]">
+                            <Duration start={latestRun.started_at} end={latestRun.completed_at} />
+                        </span>
+                    </>
+                )}
+            </div>
         </div>
         <div className="flex gap-2">
              <Button onClick={() => triggerMutation.mutate(job.id)} disabled={triggerMutation.isPending}>
@@ -64,11 +158,45 @@ export function JobDetailPage() {
           <TabsTrigger value="runs">Runs</TabsTrigger>
           <TabsTrigger value="definition">Definition</TabsTrigger>
         </TabsList>
-        <TabsContent value="dag" className="h-[600px] mt-4">
-            {dag && atoms && <JobDAG dag={dag} atoms={atoms} />}
+        <TabsContent value="dag" className="h-[600px] mt-4 border rounded-md overflow-hidden">
+            {dag && atoms && <JobDAG dag={dag} atoms={atoms} taskMetadata={taskMetadata} />}
         </TabsContent>
         <TabsContent value="runs" className="mt-4">
-            <div className="p-4 border rounded-md bg-card">Runs List (Coming Soon)</div>
+            <div className="rounded-md border bg-card divide-y">
+                {runs?.length === 0 && (
+                    <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
+                )}
+                {runs?.map(run => (
+                    <Link 
+                        key={run.id}
+                        to="/jobs/$jobId/runs/$runId"
+                        params={{ jobId: job.id, runId: run.id }}
+                        className="flex items-center justify-between p-4 hover:bg-muted/50 transition-colors group"
+                    >
+                        <div className="flex items-center gap-4">
+                            <Clock className="h-4 w-4 text-muted-foreground" />
+                            <div>
+                                <div className="font-mono text-sm font-bold">{run.id.substring(0, 8)}</div>
+                                <div className="text-xs text-muted-foreground"><RelativeTime date={run.created_at} /></div>
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-3">
+                            <Badge variant={
+                              run.status === "succeeded" || run.status === "completed" 
+                                ? "success" 
+                                : run.status === "failed" 
+                                  ? "destructive" 
+                                  : run.status === "running"
+                                    ? "running"
+                                    : "secondary"
+                            }>
+                                {run.status}
+                            </Badge>
+                            <ChevronRight className="h-4 w-4 text-muted-foreground group-hover:text-primary transition-colors" />
+                        </div>
+                    </Link>
+                ))}
+            </div>
         </TabsContent>
         <TabsContent value="definition" className="mt-4">
             <pre className="p-4 bg-muted rounded-md overflow-auto text-xs border">

@@ -1,14 +1,12 @@
 import { useParams } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type Atom, type JobRun } from "@/lib/api";
+import { api, type Atom, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { JobDAG } from "./JobDAG";
 import { LogViewer } from "./LogViewer";
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
-import { Terminal } from "lucide-react";
 import { toast } from "sonner";
 
 export function RunDetailPage() {
@@ -19,6 +17,7 @@ export function RunDetailPage() {
     const { data: run, isLoading: isLoadingRun } = useQuery({
         queryKey: ["job", jobId, "runs", runId],
         queryFn: () => api.getJobRun(jobId, runId),
+        refetchInterval: 5000, // Fallback to polling every 5s
     });
 
     const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -39,37 +38,67 @@ export function RunDetailPage() {
     useEffect(() => {
         if (!runId || !jobId) return;
         
-        events.connect({ job_id: jobId, run_id: runId });
-
         const onEvent = (e: CaesiumEvent) => {
              queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
                 if (!old) return old;
                 
-                const updated = { ...old };
-                
-                if (e.type === "run_completed") {
-                    updated.status = "completed";
+                if (e.type === "run_completed" || e.type === "run_succeeded") {
+                    const finalRun = e.payload as JobRun;
+                    if (finalRun && finalRun.tasks) return finalRun;
+                    
                     toast.success("Run completed");
-                } else if (e.type === "run_failed") {
-                    updated.status = "failed";
+                    return { ...old, status: "succeeded" };
+                } 
+                
+                if (e.type === "run_failed") {
                     toast.error("Run failed");
-                } else if (e.type.startsWith("task_")) {
-                    if (updated.tasks) {
-                        updated.tasks = updated.tasks.map(t => {
-                            if (t.task_id === e.task_id) {
-                                let status = t.status;
-                                if (e.type === "task_started") status = "running";
-                                else if (e.type === "task_succeeded") status = "completed";
-                                else if (e.type === "task_failed") status = "failed";
-                                else if (e.type === "task_skipped") status = "skipped";
-                                return { ...t, status };
-                            }
-                            return t;
-                        });
+                    return { ...old, status: "failed" };
+                } 
+                
+                if (e.type.startsWith("task_")) {
+                    const taskUpdate = e.payload as TaskRun;
+                    const updated = { ...old };
+                    const tasks = [...(updated.tasks || [])];
+                    const taskId = taskUpdate?.task_id || e.task_id;
+                    
+                    if (!taskId) return old;
+
+                    const taskIndex = tasks.findIndex(t => t.task_id === taskId);
+                    
+                    let status = taskUpdate?.status;
+                    if (e.type === "task_started") status = "running";
+                    else if (e.type === "task_succeeded") status = "succeeded";
+                    else if (e.type === "task_failed") status = "failed";
+                    else if (e.type === "task_skipped") status = "skipped";
+
+                    if (taskIndex > -1) {
+                        tasks[taskIndex] = { 
+                            ...tasks[taskIndex], 
+                            ...(taskUpdate || {}),
+                            status: status || tasks[taskIndex].status 
+                        };
+                    } else {
+                        const baseTask: TaskRun = {
+                            id: taskId,
+                            job_run_id: runId,
+                            task_id: taskId,
+                            atom_id: "",
+                            engine: "",
+                            image: "",
+                            command: [],
+                            status: status || "pending",
+                            created_at: new Date().toISOString(),
+                            updated_at: new Date().toISOString(),
+                        };
+                        const newTask: TaskRun = taskUpdate ? { ...baseTask, ...taskUpdate } : baseTask;
+                        tasks.push(newTask);
                     }
+                    
+                    updated.tasks = tasks;
+                    return updated;
                 }
                 
-                return updated;
+                return old;
              });
         };
         
@@ -78,16 +107,20 @@ export function RunDetailPage() {
 
         return () => {
             eventTypes.forEach(t => events.unsubscribe(t, onEvent));
-            events.disconnect();
         }
     }, [jobId, runId, queryClient]);
 
-    const taskStatus = useMemo(() => {
-        const statusMap: Record<string, string> = {};
+    const taskMetadata = useMemo(() => {
+        const meta: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string }> = {};
         run?.tasks?.forEach(t => {
-            statusMap[t.task_id] = t.status;
+            meta[t.task_id] = {
+                status: t.status,
+                started_at: t.started_at,
+                completed_at: t.completed_at,
+                error: t.error
+            };
         });
-        return statusMap;
+        return meta;
     }, [run]);
 
     if (isLoadingRun || isLoadingDAG || isLoadingAtoms) return <div className="p-8 space-y-4">
@@ -106,14 +139,30 @@ export function RunDetailPage() {
                 </div>
                 <div className="flex gap-2 items-center">
                     <span className="text-sm text-muted-foreground">Status:</span>
-                    <Badge variant={run.status === "succeeded" || run.status === "completed" ? "default" : run.status === "failed" ? "destructive" : "secondary"}>
+                    <Badge variant={
+                      run.status === "succeeded" || run.status === "completed" 
+                        ? "success" 
+                        : run.status === "failed" 
+                          ? "destructive" 
+                          : run.status === "running"
+                            ? "running"
+                            : "secondary"
+                    }>
                         {run.status}
                     </Badge>
                 </div>
             </div>
 
-            <div className="border rounded-md bg-card">
-                 {dag && atoms && <JobDAG dag={dag} atoms={atoms} taskStatus={taskStatus} />}
+            <div className="border rounded-md bg-card h-[600px] overflow-hidden">
+                 {dag && atoms && (
+                    <JobDAG 
+                        dag={dag} 
+                        atoms={atoms} 
+                        taskMetadata={taskMetadata} 
+                        onNodeClick={setSelectedTaskId}
+                        selectedTaskId={selectedTaskId}
+                    />
+                 )}
             </div>
 
             {selectedTaskId && (
@@ -126,26 +175,6 @@ export function RunDetailPage() {
                     />
                 </div>
             )}
-            
-            <div className="space-y-2">
-                <h3 className="text-lg font-medium">Tasks</h3>
-                <div className="space-y-1">
-                    {run.tasks?.map(task => (
-                        <div key={task.id} className="flex justify-between items-center p-2 border rounded text-sm">
-                            <span className="font-mono">{task.task_id}</span>
-                            <div className="flex gap-2 items-center">
-                                <span className="text-muted-foreground">{task.atom_id}</span>
-                                <Badge variant="outline">{task.status}</Badge>
-                                {task.status !== 'pending' && (
-                                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setSelectedTaskId(task.task_id)}>
-                                        <Terminal className="h-4 w-4" />
-                                    </Button>
-                                )}
-                            </div>
-                        </div>
-                    ))}
-                </div>
-            </div>
         </div>
     );
 }

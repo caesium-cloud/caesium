@@ -3,12 +3,13 @@ package event
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 type Controller struct {
@@ -19,7 +20,7 @@ func New(bus event.Bus) *Controller {
 	return &Controller{bus: bus}
 }
 
-func (ctrl *Controller) Stream(c echo.Context) error {
+func (ctrl *Controller) Stream(c *echo.Context) error {
 	ctx := c.Request().Context()
 	jobIDStr := c.QueryParam("job_id")
 	runIDStr := c.QueryParam("run_id")
@@ -60,11 +61,16 @@ func (ctrl *Controller) Stream(c echo.Context) error {
 	c.Response().Header().Set(echo.HeaderConnection, "keep-alive")
 	c.Response().Header().Set("X-Accel-Buffering", "no") // Disable buffering in Nginx
 
+	flusher, ok := c.Response().(http.Flusher)
+	if !ok {
+		return echo.NewHTTPError(500, "streaming not supported")
+	}
+
 	// Send a comment to keep the connection alive (and for testing connectivity)
 	if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
 		return nil
 	}
-	c.Response().Flush()
+	flusher.Flush()
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
@@ -77,7 +83,7 @@ func (ctrl *Controller) Stream(c echo.Context) error {
 			if _, err := fmt.Fprintf(c.Response(), ": ping\n\n"); err != nil {
 				return nil
 			}
-			c.Response().Flush()
+			flusher.Flush()
 		case e, ok := <-ch:
 			if !ok {
 				return nil
@@ -85,14 +91,14 @@ func (ctrl *Controller) Stream(c echo.Context) error {
 
 			data, err := json.Marshal(e)
 			if err != nil {
-				c.Logger().Errorf("failed to marshal event for SSE stream: %v", err)
+				c.Logger().Error("failed to marshal event for SSE stream", "error", err)
 				continue
 			}
 
 			if _, err := fmt.Fprintf(c.Response(), "event: %s\ndata: %s\n\n", e.Type, data); err != nil {
 				return nil
 			}
-			c.Response().Flush()
+			flusher.Flush()
 		}
 	}
 }

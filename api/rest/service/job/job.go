@@ -7,6 +7,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -95,11 +96,25 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 		q = q.Limit(int(req.Limit))
 	}
 
-	if req.Offset > 0 {
-		q = q.Offset(int(req.Offset))
+	if err := q.Find(&jobs).Error; err != nil {
+		return nil, err
 	}
 
-	return jobs, q.Find(&jobs).Error
+	runStore := runstorage.NewStore(j.db)
+	for _, job := range jobs {
+		if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
+			job.LatestRun = &models.JobRun{
+				ID:          latest.ID,
+				JobID:       latest.JobID,
+				Status:      string(latest.Status),
+				StartedAt:   latest.StartedAt,
+				CompletedAt: latest.CompletedAt,
+				Error:       latest.Error,
+			}
+		}
+	}
+
+	return jobs, nil
 }
 
 func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {

@@ -21,7 +21,7 @@ config:
   logLevel: info
   port: 8080
   dqlitePort: 9001
-  maxParallelTasks: 1
+  # maxParallelTasks: 1
   # -- Database backend: "internal" (dqlite) or "postgres"
   databaseType: internal
   # -- PostgreSQL DSN (only used when databaseType=postgres)

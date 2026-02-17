@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useCallback } from 'react';
 import ReactFlow, {
   Controls,
   Background,
@@ -6,19 +6,32 @@ import ReactFlow, {
   type Node,
   type Edge,
   Position,
+  ConnectionLineType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
 import type { JobDAGResponse, Atom } from '@/lib/api';
+import { TaskNode } from './components/TaskNode';
 
-const nodeWidth = 200;
-const nodeHeight = 50;
+const nodeWidth = 300;
+const nodeHeight = 220;
+
+const nodeTypes = {
+  task: TaskNode,
+};
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
 
-  dagreGraph.setGraph({ rankdir: direction });
+  dagreGraph.setGraph({ 
+    rankdir: direction, 
+    nodesep: 150, 
+    ranksep: 200,
+    marginx: 50,
+    marginy: 50,
+    ranker: 'network-simplex',
+  });
 
   nodes.forEach((node) => {
     dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
@@ -46,61 +59,92 @@ const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => 
   return { nodes: layoutedNodes, edges };
 };
 
+interface TaskRunMetadata {
+  status: string;
+  started_at?: string;
+  completed_at?: string;
+  error?: string;
+}
+
 interface JobDAGProps {
   dag: JobDAGResponse;
   atoms: Record<string, Atom>;
   taskStatus?: Record<string, string>;
+  taskMetadata?: Record<string, TaskRunMetadata>;
+  onNodeClick?: (taskId: string) => void;
+  selectedTaskId?: string | null;
 }
 
-export function JobDAG({ dag, atoms, taskStatus }: JobDAGProps) {
+export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, selectedTaskId }: JobDAGProps) {
     const initialNodes: Node[] = useMemo(() => {
         if (!dag.nodes) return [];
         return dag.nodes.map(n => {
             const atom = atoms[n.atom_id];
-            const status = taskStatus?.[n.id];
+            const meta = taskMetadata?.[n.id];
+            const status = meta?.status || taskStatus?.[n.id] || 'pending';
             
-            let className = "border-2 rounded-md bg-white min-w-[150px]";
-            if (status === 'running') className += " border-blue-500 animate-pulse";
-            else if (status === 'completed') className += " border-green-500";
-            else if (status === 'failed') className += " border-red-500";
-            else if (status === 'cancelled') className += " border-yellow-500";
-            else className += " border-slate-200";
-
             return {
                 id: n.id,
-                type: 'input', 
-                data: { label: atom ? `${atom.image}` : n.atom_id },
-                className,
+                type: 'task',
+                data: { 
+                  label: n.id,
+                  atom: atom,
+                  status: status,
+                  isSelected: selectedTaskId === n.id,
+                  startedAt: meta?.started_at,
+                  completedAt: meta?.completed_at,
+                  error: meta?.error,
+                },
                 position: { x: 0, y: 0 } 
             }
         });
-    }, [dag, atoms, taskStatus]);
+    }, [dag, atoms, taskStatus, taskMetadata, selectedTaskId]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
-        return dag.edges.map((e, i) => ({
-            id: `e${i}`,
+        return dag.edges.map((e) => ({
+            id: `e${e.from}-${e.to}`,
             source: e.from,
             target: e.to,
             type: 'smoothstep',
-            markerEnd: { type: MarkerType.ArrowClosed },
+            animated: taskStatus?.[e.from] === 'running',
+            markerEnd: { 
+              type: MarkerType.ArrowClosed,
+              width: 20,
+              height: 20,
+              color: '#94a3b8',
+            },
+            style: {
+              strokeWidth: 2,
+              stroke: taskStatus?.[e.from] === 'completed' ? '#22c55e' : '#94a3b8',
+            }
         }));
-    }, [dag]);
+    }, [dag, taskStatus]);
 
     const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
         () => getLayoutedElements(initialNodes, initialEdges),
         [initialNodes, initialEdges]
     );
 
+    const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
+      onNodeClick?.(node.id);
+    }, [onNodeClick]);
+
   return (
-    <div style={{ height: 600 }} className="border rounded-md bg-white">
+    <div className="w-full h-full min-h-[500px] bg-slate-950/50 relative overflow-hidden">
       <ReactFlow
         nodes={layoutedNodes}
         edges={layoutedEdges}
+        nodeTypes={nodeTypes}
+        onNodeClick={handleNodeClick}
+        connectionLineType={ConnectionLineType.SmoothStep}
         fitView
+        fitViewOptions={{ padding: 0.2 }}
+        minZoom={0.1}
+        maxZoom={1.5}
       >
-        <Background />
-        <Controls />
+        <Background color="#334155" gap={20} />
+        <Controls className="fill-slate-400" />
       </ReactFlow>
     </div>
   );
