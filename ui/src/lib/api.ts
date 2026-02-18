@@ -12,6 +12,9 @@ export interface Job {
 export interface JobRun {
   id: string;
   job_id: string;
+  job_alias?: string;
+  trigger_type?: string;
+  trigger_alias?: string;
   status: string;
   error?: string;
   started_at: string;

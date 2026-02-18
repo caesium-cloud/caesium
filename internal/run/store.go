@@ -76,16 +76,19 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID          uuid.UUID      `json:"id"`
-	JobID       uuid.UUID      `json:"job_id"`
-	Status      Status         `json:"status"`
-	StartedAt   time.Time      `json:"started_at"`
-	CompletedAt *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
-	Error       string         `json:"error,omitempty"`
-	Tasks       []*TaskRun     `json:"tasks"`
-	Callbacks   []*CallbackRun `json:"callbacks"`
+	ID           uuid.UUID      `json:"id"`
+	JobID        uuid.UUID      `json:"job_id"`
+	JobAlias     string         `json:"job_alias,omitempty"`
+	TriggerType  string         `json:"trigger_type,omitempty"`
+	TriggerAlias string         `json:"trigger_alias,omitempty"`
+	Status       Status         `json:"status"`
+	StartedAt    time.Time      `json:"started_at"`
+	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	Error        string         `json:"error,omitempty"`
+	Tasks        []*TaskRun     `json:"tasks"`
+	Callbacks    []*CallbackRun `json:"callbacks"`
 }
 
 type Store struct {
@@ -529,21 +532,35 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 }
 
 func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
-	var modelsRuns []models.JobRun
-	if err := s.db.Where("job_id = ?", jobID).
-		Order("started_at ASC").
+	var results []struct {
+		models.JobRun
+		JobAlias     string
+		TriggerType  string
+		TriggerAlias string
+	}
+
+	err := s.db.Table("job_runs").
+		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
+		Joins("join jobs on jobs.id = job_runs.job_id").
+		Joins("join triggers on triggers.id = jobs.trigger_id").
+		Where("job_runs.job_id = ?", jobID).
+		Order("job_runs.started_at ASC").
 		Preload("Tasks").
-		Find(&modelsRuns).Error; err != nil {
+		Scan(&results).Error
+
+	if err != nil {
 		return nil, err
 	}
 
-	runs := make([]*JobRun, 0, len(modelsRuns))
-	for idx := range modelsRuns {
-		runModel := &modelsRuns[idx]
-		runValue, err := s.convertRunModel(runModel)
+	runs := make([]*JobRun, 0, len(results))
+	for i := range results {
+		runValue, err := s.convertRunModel(&results[i].JobRun)
 		if err != nil {
 			return nil, err
 		}
+		runValue.JobAlias = results[i].JobAlias
+		runValue.TriggerType = results[i].TriggerType
+		runValue.TriggerAlias = results[i].TriggerAlias
 		runs = append(runs, runValue)
 	}
 
@@ -563,11 +580,38 @@ func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 
 func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 	var model models.JobRun
-	if err := s.db.Preload("Tasks").
-		First(&model, "id = ?", runID).Error; err != nil {
+	// Use a JOIN to fetch job and trigger information for human readability
+	err := s.db.Preload("Tasks").
+		First(&model, "id = ?", runID).Error
+	if err != nil {
 		return nil, err
 	}
-	return s.convertRunModel(&model)
+
+	runValue, err := s.convertRunModel(&model)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich with metadata
+	var meta struct {
+		JobAlias     string
+		TriggerType  string
+		TriggerAlias string
+	}
+	err = s.db.Table("job_runs").
+		Select("jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
+		Joins("join jobs on jobs.id = job_runs.job_id").
+		Joins("join triggers on triggers.id = jobs.trigger_id").
+		Where("job_runs.id = ?", runID).
+		Scan(&meta).Error
+
+	if err == nil {
+		runValue.JobAlias = meta.JobAlias
+		runValue.TriggerType = meta.TriggerType
+		runValue.TriggerAlias = meta.TriggerAlias
+	}
+
+	return runValue, nil
 }
 
 func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {

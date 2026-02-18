@@ -155,9 +155,12 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         {error && (
           <div className="px-2.5 py-2 rounded-lg bg-red-500/10 border border-red-500/20 flex gap-2 items-start animate-in slide-in-from-top-1 duration-300">
             <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
-            <div className="flex flex-col gap-0.5">
-              <span className="text-[8px] font-bold text-red-500/80 uppercase tracking-wider">Error Details</span>
-              <span className="text-[9px] text-red-400/90 font-mono leading-relaxed break-all max-h-16 overflow-y-auto custom-scrollbar">
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[8px] font-bold text-red-500/80 uppercase tracking-wider">Error Details</span>
+                <span className="text-[7px] text-red-500/40 font-medium uppercase italic">Details ↗</span>
+              </div>
+              <span className="text-[9px] text-red-400/90 font-mono leading-relaxed break-all line-clamp-3">
                 {error}
               </span>
             </div>
