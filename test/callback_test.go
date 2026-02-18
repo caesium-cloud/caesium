@@ -58,7 +58,7 @@ func TestIntegrationCallbackDispatchAndRetry(t *testing.T) {
 	require.NoError(t, db.Create(task).Error)
 
 	store := run.NewStore(db)
-	runEntry, err := store.Start(job.ID)
+	runEntry, err := store.Start(job.ID, nil)
 	require.NoError(t, err)
 	require.NoError(t, store.RegisterTask(runEntry.ID, task, atom, 0))
 	require.NoError(t, store.StartTask(runEntry.ID, task.ID, "runtime-1"))

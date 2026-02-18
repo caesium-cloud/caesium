@@ -132,12 +132,16 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) Start(jobID uuid.UUID) (*JobRun, error) {
+func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
 		JobID:     jobID,
 		Status:    string(StatusRunning),
 		StartedAt: time.Now().UTC(),
+	}
+
+	if triggerID != nil {
+		model.TriggerID = *triggerID
 	}
 
 	if err := s.db.Create(model).Error; err != nil {
@@ -542,7 +546,7 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 	err := s.db.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
-		Joins("join triggers on triggers.id = jobs.trigger_id").
+		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.job_id = ?", jobID).
 		Order("job_runs.started_at ASC").
 		Preload("Tasks").
@@ -601,7 +605,7 @@ func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 	err = s.db.Table("job_runs").
 		Select("jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
-		Joins("join triggers on triggers.id = jobs.trigger_id").
+		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.id = ?", runID).
 		Scan(&meta).Error
 

@@ -19,7 +19,7 @@ func TestStorePersistsRunState(t *testing.T) {
 	store := NewStore(db)
 
 	jobID := uuid.New()
-	runRecord, err := store.Start(jobID)
+	runRecord, err := store.Start(jobID, nil)
 	require.NoError(t, err)
 	require.Equal(t, StatusRunning, runRecord.Status)
 
@@ -117,7 +117,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	store := NewStore(db)
 
 	jobID := uuid.New()
-	runRecord, err := store.Start(jobID)
+	runRecord, err := store.Start(jobID, nil)
 	require.NoError(t, err)
 
 	atomA := &models.Atom{
@@ -212,7 +212,7 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 	store := NewStore(db)
 
 	jobID := uuid.New()
-	runRecord, err := store.Start(jobID)
+	runRecord, err := store.Start(jobID, nil)
 	require.NoError(t, err)
 
 	atom := &models.Atom{

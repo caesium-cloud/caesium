@@ -14,7 +14,7 @@ type Service interface {
 	WithStore(*runstorage.Store) Service
 	WithDatabase(*gorm.DB) Service
 	SetBus(event.Bus)
-	Start(uuid.UUID) (*runstorage.JobRun, error)
+	Start(jobID uuid.UUID, triggerID *uuid.UUID) (*runstorage.JobRun, error)
 	Get(uuid.UUID) (*runstorage.JobRun, error)
 	List(uuid.UUID) ([]*runstorage.JobRun, error)
 	Latest(uuid.UUID) (*runstorage.JobRun, error)
@@ -54,8 +54,8 @@ func (r *runService) SetBus(bus event.Bus) {
 	}
 }
 
-func (r *runService) Start(jobID uuid.UUID) (*runstorage.JobRun, error) {
-	return r.store.Start(jobID)
+func (r *runService) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*runstorage.JobRun, error) {
+	return r.store.Start(jobID, triggerID)
 }
 
 func (r *runService) Get(runID uuid.UUID) (*runstorage.JobRun, error) {

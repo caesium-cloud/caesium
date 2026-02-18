@@ -54,7 +54,7 @@ func TestDispatchNotificationSuccess(t *testing.T) {
 	require.NoError(t, db.Create(task).Error)
 
 	store := run.NewStore(db)
-	runEntry, err := store.Start(job.ID)
+	runEntry, err := store.Start(job.ID, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, store.RegisterTask(runEntry.ID, task, atom, 0))
@@ -116,7 +116,7 @@ func TestDispatchMissingHandler(t *testing.T) {
 	require.NoError(t, db.Create(job).Error)
 
 	store := run.NewStore(db)
-	runEntry, err := store.Start(job.ID)
+	runEntry, err := store.Start(job.ID, nil)
 	require.NoError(t, err)
 	require.NoError(t, store.Complete(runEntry.ID, nil))
 
@@ -173,7 +173,7 @@ func TestRetryFailedCallbacks(t *testing.T) {
 	require.NoError(t, db.Create(task).Error)
 
 	store := run.NewStore(db)
-	runEntry, err := store.Start(job.ID)
+	runEntry, err := store.Start(job.ID, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, store.RegisterTask(runEntry.ID, task, atom, 0))

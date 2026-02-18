@@ -34,6 +34,7 @@ type Job interface {
 
 type job struct {
 	id                     uuid.UUID
+	triggerID              *uuid.UUID
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -51,6 +52,7 @@ type jobOption func(*job)
 func New(m *models.Job, opts ...jobOption) Job {
 	j := &job{
 		id:                     m.ID,
+		triggerID:              &m.TriggerID,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -86,6 +88,12 @@ const (
 	executionModeLocal       = "local"
 	executionModeDistributed = "distributed"
 )
+
+func WithTriggerID(id *uuid.UUID) jobOption {
+	return func(j *job) {
+		j.triggerID = id
+	}
+}
 
 func withRunStoreFactory(factory func() *run.Store) jobOption {
 	return func(j *job) {
@@ -203,7 +211,7 @@ func (j *job) Run(ctx context.Context) error {
 			return store.Get(running.ID)
 		}
 
-		return store.Start(j.id)
+		return store.Start(j.id, j.triggerID)
 	}
 
 	snapshot, err := resolveRun()
