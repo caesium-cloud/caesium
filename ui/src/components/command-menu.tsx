@@ -2,8 +2,6 @@ import * as React from "react"
 import { useNavigate } from "@tanstack/react-router"
 import {
   LayoutDashboard,
-  Play,
-  Box,
   BarChart,
   Circle,
   Search
@@ -70,14 +68,6 @@ export function CommandMenu() {
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
               <LayoutDashboard className="mr-2 h-4 w-4" />
               <span>Jobs</span>
-            </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
-              <Play className="mr-2 h-4 w-4" />
-              <span>Triggers</span>
-            </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
-              <Box className="mr-2 h-4 w-4" />
-              <span>Atoms</span>
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
               <BarChart className="mr-2 h-4 w-4" />

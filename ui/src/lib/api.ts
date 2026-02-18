@@ -31,7 +31,7 @@ export interface TaskRun {
   atom_id: string;
   engine: string;
   image: string;
-  command: string[];
+  command: string;
   status: string;
   result?: string;
   error?: string;
@@ -45,7 +45,7 @@ export interface Atom {
   id: string;
   engine: string;
   image: string;
-  command: string[];
+  command: string;
   spec: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -151,6 +151,8 @@ export const api = {
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
   triggerJob: (jobId: string) => request<JobRun>(`/jobs/${jobId}/run`, { method: "POST" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
+  getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
   getAtoms: () => request<Atom[]>("/atoms"),
+  getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
   getStats: () => request<StatsResponse>("/stats"),
 };

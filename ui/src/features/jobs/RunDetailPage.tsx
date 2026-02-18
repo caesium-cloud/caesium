@@ -91,7 +91,7 @@ export function RunDetailPage() {
                             atom_id: "",
                             engine: "",
                             image: "",
-                            command: [],
+                            command: "",
                             status: status || "pending",
                             created_at: new Date().toISOString(),
                             updated_at: new Date().toISOString(),
