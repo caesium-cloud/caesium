@@ -27,8 +27,6 @@ export function AppShell() {
       if (e.key === "g") {
         const nextKeyHandler = (nextEvent: KeyboardEvent) => {
           if (nextEvent.key === "j") navigate({ to: "/jobs" });
-          if (nextEvent.key === "t") navigate({ to: "/triggers" });
-          if (nextEvent.key === "a") navigate({ to: "/atoms" });
           if (nextEvent.key === "s") navigate({ to: "/stats" });
           window.removeEventListener("keydown", nextKeyHandler);
         };

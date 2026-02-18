@@ -93,6 +93,23 @@ export function JobDetailPage() {
     }
   });
 
+  const { data: trigger, isLoading: isLoadingTrigger } = useQuery({
+    queryKey: ["trigger", job?.trigger_id],
+    queryFn: () => job?.trigger_id ? api.getTrigger(job.trigger_id) : Promise.resolve(null),
+    enabled: !!job?.trigger_id,
+  });
+
+  const formatCommand = (command: string) => {
+    if (!command) return "N/A";
+    try {
+        const parsed = JSON.parse(command);
+        if (Array.isArray(parsed)) return parsed.join(" ");
+        return String(parsed);
+    } catch {
+        return command;
+    }
+  };
+
   const triggerMutation = useMutation({
     mutationFn: api.triggerJob,
     onSuccess: (run) => {
@@ -104,7 +121,7 @@ export function JobDetailPage() {
     },
   });
 
-  if (isLoadingJob || isLoadingDAG || isLoadingAtoms || isLoadingRuns) return <div className="p-8">Loading...</div>;
+  if (isLoadingJob || isLoadingDAG || isLoadingAtoms || isLoadingRuns || isLoadingTrigger) return <div className="p-8">Loading...</div>;
 
   if (!job) return <div className="p-8">Job not found</div>;
 
@@ -159,6 +176,8 @@ export function JobDetailPage() {
         <TabsList>
           <TabsTrigger value="dag">DAG</TabsTrigger>
           <TabsTrigger value="runs">Runs</TabsTrigger>
+          <TabsTrigger value="atoms">Atoms</TabsTrigger>
+          <TabsTrigger value="configuration">Configuration</TabsTrigger>
           <TabsTrigger value="definition">Definition</TabsTrigger>
         </TabsList>
         <TabsContent value="dag" className="h-[600px] mt-4 border rounded-md overflow-hidden">
@@ -213,6 +232,83 @@ export function JobDetailPage() {
                     </Link>
                 ))}
             </div>
+        </TabsContent>
+        <TabsContent value="atoms" className="mt-4">
+            <div className="rounded-md border bg-card">
+                <div className="p-4 border-b bg-muted/40">
+                    <h3 className="font-semibold text-sm">Task & Atom Details</h3>
+                </div>
+                <div className="divide-y">
+                    {dag?.nodes.map((node: any) => {
+                        const atom = atoms?.[node.atom_id];
+                        return (
+                            <div key={node.id} className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div>
+                                    <div className="text-sm font-medium mb-1">Task ID</div>
+                                    <div className="font-mono text-xs text-muted-foreground bg-muted p-1 rounded inline-block">
+                                        {node.id}
+                                    </div>
+                                </div>
+                                {atom && (
+                                    <div className="space-y-2">
+                                        <div className="grid grid-cols-[100px_1fr] gap-2 text-xs">
+                                            <span className="text-muted-foreground font-medium">Atom ID:</span>
+                                            <span className="font-mono text-muted-foreground">{atom.id}</span>
+                                            
+                                            <span className="text-muted-foreground font-medium">Engine:</span>
+                                            <span className="font-mono uppercase">{atom.engine}</span>
+                                            
+                                            <span className="text-muted-foreground font-medium">Image:</span>
+                                            <span className="font-mono text-blue-400">{atom.image}</span>
+                                            
+                                            <span className="text-muted-foreground font-medium">Command:</span>
+                                            <code className="font-mono bg-slate-950 px-1 rounded border border-slate-800 break-all">
+                                                {formatCommand(atom.command)}
+                                            </code>
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            </div>
+        </TabsContent>
+        <TabsContent value="configuration" className="mt-4">
+             <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-md border bg-card p-4 space-y-4">
+                    <div className="flex items-center justify-between border-b pb-2">
+                        <h3 className="font-semibold text-sm">Trigger Configuration</h3>
+                        {trigger ? (
+                             <Badge variant="outline">{trigger.type}</Badge>
+                        ) : (
+                             <Badge variant="secondary">No Trigger</Badge>
+                        )}
+                    </div>
+                    {trigger ? (
+                        <div className="space-y-3 text-sm">
+                            <div className="grid grid-cols-[100px_1fr] gap-2">
+                                <span className="text-muted-foreground">ID:</span>
+                                <span className="font-mono text-xs">{trigger.id}</span>
+                            </div>
+                            <div className="grid grid-cols-[100px_1fr] gap-2">
+                                <span className="text-muted-foreground">Alias:</span>
+                                <span className="font-medium">{trigger.alias}</span>
+                            </div>
+                            <div className="grid grid-cols-[100px_1fr] gap-2">
+                                <span className="text-muted-foreground">Config:</span>
+                                <pre className="font-mono text-xs bg-muted p-2 rounded overflow-x-auto">
+                                    {trigger.configuration}
+                                </pre>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="text-muted-foreground text-sm py-4">
+                            This job does not have an associated trigger.
+                        </div>
+                    )}
+                </div>
+             </div>
         </TabsContent>
         <TabsContent value="definition" className="mt-4">
             <pre className="p-4 bg-muted rounded-md overflow-auto text-xs border">
