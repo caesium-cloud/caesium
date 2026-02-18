@@ -83,6 +83,7 @@ Routes implemented:
 - [x] Define Event Types matching backend schema.
 - [x] Create SSE Client Manager (`src/lib/events.ts`) with reconnect and subscription logic.
 - [x] React Query Integration for granular cache invalidation.
+- [x] Persistent Global SSE connection initialized at root.
 
 ------------------------------------------------------------------------
 
@@ -91,6 +92,7 @@ Routes implemented:
 - [x] Fetch `/jobs`
 - [x] Display in `shadcn` Table
 - [x] Add "Trigger Run" action with toast notifications.
+- [x] Real-time status and duration updates via SSE.
 
 ------------------------------------------------------------------------
 
@@ -99,13 +101,14 @@ Routes implemented:
 - [x] DAG Rendering with React Flow + Dagre layout.
 - [x] Node status styling (Running, Completed, Failed).
 - [x] Tabbed view (DAG, Runs, Definition).
+- [x] Integrated real-time DAG updates.
 
 ------------------------------------------------------------------------
 
 # 8. Run Detail Page [COMPLETED]
 
 - [x] Real-time status mapping from SSE events.
-- [x] Interactive Task list with log access.
+- [x] Interactive DAG with log access via node click.
 - [x] Live run/task state visualization.
 
 ------------------------------------------------------------------------
@@ -114,17 +117,19 @@ Routes implemented:
 
 - [x] Use existing REST streaming endpoint (`/v1/jobs/:id/runs/:run_id/logs`).
 - [x] Render with `xterm.js` for high-performance terminal output.
-- [x] Integrated into Task list on the Run Detail page.
+- [x] Integrated into DAG visualization on the Run Detail page.
 
 ------------------------------------------------------------------------
 
-# 10. UI Polish [IN PROGRESS]
+# 10. UI Polish [COMPLETED]
 
 - [x] Toast notifications (Sonner)
 - [x] Loading states (Skeletons)
-- [ ] Keyboard shortcuts
-- [ ] Command palette (`cmd+k`)
-- [ ] Smooth transitions
+- [x] Keyboard shortcuts (`g+j`, `g+t`, etc.)
+- [x] Command palette (`cmd+k`)
+- [x] Smooth transitions (Fade-in animations)
+- [x] Native Dark Mode (default) with persistent theme switcher.
+- [x] Advanced DAG Visualization (engine icons, YAML command lists, live errors).
 
 ------------------------------------------------------------------------
 
@@ -132,7 +137,7 @@ Routes implemented:
 
 - [x] Multi-stage Docker build producing `ui/dist`.
 - [x] Go `//go:embed` integration in `ui/embed.go`.
-- [x] Echo route registration and SPA fallback in `api/ui.go`.
+- [x] Echo v5 route registration and SPA fallback in `api/ui.go`.
 
 ------------------------------------------------------------------------
 
@@ -146,17 +151,17 @@ Routes implemented:
 6.  [x] DAG view
 7.  [x] Run detail + SSE updates
 8.  [x] Log viewer
-9.  [ ] Polish (Ongoing)
+9.  [x] Polish
 10. [x] Embed build
 
 ------------------------------------------------------------------------
 
-# 13. Definition of Done [90% COMPLETED]
+# 13. Definition of Done [100% COMPLETED]
 
-- [x] Jobs list works
-- [x] DAG interactive
-- [x] Run page updates in real time (SSE)
-- [x] Logs stream live
-- [x] Actions reflected instantly
-- [x] Clean, polished UI
-- [x] Build artifacts embedded successfully
+- [x] Jobs list works with real-time updates.
+- [x] DAG fully interactive and descriptive.
+- [x] Run page updates in real time (SSE).
+- [x] Logs stream live with high performance.
+- [x] Actions (Trigger/Search) reflected instantly.
+- [x] Modern, polished "Operator-Grade" UI.
+- [x] Build artifacts embedded in Echo v5 backend.

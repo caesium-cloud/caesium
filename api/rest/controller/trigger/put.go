@@ -10,10 +10,10 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
-func Put(c echo.Context) error {
+func Put(c *echo.Context) error {
 	var (
 		ctx = context.Background()
 		id  = uuid.MustParse(c.Param("id"))
@@ -23,11 +23,11 @@ func Put(c echo.Context) error {
 	t, err := svc.Get(id)
 	switch {
 	case err != nil:
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
 	case t == nil:
 		return echo.ErrNotFound
 	case t.Type != models.TriggerTypeHTTP:
-		return echo.ErrBadRequest.SetInternal(
+		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(
 			fmt.Errorf(
 				"trigger: '%v' is type: '%v', not '%v'",
 				t.ID,
@@ -38,7 +38,7 @@ func Put(c echo.Context) error {
 	default:
 		h, err := http.New(t)
 		if err != nil {
-			return echo.ErrInternalServerError.SetInternal(err)
+			return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
 		}
 
 		executor.Queue(ctx, h)

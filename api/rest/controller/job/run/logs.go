@@ -17,31 +17,31 @@ import (
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
-func Logs(c echo.Context) error {
+func Logs(c *echo.Context) error {
 	ctx := c.Request().Context()
 
 	jobID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	runID, err := uuid.Parse(c.Param("run_id"))
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	taskParam := c.QueryParam("task_id")
 	if taskParam == "" {
-		return echo.ErrBadRequest.SetInternal(fmt.Errorf("task_id is required"))
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(fmt.Errorf("task_id is required"))
 	}
 
 	taskID, err := uuid.Parse(taskParam)
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	var since time.Time
@@ -51,7 +51,7 @@ func Logs(c echo.Context) error {
 			if parsed, parseErr := time.Parse(time.RFC3339, sinceParam); parseErr == nil {
 				since = parsed
 			} else {
-				return echo.ErrBadRequest.SetInternal(err)
+				return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 			}
 		}
 	}
@@ -61,7 +61,7 @@ func Logs(c echo.Context) error {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
 		}
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	if runEntry.JobID != jobID {
@@ -86,7 +86,7 @@ func Logs(c echo.Context) error {
 
 	engine, err := engineFor(ctx, taskEntry.Engine)
 	if err != nil {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	reader, err := engine.Logs(&atom.EngineLogsRequest{ID: taskEntry.RuntimeID, Since: since})
@@ -95,7 +95,7 @@ func Logs(c echo.Context) error {
 		if runEntry.CompletedAt != nil {
 			status = http.StatusGone
 		}
-		return echo.NewHTTPError(status, "log stream unavailable").SetInternal(err)
+		return echo.NewHTTPError(status, "log stream unavailable").Wrap(err)
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
@@ -107,7 +107,7 @@ func Logs(c echo.Context) error {
 	res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
 	res.WriteHeader(http.StatusOK)
 
-	flusher, _ := res.Writer.(http.Flusher)
+	flusher, _ := res.(http.Flusher)
 	buf := make([]byte, 4096)
 
 	for {
@@ -117,7 +117,7 @@ func Logs(c echo.Context) error {
 		default:
 			n, readErr := reader.Read(buf)
 			if n > 0 {
-				if _, writeErr := res.Writer.Write(buf[:n]); writeErr != nil {
+				if _, writeErr := res.Write(buf[:n]); writeErr != nil {
 					return writeErr
 				}
 				if flusher != nil {

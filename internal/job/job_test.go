@@ -380,17 +380,23 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if err, ok := e.createErrByName[req.Name]; ok {
+	// Extract taskID from name (pattern is runID[:8]-taskID)
+	name := req.Name
+	if len(name) > 36 && name[8] == '-' {
+		name = name[9:]
+	}
+
+	if err, ok := e.createErrByName[name]; ok {
 		return nil, err
 	}
 
 	duration := 10 * time.Millisecond
-	if configured, ok := e.runDurationByName[req.Name]; ok {
+	if configured, ok := e.runDurationByName[name]; ok {
 		duration = configured
 	}
 
 	result := atom.Success
-	if configured, ok := e.resultByName[req.Name]; ok {
+	if configured, ok := e.resultByName[name]; ok {
 		result = configured
 	}
 
@@ -424,6 +430,12 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 
 	if req.Force {
 		e.stopForceByID[req.ID] = true
+		// Record by taskID as well (pattern is runID[:8]-taskID)
+		name := req.ID
+		if len(name) > 36 && name[8] == '-' {
+			name = name[9:]
+		}
+		e.stopForceByID[name] = true
 	}
 
 	if state.stoppedAt.IsZero() {

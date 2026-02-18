@@ -10,7 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
@@ -20,10 +20,10 @@ type JobResponse struct {
 	LatestRun *runstorage.JobRun `json:"latest_run,omitempty"`
 }
 
-func Get(c echo.Context) error {
+func Get(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	ctx := c.Request().Context()
@@ -34,7 +34,7 @@ func Get(c echo.Context) error {
 			return echo.ErrNotFound
 		}
 
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	resp := &JobResponse{Job: j}
@@ -42,12 +42,12 @@ func Get(c echo.Context) error {
 	if trig, err := tsvc.Service(ctx).Get(j.TriggerID); err == nil {
 		resp.Trigger = trig
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	latest, err := runsvc.New(ctx).Latest(j.ID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 	resp.LatestRun = latest
 

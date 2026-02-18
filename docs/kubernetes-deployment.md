@@ -85,7 +85,7 @@ All settings are in `helm/caesium/values.yaml`.
 | `config.logLevel` | `CAESIUM_LOG_LEVEL` | `info` |
 | `config.port` | HTTP API/container port (`CAESIUM_PORT`) | `8080` |
 | `config.dqlitePort` | dqlite RAFT port | `9001` |
-| `config.maxParallelTasks` | `CAESIUM_MAX_PARALLEL_TASKS` | `1` |
+| `config.maxParallelTasks` | `CAESIUM_MAX_PARALLEL_TASKS` | `runtime.NumCPU()` |
 | `config.databaseType` | `internal` (dqlite) or `postgres` | `internal` |
 | `config.databaseDSN` | PostgreSQL DSN when using `postgres` | `""` |
 | `config.extraEnv` | Extra env vars injected into pod spec | `[]` |

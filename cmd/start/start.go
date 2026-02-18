@@ -184,7 +184,4 @@ func shutdown() {
 	if cancel != nil {
 		cancel()
 	}
-	if err := api.Shutdown(); err != nil {
-		log.Error("api shutdown failure", "error", err)
-	}
 }

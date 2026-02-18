@@ -7,16 +7,16 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
-func Tasks(c echo.Context) error {
+func Tasks(c *echo.Context) error {
 	ctx := c.Request().Context()
 
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	if _, err = job.Service(ctx).Get(id); err != nil {
@@ -24,7 +24,7 @@ func Tasks(c echo.Context) error {
 			return echo.ErrNotFound
 		}
 
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	tasks, err := task.Service(ctx).List(&task.ListRequest{
@@ -32,7 +32,7 @@ func Tasks(c echo.Context) error {
 		OrderBy: []string{"created_at"},
 	})
 	if err != nil {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	return c.JSON(http.StatusOK, tasks)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -61,7 +62,7 @@ func New(m *models.Job, opts ...jobOption) Job {
 		newDockerEngine:     func(ctx context.Context) atom.Engine { return docker.NewEngine(ctx) },
 		newKubernetesEngine: func(ctx context.Context) atom.Engine { return kubernetes.NewEngine(ctx) },
 		newPodmanEngine:     func(ctx context.Context) atom.Engine { return podman.NewEngine(ctx) },
-		atomPollInterval:    5 * time.Second,
+		atomPollInterval:    env.Variables().AtomPollInterval,
 	}
 
 	for _, opt := range opts {
@@ -429,7 +430,7 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command)
 
 		a, err := runner.engine.Create(&atom.EngineCreateRequest{
-			Name:    taskID.String(),
+			Name:    fmt.Sprintf("%s-%s", runID.String()[:8], taskID.String()),
 			Image:   runner.image,
 			Command: runner.command,
 			Spec:    runner.spec,
@@ -498,8 +499,8 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	maxParallel := vars.MaxParallelTasks
-	if maxParallel < 1 {
-		maxParallel = 1
+	if maxParallel <= 0 {
+		maxParallel = runtime.NumCPU()
 	}
 
 	taskPool := worker.NewPool(maxParallel)
@@ -629,7 +630,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 	}
 
 	if pollInterval <= 0 {
-		pollInterval = 5 * time.Second
+		pollInterval = 1 * time.Second
 	}
 
 	ticker := time.NewTicker(pollInterval)

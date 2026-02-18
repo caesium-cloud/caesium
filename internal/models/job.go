@@ -21,6 +21,8 @@ type Job struct {
 	ProvenancePath     string            `json:"provenance_path"`
 	CreatedAt          time.Time         `gorm:"not null" json:"created_at"`
 	UpdatedAt          time.Time         `gorm:"not null" json:"updated_at"`
+
+	LatestRun *JobRun `gorm:"-" json:"latest_run,omitempty"`
 }
 
 func (j *Job) String() string {

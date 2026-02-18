@@ -54,6 +54,8 @@ type CallbackRun struct {
 
 type TaskRun struct {
 	ID                      uuid.UUID         `json:"id"`
+	JobRunID                uuid.UUID         `json:"job_run_id"`
+	TaskID                  uuid.UUID         `json:"task_id"`
 	AtomID                  uuid.UUID         `json:"atom_id"`
 	Engine                  models.AtomEngine `json:"engine"`
 	Image                   string            `json:"image"`
@@ -69,6 +71,8 @@ type TaskRun struct {
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
 	Error                   string            `json:"error,omitempty"`
 	OutstandingPredecessors int               `json:"outstanding_predecessors"`
+	CreatedAt               time.Time         `json:"created_at"`
+	UpdatedAt               time.Time         `json:"updated_at"`
 }
 
 type JobRun struct {
@@ -77,6 +81,8 @@ type JobRun struct {
 	Status      Status         `json:"status"`
 	StartedAt   time.Time      `json:"started_at"`
 	CompletedAt *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
 	Error       string         `json:"error,omitempty"`
 	Tasks       []*TaskRun     `json:"tasks"`
 	Callbacks   []*CallbackRun `json:"callbacks"`
@@ -212,7 +218,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		}).Error
 
 	if err == nil && s.bus != nil {
-		s.publishTaskEvent(event.TypeTaskStarted, runID, taskID)
+		s.publishTaskEvent(s.db, event.TypeTaskStarted, runID, taskID)
 	}
 
 	return err
@@ -234,7 +240,7 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 	}
 
 	if s.bus != nil {
-		s.publishTaskEvent(event.TypeTaskStarted, runID, taskID)
+		s.publishTaskEvent(s.db, event.TypeTaskStarted, runID, taskID)
 	}
 
 	return nil
@@ -334,7 +340,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		}
 
 		if s.bus != nil {
-			s.publishTaskEvent(event.TypeTaskSucceeded, runID, taskID)
+			s.publishTaskEvent(tx, event.TypeTaskSucceeded, runID, taskID)
 		}
 
 		return nil
@@ -396,7 +402,7 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 	}
 
 	if s.bus != nil {
-		s.publishTaskEvent(event.TypeTaskFailed, runID, taskID)
+		s.publishTaskEvent(s.db, event.TypeTaskFailed, runID, taskID)
 	}
 
 	return nil
@@ -413,7 +419,7 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 		}).Error
 
 	if err == nil && s.bus != nil {
-		s.publishTaskEvent(event.TypeTaskSkipped, runID, taskID)
+		s.publishTaskEvent(s.db, event.TypeTaskSkipped, runID, taskID)
 	}
 
 	return err
@@ -557,6 +563,8 @@ func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
 		JobID:     model.JobID,
 		Status:    Status(model.Status),
 		StartedAt: model.StartedAt,
+		CreatedAt: model.CreatedAt,
+		UpdatedAt: model.UpdatedAt,
 		Error:     model.Error,
 	}
 
@@ -596,6 +604,8 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 
 	task := &TaskRun{
 		ID:                      model.TaskID,
+		JobRunID:                model.JobRunID,
+		TaskID:                  model.TaskID,
 		AtomID:                  model.AtomID,
 		Engine:                  model.Engine,
 		Image:                   model.Image,
@@ -608,6 +618,8 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,
+		CreatedAt:               model.CreatedAt,
+		UpdatedAt:               model.UpdatedAt,
 	}
 
 	if model.StartedAt != nil {
@@ -656,16 +668,16 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 	}
 }
 
-func (s *Store) publishTaskEvent(eventType event.Type, runID, taskID uuid.UUID) {
+func (s *Store) publishTaskEvent(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID) {
 	// Need to fetch JobID for the event
 	var taskRun models.TaskRun
-	if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+	if err := db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
 		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
 		return
 	}
 
 	var jobRun models.JobRun
-	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+	if err := db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
 		log.Error("failed to fetch job run for event", "error", err, "run_id", runID)
 		return
 	}

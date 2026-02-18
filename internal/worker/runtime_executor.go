@@ -23,7 +23,7 @@ import (
 const (
 	taskFailurePolicyHalt     = "halt"
 	taskFailurePolicyContinue = "continue"
-	defaultLeaseRenewInterval = 5 * time.Second
+	defaultLeaseRenewInterval = 1 * time.Second
 	minLeaseRenewInterval     = 1 * time.Second
 )
 

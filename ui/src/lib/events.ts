@@ -13,19 +13,41 @@ class EventManager {
   private eventSource: EventSource | null = null;
   private listeners: Map<string, EventHandler[]> = new Map();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private filters: Record<string, string> = {};
 
-  connect(filters?: Record<string, string>) {
+  connect(filters: Record<string, string> = {}) {
+    this.filters = filters;
+    this.reconnect();
+  }
+
+  private reconnect() {
     if (this.eventSource) {
-        // If already connected with same filters, do nothing?
-        // Simple check: strict equality of url params? 
-        // For now, close and reconnect to be safe and simple.
       this.eventSource.close();
     }
 
-    const params = new URLSearchParams(filters);
+    const params = new URLSearchParams(this.filters);
     const url = `/v1/events?${params.toString()}`;
 
     this.eventSource = new EventSource(url);
+
+    const eventTypes = [
+      "job_created", "job_deleted", 
+      "run_started", "run_completed", "run_failed",
+      "task_started", "task_succeeded", "task_failed", "task_skipped",
+      "log_chunk"
+    ];
+
+    eventTypes.forEach(type => {
+      this.eventSource?.addEventListener(type, (message: MessageEvent) => {
+        try {
+          const event = JSON.parse(message.data) as CaesiumEvent;
+          if (!event.type) event.type = type;
+          this.emit(event);
+        } catch (err) {
+          console.error(`Failed to parse SSE message for ${type}`, err);
+        }
+      });
+    });
 
     this.eventSource.onmessage = (message) => {
       try {
@@ -36,16 +58,14 @@ class EventManager {
       }
     };
 
-    this.eventSource.onerror = (err) => {
-      console.error("SSE Error", err);
+    this.eventSource.onerror = () => {
       this.eventSource?.close();
       this.eventSource = null;
-      // Reconnect logic
       if (!this.reconnectTimer) {
         this.reconnectTimer = setTimeout(() => {
           this.reconnectTimer = null;
-          this.connect(filters);
-        }, 5000);
+          this.reconnect();
+        }, 3000);
       }
     };
   }

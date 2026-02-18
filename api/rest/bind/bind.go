@@ -10,7 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 func All(g *echo.Group, bus internal_event.Bus) {

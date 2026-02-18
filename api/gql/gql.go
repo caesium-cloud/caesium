@@ -4,7 +4,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/gql/schema"
 	"github.com/graphql-go/graphql"
 	"github.com/graphql-go/handler"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 )
 
 // Handler wraps the GraphQL schema and makes it injectable

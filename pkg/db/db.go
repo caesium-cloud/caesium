@@ -44,6 +44,12 @@ func Connection() *gorm.DB {
 		if err != nil {
 			log.Fatal("failed to connect to database", "error", err)
 		}
+
+		if dbType == "internal" || dbType == dqlite.DriverName {
+			if sqlDB, err := gdb.DB(); err == nil {
+				sqlDB.SetMaxOpenConns(1)
+			}
+		}
 	})
 
 	return gdb

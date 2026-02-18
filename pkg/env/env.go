@@ -1,6 +1,7 @@
 package env
 
 import (
+	"runtime"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -12,6 +13,8 @@ var variables = new(Environment)
 
 // Process the environment variables set for caesium.
 func Process() error {
+	variables.MaxParallelTasks = runtime.NumCPU()
+
 	if err := envconfig.Process("caesium", variables); err != nil {
 		return errors.Wrap(err, "failed to process environment variables")
 	}
@@ -44,7 +47,7 @@ type Environment struct {
 	DatabasePath                  string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
 	DatabaseType                  string        `default:"internal" split_words:"true"`
 	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
-	MaxParallelTasks              int           `default:"1" split_words:"true"`
+	MaxParallelTasks              int           `split_words:"true"`
 	TaskFailurePolicy             string        `default:"halt" split_words:"true"`
 	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
 	ExecutionMode                 string        `default:"local" split_words:"true"`
@@ -52,6 +55,7 @@ type Environment struct {
 	WorkerPollInterval            time.Duration `default:"2s" split_words:"true"`
 	WorkerLeaseTTL                time.Duration `default:"5m" split_words:"true"`
 	WorkerPoolSize                int           `default:"4" split_words:"true"`
+	AtomPollInterval              time.Duration `default:"1s" split_words:"true"`
 	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
 	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
 	JobdefGitInterval             time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`
