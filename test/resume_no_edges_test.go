@@ -80,7 +80,7 @@ func TestResumeWithoutEdges(t *testing.T) {
 	require.NoError(t, db.Create(taskB).Error)
 
 	store := run.NewStore(db)
-	runEntry, err := store.Start(job.ID)
+	runEntry, err := store.Start(job.ID, nil)
 	require.NoError(t, err)
 
 	require.NoError(t, store.RegisterTask(runEntry.ID, taskA, atomA, 0))

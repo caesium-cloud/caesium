@@ -32,14 +32,14 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	r, err := runsvc.New(ctx).Start(j.ID)
+	r, err := runsvc.New(ctx).Start(j.ID, nil)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	go func() {
 		runCtx := runstorage.WithContext(context.Background(), r.ID)
-		if err := job.New(j).Run(runCtx); err != nil {
+		if err := job.New(j, job.WithTriggerID(nil)).Run(runCtx); err != nil {
 			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()

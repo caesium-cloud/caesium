@@ -53,7 +53,7 @@ func (s *StoreMetricsSuite) TearDownTest() {
 
 func (s *StoreMetricsSuite) TestStartIncrementsActiveGauge() {
 	jobID := uuid.New()
-	run, err := s.store.Start(jobID)
+	run, err := s.store.Start(jobID, nil)
 	s.Require().NoError(err)
 	s.Require().NotNil(run)
 
@@ -63,7 +63,7 @@ func (s *StoreMetricsSuite) TestStartIncrementsActiveGauge() {
 
 func (s *StoreMetricsSuite) TestCompleteRecordsCounterAndDuration() {
 	jobID := uuid.New()
-	run, err := s.store.Start(jobID)
+	run, err := s.store.Start(jobID, nil)
 	s.Require().NoError(err)
 
 	// Simulate some passage of time by updating started_at in the past.
@@ -89,7 +89,7 @@ func (s *StoreMetricsSuite) TestCompleteRecordsCounterAndDuration() {
 
 func (s *StoreMetricsSuite) TestCompleteWithErrorRecordsFailure() {
 	jobID := uuid.New()
-	run, err := s.store.Start(jobID)
+	run, err := s.store.Start(jobID, nil)
 	s.Require().NoError(err)
 
 	err = s.store.Complete(run.ID, fmt.Errorf("boom"))
@@ -101,7 +101,7 @@ func (s *StoreMetricsSuite) TestCompleteWithErrorRecordsFailure() {
 
 func (s *StoreMetricsSuite) TestCompleteTaskRecordsMetrics() {
 	jobID := uuid.New()
-	run, err := s.store.Start(jobID)
+	run, err := s.store.Start(jobID, nil)
 	s.Require().NoError(err)
 
 	taskID := uuid.New()
@@ -131,7 +131,7 @@ func (s *StoreMetricsSuite) TestCompleteTaskRecordsMetrics() {
 
 func (s *StoreMetricsSuite) TestFailTaskRecordsMetrics() {
 	jobID := uuid.New()
-	run, err := s.store.Start(jobID)
+	run, err := s.store.Start(jobID, nil)
 	s.Require().NoError(err)
 
 	taskID := uuid.New()
