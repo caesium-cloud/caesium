@@ -10,7 +10,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
 import { Clock } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
-import { Duration } from "@/components/duration";
 
 export function RunDetailPage() {
     const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
