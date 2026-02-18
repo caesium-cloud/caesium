@@ -20,7 +20,10 @@ export function LogViewer({ jobId, runId, taskId, onClose }: LogViewerProps) {
     if (!terminalRef.current) return;
 
     const term = new Terminal({
-      cursorBlink: true,
+      cursorBlink: false,
+      cursorStyle: "bar",
+      disableStdin: true,
+      convertEol: true,
       fontSize: 12,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, "Courier New", monospace',
       theme: {

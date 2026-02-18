@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -271,9 +272,15 @@ func (s *DockerTestSuite) TestLogs() {
 		Since: time.Now(),
 	}
 
+	// Simulate multiplexed logs: [STREAM_TYPE, 0, 0, 0, SIZE1, SIZE2, SIZE3, SIZE4] + content
+	// Stream type 1 = stdout
+	header := []byte{1, 0, 0, 0, 0, 0, 0, 4}
+	content := []byte("logs")
+	mockLogs := append(header, content...)
+
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerLogs", testAtomID).
-		Return()
+		Return(io.ReadCloser(io.NopCloser(bytes.NewReader(mockLogs))), nil)
 
 	logs, err := s.engine.Logs(req)
 	assert.Nil(s.T(), err)
