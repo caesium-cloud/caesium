@@ -195,8 +195,8 @@ func (e *dockerEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) 
 	pr, pw := io.Pipe()
 
 	go func() {
-		defer raw.Close()
-		defer pw.Close()
+		defer func() { _ = raw.Close() }()
+		defer func() { _ = pw.Close() }()
 
 		// multiplexed logs need to be demultiplexed using StdCopy
 		if _, err := stdcopy.StdCopy(pw, pw, raw); err != nil {
