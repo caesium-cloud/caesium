@@ -127,7 +127,23 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 		q   = j.db.WithContext(j.ctx)
 	)
 
-	return job, q.First(job).Error
+	if err := q.First(job).Error; err != nil {
+		return nil, err
+	}
+
+	runStore := runstorage.NewStore(j.db)
+	if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
+		job.LatestRun = &models.JobRun{
+			ID:          latest.ID,
+			JobID:       latest.JobID,
+			Status:      string(latest.Status),
+			StartedAt:   latest.StartedAt,
+			CompletedAt: latest.CompletedAt,
+			Error:       latest.Error,
+		}
+	}
+
+	return job, nil
 }
 
 type CreateRequest struct {

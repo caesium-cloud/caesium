@@ -177,10 +177,23 @@ export function JobDetailPage() {
                         className="flex items-center justify-between p-4 hover:bg-muted/50 transition-colors group"
                     >
                         <div className="flex items-center gap-4">
-                            <Clock className="h-4 w-4 text-muted-foreground" />
+                            <div className="p-2 rounded-full bg-slate-800/50 border border-slate-700/50">
+                                <Clock className="h-4 w-4 text-slate-400" />
+                            </div>
                             <div>
-                                <div className="font-mono text-sm font-bold">{run.id.substring(0, 8)}</div>
-                                <div className="text-xs text-muted-foreground"><RelativeTime date={run.created_at} /></div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm font-bold text-slate-200">
+                                        <RelativeTime date={run.created_at} />
+                                    </span>
+                                    <Badge variant="outline" className="text-[10px] h-4 border-slate-700 text-slate-400 font-mono uppercase">
+                                        {run.trigger_type || 'manual'}: {run.trigger_alias || 'user'}
+                                    </Badge>
+                                </div>
+                                <div className="text-[10px] font-mono text-muted-foreground flex items-center gap-2">
+                                    {run.id.substring(0, 8)}
+                                    <span>•</span>
+                                    <Duration start={run.started_at} end={run.completed_at} />
+                                </div>
                             </div>
                         </div>
                         <div className="flex items-center gap-3">

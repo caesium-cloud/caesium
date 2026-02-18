@@ -1,4 +1,4 @@
-import { useParams } from "@tanstack/react-router";
+import { useParams, Link } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type Atom, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
@@ -8,6 +8,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "sonner";
+import { Clock } from "lucide-react";
+import { RelativeTime } from "@/components/relative-time";
+import { Duration } from "@/components/duration";
 
 export function RunDetailPage() {
     const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
@@ -138,8 +141,27 @@ export function RunDetailPage() {
         <div className="space-y-6">
             <div className="flex items-center justify-between">
                 <div>
-                    <h1 className="text-2xl font-bold tracking-tight">Run {runId.substring(0, 8)}</h1>
-                    <p className="text-muted-foreground font-mono text-sm">Job: {jobId}</p>
+                    <div className="flex items-center gap-2 mb-1">
+                        <Link to="/jobs/$jobId" params={{ jobId }} className="text-sm font-medium text-blue-400 hover:underline">
+                            {run.job_alias || 'Job Details'}
+                        </Link>
+                        <span className="text-muted-foreground">/</span>
+                        <h1 className="text-2xl font-bold tracking-tight">Run {runId.substring(0, 8)}</h1>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <div className="flex items-center gap-1.5">
+                            <Clock className="w-3.5 h-3.5" />
+                            <RelativeTime date={run.created_at} />
+                        </div>
+                        <span>•</span>
+                        <div className="flex items-center gap-1.5">
+                            <Badge variant="outline" className="text-[10px] h-4 border-slate-700 text-slate-400 font-mono uppercase">
+                                {run.trigger_type || 'manual'}: {run.trigger_alias || 'user'}
+                            </Badge>
+                        </div>
+                        <span>•</span>
+                        <p className="font-mono">ID: {runId}</p>
+                    </div>
                 </div>
                 <div className="flex gap-2 items-center">
                     <span className="text-sm text-muted-foreground">Status:</span>
@@ -175,6 +197,7 @@ export function RunDetailPage() {
                         jobId={jobId}
                         runId={runId}
                         taskId={selectedTaskId}
+                        error={taskMetadata[selectedTaskId]?.error}
                         onClose={() => setSelectedTaskId(null)}
                     />
                 </div>

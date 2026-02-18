@@ -8,10 +8,13 @@ import (
 )
 
 type JobRun struct {
-	ID          uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID       uuid.UUID `gorm:"type:uuid;index;not null" json:"job_id"`
-	Status      string    `gorm:"type:text;index;not null" json:"status"`
-	Error       string    `json:"error,omitempty"`
+	ID           uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID `gorm:"type:uuid;index;not null" json:"job_id"`
+	TriggerID    uuid.UUID `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType  string    `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias string    `gorm:"type:text" json:"trigger_alias"`
+	Status       string    `gorm:"type:text;index;not null" json:"status"`
+	Error        string    `json:"error,omitempty"`
 	StartedAt   time.Time `gorm:"not null" json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at,omitempty"`
 	CreatedAt   time.Time  `gorm:"not null" json:"created_at"`
