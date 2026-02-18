@@ -583,37 +583,33 @@ func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 }
 
 func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
-	var model models.JobRun
-	// Use a JOIN to fetch job and trigger information for human readability
-	err := s.db.Preload("Tasks").
-		First(&model, "id = ?", runID).Error
-	if err != nil {
-		return nil, err
-	}
-
-	runValue, err := s.convertRunModel(&model)
-	if err != nil {
-		return nil, err
-	}
-
-	// Enrich with metadata
-	var meta struct {
+	var result struct {
+		models.JobRun
 		JobAlias     string
 		TriggerType  string
 		TriggerAlias string
 	}
-	err = s.db.Table("job_runs").
-		Select("jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
-		Joins("join jobs on jobs.id = job_runs.job_id").
+
+	// Use a JOIN to fetch job and trigger information for human readability
+	err := s.db.Table("job_runs").
+		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
+		Joins("left join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.id = ?", runID).
-		Scan(&meta).Error
-
-	if err == nil {
-		runValue.JobAlias = meta.JobAlias
-		runValue.TriggerType = meta.TriggerType
-		runValue.TriggerAlias = meta.TriggerAlias
+		Preload("Tasks").
+		First(&result).Error
+	if err != nil {
+		return nil, err
 	}
+
+	runValue, err := s.convertRunModel(&result.JobRun)
+	if err != nil {
+		return nil, err
+	}
+
+	runValue.JobAlias = result.JobAlias
+	runValue.TriggerType = result.TriggerType
+	runValue.TriggerAlias = result.TriggerAlias
 
 	return runValue, nil
 }

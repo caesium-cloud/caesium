@@ -1,6 +1,6 @@
 import { useParams, useNavigate, Link } from "@tanstack/react-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type Atom, type JobRun, type TaskRun } from "@/lib/api";
+import { api, type Atom, type JobRun, type TaskRun, type DAGNode } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -239,7 +239,7 @@ export function JobDetailPage() {
                     <h3 className="font-semibold text-sm">Task & Atom Details</h3>
                 </div>
                 <div className="divide-y">
-                    {dag?.nodes.map((node: any) => {
+                    {dag?.nodes.map((node: DAGNode) => {
                         const atom = atoms?.[node.atom_id];
                         return (
                             <div key={node.id} className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
