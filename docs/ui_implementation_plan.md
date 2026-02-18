@@ -154,7 +154,7 @@ Routes implemented:
 
 ------------------------------------------------------------------------
 
-# 13. Phase 2: Deep Observability & Testing [PLANNED]
+# 13. Phase 2: Deep Observability & Testing [IN PROGRESS]
 
 While the core operator UI is complete, the following enhancements will elevate the platform to a production-ready observability suite.
 
@@ -164,10 +164,10 @@ While the core operator UI is complete, the following enhancements will elevate 
 - [ ] Add "Daily Run Volume" (Bar Chart).
 - [ ] Add "Failure Distribution by Job" (Pie Chart).
 
-## 13.2 Detailed Inspections [IN PROGRESS]
-- [ ] **Job Detail Integration**: Inspect associated triggers and atoms directly within the Job Detail page.
-- [ ] **Trigger Configuration**: View cron schedules, aliases, and recent firings in a dedicated tab.
-- [ ] **Atom Usage**: View image, command, and engine details for all tasks in a job.
+## 13.2 Detailed Inspections [COMPLETED]
+- [x] **Job Detail Integration**: Inspect associated triggers and atoms directly within the Job Detail page.
+- [x] **Trigger Configuration**: View cron schedules, aliases, and recent firings in a dedicated tab.
+- [x] **Atom Usage**: View image, command, and engine details for all tasks in a job.
 
 ## 13.3 Testing & Quality
 - [ ] **E2E Testing**: Implement Playwright tests for critical paths (Trigger Job -> Watch SSE -> View Logs).
