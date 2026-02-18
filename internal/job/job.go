@@ -188,7 +188,7 @@ func (j *job) Run(ctx context.Context) error {
 			existing, err := store.Get(id)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return store.Start(j.id)
+					return store.Start(j.id, j.triggerID)
 				}
 				return nil, err
 			}
