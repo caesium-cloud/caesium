@@ -491,7 +491,16 @@ func (j *job) Run(ctx context.Context) error {
 			return err
 		}
 
-		if err := store.CompleteTask(runID, taskID, string(a.Result())); err != nil {
+		atomResult := a.Result()
+		if atomResult != atom.Success {
+			err := fmt.Errorf("atom failed with result: %s", atomResult)
+			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
+				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
+			}
+			return err
+		}
+
+		if err := store.CompleteTask(runID, taskID, string(atomResult)); err != nil {
 			return err
 		}
 

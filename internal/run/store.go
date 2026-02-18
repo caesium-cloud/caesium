@@ -258,6 +258,11 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
+		status := TaskStatusSucceeded
+		if result != "success" && result != "ok" && result != "" {
+			status = TaskStatusFailed
+		}
+
 		// Capture task metadata for metrics before updating.
 		var taskRun models.TaskRun
 		taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
@@ -269,10 +274,10 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
 				jobID := jobRun.JobID.String()
 				engine := string(taskRun.Engine)
-				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusSucceeded)).Inc()
+				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
 				if taskRun.StartedAt != nil {
 					duration := now.Sub(*taskRun.StartedAt).Seconds()
-					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusSucceeded)).Observe(duration)
+					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).Observe(duration)
 				}
 			}
 		} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
@@ -284,17 +289,29 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		if enforceClaim {
 			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 		}
-		resultUpdate := updateQuery.
-			Updates(map[string]interface{}{
-				"status":       string(TaskStatusSucceeded),
-				"completed_at": now,
-				"result":       result,
-			})
+
+		updates := map[string]interface{}{
+			"status":       string(status),
+			"completed_at": now,
+			"result":       result,
+		}
+		if status == TaskStatusFailed {
+			updates["error"] = "task failed with result: " + result
+		}
+
+		resultUpdate := updateQuery.Updates(updates)
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
 		}
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
+		}
+
+		if status == TaskStatusFailed {
+			if s.bus != nil {
+				s.publishTaskEvent(tx, event.TypeTaskFailed, runID, taskID)
+			}
+			return nil
 		}
 
 		var edges []models.TaskEdge
