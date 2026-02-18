@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 )
 
 // Engine defines the interface for treating the
@@ -186,7 +187,24 @@ func (e *dockerEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) 
 		opts.Since = req.Since.Format(time.RFC3339Nano)
 	}
 
-	return e.backend.ContainerLogs(e.ctx, req.ID, opts)
+	raw, err := e.backend.ContainerLogs(e.ctx, req.ID, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	pr, pw := io.Pipe()
+
+	go func() {
+		defer raw.Close()
+		defer pw.Close()
+
+		// multiplexed logs need to be demultiplexed using StdCopy
+		if _, err := stdcopy.StdCopy(pw, pw, raw); err != nil {
+			log.Error("failed to demultiplex docker logs", "error", err)
+		}
+	}()
+
+	return pr, nil
 }
 
 func formatEnv(values map[string]string) []string {

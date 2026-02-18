@@ -98,7 +98,7 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID strin
 	if containerID == "" {
 		return nil, args.Error(0)
 	}
-	return io.NopCloser(bytes.NewReader([]byte("logs"))), nil
+	return args.Get(0).(io.ReadCloser), args.Error(1)
 }
 
 func (m *mockDockerBackend) ImagePull(ctx context.Context, imageRef string, options image.PullOptions) (io.ReadCloser, error) {
