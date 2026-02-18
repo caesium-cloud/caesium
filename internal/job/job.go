@@ -501,7 +501,22 @@ func (j *job) Run(ctx context.Context) error {
 
 		atomResult := a.Result()
 		if atomResult != atom.Success {
-			err := fmt.Errorf("atom failed with result: %s", atomResult)
+			var err error
+			switch atomResult {
+			case atom.Failure:
+				err = fmt.Errorf("command exited with non-zero status")
+			case atom.StartupFailure:
+				err = fmt.Errorf("atom failed to start (check image/command)")
+			case atom.ResourceFailure:
+				err = fmt.Errorf("atom exhausted resources (e.g. OOM)")
+			case atom.Killed:
+				err = fmt.Errorf("atom was forcefully killed")
+			case atom.Terminated:
+				err = fmt.Errorf("atom was gracefully terminated")
+			default:
+				err = fmt.Errorf("atom failed with result: %s", atomResult)
+			}
+
 			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
 				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 			}

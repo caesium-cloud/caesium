@@ -21,6 +21,8 @@ type Status string
 
 type TaskStatus string
 
+type Result string
+
 const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
@@ -303,7 +305,20 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			"result":       result,
 		}
 		if status == TaskStatusFailed {
-			updates["error"] = "task failed with result: " + result
+			msg := result
+			switch Result(result) {
+			case "failure":
+				msg = "command exited with non-zero status"
+			case "startup_failure":
+				msg = "atom failed to start (check image/command)"
+			case "resource_failure":
+				msg = "atom exhausted resources (e.g. OOM)"
+			case "killed":
+				msg = "atom was forcefully killed"
+			case "terminated":
+				msg = "atom was gracefully terminated"
+			}
+			updates["error"] = msg
 		}
 
 		resultUpdate := updateQuery.Updates(updates)
