@@ -156,7 +156,27 @@ Routes implemented:
 
 ------------------------------------------------------------------------
 
-# 13. Definition of Done [100% COMPLETED]
+# 13. Phase 2: Deep Observability & Testing [PLANNED]
+
+While the core operator UI is complete, the following enhancements will elevate the platform to a production-ready observability suite.
+
+## 13.1 Advanced Stats Visualization
+- [ ] Replace basic tables with **Recharts** visualizations.
+- [ ] Add "Job Success Rate over Time" (Line Chart).
+- [ ] Add "Daily Run Volume" (Bar Chart).
+- [ ] Add "Failure Distribution by Job" (Pie Chart).
+
+## 13.2 Detailed Inspections
+- [ ] **Triggers Detail Page**: Click into a trigger to see its history of firings and associated job runs.
+- [ ] **Atoms Detail Page**: Inspect atom usage, total duration time, and failure rates per image/engine.
+
+## 13.3 Testing & Quality
+- [ ] **E2E Testing**: Implement Playwright tests for critical paths (Trigger Job -> Watch SSE -> View Logs).
+- [ ] **Component Testing**: Expand unit tests for complex visual components like `TaskNode` and `JobDAG`.
+
+------------------------------------------------------------------------
+
+# 14. Definition of Done [Phase 1: 100% COMPLETED]
 
 - [x] Jobs list works with real-time updates.
 - [x] DAG fully interactive and descriptive.

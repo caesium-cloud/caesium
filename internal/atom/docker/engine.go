@@ -160,14 +160,16 @@ func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 		return err
 	}
 
-	log.Info("removing docker container", "id", req.ID)
-
-	opts := dockercontainer.RemoveOptions{
-		Force:         req.Force,
-		RemoveVolumes: true,
-	}
-
-	return e.backend.ContainerRemove(e.ctx, req.ID, opts)
+	// TODO: implement garbage collection policy
+	// log.Info("removing docker container", "id", req.ID)
+	//
+	// opts := dockercontainer.RemoveOptions{
+	// 	Force:         req.Force,
+	// 	RemoveVolumes: true,
+	// }
+	//
+	// return e.backend.ContainerRemove(e.ctx, req.ID, opts)
+	return nil
 }
 
 // Logs streams the log output from a Caesium Docker container
