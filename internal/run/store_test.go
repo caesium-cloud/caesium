@@ -99,7 +99,7 @@ func TestStorePersistsRunState(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "done"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "ok"))
 	require.NoError(t, store.Complete(runRecord.ID, nil))
 
 	finalStore := NewStore(db)
@@ -182,7 +182,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskC, atomC, 0))
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "done"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "ok"))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "done"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok"))
 
 	state, err = store.Get(runRecord.ID)
 	require.NoError(t, err)
