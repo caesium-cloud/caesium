@@ -22,6 +22,7 @@ coverage.txt
 
 # Development tools
 .devcontainer
+.idea
 .vscode
 
 # LLMs

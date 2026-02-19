@@ -69,4 +69,11 @@ type Environment struct {
 	JobdefSecretsVaultNamespace   string        `envconfig:"JOBDEF_SECRETS_VAULT_NAMESPACE"`
 	JobdefSecretsVaultCACert      string        `envconfig:"JOBDEF_SECRETS_VAULT_CA_CERT"`
 	JobdefSecretsVaultSkipVerify  bool          `envconfig:"JOBDEF_SECRETS_VAULT_SKIP_VERIFY" default:"false"`
+	OpenLineageEnabled           bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
+	OpenLineageTransport         string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
+	OpenLineageURL               string        `envconfig:"OPEN_LINEAGE_URL" default:""`
+	OpenLineageNamespace         string        `envconfig:"OPEN_LINEAGE_NAMESPACE" default:"caesium"`
+	OpenLineageHeaders           string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
+	OpenLineageFilePath          string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
+	OpenLineageTimeout           time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
 }
