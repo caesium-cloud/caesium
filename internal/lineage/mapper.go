@@ -202,7 +202,7 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	}
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, evt.TaskID)
+	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
 
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
@@ -213,7 +213,7 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 		Producer:  producerURI,
 		SchemaURL: schemaURL,
 		Run: Run{
-			RunID:  evt.TaskID,
+			RunID:  payload.ID,
 			Facets: runFacets,
 		},
 		Job: Job{
@@ -233,7 +233,7 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	}
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, evt.TaskID)
+	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
 
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
@@ -244,7 +244,7 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 		Producer:  producerURI,
 		SchemaURL: schemaURL,
 		Run: Run{
-			RunID:  evt.TaskID,
+			RunID:  payload.ID,
 			Facets: runFacets,
 		},
 		Job: Job{
@@ -264,7 +264,7 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 	}
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, evt.TaskID)
+	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
 
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
@@ -282,7 +282,7 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 		Producer:  producerURI,
 		SchemaURL: schemaURL,
 		Run: Run{
-			RunID:  evt.TaskID,
+			RunID:  payload.ID,
 			Facets: runFacets,
 		},
 		Job: Job{
@@ -302,7 +302,7 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	}
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
-	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, evt.TaskID)
+	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
 
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
@@ -313,7 +313,7 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 		Producer:  producerURI,
 		SchemaURL: schemaURL,
 		Run: Run{
-			RunID:  evt.TaskID,
+			RunID:  payload.ID,
 			Facets: runFacets,
 		},
 		Job: Job{
@@ -354,26 +354,49 @@ func (m *mapper) resolveJobAlias(jobID uuid.UUID, hint string) string {
 		return hint
 	}
 
+	entry, ok := m.getJobInfo(jobID)
+	if !ok || entry.alias == "" {
+		return jobID.String()
+	}
+	return entry.alias
+}
+
+func (m *mapper) getJobInfo(jobID uuid.UUID) (jobCacheEntry, bool) {
 	if entry, ok := m.cache.Get(jobID); ok {
-		return entry.alias
+		return entry, true
 	}
 
-	if m.db != nil {
-		var job jobRecord
-		if err := m.db.Select("alias", "provenance_repo", "provenance_ref", "provenance_commit", "provenance_path").
-			Where("id = ?", jobID).First(&job).Error; err == nil && job.Alias != "" {
-			m.cache.Set(jobID, jobCacheEntry{
-				alias:            job.Alias,
-				provenanceRepo:   job.ProvenanceRepo,
-				provenanceRef:    job.ProvenanceRef,
-				provenanceCommit: job.ProvenanceCommit,
-				provenancePath:   job.ProvenancePath,
-			})
-			return job.Alias
-		}
+	if m.db == nil {
+		return jobCacheEntry{}, false
 	}
 
-	return jobID.String()
+	var job jobRecord
+	if err := m.db.Select("alias", "provenance_repo", "provenance_ref", "provenance_commit", "provenance_path").
+		Where("id = ?", jobID).First(&job).Error; err != nil {
+		return jobCacheEntry{}, false
+	}
+
+	entry := jobCacheEntry{
+		alias:            job.Alias,
+		provenanceRepo:   job.ProvenanceRepo,
+		provenanceRef:    job.ProvenanceRef,
+		provenanceCommit: job.ProvenanceCommit,
+		provenancePath:   job.ProvenancePath,
+	}
+	m.cache.Set(jobID, entry)
+	return entry, true
+}
+
+func buildSourceCodeFacet(entry jobCacheEntry) SourceCodeLocationFacet {
+	return SourceCodeLocationFacet{
+		BaseFacet: newBaseFacet(sourceCodeFacetSchema),
+		Type:      "git",
+		URL:       entry.provenanceRepo,
+		RepoURL:   entry.provenanceRepo,
+		Branch:    entry.provenanceRef,
+		Path:      entry.provenancePath,
+		Version:   entry.provenanceCommit,
+	}
 }
 
 func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]interface{} {
@@ -386,42 +409,8 @@ func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]inte
 		},
 	}
 
-	if entry, ok := m.cache.Get(jobID); ok && entry.provenanceRepo != "" {
-		facets["sourceCodeLocation"] = SourceCodeLocationFacet{
-			BaseFacet: newBaseFacet(sourceCodeFacetSchema),
-			Type:      "git",
-			URL:       entry.provenanceRepo,
-			RepoURL:   entry.provenanceRepo,
-			Branch:    entry.provenanceRef,
-			Path:      entry.provenancePath,
-			Version:   entry.provenanceCommit,
-		}
-		return facets
-	}
-
-	if m.db != nil {
-		var job jobRecord
-		if err := m.db.Select("alias", "provenance_repo", "provenance_ref", "provenance_commit", "provenance_path").
-			Where("id = ?", jobID).First(&job).Error; err == nil {
-			m.cache.Set(jobID, jobCacheEntry{
-				alias:            job.Alias,
-				provenanceRepo:   job.ProvenanceRepo,
-				provenanceRef:    job.ProvenanceRef,
-				provenanceCommit: job.ProvenanceCommit,
-				provenancePath:   job.ProvenancePath,
-			})
-			if job.ProvenanceRepo != "" {
-				facets["sourceCodeLocation"] = SourceCodeLocationFacet{
-					BaseFacet: newBaseFacet(sourceCodeFacetSchema),
-					Type:      "git",
-					URL:       job.ProvenanceRepo,
-					RepoURL:   job.ProvenanceRepo,
-					Branch:    job.ProvenanceRef,
-					Path:      job.ProvenancePath,
-					Version:   job.ProvenanceCommit,
-				}
-			}
-		}
+	if entry, ok := m.getJobInfo(jobID); ok && entry.provenanceRepo != "" {
+		facets["sourceCodeLocation"] = buildSourceCodeFacet(entry)
 	}
 
 	return facets

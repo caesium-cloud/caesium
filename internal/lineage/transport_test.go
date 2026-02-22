@@ -96,8 +96,14 @@ func TestFileTransport(t *testing.T) {
 		t.Fatalf("create temp file: %v", err)
 	}
 	tmpPath := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpPath)
+	if err := tmpFile.Close(); err != nil {
+		t.Fatalf("close temp file: %v", err)
+	}
+	defer func() {
+		if err := os.Remove(tmpPath); err != nil {
+			t.Fatalf("remove temp file: %v", err)
+		}
+	}()
 
 	transport, err := NewFileTransport(tmpPath)
 	if err != nil {
