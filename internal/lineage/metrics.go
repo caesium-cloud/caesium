@@ -1,10 +1,14 @@
 package lineage
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
 
 var (
+	registerMetricsOnce sync.Once
+
 	LineageEventsEmitted = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_lineage_events_emitted_total",
@@ -24,8 +28,10 @@ var (
 )
 
 func RegisterMetrics() {
-	prometheus.MustRegister(
-		LineageEventsEmitted,
-		LineageEmitDuration,
-	)
+	registerMetricsOnce.Do(func() {
+		prometheus.MustRegister(
+			LineageEventsEmitted,
+			LineageEmitDuration,
+		)
+	})
 }

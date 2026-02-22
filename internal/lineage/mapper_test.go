@@ -189,8 +189,8 @@ func TestMapTaskStart(t *testing.T) {
 		t.Errorf("eventType = %v, want START", olEvent.EventType)
 	}
 
-	if olEvent.Run.RunID != payload.TaskID {
-		t.Errorf("run.runId = %v, want %v (TaskID)", olEvent.Run.RunID, payload.TaskID)
+	if olEvent.Run.RunID != payload.ID {
+		t.Errorf("run.runId = %v, want %v (TaskRun ID)", olEvent.Run.RunID, payload.ID)
 	}
 
 	expectedJobName := jobID.String() + ".task." + payload.TaskID.String()
@@ -236,8 +236,8 @@ func TestMapTaskComplete(t *testing.T) {
 	if olEvent.EventType != EventTypeComplete {
 		t.Errorf("eventType = %v, want COMPLETE", olEvent.EventType)
 	}
-	if olEvent.Run.RunID != payload.TaskID {
-		t.Errorf("run.runId = %v, want %v", olEvent.Run.RunID, payload.TaskID)
+	if olEvent.Run.RunID != payload.ID {
+		t.Errorf("run.runId = %v, want %v", olEvent.Run.RunID, payload.ID)
 	}
 
 	if _, ok := olEvent.Run.Facets["parent"]; !ok {
@@ -383,7 +383,7 @@ func TestRunStartHasDAGFacet(t *testing.T) {
 	if df.TriggerAlias != "nightly" {
 		t.Errorf("triggerAlias = %v, want nightly", df.TriggerAlias)
 	}
-	if df.BaseFacet.Producer != producerURI {
+	if df.Producer != producerURI {
 		t.Error("_producer must be set on custom facet")
 	}
 }
@@ -428,7 +428,7 @@ func TestTaskStartHasExecutionFacet(t *testing.T) {
 	if ef.ClaimedBy != "worker-1" {
 		t.Errorf("claimedBy = %v, want worker-1", ef.ClaimedBy)
 	}
-	if ef.BaseFacet.Producer != producerURI {
+	if ef.Producer != producerURI {
 		t.Error("_producer must be set on custom facet")
 	}
 }
