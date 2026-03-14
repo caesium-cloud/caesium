@@ -1,6 +1,7 @@
 package dag
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 
@@ -265,23 +266,13 @@ func (n *Node) Order() int {
 
 func sortNodes(nodes []*Node) {
 	slices.SortFunc(nodes, func(a, b *Node) int {
-		if a.id < b.id {
-			return -1
-		} else if a.id > b.id {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.id, b.id)
 	})
 }
 
 func insertSorted(queue []*Node, node *Node) []*Node {
 	index, _ := slices.BinarySearchFunc(queue, node, func(a, b *Node) int {
-		if a.id < b.id {
-			return -1
-		} else if a.id > b.id {
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.id, b.id)
 	})
 	queue = append(queue, nil)
 	copy(queue[index+1:], queue[index:])
