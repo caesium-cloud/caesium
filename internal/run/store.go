@@ -758,7 +758,12 @@ func (s *Store) publishTaskEvent(db *gorm.DB, eventType event.Type, runID, taskI
 		return
 	}
 
-	payload, err := json.Marshal(convertRunTaskModel(&taskRun))
+	taskPayload := convertRunTaskModel(&taskRun)
+	// Use task-run row ID for event payloads so downstream consumers can identify
+	// each task execution uniquely across retries/runs.
+	taskPayload.ID = taskRun.ID
+
+	payload, err := json.Marshal(taskPayload)
 	if err != nil {
 		log.Error("failed to marshal task run for event", "error", err, "run_id", runID, "task_id", taskID)
 		return

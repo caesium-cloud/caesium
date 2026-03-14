@@ -49,6 +49,14 @@ func OpenTestDB(tb testing.TB) *gorm.DB {
 	if err != nil {
 		tb.Fatalf("open sqlite: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		tb.Fatalf("open sqlite sql.DB: %v", err)
+	}
+	// Keep tests on a single SQLite connection to avoid lock contention
+	// and intermittent CGO crashes under high-concurrency race runs.
+	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
 
 	if err := db.AutoMigrate(models.All...); err != nil {
 		tb.Fatalf("migrate: %v", err)

@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -105,6 +106,34 @@ func start(cmd *cobra.Command, args []string) error {
 		"node_labels",
 		vars.NodeLabels,
 	)
+	if vars.OpenLineageEnabled {
+		transport, err := lineage.BuildTransport(lineage.Config{
+			Enabled:   vars.OpenLineageEnabled,
+			Transport: vars.OpenLineageTransport,
+			URL:       vars.OpenLineageURL,
+			Namespace: vars.OpenLineageNamespace,
+			Headers:   vars.OpenLineageHeaders,
+			FilePath:  vars.OpenLineageFilePath,
+			Timeout:   vars.OpenLineageTimeout,
+		})
+		if err != nil {
+			log.Error("openlineage transport configuration failure, disabling integration", "error", err)
+		} else {
+			lineage.RegisterMetrics()
+			sub := lineage.NewSubscriber(bus, transport, vars.OpenLineageNamespace, db.Connection())
+			sub.SetTransportName(vars.OpenLineageTransport)
+			go func() {
+				log.Info("launching openlineage subscriber",
+					"transport", vars.OpenLineageTransport,
+					"namespace", vars.OpenLineageNamespace,
+				)
+				if err := sub.Start(ctx); err != nil && ctx.Err() == nil {
+					log.Error("openlineage subscriber exited", "error", err)
+				}
+			}()
+		}
+	}
+
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
 	if err != nil {
