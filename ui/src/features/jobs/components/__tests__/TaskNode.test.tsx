@@ -33,9 +33,7 @@ describe('TaskNode', () => {
       engine: 'docker',
       command: ['echo', 'hello'],
     });
-    // The status icon should be a CheckCircle2 (green check)
-    const svgs = document.querySelectorAll('.text-green-400');
-    expect(svgs.length).toBeGreaterThan(0);
+    expect(screen.getByTestId('status-icon-succeeded')).toBeInTheDocument();
   });
 
   it('renders task with failed status and shows error info', () => {
@@ -59,9 +57,7 @@ describe('TaskNode', () => {
       engine: 'docker',
       command: [],
     });
-    // Container icon should render for docker engine
-    const engineIcons = document.querySelectorAll('.text-blue-400');
-    expect(engineIcons.length).toBeGreaterThan(0);
+    expect(screen.getByTestId('engine-icon-docker')).toBeInTheDocument();
   });
 
   it('renders command arguments', () => {

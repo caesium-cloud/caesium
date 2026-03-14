@@ -5,7 +5,6 @@ run:
     - integration
 
 linters:
-  default: standard
   enable:
     - bodyclose
     - noctx
@@ -32,10 +31,6 @@ linters:
         linters:
           - errcheck
           - gocritic
-
-formatters:
-  enable:
-    - gofmt
 
 issues:
   max-issues-per-linter: 0
