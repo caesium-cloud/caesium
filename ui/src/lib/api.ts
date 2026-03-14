@@ -153,6 +153,12 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     throw new ApiError(response.status, await response.text());
   }
 
+  // 202 Accepted / 204 No Content — body is empty, nothing to parse
+  const contentType = response.headers.get("content-type");
+  if (!contentType?.includes("application/json")) {
+    return undefined as T;
+  }
+
   return response.json();
 }
 
@@ -206,14 +212,30 @@ export const api = {
   getAtoms: () => request<Atom[]>("/atoms"),
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
-  applyJobDef: (yaml: string) =>
-    request<unknown>("/jobdefs/apply", {
+  applyJobDef: async (yamlText: string): Promise<{ applied: number }> => {
+    // The backend expects {"definitions":[...]} JSON, not raw YAML.
+    // Parse all YAML documents from the editor, then POST as JSON — matching
+    // the same contract used by the CLI (cmd/job/apply.go).
+    const { loadAll } = await import("js-yaml");
+    const definitions: unknown[] = [];
+    loadAll(yamlText, (doc) => { if (doc) definitions.push(doc); });
+    if (definitions.length === 0) {
+      throw new ApiError(400, "No definitions found in the YAML");
+    }
+    return request<{ applied: number }>("/jobdefs/apply", {
       method: "POST",
-      headers: { "Content-Type": "application/x-yaml" },
-      body: yaml,
-    }),
+      body: JSON.stringify({ definitions }),
+    });
+  },
   getWorkers: (nodeAddress: string) => request<WorkerStatus>(`/nodes/${nodeAddress}/workers`),
-  getHealth: () =>
-    fetch(`${import.meta.env.VITE_API_BASE_URL?.replace("/v1", "") || ""}/health`).then(r => r.json()) as Promise<HealthCheck>,
+  getHealth: async (): Promise<HealthCheck> => {
+    // /health is mounted at the root, not under /v1
+    const healthBase = API_BASE_URL.replace(/\/v1\/?$/, "");
+    const response = await fetch(`${healthBase}/health`);
+    if (!response.ok) {
+      throw new ApiError(response.status, await response.text());
+    }
+    return response.json();
+  },
   getStats: () => request<StatsResponse>("/stats"),
 };

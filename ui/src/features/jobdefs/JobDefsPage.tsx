@@ -8,26 +8,25 @@ import { FileCode2, Play, CheckCircle2, XCircle, RotateCcw } from "lucide-react"
 import { useState } from "react";
 
 const EXAMPLE_YAML = `# Example Caesium job definition
-jobs:
-  - alias: my-pipeline
-    trigger: my-cron-trigger
-    tasks:
-      - atom: data-fetch
-        next: data-transform
-      - atom: data-transform
-        next: data-load
-      - atom: data-load
-
-atoms:
-  - engine: docker
+apiVersion: v1
+kind: Job
+metadata:
+  alias: my-pipeline
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+    timezone: "UTC"
+steps:
+  - name: fetch
     image: python:3.11-slim
-    command: python /app/fetch.py
-
-triggers:
-  - alias: my-cron-trigger
-    type: cron
-    configuration:
-      expression: "0 * * * *"
+    command: ["python", "/app/fetch.py"]
+  - name: transform
+    image: python:3.11-slim
+    command: ["python", "/app/transform.py"]
+  - name: load
+    image: python:3.11-slim
+    command: ["python", "/app/load.py"]
 `;
 
 export function JobDefsPage() {
@@ -170,25 +169,36 @@ export function JobDefsPage() {
             </CardHeader>
             <CardContent className="space-y-4 text-xs">
               <div>
-                <p className="font-semibold text-foreground mb-1.5">Job</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`alias: string       # required
-trigger: string     # trigger alias
-tasks:
-  - atom: string    # atom alias/id
-    next: string    # next task alias`}</pre>
+                <p className="font-semibold text-foreground mb-1.5">Required top-level fields</p>
+                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`apiVersion: v1
+kind: Job
+metadata:
+  alias: string     # required
+trigger:
+  type: cron|http
+  configuration: {} # type-specific
+steps:
+  - name: string    # required
+    image: string   # required
+    command: [...]  # optional
+    engine: docker  # default`}</pre>
               </div>
               <div>
-                <p className="font-semibold text-foreground mb-1.5">Atom</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`engine: docker|kubernetes
-image: string       # container image
-command: string     # entrypoint command`}</pre>
+                <p className="font-semibold text-foreground mb-1.5">Step DAG edges</p>
+                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`# Explicit successors
+next: [step-b, step-c]
+# Or prerequisites
+dependsOn: [step-a]
+# Without edges: steps run
+# sequentially top-to-bottom`}</pre>
               </div>
               <div>
-                <p className="font-semibold text-foreground mb-1.5">Trigger</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`alias: string
-type: cron|http
-configuration:
-  expression: "* * * * *"  # cron`}</pre>
+                <p className="font-semibold text-foreground mb-1.5">Callbacks (optional)</p>
+                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`callbacks:
+  - type: notification
+    configuration:
+      webhook_url: "https://..."
+      channel: "#alerts"`}</pre>
               </div>
             </CardContent>
           </Card>
