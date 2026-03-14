@@ -35,6 +35,8 @@ type Job interface {
 type job struct {
 	id                     uuid.UUID
 	triggerID              *uuid.UUID
+	maxParallelTasks       int
+	taskTimeout            time.Duration
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -53,6 +55,8 @@ func New(m *models.Job, opts ...jobOption) Job {
 	j := &job{
 		id:                     m.ID,
 		triggerID:              &m.TriggerID,
+		maxParallelTasks:       m.MaxParallelTasks,
+		taskTimeout:            m.TaskTimeout,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -179,23 +183,17 @@ func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
 
-	// Get the job model to check for overrides
-	jobModel, err := store.GetJob(j.id)
-	if err != nil {
-		return fmt.Errorf("job %s: load model: %w", j.id, err)
-	}
-
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
 	continueOnFailure := failurePolicy == taskFailurePolicyContinue
 
 	// Use job overrides if specified, otherwise fall back to environment variables
-	taskTimeout := jobModel.TaskTimeout
+	taskTimeout := j.taskTimeout
 	if taskTimeout == 0 {
 		taskTimeout = vars.TaskTimeout
 	}
 
-	maxParallel := jobModel.MaxParallelTasks
+	maxParallel := j.maxParallelTasks
 	if maxParallel <= 0 {
 		maxParallel = vars.MaxParallelTasks
 	}

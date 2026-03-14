@@ -94,7 +94,10 @@ func (w *Worker) Run(ctx context.Context) error {
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
 	// Add up to 20% jitter to the sleep duration to avoid synchronized polling
-	jitter := time.Duration(rand.Int64N(int64(d) / 5))
+	var jitter time.Duration
+	if maxJitter := int64(d) / 5; maxJitter > 0 {
+		jitter = time.Duration(rand.Int64N(maxJitter))
+	}
 	timer := time.NewTimer(d + jitter)
 	defer timer.Stop()
 

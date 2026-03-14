@@ -13,6 +13,18 @@ interface SuccessRateTrendChartProps {
   data: DailyStats[];
 }
 
+function formatDateLabel(value: string) {
+  const [year, month, day] = value.split('-').map(Number);
+  if (!year || !month || !day) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: 'numeric',
+  }).format(new Date(year, month - 1, day));
+}
+
 export function SuccessRateTrendChart({ data }: SuccessRateTrendChartProps) {
   if (!data || data.length === 0) {
     return (
@@ -37,10 +49,7 @@ export function SuccessRateTrendChart({ data }: SuccessRateTrendChartProps) {
           fontSize={12}
           tickLine={false}
           axisLine={false}
-          tickFormatter={(value) => {
-            const date = new Date(value);
-            return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-          }}
+          tickFormatter={formatDateLabel}
         />
         <YAxis 
           stroke="hsl(var(--muted-foreground))"

@@ -160,6 +160,51 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 	require.True(t, engine.wasForceStopped(taskID.String()))
 }
 
+func TestRunLocalUsesJobLevelOverrides(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskA := uuid.New()
+	taskB := uuid.New()
+	taskC := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskA, JobID: jobID, AtomID: uuid.New()},
+		{ID: taskB, JobID: jobID, AtomID: uuid.New()},
+		{ID: taskC, JobID: jobID, AtomID: uuid.New()},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
+		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
+		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
+	}}
+	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: taskA, ToTaskID: taskB},
+	}}
+	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
+
+	engine.runDurationByName[taskA.String()] = 50 * time.Millisecond
+	engine.runDurationByName[taskB.String()] = 20 * time.Millisecond
+	engine.runDurationByName[taskC.String()] = 50 * time.Millisecond
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, edgeSvc, engine)
+
+	err := New(&models.Job{
+		ID:               jobID,
+		MaxParallelTasks: 2,
+	}, opts...).Run(context.Background())
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, engine.maxConcurrent(), 2)
+}
+
 func withTestDeps(
 	store *run.Store,
 	vars env.Environment,

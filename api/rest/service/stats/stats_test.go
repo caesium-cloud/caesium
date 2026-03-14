@@ -152,6 +152,35 @@ func (s *StatsSuite) TestAvgDurationComputed() {
 	s.InDelta(90.0, resp.Jobs.AvgDurationSeconds, 1.0)
 }
 
+func (s *StatsSuite) TestSuccessRateTrendUsesFullCalendarWindow() {
+	jobID := s.createJob("trend-test")
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+
+	completedToday := today.Add(2 * time.Hour)
+	s.createJobRun(jobID, "succeeded", today.Add(time.Hour), &completedToday)
+
+	twoDaysAgo := today.Add(-2 * 24 * time.Hour)
+	completedTwoDaysAgo := twoDaysAgo.Add(3 * time.Hour)
+	s.createJobRun(jobID, "failed", twoDaysAgo.Add(2*time.Hour), &completedTwoDaysAgo)
+
+	svc := &Service{ctx: context.Background(), db: s.db}
+	resp, err := svc.Get()
+	s.Require().NoError(err)
+	s.Require().Len(resp.SuccessRateTrend, 7)
+
+	byDate := make(map[string]float64, len(resp.SuccessRateTrend))
+	for _, day := range resp.SuccessRateTrend {
+		byDate[day.Date] = day.SuccessRate
+	}
+
+	s.Equal(today.Add(-6*24*time.Hour).Format("2006-01-02"), resp.SuccessRateTrend[0].Date)
+	s.Equal(today.Format("2006-01-02"), resp.SuccessRateTrend[6].Date)
+	s.Equal(1.0, byDate[today.Format("2006-01-02")])
+	s.Equal(0.0, byDate[twoDaysAgo.Format("2006-01-02")])
+	s.Equal(0.0, byDate[today.Add(-1*24*time.Hour).Format("2006-01-02")])
+}
+
 func (s *StatsSuite) createJob(alias string) uuid.UUID {
 	id := uuid.New()
 	triggerID := uuid.New()
