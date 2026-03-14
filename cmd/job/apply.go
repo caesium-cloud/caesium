@@ -2,6 +2,7 @@ package job
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -37,7 +38,7 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := sendApplyRequest(strings.TrimSuffix(applyServer, "/"), defs); err != nil {
+		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs); err != nil {
 			return err
 		}
 
@@ -119,14 +120,20 @@ func appendDefinitions(path string, defs *[]schema.Definition) error {
 	return nil
 }
 
-func sendApplyRequest(server string, defs []schema.Definition) error {
+func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition) error {
 	reqBody := jobdef.ApplyRequest{Definitions: defs}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return err
 	}
 
-	resp, err := http.Post(server+"/v1/jobdefs/apply", "application/json", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server+"/v1/jobdefs/apply", bytes.NewReader(payload))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}

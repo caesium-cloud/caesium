@@ -280,7 +280,7 @@ func (s *DockerTestSuite) TestLogs() {
 
 	s.engine.backend.(*mockDockerBackend).
 		On("ContainerLogs", testAtomID).
-		Return(io.ReadCloser(io.NopCloser(bytes.NewReader(mockLogs))), nil)
+		Return(io.NopCloser(bytes.NewReader(mockLogs)), nil)
 
 	logs, err := s.engine.Logs(req)
 	assert.Nil(s.T(), err)

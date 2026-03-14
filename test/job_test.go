@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
@@ -32,7 +33,10 @@ func (s *IntegrationTestSuite) TestHTTPJob() {
 	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v", s.caesiumURL, job.TriggerID))
 	assert.Nil(s.T(), err)
 
-	resp, err := http.DefaultClient.Do(&http.Request{Method: http.MethodPut, URL: u})
+	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodPut, u.String(), nil)
+	assert.Nil(s.T(), err)
+
+	resp, err := http.DefaultClient.Do(req)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
 	if resp.Body != nil {
@@ -61,7 +65,7 @@ func (s *IntegrationTestSuite) TestJobMetadataAndTasks() {
 func (s *IntegrationTestSuite) TestJobListFilterByTrigger() {
 	created := s.createJob("test_job_filter", nil)
 
-	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs?trigger_id=%s", s.caesiumURL, created.TriggerID.String()))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs?trigger_id=%s", s.caesiumURL, created.TriggerID.String()), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -75,7 +79,7 @@ func (s *IntegrationTestSuite) TestJobListFilterByTrigger() {
 func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
 	created := s.createJob("test_job_delete", nil)
 
-	req, err := http.NewRequest(http.MethodDelete, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()), nil)
+	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodDelete, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()), nil)
 	assert.Nil(s.T(), err)
 	resp, err := http.DefaultClient.Do(req)
 	assert.Nil(s.T(), err)
@@ -84,14 +88,14 @@ func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
 		_ = resp.Body.Close()
 	}
 
-	resp, err = http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()))
+	resp, err = s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, created.ID.String()), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusNotFound, resp.StatusCode)
 }
 
 func (s *IntegrationTestSuite) TestJobApplyCommand() {
-	cmd := exec.Command(s.cliPath, "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
+	cmd := exec.CommandContext(s.T().Context(), s.cliPath, "job", "apply", "--path", filepath.Join("test", "definitions"), "--server", s.caesiumURL)
 	cmd.Dir = s.projectRoot
 	output, err := cmd.CombinedOutput()
 	assert.Nil(s.T(), err, string(output))
@@ -158,7 +162,7 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 	buf, err := json.Marshal(req)
 	assert.Nil(s.T(), err)
 
-	resp, err := http.Post(fmt.Sprintf("%v/v1/jobs", s.caesiumURL), "application/json", bytes.NewBuffer(buf))
+	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%v/v1/jobs", s.caesiumURL), bytes.NewBuffer(buf))
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusCreated, resp.StatusCode)
 	defer resp.Body.Close()
@@ -169,7 +173,7 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 }
 
 func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {
-	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs", s.caesiumURL))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs", s.caesiumURL), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -180,7 +184,7 @@ func (s *IntegrationTestSuite) jobDetailByAlias(alias string) map[string]any {
 		aliasVal := stringFromMap(job, "alias")
 		if aliasVal == alias {
 			id := stringFromMap(job, "id")
-			resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, id))
+			resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, id), nil)
 			assert.Nil(s.T(), err)
 			defer resp.Body.Close()
 			assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -239,7 +243,7 @@ func convertToStringMap(v any) (map[string]any, bool) {
 }
 
 func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {
-	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s/tasks", s.caesiumURL, jobID))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s/tasks", s.caesiumURL, jobID), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -249,7 +253,7 @@ func (s *IntegrationTestSuite) jobTasks(jobID string) []map[string]any {
 }
 
 func (s *IntegrationTestSuite) atomDetail(atomID string) map[string]any {
-	resp, err := http.Get(fmt.Sprintf("%v/v1/atoms/%s", s.caesiumURL, atomID))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/atoms/%s", s.caesiumURL, atomID), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -259,7 +263,7 @@ func (s *IntegrationTestSuite) atomDetail(atomID string) map[string]any {
 }
 
 func (s *IntegrationTestSuite) describeDAG(jobID string) map[string][]string {
-	resp, err := http.Get(fmt.Sprintf("%v/v1/jobs/%s/dag", s.caesiumURL, jobID))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s/dag", s.caesiumURL, jobID), nil)
 	assert.Nil(s.T(), err)
 	defer resp.Body.Close()
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -373,4 +377,15 @@ func (s *IntegrationTestSuite) validateCreatedMetadata(job *models.Job, label, a
 			assert.Equal(s.T(), annotation, owner)
 		}
 	}
+}
+
+func (s *IntegrationTestSuite) doJSONRequest(method, target string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(s.T().Context(), method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	//nolint:bodyclose // Response body ownership is transferred to the caller.
+	return http.DefaultClient.Do(req)
 }

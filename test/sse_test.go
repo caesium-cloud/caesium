@@ -20,11 +20,12 @@ import (
 func (s *IntegrationTestSuite) TestSSEStream() {
 	// 1. Subscribe to SSE stream
 	eventsURL := fmt.Sprintf("%v/v1/events", s.caesiumURL)
-	req, err := http.NewRequest("GET", eventsURL, nil)
+	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodGet, eventsURL, nil)
 	assert.Nil(s.T(), err)
 	req.Header.Set("Accept", "text/event-stream")
 
 	client := &http.Client{}
+	//nolint:bodyclose // The SSE response body stays open for the lifetime of the streaming test and is closed on function exit.
 	resp, err := client.Do(req)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
@@ -108,8 +109,11 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 
 	// 3. Trigger a run
 	triggerURL := fmt.Sprintf("%v/v1/jobs/%s/run", s.caesiumURL, job.ID)
-	triggerResp, err := http.Post(triggerURL, "application/json", nil)
+	triggerResp, err := s.doJSONRequest(http.MethodPost, triggerURL, nil)
 	assert.Nil(s.T(), err)
+	if triggerResp != nil && triggerResp.Body != nil {
+		defer func() { _ = triggerResp.Body.Close() }()
+	}
 	assert.Equal(s.T(), http.StatusAccepted, triggerResp.StatusCode)
 
 	// 4. Verify events
@@ -128,9 +132,10 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 		select {
 		case evt := <-eventChan:
 			match := false
-			if evt.JobID == job.ID {
+			switch evt.JobID {
+			case job.ID:
 				match = true
-			} else if evt.JobID == uuid.Nil {
+			case uuid.Nil:
 				// Fallback for events where JobID might be missing but we can infer
 				if evt.Type == event.TypeRunStarted || evt.Type == event.TypeRunCompleted || evt.Type == event.TypeRunFailed {
 					match = true
