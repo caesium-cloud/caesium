@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { FailureDistributionChart } from "./components/FailureDistributionChart";
 import {
   Table,
   TableBody,
@@ -117,6 +118,15 @@ export function StatsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Failure Distribution</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <FailureDistributionChart data={stats?.top_failing ?? []} />
+        </CardContent>
+      </Card>
     </div>
   );
 }
