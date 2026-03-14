@@ -93,9 +93,9 @@ export function JobsPage() {
             {jobs?.map((job) => {
               const isRunning = job.latest_run?.status === "running";
               return (
-                <TableRow key={job.id} className={cn(isRunning && "bg-blue-500/5 animate-in fade-in duration-1000")}>
+                <TableRow key={job.id} className={cn(isRunning && "bg-primary/5 animate-in fade-in duration-1000")}>
                   <TableCell className="font-medium relative overflow-hidden">
-                    {isRunning && <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500 animate-pulse" />}
+                    {isRunning && <div className="absolute left-0 top-0 bottom-0 w-1 bg-primary animate-pulse" />}
                     <Link to="/jobs/$jobId" params={{ jobId: job.id }} className="hover:underline text-primary">
                       {job.alias}
                     </Link>

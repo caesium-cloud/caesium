@@ -141,7 +141,7 @@ export function RunDetailPage() {
             <div className="flex items-center justify-between">
                 <div>
                     <div className="flex items-center gap-2 mb-1">
-                        <Link to="/jobs/$jobId" params={{ jobId }} className="text-sm font-medium text-blue-400 hover:underline">
+                        <Link to="/jobs/$jobId" params={{ jobId }} className="text-sm font-medium text-primary hover:underline">
                             {run.job_alias || 'Job Details'}
                         </Link>
                         <span className="text-muted-foreground">/</span>
@@ -154,7 +154,7 @@ export function RunDetailPage() {
                         </div>
                         <span>•</span>
                         <div className="flex items-center gap-1.5">
-                            <Badge variant="outline" className="text-[10px] h-4 border-slate-700 text-slate-400 font-mono uppercase">
+                            <Badge variant="outline" className="text-[10px] h-4 border-border text-muted-foreground font-mono uppercase">
                                 {run.trigger_type || 'manual'}: {run.trigger_alias || 'user'}
                             </Badge>
                         </div>
