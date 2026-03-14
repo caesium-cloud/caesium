@@ -2,9 +2,12 @@ package app
 
 import (
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/charmbracelet/bubbles/table"
@@ -76,10 +79,8 @@ func titleCase(value string) string {
 	if value == "" {
 		return ""
 	}
-	if len(value) == 1 {
-		return strings.ToUpper(value)
-	}
-	return strings.ToUpper(value[:1]) + value[1:]
+	r, size := utf8.DecodeRuneInString(value)
+	return string(unicode.ToUpper(r)) + value[size:]
 }
 
 func formatStringMap(values map[string]string) string {
@@ -87,11 +88,7 @@ func formatStringMap(values map[string]string) string {
 		return "-"
 	}
 
-	keys := make([]string, 0, len(values))
-	for key := range values {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(values))
 
 	parts := make([]string, 0, len(keys))
 	for _, key := range keys {

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -184,7 +186,7 @@ func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, e
 		steps = append(steps, StepSpec{
 			Engine:  string(atom.Engine),
 			Image:   atom.Image,
-			Command: append([]string(nil), atom.Cmd()...),
+			Command: slices.Clone(atom.Cmd()),
 		})
 	}
 	return steps, nil
@@ -248,25 +250,17 @@ func isYAML(path string) bool {
 }
 
 func cloneStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
+	if in == nil {
 		return map[string]string{}
 	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(in)
 }
 
 func cloneAnyMap(in map[string]any) map[string]any {
-	if len(in) == 0 {
+	if in == nil {
 		return map[string]any{}
 	}
-	out := make(map[string]any, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(in)
 }
 
 func copyCallbacks(cbs []schema.Callback) []CallbackSpec {
@@ -292,7 +286,7 @@ func copySteps(steps []schema.Step) []StepSpec {
 		result = append(result, StepSpec{
 			Engine:  step.Engine,
 			Image:   step.Image,
-			Command: append([]string(nil), step.Command...),
+			Command: slices.Clone(step.Command),
 		})
 	}
 	return result

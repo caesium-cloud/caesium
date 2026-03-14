@@ -9,7 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -242,7 +242,7 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 		return err
 	}
 
-	sort.Strings(files)
+	slices.Sort(files)
 
 	for _, path := range files {
 		relToRepo, err := filepath.Rel(dir, path)

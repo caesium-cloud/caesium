@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -215,7 +215,7 @@ func formatEnv(values map[string]string) []string {
 	for k := range values {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	env := make([]string, 0, len(keys))
 	for _, k := range keys {
 		env = append(env, fmt.Sprintf("%s=%s", k, values[k]))

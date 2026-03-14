@@ -1,9 +1,10 @@
 package job
 
 import (
+	"cmp"
 	"errors"
 	"net/http"
-	"sort"
+	"slices"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
@@ -98,8 +99,8 @@ func DAG(c *echo.Context) error {
 		}
 
 		if len(successors) > 1 {
-			sort.Slice(successors, func(i, j int) bool {
-				return successors[i].String() < successors[j].String()
+			slices.SortFunc(successors, func(a, b uuid.UUID) int {
+				return cmp.Compare(a.String(), b.String())
 			})
 		}
 

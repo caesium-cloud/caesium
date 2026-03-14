@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
@@ -315,7 +315,7 @@ func (s *IntegrationTestSuite) describeDAG(jobID string) map[string][]string {
 			nextSteps = append(nextSteps, commandFor(successor.AtomID))
 		}
 		if len(nextSteps) > 1 {
-			sort.Strings(nextSteps)
+			slices.Sort(nextSteps)
 		}
 		transitions[step] = nextSteps
 	}

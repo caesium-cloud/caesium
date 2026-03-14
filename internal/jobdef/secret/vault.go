@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
@@ -79,7 +80,7 @@ func (r *VaultResolver) Resolve(ctx context.Context, ref string) (string, error)
 	}
 
 	field := strings.TrimSpace(reference.Query.Get("field"))
-	segments := append([]string(nil), reference.Segments...)
+	segments := slices.Clone(reference.Segments)
 
 	if field == "" && len(segments) >= 2 {
 		field = strings.TrimSpace(segments[len(segments)-1])

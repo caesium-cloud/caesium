@@ -6,7 +6,7 @@ import (
 	"io"
 	"os/user"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -186,7 +186,7 @@ func convertEnvVars(env map[string]string) []v1.EnvVar {
 	for k := range env {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	vars := make([]v1.EnvVar, 0, len(keys))
 	for _, k := range keys {
 		vars = append(vars, v1.EnvVar{Name: k, Value: env[k]})

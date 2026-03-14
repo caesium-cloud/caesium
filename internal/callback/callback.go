@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -234,7 +235,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 			AtomID:      task.AtomID,
 			Engine:      task.Engine,
 			Image:       task.Image,
-			Command:     append([]string(nil), task.Command...),
+			Command:     slices.Clone(task.Command),
 			RuntimeID:   task.RuntimeID,
 			Status:      string(task.Status),
 			Result:      task.Result,

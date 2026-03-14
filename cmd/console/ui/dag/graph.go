@@ -1,8 +1,9 @@
 package dag
 
 import (
+	"cmp"
 	"fmt"
-	"sort"
+	"slices"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 )
@@ -72,7 +73,7 @@ func FromJobDAG(spec *api.JobDAG) (*Graph, error) {
 			successors = append(successors, targetID)
 		}
 		if len(successors) > 1 {
-			sort.Strings(successors)
+			slices.Sort(successors)
 		}
 
 		for _, targetID := range successors {
@@ -264,14 +265,14 @@ func (n *Node) Order() int {
 }
 
 func sortNodes(nodes []*Node) {
-	sort.Slice(nodes, func(i, j int) bool {
-		return nodes[i].id < nodes[j].id
+	slices.SortFunc(nodes, func(a, b *Node) int {
+		return cmp.Compare(a.id, b.id)
 	})
 }
 
 func insertSorted(queue []*Node, node *Node) []*Node {
-	index := sort.Search(len(queue), func(i int) bool {
-		return queue[i].id >= node.id
+	index, _ := slices.BinarySearchFunc(queue, node, func(a, b *Node) int {
+		return cmp.Compare(a.id, b.id)
 	})
 	queue = append(queue, nil)
 	copy(queue[index+1:], queue[index:])
