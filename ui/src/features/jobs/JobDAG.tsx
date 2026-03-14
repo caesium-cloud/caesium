@@ -108,15 +108,15 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
             target: e.to,
             type: 'smoothstep',
             animated: taskStatus?.[e.from] === 'running',
-            markerEnd: { 
+            markerEnd: {
               type: MarkerType.ArrowClosed,
               width: 20,
               height: 20,
-              color: '#94a3b8',
+              color: 'hsl(220 10% 55%)',
             },
             style: {
               strokeWidth: 2,
-              stroke: taskStatus?.[e.from] === 'completed' ? '#22c55e' : '#94a3b8',
+              stroke: taskStatus?.[e.from] === 'completed' ? '#10b981' : 'hsl(220 10% 55%)',
             }
         }));
     }, [dag, taskStatus]);
@@ -131,7 +131,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
     }, [onNodeClick]);
 
   return (
-    <div className="w-full h-full min-h-[500px] bg-slate-950/50 relative overflow-hidden">
+    <div className="w-full h-full min-h-[500px] bg-caesium-void/50 relative overflow-hidden">
       <ReactFlow
         nodes={layoutedNodes}
         edges={layoutedEdges}
@@ -143,8 +143,8 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
         minZoom={0.1}
         maxZoom={1.5}
       >
-        <Background color="#334155" gap={20} />
-        <Controls className="fill-slate-400" />
+        <Background color="hsl(240 15% 16%)" gap={20} />
+        <Controls className="fill-muted-foreground" />
       </ReactFlow>
     </div>
   );

@@ -83,7 +83,7 @@ export function CommandMenu() {
                 className="flex items-center justify-between"
               >
                 <div className="flex items-center">
-                  <Circle className="mr-2 h-4 w-4 text-blue-500" />
+                  <Circle className="mr-2 h-4 w-4 text-primary" />
                   <span>{job.alias}</span>
                   <span className="ml-2 text-xs text-muted-foreground font-mono">{job.id.substring(0, 8)}</span>
                 </div>

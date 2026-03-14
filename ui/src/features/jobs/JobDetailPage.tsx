@@ -196,15 +196,15 @@ export function JobDetailPage() {
                         className="flex items-center justify-between p-4 hover:bg-muted/50 transition-colors group"
                     >
                         <div className="flex items-center gap-4">
-                            <div className="p-2 rounded-full bg-slate-800/50 border border-slate-700/50">
-                                <Clock className="h-4 w-4 text-slate-400" />
+                            <div className="p-2 rounded-full bg-secondary/50 border border-border/50">
+                                <Clock className="h-4 w-4 text-muted-foreground" />
                             </div>
                             <div>
                                 <div className="flex items-center gap-2">
-                                    <span className="text-sm font-bold text-slate-200">
+                                    <span className="text-sm font-bold text-foreground/90">
                                         <RelativeTime date={run.created_at} />
                                     </span>
-                                    <Badge variant="outline" className="text-[10px] h-4 border-slate-700 text-slate-400 font-mono uppercase">
+                                    <Badge variant="outline" className="text-[10px] h-4 border-border text-muted-foreground font-mono uppercase">
                                         {run.trigger_type || 'manual'}: {run.trigger_alias || 'user'}
                                     </Badge>
                                 </div>
@@ -259,10 +259,10 @@ export function JobDetailPage() {
                                             <span className="font-mono uppercase">{atom.engine}</span>
                                             
                                             <span className="text-muted-foreground font-medium">Image:</span>
-                                            <span className="font-mono text-blue-400">{atom.image}</span>
+                                            <span className="font-mono text-primary">{atom.image}</span>
                                             
                                             <span className="text-muted-foreground font-medium">Command:</span>
-                                            <code className="font-mono bg-slate-950 px-1 rounded border border-slate-800 break-all">
+                                            <code className="font-mono bg-caesium-void px-1 rounded border border-border break-all">
                                                 {formatCommand(atom.command)}
                                             </code>
                                         </div>

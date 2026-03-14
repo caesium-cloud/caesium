@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import { LayoutDashboard, BarChart } from "lucide-react";
+import { CaesiumLogo } from "@/components/caesium-logo";
 
 export function Sidebar() {
   const navItems = [
@@ -9,8 +10,9 @@ export function Sidebar() {
 
   return (
     <aside className="w-64 border-r bg-card flex flex-col">
-      <div className="h-14 flex items-center px-6 border-b">
-        <span className="font-bold text-lg">Caesium</span>
+      <div className="h-14 flex items-center px-6 border-b gap-2.5">
+        <CaesiumLogo className="h-7 w-7 shrink-0" />
+        <span className="font-light text-lg tracking-widest">caesium</span>
       </div>
       <nav className="flex-1 p-4 space-y-2">
         {navItems.map((item) => (
