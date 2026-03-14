@@ -17,9 +17,9 @@
       stroke="url(#orbit-grad)" stroke-width="4" opacity="0.85"
       transform="rotate(60 256 256)"/>
     <circle cx="256" cy="256" r="18" fill="#0F0F1A"/>
-    <circle cx="361" cy="74" r="9" fill="#D97706"/>
-    <circle cx="46" cy="256" r="9" fill="#D97706"/>
-    <circle cx="361" cy="438" r="9" fill="#D97706"/>
+    <circle cx="361" cy="74" r="9" fill="#F59E0B"/>
+    <circle cx="46" cy="256" r="9" fill="#F59E0B"/>
+    <circle cx="361" cy="438" r="9" fill="#F59E0B"/>
   </g>
 
   <!-- Wordmark -->
