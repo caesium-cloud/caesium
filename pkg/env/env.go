@@ -76,4 +76,5 @@ type Environment struct {
 	OpenLineageHeaders           string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
 	OpenLineageFilePath          string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
 	OpenLineageTimeout           time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
+	OpenLineageRetryAttempts    uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
 }

@@ -19,6 +19,8 @@ type Job struct {
 	ProvenanceRef      string            `json:"provenance_ref"`
 	ProvenanceCommit   string            `json:"provenance_commit"`
 	ProvenancePath     string            `json:"provenance_path"`
+	MaxParallelTasks   int               `json:"max_parallel_tasks"`
+	TaskTimeout        time.Duration     `json:"task_timeout"`
 	CreatedAt          time.Time         `gorm:"not null" json:"created_at"`
 	UpdatedAt          time.Time         `gorm:"not null" json:"updated_at"`
 

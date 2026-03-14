@@ -75,11 +75,13 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 		}
 
 		jobModel := &models.Job{
-			ID:          uuid.New(),
-			Alias:       alias,
-			TriggerID:   trig.ID,
-			Labels:      jsonmap.FromStringMap(def.Metadata.Labels),
-			Annotations: jsonmap.FromStringMap(def.Metadata.Annotations),
+			ID:               uuid.New(),
+			Alias:            alias,
+			TriggerID:        trig.ID,
+			Labels:           jsonmap.FromStringMap(def.Metadata.Labels),
+			Annotations:      jsonmap.FromStringMap(def.Metadata.Annotations),
+			MaxParallelTasks: def.Metadata.MaxParallelTasks,
+			TaskTimeout:      def.Metadata.TaskTimeout,
 		}
 
 		if opts != nil && opts.Provenance != nil {

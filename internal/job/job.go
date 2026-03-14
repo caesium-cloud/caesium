@@ -178,10 +178,30 @@ func withAtomPollInterval(interval time.Duration) jobOption {
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
+
+	// Get the job model to check for overrides
+	jobModel, err := store.GetJob(j.id)
+	if err != nil {
+		return fmt.Errorf("job %s: load model: %w", j.id, err)
+	}
+
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
 	continueOnFailure := failurePolicy == taskFailurePolicyContinue
-	taskTimeout := vars.TaskTimeout
+
+	// Use job overrides if specified, otherwise fall back to environment variables
+	taskTimeout := jobModel.TaskTimeout
+	if taskTimeout == 0 {
+		taskTimeout = vars.TaskTimeout
+	}
+
+	maxParallel := jobModel.MaxParallelTasks
+	if maxParallel <= 0 {
+		maxParallel = vars.MaxParallelTasks
+	}
+	if maxParallel <= 0 {
+		maxParallel = runtime.NumCPU()
+	}
 
 	resolveRun := func() (*run.JobRun, error) {
 		if id, ok := run.FromContext(ctx); ok {
@@ -528,11 +548,6 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		return nil
-	}
-
-	maxParallel := vars.MaxParallelTasks
-	if maxParallel <= 0 {
-		maxParallel = runtime.NumCPU()
 	}
 
 	taskPool := worker.NewPool(maxParallel)

@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -92,7 +93,9 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func sleepWithContext(ctx context.Context, d time.Duration) error {
-	timer := time.NewTimer(d)
+	// Add up to 20% jitter to the sleep duration to avoid synchronized polling
+	jitter := time.Duration(rand.Int64N(int64(d) / 5))
+	timer := time.NewTimer(d + jitter)
 	defer timer.Stop()
 
 	select {

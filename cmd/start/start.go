@@ -108,13 +108,14 @@ func start(cmd *cobra.Command, args []string) error {
 	)
 	if vars.OpenLineageEnabled {
 		transport, err := lineage.BuildTransport(lineage.Config{
-			Enabled:   vars.OpenLineageEnabled,
-			Transport: vars.OpenLineageTransport,
-			URL:       vars.OpenLineageURL,
-			Namespace: vars.OpenLineageNamespace,
-			Headers:   vars.OpenLineageHeaders,
-			FilePath:  vars.OpenLineageFilePath,
-			Timeout:   vars.OpenLineageTimeout,
+			Enabled:       vars.OpenLineageEnabled,
+			Transport:     vars.OpenLineageTransport,
+			URL:           vars.OpenLineageURL,
+			Namespace:     vars.OpenLineageNamespace,
+			Headers:       vars.OpenLineageHeaders,
+			FilePath:      vars.OpenLineageFilePath,
+			Timeout:       vars.OpenLineageTimeout,
+			RetryAttempts: vars.OpenLineageRetryAttempts,
 		})
 		if err != nil {
 			log.Error("openlineage transport configuration failure, disabling integration", "error", err)

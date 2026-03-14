@@ -550,6 +550,14 @@ func (s *Store) Get(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(runID)
 }
 
+func (s *Store) GetJob(id uuid.UUID) (*models.Job, error) {
+	var job models.Job
+	if err := s.db.First(&job, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
 func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 	var results []struct {
 		models.JobRun

@@ -36,9 +36,11 @@ type Definition struct {
 
 // Metadata contains descriptive data for the job.
 type Metadata struct {
-	Alias       string            `yaml:"alias" json:"alias"`
-	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
-	Annotations map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
+	Alias            string            `yaml:"alias" json:"alias"`
+	Labels           map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Annotations      map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
+	MaxParallelTasks int               `yaml:"maxParallelTasks,omitempty" json:"maxParallelTasks,omitempty"`
+	TaskTimeout      time.Duration     `yaml:"taskTimeout,omitempty" json:"taskTimeout,omitempty"`
 }
 
 // Trigger defines how the job is triggered.
