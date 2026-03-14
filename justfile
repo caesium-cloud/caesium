@@ -176,7 +176,7 @@ ui-test: builder
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
         {{repo}}/{{builder_image}}:{{tag}} \
-        sh -c 'npm install && npm test'
+        sh -c 'npm install && npm test && npm run build:ci'
 
 helm-lint:
     helm lint ./helm/caesium
