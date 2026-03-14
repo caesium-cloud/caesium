@@ -69,6 +69,7 @@ func (s *EventsService) Stream(ctx context.Context, jobID, runID string, types [
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
 
+	//nolint:bodyclose // The SSE response body is intentionally owned by the streaming goroutine below.
 	resp, err := s.client.httpClient.Do(req)
 	if err != nil {
 		return nil, err

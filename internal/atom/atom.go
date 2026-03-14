@@ -8,7 +8,7 @@ import (
 )
 
 // Atom defines the interface for interacting with
-// an individual Atom. A Atom is analagous to a
+// an individual Atom. A Atom is analogous to a
 // Docker container or a Kubernetes pod/deployment.
 type Atom interface {
 	ID() string
@@ -21,7 +21,7 @@ type Atom interface {
 }
 
 // Engine defines the interface for interacting with
-// a Atom environment. A atom.Engine is analagous
+// a Atom environment. A atom.Engine is analogous
 // to a Docker daemon or a Kubernetes master.
 type Engine interface {
 	Get(*EngineGetRequest) (Atom, error)
@@ -53,7 +53,7 @@ type EngineCreateRequest struct {
 	Spec    container.Spec
 }
 
-// EngineStopRequest defines the input paramters to
+// EngineStopRequest defines the input parameters to
 // an Engine.Stop request.
 type EngineStopRequest struct {
 	ID      string

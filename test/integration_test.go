@@ -3,6 +3,7 @@
 package test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +37,7 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	s.projectRoot = filepath.Clean(filepath.Join(cwd, ".."))
 
 	binPath := filepath.Join(s.projectRoot, "caesium-cli")
-	build := exec.Command("go", "build", "-o", binPath, ".")
+	build := exec.CommandContext(s.T().Context(), "go", "build", "-o", binPath, ".")
 	build.Dir = s.projectRoot
 	build.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -69,7 +70,14 @@ func (s *IntegrationTestSuite) SetupSuite() {
 			)
 		}
 
-		resp, err := client.Get(fmt.Sprintf("%v/health", s.caesiumURL))
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("%v/health", s.caesiumURL), nil)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Second)
+			continue
+		}
+
+		resp, err := client.Do(req)
 		if err == nil && resp != nil {
 			lastStatus = resp.StatusCode
 			var body []byte
@@ -89,8 +97,11 @@ func (s *IntegrationTestSuite) SetupSuite() {
 }
 
 func (s *IntegrationTestSuite) TestHealth() {
-	resp, err := http.Get(fmt.Sprintf("%v/health", s.caesiumURL))
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/health", s.caesiumURL), nil)
 	assert.Nil(s.T(), err)
+	if resp != nil && resp.Body != nil {
+		defer func() { _ = resp.Body.Close() }()
+	}
 	assert.Equal(s.T(), http.StatusOK, resp.StatusCode)
 }
 
@@ -153,7 +164,7 @@ func (s *IntegrationTestSuite) writeJobManifest(contents string) string {
 }
 
 func (s *IntegrationTestSuite) runCLI(args ...string) {
-	cmd := exec.Command(s.cliPath, args...)
+	cmd := exec.CommandContext(s.T().Context(), s.cliPath, args...)
 	cmd.Dir = s.projectRoot
 	cmd.Env = os.Environ()
 	output, err := cmd.CombinedOutput()
@@ -202,7 +213,7 @@ func (s *IntegrationTestSuite) fetchAtomSpec(atomID string) container.Spec {
 }
 
 func (s *IntegrationTestSuite) getJSON(path string, target any) {
-	resp, err := http.Get(s.caesiumURL + path)
+	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+path, nil)
 	require.NoError(s.T(), err)
 	defer resp.Body.Close()
 
@@ -211,4 +222,14 @@ func (s *IntegrationTestSuite) getJSON(path string, target any) {
 
 	require.Equal(s.T(), http.StatusOK, resp.StatusCode, string(body))
 	require.NoError(s.T(), json.Unmarshal(body, target))
+}
+
+func (s *IntegrationTestSuite) doRequest(method, target string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(s.T().Context(), method, target, body)
+	if err != nil {
+		return nil, err
+	}
+
+	//nolint:bodyclose // Response body ownership is transferred to the caller.
+	return http.DefaultClient.Do(req)
 }

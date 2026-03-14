@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,11 +32,18 @@ func main() {
 		panic(err)
 	}
 
-	resp, err := http.Post(
+	req, err := http.NewRequestWithContext(
+		context.Background(),
+		http.MethodPost,
 		fmt.Sprintf("http://localhost:%v/v1/private/db/query", env.Variables().Port),
-		"application/json",
 		bytes.NewBuffer(buf),
 	)
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
 
 	if err != nil {
 		panic(err)

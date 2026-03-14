@@ -134,14 +134,15 @@ func (m Migrator) CreateConstraint(value interface{}, name string) error {
 					constraintValues []interface{}
 				)
 
-				if constraint != nil {
+				switch {
+				case constraint != nil:
 					constraintName = constraint.Name
 					constraintSql, constraintValues = buildConstraint(constraint)
-				} else if chk != nil {
+				case chk != nil:
 					constraintName = chk.Name
 					constraintSql = "CONSTRAINT ? CHECK (?)"
 					constraintValues = []interface{}{clause.Column{Name: chk.Name}, clause.Expr{SQL: chk.Constraint}}
-				} else {
+				default:
 					return "", nil, nil
 				}
 

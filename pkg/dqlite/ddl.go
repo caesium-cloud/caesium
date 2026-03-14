@@ -37,26 +37,26 @@ func parseDDL(sql string) (*ddl, error) {
 		}
 
 		if c == '\'' || c == '"' || c == '`' {
-			if c == next {
+			switch {
+			case c == next:
 				// Skip escaped quote
 				buf += string(c)
 				i++
-			} else if quote > 0 {
+			case quote > 0:
 				quote = 0
-			} else {
+			default:
 				quote = c
 			}
 		} else if quote == 0 {
-			if c == '(' {
+			switch {
+			case c == '(':
 				bracketLevel++
-			} else if c == ')' {
+			case c == ')':
 				bracketLevel--
-			} else if bracketLevel == 0 {
-				if c == ',' {
-					fields = append(fields, strings.TrimSpace(buf))
-					buf = ""
-					continue
-				}
+			case bracketLevel == 0 && c == ',':
+				fields = append(fields, strings.TrimSpace(buf))
+				buf = ""
+				continue
 			}
 		}
 
