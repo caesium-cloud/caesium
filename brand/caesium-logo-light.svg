@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" fill="none">
+  <defs>
+    <linearGradient id="orbit-grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F0F1A"/>
+      <stop offset="100%" stop-color="#1A1A2E"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Icon (scaled to fit 320x320 area) -->
+  <g transform="translate(20, 28) scale(0.515)">
+    <ellipse cx="256" cy="256" rx="210" ry="70"
+      stroke="url(#orbit-grad)" stroke-width="4" opacity="0.85"
+      transform="rotate(-60 256 256)"/>
+    <ellipse cx="256" cy="256" rx="210" ry="70"
+      stroke="url(#orbit-grad)" stroke-width="4" opacity="0.85"/>
+    <ellipse cx="256" cy="256" rx="210" ry="70"
+      stroke="url(#orbit-grad)" stroke-width="4" opacity="0.85"
+      transform="rotate(60 256 256)"/>
+    <circle cx="256" cy="256" r="18" fill="#0F0F1A"/>
+    <circle cx="361" cy="74" r="9" fill="#D97706"/>
+    <circle cx="46" cy="256" r="9" fill="#D97706"/>
+    <circle cx="361" cy="438" r="9" fill="#D97706"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="330" y="195"
+    font-family="Inter, -apple-system, system-ui, sans-serif"
+    font-size="86" font-weight="300" letter-spacing="12"
+    fill="#0F0F1A">caesium</text>
+</svg>
