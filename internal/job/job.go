@@ -35,6 +35,8 @@ type Job interface {
 type job struct {
 	id                     uuid.UUID
 	triggerID              *uuid.UUID
+	maxParallelTasks       int
+	taskTimeout            time.Duration
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -53,6 +55,8 @@ func New(m *models.Job, opts ...jobOption) Job {
 	j := &job{
 		id:                     m.ID,
 		triggerID:              &m.TriggerID,
+		maxParallelTasks:       m.MaxParallelTasks,
+		taskTimeout:            m.TaskTimeout,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -178,10 +182,24 @@ func withAtomPollInterval(interval time.Duration) jobOption {
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
+
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
 	continueOnFailure := failurePolicy == taskFailurePolicyContinue
-	taskTimeout := vars.TaskTimeout
+
+	// Use job overrides if specified, otherwise fall back to environment variables
+	taskTimeout := j.taskTimeout
+	if taskTimeout == 0 {
+		taskTimeout = vars.TaskTimeout
+	}
+
+	maxParallel := j.maxParallelTasks
+	if maxParallel <= 0 {
+		maxParallel = vars.MaxParallelTasks
+	}
+	if maxParallel <= 0 {
+		maxParallel = runtime.NumCPU()
+	}
 
 	resolveRun := func() (*run.JobRun, error) {
 		if id, ok := run.FromContext(ctx); ok {
@@ -528,11 +546,6 @@ func (j *job) Run(ctx context.Context) error {
 		}
 
 		return nil
-	}
-
-	maxParallel := vars.MaxParallelTasks
-	if maxParallel <= 0 {
-		maxParallel = runtime.NumCPU()
 	}
 
 	taskPool := worker.NewPool(maxParallel)

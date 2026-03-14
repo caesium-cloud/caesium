@@ -7,13 +7,14 @@ import (
 )
 
 type Config struct {
-	Enabled   bool
-	Transport string
-	URL       string
-	Namespace string
-	Headers   string
-	FilePath  string
-	Timeout   time.Duration
+	Enabled       bool
+	Transport     string
+	URL           string
+	Namespace     string
+	Headers       string
+	FilePath      string
+	Timeout       time.Duration
+	RetryAttempts uint
 }
 
 func BuildTransport(cfg Config) (Transport, error) {
@@ -25,11 +26,12 @@ func BuildTransport(cfg Config) (Transport, error) {
 		if url == "" {
 			return nil, fmt.Errorf("lineage: CAESIUM_OPEN_LINEAGE_URL is required for HTTP transport")
 		}
-		return NewHTTPTransport(HTTPTransportConfig{
+		base := NewHTTPTransport(HTTPTransportConfig{
 			URL:     url,
 			Headers: parseHeaders(cfg.Headers),
 			Timeout: cfg.Timeout,
-		}), nil
+		})
+		return NewRetryTransport(base, cfg.RetryAttempts), nil
 
 	case "console":
 		return NewConsoleTransport(), nil

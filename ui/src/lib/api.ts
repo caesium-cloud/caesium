@@ -112,6 +112,12 @@ export interface StatsResponse {
   jobs: JobStats;
   top_failing: FailingJob[];
   slowest_jobs: SlowestJob[];
+  success_rate_trend: DailyStats[];
+}
+
+export interface DailyStats {
+  date: string;
+  success_rate: number;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/v1";

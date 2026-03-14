@@ -65,6 +65,15 @@ func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
 	}
 }
 
+func TestSleepWithContextHandlesTinyDurations(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if err := sleepWithContext(ctx, time.Nanosecond); err != nil {
+		t.Fatalf("sleepWithContext returned error: %v", err)
+	}
+}
+
 type claimerResponse struct {
 	task *models.TaskRun
 	err  error

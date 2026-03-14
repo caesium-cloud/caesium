@@ -38,6 +38,10 @@ const mockStats: StatsResponse = {
   slowest_jobs: [
     { job_id: 'job-3', alias: 'build-all', avg_duration_seconds: 120.5 },
   ],
+  success_rate_trend: [
+    { date: '2026-03-08', success_rate: 0.75 },
+    { date: '2026-03-09', success_rate: 1 },
+  ],
 };
 
 function createWrapper() {
