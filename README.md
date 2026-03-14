@@ -150,10 +150,10 @@ The server exposes a REST API on port `8080` and a GraphQL endpoint at `/gql`.
 | `GET /v1/jobs` | List job definitions |
 | `POST /v1/jobs` | Create a job |
 | `GET /v1/jobs/{id}/dag` | Retrieve task dependency graph |
-| `POST /v1/jobs/{id}/runs` | Trigger a new run |
+| `POST /v1/jobs/{id}/run` | Trigger a new run |
 | `GET /v1/jobs/{id}/runs/{run_id}/logs` | Stream task logs (SSE) |
 | `GET /v1/triggers` | List triggers |
-| `PUT /v1/triggers` | Update a trigger |
+| `PUT /v1/triggers/{id}` | Update a trigger |
 | `GET /v1/atoms` | List registered execution atoms |
 | `GET /v1/events` | Subscribe to lifecycle events (SSE) |
 | `GET/POST /gql` | GraphQL endpoint |
