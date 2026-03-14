@@ -65,7 +65,10 @@ export function SuccessRateTrendChart({ data }: SuccessRateTrendChartProps) {
             borderColor: 'hsl(var(--border))',
             color: 'hsl(var(--foreground))'
           }}
-          formatter={(value: number) => [`${value.toFixed(1)}%`, 'Success Rate']}
+          formatter={(value) => {
+            const numericValue = typeof value === 'number' ? value : Number(value ?? 0);
+            return [`${numericValue.toFixed(1)}%`, 'Success Rate'];
+          }}
         />
         <Line 
           type="monotone" 
