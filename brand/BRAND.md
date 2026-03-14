@@ -30,7 +30,8 @@ The logomark is a stylized atom: three orbital rings in electric cyan with gold 
 
 | Name | Hex | HSL | Use |
 |------|-----|-----|-----|
-| Caesium Blue | `#00B4D8` | `192 100% 42%` | Primary accent, links, CTAs |
+| Caesium Blue | `#00B4D8` | `192 100% 42%` | Primary accent, links, CTAs (dark mode) |
+| Caesium Blue (light mode) | `#00899E` | `192 100% 35%` | Primary accent on light backgrounds (WCAG AA) |
 | Caesium Blue Light | `#38BDF8` | `199 93% 60%` | Hover states, highlights |
 | Caesium Gold | `#F59E0B` | `38 92% 50%` | Secondary accent, badges, status |
 | Caesium Gold Light | `#FBBF24` | `45 96% 56%` | Hover states |
