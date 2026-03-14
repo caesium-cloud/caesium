@@ -7,6 +7,14 @@ export interface Job {
   created_at: string;
   updated_at: string;
   latest_run?: JobRun;
+  // Provenance / GitOps fields
+  source_id?: string;
+  repo?: string;
+  ref?: string;
+  commit?: string;
+  path?: string;
+  max_parallel_tasks?: number;
+  task_timeout?: number;
 }
 
 export interface JobRun {
@@ -148,6 +156,29 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   return response.json();
 }
 
+export interface WorkerClaim {
+  id: string;
+  task_run_id: string;
+  node_id: string;
+  status: string;
+  claimed_at: string;
+  expires_at: string;
+}
+
+export interface WorkerStatus {
+  node_address: string;
+  active_claims: WorkerClaim[];
+  running_count: number;
+  expired_count: number;
+  last_activity?: string;
+}
+
+export interface HealthCheck {
+  status: string;
+  uptime: string;
+  checks: Record<string, unknown>;
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
@@ -156,9 +187,23 @@ export const api = {
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
   triggerJob: (jobId: string) => request<JobRun>(`/jobs/${jobId}/run`, { method: "POST" }),
+  retryCallbacks: (jobId: string, runId: string) =>
+    request<void>(`/jobs/${jobId}/runs/${runId}/callbacks/retry`, { method: "POST" }),
+  deleteJob: (id: string) => request<void>(`/jobs/${id}`, { method: "DELETE" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
+  fireTrigger: (id: string) => request<void>(`/triggers/${id}`, { method: "PUT" }),
   getAtoms: () => request<Atom[]>("/atoms"),
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
+  deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
+  applyJobDef: (yaml: string) =>
+    request<unknown>("/jobdefs/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-yaml" },
+      body: yaml,
+    }),
+  getWorkers: (nodeAddress: string) => request<WorkerStatus>(`/nodes/${nodeAddress}/workers`),
+  getHealth: () =>
+    fetch(`${import.meta.env.VITE_API_BASE_URL?.replace("/v1", "") || ""}/health`).then(r => r.json()) as Promise<HealthCheck>,
   getStats: () => request<StatsResponse>("/stats"),
 };
