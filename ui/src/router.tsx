@@ -1,9 +1,5 @@
-import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, redirect, lazyRouteComponent } from "@tanstack/react-router";
 import { AppShell } from "./components/layout/AppShell";
-import { JobsPage } from "./features/jobs/JobsPage";
-import { JobDetailPage } from "./features/jobs/JobDetailPage";
-import { RunDetailPage } from "./features/jobs/RunDetailPage";
-import { StatsPage } from "./features/stats/StatsPage";
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -18,25 +14,25 @@ const indexRoute = createRoute({
 const jobsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs",
-  component: JobsPage,
+  component: lazyRouteComponent(() => import("./features/jobs/JobsPage"), "JobsPage"),
 });
 
 const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId",
-  component: JobDetailPage,
+  component: lazyRouteComponent(() => import("./features/jobs/JobDetailPage"), "JobDetailPage"),
 });
 
 const runDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId/runs/$runId",
-  component: RunDetailPage,
+  component: lazyRouteComponent(() => import("./features/jobs/RunDetailPage"), "RunDetailPage"),
 });
 
 const statsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "stats",
-  component: StatsPage,
+  component: lazyRouteComponent(() => import("./features/stats/StatsPage"), "StatsPage"),
 });
 
 const routeTree = rootRoute.addChildren([
