@@ -1,3 +1,4 @@
+import { useState } from "react";
 import type { TaskRun } from "@/lib/api";
 
 interface Props {
@@ -21,7 +22,9 @@ function formatMs(ms: number): string {
 
 export function RunTimeline({ tasks, runStartedAt }: Props) {
   const runStart = new Date(runStartedAt).getTime();
-  const now = Date.now();
+  // Pass Date.now as an initializer reference (not called during render) so
+  // React captures wall-clock time once at mount without violating purity rules.
+  const [now] = useState<number>(Date.now);
 
   // Only show tasks that have started
   const startedTasks = tasks.filter(t => t.started_at);

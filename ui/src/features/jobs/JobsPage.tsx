@@ -96,8 +96,6 @@ export function JobsPage() {
   const totalPages = Math.ceil(filtered.length / PAGE_SIZE);
   const pageJobs = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
 
-  // Reset to page 0 when filter changes
-  useEffect(() => setPage(0), [search, labelFilter]);
 
   if (isLoading) return <div className="p-8 text-center text-muted-foreground">Loading jobs...</div>;
   if (error) return <div className="p-8 text-center text-destructive">Error loading jobs: {error.message}</div>;
@@ -115,12 +113,12 @@ export function JobsPage() {
           <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground pointer-events-none" />
           <input
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => { setSearch(e.target.value); setPage(0); }}
             placeholder="Search jobs..."
             className="w-full rounded-md border bg-background px-3 py-2 pl-8 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           />
           {search && (
-            <button onClick={() => setSearch("")} className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground">
+            <button onClick={() => { setSearch(""); setPage(0); }} className="absolute right-2.5 top-2.5 text-muted-foreground hover:text-foreground">
               <X className="h-4 w-4" />
             </button>
           )}
@@ -128,7 +126,7 @@ export function JobsPage() {
         {allLabelKeys.map(key => (
           <button
             key={key}
-            onClick={() => setLabelFilter(labelFilter === key ? null : key)}
+            onClick={() => { setLabelFilter(labelFilter === key ? null : key); setPage(0); }}
             className={cn(
               "rounded-full px-3 py-1 text-xs border transition-colors",
               labelFilter === key
@@ -140,7 +138,7 @@ export function JobsPage() {
           </button>
         ))}
         {labelFilter && (
-          <button onClick={() => setLabelFilter(null)} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
+          <button onClick={() => { setLabelFilter(null); setPage(0); }} className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1">
             <X className="h-3 w-3" /> Clear filter
           </button>
         )}
@@ -183,7 +181,7 @@ export function JobsPage() {
                       {labelEntries.map(([k, v]) => (
                         <button
                           key={k}
-                          onClick={() => setLabelFilter(labelFilter === k ? null : k)}
+                          onClick={() => { setLabelFilter(labelFilter === k ? null : k); setPage(0); }}
                           title={`Filter by label: ${k}`}
                           className="text-[10px] font-mono bg-muted rounded px-1.5 py-0.5 text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors"
                         >
