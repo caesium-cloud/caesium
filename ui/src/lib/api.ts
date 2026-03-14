@@ -173,10 +173,20 @@ export interface WorkerStatus {
   last_activity?: string;
 }
 
+export interface HealthCheckResult {
+  status?: "healthy" | "degraded";
+  latency_ms?: number;
+  count?: number;
+}
+
 export interface HealthCheck {
-  status: string;
-  uptime: string;
-  checks: Record<string, unknown>;
+  status: "healthy" | "degraded";
+  uptime: number; // Go time.Duration serialized as int64 nanoseconds
+  checks?: {
+    database?: HealthCheckResult;
+    active_runs?: HealthCheckResult;
+    triggers?: HealthCheckResult;
+  };
 }
 
 export const api = {
