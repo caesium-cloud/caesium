@@ -2,9 +2,11 @@ package detail
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/caesium-cloud/caesium/cmd/console/api"
 	"github.com/caesium-cloud/caesium/cmd/console/ui/dag"
@@ -232,7 +234,7 @@ func formatKVPairs(label string, values map[string]string) string {
 	for key := range values {
 		keys = append(keys, key)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	parts := make([]string, len(keys))
 	for i, key := range keys {
@@ -314,8 +316,6 @@ func titleCase(value string) string {
 	if value == "" {
 		return ""
 	}
-	if len(value) == 1 {
-		return strings.ToUpper(value)
-	}
-	return strings.ToUpper(value[:1]) + value[1:]
+	r, size := utf8.DecodeRuneInString(value)
+	return string(unicode.ToUpper(r)) + value[size:]
 }

@@ -2,7 +2,7 @@ package report
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -118,10 +118,10 @@ func RenderSummaryMarkdown(summary Summary) string {
 	b.WriteString(fmt.Sprintf("Total definitions: **%d**\n\n", summary.Total))
 
 	if len(summary.MissingAliases) > 0 {
-		slices := append([]string(nil), summary.MissingAliases...)
-		sort.Strings(slices)
+		sorted := slices.Clone(summary.MissingAliases)
+		slices.Sort(sorted)
 		b.WriteString("## Missing Aliases\n\n")
-		for _, entry := range slices {
+		for _, entry := range sorted {
 			b.WriteString(fmt.Sprintf("- %s\n", entry))
 		}
 		b.WriteString("\n")
@@ -150,7 +150,7 @@ func writeCountTable(b *strings.Builder, counts map[string]int) {
 	for k := range counts {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 
 	b.WriteString("| Value | Count |\n")
 	b.WriteString("|-------|-------|\n")

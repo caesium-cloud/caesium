@@ -1,12 +1,12 @@
 package env
 
 import (
+	"fmt"
 	"runtime"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/pkg/errors"
 )
 
 var variables = new(Environment)
@@ -16,12 +16,12 @@ func Process() error {
 	variables.MaxParallelTasks = runtime.NumCPU()
 
 	if err := envconfig.Process("caesium", variables); err != nil {
-		return errors.Wrap(err, "failed to process environment variables")
+		return fmt.Errorf("failed to process environment variables: %w", err)
 	}
 
 	// set the log level
 	if err := log.SetLevel(variables.LogLevel); err != nil {
-		return errors.Wrap(err, "failed to set log level")
+		return fmt.Errorf("failed to set log level: %w", err)
 	}
 
 	return nil

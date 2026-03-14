@@ -2,7 +2,7 @@ package job
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/report"
@@ -83,10 +83,10 @@ func renderPlainSummary(summary report.Summary) string {
 	b.WriteString(fmt.Sprintf("Total definitions: %d\n", summary.Total))
 
 	if len(summary.MissingAliases) > 0 {
-		slices := append([]string(nil), summary.MissingAliases...)
-		sort.Strings(slices)
+		sorted := slices.Clone(summary.MissingAliases)
+		slices.Sort(sorted)
 		b.WriteString("Missing aliases:\n")
-		for _, entry := range slices {
+		for _, entry := range sorted {
 			b.WriteString(fmt.Sprintf("  - %s\n", entry))
 		}
 	}
@@ -114,7 +114,7 @@ func writePlainCounts(b *strings.Builder, counts map[string]int) {
 	for k := range counts {
 		keys = append(keys, k)
 	}
-	sort.Strings(keys)
+	slices.Sort(keys)
 	for _, key := range keys {
 		fmt.Fprintf(b, "  - %s: %d\n", key, counts[key])
 	}

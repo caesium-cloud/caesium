@@ -2,7 +2,7 @@ package jobdef
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -202,7 +202,7 @@ func DeriveStepSuccessors(steps []Step) (map[string][]string, error) {
 		for succ := range targets {
 			list = append(list, succ)
 		}
-		sort.Strings(list)
+		slices.Sort(list)
 		result[name] = list
 	}
 	return result, nil

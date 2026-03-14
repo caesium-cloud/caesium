@@ -3,9 +3,10 @@ package job
 import (
 	"context"
 	"errors"
+	"cmp"
 	"fmt"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -416,8 +417,8 @@ func (j *job) Run(ctx context.Context) error {
 		}
 		queue = append(queue, id)
 		inQueue[id] = true
-		sort.Slice(queue, func(i, j int) bool {
-			return taskOrder[queue[i]] < taskOrder[queue[j]]
+		slices.SortFunc(queue, func(a, b uuid.UUID) int {
+			return cmp.Compare(taskOrder[a], taskOrder[b])
 		})
 	}
 
