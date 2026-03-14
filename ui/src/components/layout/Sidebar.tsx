@@ -1,11 +1,15 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, BarChart } from "lucide-react";
+import { LayoutDashboard, BarChart, Box, Activity, Zap, FileCode2 } from "lucide-react";
 import { CaesiumLogo } from "@/components/caesium-logo";
 
 export function Sidebar() {
   const navItems = [
     { to: "/jobs", label: "Jobs", icon: LayoutDashboard },
     { to: "/stats", label: "Stats", icon: BarChart },
+    { to: "/atoms", label: "Atoms", icon: Box },
+    { to: "/triggers", label: "Triggers", icon: Zap },
+    { to: "/jobdefs", label: "Job Defs", icon: FileCode2 },
+    { to: "/system", label: "System", icon: Activity },
   ];
 
   return (

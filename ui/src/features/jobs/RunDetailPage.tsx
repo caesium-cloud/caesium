@@ -1,20 +1,40 @@
-import { useParams, Link } from "@tanstack/react-router";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useParams, Link, useNavigate } from "@tanstack/react-router";
+import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import { api, type Atom, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { JobDAG } from "./JobDAG";
 import { LogViewer } from "./LogViewer";
+import { RunTimeline } from "./RunTimeline";
 import { useEffect, useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { toast } from "sonner";
-import { Clock } from "lucide-react";
+import { Clock, Play, RotateCcw } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
 
 export function RunDetailPage() {
     const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
     const queryClient = useQueryClient();
+    const navigate = useNavigate();
     const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+
+    const retryMutation = useMutation({
+        mutationFn: () => api.retryCallbacks(jobId, runId),
+        onSuccess: () => toast.success("Callbacks retried"),
+        onError: () => toast.error("Failed to retry callbacks"),
+    });
+
+    const rerunMutation = useMutation({
+        mutationFn: () => api.triggerJob(jobId),
+        onSuccess: (newRun) => {
+            queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+            toast.success("New run triggered");
+            navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId, runId: newRun.id } });
+        },
+        onError: () => toast.error("Failed to trigger run"),
+    });
 
     const { data: run, isLoading: isLoadingRun } = useQuery({
         queryKey: ["job", jobId, "runs", runId],
@@ -165,42 +185,81 @@ export function RunDetailPage() {
                 <div className="flex gap-2 items-center">
                     <span className="text-sm text-muted-foreground">Status:</span>
                     <Badge variant={
-                      run.status === "succeeded" || run.status === "completed" 
-                        ? "success" 
-                        : run.status === "failed" 
-                          ? "destructive" 
+                      run.status === "succeeded" || run.status === "completed"
+                        ? "success"
+                        : run.status === "failed"
+                          ? "destructive"
                           : run.status === "running"
                             ? "running"
                             : "secondary"
                     }>
                         {run.status}
                     </Badge>
+                    {run.status === "failed" && (
+                        <>
+                            <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => retryMutation.mutate()}
+                                disabled={retryMutation.isPending}
+                            >
+                                <RotateCcw className="h-3.5 w-3.5 mr-1.5" />
+                                Retry Callbacks
+                            </Button>
+                            <Button
+                                size="sm"
+                                onClick={() => rerunMutation.mutate()}
+                                disabled={rerunMutation.isPending}
+                            >
+                                <Play className="h-3.5 w-3.5 mr-1.5" />
+                                Re-run Job
+                            </Button>
+                        </>
+                    )}
                 </div>
             </div>
 
-            <div className="border rounded-md bg-card h-[600px] overflow-hidden">
-                 {dag && atoms && (
-                    <JobDAG 
-                        dag={dag} 
-                        atoms={atoms} 
-                        taskMetadata={taskMetadata} 
-                        onNodeClick={setSelectedTaskId}
-                        selectedTaskId={selectedTaskId}
-                    />
-                 )}
-            </div>
-
-            {selectedTaskId && (
-                <div className="h-[400px]">
-                    <LogViewer
-                        jobId={jobId}
-                        runId={runId}
-                        taskId={selectedTaskId}
-                        error={taskMetadata[selectedTaskId]?.error}
-                        onClose={() => setSelectedTaskId(null)}
-                    />
-                </div>
-            )}
+            <Tabs defaultValue="dag">
+                <TabsList>
+                    <TabsTrigger value="dag">DAG</TabsTrigger>
+                    <TabsTrigger value="timeline">Timeline</TabsTrigger>
+                </TabsList>
+                <TabsContent value="dag" className="mt-3">
+                    <div className="border rounded-md bg-card h-[600px] overflow-hidden">
+                        {dag && atoms && (
+                            <JobDAG
+                                dag={dag}
+                                atoms={atoms}
+                                taskMetadata={taskMetadata}
+                                onNodeClick={setSelectedTaskId}
+                                selectedTaskId={selectedTaskId}
+                            />
+                        )}
+                    </div>
+                    {selectedTaskId && (
+                        <div className="h-[400px] mt-4">
+                            <LogViewer
+                                jobId={jobId}
+                                runId={runId}
+                                taskId={selectedTaskId}
+                                error={taskMetadata[selectedTaskId]?.error}
+                                onClose={() => setSelectedTaskId(null)}
+                            />
+                        </div>
+                    )}
+                </TabsContent>
+                <TabsContent value="timeline" className="mt-3">
+                    <div className="border rounded-md bg-card p-4">
+                        {run.tasks && run.tasks.length > 0 ? (
+                            <RunTimeline tasks={run.tasks} runStartedAt={run.started_at || run.created_at} />
+                        ) : (
+                            <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
+                                No task data available.
+                            </div>
+                        )}
+                    </div>
+                </TabsContent>
+            </Tabs>
         </div>
     );
 }

@@ -5,7 +5,7 @@ import { events, type CaesiumEvent } from "@/lib/events";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { JobDAG } from "./JobDAG";
-import { Play, Clock, ChevronRight } from "lucide-react";
+import { Play, Clock, ChevronRight, GitBranch, GitCommit, ExternalLink, Tag } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Duration } from "@/components/duration";
@@ -178,6 +178,7 @@ export function JobDetailPage() {
           <TabsTrigger value="runs">Runs</TabsTrigger>
           <TabsTrigger value="atoms">Atoms</TabsTrigger>
           <TabsTrigger value="configuration">Configuration</TabsTrigger>
+          {(job.repo || job.source_id) && <TabsTrigger value="provenance">Provenance</TabsTrigger>}
           <TabsTrigger value="definition">Definition</TabsTrigger>
         </TabsList>
         <TabsContent value="dag" className="h-[600px] mt-4 border rounded-md overflow-hidden">
@@ -309,6 +310,96 @@ export function JobDetailPage() {
                     )}
                 </div>
              </div>
+        </TabsContent>
+        <TabsContent value="provenance" className="mt-4">
+            <div className="rounded-md border bg-card p-4 space-y-4 max-w-2xl">
+                <h3 className="font-semibold text-sm border-b pb-2">Git Provenance</h3>
+                <div className="space-y-3 text-sm">
+                    {job.repo && (
+                        <div className="flex items-start gap-3">
+                            <ExternalLink className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Repository</p>
+                                <a
+                                    href={job.repo.startsWith("http") ? job.repo : undefined}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="font-mono text-primary hover:underline break-all"
+                                >
+                                    {job.repo}
+                                </a>
+                            </div>
+                        </div>
+                    )}
+                    {job.ref && (
+                        <div className="flex items-start gap-3">
+                            <GitBranch className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Ref / Branch</p>
+                                <code className="font-mono text-sm bg-muted px-1.5 py-0.5 rounded">{job.ref}</code>
+                            </div>
+                        </div>
+                    )}
+                    {job.commit && (
+                        <div className="flex items-start gap-3">
+                            <GitCommit className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Commit</p>
+                                {job.repo && job.repo.includes("github.com") ? (
+                                    <a
+                                        href={`${job.repo.replace(".git", "")}/commit/${job.commit}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-mono text-primary hover:underline"
+                                    >
+                                        {job.commit.substring(0, 12)}
+                                    </a>
+                                ) : (
+                                    <code className="font-mono text-sm bg-muted px-1.5 py-0.5 rounded">{job.commit.substring(0, 12)}</code>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    {job.path && (
+                        <div className="flex items-start gap-3">
+                            <Tag className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Definition Path</p>
+                                {job.repo && job.commit && job.repo.includes("github.com") ? (
+                                    <a
+                                        href={`${job.repo.replace(".git", "")}/blob/${job.commit}/${job.path}`}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        className="font-mono text-primary hover:underline"
+                                    >
+                                        {job.path}
+                                    </a>
+                                ) : (
+                                    <code className="font-mono text-sm bg-muted px-1.5 py-0.5 rounded">{job.path}</code>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    {job.source_id && (
+                        <div className="flex items-start gap-3">
+                            <Tag className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Source ID</p>
+                                <code className="font-mono text-xs text-muted-foreground">{job.source_id}</code>
+                            </div>
+                        </div>
+                    )}
+                    {job.max_parallel_tasks != null && (
+                        <div className="flex items-start gap-3">
+                            <Tag className="h-4 w-4 text-muted-foreground mt-0.5 shrink-0" />
+                            <div>
+                                <p className="text-xs text-muted-foreground mb-0.5">Max Parallel Tasks</p>
+                                <code className="font-mono text-sm">{job.max_parallel_tasks}</code>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </div>
         </TabsContent>
         <TabsContent value="definition" className="mt-4">
             <pre className="p-4 bg-muted rounded-md overflow-auto text-xs border">

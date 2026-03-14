@@ -35,12 +35,40 @@ const statsRoute = createRoute({
   component: lazyRouteComponent(() => import("./features/stats/StatsPage"), "StatsPage"),
 });
 
+const atomsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "atoms",
+  component: lazyRouteComponent(() => import("./features/atoms/AtomsPage"), "AtomsPage"),
+});
+
+const systemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "system",
+  component: lazyRouteComponent(() => import("./features/system/SystemPage"), "SystemPage"),
+});
+
+const triggersRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "triggers",
+  component: lazyRouteComponent(() => import("./features/triggers/TriggersPage"), "TriggersPage"),
+});
+
+const jobDefsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobdefs",
+  component: lazyRouteComponent(() => import("./features/jobdefs/JobDefsPage"), "JobDefsPage"),
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
   jobDetailRoute,
   runDetailRoute,
   statsRoute,
+  atomsRoute,
+  systemRoute,
+  triggersRoute,
+  jobDefsRoute,
 ]);
 
 export const router = createRouter({ routeTree });

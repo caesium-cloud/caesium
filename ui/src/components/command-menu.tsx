@@ -4,7 +4,11 @@ import {
   LayoutDashboard,
   BarChart,
   Circle,
-  Search
+  Search,
+  Box,
+  Zap,
+  FileCode2,
+  Activity,
 } from "lucide-react"
 
 import {
@@ -64,7 +68,7 @@ export function CommandMenu() {
         <CommandInput placeholder="Type a command or search..." />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
-          <CommandGroup heading="Suggestions">
+          <CommandGroup heading="Navigate">
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
               <LayoutDashboard className="mr-2 h-4 w-4" />
               <span>Jobs</span>
@@ -72,6 +76,22 @@ export function CommandMenu() {
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
               <BarChart className="mr-2 h-4 w-4" />
               <span>Stats</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
+              <Box className="mr-2 h-4 w-4" />
+              <span>Atoms</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
+              <Zap className="mr-2 h-4 w-4" />
+              <span>Triggers</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
+              <FileCode2 className="mr-2 h-4 w-4" />
+              <span>Job Definitions</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
+              <Activity className="mr-2 h-4 w-4" />
+              <span>System Health</span>
             </CommandItem>
           </CommandGroup>
           <CommandSeparator />
