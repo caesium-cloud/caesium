@@ -52,7 +52,7 @@ func (a *atomService) List(req *ListRequest) (models.Atoms, error) {
 	)
 
 	if req.Engine != "" {
-		q = q.Where("enging = ?", req.Engine)
+		q = q.Where("engine = ?", req.Engine)
 	}
 
 	for _, orderBy := range req.OrderBy {
@@ -133,5 +133,5 @@ func (a *atomService) Delete(id uuid.UUID) error {
 		q = a.db.WithContext(a.ctx)
 	)
 
-	return q.Delete(&models.Job{}, id).Error
+	return q.Delete(&models.Atom{}, id).Error
 }
