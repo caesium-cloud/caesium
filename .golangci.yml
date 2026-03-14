@@ -1,0 +1,42 @@
+version: "2"
+
+run:
+  build-tags:
+    - integration
+
+linters:
+  default: standard
+  enable:
+    - bodyclose
+    - noctx
+    - unconvert
+    - misspell
+    - gocritic
+  settings:
+    govet:
+      disable:
+        - fieldalignment
+  exclusions:
+    paths:
+      - ui
+      - third_party
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+          - gocritic
+      - path: ^cmd/
+        linters:
+          - gocritic
+      - path: ^test/
+        linters:
+          - errcheck
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
