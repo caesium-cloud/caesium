@@ -4,16 +4,22 @@ import { api, ApiError } from '@/lib/api';
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
 
+/** Builds a minimal Response-like mock that satisfies the request() helper. */
+function okResponse(body: unknown) {
+  return {
+    ok: true,
+    headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
+    json: () => Promise.resolve(body),
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
 });
 
 describe('api', () => {
   it('getJobs calls fetch with correct URL', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve([]),
-    });
+    mockFetch.mockResolvedValue(okResponse([]));
     await api.getJobs();
     expect(mockFetch).toHaveBeenCalledWith(
       '/v1/jobs',
@@ -24,10 +30,7 @@ describe('api', () => {
   });
 
   it('getJob includes ID in URL', async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({}),
-    });
+    mockFetch.mockResolvedValue(okResponse({}));
     await api.getJob('test-id-123');
     expect(mockFetch).toHaveBeenCalledWith(
       '/v1/jobs/test-id-123',
@@ -56,10 +59,7 @@ describe('api', () => {
       top_failing: [],
       slowest_jobs: [],
     };
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve(statsData),
-    });
+    mockFetch.mockResolvedValue(okResponse(statsData));
     const result = await api.getStats();
     expect(result).toEqual(statsData);
   });
