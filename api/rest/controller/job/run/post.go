@@ -42,6 +42,11 @@ func Post(c *echo.Context) error {
 	}
 
 	r, err := runsvc.New(ctx).Start(j.ID, nil, req.Params)
+	if j.Paused {
+		return echo.NewHTTPError(http.StatusConflict, "job is paused")
+	}
+
+	r, err := runsvc.New(ctx).Start(j.ID, nil, req.Params)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}

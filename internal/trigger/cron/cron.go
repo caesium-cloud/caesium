@@ -104,6 +104,10 @@ func (c *Cron) Fire(ctx context.Context) error {
 	log.Info("running jobs", "count", len(jobs))
 
 	for _, j := range jobs {
+		if j.Paused {
+			log.Info("skipping paused job", "id", j.ID)
+			continue
+		}
 		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
 		params := c.defaultParams
 		go func() {
