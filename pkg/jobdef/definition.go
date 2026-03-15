@@ -65,6 +65,9 @@ type Step struct {
 	NodeSelector   map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
 	Next           []string          `yaml:"next,omitempty" json:"next,omitempty"`
 	DependsOn      []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Retries        int               `yaml:"retries,omitempty" json:"retries,omitempty"`
+	RetryDelay     time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
+	RetryBackoff   bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -78,6 +81,9 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		NodeSelector   map[string]string `yaml:"nodeSelector"`
 		Next           interface{}       `yaml:"next"`
 		DependsOn      interface{}       `yaml:"dependsOn"`
+		Retries        int               `yaml:"retries"`
+		RetryDelay     time.Duration     `yaml:"retryDelay"`
+		RetryBackoff   bool              `yaml:"retryBackoff"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -106,6 +112,9 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.NodeSelector = rs.NodeSelector
 	s.Next = nextList
 	s.DependsOn = dependsList
+	s.Retries = rs.Retries
+	s.RetryDelay = rs.RetryDelay
+	s.RetryBackoff = rs.RetryBackoff
 	s.Spec = rs.Spec
 
 	return nil

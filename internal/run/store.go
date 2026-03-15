@@ -68,6 +68,8 @@ type TaskRun struct {
 	ClaimedBy               string            `json:"claimed_by,omitempty"`
 	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
 	ClaimAttempt            int               `json:"claim_attempt"`
+	Attempt                 int               `json:"attempt"`
+	MaxAttempts             int               `json:"max_attempts"`
 	Result                  string            `json:"result,omitempty"`
 	StartedAt               *time.Time        `json:"started_at,omitempty"`
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
@@ -200,6 +202,11 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		}
 	}
 
+	maxAttempts := task.Retries + 1
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
 		JobRunID:                runID,
@@ -210,6 +217,8 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Command:                 command,
 		Status:                  string(TaskStatusPending),
 		NodeSelector:            maps.Clone(task.NodeSelector),
+		Attempt:                 1,
+		MaxAttempts:             maxAttempts,
 		OutstandingPredecessors: outstanding,
 	}
 
@@ -441,6 +450,45 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 
 	if s.bus != nil {
 		s.publishTaskEvent(s.db, event.TypeTaskFailed, runID, taskID)
+	}
+
+	return nil
+}
+
+// RetryTask resets a failed task run back to pending and increments its Attempt counter.
+func (s *Store) RetryTask(runID, taskID uuid.UUID, attempt int) error {
+	return s.retryTask(runID, taskID, attempt, "", false)
+}
+
+// RetryTaskClaimed resets a claimed failed task run and increments its Attempt counter.
+func (s *Store) RetryTaskClaimed(runID, taskID uuid.UUID, attempt int, claimedBy string) error {
+	return s.retryTask(runID, taskID, attempt, claimedBy, true)
+}
+
+func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
+	updateQuery := s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID)
+	if enforceClaim {
+		updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+	}
+	resultUpdate := updateQuery.
+		Updates(map[string]interface{}{
+			"status":       string(TaskStatusPending),
+			"attempt":      attempt,
+			"runtime_id":   "",
+			"started_at":   nil,
+			"completed_at": nil,
+			"error":        "",
+		})
+	if resultUpdate.Error != nil {
+		return resultUpdate.Error
+	}
+	if enforceClaim && resultUpdate.RowsAffected == 0 {
+		return ErrTaskClaimMismatch
+	}
+
+	if s.bus != nil {
+		s.publishTaskEvent(event.TypeTaskRetrying, runID, taskID)
 	}
 
 	return nil
@@ -690,6 +738,8 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		NodeSelector:            jsonmap.ToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,
+		Attempt:                 model.Attempt,
+		MaxAttempts:             model.MaxAttempts,
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,

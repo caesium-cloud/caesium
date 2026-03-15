@@ -86,6 +86,14 @@ var (
 		},
 		[]string{"node_id"},
 	)
+
+	TaskRetriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_task_retries_total",
+			Help: "Total number of task retry attempts.",
+		},
+		[]string{"job_alias", "task_name", "attempt"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -101,5 +109,6 @@ func Register() {
 		WorkerClaimsTotal,
 		WorkerClaimContentionTotal,
 		WorkerLeaseExpirationsTotal,
+		TaskRetriesTotal,
 	)
 }

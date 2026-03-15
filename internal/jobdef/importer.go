@@ -184,6 +184,9 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			JobID:        job.ID,
 			AtomID:       atom.ID,
 			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
+			Retries:      step.Retries,
+			RetryDelay:   step.RetryDelay,
+			RetryBackoff: step.RetryBackoff,
 		}
 
 		if err := tx.Create(task).Error; err != nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/callback"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
@@ -272,10 +274,12 @@ func (j *job) Run(ctx context.Context) error {
 
 	taskOrder := make(map[uuid.UUID]int, len(tasks))
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
+	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
 	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
 
 	for idx, t := range tasks {
 		taskOrder[t.ID] = idx
+		tasksByID[t.ID] = t
 
 		modelAtom, err := svc.Get(t.AtomID)
 		if err != nil {
@@ -432,112 +436,128 @@ func (j *job) Run(ctx context.Context) error {
 		err error
 	}
 
+	// executeAtom creates, monitors, and stops a container for one execution attempt.
+	// It returns the atom result string and any error.
+	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner) (string, error) {
+		atomName := taskID.String()
+		if attempt > 1 {
+			atomName = fmt.Sprintf("%s-attempt%d", taskID, attempt)
+		}
+
+		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
+
+		a, err := runner.engine.Create(&atom.EngineCreateRequest{
+			Name:    atomName,
+			Image:   runner.image,
+			Command: runner.command,
+			Spec:    runner.spec,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
+			return "", err
+		}
+
+		ticker := time.NewTicker(j.atomPollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-taskCtx.Done():
+				if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+					if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+						ID:    a.ID(),
+						Force: true,
+					}); stopErr != nil {
+						return "", fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					}
+					return "", fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				}
+				return "", taskCtx.Err()
+			case <-ticker.C:
+				var fetchErr error
+				a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
+				if fetchErr != nil {
+					return "", fetchErr
+				}
+
+				if !a.StoppedAt().IsZero() {
+					log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
+
+					stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+						ID:    a.ID(),
+						Force: true,
+					})
+					return string(a.Result()), stopErr
+				}
+
+				log.Info("atom running", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "state", a.State())
+			}
+		}
+	}
+
 	runTask := func(taskID uuid.UUID) error {
 		runner := runners[taskID]
 		if runner == nil {
 			return fmt.Errorf("missing runner for task %s", taskID)
 		}
 
-		taskCtx := ctx
-		cancel := func() {}
-		if taskTimeout > 0 {
-			taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
+		taskModel := tasksByID[taskID]
+		maxAttempts := 1
+		if taskModel != nil && taskModel.Retries > 0 {
+			maxAttempts = taskModel.Retries + 1
 		}
-		defer cancel()
 
-		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command)
-
-		a, err := runner.engine.Create(&atom.EngineCreateRequest{
-			Name:    fmt.Sprintf("%s-%s", runID.String()[:8], taskID.String()),
-			Image:   runner.image,
-			Command: runner.command,
-			Spec:    runner.spec,
-		})
-		if err != nil {
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			taskCtx := ctx
+			cancel := func() {}
+			if taskTimeout > 0 {
+				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			return err
-		}
 
-		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			return err
-		}
+			result, execErr := executeAtom(taskCtx, taskID, attempt, runner)
+			cancel()
 
-		monitor := func() error {
-			ticker := time.NewTicker(j.atomPollInterval)
-			defer ticker.Stop()
+			if execErr == nil {
+				if err := store.CompleteTask(runID, taskID, result); err != nil {
+					return err
+				}
+				return nil
+			}
+			lastErr = execErr
 
-			for {
+			// No more attempts — mark as permanently failed.
+			if attempt >= maxAttempts {
+				break
+			}
+
+			// Compute retry delay.
+			delay := computeRetryDelay(taskModel, attempt)
+
+			log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
+
+			metrics.TaskRetriesTotal.WithLabelValues(j.id.String(), taskID.String(), strconv.Itoa(attempt)).Inc()
+
+			if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
+				log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)
+			}
+
+			if delay > 0 {
 				select {
-				case <-taskCtx.Done():
-					if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-						if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-							ID:    a.ID(),
-							Force: true,
-						}); stopErr != nil {
-							return fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
-						}
-						return fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
-					}
-					return taskCtx.Err()
-				case <-ticker.C:
-					var fetchErr error
-					a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
-					if fetchErr != nil {
-						return fetchErr
-					}
-
-					if !a.StoppedAt().IsZero() {
-						log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
-
-						return runner.engine.Stop(&atom.EngineStopRequest{
-							ID:    a.ID(),
-							Force: true,
-						})
-					}
-
-					log.Info("atom running", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "state", a.State())
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
 				}
 			}
 		}
 
-		if err = monitor(); err != nil {
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
-			}
-			return err
+		if persistErr := store.FailTask(runID, taskID, lastErr); persistErr != nil {
+			log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 		}
-
-		atomResult := a.Result()
-		if atomResult != atom.Success {
-			var err error
-			switch atomResult {
-			case atom.Failure:
-				err = fmt.Errorf("command exited with non-zero status")
-			case atom.StartupFailure:
-				err = fmt.Errorf("atom failed to start (check image/command)")
-			case atom.ResourceFailure:
-				err = fmt.Errorf("atom exhausted resources (e.g. OOM)")
-			case atom.Killed:
-				err = fmt.Errorf("atom was forcefully killed")
-			case atom.Terminated:
-				err = fmt.Errorf("atom was gracefully terminated")
-			default:
-				err = fmt.Errorf("atom failed with result: %s", atomResult)
-			}
-
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
-			}
-			return err
-		}
-
-		if err := store.CompleteTask(runID, taskID, string(atomResult)); err != nil {
-			return err
-		}
-
-		return nil
+		return lastErr
 	}
 
 	taskPool := worker.NewPool(maxParallel)
