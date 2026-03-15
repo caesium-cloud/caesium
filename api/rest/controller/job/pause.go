@@ -11,30 +11,20 @@ import (
 )
 
 func Pause(c echo.Context) error {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
-	}
-
-	j, err := jsvc.Service(c.Request().Context()).SetPaused(id, true)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return echo.ErrNotFound
-		}
-
-		return echo.ErrInternalServerError.SetInternal(err)
-	}
-
-	return c.JSON(http.StatusOK, j)
+	return setPaused(c, true)
 }
 
 func Unpause(c echo.Context) error {
+	return setPaused(c, false)
+}
+
+func setPaused(c echo.Context, paused bool) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
-	j, err := jsvc.Service(c.Request().Context()).SetPaused(id, false)
+	j, err := jsvc.Service(c.Request().Context()).SetPaused(id, paused)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound

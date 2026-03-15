@@ -581,36 +581,6 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	return err
 }
 
-// PredecessorStatuses returns the TaskStatus for each predecessor of the given
-// task within a job run. It looks up edges via the task_edges table.
-func (s *Store) PredecessorStatuses(runID, taskID uuid.UUID) ([]TaskStatus, error) {
-	var edges []models.TaskEdge
-	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
-		return nil, err
-	}
-
-	if len(edges) == 0 {
-		return nil, nil
-	}
-
-	fromIDs := make([]uuid.UUID, len(edges))
-	for i, edge := range edges {
-		fromIDs[i] = edge.FromTaskID
-	}
-
-	var taskRuns []models.TaskRun
-	if err := s.db.
-		Where("job_run_id = ? AND task_id IN ?", runID, fromIDs).
-		Find(&taskRuns).Error; err != nil {
-		return nil, err
-	}
-
-	statuses := make([]TaskStatus, len(taskRuns))
-	for i, tr := range taskRuns {
-		statuses[i] = TaskStatus(tr.Status)
-	}
-	return statuses, nil
-}
 
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).

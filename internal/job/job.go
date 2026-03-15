@@ -591,7 +591,7 @@ func (j *job) Run(ctx context.Context) error {
 
 			log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 
-			metrics.TaskRetriesTotal.WithLabelValues(j.id.String(), taskID.String(), strconv.Itoa(attempt)).Inc()
+			metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
 
 			if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
 				log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)

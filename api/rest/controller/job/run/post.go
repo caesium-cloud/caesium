@@ -28,9 +28,14 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	// Parse optional request body — ignore decode errors so an empty body is fine.
+	// Parse optional request body. An empty or absent body is fine; a malformed
+	// JSON body returns 400 so the caller gets a clear signal.
 	var req PostRequest
-	_ = c.Bind(&req)
+	if err := c.Bind(&req); err != nil {
+		// Echo's Bind returns an HTTPError for content-type mismatches and a
+		// plain error for JSON decode failures. Unwrap either into a 400.
+		return echo.ErrBadRequest.SetInternal(err)
+	}
 
 	j, err := jsvc.Service(ctx).Get(id)
 	if err != nil {
