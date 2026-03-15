@@ -8,24 +8,27 @@ import (
 )
 
 type JobRun struct {
-	ID           uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID        uuid.UUID `gorm:"type:uuid;index;not null" json:"job_id"`
-	TriggerID    uuid.UUID `gorm:"type:uuid;index" json:"trigger_id"`
-	TriggerType  string    `gorm:"type:text" json:"trigger_type"`
-	TriggerAlias string    `gorm:"type:text" json:"trigger_alias"`
-	Status       string    `gorm:"type:text;index;not null" json:"status"`
-	Error        string    `json:"error,omitempty"`
-	StartedAt   time.Time `gorm:"not null" json:"started_at"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	CreatedAt   time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt   time.Time  `gorm:"not null" json:"updated_at"`
-	Tasks       []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID  `gorm:"type:uuid;index;not null" json:"job_id"`
+	Job          Job        `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TriggerID    uuid.UUID  `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType  string     `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias string     `gorm:"type:text" json:"trigger_alias"`
+	Status       string     `gorm:"type:text;index;not null" json:"status"`
+	Error        string     `json:"error,omitempty"`
+	StartedAt    time.Time  `gorm:"not null" json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt    time.Time  `gorm:"not null" json:"updated_at"`
+	Tasks        []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
 }
 
 type TaskRun struct {
 	ID                      uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
-	JobRunID                uuid.UUID         `gorm:"type:uuid;index;not null" json:"job_run_id"`
-	TaskID                  uuid.UUID         `gorm:"type:uuid;index;not null" json:"task_id"`
+	JobRunID                uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"job_run_id"`
+	JobRun                  JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TaskID                  uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
+	Task                    Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	AtomID                  uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
 	Engine                  AtomEngine        `gorm:"type:text;not null" json:"engine"`
 	Image                   string            `gorm:"not null" json:"image"`

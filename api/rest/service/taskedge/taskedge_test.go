@@ -54,7 +54,7 @@ func (s *TaskEdgeSuite) createJob(triggerID uuid.UUID) uuid.UUID {
 	id := uuid.New()
 	s.Require().NoError(s.db.Create(&models.Job{
 		ID:        id,
-		Alias:     "test-job",
+		Alias:     "test-job-" + id.String()[:8],
 		TriggerID: triggerID,
 	}).Error)
 	return id

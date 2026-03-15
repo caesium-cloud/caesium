@@ -70,32 +70,9 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 		s.Empty(atom.ProvenancePath)
 	}
 
-	var tasks []models.Task
-	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&tasks).Error)
-
-	withNext := 0
-	for _, task := range tasks {
-		if task.NextID != nil {
-			withNext++
-		}
-	}
-	s.Equal(2, withNext)
-
 	var edges []models.TaskEdge
 	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&edges).Error)
 	s.Len(edges, 2)
-
-	edgeTargets := make(map[uuid.UUID]uuid.UUID, len(edges))
-	for _, edge := range edges {
-		edgeTargets[edge.FromTaskID] = edge.ToTaskID
-	}
-
-	for _, task := range tasks {
-		if task.NextID == nil {
-			continue
-		}
-		s.Equal(*task.NextID, edgeTargets[task.ID])
-	}
 }
 
 func (s *ImporterTestSuite) TestDuplicateAliasFails() {
@@ -221,16 +198,6 @@ steps:
 	s.ElementsMatch([]string{"repo/join"}, adj["repo/branch-a"])
 	s.ElementsMatch([]string{"repo/join"}, adj["repo/branch-b"])
 
-	for _, task := range tasks {
-		switch imageByTask[task.ID] {
-		case "repo/start":
-			s.Nil(task.NextID)
-		case "repo/branch-a", "repo/branch-b":
-			s.NotNil(task.NextID)
-		case "repo/join":
-			s.Nil(task.NextID)
-		}
-	}
 }
 
 func (s *ImporterTestSuite) TestApplyPersistsStepNodeSelector() {

@@ -356,19 +356,10 @@ func (j *job) Run(ctx context.Context) error {
 		addedEdges++
 	}
 
-	if addedEdges == 0 {
-		for _, t := range tasks {
-			if t.NextID == nil {
-				continue
-			}
-			addEdge(t.ID, *t.NextID)
-			addedEdges++
-		}
-
-		if addedEdges == 0 && len(tasks) > 1 {
-			for idx := 0; idx < len(tasks)-1; idx++ {
-				addEdge(tasks[idx].ID, tasks[idx+1].ID)
-			}
+	if addedEdges == 0 && len(tasks) > 1 {
+		// No explicit edges; fall back to sequential creation order.
+		for idx := 0; idx < len(tasks)-1; idx++ {
+			addEdge(tasks[idx].ID, tasks[idx+1].ID)
 		}
 	}
 

@@ -1,13 +1,16 @@
 package models
 
+// All lists every model for AutoMigrate. Order matters: parent tables
+// must appear before children so that foreign-key constraints can
+// reference them.
 var All = []interface{}{
 	&Atom{},
-	&Callback{},
-	&CallbackRun{},
+	&Trigger{},
 	&Job{},
-	&JobRun{},
-	&TaskRun{},
 	&Task{},
 	&TaskEdge{},
-	&Trigger{},
+	&Callback{},
+	&JobRun{},
+	&TaskRun{},
+	&CallbackRun{},
 }

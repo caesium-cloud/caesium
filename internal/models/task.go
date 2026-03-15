@@ -10,8 +10,9 @@ import (
 type Task struct {
 	ID           uuid.UUID         `gorm:"type:uuid;primaryKey"`
 	JobID        uuid.UUID         `gorm:"type:uuid;index;not null"`
+	Job          Job               `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	AtomID       uuid.UUID         `gorm:"type:uuid;index;not null"`
-	NextID       *uuid.UUID        `gorm:"type:uuid;index"`
+	Atom         Atom              `gorm:"constraint:OnDelete:RESTRICT" json:"-"`
 	NodeSelector datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	CreatedAt    time.Time         `gorm:"not null"`
 	UpdatedAt    time.Time         `gorm:"not null"`

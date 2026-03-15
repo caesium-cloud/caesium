@@ -49,6 +49,8 @@ func Connection() *gorm.DB {
 			if sqlDB, err := gdb.DB(); err == nil {
 				sqlDB.SetMaxOpenConns(1)
 			}
+			// Enable foreign key enforcement for SQLite-based databases.
+			gdb.Exec("PRAGMA foreign_keys = ON")
 		}
 	})
 

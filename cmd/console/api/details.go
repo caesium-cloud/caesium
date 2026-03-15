@@ -63,7 +63,6 @@ type JobDAG struct {
 type JobDAGNode struct {
 	ID         string   `json:"id"`
 	AtomID     string   `json:"atom_id"`
-	NextID     *string  `json:"next_id"`
 	Successors []string `json:"successors"`
 }
 

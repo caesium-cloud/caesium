@@ -72,7 +72,6 @@ export interface JobTask {
   id: string;
   job_id: string;
   atom_id: string;
-  next_id?: string;
   node_selector: Record<string, unknown>;
   created_at: string;
   updated_at: string;
@@ -81,7 +80,6 @@ export interface JobTask {
 export interface DAGNode {
   id: string;
   atom_id: string;
-  next_id?: string;
   successors?: string[];
 }
 
