@@ -28,6 +28,7 @@ type TaskRun struct {
 	JobRunID                uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"job_run_id"`
 	JobRun                  JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	TaskID                  uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
+	Task                    Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	AtomID                  uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
 	Engine                  AtomEngine        `gorm:"type:text;not null" json:"engine"`
 	Image                   string            `gorm:"not null" json:"image"`
