@@ -25,6 +25,28 @@ Runtime images are published as multi-arch Docker manifests so `docker pull caes
 - Cross-build one platform with buildx: `just build-cross linux/arm64`
 - Build and push multi-arch images: `just build-multiarch tag=<tag>`
 
+## Quick Start
+
+### Run the server
+
+```bash
+just run
+```
+
+The API and embedded web UI are served from `http://localhost:8080`.
+
+### Load example jobs
+
+```bash
+just hydrate
+```
+
+### Trigger a run manually
+
+```bash
+curl -X POST http://localhost:8080/v1/jobs/<job-id>/run
+```
+
 ## Mixed-Arch Cluster Notes
 
 - Mixed `amd64`/`arm64` caesium clusters are supported when all nodes run compatible versions.
@@ -38,6 +60,20 @@ Runtime images are published as multi-arch Docker manifests so `docker pull caes
 - Embedded web UI plan: [docs/ui_implementation_plan.md](docs/ui_implementation_plan.md)
 - Kubernetes + Helm guide: [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md)
 - Job manifest guide: [docs/job-definitions.md](docs/job-definitions.md)
+
+## API Reference
+
+- `GET /health` for health checks
+- `GET /metrics` for Prometheus metrics
+- `GET /v1/jobs` to list jobs
+- `POST /v1/jobs/:id/run` to start a run
+- `GET /v1/jobs/:id/runs/:run_id` to inspect a run
+- `GET /v1/events` to subscribe to lifecycle events
+- `GET/POST /gql` for GraphQL access
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for development workflow, testing expectations, and PR conventions.
 
 [Pkg]: https://pkg.go.dev/github.com/caesium-cloud/caesium
 [Pkg Widget]: https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg

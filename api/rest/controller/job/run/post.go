@@ -32,8 +32,6 @@ func Post(c *echo.Context) error {
 	// JSON body returns 400 so the caller gets a clear signal.
 	var req PostRequest
 	if err := c.Bind(&req); err != nil {
-		// Echo's Bind returns an HTTPError for content-type mismatches and a
-		// plain error for JSON decode failures. Unwrap either into a 400.
 		return echo.ErrBadRequest.SetInternal(err)
 	}
 
@@ -46,7 +44,6 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	r, err := runsvc.New(ctx).Start(j.ID, nil, req.Params)
 	if j.Paused {
 		return echo.NewHTTPError(http.StatusConflict, "job is paused")
 	}

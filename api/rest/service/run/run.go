@@ -57,7 +57,6 @@ func (r *runService) SetBus(bus event.Bus) {
 func (r *runService) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*runstorage.JobRun, error) {
 	return r.store.Start(jobID, triggerID, params...)
 }
-}
 
 func (r *runService) Get(runID uuid.UUID) (*runstorage.JobRun, error) {
 	return r.store.Get(runID)

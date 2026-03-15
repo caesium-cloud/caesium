@@ -3,6 +3,7 @@ package detail
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"

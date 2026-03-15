@@ -54,6 +54,29 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		return
 	}
 
+	jobAlias := ""
+	resolveJobAlias := func() string {
+		if jobAlias != "" {
+			return jobAlias
+		}
+
+		var result struct {
+			Alias string
+		}
+		if err := e.store.DB().
+			Table("job_runs").
+			Select("jobs.alias AS alias").
+			Joins("join jobs on jobs.id = job_runs.job_id").
+			Where("job_runs.id = ?", taskRun.JobRunID).
+			Take(&result).Error; err == nil && strings.TrimSpace(result.Alias) != "" {
+			jobAlias = result.Alias
+			return jobAlias
+		}
+
+		jobAlias = taskRun.JobRunID.String()
+		return jobAlias
+	}
+
 	// Load the task model to get retry configuration.
 	var taskModel models.Task
 	hasTaskModel := e.store.DB().First(&taskModel, "id = ?", taskRun.TaskID).Error == nil
@@ -102,7 +125,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 		log.Info("retrying worker task", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 
-		metrics.TaskRetriesTotal.WithLabelValues(taskRun.JobRunID.String(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
+		metrics.TaskRetriesTotal.WithLabelValues(resolveJobAlias(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
 
 		if retryErr := e.store.RetryTaskClaimed(taskRun.JobRunID, taskRun.TaskID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
 			if errors.Is(retryErr, run.ErrTaskClaimMismatch) {

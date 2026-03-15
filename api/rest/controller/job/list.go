@@ -8,11 +8,11 @@ import (
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
-func List(c echo.Context) error {
+func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
 		return echo.ErrBadRequest.SetInternal(err)
@@ -37,7 +37,7 @@ func List(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-func parseListRequest(c echo.Context) (req *job.ListRequest, err error) {
+func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {
 	req = &job.ListRequest{
 		TriggerID: c.QueryParam("trigger_id"),
 	}

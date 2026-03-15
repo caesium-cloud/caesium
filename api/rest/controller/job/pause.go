@@ -6,19 +6,19 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/google/uuid"
-	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
 
-func Pause(c echo.Context) error {
+func Pause(c *echo.Context) error {
 	return setPaused(c, true)
 }
 
-func Unpause(c echo.Context) error {
+func Unpause(c *echo.Context) error {
 	return setPaused(c, false)
 }
 
-func setPaused(c echo.Context, paused bool) error {
+func setPaused(c *echo.Context, paused bool) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.ErrBadRequest.SetInternal(err)
