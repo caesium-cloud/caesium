@@ -52,8 +52,9 @@ type Metadata struct {
 
 // Trigger defines how the job is triggered.
 type Trigger struct {
-	Type          string         `yaml:"type" json:"type"`
-	Configuration map[string]any `yaml:"configuration" json:"configuration"`
+	Type          string            `yaml:"type" json:"type"`
+	Configuration map[string]any    `yaml:"configuration" json:"configuration"`
+	DefaultParams map[string]string `yaml:"defaultParams,omitempty" json:"defaultParams,omitempty"`
 }
 
 // Callback defines a job callback (notification, etc.).

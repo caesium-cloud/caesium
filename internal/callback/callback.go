@@ -26,14 +26,15 @@ type Handler interface {
 
 // Metadata captures the job/run context sent to callbacks.
 type Metadata struct {
-	JobID       uuid.UUID   `json:"job_id"`
-	JobAlias    string      `json:"job_alias"`
-	RunID       uuid.UUID   `json:"run_id"`
-	Status      string      `json:"status"`
-	Error       string      `json:"error,omitempty"`
-	StartedAt   time.Time   `json:"started_at"`
-	CompletedAt *time.Time  `json:"completed_at,omitempty"`
-	Tasks       []TaskState `json:"tasks"`
+	JobID       uuid.UUID         `json:"job_id"`
+	JobAlias    string            `json:"job_alias"`
+	RunID       uuid.UUID         `json:"run_id"`
+	Params      map[string]string `json:"params,omitempty"`
+	Status      string            `json:"status"`
+	Error       string            `json:"error,omitempty"`
+	StartedAt   time.Time         `json:"started_at"`
+	CompletedAt *time.Time        `json:"completed_at,omitempty"`
+	Tasks       []TaskState       `json:"tasks"`
 }
 
 // TaskState summarises an individual task run.
@@ -209,6 +210,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 		JobID:       jobID,
 		JobAlias:    job.Alias,
 		RunID:       runID,
+		Params:      runState.Params,
 		Status:      string(runState.Status),
 		Error:       runState.Error,
 		StartedAt:   runState.StartedAt,

@@ -16,6 +16,7 @@ type JobRun struct {
 	TriggerAlias string     `gorm:"type:text" json:"trigger_alias"`
 	Status       string     `gorm:"type:text;index;not null" json:"status"`
 	Error        string     `json:"error,omitempty"`
+	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
 	StartedAt    time.Time  `gorm:"not null" json:"started_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`

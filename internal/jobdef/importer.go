@@ -121,7 +121,14 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 }
 
 func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger, opts *ApplyOptions) (*models.Trigger, error) {
-	cfg, err := jsonutil.MarshalMapString(trig.Configuration)
+	cfgMap := trig.Configuration
+	if cfgMap == nil {
+		cfgMap = make(map[string]any)
+	}
+	if len(trig.DefaultParams) > 0 {
+		cfgMap["defaultParams"] = trig.DefaultParams
+	}
+	cfg, err := jsonutil.MarshalMapString(cfgMap)
 	if err != nil {
 		return nil, err
 	}

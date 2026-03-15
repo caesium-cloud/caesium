@@ -3,6 +3,7 @@ package run
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"sync"
 	"time"
@@ -86,6 +87,7 @@ type JobRun struct {
 	TriggerType  string         `json:"trigger_type,omitempty"`
 	TriggerAlias string         `json:"trigger_alias,omitempty"`
 	Status       Status         `json:"status"`
+	Params       map[string]string `json:"params,omitempty"`
 	StartedAt    time.Time      `json:"started_at"`
 	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
 	CreatedAt    time.Time      `json:"created_at"`
@@ -136,7 +138,7 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*JobRun, error) {
+func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
 		JobID:     jobID,
@@ -146,6 +148,13 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*JobRun, error) {
 
 	if triggerID != nil {
 		model.TriggerID = *triggerID
+	}
+	if len(params) > 0 && len(params[0]) > 0 {
+		encoded, err := json.Marshal(params[0])
+		if err != nil {
+			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
+		}
+		model.Params = encoded
 	}
 
 	if err := s.db.Create(model).Error; err != nil {
@@ -720,6 +729,13 @@ func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
 		CreatedAt: model.CreatedAt,
 		UpdatedAt: model.UpdatedAt,
 		Error:     model.Error,
+	}
+
+	if len(model.Params) > 0 {
+		var p map[string]string
+		if err := json.Unmarshal(model.Params, &p); err == nil {
+			runValue.Params = p
+		}
 	}
 
 	if model.CompletedAt != nil {

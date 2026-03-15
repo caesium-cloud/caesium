@@ -15,6 +15,11 @@ import (
 	"gorm.io/gorm"
 )
 
+// PostRequest holds the optional body for POST /v1/jobs/:id/run.
+type PostRequest struct {
+	Params map[string]string `json:"params,omitempty"`
+}
+
 func Post(c *echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -22,6 +27,10 @@ func Post(c *echo.Context) error {
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
+
+	// Parse optional request body — ignore decode errors so an empty body is fine.
+	var req PostRequest
+	_ = c.Bind(&req)
 
 	j, err := jsvc.Service(ctx).Get(id)
 	if err != nil {
@@ -32,14 +41,14 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	r, err := runsvc.New(ctx).Start(j.ID, nil)
+	r, err := runsvc.New(ctx).Start(j.ID, nil, req.Params)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	go func() {
 		runCtx := runstorage.WithContext(context.Background(), r.ID)
-		if err := job.New(j, job.WithTriggerID(nil)).Run(runCtx); err != nil {
+		if err := job.New(j, job.WithTriggerID(nil), job.WithParams(r.Params)).Run(runCtx); err != nil {
 			log.Error("job run failure", "id", j.ID, "run_id", r.ID, "error", err)
 		}
 	}()

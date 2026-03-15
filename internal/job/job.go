@@ -41,6 +41,8 @@ type job struct {
 	triggerID              *uuid.UUID
 	maxParallelTasks       int
 	taskTimeout            time.Duration
+	alias                  string
+	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -61,6 +63,7 @@ func New(m *models.Job, opts ...jobOption) Job {
 		triggerID:              &m.TriggerID,
 		maxParallelTasks:       m.MaxParallelTasks,
 		taskTimeout:            m.TaskTimeout,
+		alias:                  m.Alias,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -183,6 +186,27 @@ func withAtomPollInterval(interval time.Duration) jobOption {
 	}
 }
 
+// WithParams is an exported option that attaches run parameters to the job.
+// Parameters are injected into each task's environment as
+// CAESIUM_PARAM_<KEY>=<VALUE> (KEY uppercased).
+func WithParams(params map[string]string) jobOption {
+	return func(j *job) {
+		j.params = params
+	}
+}
+
+// buildParamEnv returns a map of environment variables derived from params.
+// It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
+func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
+	env := make(map[string]string, len(params)+2)
+	env["CAESIUM_RUN_ID"] = runID.String()
+	env["CAESIUM_JOB_ALIAS"] = jobAlias
+	for k, v := range params {
+		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
+	}
+	return env
+}
+
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
@@ -210,7 +234,7 @@ func (j *job) Run(ctx context.Context) error {
 			existing, err := store.Get(id)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return store.Start(j.id, j.triggerID)
+					return store.Start(j.id, j.triggerID, j.params)
 				}
 				return nil, err
 			}
@@ -233,7 +257,7 @@ func (j *job) Run(ctx context.Context) error {
 			return store.Get(running.ID)
 		}
 
-		return store.Start(j.id, j.triggerID)
+		return store.Start(j.id, j.triggerID, j.params)
 	}
 
 	snapshot, err := resolveRun()
@@ -450,6 +474,8 @@ func (j *job) Run(ctx context.Context) error {
 		err error
 	}
 
+	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
+
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
 	// It returns the atom result string and any error.
 	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner) (string, error) {
@@ -460,11 +486,23 @@ func (j *job) Run(ctx context.Context) error {
 
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
+		spec := runner.spec
+		if len(paramEnv) > 0 {
+			merged := make(map[string]string, len(spec.Env)+len(paramEnv))
+			for k, v := range spec.Env {
+				merged[k] = v
+			}
+			for k, v := range paramEnv {
+				merged[k] = v
+			}
+			spec.Env = merged
+		}
+
 		a, err := runner.engine.Create(&atom.EngineCreateRequest{
 			Name:    atomName,
 			Image:   runner.image,
 			Command: runner.command,
-			Spec:    runner.spec,
+			Spec:    spec,
 		})
 		if err != nil {
 			return "", err
