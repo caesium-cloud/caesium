@@ -341,33 +341,11 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			return err
 		}
 		if len(edges) == 0 {
-			var task models.Task
-			if err := tx.First(&task, "id = ?", taskID).Error; err != nil {
-				return err
+			// No explicit edges from this task; nothing to propagate.
+			if s.bus != nil {
+				s.publishTaskEvent(tx, event.TypeTaskSucceeded, runID, taskID)
 			}
-			var jobEdgeCount int64
-			if err := tx.Model(&models.TaskEdge{}).
-				Where("job_id = ?", task.JobID).
-				Limit(1).
-				Count(&jobEdgeCount).Error; err != nil {
-				return err
-			}
-			if jobEdgeCount > 0 {
-				return nil
-			}
-			if task.NextID != nil {
-				edges = append(edges, models.TaskEdge{ToTaskID: *task.NextID})
-			} else {
-				var next models.Task
-				err := tx.Where("job_id = ? AND created_at > ?", task.JobID, task.CreatedAt).
-					Order("created_at asc").
-					First(&next).Error
-				if err == nil {
-					edges = append(edges, models.TaskEdge{ToTaskID: next.ID})
-				} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-					return err
-				}
-			}
+			return nil
 		}
 
 		for _, edge := range edges {

@@ -18,14 +18,16 @@ const (
 type CallbackRun struct {
 	ID          uuid.UUID         `gorm:"type:uuid;primaryKey"`
 	CallbackID  uuid.UUID         `gorm:"type:uuid;index;not null"`
+	Callback    Callback          `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	JobID       uuid.UUID         `gorm:"type:uuid;index;not null"`
 	JobRunID    uuid.UUID         `gorm:"type:uuid;index;not null"`
+	JobRun      JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	Status      CallbackRunStatus `gorm:"type:text;index;not null"`
 	Error       string            `gorm:"type:text"`
 	StartedAt   time.Time         `gorm:"not null"`
-	CompletedAt *time.Time        `gorm:""`
-	CreatedAt   time.Time         `gorm:"not null"`
-	UpdatedAt   time.Time         `gorm:"not null"`
+	CompletedAt *time.Time
+	CreatedAt   time.Time `gorm:"not null"`
+	UpdatedAt   time.Time `gorm:"not null"`
 }
 
 type CallbackRuns []*CallbackRun

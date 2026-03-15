@@ -23,7 +23,6 @@ type DAGResponse struct {
 type DAGNode struct {
 	ID         uuid.UUID   `json:"id"`
 	AtomID     uuid.UUID   `json:"atom_id"`
-	NextID     *uuid.UUID  `json:"next_id,omitempty"`
 	Successors []uuid.UUID `json:"successors"`
 }
 
@@ -78,15 +77,6 @@ func DAG(c *echo.Context) error {
 		addEdge(edge.FromTaskID, edge.ToTaskID)
 	}
 
-	if len(rawEdges) == 0 {
-		for _, t := range tasks {
-			if t.NextID == nil {
-				continue
-			}
-			addEdge(t.ID, *t.NextID)
-		}
-	}
-
 	nodes := make([]DAGNode, 0, len(tasks))
 	edges := make([]DAGEdge, 0, len(tasks))
 
@@ -111,22 +101,9 @@ func DAG(c *echo.Context) error {
 			})
 		}
 
-		var nextID *uuid.UUID
-		switch len(successors) {
-		case 0:
-			if t.NextID != nil {
-				val := *t.NextID
-				nextID = &val
-			}
-		case 1:
-			val := successors[0]
-			nextID = &val
-		}
-
 		nodes = append(nodes, DAGNode{
 			ID:         t.ID,
 			AtomID:     t.AtomID,
-			NextID:     nextID,
 			Successors: successors,
 		})
 	}

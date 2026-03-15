@@ -54,7 +54,7 @@ func (s *TaskSuite) createJob(triggerID uuid.UUID) uuid.UUID {
 	id := uuid.New()
 	s.Require().NoError(s.db.Create(&models.Job{
 		ID:        id,
-		Alias:     "test-job",
+		Alias:     "test-job-" + id.String()[:8],
 		TriggerID: triggerID,
 	}).Error)
 	return id
@@ -154,27 +154,6 @@ func (s *TaskSuite) TestCreateBasic() {
 	s.NotEqual(uuid.Nil, task.ID)
 	s.Equal(jobID, task.JobID)
 	s.Equal(atomID, task.AtomID)
-	s.Nil(task.NextID)
-}
-
-func (s *TaskSuite) TestCreateWithNextID() {
-	triggerID := s.createTrigger()
-	jobID := s.createJob(triggerID)
-	atomID := s.createAtom()
-
-	// Create first task
-	first := s.createTask(jobID, atomID)
-
-	// Create second task pointing to first
-	nextID := first.ID.String()
-	task, err := s.svc().Create(&CreateRequest{
-		JobID:  jobID.String(),
-		AtomID: atomID.String(),
-		NextID: &nextID,
-	})
-	s.Require().NoError(err)
-	s.Require().NotNil(task.NextID)
-	s.Equal(first.ID, *task.NextID)
 }
 
 func (s *TaskSuite) TestCreateWithNodeSelector() {

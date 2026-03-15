@@ -10,8 +10,9 @@ import (
 
 type Job struct {
 	ID                 uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
-	Alias              string            `gorm:"index" json:"alias"`
+	Alias              string            `gorm:"uniqueIndex" json:"alias"`
 	TriggerID          uuid.UUID         `gorm:"type:uuid;index;not null" json:"trigger_id"`
+	Trigger            Trigger           `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	Labels             datatypes.JSONMap `gorm:"type:json" json:"labels"`
 	Annotations        datatypes.JSONMap `gorm:"type:json" json:"annotations"`
 	ProvenanceSourceID string            `gorm:"index" json:"provenance_source_id"`

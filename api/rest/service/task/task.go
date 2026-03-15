@@ -41,7 +41,6 @@ type ListRequest struct {
 	OrderBy []string
 	JobID   string
 	AtomID  string
-	NextID  string
 }
 
 func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
@@ -64,14 +63,6 @@ func (t *taskService) List(req *ListRequest) (models.Tasks, error) {
 		}
 
 		q = q.Where("atom_id = ?", req.AtomID)
-	}
-
-	if req.NextID != "" {
-		if _, err := uuid.Parse(req.NextID); err != nil {
-			return nil, err
-		}
-
-		q = q.Where("next_id = ?", req.NextID)
 	}
 
 	for _, orderBy := range req.OrderBy {
@@ -101,7 +92,6 @@ func (t *taskService) Get(id uuid.UUID) (*models.Task, error) {
 type CreateRequest struct {
 	JobID        string            `json:"job_id"`
 	AtomID       string            `json:"atom_id"`
-	NextID       *string           `json:"next_id"`
 	NodeSelector map[string]string `json:"node_selector,omitempty"`
 }
 
@@ -116,15 +106,6 @@ func (t *taskService) Create(req *CreateRequest) (*models.Task, error) {
 		JobID:        uuid.MustParse(req.JobID),
 		AtomID:       uuid.MustParse(req.AtomID),
 		NodeSelector: jsonmap.FromStringMap(req.NodeSelector),
-	}
-
-	if req.NextID != nil {
-		id, err := uuid.Parse(*req.NextID)
-		if err != nil {
-			return nil, err
-		}
-
-		task.NextID = &id
 	}
 
 	return task, q.Create(task).Error

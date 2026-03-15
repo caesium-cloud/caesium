@@ -268,7 +268,7 @@ func (i *Importer) createEdges(tx *gorm.DB, job *models.Job, steps []schema.Step
 		}
 	}
 
-	return i.backfillLegacyNext(tx, successors, taskByName)
+	return nil
 }
 
 func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []schema.Callback) error {
@@ -292,26 +292,3 @@ func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []sch
 	return nil
 }
 
-func (i *Importer) backfillLegacyNext(tx *gorm.DB, successors map[string][]string, taskByName map[string]*models.Task) error {
-	for fromName, succs := range successors {
-		if len(succs) != 1 {
-			continue
-		}
-
-		fromTask, ok := taskByName[fromName]
-		if !ok {
-			return fmt.Errorf("missing task for step %s", fromName)
-		}
-		toTask, ok := taskByName[succs[0]]
-		if !ok {
-			return fmt.Errorf("missing task for successor step %s", succs[0])
-		}
-
-		if err := tx.Model(&models.Task{}).
-			Where("id = ?", fromTask.ID).
-			Update("next_id", toTask.ID).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}

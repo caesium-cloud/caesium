@@ -78,13 +78,11 @@ func Post(c *echo.Context) error {
 			"creating task",
 			"job_id", j.ID,
 			"atom_id", a.ID,
-			"next_id", t.NextID,
 		)
 
 		taskModel, err := tsvc.Create(&task.CreateRequest{
 			JobID:        j.ID.String(),
 			AtomID:       a.ID.String(),
-			NextID:       t.NextID,
 			NodeSelector: t.NodeSelector,
 		})
 		if err != nil {
@@ -93,10 +91,10 @@ func Post(c *echo.Context) error {
 		}
 
 		createdTasks = append(createdTasks, taskModel.ID.String())
-		if t.NextID != nil && *t.NextID != "" {
+		for _, dep := range t.DependsOn {
 			explicitEdges = append(explicitEdges, edgeSpec{
-				from: taskModel.ID.String(),
-				to:   *t.NextID,
+				from: dep,
+				to:   taskModel.ID.String(),
 			})
 		}
 	}
@@ -153,7 +151,7 @@ type PostRequest struct {
 
 type TaskRequest struct {
 	Atom         *atom.CreateRequest `json:"atom"`
-	NextID       *string             `json:"next_id"`
+	DependsOn    []string            `json:"depends_on,omitempty"`
 	NodeSelector map[string]string   `json:"node_selector,omitempty"`
 }
 
