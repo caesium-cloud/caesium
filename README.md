@@ -162,6 +162,8 @@ The server exposes a REST API on port `8080` and a GraphQL endpoint at `/gql`.
 
 | Guide | Description |
 |---|---|
+| [docs/README.md](docs/README.md) | Documentation index |
+| [docs/airflow-parity.md](docs/airflow-parity.md) | Airflow parity progress and remaining gaps |
 | [docs/job-definitions.md](docs/job-definitions.md) | Authoring, linting, diffing, and applying job manifests |
 | [docs/job-schema-reference.md](docs/job-schema-reference.md) | Full YAML schema reference |
 | [docs/console.md](docs/console.md) | Terminal UI usage and keyboard shortcuts |

@@ -42,6 +42,8 @@ const (
 	actionNone actionKind = iota
 	actionTrigger
 	actionRerun
+	actionPause
+	actionUnpause
 )
 
 type actionRequest struct {
@@ -76,6 +78,7 @@ type Model struct {
 	selectedJobID      string
 	jobDetail          *api.JobDetail
 	graph              *dag.Graph
+	taskDefinitions    map[string]api.JobTask
 	taskRunStatus      map[string]api.RunTask
 	focusedNodeID      string
 	dagLayout          string
@@ -170,6 +173,7 @@ func New(client *api.Client) Model {
 		logsFollow:      true,
 		atomDetails:     make(map[string]*api.Atom),
 		atomIndex:       make(map[string]api.Atom),
+		taskDefinitions: make(map[string]api.JobTask),
 		taskRunStatus:   make(map[string]api.RunTask),
 		followLatestRun: true,
 	}
@@ -396,6 +400,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeRunID = ""
 			m.followLatestRun = true
 			m.resetDetailView(nil, nil, true)
+			m.taskDefinitions = make(map[string]api.JobTask)
 			m.taskRunStatus = make(map[string]api.RunTask)
 			m.statsData = nil
 			m.statsLoading = false
@@ -503,6 +508,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.triggerSelectedJob(); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+		case "P":
+			if cmd := m.togglePauseSelectedJob(); cmd != nil {
+				cmds = append(cmds, cmd)
+			}
 		case "/":
 			if m.active == sectionJobs && !m.showDetail {
 				m.jobFilterInput = true
@@ -593,6 +602,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, fetchRuns(m.client, m.runsJobID))
 		}
 		m.resetDetailView(nil, nil, false)
+		m.setTaskDefinitions(msg.detail.Tasks)
 		m.setJobStatus(msg.detail.Job.ID, msg.detail.LatestRun)
 		if msg.detail.LatestRun != nil && (m.followLatestRun || m.activeRunID == "") {
 			m.activeRunID = msg.detail.LatestRun.ID
@@ -749,6 +759,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case jobTriggerErrMsg:
 		req := m.clearPendingAction(msg.jobID)
 		m.setActionStatus(actionFailureTitle(req), msg.err)
+	case jobPauseToggledMsg:
+		req := m.clearPendingAction(msg.jobID)
+		if msg.job != nil {
+			m.updateJobRecord(*msg.job)
+			if m.jobDetail != nil && m.jobDetail.Job.ID == msg.job.ID {
+				m.jobDetail.Job.Paused = msg.job.Paused
+			}
+		} else {
+			m.setJobPaused(msg.jobID, msg.paused)
+		}
+		m.setActionStatus(actionAcceptedNotice(req, nil), nil)
+	case jobPauseErrMsg:
+		req := m.clearPendingAction(msg.jobID)
+		m.setActionStatus(actionFailureTitle(req), msg.err)
 	case healthCheckedMsg:
 		m.apiHealthy = msg.ok
 		m.apiHealthErr = msg.err
@@ -774,11 +798,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case api.TypeJobCreated, api.TypeJobDeleted:
 			cmds = append(cmds, fetchData(m.client))
+		case api.TypeJobPaused:
+			m.setJobPaused(msg.JobID.String(), true)
+		case api.TypeJobUnpaused:
+			m.setJobPaused(msg.JobID.String(), false)
 		case api.TypeRunStarted:
 			m.handleRunStarted(api.Event(msg))
 		case api.TypeRunCompleted, api.TypeRunFailed:
 			m.handleRunCompleted(api.Event(msg))
-		case api.TypeTaskStarted, api.TypeTaskSucceeded, api.TypeTaskFailed, api.TypeTaskSkipped:
+		case api.TypeTaskStarted, api.TypeTaskSucceeded, api.TypeTaskFailed, api.TypeTaskSkipped, api.TypeTaskRetrying:
 			m.handleTaskUpdate(api.Event(msg))
 		}
 	case dataLoadErrMsg:
@@ -914,6 +942,52 @@ func (m Model) jobLabel(jobID string) string {
 	return shortID(jobID)
 }
 
+func (m Model) currentJob() *api.Job {
+	jobID := m.currentJobID()
+	if jobID == "" {
+		return nil
+	}
+	for i := range m.jobRecords {
+		if m.jobRecords[i].ID == jobID {
+			return &m.jobRecords[i]
+		}
+	}
+	return nil
+}
+
+func (m *Model) updateJobRecord(job api.Job) {
+	for i := range m.jobRecords {
+		if m.jobRecords[i].ID == job.ID {
+			m.jobRecords[i] = job
+			m.refreshJobRows()
+			return
+		}
+	}
+}
+
+func (m *Model) setJobPaused(jobID string, paused bool) {
+	if jobID == "" {
+		return
+	}
+	for i := range m.jobRecords {
+		if m.jobRecords[i].ID == jobID {
+			m.jobRecords[i].Paused = paused
+			break
+		}
+	}
+	if m.jobDetail != nil && m.jobDetail.Job.ID == jobID {
+		m.jobDetail.Job.Paused = paused
+	}
+	m.refreshJobRows()
+}
+
+func (m *Model) setTaskDefinitions(tasks []api.JobTask) {
+	m.taskDefinitions = make(map[string]api.JobTask, len(tasks))
+	for _, task := range tasks {
+		m.taskDefinitions[task.ID] = task
+	}
+}
+
 func (m *Model) setJobStatus(jobID string, run *api.Run) {
 	if jobID == "" {
 		return
@@ -929,6 +1003,29 @@ func (m *Model) setJobStatus(jobID string, run *api.Run) {
 	if len(m.jobRecords) > 0 {
 		m.refreshJobRows()
 	}
+}
+
+func (m *Model) togglePauseSelectedJob() tea.Cmd {
+	if m.state != statusReady || m.active != sectionJobs {
+		return nil
+	}
+	if m.actionPending != nil || m.confirmAction != nil {
+		return nil
+	}
+	job := m.currentJob()
+	if job == nil {
+		return nil
+	}
+	kind := actionPause
+	if job.Paused {
+		kind = actionUnpause
+	}
+	m.confirmAction = &actionRequest{
+		kind:  kind,
+		jobID: job.ID,
+		label: m.jobLabel(job.ID),
+	}
+	return nil
 }
 
 func (m *Model) refreshJobRows() {
@@ -1114,6 +1211,7 @@ func (m *Model) resetDetailView(detailErr, dagErr error, hideDetail bool) {
 	m.graph = nil
 	m.focusedNodeID = ""
 	m.dagLayout = ""
+	m.taskDefinitions = make(map[string]api.JobTask)
 	m.taskRunStatus = make(map[string]api.RunTask)
 	m.dagViewport.SetContent("")
 	m.detailErr = detailErr
@@ -1165,6 +1263,10 @@ func actionVerb(kind actionKind) string {
 		return "Triggering"
 	case actionRerun:
 		return "Re-running"
+	case actionPause:
+		return "Pausing"
+	case actionUnpause:
+		return "Unpausing"
 	default:
 		return "Working"
 	}
@@ -1179,12 +1281,24 @@ func actionFailureTitle(req *actionRequest) string {
 		return "Trigger failed"
 	case actionRerun:
 		return "Re-run failed"
+	case actionPause:
+		return "Pause failed"
+	case actionUnpause:
+		return "Unpause failed"
 	default:
 		return "Action failed"
 	}
 }
 
 func actionAcceptedNotice(req *actionRequest, run *api.Run) string {
+	if req != nil {
+		switch req.kind {
+		case actionPause:
+			return "Job paused"
+		case actionUnpause:
+			return "Job unpaused"
+		}
+	}
 	if run == nil {
 		if req != nil && req.kind == actionRerun {
 			return "Re-run accepted"
@@ -1407,6 +1521,10 @@ func (m *Model) triggerSelectedJob() tea.Cmd {
 	if jobID == "" {
 		return nil
 	}
+	if job := m.currentJob(); job != nil && job.Paused {
+		m.setActionStatus(fmt.Sprintf("Trigger unavailable: %s is paused", m.jobLabel(jobID)), nil)
+		return nil
+	}
 	label := m.jobLabel(jobID)
 	m.confirmAction = &actionRequest{
 		kind:  actionTrigger,
@@ -1475,6 +1593,10 @@ func (m *Model) startAction(req actionRequest) tea.Cmd {
 	switch req.kind {
 	case actionRerun:
 		return rerunJob(m.client, req.jobID, req.runID)
+	case actionPause:
+		return setPausedJob(m.client, req.jobID, true)
+	case actionUnpause:
+		return setPausedJob(m.client, req.jobID, false)
 	default:
 		return triggerJob(m.client, req.jobID)
 	}

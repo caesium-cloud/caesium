@@ -18,6 +18,7 @@ type JobDetail struct {
 	Job       JobDescriptor
 	Trigger   *TriggerDetail
 	LatestRun *Run
+	Tasks     []JobTask
 	DAG       *JobDAG
 }
 
@@ -26,6 +27,7 @@ type JobDescriptor struct {
 	ID                 string            `json:"id"`
 	Alias              string            `json:"alias"`
 	TriggerID          string            `json:"trigger_id"`
+	Paused             bool              `json:"paused"`
 	Labels             map[string]string `json:"labels"`
 	Annotations        map[string]string `json:"annotations"`
 	ProvenanceSourceID string            `json:"provenance_source_id"`
@@ -35,6 +37,21 @@ type JobDescriptor struct {
 	ProvenancePath     string            `json:"provenance_path"`
 	CreatedAt          time.Time         `json:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at"`
+}
+
+// JobTask represents persisted task definition metadata for a job.
+type JobTask struct {
+	ID           string            `json:"id"`
+	JobID        string            `json:"job_id"`
+	AtomID       string            `json:"atom_id"`
+	NextID       *string           `json:"next_id"`
+	NodeSelector map[string]string `json:"node_selector,omitempty"`
+	Retries      int               `json:"retries"`
+	RetryDelay   time.Duration     `json:"retry_delay"`
+	RetryBackoff bool              `json:"retry_backoff"`
+	TriggerRule  string            `json:"trigger_rule"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 // TriggerDetail mirrors the trigger payload returned alongside job detail.
@@ -103,6 +120,12 @@ func (s *JobsService) Detail(ctx context.Context, jobID string, opts *JobDetailO
 			return nil, err
 		}
 		detail.DAG = dag
+
+		tasks, err := s.fetchTasks(ctx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		detail.Tasks = tasks
 	}
 
 	return detail, nil
@@ -117,4 +140,15 @@ func (s *JobsService) fetchDAG(ctx context.Context, jobID string) (*JobDAG, erro
 	}
 
 	return &payload, nil
+}
+
+func (s *JobsService) fetchTasks(ctx context.Context, jobID string) ([]JobTask, error) {
+	endpoint := s.client.resolve(fmt.Sprintf("/v1/jobs/%s/tasks", jobID))
+
+	var payload []JobTask
+	if err := s.client.do(ctx, http.MethodGet, endpoint, &payload); err != nil {
+		return nil, fmt.Errorf("job tasks: %w", err)
+	}
+
+	return payload, nil
 }

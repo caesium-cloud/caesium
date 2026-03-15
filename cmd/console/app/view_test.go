@@ -31,6 +31,9 @@ func TestJobsDetailFooterKeysAreContextAware(t *testing.T) {
 	if !strings.Contains(joinedWith, "[space] follow") {
 		t.Fatalf("expected log controls in detail footer when logs are open: %q", joinedWith)
 	}
+	if !strings.Contains(joinedWithout, "[P] pause") {
+		t.Fatalf("expected pause toggle in detail footer, got: %q", joinedWithout)
+	}
 }
 
 func TestRenderLogsModalEmptyStateCopy(t *testing.T) {
@@ -155,5 +158,21 @@ func TestRenderConfirmModalOverlaysOnBackground(t *testing.T) {
 	}
 	if !strings.Contains(out, "Trigger Job") {
 		t.Fatalf("expected confirm modal title in output, got: %q", out)
+	}
+}
+
+func TestRenderJobsSummaryStripIncludesPausedJobs(t *testing.T) {
+	model := New(nil)
+	model.jobRecords = []api.Job{
+		{ID: "job-1", Alias: "paused", Paused: true},
+		{ID: "job-2", Alias: "active"},
+	}
+	model.jobRunStatus = map[string]*api.Run{
+		"job-2": {ID: "run-1", Status: "succeeded"},
+	}
+
+	out := model.renderJobsSummaryStrip()
+	if !strings.Contains(out, "paused") {
+		t.Fatalf("expected paused summary in output, got: %q", out)
 	}
 }

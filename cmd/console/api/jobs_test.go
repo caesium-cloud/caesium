@@ -60,6 +60,52 @@ func TestJobsList(t *testing.T) {
 	}
 }
 
+func TestJobsPauseAndUnpause(t *testing.T) {
+	var methods []string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		methods = append(methods, r.Method+" "+r.URL.Path)
+		if r.Method != http.MethodPut {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		switch r.URL.Path {
+		case "/v1/jobs/job-1/pause":
+			_, _ = w.Write([]byte(`{"id":"job-1","alias":"job-a","paused":true}`))
+		case "/v1/jobs/job-1/unpause":
+			_, _ = w.Write([]byte(`{"id":"job-1","alias":"job-a","paused":false}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	cfg := &config.Config{BaseURL: mustParse(t, ts.URL), HTTPTimeout: time.Second}
+	client := New(cfg)
+
+	paused, err := client.Jobs().Pause(context.Background(), "job-1")
+	if err != nil {
+		t.Fatalf("pause returned error: %v", err)
+	}
+	if !paused.Paused {
+		t.Fatal("expected paused job response")
+	}
+
+	unpaused, err := client.Jobs().Unpause(context.Background(), "job-1")
+	if err != nil {
+		t.Fatalf("unpause returned error: %v", err)
+	}
+	if unpaused.Paused {
+		t.Fatal("expected unpaused job response")
+	}
+
+	if len(methods) != 2 || methods[0] != "PUT /v1/jobs/job-1/pause" || methods[1] != "PUT /v1/jobs/job-1/unpause" {
+		t.Fatalf("unexpected methods: %#v", methods)
+	}
+}
+
 func mustParse(t *testing.T, raw string) *url.URL {
 	t.Helper()
 	u, err := url.Parse(raw)

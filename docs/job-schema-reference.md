@@ -27,6 +27,12 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 
 Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.
 
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `type` | string | required | One of `cron` or `http`. |
+| `configuration` | object | required | Trigger-specific configuration persisted by the API. |
+| `defaultParams` | map[string]string | optional | Default run parameters applied when the trigger starts a run. |
+
 ### Cron Trigger
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
@@ -53,11 +59,16 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |
 | `image` | string | required | Container image reference. |
 | `command` | array[string] | optional | Executed command; defaults to entrypoint. |
+| `nodeSelector` | map[string]string | optional | Labels used by distributed workers when selecting a node for the task. |
 | `env` | map[string]string | optional | Environment variables injected into the container. |
 | `workdir` | string | optional | Working directory set for the container process. |
 | `mounts` | array[Mount] | optional | Bind mounts that make host paths available inside the container. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
+| `retries` | integer | optional | Number of retry attempts after the first task failure. |
+| `retryDelay` | duration | optional | Delay before the next retry attempt. |
+| `retryBackoff` | boolean | optional | When true, doubles the retry delay on each attempt. |
+| `triggerRule` | string | optional | One of `all_success`, `all_done`, `all_failed`, `one_success`, or `always`. Defaults to `all_success`. |
 
 ### Mount
 

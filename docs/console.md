@@ -58,6 +58,7 @@ CAESIUM_BASE_URL="https://caesium.example.com" just console
 | `Enter` | (Jobs tab) open the detail/DAG screen |
 | `u` | (Jobs detail) open the run selector |
 | `t` | (Jobs tab) trigger the selected job manually |
+| `P` | (Jobs tab/detail) pause or unpause the selected job |
 | `g` | (Jobs detail) open/close task log streaming for the focused DAG node |
 | `R` | (Run selector) request re-run confirmation for the selected run |
 | `Space` | (Logs modal) toggle follow/pause |
@@ -77,6 +78,9 @@ When exporting logs, the console writes a snippet file to your OS temp directory
 - The status line shows API health and timing diagnostics: ping latency, load latency, retry count, and check timestamp.
 - Use `p` anytime to force a fresh health ping and update the diagnostics state immediately.
 - In distributed execution mode, DAG task nodes show `node: <address>` when a worker has claimed the task; the node detail modal also exposes `Claimed By`.
+- The Jobs table now marks paused jobs directly, and the detail header shows whether the selected job is paused.
+- The job detail pane shows selected run parameters when a run was started with `params` or trigger `defaultParams`.
+- The node detail modal now surfaces task trigger rules, retry/backoff settings, attempt counts, and node selectors alongside runtime status.
 
 ## Development Notes
 

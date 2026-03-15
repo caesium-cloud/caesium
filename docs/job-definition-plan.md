@@ -81,6 +81,14 @@
 - [x] Add scenario coverage for Git-sourced definitions to ensure DAG edges survive sync/diff workflows.
 - [x] Document authoring patterns (fan-out, join, conditional) with YAML examples and executor guarantees.
 
+### Airflow Parity Phase 1
+
+- [x] Task retries with persisted retry delay and optional exponential backoff.
+- [x] Trigger-rule evaluation for `all_success`, `all_done`, `all_failed`, `one_success`, and `always`.
+- [x] Run parameter propagation from trigger defaults and manual run requests.
+- [x] Job pause/unpause controls in the REST API and trigger execution path.
+- [x] Console/detail surfaces updated to show paused state, run parameters, and task retry/trigger metadata.
+
 ## Validation & Testing
 - [x] Unit tests for parsing and validation.
 - [x] Integration tests for importer verifying DB state.

@@ -5,6 +5,7 @@ This directory contains user-facing guides, schema references, and planning note
 ## Start Here
 
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, and applying job manifests.
+- [airflow-parity.md](airflow-parity.md): Progress notes for Airflow-compatible job semantics and operator controls.
 - [console.md](console.md): Running and using the terminal UI console.
 - [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Configuration, rollout, and troubleshooting for local/distributed parallel execution.
