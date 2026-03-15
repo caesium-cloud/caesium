@@ -45,10 +45,10 @@ Use worker status API:
 - `GET /v1/nodes/:address/workers`
 - Confirms claimed-task counts, running claims, attempt totals, lease expiry visibility, and last activity.
 
-Use console TUI:
+Use the embedded web UI:
 
-- Jobs detail DAG now shows `node: <address>` on task nodes when `claimed_by` is present.
-- Node detail modal shows `Claimed By` for the focused task.
+- The Job and Run DAG views show worker attribution when `claimed_by` is present.
+- Task detail panels surface `Claimed By`, claim attempts, and other task metadata for the selected node.
 
 Use metrics:
 

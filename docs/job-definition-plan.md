@@ -42,7 +42,7 @@
 ### Phase 3 – Enhancements
 - [x] Add diff/preview tooling (`caesium job diff`) and status reporting.
 - [x] Persist metadata labels and annotations (DB migrations and API updates).
-- [x] Integrate imported job metadata into console UI.
+- [x] Integrate imported job metadata into the embedded web UI.
 - [x] Add secret resolver implementations (k8s/vault/env) with optional `--check-secrets` lint mode.
 - [x] Wire a production-ready `SecretResolver` into Git sync configuration (env/config plumbing).
 - [x] Extend provenance persistence to triggers/atoms once relevant drift tooling is in place.
@@ -73,9 +73,9 @@
 - [x] Cover new behaviour with executor-focused unit tests and integration scenarios.
 
 #### API, CLI, & Console
-- [x] Expose DAG structure via REST (`/v1/jobs/:id/tasks`, `/v1/jobs/:id/runs/:run_id/tasks`) and ensure CLI output (`caesium job get`, `caesium console`) reflects branching-specific successors and run history.
+- [x] Expose DAG structure via REST (`/v1/jobs/:id/tasks`, `/v1/jobs/:id/runs/:run_id/tasks`) and ensure operator-facing surfaces reflect branching-specific successors and run history.
 - [ ] Add serializer helpers so clients can render adjacency information cleanly (e.g., topological order, grouped successors).
-- [ ] Update console UI planning docs and Bubble Tea surfaces to visualise branches.
+- [x] Update embedded web UI planning docs and React surfaces to visualise branches.
 
 - [x] Extend integration tests to import, execute, and verify multi-branch jobs (parallel success, join wait, failure short-circuit).
 - [x] Add scenario coverage for Git-sourced definitions to ensure DAG edges survive sync/diff workflows.
@@ -87,7 +87,7 @@
 - [x] Trigger-rule evaluation for `all_success`, `all_done`, `all_failed`, `one_success`, and `always`.
 - [x] Run parameter propagation from trigger defaults and manual run requests.
 - [x] Job pause/unpause controls in the REST API and trigger execution path.
-- [x] Console/detail surfaces updated to show paused state, run parameters, and task retry/trigger metadata.
+- [x] Embedded web UI job/run/task surfaces updated to show paused state, run parameters, and task retry/trigger metadata.
 
 ## Validation & Testing
 - [x] Unit tests for parsing and validation.

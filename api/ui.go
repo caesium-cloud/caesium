@@ -7,20 +7,20 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/ui"
-	"github.com/labstack/echo/v5"
+	"github.com/labstack/echo/v4"
 )
 
 func RegisterUI(e *echo.Echo) {
 	// Get the sub-filesystem for the dist directory
 	distFS, err := fs.Sub(ui.DistDir, "dist")
 	if err != nil {
-		e.Logger.Error("failed to create sub-filesystem for UI", "error", err)
+		e.Logger.Errorf("failed to create sub-filesystem for UI: %v", err)
 		os.Exit(1)
 	}
 
 	fileServer := http.FileServer(http.FS(distFS))
 
-	e.GET("/*", func(c *echo.Context) error {
+	e.GET("/*", func(c echo.Context) error {
 		path := c.Request().URL.Path
 
 		// If it's a request for an API or health, don't handle it here

@@ -50,11 +50,6 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        caesium: {
-          blue: "hsl(var(--caesium-blue))",
-          gold: "hsl(var(--caesium-gold))",
-          void: "hsl(var(--caesium-void))",
-        },
       },
       borderRadius: {
         lg: "var(--radius)",

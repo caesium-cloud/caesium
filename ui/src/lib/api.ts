@@ -4,17 +4,11 @@ export interface Job {
   trigger_id: string;
   labels: Record<string, unknown>;
   annotations: Record<string, unknown>;
+  paused: boolean;
   created_at: string;
   updated_at: string;
+  trigger?: Trigger;
   latest_run?: JobRun;
-  // Provenance / GitOps fields
-  source_id?: string;
-  repo?: string;
-  ref?: string;
-  commit?: string;
-  path?: string;
-  max_parallel_tasks?: number;
-  task_timeout?: number;
 }
 
 export interface JobRun {
@@ -24,6 +18,7 @@ export interface JobRun {
   trigger_type?: string;
   trigger_alias?: string;
   status: string;
+  params?: Record<string, string>;
   error?: string;
   started_at: string;
   completed_at?: string;
@@ -39,10 +34,18 @@ export interface TaskRun {
   atom_id: string;
   engine: string;
   image: string;
-  command: string;
+  command: string | string[];
+  runtime_id?: string;
   status: string;
+  node_selector?: Record<string, unknown>;
+  claimed_by?: string;
+  claim_expires_at?: string;
+  claim_attempt?: number;
+  attempt?: number;
+  max_attempts?: number;
   result?: string;
   error?: string;
+  outstanding_predecessors?: number;
   started_at?: string;
   completed_at?: string;
   created_at: string;
@@ -72,7 +75,12 @@ export interface JobTask {
   id: string;
   job_id: string;
   atom_id: string;
+  next_id?: string;
   node_selector: Record<string, unknown>;
+  retries: number;
+  retry_delay: number;
+  retry_backoff: boolean;
+  trigger_rule: string;
   created_at: string;
   updated_at: string;
 }
@@ -80,6 +88,7 @@ export interface JobTask {
 export interface DAGNode {
   id: string;
   atom_id: string;
+  next_id?: string;
   successors?: string[];
 }
 
@@ -118,12 +127,10 @@ export interface StatsResponse {
   jobs: JobStats;
   top_failing: FailingJob[];
   slowest_jobs: SlowestJob[];
-  success_rate_trend: DailyStats[];
 }
 
-export interface DailyStats {
-  date: string;
-  success_rate: number;
+export interface TriggerRunRequest {
+  params?: Record<string, string>;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/v1";
@@ -151,46 +158,7 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     throw new ApiError(response.status, await response.text());
   }
 
-  // 202 Accepted / 204 No Content — body is empty, nothing to parse
-  const contentType = response.headers.get("content-type");
-  if (!contentType?.includes("application/json")) {
-    return undefined as T;
-  }
-
   return response.json();
-}
-
-export interface WorkerClaim {
-  id: string;
-  task_run_id: string;
-  node_id: string;
-  status: string;
-  claimed_at: string;
-  expires_at: string;
-}
-
-export interface WorkerStatus {
-  node_address: string;
-  active_claims: WorkerClaim[];
-  running_count: number;
-  expired_count: number;
-  last_activity?: string;
-}
-
-export interface HealthCheckResult {
-  status?: "healthy" | "degraded";
-  latency_ms?: number;
-  count?: number;
-}
-
-export interface HealthCheck {
-  status: "healthy" | "degraded";
-  uptime: number; // Go time.Duration serialized as int64 nanoseconds
-  checks?: {
-    database?: HealthCheckResult;
-    active_runs?: HealthCheckResult;
-    triggers?: HealthCheckResult;
-  };
 }
 
 export const api = {
@@ -200,40 +168,16 @@ export const api = {
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
-  triggerJob: (jobId: string) => request<JobRun>(`/jobs/${jobId}/run`, { method: "POST" }),
-  retryCallbacks: (jobId: string, runId: string) =>
-    request<void>(`/jobs/${jobId}/runs/${runId}/callbacks/retry`, { method: "POST" }),
-  deleteJob: (id: string) => request<void>(`/jobs/${id}`, { method: "DELETE" }),
+  triggerJob: (jobId: string, body?: TriggerRunRequest) =>
+    request<JobRun>(`/jobs/${jobId}/run`, {
+      method: "POST",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
+  pauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/pause`, { method: "PUT" }),
+  unpauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/unpause`, { method: "PUT" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
-  fireTrigger: (id: string) => request<void>(`/triggers/${id}`, { method: "PUT" }),
   getAtoms: () => request<Atom[]>("/atoms"),
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
-  deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
-  applyJobDef: async (yamlText: string): Promise<{ applied: number }> => {
-    // The backend expects {"definitions":[...]} JSON, not raw YAML.
-    // Parse all YAML documents from the editor, then POST as JSON — matching
-    // the same contract used by the CLI (cmd/job/apply.go).
-    const { loadAll } = await import("js-yaml");
-    const definitions: unknown[] = [];
-    loadAll(yamlText, (doc) => { if (doc) definitions.push(doc); });
-    if (definitions.length === 0) {
-      throw new ApiError(400, "No definitions found in the YAML");
-    }
-    return request<{ applied: number }>("/jobdefs/apply", {
-      method: "POST",
-      body: JSON.stringify({ definitions }),
-    });
-  },
-  getWorkers: (nodeAddress: string) => request<WorkerStatus>(`/nodes/${nodeAddress}/workers`),
-  getHealth: async (): Promise<HealthCheck> => {
-    // /health is mounted at the root, not under /v1
-    const healthBase = API_BASE_URL.replace(/\/v1\/?$/, "");
-    const response = await fetch(`${healthBase}/health`);
-    if (!response.ok) {
-      throw new ApiError(response.status, await response.text());
-    }
-    return response.json();
-  },
   getStats: () => request<StatsResponse>("/stats"),
 };

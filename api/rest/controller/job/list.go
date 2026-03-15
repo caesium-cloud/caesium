@@ -1,29 +1,43 @@
 package job
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
-	"github.com/labstack/echo/v5"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 )
 
-func List(c *echo.Context) error {
+func List(c echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+		return echo.ErrBadRequest.SetInternal(err)
 	}
 
 	jobs, err := job.Service(c.Request().Context()).List(req)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+		return echo.ErrInternalServerError.SetInternal(err)
 	}
 
-	return c.JSON(http.StatusOK, jobs)
+	resp := make([]*JobResponse, 0, len(jobs))
+	for _, entry := range jobs {
+		item := &JobResponse{Job: entry}
+		latest, latestErr := runsvc.New(c.Request().Context()).Latest(entry.ID)
+		if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
+			return echo.ErrInternalServerError.SetInternal(latestErr)
+		}
+		item.LatestRun = latest
+		resp = append(resp, item)
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
-func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {
+func parseListRequest(c echo.Context) (req *job.ListRequest, err error) {
 	req = &job.ListRequest{
 		TriggerID: c.QueryParam("trigger_id"),
 	}

@@ -28,7 +28,7 @@ export function LogViewer({ jobId, runId, taskId, error, onClose }: LogViewerPro
       fontSize: 12,
       fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, "Courier New", monospace',
       theme: {
-        background: "#0a0a12",
+        background: "#0f172a",
       },
     });
 
@@ -82,20 +82,20 @@ export function LogViewer({ jobId, runId, taskId, error, onClose }: LogViewerPro
   }, [jobId, runId, taskId]);
 
   return (
-    <div className="flex flex-col h-full bg-caesium-void rounded-md overflow-hidden border border-border">
-      <div className="flex items-center justify-between px-4 py-2 bg-card border-b border-border">
-        <span className="text-xs font-mono text-muted-foreground truncate">Task: {taskId}</span>
-        <Button variant="ghost" size="icon" className="h-6 w-6 text-muted-foreground hover:text-foreground" onClick={onClose}>
+    <div className="flex flex-col h-full bg-[#0f172a] rounded-md overflow-hidden border border-slate-800">
+      <div className="flex items-center justify-between px-4 py-2 bg-slate-900 border-b border-slate-800">
+        <span className="text-xs font-mono text-slate-400 truncate">Task: {taskId}</span>
+        <Button variant="ghost" size="icon" className="h-6 w-6 text-slate-400 hover:text-white" onClick={onClose}>
             <X className="h-4 w-4" />
         </Button>
       </div>
-
+      
       {error && (
-        <div className="px-4 py-3 bg-destructive/10 border-b border-destructive/20 flex gap-3 items-start overflow-y-auto max-h-32">
-          <AlertTriangle className="w-4 h-4 text-destructive shrink-0 mt-0.5" />
+        <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 flex gap-3 items-start overflow-y-auto max-h-32">
+          <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
           <div className="flex flex-col gap-1">
-            <span className="text-[10px] font-bold text-destructive uppercase tracking-wider">Full Error Detail</span>
-            <span className="text-xs text-destructive/90 font-mono leading-relaxed">
+            <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">Full Error Detail</span>
+            <span className="text-xs text-red-400 font-mono leading-relaxed">
               {error}
             </span>
           </div>

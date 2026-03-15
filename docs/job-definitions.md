@@ -179,7 +179,7 @@ The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automatio
 
 - Pause a job without changing its definition via `PUT /v1/jobs/:id/pause`.
 - Resume a paused job via `PUT /v1/jobs/:id/unpause`.
-- Paused jobs remain visible in the console and API, but cron and HTTP triggers skip starting new runs until the job is unpaused.
+- Paused jobs remain visible in the embedded web UI and API, but cron and HTTP triggers skip starting new runs until the job is unpaused.
 
 ## Schema Tooling
 

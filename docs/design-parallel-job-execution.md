@@ -12,7 +12,7 @@ Implemented on branch `codex/parallel-exec-phase1a`:
 - Phase 1.2 worker pool (`internal/worker/pool.go`) with unit tests.
 - Phase 1.3 failure policy (`halt`/`continue`) with dependent-task skip behavior.
 - Phase 1.4 task timeout (`CAESIUM_TASK_TIMEOUT`) with forced stop + persisted task failure.
-- TUI support for skipped task state in DAG and detail views.
+- Embedded web UI support for skipped task state in DAG and task detail views.
 
 Implemented on branch `codex/parallel-exec-phase2a`:
 
@@ -69,13 +69,13 @@ Implemented on branch `codex/parallel-exec-phase2-hardening`:
 
 Implemented on branch `codex/phase3-4-3-5-polish`:
 
-- Phase 3.4 TUI node-execution attribution:
-  - Console run-task API model now decodes `claimed_by` and `claim_attempt`.
-  - DAG nodes now render `node: <address>` metadata when a task is claimed by a worker node.
-  - Node detail modal now shows `Claimed By` for the selected task.
+- Phase 3.4 web UI node-execution attribution:
+  - Embedded UI run-task API model decodes `claimed_by` and `claim_attempt`.
+  - DAG nodes render worker attribution metadata when a task is claimed by a node.
+  - Task detail panels show `Claimed By` for the selected task.
 - Phase 3.5 configuration and operations documentation:
   - Added a dedicated distributed parallel execution operations guide (`docs/parallel-execution-operations.md`).
-  - Updated console docs to clarify that DAG nodes now surface worker-node attribution.
+  - Updated embedded UI docs to clarify that DAG nodes surface worker-node attribution.
 
 Not yet complete:
 
@@ -394,7 +394,7 @@ New environment variables:
 - [x] **3.1** Add metrics: tasks claimed per node, claim contention, lease expirations
 - [x] **3.2** Expose worker status in the API (`GET /v1/nodes/:address/workers`)
 - [x] **3.3** Add node affinity labels (optional: prefer certain tasks on certain nodes)
-- [x] **3.4** Update the console TUI DAG view to show which node is executing each task
+- [x] **3.4** Update the embedded web UI DAG view to show which node is executing each task
 - [x] **3.5** Document configuration and operational guidance
 
 ## Risks and Mitigations
