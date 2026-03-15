@@ -1,10 +1,14 @@
 import { Link } from "@tanstack/react-router";
-import { LayoutDashboard, BarChart } from "lucide-react";
+import { BarChart, Database, FileCode2, LayoutDashboard, Radio, Server } from "lucide-react";
 
 export function Sidebar() {
   const navItems = [
     { to: "/jobs", label: "Jobs", icon: LayoutDashboard },
+    { to: "/triggers", label: "Triggers", icon: Radio },
+    { to: "/atoms", label: "Atoms", icon: Database },
     { to: "/stats", label: "Stats", icon: BarChart },
+    { to: "/system", label: "System", icon: Server },
+    { to: "/jobdefs", label: "JobDefs", icon: FileCode2 },
   ];
 
   return (

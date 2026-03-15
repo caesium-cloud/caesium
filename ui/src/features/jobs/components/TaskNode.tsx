@@ -1,6 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
-import { cn } from '@/lib/utils';
+import { cn, shortId } from '@/lib/utils';
 import { 
   Activity, 
   CheckCircle2, 
@@ -18,30 +18,31 @@ import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
+  const taskLabel = typeof label === 'string' ? label : '';
 
   const getStatusIcon = () => {
     switch (status) {
       case 'completed':
       case 'succeeded':
-        return <CheckCircle2 className="w-5 h-5 text-green-400 fill-green-500/10" />;
+        return <CheckCircle2 data-testid="status-icon-succeeded" className="w-5 h-5 text-green-400 fill-green-500/10" />;
       case 'failed':
-        return <XCircle className="w-5 h-5 text-red-400 fill-red-500/10" />;
+        return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-red-400 fill-red-500/10" />;
       case 'running':
-        return <Activity className="w-5 h-5 text-blue-400 animate-spin" />;
+        return <Activity data-testid="status-icon-running" className="w-5 h-5 text-blue-400 animate-spin" />;
       case 'pending':
-        return <Clock className="w-5 h-5 text-slate-500" />;
+        return <Clock data-testid="status-icon-pending" className="w-5 h-5 text-slate-500" />;
       default:
-        return <Circle className="w-5 h-5 text-slate-600" />;
+        return <Circle data-testid="status-icon-unknown" className="w-5 h-5 text-slate-600" />;
     }
   };
 
   const getEngineIcon = () => {
     const e = (engine || atom?.engine || '').toLowerCase();
-    if (e.includes('docker')) return <Container className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('podman')) return <Zap className="w-3.5 h-3.5 text-purple-400" />;
-    if (e.includes('wasm')) return <Zap className="w-3.5 h-3.5 text-yellow-400" />;
-    return <Settings className="w-3.5 h-3.5 text-slate-500" />;
+    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-blue-400" />;
+    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-blue-400" />;
+    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-purple-400" />;
+    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-yellow-400" />;
+    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-slate-500" />;
   };
 
   const getProcessedCommand = () => {
@@ -114,7 +115,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                   </span>
                 )}
                 <span className="text-[9px] font-mono text-slate-500 truncate">
-                  {label.substring(0, 8)}
+                  {shortId(taskLabel)}
                 </span>
               </div>
             </div>

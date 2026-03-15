@@ -53,7 +53,7 @@ function TriggerConfig({ trigger }: { trigger: Trigger }) {
       </div>
     );
   }
-  return <span className="text-xs text-muted-foreground font-mono">{trigger.configuration.substring(0, 60)}</span>;
+  return <span className="text-xs text-muted-foreground font-mono">{String(trigger.configuration ?? "").slice(0, 60)}</span>;
 }
 
 export function TriggersPage() {

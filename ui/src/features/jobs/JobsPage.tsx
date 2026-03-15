@@ -17,7 +17,7 @@ import {
 } from "@/components/ui/table";
 import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { cn } from "@/lib/utils";
+import { cn, shortId } from "@/lib/utils";
 
 export function JobsPage() {
   const navigate = useNavigate();
@@ -138,7 +138,7 @@ export function JobsPage() {
                         </Badge>
                       ) : null}
                     </div>
-                    <div className="text-[10px] font-mono text-muted-foreground">{job.id.substring(0, 8)}</div>
+                    <div className="text-[10px] font-mono text-muted-foreground">{shortId(job.id)}</div>
                   </TableCell>
                   <TableCell>
                     {isPaused ? (

@@ -1,9 +1,13 @@
 import * as React from "react"
 import { useNavigate } from "@tanstack/react-router"
 import {
+  Database,
   LayoutDashboard,
   BarChart,
   Circle,
+  FileCode2,
+  Radio,
+  Server,
   Search
 } from "lucide-react"
 
@@ -18,6 +22,7 @@ import {
 } from "@/components/ui/command"
 import { useQuery } from "@tanstack/react-query"
 import { api } from "@/lib/api"
+import { shortId } from "@/lib/utils"
 import { RelativeTime } from "./relative-time"
 
 export function CommandMenu() {
@@ -73,6 +78,22 @@ export function CommandMenu() {
               <BarChart className="mr-2 h-4 w-4" />
               <span>Stats</span>
             </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
+              <Radio className="mr-2 h-4 w-4" />
+              <span>Triggers</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
+              <Database className="mr-2 h-4 w-4" />
+              <span>Atoms</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
+              <Server className="mr-2 h-4 w-4" />
+              <span>System</span>
+            </CommandItem>
+            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
+              <FileCode2 className="mr-2 h-4 w-4" />
+              <span>Job Definitions</span>
+            </CommandItem>
           </CommandGroup>
           <CommandSeparator />
           <CommandGroup heading="Jobs">
@@ -85,7 +106,7 @@ export function CommandMenu() {
                 <div className="flex items-center">
                   <Circle className="mr-2 h-4 w-4 text-blue-500" />
                   <span>{job.alias}</span>
-                  <span className="ml-2 text-xs text-muted-foreground font-mono">{job.id.substring(0, 8)}</span>
+                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(job.id)}</span>
                 </div>
                 <div className="text-[10px] text-muted-foreground">
                   <RelativeTime date={job.created_at} />

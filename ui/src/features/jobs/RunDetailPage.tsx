@@ -9,6 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type Atom, type JobTask, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
+import { shortId } from "@/lib/utils";
 import { JobDAG } from "./JobDAG";
 import { LogViewer } from "./LogViewer";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
@@ -178,7 +179,7 @@ export function RunDetailPage() {
               Job Details
             </Link>
             <span className="text-muted-foreground">/</span>
-            <h1 className="text-2xl font-bold tracking-tight">Run {runId.substring(0, 8)}</h1>
+            <h1 className="text-2xl font-bold tracking-tight">Run {shortId(runId)}</h1>
           </div>
           <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
             <div className="flex items-center gap-1.5">

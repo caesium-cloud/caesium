@@ -13,7 +13,7 @@ import { JobDAG } from "./JobDAG";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { api, type Atom, type Job, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatKeyValueMap, parseJSONConfig } from "@/lib/utils";
+import { formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
@@ -229,7 +229,7 @@ export function JobDetailPage() {
                     ) : null}
                   </div>
                   <div className="text-xs text-muted-foreground">
-                    <RelativeTime date={run.started_at} /> • <span className="font-mono">{run.id.substring(0, 8)}</span> •{" "}
+                    <RelativeTime date={run.started_at} /> • <span className="font-mono">{shortId(run.id)}</span> •{" "}
                     <span className="font-mono">
                       <Duration start={run.started_at} end={run.completed_at} />
                     </span>
@@ -246,7 +246,7 @@ export function JobDetailPage() {
             <div key={task.id} className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
               <Card>
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${task.id.substring(0, 8)}`}</CardTitle>
+                  <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm md:grid-cols-2">
                   <TaskMetadataPanel task={task} runTask={latestRunTasks[task.id]} framed={false} />

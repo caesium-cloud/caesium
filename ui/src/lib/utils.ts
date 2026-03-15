@@ -52,3 +52,11 @@ export function formatKeyValueMap(value?: Record<string, unknown> | null): strin
     .map(([key, entry]) => `${key}=${String(entry)}`)
     .join(", ")
 }
+
+export function shortId(value?: string | null, length = 8): string {
+  if (!value) {
+    return "unknown"
+  }
+
+  return value.slice(0, length)
+}

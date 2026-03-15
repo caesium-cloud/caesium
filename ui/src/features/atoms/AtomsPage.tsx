@@ -15,7 +15,7 @@ import { toast } from "sonner";
 import { Trash2, Search, X, ChevronDown, ChevronRight, ChevronLeft, Container } from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
 import { useState, useMemo } from "react";
-import { cn } from "@/lib/utils";
+import { cn, shortId } from "@/lib/utils";
 
 const PAGE_SIZE = 25;
 
@@ -156,7 +156,7 @@ export function AtomsPage() {
                       ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
                       : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">{atom.id.substring(0, 8)}</TableCell>
+                  <TableCell className="font-mono text-xs">{shortId(atom.id)}</TableCell>
                   <TableCell>
                     <Badge variant={(ENGINE_VARIANT[atom.engine] as "default" | "secondary" | "outline") || "outline"}>
                       {atom.engine}

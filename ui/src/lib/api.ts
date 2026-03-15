@@ -1,3 +1,5 @@
+import { parseAllDocuments } from "yaml";
+
 export interface Job {
   id: string;
   alias: string;
@@ -127,6 +129,32 @@ export interface StatsResponse {
   jobs: JobStats;
   top_failing: FailingJob[];
   slowest_jobs: SlowestJob[];
+  success_rate_trend: DailyStats[];
+}
+
+export interface DailyStats {
+  date: string;
+  success_rate: number;
+}
+
+export interface HealthCheckResult {
+  status?: string;
+  latency_ms?: number;
+  count?: number;
+}
+
+export interface HealthResponse {
+  status: string;
+  uptime: number;
+  checks?: {
+    database?: HealthCheckResult;
+    active_runs?: HealthCheckResult;
+    triggers?: HealthCheckResult;
+  };
+}
+
+export interface ApplyJobDefResponse {
+  applied: number;
 }
 
 export interface TriggerRunRequest {
@@ -146,6 +174,10 @@ export class ApiError extends Error {
 
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
+  return requestURL<T>(url, options);
+}
+
+async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...options,
     headers: {
@@ -158,7 +190,28 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
     throw new ApiError(response.status, await response.text());
   }
 
-  return response.json();
+  if (response.status === 202 || response.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
+}
+
+function parseJobDefinitions(yaml: string) {
+  const docs = parseAllDocuments(yaml);
+  return docs
+    .map((doc) => {
+      if (doc.errors.length > 0) {
+        throw new Error(doc.errors.map((err) => err.message).join("\n"));
+      }
+      return doc.toJS();
+    })
+    .filter((doc): doc is Record<string, unknown> => !!doc && typeof doc === "object");
 }
 
 export const api = {
@@ -177,7 +230,15 @@ export const api = {
   unpauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/unpause`, { method: "PUT" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
+  fireTrigger: (id: string) => request<void>(`/triggers/${id}`, { method: "PUT" }),
   getAtoms: () => request<Atom[]>("/atoms"),
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
+  deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
+  getHealth: () => requestURL<HealthResponse>("/health"),
+  applyJobDef: (yaml: string) =>
+    request<ApplyJobDefResponse>("/jobdefs/apply", {
+      method: "POST",
+      body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
+    }),
 };
