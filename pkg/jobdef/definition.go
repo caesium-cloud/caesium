@@ -22,6 +22,12 @@ const (
 	EngineDocker     = "docker"
 	EngineKubernetes = "kubernetes"
 	EnginePodman     = "podman"
+
+	TriggerRuleAllSuccess = "all_success"
+	TriggerRuleAllDone    = "all_done"
+	TriggerRuleAllFailed  = "all_failed"
+	TriggerRuleOneSuccess = "one_success"
+	TriggerRuleAlways     = "always"
 )
 
 // Definition models the root job document.
@@ -68,6 +74,7 @@ type Step struct {
 	Retries        int               `yaml:"retries,omitempty" json:"retries,omitempty"`
 	RetryDelay     time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
 	RetryBackoff   bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	TriggerRule    string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -84,6 +91,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		Retries        int               `yaml:"retries"`
 		RetryDelay     time.Duration     `yaml:"retryDelay"`
 		RetryBackoff   bool              `yaml:"retryBackoff"`
+		TriggerRule    string            `yaml:"triggerRule"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -115,6 +123,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.Retries = rs.Retries
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
+	s.TriggerRule = rs.TriggerRule
 	s.Spec = rs.Spec
 
 	return nil
@@ -243,6 +252,15 @@ func computeStepAdjacency(steps []Step) (map[string]int, map[string]map[string]s
 		}
 		if err := ensureUnique(step.DependsOn, fmt.Sprintf("steps[%d].dependsOn", i)); err != nil {
 			return nil, nil, err
+		}
+
+		if rule := strings.TrimSpace(step.TriggerRule); rule != "" {
+			switch rule {
+			case TriggerRuleAllSuccess, TriggerRuleAllDone, TriggerRuleAllFailed, TriggerRuleOneSuccess, TriggerRuleAlways:
+			default:
+				return nil, nil, fmt.Errorf("steps[%d].triggerRule %q must be one of [%s,%s,%s,%s,%s]",
+					i, rule, TriggerRuleAllSuccess, TriggerRuleAllDone, TriggerRuleAllFailed, TriggerRuleOneSuccess, TriggerRuleAlways)
+			}
 		}
 	}
 

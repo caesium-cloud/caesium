@@ -179,6 +179,11 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			return nil, err
 		}
 
+		triggerRule := strings.TrimSpace(step.TriggerRule)
+		if triggerRule == "" {
+			triggerRule = schema.TriggerRuleAllSuccess
+		}
+
 		task := &models.Task{
 			ID:           uuid.New(),
 			JobID:        job.ID,
@@ -187,6 +192,7 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			Retries:      step.Retries,
 			RetryDelay:   step.RetryDelay,
 			RetryBackoff: step.RetryBackoff,
+			TriggerRule:  triggerRule,
 		}
 
 		if err := tx.Create(task).Error; err != nil {
@@ -294,4 +300,3 @@ func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []sch
 	}
 	return nil
 }
-

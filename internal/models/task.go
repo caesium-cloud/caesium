@@ -17,6 +17,7 @@ type Task struct {
 	Retries      int               `gorm:"not null;default:0" json:"retries"`
 	RetryDelay   time.Duration     `gorm:"not null;default:0" json:"retry_delay"`
 	RetryBackoff bool              `gorm:"not null;default:false" json:"retry_backoff"`
+	TriggerRule  string            `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
 	CreatedAt    time.Time         `gorm:"not null"`
 	UpdatedAt    time.Time         `gorm:"not null"`
 }

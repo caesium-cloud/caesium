@@ -25,6 +25,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -276,10 +277,17 @@ func (j *job) Run(ctx context.Context) error {
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
 	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
 	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
+	triggerRuleByTask := make(map[uuid.UUID]string, len(tasks))
 
 	for idx, t := range tasks {
 		taskOrder[t.ID] = idx
 		tasksByID[t.ID] = t
+
+		rule := t.TriggerRule
+		if rule == "" {
+			rule = jobdefschema.TriggerRuleAllSuccess
+		}
+		triggerRuleByTask[t.ID] = rule
 
 		modelAtom, err := svc.Get(t.AtomID)
 		if err != nil {
@@ -326,11 +334,13 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	adjacency := make(map[uuid.UUID][]uuid.UUID, len(tasks))
+	predecessors := make(map[uuid.UUID][]uuid.UUID, len(tasks))
 	indegree := make(map[uuid.UUID]int, len(tasks))
 	edgeSet := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
 
 	for _, t := range tasks {
 		adjacency[t.ID] = []uuid.UUID{}
+		predecessors[t.ID] = []uuid.UUID{}
 		indegree[t.ID] = 0
 	}
 
@@ -350,6 +360,7 @@ func (j *job) Run(ctx context.Context) error {
 			return
 		}
 		adjacency[from] = append(adjacency[from], to)
+		predecessors[to] = append(predecessors[to], from)
 		indegree[to]++
 		targets[to] = struct{}{}
 	}
@@ -389,6 +400,7 @@ func (j *job) Run(ctx context.Context) error {
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
 	processed := make(map[uuid.UUID]bool, len(tasks))
+	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
@@ -396,9 +408,11 @@ func (j *job) Run(ctx context.Context) error {
 		switch taskState.Status {
 		case run.TaskStatusSucceeded:
 			processed[taskState.ID] = true
+			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
 			terminalTasks++
 		case run.TaskStatusSkipped:
 			processed[taskState.ID] = true
+			taskOutcomes[taskState.ID] = run.TaskStatusSkipped
 			terminalTasks++
 		case run.TaskStatusFailed:
 			runErr = fmt.Errorf("task %s previously failed", taskState.ID)
@@ -612,6 +626,7 @@ func (j *job) Run(ctx context.Context) error {
 		terminalTasks++
 
 		if result.err != nil {
+			taskOutcomes[result.id] = run.TaskStatusFailed
 			if runErr == nil {
 				runErr = result.err
 			}
@@ -621,27 +636,71 @@ func (j *job) Run(ctx context.Context) error {
 				continue
 			}
 
-			descendants := collectDescendants(adjacency, result.id)
+			// With continueOnFailure: skip only downstream tasks whose trigger
+			// rules require all predecessors to succeed. Tasks with all_done,
+			// all_failed, or always rules are left to the normal indegree path
+			// so they can still run / evaluate their own rule.
 			skipReason := fmt.Sprintf("skipped due to failed dependency task %s", result.id)
-			for _, id := range descendants {
-				if processed[id] {
-					continue
-				}
-				if err := store.SkipTask(runID, id, skipReason); err != nil {
-					log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
-					if runErr == nil {
-						runErr = err
+			skipDescendantsFiltered(
+				adjacency, predecessors, triggerRuleByTask,
+				result.id, processed, inQueue,
+				func(id uuid.UUID) {
+					if err := store.SkipTask(runID, id, skipReason); err != nil {
+						log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
+						if runErr == nil {
+							runErr = err
+						}
+						halt = true
+						queue = queue[:0]
 					}
-					halt = true
-					queue = queue[:0]
-					break
+					taskOutcomes[id] = run.TaskStatusSkipped
+					processed[id] = true
+					terminalTasks++
+					delete(inQueue, id)
+				},
+			)
+
+			// Decrement indegree for successors that were NOT skipped (they
+			// have a failure-tolerant trigger rule). When their indegree
+			// reaches 0, evaluate the rule and push or skip accordingly.
+			if !halt {
+				for _, successor := range adjacency[result.id] {
+					if processed[successor] {
+						continue
+					}
+					if _, ok := indegree[successor]; !ok {
+						continue
+					}
+					if indegree[successor] > 0 {
+						indegree[successor]--
+					}
+					if indegree[successor] == 0 {
+						predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+						if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+							push(successor)
+						} else {
+							skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+							if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+								log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
+								if runErr == nil {
+									runErr = err
+								}
+								halt = true
+								queue = queue[:0]
+								break
+							}
+							taskOutcomes[successor] = run.TaskStatusSkipped
+							processed[successor] = true
+							terminalTasks++
+							delete(inQueue, successor)
+						}
+					}
 				}
-				processed[id] = true
-				terminalTasks++
-				delete(inQueue, id)
 			}
 			continue
 		}
+
+		taskOutcomes[result.id] = run.TaskStatusSucceeded
 
 		if !halt {
 			for _, successor := range adjacency[result.id] {
@@ -652,7 +711,25 @@ func (j *job) Run(ctx context.Context) error {
 					indegree[successor]--
 				}
 				if indegree[successor] == 0 {
-					push(successor)
+					predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+					if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+						push(successor)
+					} else {
+						skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+						if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+							log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
+							if runErr == nil {
+								runErr = err
+							}
+							halt = true
+							queue = queue[:0]
+							break
+						}
+						taskOutcomes[successor] = run.TaskStatusSkipped
+						processed[successor] = true
+						terminalTasks++
+						delete(inQueue, successor)
+					}
 				}
 			}
 		}
