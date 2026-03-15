@@ -88,7 +88,7 @@ steps:
 | `all_done` | Run when all predecessors finished, regardless of status |
 | `all_failed` | Run only when all predecessors failed |
 | `one_success` | Run when at least one predecessor succeeded |
-| `always` | Run unconditionally, ignoring predecessor status |
+| `always` | Alias for `all_done` (provided for Airflow familiarity) |
 
 ### Data Model
 
@@ -181,7 +181,7 @@ Modify `POST /v1/jobs/{id}/run` to accept an optional JSON body:
 
 ---
 
-## Workstream 4: Backfill & Catchup (P0)
+## Workstream 4: Backfill & Catchup (P1)
 
 **Why**: Critical for data pipeline use cases. When a pipeline is deployed late or a historical reprocess is needed, operators must be able to fill in missing runs for a date range.
 
@@ -319,7 +319,7 @@ The container for `check-data-freshness` prints `full-refresh` to stdout → onl
 
 ### Implementation Steps
 
-1. **Schema**: Add `branch` as a `Type` option for steps. Validate that branch steps must have at least one `next` entry.
+1. **Schema**: Add `branch` as a `Type` option for steps. Branch steps with `next` entries define the set of selectable paths; an empty `next` list is valid and enables short-circuit behavior (all downstream steps are skipped).
 2. **Model**: Add `branch` to `TaskType` constants.
 3. **Branch executor**: In `internal/job/branch.go`:
    - Run the container, capture stdout.
@@ -343,7 +343,7 @@ The container for `check-data-freshness` prints `full-refresh` to stdout → onl
 
 ---
 
-## Workstream 7: Dynamic Task Mapping (P1)
+## Workstream 7: Dynamic Task Mapping (P2)
 
 **Why**: Enables fan-out patterns where the number of parallel tasks isn't known until runtime — process each file in a directory, each partition in a table, each item in an API response.
 
@@ -477,7 +477,7 @@ Container-native approach: tasks write output to a convention path (`/caesium/ou
 
 ---
 
-## Workstream 10: Pause/Unpause Jobs (P2)
+## Workstream 10: Pause/Unpause Jobs (P0)
 
 **Why**: Operators need to temporarily suspend a job's schedule without deleting it — during maintenance windows, incident response, or when a downstream system is unavailable.
 
@@ -549,7 +549,7 @@ Container-native approach: tasks write output to a convention path (`/caesium/ou
 
 ---
 
-## Workstream 12: DAG Run Timeout (P2)
+## Workstream 12: DAG Run Timeout (P1)
 
 **Why**: A job with many tasks needs an overall time cap to prevent runaway pipelines from consuming resources indefinitely.
 
