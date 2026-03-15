@@ -32,7 +32,7 @@ func Post(c *echo.Context) error {
 	// JSON body returns 400 so the caller gets a clear signal.
 	var req PostRequest
 	if err := c.Bind(&req); err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	j, err := jsvc.Service(ctx).Get(id)

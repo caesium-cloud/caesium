@@ -476,3 +476,49 @@ func TestMixedRuleDAGFailurePath(t *testing.T) {
 	require.Equal(t, run.TaskStatusSucceeded, status[taskNotify], "always notify must still run on failure")
 	require.Equal(t, run.TaskStatusSucceeded, status[taskCleanup], "all_failed cleanup must run when process failed")
 }
+
+func TestSkippedTaskPropagatesToDescendants(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskProcess := uuid.New()
+	taskCleanup := uuid.New()
+	taskNotify := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskProcess, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllSuccess},
+		{ID: taskCleanup, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAllFailed},
+		{ID: taskNotify, JobID: jobID, AtomID: uuid.New(), TriggerRule: jobdefschema.TriggerRuleAlways},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		taskSvc.tasks[0].AtomID: fakeModelAtom(taskSvc.tasks[0].AtomID),
+		taskSvc.tasks[1].AtomID: fakeModelAtom(taskSvc.tasks[1].AtomID),
+		taskSvc.tasks[2].AtomID: fakeModelAtom(taskSvc.tasks[2].AtomID),
+	}}
+	edgeSvc := &fakeTaskEdgeService{edges: models.TaskEdges{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: taskProcess, ToTaskID: taskCleanup},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: taskCleanup, ToTaskID: taskNotify},
+	}}
+	persistGraph(t, db, taskSvc.tasks, edgeSvc.edges)
+
+	engine.runDurationByName[taskProcess.String()] = 10 * time.Millisecond
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyContinue,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, edgeSvc, engine)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	require.NoError(t, err)
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusSucceeded, status[taskProcess], "process should succeed")
+	require.Equal(t, run.TaskStatusSkipped, status[taskCleanup], "all_failed cleanup should be skipped on success")
+	require.Equal(t, run.TaskStatusSucceeded, status[taskNotify], "always notify should run after skipped cleanup")
+}

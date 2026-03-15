@@ -13,11 +13,9 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-var e *echo.Echo
-
 // Start launches Caesium's API.
 func Start(ctx context.Context, bus event.Bus) error {
-	e = echo.New()
+	e := echo.New()
 
 	// health
 	e.GET("/health", Health)
@@ -43,9 +41,5 @@ func Start(ctx context.Context, bus event.Bus) error {
 }
 
 func Shutdown() error {
-	if e != nil {
-		return e.Shutdown(context.Background())
-	}
-
 	return nil
 }

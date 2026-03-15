@@ -21,7 +21,7 @@ func Unpause(c *echo.Context) error {
 func setPaused(c *echo.Context, paused bool) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	j, err := jsvc.Service(c.Request().Context()).SetPaused(id, paused)
@@ -30,7 +30,7 @@ func setPaused(c *echo.Context, paused bool) error {
 			return echo.ErrNotFound
 		}
 
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	return c.JSON(http.StatusOK, j)

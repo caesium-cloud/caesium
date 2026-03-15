@@ -15,12 +15,12 @@ import (
 func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
-		return echo.ErrBadRequest.SetInternal(err)
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	jobs, err := job.Service(c.Request().Context()).List(req)
 	if err != nil {
-		return echo.ErrInternalServerError.SetInternal(err)
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	resp := make([]*JobResponse, 0, len(jobs))
@@ -28,7 +28,7 @@ func List(c *echo.Context) error {
 		item := &JobResponse{Job: entry}
 		latest, latestErr := runsvc.New(c.Request().Context()).Latest(entry.ID)
 		if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
-			return echo.ErrInternalServerError.SetInternal(latestErr)
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(latestErr)
 		}
 		item.LatestRun = latest
 		resp = append(resp, item)

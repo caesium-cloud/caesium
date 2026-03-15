@@ -81,20 +81,20 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID           uuid.UUID      `json:"id"`
-	JobID        uuid.UUID      `json:"job_id"`
-	JobAlias     string         `json:"job_alias,omitempty"`
-	TriggerType  string         `json:"trigger_type,omitempty"`
-	TriggerAlias string         `json:"trigger_alias,omitempty"`
-	Status       Status         `json:"status"`
+	ID           uuid.UUID         `json:"id"`
+	JobID        uuid.UUID         `json:"job_id"`
+	JobAlias     string            `json:"job_alias,omitempty"`
+	TriggerType  string            `json:"trigger_type,omitempty"`
+	TriggerAlias string            `json:"trigger_alias,omitempty"`
+	Status       Status            `json:"status"`
 	Params       map[string]string `json:"params,omitempty"`
-	StartedAt    time.Time      `json:"started_at"`
-	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	Error        string         `json:"error,omitempty"`
-	Tasks        []*TaskRun     `json:"tasks"`
-	Callbacks    []*CallbackRun `json:"callbacks"`
+	StartedAt    time.Time         `json:"started_at"`
+	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	Error        string            `json:"error,omitempty"`
+	Tasks        []*TaskRun        `json:"tasks"`
+	Callbacks    []*CallbackRun    `json:"callbacks"`
 }
 
 type Store struct {
@@ -497,7 +497,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 	}
 
 	if s.bus != nil {
-		s.publishTaskEvent(event.TypeTaskRetrying, runID, taskID)
+		s.publishTaskEvent(s.db, event.TypeTaskRetrying, runID, taskID)
 	}
 
 	return nil
@@ -580,7 +580,6 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 
 	return err
 }
-
 
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).

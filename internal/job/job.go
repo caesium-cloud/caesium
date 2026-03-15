@@ -1,9 +1,9 @@
 package job
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"cmp"
 	"fmt"
 	"runtime"
 	"slices"
@@ -455,6 +455,55 @@ func (j *job) Run(ctx context.Context) error {
 		})
 	}
 
+	propagateSkipped := func(start uuid.UUID) error {
+		queue := []uuid.UUID{start}
+		seen := map[uuid.UUID]struct{}{start: {}}
+
+		for len(queue) > 0 {
+			current := queue[0]
+			queue = queue[1:]
+
+			for _, successor := range adjacency[current] {
+				if processed[successor] {
+					continue
+				}
+				if _, ok := indegree[successor]; !ok {
+					continue
+				}
+				if indegree[successor] > 0 {
+					indegree[successor]--
+				}
+				if indegree[successor] != 0 {
+					continue
+				}
+
+				predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+				if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+					push(successor)
+					continue
+				}
+
+				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+				if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+					return err
+				}
+
+				taskOutcomes[successor] = run.TaskStatusSkipped
+				processed[successor] = true
+				terminalTasks++
+				delete(inQueue, successor)
+
+				if _, ok := seen[successor]; ok {
+					continue
+				}
+				seen[successor] = struct{}{}
+				queue = append(queue, successor)
+			}
+		}
+
+		return nil
+	}
+
 	for _, taskState := range currentRun.Tasks {
 		if processed[taskState.ID] {
 			continue
@@ -695,6 +744,16 @@ func (j *job) Run(ctx context.Context) error {
 					processed[id] = true
 					terminalTasks++
 					delete(inQueue, id)
+					if err == nil && !halt {
+						if propErr := propagateSkipped(id); propErr != nil {
+							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", id, "error", propErr)
+							if runErr == nil {
+								runErr = propErr
+							}
+							halt = true
+							queue = queue[:0]
+						}
+					}
 				},
 			)
 
@@ -731,6 +790,15 @@ func (j *job) Run(ctx context.Context) error {
 							processed[successor] = true
 							terminalTasks++
 							delete(inQueue, successor)
+							if err := propagateSkipped(successor); err != nil {
+								log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
+								if runErr == nil {
+									runErr = err
+								}
+								halt = true
+								queue = queue[:0]
+								break
+							}
 						}
 					}
 				}
@@ -767,6 +835,15 @@ func (j *job) Run(ctx context.Context) error {
 						processed[successor] = true
 						terminalTasks++
 						delete(inQueue, successor)
+						if err := propagateSkipped(successor); err != nil {
+							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
+							if runErr == nil {
+								runErr = err
+							}
+							halt = true
+							queue = queue[:0]
+							break
+						}
 					}
 				}
 			}

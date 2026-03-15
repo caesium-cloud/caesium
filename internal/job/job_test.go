@@ -426,11 +426,7 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Extract taskID from name (pattern is runID[:8]-taskID)
 	name := req.Name
-	if len(name) > 36 && name[8] == '-' {
-		name = name[9:]
-	}
 
 	if err, ok := e.createErrByName[name]; ok {
 		return nil, err
@@ -476,12 +472,6 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 
 	if req.Force {
 		e.stopForceByID[req.ID] = true
-		// Record by taskID as well (pattern is runID[:8]-taskID)
-		name := req.ID
-		if len(name) > 36 && name[8] == '-' {
-			name = name[9:]
-		}
-		e.stopForceByID[name] = true
 	}
 
 	if state.stoppedAt.IsZero() {
@@ -556,8 +546,8 @@ var _ atom.Atom = (*fakeAtom)(nil)
 // specCaptureEngine wraps fakeEngine and records all EngineCreateRequest Spec values.
 type specCaptureEngine struct {
 	*fakeEngine
-	mu     sync.Mutex
-	specs  []container.Spec
+	mu    sync.Mutex
+	specs []container.Spec
 }
 
 func newSpecCaptureEngine() *specCaptureEngine {
