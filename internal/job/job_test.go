@@ -161,6 +161,44 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 	require.True(t, engine.wasForceStopped(taskID.String()))
 }
 
+func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+
+	engine.resultByName[taskID.String()] = atom.Failure
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed with result")
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusFailed, snapshot.Status)
+
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusFailed, status[taskID])
+}
+
 func TestRunLocalUsesJobLevelOverrides(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })

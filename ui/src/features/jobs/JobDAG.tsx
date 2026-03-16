@@ -6,7 +6,6 @@ import ReactFlow, {
   type Node,
   type Edge,
   Position,
-  ConnectionLineType,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
@@ -14,7 +13,7 @@ import type { JobDAGResponse, Atom } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
 
 const nodeWidth = 300;
-const nodeHeight = 220;
+const nodeHeight = 148;
 
 const nodeTypes = {
   task: TaskNode,
@@ -76,12 +75,28 @@ interface JobDAGProps {
 }
 
 export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, selectedTaskId }: JobDAGProps) {
+    const resolvedTaskStatus = useMemo(() => {
+        const statusByTask: Record<string, string> = {};
+
+        Object.entries(taskStatus ?? {}).forEach(([taskId, status]) => {
+            statusByTask[taskId] = normalizeTaskStatus(status);
+        });
+
+        Object.entries(taskMetadata ?? {}).forEach(([taskId, metadata]) => {
+            if (metadata?.status) {
+                statusByTask[taskId] = normalizeTaskStatus(metadata.status);
+            }
+        });
+
+        return statusByTask;
+    }, [taskMetadata, taskStatus]);
+
     const initialNodes: Node[] = useMemo(() => {
         if (!dag.nodes) return [];
         return dag.nodes.map(n => {
             const atom = atoms[n.atom_id];
             const meta = taskMetadata?.[n.id];
-            const status = meta?.status || taskStatus?.[n.id] || 'pending';
+            const status = resolvedTaskStatus[n.id] || 'pending';
             
             return {
                 id: n.id,
@@ -98,28 +113,33 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
                 position: { x: 0, y: 0 } 
             }
         });
-    }, [dag, atoms, taskStatus, taskMetadata, selectedTaskId]);
+    }, [dag, atoms, resolvedTaskStatus, taskMetadata, selectedTaskId]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
-        return dag.edges.map((e) => ({
-            id: `e${e.from}-${e.to}`,
-            source: e.from,
-            target: e.to,
-            type: 'smoothstep',
-            animated: taskStatus?.[e.from] === 'running',
-            markerEnd: { 
-              type: MarkerType.ArrowClosed,
-              width: 20,
-              height: 20,
-              color: '#94a3b8',
-            },
-            style: {
-              strokeWidth: 2,
-              stroke: taskStatus?.[e.from] === 'completed' ? '#22c55e' : '#94a3b8',
-            }
-        }));
-    }, [dag, taskStatus]);
+        return dag.edges.map((e) => {
+            const sourceStatus = resolvedTaskStatus[e.from] || 'pending';
+            const stroke = edgeColor(sourceStatus);
+
+            return {
+                id: `e${e.from}-${e.to}`,
+                source: e.from,
+                target: e.to,
+                type: 'simplebezier',
+                animated: sourceStatus === 'running',
+                markerEnd: { 
+                  type: MarkerType.ArrowClosed,
+                  width: 20,
+                  height: 20,
+                  color: stroke,
+                },
+                style: {
+                  strokeWidth: 2,
+                  stroke,
+                }
+            };
+        });
+    }, [dag, resolvedTaskStatus]);
 
     const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
         () => getLayoutedElements(initialNodes, initialEdges),
@@ -131,21 +151,44 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
     }, [onNodeClick]);
 
   return (
-    <div className="w-full h-full min-h-[500px] bg-slate-950/50 relative overflow-hidden">
+    <div className="relative h-full min-h-[500px] w-full overflow-hidden bg-caesium-void/95">
       <ReactFlow
         nodes={layoutedNodes}
         edges={layoutedEdges}
         nodeTypes={nodeTypes}
         onNodeClick={handleNodeClick}
-        connectionLineType={ConnectionLineType.SmoothStep}
         fitView
         fitViewOptions={{ padding: 0.2 }}
         minZoom={0.1}
         maxZoom={1.5}
       >
-        <Background color="#334155" gap={20} />
-        <Controls className="fill-slate-400" />
+        <Background color="#24344b" gap={20} />
+        <Controls className="fill-slate-300" />
       </ReactFlow>
     </div>
   );
+}
+
+function normalizeTaskStatus(status?: string) {
+    switch (status) {
+        case 'completed':
+            return 'succeeded';
+        default:
+            return status || 'pending';
+    }
+}
+
+function edgeColor(status: string) {
+    switch (status) {
+        case 'running':
+            return '#00b4d8';
+        case 'succeeded':
+            return '#10b981';
+        case 'failed':
+            return '#f97316';
+        case 'skipped':
+            return '#f59e0b';
+        default:
+            return '#64748b';
+    }
 }

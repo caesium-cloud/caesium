@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { JobDAG } from "./JobDAG";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
-import { api, type Atom, type Job, type TaskRun, type Trigger } from "@/lib/api";
+import { api, type Atom, type Job, type JobRun, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
@@ -63,12 +63,6 @@ export function JobDetailPage() {
   });
 
   useEffect(() => {
-    const onRunEvent = (e: CaesiumEvent) => {
-      if (e.job_id !== jobId) return;
-      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
-      queryClient.invalidateQueries({ queryKey: ["job", jobId] });
-    };
-
     const onPauseEvent = (e: CaesiumEvent) => {
       if (e.job_id !== jobId) return;
       const payload = e.payload as Job | undefined;
@@ -82,15 +76,9 @@ export function JobDetailPage() {
       );
     };
 
-    ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
-      events.subscribe(type, onRunEvent),
-    );
     ["job_paused", "job_unpaused"].forEach((type) => events.subscribe(type, onPauseEvent));
 
     return () => {
-      ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
-        events.unsubscribe(type, onRunEvent),
-      );
       ["job_paused", "job_unpaused"].forEach((type) => events.unsubscribe(type, onPauseEvent));
     };
   }, [jobId, queryClient]);
@@ -108,14 +96,22 @@ export function JobDetailPage() {
   });
 
   const pauseMutation = useMutation({
-    mutationFn: ({ jobId: currentJobId, paused }: { jobId: string; paused: boolean }) =>
+    mutationFn: ({ jobId: currentJobId, paused }: { jobId: string; paused: boolean; hasActiveRun: boolean }) =>
       paused ? api.pauseJob(currentJobId) : api.unpauseJob(currentJobId),
-    onSuccess: (updated) => {
+    onSuccess: (updated, variables) => {
       queryClient.setQueryData(["job", jobId], updated);
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
         old?.map((entry) => (entry.id === updated.id ? { ...entry, paused: updated.paused } : entry)),
       );
-      toast.success(updated.paused ? "Job paused" : "Job unpaused");
+      if (updated.paused) {
+        toast.success(
+          variables.hasActiveRun
+            ? "Job paused. The active run will finish, but new runs are blocked."
+            : "Job paused. New runs are blocked.",
+        );
+        return;
+      }
+      toast.success("Job unpaused");
     },
     onError: (err: Error) => {
       toast.error(`Failed to update job state: ${err.message}`);
@@ -126,12 +122,117 @@ export function JobDetailPage() {
     () => (runs ? [...runs].sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime()) : []),
     [runs],
   );
-  const latestRun = sortedRuns[0];
-  const latestRunTasks = useMemo(() => buildTaskRunMap(latestRun?.tasks), [latestRun?.tasks]);
-  const taskMetadata = useMemo(() => buildTaskStatusMap(latestRun?.tasks), [latestRun?.tasks]);
+  const activeRunSummary = useMemo(() => sortedRuns.find((run) => run.status === "running"), [sortedRuns]);
+  const featuredRunSummary = activeRunSummary ?? sortedRuns[0] ?? job?.latest_run;
+  const featuredRunId = featuredRunSummary?.id;
+  const { data: featuredRun, isLoading: isLoadingFeaturedRun } = useQuery({
+    queryKey: ["job", jobId, "runs", featuredRunId],
+    queryFn: () => api.getJobRun(jobId, featuredRunId!),
+    enabled: !!featuredRunId,
+    refetchInterval: featuredRunSummary?.status === "running" ? 5000 : 30000,
+  });
+
+  useEffect(() => {
+    if (!featuredRunId) {
+      return;
+    }
+
+    const onEvent = (e: CaesiumEvent) => {
+      if (e.job_id !== jobId) return;
+      if (e.run_id && e.run_id !== featuredRunId) return;
+
+      queryClient.setQueryData(["job", jobId, "runs", featuredRunId], (old: JobRun | undefined) => {
+        if (!old) return old;
+
+        if (e.type === "run_started") {
+          const startedRun = e.payload as JobRun | undefined;
+          return startedRun?.id === featuredRunId ? { ...old, ...startedRun } : old;
+        }
+
+        if (e.type === "run_completed" || e.type === "run_succeeded") {
+          const completedRun = e.payload as JobRun | undefined;
+          if (completedRun?.id === featuredRunId) {
+            return completedRun?.tasks ? completedRun : { ...old, ...completedRun, status: "succeeded" };
+          }
+          return old;
+        }
+
+        if (e.type === "run_failed") {
+          const failedRun = e.payload as JobRun | undefined;
+          if (failedRun?.id === featuredRunId) {
+            return failedRun?.tasks ? failedRun : { ...old, ...failedRun, status: "failed" };
+          }
+          return old;
+        }
+
+        if (e.type.startsWith("task_")) {
+          const taskUpdate = e.payload as TaskRun | undefined;
+          const taskID = taskUpdate?.task_id || e.task_id;
+          if (!taskID) return old;
+
+          const updatedTasks = [...(old.tasks || [])];
+          const existingIndex = updatedTasks.findIndex((task) => task.task_id === taskID);
+          const nextStatus =
+            e.type === "task_started"
+              ? "running"
+              : e.type === "task_succeeded"
+                ? "succeeded"
+                : e.type === "task_failed"
+                  ? "failed"
+                  : e.type === "task_skipped"
+                    ? "skipped"
+                    : taskUpdate?.status || "pending";
+
+          if (existingIndex >= 0) {
+            updatedTasks[existingIndex] = {
+              ...updatedTasks[existingIndex],
+              ...taskUpdate,
+              status: nextStatus,
+            };
+          } else {
+            updatedTasks.push({
+              id: taskID,
+              job_run_id: featuredRunId,
+              task_id: taskID,
+              atom_id: taskUpdate?.atom_id || "",
+              engine: taskUpdate?.engine || "",
+              image: taskUpdate?.image || "",
+              command: taskUpdate?.command || [],
+              status: nextStatus,
+              created_at: new Date().toISOString(),
+              updated_at: new Date().toISOString(),
+              ...taskUpdate,
+            });
+          }
+
+          return { ...old, tasks: updatedTasks };
+        }
+
+        return old;
+      });
+
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId] });
+    };
+
+    ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+      events.subscribe(type, onEvent),
+    );
+
+    return () => {
+      ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+        events.unsubscribe(type, onEvent),
+      );
+    };
+  }, [featuredRunId, jobId, queryClient]);
+
+  const activeRun = featuredRun?.status === "running" ? featuredRun : activeRunSummary;
+  const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
+  const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
+  const taskStatus = useMemo(() => buildTaskStatusLookup(featuredRun?.tasks), [featuredRun?.tasks]);
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
 
-  if (isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger) {
+  if (isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger || (featuredRunId && isLoadingFeaturedRun)) {
     return <div className="p-8">Loading...</div>;
   }
 
@@ -148,17 +249,17 @@ export function JobDetailPage() {
             <Badge variant={job.paused ? "outline" : "secondary"} className={job.paused ? "border-amber-500/40 text-amber-300" : ""}>
               {job.paused ? "Paused" : "Active"}
             </Badge>
-            {latestRun ? renderRunStatus(latestRun.status) : null}
+            {featuredRun ? renderRunStatus(featuredRun.status) : null}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{job.id}</span>
-            {latestRun ? (
+            {featuredRun ? (
               <>
                 <span>•</span>
-                <span>Last run <RelativeTime date={latestRun.started_at} /></span>
+                <span>{activeRun ? "Active run started" : "Last run"} <RelativeTime date={featuredRun.started_at} /></span>
                 <span>•</span>
                 <span className="font-mono">
-                  <Duration start={latestRun.started_at} end={latestRun.completed_at} />
+                  <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
                 </span>
               </>
             ) : null}
@@ -171,7 +272,7 @@ export function JobDetailPage() {
           </Button>
           <Button
             variant="outline"
-            onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused })}
+            onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
             disabled={pauseMutation.isPending}
           >
             <Pause className="mr-2 h-4 w-4" />
@@ -180,13 +281,30 @@ export function JobDetailPage() {
         </div>
       </div>
 
-      {latestRun?.params && Object.keys(latestRun.params).length > 0 ? (
+      {job.paused || activeRun ? (
+        <Card className="border-primary/15 bg-card/80">
+          <CardContent className="flex flex-col gap-4 p-4 md:flex-row md:items-center md:justify-between">
+            <div className="space-y-1">
+              <div className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Execution State</div>
+              <p className="text-sm text-foreground">
+                {job.paused
+                  ? activeRun
+                    ? "This job is paused for new runs. The active run will keep draining until completion."
+                    : "This job is paused. Triggering is blocked until it is unpaused."
+                  : "The DAG below is following the most relevant run in real time."}
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {featuredRun?.params && Object.keys(featuredRun.params).length > 0 ? (
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-sm">Latest Run Parameters</CardTitle>
+            <CardTitle className="text-sm">{activeRun ? "Active Run Parameters" : "Latest Run Parameters"}</CardTitle>
           </CardHeader>
           <CardContent className="grid gap-2 md:grid-cols-2">
-            {Object.entries(latestRun.params).map(([key, value]) => (
+            {Object.entries(featuredRun.params).map(([key, value]) => (
               <div key={key}>
                 <div className="text-xs uppercase tracking-wide text-muted-foreground">{key}</div>
                 <div className="font-mono text-sm">{value}</div>
@@ -205,8 +323,25 @@ export function JobDetailPage() {
           <TabsTrigger value="definition">Definition</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="dag" className="mt-4 h-[600px] overflow-hidden rounded-md border">
-          {dag && atoms ? <JobDAG dag={dag} atoms={atoms} taskMetadata={taskMetadata} /> : null}
+        <TabsContent value="dag" className="mt-4">
+          <div className="flex h-[600px] flex-col overflow-hidden rounded-md border bg-card">
+            <div className="border-b border-border/70 px-4 py-3">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <div className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">DAG Overlay</div>
+                  <div className="mt-1 text-sm text-foreground">
+                    {featuredRun
+                      ? `${activeRun ? "Showing live task state from" : "Showing the latest task state from"} run ${shortId(featuredRun.id)}`
+                      : "Showing DAG topology only. Trigger a run to populate live task state."}
+                  </div>
+                </div>
+                {featuredRun ? <Badge variant={activeRun ? "running" : "secondary"}>{activeRun ? "Live Overlay" : "Latest Overlay"}</Badge> : null}
+              </div>
+            </div>
+            <div className="flex-1">
+              {dag && atoms ? <JobDAG dag={dag} atoms={atoms} taskMetadata={taskMetadata} taskStatus={taskStatus} /> : null}
+            </div>
+          </div>
         </TabsContent>
 
         <TabsContent value="runs" className="mt-4">
@@ -249,7 +384,7 @@ export function JobDetailPage() {
                   <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm md:grid-cols-2">
-                  <TaskMetadataPanel task={task} runTask={latestRunTasks[task.id]} framed={false} />
+                    <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} framed={false} />
                   <div className="space-y-3">
                     <div>
                       <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Atom ID</div>
@@ -292,7 +427,7 @@ export function JobDetailPage() {
             <CardContent className="space-y-3 text-sm">
               <div>
                 <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Pause State</div>
-                <div>{job.paused ? "Paused" : "Active"}</div>
+                <div>{job.paused ? "Paused (blocks new runs)" : "Active"}</div>
               </div>
               <div>
                 <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
@@ -325,6 +460,14 @@ function buildTaskStatusMap(tasks?: TaskRun[]) {
     };
   });
   return metadata;
+}
+
+function buildTaskStatusLookup(tasks?: TaskRun[]) {
+  const map: Record<string, string> = {};
+  tasks?.forEach((task) => {
+    map[task.task_id] = task.status;
+  });
+  return map;
 }
 
 function buildTaskRunMap(tasks?: TaskRun[]) {

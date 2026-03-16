@@ -71,14 +71,18 @@ export function JobsPage() {
   });
 
   const pauseMutation = useMutation({
-    mutationFn: ({ jobId, paused }: { jobId: string; paused: boolean }) =>
+    mutationFn: ({ jobId, paused }: { jobId: string; paused: boolean; hasActiveRun: boolean }) =>
       paused ? api.pauseJob(jobId) : api.unpauseJob(jobId),
-    onSuccess: (job) => {
+    onSuccess: (job, variables) => {
       queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
         old?.map((entry) => (entry.id === job.id ? { ...entry, paused: job.paused } : entry)),
       );
       queryClient.setQueryData(["job", job.id], (old: Job | undefined) => (old ? { ...old, paused: job.paused } : job));
-      toast.success(job.paused ? "Job paused" : "Job unpaused");
+      if (job.paused) {
+        toast.success(variables.hasActiveRun ? "Job paused. The active run will finish, but new runs are blocked." : "Job paused. New runs are blocked.");
+        return;
+      }
+      toast.success("Job unpaused");
     },
     onError: (err: Error) => {
       toast.error(`Failed to update job state: ${err.message}`);
@@ -141,13 +145,19 @@ export function JobsPage() {
                     <div className="text-[10px] font-mono text-muted-foreground">{shortId(job.id)}</div>
                   </TableCell>
                   <TableCell>
-                    {isPaused ? (
-                      <Badge variant="outline" className="border-amber-500/40 text-amber-300">
-                        Paused
-                      </Badge>
-                    ) : (
-                      renderRunStatus(latestRun)
-                    )}
+                    <div className="flex flex-col items-start gap-1">
+                      {isRunning ? renderRunStatus(latestRun) : !isPaused ? renderRunStatus(latestRun) : null}
+                      {isPaused ? (
+                        <Badge variant="outline" className="border-amber-500/40 text-amber-300">
+                          Paused
+                        </Badge>
+                      ) : null}
+                      {isPaused ? (
+                        <span className="text-xs text-muted-foreground">
+                          {isRunning ? "New runs are blocked while the current run drains." : "New runs are blocked until this job is unpaused."}
+                        </span>
+                      ) : null}
+                    </div>
                   </TableCell>
                   <TableCell className="text-muted-foreground text-sm whitespace-nowrap">
                     {latestRun ? <RelativeTime date={latestRun.started_at} /> : "-"}
@@ -169,9 +179,9 @@ export function JobsPage() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !isPaused })}
+                        onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !isPaused, hasActiveRun: isRunning })}
                         disabled={pauseMutation.isPending}
-                        title={isPaused ? "Unpause job" : "Pause job"}
+                        title={isPaused ? "Unpause job" : "Pause future runs"}
                       >
                         <Pause className="h-4 w-4" />
                       </Button>

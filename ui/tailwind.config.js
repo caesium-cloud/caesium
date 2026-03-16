@@ -16,6 +16,10 @@ export default {
       },
     },
     extend: {
+      fontFamily: {
+        sans: ["var(--font-sans)"],
+        mono: ["var(--font-mono)"],
+      },
       colors: {
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
@@ -49,6 +53,11 @@ export default {
         card: {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
+        },
+        caesium: {
+          cyan: "hsl(var(--caesium-cyan))",
+          gold: "hsl(var(--caesium-gold))",
+          void: "hsl(var(--caesium-void))",
         },
       },
       borderRadius: {

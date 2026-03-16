@@ -46,6 +46,19 @@ const (
 	CallbackStatusFailed    CallbackStatus = "failed"
 )
 
+func IsSuccessfulTaskResult(result string) bool {
+	return taskStatusFromResult(result) == TaskStatusSucceeded
+}
+
+func taskStatusFromResult(result string) TaskStatus {
+	switch Result(result) {
+	case "", "success", "ok":
+		return TaskStatusSucceeded
+	default:
+		return TaskStatusFailed
+	}
+}
+
 type CallbackRun struct {
 	ID          uuid.UUID      `json:"id"`
 	CallbackID  uuid.UUID      `json:"callback_id"`
@@ -285,10 +298,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
-		status := TaskStatusSucceeded
-		if result != "success" && result != "ok" && result != "" {
-			status = TaskStatusFailed
-		}
+		status := taskStatusFromResult(result)
 
 		// Capture task metadata for metrics before updating.
 		var taskRun models.TaskRun

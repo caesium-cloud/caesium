@@ -626,6 +626,9 @@ func (j *job) Run(ctx context.Context) error {
 				if err := store.CompleteTask(runID, taskID, result); err != nil {
 					return err
 				}
+				if !run.IsSuccessfulTaskResult(result) {
+					return fmt.Errorf("task %s failed with result %q", taskID, result)
+				}
 				return nil
 			}
 			lastErr = execErr

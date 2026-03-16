@@ -244,6 +244,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy); err != nil {
 		return err
 	}
+	if !run.IsSuccessfulTaskResult(string(a.Result())) {
+		return fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
+	}
 
 	return nil
 }
