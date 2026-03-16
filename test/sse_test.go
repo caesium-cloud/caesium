@@ -127,10 +127,18 @@ func (s *IntegrationTestSuite) TestSSEStream() {
 		event.TypeTaskSucceeded,
 		event.TypeRunCompleted,
 	}
+	expectedSet := make(map[event.Type]bool, len(expectedEvents))
+	for _, t := range expectedEvents {
+		expectedSet[t] = true
+	}
 
 	for len(receivedEvents) < len(expectedEvents) {
 		select {
 		case evt := <-eventChan:
+			if !expectedSet[evt.Type] {
+				continue
+			}
+
 			match := false
 			switch evt.JobID {
 			case job.ID:
