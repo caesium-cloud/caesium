@@ -1,6 +1,7 @@
 package podman
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"time"
@@ -220,6 +221,42 @@ func (s *PodmanTestSuite) TestCreateStartError() {
 		Return(fmt.Errorf("invalid container id"))
 
 	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
+func (s *PodmanTestSuite) TestWait() {
+	req := &atom.EngineWaitRequest{
+		ID:      testAtomID,
+		Context: context.Background(),
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerWait", testAtomID, req.Context).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Wait(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	assert.Equal(s.T(), testAtomID, c.ID())
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
+func (s *PodmanTestSuite) TestWaitError() {
+	req := &atom.EngineWaitRequest{
+		ID:      "",
+		Context: context.Background(),
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerWait", "", req.Context).
+		Return(fmt.Errorf("container wait error"))
+
+	c, err := s.engine.Wait(req)
 	assert.NotNil(s.T(), err)
 	assert.Nil(s.T(), c)
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())

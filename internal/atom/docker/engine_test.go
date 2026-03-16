@@ -266,6 +266,42 @@ func (s *DockerTestSuite) TestStopError() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+func (s *DockerTestSuite) TestWait() {
+	req := &atom.EngineWaitRequest{
+		ID:      testAtomID,
+		Context: context.Background(),
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerWait", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Wait(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	assert.Equal(s.T(), testAtomID, c.ID())
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestWaitError() {
+	req := &atom.EngineWaitRequest{
+		ID:      "",
+		Context: context.Background(),
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerWait", "").
+		Return(fmt.Errorf("container wait error"))
+
+	c, err := s.engine.Wait(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestLogs() {
 	req := &atom.EngineLogsRequest{
 		ID:    testAtomID,

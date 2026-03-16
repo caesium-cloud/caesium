@@ -499,19 +499,6 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	return state.snapshot(), nil
 }
 
-func (e *fakeEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
-	for {
-		atomValue, err := e.Get(&atom.EngineGetRequest{ID: req.ID})
-		if err != nil {
-			return nil, err
-		}
-		if !atomValue.StoppedAt().IsZero() {
-			return atomValue, nil
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
 func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -75,8 +75,8 @@ func (m *mockPodmanBackend) ContainerStart(id string) error {
 	return nil
 }
 
-func (m *mockPodmanBackend) ContainerWait(id string) error {
-	args := m.Called(id)
+func (m *mockPodmanBackend) ContainerWait(id string, ctx context.Context) error {
+	args := m.Called(id, ctx)
 	if id == "" {
 		return args.Error(0)
 	}
