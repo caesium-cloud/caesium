@@ -23,6 +23,9 @@ trigger:
   configuration:
     cron: "0 2 * * *"
     timezone: "UTC"
+  defaultParams:
+    dataset: "warehouse"
+    cadence: "nightly"
 steps:
   - name: extract
     image: alpine:3.20
@@ -95,6 +98,9 @@ steps:
     image: alpine:3.20
     command: ["sh", "-c", "echo task a"]
     dependsOn: start
+    retries: 2
+    retryDelay: 30s
+    retryBackoff: true
   - name: branch-b
     engine: docker
     image: alpine:3.20
@@ -104,6 +110,7 @@ steps:
     engine: docker
     image: alpine:3.20
     command: ["sh", "-c", "echo join"]
+    triggerRule: one_success
     dependsOn:
       - branch-a
       - branch-b
@@ -114,8 +121,11 @@ steps:
 - `apiVersion`/`kind` are fixed (`v1`, `Job`).
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
+- `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run.
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
+- Steps support retry controls via `retries`, `retryDelay`, and `retryBackoff`.
+- Steps support Airflow-style trigger rules via `triggerRule`. Supported values are `all_success`, `all_done`, `all_failed`, `one_success`, and `always`.
 - `callbacks.configuration` is stored as JSON. The built-in `notification` callback accepts `url`/`webhook_url` plus optional `headers` and `user_agent` keys.
 - Callback payloads POST a JSON body containing job/run metadata (`job_id`, `job_alias`, `run_id`, `status`, `error`, `started_at`, `completed_at`) and task entries (`task_id`, `engine`, `image`, `command`, `status`, `runtime_id`, `error`).
 - Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
@@ -164,6 +174,12 @@ steps:
   - Callback failure handling (`callback-failure.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`.
+
+## Operational Controls
+
+- Pause a job without changing its definition via `PUT /v1/jobs/:id/pause`.
+- Resume a paused job via `PUT /v1/jobs/:id/unpause`.
+- Paused jobs remain visible in the embedded web UI and API, but cron and HTTP triggers skip starting new runs until the job is unpaused.
 
 ## Schema Tooling
 

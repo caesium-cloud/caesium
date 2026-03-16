@@ -3,6 +3,7 @@ package run
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"sync"
 	"time"
@@ -45,6 +46,19 @@ const (
 	CallbackStatusFailed    CallbackStatus = "failed"
 )
 
+func IsSuccessfulTaskResult(result string) bool {
+	return taskStatusFromResult(result) == TaskStatusSucceeded
+}
+
+func taskStatusFromResult(result string) TaskStatus {
+	switch Result(result) {
+	case "", "success", "ok":
+		return TaskStatusSucceeded
+	default:
+		return TaskStatusFailed
+	}
+}
+
 type CallbackRun struct {
 	ID          uuid.UUID      `json:"id"`
 	CallbackID  uuid.UUID      `json:"callback_id"`
@@ -68,6 +82,8 @@ type TaskRun struct {
 	ClaimedBy               string            `json:"claimed_by,omitempty"`
 	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
 	ClaimAttempt            int               `json:"claim_attempt"`
+	Attempt                 int               `json:"attempt"`
+	MaxAttempts             int               `json:"max_attempts"`
 	Result                  string            `json:"result,omitempty"`
 	StartedAt               *time.Time        `json:"started_at,omitempty"`
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
@@ -78,19 +94,20 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID           uuid.UUID      `json:"id"`
-	JobID        uuid.UUID      `json:"job_id"`
-	JobAlias     string         `json:"job_alias,omitempty"`
-	TriggerType  string         `json:"trigger_type,omitempty"`
-	TriggerAlias string         `json:"trigger_alias,omitempty"`
-	Status       Status         `json:"status"`
-	StartedAt    time.Time      `json:"started_at"`
-	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	Error        string         `json:"error,omitempty"`
-	Tasks        []*TaskRun     `json:"tasks"`
-	Callbacks    []*CallbackRun `json:"callbacks"`
+	ID           uuid.UUID         `json:"id"`
+	JobID        uuid.UUID         `json:"job_id"`
+	JobAlias     string            `json:"job_alias,omitempty"`
+	TriggerType  string            `json:"trigger_type,omitempty"`
+	TriggerAlias string            `json:"trigger_alias,omitempty"`
+	Status       Status            `json:"status"`
+	Params       map[string]string `json:"params,omitempty"`
+	StartedAt    time.Time         `json:"started_at"`
+	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	Error        string            `json:"error,omitempty"`
+	Tasks        []*TaskRun        `json:"tasks"`
+	Callbacks    []*CallbackRun    `json:"callbacks"`
 }
 
 type Store struct {
@@ -134,7 +151,7 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
-func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*JobRun, error) {
+func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
 		JobID:     jobID,
@@ -144,6 +161,13 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID) (*JobRun, error) {
 
 	if triggerID != nil {
 		model.TriggerID = *triggerID
+	}
+	if len(params) > 0 && len(params[0]) > 0 {
+		encoded, err := json.Marshal(params[0])
+		if err != nil {
+			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
+		}
+		model.Params = encoded
 	}
 
 	if err := s.db.Create(model).Error; err != nil {
@@ -200,6 +224,11 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		}
 	}
 
+	maxAttempts := task.Retries + 1
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
 		JobRunID:                runID,
@@ -210,6 +239,8 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Command:                 command,
 		Status:                  string(TaskStatusPending),
 		NodeSelector:            maps.Clone(task.NodeSelector),
+		Attempt:                 1,
+		MaxAttempts:             maxAttempts,
 		OutstandingPredecessors: outstanding,
 	}
 
@@ -267,10 +298,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
-		status := TaskStatusSucceeded
-		if result != "success" && result != "ok" && result != "" {
-			status = TaskStatusFailed
-		}
+		status := taskStatusFromResult(result)
 
 		// Capture task metadata for metrics before updating.
 		var taskRun models.TaskRun
@@ -441,6 +469,45 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 
 	if s.bus != nil {
 		s.publishTaskEvent(s.db, event.TypeTaskFailed, runID, taskID)
+	}
+
+	return nil
+}
+
+// RetryTask resets a failed task run back to pending and increments its Attempt counter.
+func (s *Store) RetryTask(runID, taskID uuid.UUID, attempt int) error {
+	return s.retryTask(runID, taskID, attempt, "", false)
+}
+
+// RetryTaskClaimed resets a claimed failed task run and increments its Attempt counter.
+func (s *Store) RetryTaskClaimed(runID, taskID uuid.UUID, attempt int, claimedBy string) error {
+	return s.retryTask(runID, taskID, attempt, claimedBy, true)
+}
+
+func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
+	updateQuery := s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID)
+	if enforceClaim {
+		updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+	}
+	resultUpdate := updateQuery.
+		Updates(map[string]interface{}{
+			"status":       string(TaskStatusPending),
+			"attempt":      attempt,
+			"runtime_id":   "",
+			"started_at":   nil,
+			"completed_at": nil,
+			"error":        "",
+		})
+	if resultUpdate.Error != nil {
+		return resultUpdate.Error
+	}
+	if enforceClaim && resultUpdate.RowsAffected == 0 {
+		return ErrTaskClaimMismatch
+	}
+
+	if s.bus != nil {
+		s.publishTaskEvent(s.db, event.TypeTaskRetrying, runID, taskID)
 	}
 
 	return nil
@@ -643,6 +710,13 @@ func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
 		Error:     model.Error,
 	}
 
+	if len(model.Params) > 0 {
+		var p map[string]string
+		if err := json.Unmarshal(model.Params, &p); err == nil {
+			runValue.Params = p
+		}
+	}
+
 	if model.CompletedAt != nil {
 		completed := *model.CompletedAt
 		runValue.CompletedAt = &completed
@@ -690,6 +764,8 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		NodeSelector:            jsonmap.ToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,
+		Attempt:                 model.Attempt,
+		MaxAttempts:             model.MaxAttempts,
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,

@@ -16,6 +16,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -158,6 +159,44 @@ func TestRunLocalTaskTimeoutFailsTaskAndStopsAtom(t *testing.T) {
 	status := taskStatusByID(snapshot)
 	require.Equal(t, run.TaskStatusFailed, status[taskID])
 	require.True(t, engine.wasForceStopped(taskID.String()))
+}
+
+func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+
+	engine.resultByName[taskID.String()] = atom.Failure
+
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed with result")
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusFailed, snapshot.Status)
+
+	status := taskStatusByID(snapshot)
+	require.Equal(t, run.TaskStatusFailed, status[taskID])
 }
 
 func TestRunLocalUsesJobLevelOverrides(t *testing.T) {
@@ -425,11 +464,7 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// Extract taskID from name (pattern is runID[:8]-taskID)
 	name := req.Name
-	if len(name) > 36 && name[8] == '-' {
-		name = name[9:]
-	}
 
 	if err, ok := e.createErrByName[name]; ok {
 		return nil, err
@@ -475,12 +510,6 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 
 	if req.Force {
 		e.stopForceByID[req.ID] = true
-		// Record by taskID as well (pattern is runID[:8]-taskID)
-		name := req.ID
-		if len(name) > 36 && name[8] == '-' {
-			name = name[9:]
-		}
-		e.stopForceByID[name] = true
 	}
 
 	if state.stoppedAt.IsZero() {
@@ -551,3 +580,159 @@ var _ asvc.Atom = (*fakeAtomService)(nil)
 var _ taskedge.TaskEdge = (*fakeTaskEdgeService)(nil)
 var _ atom.Engine = (*fakeEngine)(nil)
 var _ atom.Atom = (*fakeAtom)(nil)
+
+// specCaptureEngine wraps fakeEngine and records all EngineCreateRequest Spec values.
+type specCaptureEngine struct {
+	*fakeEngine
+	mu    sync.Mutex
+	specs []container.Spec
+}
+
+func newSpecCaptureEngine() *specCaptureEngine {
+	return &specCaptureEngine{fakeEngine: newFakeEngine()}
+}
+
+func (e *specCaptureEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	e.mu.Lock()
+	e.specs = append(e.specs, req.Spec)
+	e.mu.Unlock()
+	return e.fakeEngine.Create(req)
+}
+
+func (e *specCaptureEngine) capturedEnvs() []map[string]string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]map[string]string, len(e.specs))
+	for i, s := range e.specs {
+		out[i] = s.Env
+	}
+	return out
+}
+
+// TestRunLocalInjectsParamEnvVars verifies that WithParams causes CAESIUM_PARAM_*
+// environment variables to be injected into each task's container spec.
+func TestRunLocalInjectsParamEnvVars(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newSpecCaptureEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	params := map[string]string{
+		"date": "2026-03-10",
+		"env":  "staging",
+	}
+
+	opts := append(
+		withTestDeps(store, env.Environment{
+			MaxParallelTasks:  1,
+			TaskFailurePolicy: taskFailurePolicyHalt,
+			ExecutionMode:     executionModeLocal,
+		}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine),
+		WithParams(params),
+	)
+
+	err := New(&models.Job{ID: jobID, Alias: "test-job"}, opts...).Run(context.Background())
+	require.NoError(t, err)
+
+	envs := engine.capturedEnvs()
+	require.Len(t, envs, 1, "expected exactly one task to have run")
+
+	taskEnv := envs[0]
+	require.Equal(t, "2026-03-10", taskEnv["CAESIUM_PARAM_DATE"], "CAESIUM_PARAM_DATE should be injected")
+	require.Equal(t, "staging", taskEnv["CAESIUM_PARAM_ENV"], "CAESIUM_PARAM_ENV should be injected")
+	require.Equal(t, "test-job", taskEnv["CAESIUM_JOB_ALIAS"], "CAESIUM_JOB_ALIAS should be injected")
+	require.NotEmpty(t, taskEnv["CAESIUM_RUN_ID"], "CAESIUM_RUN_ID should be injected")
+}
+
+// TestRunLocalCronDefaultParamsUsedWhenNoHTTPParams verifies that params set via
+// WithParams are used when no HTTP params are given (simulates cron default params).
+func TestRunLocalCronDefaultParamsUsedWhenNoHTTPParams(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newSpecCaptureEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	defaultParams := map[string]string{"mode": "production"}
+
+	opts := append(
+		withTestDeps(store, env.Environment{
+			MaxParallelTasks:  1,
+			TaskFailurePolicy: taskFailurePolicyHalt,
+			ExecutionMode:     executionModeLocal,
+		}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine),
+		WithParams(defaultParams),
+	)
+
+	err := New(&models.Job{ID: jobID, Alias: "cron-job"}, opts...).Run(context.Background())
+	require.NoError(t, err)
+
+	envs := engine.capturedEnvs()
+	require.Len(t, envs, 1)
+	require.Equal(t, "production", envs[0]["CAESIUM_PARAM_MODE"], "default cron param MODE should be injected")
+}
+
+// TestRunLocalHTTPParamsStoredInRun verifies that when params are passed via
+// WithParams, they end up persisted in the run store for retrieval.
+func TestRunLocalHTTPParamsStoredInRun(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+
+	jobID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: fakeModelAtom(atomID),
+	}}
+	persistGraph(t, db, taskSvc.tasks, nil)
+
+	params := map[string]string{"date": "2026-03-10"}
+
+	opts := append(
+		withTestDeps(store, env.Environment{
+			MaxParallelTasks:  1,
+			TaskFailurePolicy: taskFailurePolicyHalt,
+			ExecutionMode:     executionModeLocal,
+		}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine),
+		WithParams(params),
+	)
+
+	err := New(&models.Job{ID: jobID}, opts...).Run(context.Background())
+	require.NoError(t, err)
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, "2026-03-10", snapshot.Params["date"], "params should be persisted on the run")
+}

@@ -3,7 +3,7 @@
 ## React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack + React Flow + SSE
 
 This document defines a **step-by-step implementation plan** for
-building the Caesium Web UI.
+building the embedded Caesium Web UI.
 
 It is designed to be executed iteratively by autonomous coding agents.
 
@@ -17,7 +17,8 @@ Build a modern, operator-grade UI for Caesium with:
 -   [x] Interactive DAG visualization
 -   [x] Run inspection with status overlays
 -   [x] Live log streaming
--   [x] Operator actions (trigger run, retry callbacks)
+-   [x] Operator actions (trigger run, pause/unpause, retry callbacks)
+-   [x] Airflow parity surfaces for paused jobs, run parameters, and task retry/trigger metadata
 -   [x] Beautiful, polished UI (Akuity-style)
 
 No authentication or multi-tenancy in v1.
@@ -135,7 +136,7 @@ Routes implemented:
 
 - [x] Multi-stage Docker build producing `ui/dist`.
 - [x] Go `//go:embed` integration in `ui/embed.go`.
-- [x] Echo v5 route registration and SPA fallback in `api/ui.go`.
+- [x] Echo route registration and SPA fallback in `api/ui.go`.
 
 ------------------------------------------------------------------------
 
@@ -169,7 +170,13 @@ While the core operator UI is complete, the following enhancements will elevate 
 - [x] **Trigger Configuration**: View cron schedules, aliases, and recent firings in a dedicated tab.
 - [x] **Atom Usage**: View image, command, and engine details for all tasks in a job.
 
-## 13.3 Testing & Quality
+## 13.3 Airflow Parity UI [COMPLETED]
+- [x] Surface paused jobs on the Jobs page and Job Detail page.
+- [x] Add pause/unpause operator actions in the web UI using the REST API.
+- [x] Show run parameters on Job Detail and Run Detail pages.
+- [x] Show task `triggerRule`, retries, retry backoff, attempt counts, and node selectors in task detail panels.
+
+## 13.4 Testing & Quality
 - [ ] **E2E Testing**: Implement Playwright tests for critical paths (Trigger Job -> Watch SSE -> View Logs).
 - [ ] **Component Testing**: Expand unit tests for complex visual components like `TaskNode` and `JobDAG`.
 
@@ -183,4 +190,4 @@ While the core operator UI is complete, the following enhancements will elevate 
 - [x] Logs stream live with high performance.
 - [x] Actions (Trigger/Search) reflected instantly.
 - [x] Modern, polished "Operator-Grade" UI.
-- [x] Build artifacts embedded in Echo v5 backend.
+- [x] Build artifacts embedded in the Go backend.

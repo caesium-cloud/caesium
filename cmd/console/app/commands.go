@@ -50,6 +50,24 @@ func rerunJob(client *api.Client, jobID, runID string) tea.Cmd {
 	}
 }
 
+func setPausedJob(client *api.Client, jobID string, paused bool) tea.Cmd {
+	return func() tea.Msg {
+		var (
+			job *api.Job
+			err error
+		)
+		if paused {
+			job, err = client.Jobs().Pause(context.Background(), jobID)
+		} else {
+			job, err = client.Jobs().Unpause(context.Background(), jobID)
+		}
+		if err != nil {
+			return jobPauseErrMsg{jobID: jobID, paused: paused, err: err}
+		}
+		return jobPauseToggledMsg{jobID: jobID, job: job, paused: paused}
+	}
+}
+
 func fetchJobDetail(client *api.Client, jobID string, includeDAG bool) tea.Cmd {
 	return func() tea.Msg {
 		var opts *api.JobDetailOptions
@@ -260,6 +278,18 @@ type jobTriggeredMsg struct {
 type jobTriggerErrMsg struct {
 	jobID string
 	err   error
+}
+
+type jobPauseToggledMsg struct {
+	jobID  string
+	job    *api.Job
+	paused bool
+}
+
+type jobPauseErrMsg struct {
+	jobID  string
+	paused bool
+	err    error
 }
 
 type runsLoadedMsg struct {

@@ -51,7 +51,7 @@ func (m Model) View() string {
 		if m.showDetail {
 			footerKeys = jobsDetailFooterKeys(m.showLogsModal)
 		} else {
-			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger", "[/] filter")
+			footerKeys = append(footerKeys, "[enter] detail", "[t] trigger", "[P] pause/unpause", "[/] filter")
 		}
 	}
 	footer := renderFooter(footerKeys, m.actionStatusText(), m.viewportWidth)
@@ -126,6 +126,7 @@ func jobsDetailFooterKeys(showLogs bool) []string {
 		"[f] focus path",
 		"[u] runs",
 		"[t] trigger",
+		"[P] pause/unpause",
 		"[g] logs",
 		"[p] ping",
 		"[q] quit",
@@ -171,8 +172,11 @@ func (m Model) renderJobsView() string {
 
 func (m Model) renderJobsSummaryStrip() string {
 	total := len(m.jobRecords)
-	var running, succeeded, failed, pending, noRuns int
+	var running, succeeded, failed, pending, paused, noRuns int
 	for _, job := range m.jobRecords {
+		if job.Paused {
+			paused++
+		}
 		run, ok := m.jobRunStatus[job.ID]
 		if !ok || run == nil {
 			noRuns++
@@ -213,6 +217,10 @@ func (m Model) renderJobsSummaryStrip() string {
 	if pending > 0 {
 		parts = append(parts, divider,
 			lipgloss.NewStyle().Foreground(lipgloss.Color(sc.Pending)).Render(fmt.Sprintf("· %d pending", pending)))
+	}
+	if paused > 0 {
+		parts = append(parts, divider,
+			logoDimStyle.Render(fmt.Sprintf("⏸ %d paused", paused)))
 	}
 	if noRuns > 0 {
 		parts = append(parts, divider,
@@ -810,10 +818,11 @@ func (m Model) renderHelpModal(background string) string {
 		"  p health ping  •  T cycle theme  •  ? help  •  q quit",
 		"",
 		"Jobs List",
-		"  enter detail  •  t trigger  •  / filter jobs  •  esc clear filter",
+		"  enter detail  •  t trigger  •  P pause/unpause  •  / filter jobs",
+		"  esc clear filter",
 		"",
 		"Jobs Detail",
-		"  enter node info  •  t trigger  •  u runs  •  g logs",
+		"  enter node info  •  t trigger  •  P pause/unpause  •  u runs  •  g logs",
 		"  left/right traverse DAG  •  f focus path",
 		"",
 		"Runs + Logs",
@@ -863,6 +872,7 @@ func (m Model) renderNodeDetailModal(background string) string {
 	title := fmt.Sprintf("Node: %s (%s)", label, shortID(node.ID()))
 
 	var lines []string
+	definition, hasDefinition := m.taskDefinitions[node.ID()]
 
 	// Status
 	if task, ok := m.taskRunStatus[node.ID()]; ok {
@@ -884,12 +894,37 @@ func (m Model) renderNodeDetailModal(background string) string {
 		if task.StartedAt != nil {
 			lines = append(lines, fmt.Sprintf("  Started     %s", task.StartedAt.Format(time.RFC3339)))
 		}
+		if task.MaxAttempts > 0 {
+			lines = append(lines, fmt.Sprintf("  Attempts    %d/%d", max(task.Attempt, 1), task.MaxAttempts))
+		}
+		if task.OutstandingPredecessors > 0 {
+			lines = append(lines, fmt.Sprintf("  Waiting On  %d predecessor(s)", task.OutstandingPredecessors))
+		}
+		if len(task.NodeSelector) > 0 {
+			lines = append(lines, fmt.Sprintf("  Selector    %s", formatStringMap(task.NodeSelector)))
+		}
 		dur := formatTaskDuration(task)
 		if dur != "" {
 			lines = append(lines, fmt.Sprintf("  Duration    %s", dur))
 		}
 	} else {
 		lines = append(lines, "  Status      pending")
+	}
+
+	if hasDefinition {
+		triggerRule := strings.TrimSpace(definition.TriggerRule)
+		if triggerRule == "" {
+			triggerRule = "all_success"
+		}
+		lines = append(lines, fmt.Sprintf("  Rule        %s", triggerRule))
+		lines = append(lines, fmt.Sprintf("  Retries     %d", definition.Retries))
+		if definition.RetryDelay > 0 {
+			lines = append(lines, fmt.Sprintf("  Retry Delay %s", definition.RetryDelay))
+		}
+		lines = append(lines, fmt.Sprintf("  Backoff     %t", definition.RetryBackoff))
+		if len(definition.NodeSelector) > 0 {
+			lines = append(lines, fmt.Sprintf("  Selector    %s", formatStringMap(definition.NodeSelector)))
+		}
 	}
 
 	lines = append(lines, "")
@@ -998,6 +1033,18 @@ func actionConfirmCopy(req *actionRequest, jobLabel string) (string, string) {
 			label = "selected run"
 		}
 		return title, fmt.Sprintf("Re-run %s for %s?", label, jobLabel)
+	case actionPause:
+		title := "Pause Job"
+		if label == "" {
+			label = jobLabel
+		}
+		return title, fmt.Sprintf("Pause %s and block new runs?", label)
+	case actionUnpause:
+		title := "Unpause Job"
+		if label == "" {
+			label = jobLabel
+		}
+		return title, fmt.Sprintf("Unpause %s and allow new runs?", label)
 	default:
 		return "Confirm Action", "Proceed?"
 	}

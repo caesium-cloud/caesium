@@ -45,3 +45,47 @@ func TestJSONMapFromStringMapHandlesNil(t *testing.T) {
 	val := jsonmap.FromStringMap(nil)
 	require.Empty(t, val)
 }
+
+func TestSetPausedPausesJob(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	created, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "pause-test"})
+	require.NoError(t, err)
+	require.False(t, created.Paused)
+
+	updated, err := svc.SetPaused(created.ID, true)
+	require.NoError(t, err)
+	require.True(t, updated.Paused)
+
+	var stored models.Job
+	require.NoError(t, db.First(&stored, "id = ?", created.ID).Error)
+	require.True(t, stored.Paused)
+}
+
+func TestSetPausedUnpausesJob(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	created, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "unpause-test"})
+	require.NoError(t, err)
+
+	_, err = svc.SetPaused(created.ID, true)
+	require.NoError(t, err)
+
+	updated, err := svc.SetPaused(created.ID, false)
+	require.NoError(t, err)
+	require.False(t, updated.Paused)
+
+	var stored models.Job
+	require.NoError(t, db.First(&stored, "id = ?", created.ID).Error)
+	require.False(t, stored.Paused)
+}
+
+func TestSetPausedNotFoundReturnsError(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	_, err := svc.SetPaused(uuid.New(), true)
+	require.Error(t, err)
+}

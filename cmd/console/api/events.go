@@ -19,6 +19,8 @@ type EventType string
 const (
 	TypeJobCreated    EventType = "job_created"
 	TypeJobDeleted    EventType = "job_deleted"
+	TypeJobPaused     EventType = "job_paused"
+	TypeJobUnpaused   EventType = "job_unpaused"
 	TypeRunStarted    EventType = "run_started"
 	TypeRunCompleted  EventType = "run_completed"
 	TypeRunFailed     EventType = "run_failed"
@@ -26,6 +28,7 @@ const (
 	TypeTaskSucceeded EventType = "task_succeeded"
 	TypeTaskFailed    EventType = "task_failed"
 	TypeTaskSkipped   EventType = "task_skipped"
+	TypeTaskRetrying  EventType = "task_retrying"
 	TypeLogChunk      EventType = "log_chunk"
 )
 

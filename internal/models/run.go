@@ -16,6 +16,7 @@ type JobRun struct {
 	TriggerAlias string     `gorm:"type:text" json:"trigger_alias"`
 	Status       string     `gorm:"type:text;index;not null" json:"status"`
 	Error        string     `json:"error,omitempty"`
+	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
 	StartedAt    time.Time  `gorm:"not null" json:"started_at"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`
@@ -37,6 +38,8 @@ type TaskRun struct {
 	ClaimedBy               string            `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
 	ClaimExpiresAt          *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
 	ClaimAttempt            int               `gorm:"not null;default:0" json:"claim_attempt"`
+	Attempt                 int               `gorm:"not null;default:1" json:"attempt"`
+	MaxAttempts             int               `gorm:"not null;default:1" json:"max_attempts"`
 	NodeSelector            datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Result                  string            `json:"result,omitempty"`
 	Error                   string            `json:"error,omitempty"`

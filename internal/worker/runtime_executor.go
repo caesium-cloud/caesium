@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -52,21 +54,99 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		return
 	}
 
-	err := e.executeTask(ctx, taskRun)
-	if err == nil {
-		return
-	}
-	if errors.Is(err, run.ErrTaskClaimMismatch) {
-		log.Info("worker task claim changed; skipping execution result", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
-		return
+	jobAlias := ""
+	resolveJobAlias := func() string {
+		if jobAlias != "" {
+			return jobAlias
+		}
+
+		var result struct {
+			Alias string
+		}
+		if err := e.store.DB().
+			Table("job_runs").
+			Select("jobs.alias AS alias").
+			Joins("join jobs on jobs.id = job_runs.job_id").
+			Where("job_runs.id = ?", taskRun.JobRunID).
+			Take(&result).Error; err == nil && strings.TrimSpace(result.Alias) != "" {
+			jobAlias = result.Alias
+			return jobAlias
+		}
+
+		jobAlias = "unknown"
+		return jobAlias
 	}
 
-	if errors.Is(err, context.Canceled) {
-		log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
-		return
+	// Load the task model to get retry configuration.
+	var taskModel models.Task
+	hasTaskModel := e.store.DB().First(&taskModel, "id = ?", taskRun.TaskID).Error == nil
+
+	maxAttempts := taskRun.MaxAttempts
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	currentAttempt := taskRun.Attempt
+	if currentAttempt < 1 {
+		currentAttempt = 1
 	}
 
-	if persistErr := e.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, err, taskRun.ClaimedBy); persistErr != nil {
+	var lastErr error
+	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
+		execErr := e.executeTask(ctx, taskRun)
+		if execErr == nil {
+			return
+		}
+
+		if errors.Is(execErr, run.ErrTaskClaimMismatch) {
+			log.Info("worker task claim changed; skipping execution result", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+			return
+		}
+
+		if errors.Is(execErr, context.Canceled) {
+			log.Info("worker task canceled", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+			return
+		}
+
+		lastErr = execErr
+
+		// No more attempts — break to failure handling.
+		if attempt >= maxAttempts {
+			break
+		}
+
+		// Compute retry delay (retryDelay * 2^(attempt-1) if backoff, else retryDelay).
+		var delay time.Duration
+		if hasTaskModel && taskModel.RetryDelay > 0 {
+			delay = taskModel.RetryDelay
+			if taskModel.RetryBackoff {
+				delay = taskModel.RetryDelay * (1 << uint(attempt-1))
+			}
+		}
+
+		log.Info("retrying worker task", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
+
+		metrics.TaskRetriesTotal.WithLabelValues(resolveJobAlias(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
+
+		if retryErr := e.store.RetryTaskClaimed(taskRun.JobRunID, taskRun.TaskID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
+			if errors.Is(retryErr, run.ErrTaskClaimMismatch) {
+				log.Info("worker task claim changed before retry persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+				return
+			}
+			log.Error("failed to persist worker task retry state", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", retryErr)
+		}
+
+		// Update local attempt counter and sleep while renewing the lease.
+		taskRun.Attempt = attempt + 1
+		if delay > 0 {
+			e.sleepRenewingLease(ctx, taskRun, delay)
+		}
+
+		if ctx.Err() != nil {
+			return
+		}
+	}
+
+	if persistErr := e.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, lastErr, taskRun.ClaimedBy); persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
@@ -88,6 +168,38 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	for _, taskID := range descendants {
 		if skipErr := e.store.SkipTask(taskRun.JobRunID, taskID, reason); skipErr != nil {
 			log.Error("failed to persist skipped descendant task", "run_id", taskRun.JobRunID, "task_id", taskID, "error", skipErr)
+		}
+	}
+}
+
+// sleepRenewingLease sleeps for the given duration while periodically renewing the task lease.
+func (e *runtimeExecutor) sleepRenewingLease(ctx context.Context, taskRun *models.TaskRun, delay time.Duration) {
+	renewInterval := leaseRenewInterval(e.workerLeaseTTL)
+	deadline := time.Now().Add(delay)
+
+	for {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return
+		}
+
+		next := remaining
+		if renewInterval > 0 && renewInterval < next {
+			next = renewInterval
+		}
+
+		timer := time.NewTimer(next)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+
+		if time.Now().Before(deadline) {
+			if err := e.renewLease(taskRun); err != nil {
+				log.Error("failed to renew worker task lease during retry delay", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
+			}
 		}
 	}
 }
@@ -131,6 +243,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy); err != nil {
 		return err
+	}
+	if !run.IsSuccessfulTaskResult(string(a.Result())) {
+		return fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
 	}
 
 	return nil

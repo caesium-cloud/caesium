@@ -1,12 +1,15 @@
 package job
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
+	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
 )
 
 func List(c *echo.Context) error {
@@ -20,7 +23,18 @@ func List(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	return c.JSON(http.StatusOK, jobs)
+	resp := make([]*JobResponse, 0, len(jobs))
+	for _, entry := range jobs {
+		item := &JobResponse{Job: entry}
+		latest, latestErr := runsvc.New(c.Request().Context()).Latest(entry.ID)
+		if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
+			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(latestErr)
+		}
+		item.LatestRun = latest
+		resp = append(resp, item)
+	}
+
+	return c.JSON(http.StatusOK, resp)
 }
 
 func parseListRequest(c *echo.Context) (req *job.ListRequest, err error) {

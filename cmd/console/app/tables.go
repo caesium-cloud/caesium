@@ -29,7 +29,7 @@ func jobsToRows(jobs []api.Job, statuses map[string]*api.Run, spinnerFrame strin
 	rows := make([]table.Row, len(jobs))
 	for i, job := range jobs {
 		run := statuses[job.ID]
-		status := formatRunStatus(run, spinnerFrame)
+		status := formatJobStatus(job, run, spinnerFrame)
 		lastRun := "-"
 		duration := "-"
 		if run != nil {
@@ -46,6 +46,13 @@ func jobsToRows(jobs []api.Job, statuses map[string]*api.Run, spinnerFrame strin
 		}
 	}
 	return rows
+}
+
+func formatJobStatus(job api.Job, run *api.Run, spinnerFrame string) string {
+	if job.Paused {
+		return "⏸ Paused"
+	}
+	return formatRunStatus(run, spinnerFrame)
 }
 
 func formatRunStatus(run *api.Run, spinnerFrame string) string {

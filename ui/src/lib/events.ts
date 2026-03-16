@@ -31,7 +31,7 @@ class EventManager {
     this.eventSource = new EventSource(url);
 
     const eventTypes = [
-      "job_created", "job_deleted", 
+      "job_created", "job_deleted", "job_paused", "job_unpaused",
       "run_started", "run_completed", "run_failed",
       "task_started", "task_succeeded", "task_failed", "task_skipped",
       "log_chunk"

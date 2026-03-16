@@ -13,31 +13,35 @@ import (
 
 // Run represents a job execution run.
 type Run struct {
-	ID          string        `json:"id"`
-	JobID       string        `json:"job_id"`
-	Status      string        `json:"status"`
-	StartedAt   time.Time     `json:"started_at"`
-	CompletedAt *time.Time    `json:"completed_at"`
-	Error       string        `json:"error"`
-	Tasks       []RunTask     `json:"tasks"`
-	Callbacks   []RunCallback `json:"callbacks"`
+	ID          string            `json:"id"`
+	JobID       string            `json:"job_id"`
+	Status      string            `json:"status"`
+	Params      map[string]string `json:"params,omitempty"`
+	StartedAt   time.Time         `json:"started_at"`
+	CompletedAt *time.Time        `json:"completed_at"`
+	Error       string            `json:"error"`
+	Tasks       []RunTask         `json:"tasks"`
+	Callbacks   []RunCallback     `json:"callbacks"`
 }
 
 // RunTask contains per-task execution detail.
 type RunTask struct {
-	ID           string     `json:"id"`
-	AtomID       string     `json:"atom_id"`
-	Engine       string     `json:"engine"`
-	Image        string     `json:"image"`
-	Command      []string   `json:"command"`
-	RuntimeID    string     `json:"runtime_id"`
-	ClaimedBy    string     `json:"claimed_by,omitempty"`
-	ClaimAttempt int        `json:"claim_attempt,omitempty"`
-	Status       string     `json:"status"`
-	Result       string     `json:"result"`
-	StartedAt    *time.Time `json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at"`
-	Error        string     `json:"error"`
+	ID           string            `json:"id"`
+	AtomID       string            `json:"atom_id"`
+	Engine       string            `json:"engine"`
+	Image        string            `json:"image"`
+	Command      []string          `json:"command"`
+	RuntimeID    string            `json:"runtime_id"`
+	NodeSelector map[string]string `json:"node_selector,omitempty"`
+	ClaimedBy    string            `json:"claimed_by,omitempty"`
+	ClaimAttempt int               `json:"claim_attempt,omitempty"`
+	Attempt      int               `json:"attempt,omitempty"`
+	MaxAttempts  int               `json:"max_attempts,omitempty"`
+	Status       string            `json:"status"`
+	Result       string            `json:"result"`
+	StartedAt    *time.Time        `json:"started_at"`
+	CompletedAt  *time.Time        `json:"completed_at"`
+	Error        string            `json:"error"`
 	// OutstandingPredecessors captures how many predecessor tasks were incomplete when this task started.
 	OutstandingPredecessors int `json:"outstanding_predecessors,omitempty"`
 }

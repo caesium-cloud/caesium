@@ -1,12 +1,13 @@
 package job
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"cmp"
 	"fmt"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,11 +19,13 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/callback"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -38,6 +41,8 @@ type job struct {
 	triggerID              *uuid.UUID
 	maxParallelTasks       int
 	taskTimeout            time.Duration
+	alias                  string
+	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
 	taskServiceFactory     func(context.Context) task.Task
@@ -58,6 +63,7 @@ func New(m *models.Job, opts ...jobOption) Job {
 		triggerID:              &m.TriggerID,
 		maxParallelTasks:       m.MaxParallelTasks,
 		taskTimeout:            m.TaskTimeout,
+		alias:                  m.Alias,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -180,6 +186,27 @@ func withAtomPollInterval(interval time.Duration) jobOption {
 	}
 }
 
+// WithParams is an exported option that attaches run parameters to the job.
+// Parameters are injected into each task's environment as
+// CAESIUM_PARAM_<KEY>=<VALUE> (KEY uppercased).
+func WithParams(params map[string]string) jobOption {
+	return func(j *job) {
+		j.params = params
+	}
+}
+
+// buildParamEnv returns a map of environment variables derived from params.
+// It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
+func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
+	env := make(map[string]string, len(params)+2)
+	env["CAESIUM_RUN_ID"] = runID.String()
+	env["CAESIUM_JOB_ALIAS"] = jobAlias
+	for k, v := range params {
+		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
+	}
+	return env
+}
+
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
@@ -207,7 +234,7 @@ func (j *job) Run(ctx context.Context) error {
 			existing, err := store.Get(id)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return store.Start(j.id, j.triggerID)
+					return store.Start(j.id, j.triggerID, j.params)
 				}
 				return nil, err
 			}
@@ -230,7 +257,7 @@ func (j *job) Run(ctx context.Context) error {
 			return store.Get(running.ID)
 		}
 
-		return store.Start(j.id, j.triggerID)
+		return store.Start(j.id, j.triggerID, j.params)
 	}
 
 	snapshot, err := resolveRun()
@@ -272,10 +299,19 @@ func (j *job) Run(ctx context.Context) error {
 
 	taskOrder := make(map[uuid.UUID]int, len(tasks))
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
+	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
 	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
+	triggerRuleByTask := make(map[uuid.UUID]string, len(tasks))
 
 	for idx, t := range tasks {
 		taskOrder[t.ID] = idx
+		tasksByID[t.ID] = t
+
+		rule := t.TriggerRule
+		if rule == "" {
+			rule = jobdefschema.TriggerRuleAllSuccess
+		}
+		triggerRuleByTask[t.ID] = rule
 
 		modelAtom, err := svc.Get(t.AtomID)
 		if err != nil {
@@ -322,11 +358,13 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	adjacency := make(map[uuid.UUID][]uuid.UUID, len(tasks))
+	predecessors := make(map[uuid.UUID][]uuid.UUID, len(tasks))
 	indegree := make(map[uuid.UUID]int, len(tasks))
 	edgeSet := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
 
 	for _, t := range tasks {
 		adjacency[t.ID] = []uuid.UUID{}
+		predecessors[t.ID] = []uuid.UUID{}
 		indegree[t.ID] = 0
 	}
 
@@ -346,6 +384,7 @@ func (j *job) Run(ctx context.Context) error {
 			return
 		}
 		adjacency[from] = append(adjacency[from], to)
+		predecessors[to] = append(predecessors[to], from)
 		indegree[to]++
 		targets[to] = struct{}{}
 	}
@@ -385,6 +424,7 @@ func (j *job) Run(ctx context.Context) error {
 	queue := make([]uuid.UUID, 0, len(tasks))
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
 	processed := make(map[uuid.UUID]bool, len(tasks))
+	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
@@ -392,9 +432,11 @@ func (j *job) Run(ctx context.Context) error {
 		switch taskState.Status {
 		case run.TaskStatusSucceeded:
 			processed[taskState.ID] = true
+			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
 			terminalTasks++
 		case run.TaskStatusSkipped:
 			processed[taskState.ID] = true
+			taskOutcomes[taskState.ID] = run.TaskStatusSkipped
 			terminalTasks++
 		case run.TaskStatusFailed:
 			runErr = fmt.Errorf("task %s previously failed", taskState.ID)
@@ -411,6 +453,55 @@ func (j *job) Run(ctx context.Context) error {
 		slices.SortFunc(queue, func(a, b uuid.UUID) int {
 			return cmp.Compare(taskOrder[a], taskOrder[b])
 		})
+	}
+
+	propagateSkipped := func(start uuid.UUID) error {
+		queue := []uuid.UUID{start}
+		seen := map[uuid.UUID]struct{}{start: {}}
+
+		for len(queue) > 0 {
+			current := queue[0]
+			queue = queue[1:]
+
+			for _, successor := range adjacency[current] {
+				if processed[successor] {
+					continue
+				}
+				if _, ok := indegree[successor]; !ok {
+					continue
+				}
+				if indegree[successor] > 0 {
+					indegree[successor]--
+				}
+				if indegree[successor] != 0 {
+					continue
+				}
+
+				predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+				if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+					push(successor)
+					continue
+				}
+
+				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+				if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+					return err
+				}
+
+				taskOutcomes[successor] = run.TaskStatusSkipped
+				processed[successor] = true
+				terminalTasks++
+				delete(inQueue, successor)
+
+				if _, ok := seen[successor]; ok {
+					continue
+				}
+				seen[successor] = struct{}{}
+				queue = append(queue, successor)
+			}
+		}
+
+		return nil
 	}
 
 	for _, taskState := range currentRun.Tasks {
@@ -432,112 +523,145 @@ func (j *job) Run(ctx context.Context) error {
 		err error
 	}
 
+	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
+
+	// executeAtom creates, monitors, and stops a container for one execution attempt.
+	// It returns the atom result string and any error.
+	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner) (string, error) {
+		atomName := taskID.String()
+		if attempt > 1 {
+			atomName = fmt.Sprintf("%s-attempt%d", taskID, attempt)
+		}
+
+		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
+
+		spec := runner.spec
+		if len(paramEnv) > 0 {
+			merged := make(map[string]string, len(spec.Env)+len(paramEnv))
+			for k, v := range spec.Env {
+				merged[k] = v
+			}
+			for k, v := range paramEnv {
+				merged[k] = v
+			}
+			spec.Env = merged
+		}
+
+		a, err := runner.engine.Create(&atom.EngineCreateRequest{
+			Name:    atomName,
+			Image:   runner.image,
+			Command: runner.command,
+			Spec:    spec,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
+			return "", err
+		}
+
+		ticker := time.NewTicker(j.atomPollInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-taskCtx.Done():
+				if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+					if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+						ID:    a.ID(),
+						Force: true,
+					}); stopErr != nil {
+						return "", fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					}
+					return "", fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				}
+				return "", taskCtx.Err()
+			case <-ticker.C:
+				var fetchErr error
+				a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
+				if fetchErr != nil {
+					return "", fetchErr
+				}
+
+				if !a.StoppedAt().IsZero() {
+					log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
+
+					stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+						ID:    a.ID(),
+						Force: true,
+					})
+					return string(a.Result()), stopErr
+				}
+
+				log.Info("atom running", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "state", a.State())
+			}
+		}
+	}
+
 	runTask := func(taskID uuid.UUID) error {
 		runner := runners[taskID]
 		if runner == nil {
 			return fmt.Errorf("missing runner for task %s", taskID)
 		}
 
-		taskCtx := ctx
-		cancel := func() {}
-		if taskTimeout > 0 {
-			taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
+		taskModel := tasksByID[taskID]
+		maxAttempts := 1
+		if taskModel != nil && taskModel.Retries > 0 {
+			maxAttempts = taskModel.Retries + 1
 		}
-		defer cancel()
 
-		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command)
-
-		a, err := runner.engine.Create(&atom.EngineCreateRequest{
-			Name:    fmt.Sprintf("%s-%s", runID.String()[:8], taskID.String()),
-			Image:   runner.image,
-			Command: runner.command,
-			Spec:    runner.spec,
-		})
-		if err != nil {
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
+		var lastErr error
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			taskCtx := ctx
+			cancel := func() {}
+			if taskTimeout > 0 {
+				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
-			return err
-		}
 
-		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			return err
-		}
+			result, execErr := executeAtom(taskCtx, taskID, attempt, runner)
+			cancel()
 
-		monitor := func() error {
-			ticker := time.NewTicker(j.atomPollInterval)
-			defer ticker.Stop()
+			if execErr == nil {
+				if err := store.CompleteTask(runID, taskID, result); err != nil {
+					return err
+				}
+				if !run.IsSuccessfulTaskResult(result) {
+					return fmt.Errorf("task %s failed with result %q", taskID, result)
+				}
+				return nil
+			}
+			lastErr = execErr
 
-			for {
+			// No more attempts — mark as permanently failed.
+			if attempt >= maxAttempts {
+				break
+			}
+
+			// Compute retry delay.
+			delay := computeRetryDelay(taskModel, attempt)
+
+			log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
+
+			metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
+
+			if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
+				log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)
+			}
+
+			if delay > 0 {
 				select {
-				case <-taskCtx.Done():
-					if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-						if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-							ID:    a.ID(),
-							Force: true,
-						}); stopErr != nil {
-							return fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
-						}
-						return fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
-					}
-					return taskCtx.Err()
-				case <-ticker.C:
-					var fetchErr error
-					a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
-					if fetchErr != nil {
-						return fetchErr
-					}
-
-					if !a.StoppedAt().IsZero() {
-						log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
-
-						return runner.engine.Stop(&atom.EngineStopRequest{
-							ID:    a.ID(),
-							Force: true,
-						})
-					}
-
-					log.Info("atom running", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "state", a.State())
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(delay):
 				}
 			}
 		}
 
-		if err = monitor(); err != nil {
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
-			}
-			return err
+		if persistErr := store.FailTask(runID, taskID, lastErr); persistErr != nil {
+			log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 		}
-
-		atomResult := a.Result()
-		if atomResult != atom.Success {
-			var err error
-			switch atomResult {
-			case atom.Failure:
-				err = fmt.Errorf("command exited with non-zero status")
-			case atom.StartupFailure:
-				err = fmt.Errorf("atom failed to start (check image/command)")
-			case atom.ResourceFailure:
-				err = fmt.Errorf("atom exhausted resources (e.g. OOM)")
-			case atom.Killed:
-				err = fmt.Errorf("atom was forcefully killed")
-			case atom.Terminated:
-				err = fmt.Errorf("atom was gracefully terminated")
-			default:
-				err = fmt.Errorf("atom failed with result: %s", atomResult)
-			}
-
-			if persistErr := store.FailTask(runID, taskID, err); persistErr != nil {
-				log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
-			}
-			return err
-		}
-
-		if err := store.CompleteTask(runID, taskID, string(atomResult)); err != nil {
-			return err
-		}
-
-		return nil
+		return lastErr
 	}
 
 	taskPool := worker.NewPool(maxParallel)
@@ -592,6 +716,7 @@ func (j *job) Run(ctx context.Context) error {
 		terminalTasks++
 
 		if result.err != nil {
+			taskOutcomes[result.id] = run.TaskStatusFailed
 			if runErr == nil {
 				runErr = result.err
 			}
@@ -601,27 +726,90 @@ func (j *job) Run(ctx context.Context) error {
 				continue
 			}
 
-			descendants := collectDescendants(adjacency, result.id)
+			// With continueOnFailure: skip only downstream tasks whose trigger
+			// rules require all predecessors to succeed. Tasks with all_done,
+			// all_failed, or always rules are left to the normal indegree path
+			// so they can still run / evaluate their own rule.
 			skipReason := fmt.Sprintf("skipped due to failed dependency task %s", result.id)
-			for _, id := range descendants {
-				if processed[id] {
-					continue
-				}
-				if err := store.SkipTask(runID, id, skipReason); err != nil {
-					log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
-					if runErr == nil {
-						runErr = err
+			skipDescendantsFiltered(
+				adjacency, predecessors, triggerRuleByTask,
+				result.id, processed, inQueue,
+				func(id uuid.UUID) {
+					if err := store.SkipTask(runID, id, skipReason); err != nil {
+						log.Error("failed to persist task skip", "run_id", runID, "task_id", id, "error", err)
+						if runErr == nil {
+							runErr = err
+						}
+						halt = true
+						queue = queue[:0]
 					}
-					halt = true
-					queue = queue[:0]
-					break
+					taskOutcomes[id] = run.TaskStatusSkipped
+					processed[id] = true
+					terminalTasks++
+					delete(inQueue, id)
+					if err == nil && !halt {
+						if propErr := propagateSkipped(id); propErr != nil {
+							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", id, "error", propErr)
+							if runErr == nil {
+								runErr = propErr
+							}
+							halt = true
+							queue = queue[:0]
+						}
+					}
+				},
+			)
+
+			// Decrement indegree for successors that were NOT skipped (they
+			// have a failure-tolerant trigger rule). When their indegree
+			// reaches 0, evaluate the rule and push or skip accordingly.
+			if !halt {
+				for _, successor := range adjacency[result.id] {
+					if processed[successor] {
+						continue
+					}
+					if _, ok := indegree[successor]; !ok {
+						continue
+					}
+					if indegree[successor] > 0 {
+						indegree[successor]--
+					}
+					if indegree[successor] == 0 {
+						predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+						if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+							push(successor)
+						} else {
+							skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+							if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+								log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
+								if runErr == nil {
+									runErr = err
+								}
+								halt = true
+								queue = queue[:0]
+								break
+							}
+							taskOutcomes[successor] = run.TaskStatusSkipped
+							processed[successor] = true
+							terminalTasks++
+							delete(inQueue, successor)
+							if err := propagateSkipped(successor); err != nil {
+								log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
+								if runErr == nil {
+									runErr = err
+								}
+								halt = true
+								queue = queue[:0]
+								break
+							}
+						}
+					}
 				}
-				processed[id] = true
-				terminalTasks++
-				delete(inQueue, id)
 			}
 			continue
 		}
+
+		taskOutcomes[result.id] = run.TaskStatusSucceeded
 
 		if !halt {
 			for _, successor := range adjacency[result.id] {
@@ -632,7 +820,34 @@ func (j *job) Run(ctx context.Context) error {
 					indegree[successor]--
 				}
 				if indegree[successor] == 0 {
-					push(successor)
+					predStatuses := collectPredecessorStatuses(predecessors[successor], taskOutcomes)
+					if satisfiesTriggerRule(triggerRuleByTask[successor], predStatuses) {
+						push(successor)
+					} else {
+						skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", triggerRuleByTask[successor])
+						if err := store.SkipTask(runID, successor, skipRuleReason); err != nil {
+							log.Error("failed to persist trigger rule skip", "run_id", runID, "task_id", successor, "error", err)
+							if runErr == nil {
+								runErr = err
+							}
+							halt = true
+							queue = queue[:0]
+							break
+						}
+						taskOutcomes[successor] = run.TaskStatusSkipped
+						processed[successor] = true
+						terminalTasks++
+						delete(inQueue, successor)
+						if err := propagateSkipped(successor); err != nil {
+							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", successor, "error", err)
+							if runErr == nil {
+								runErr = err
+							}
+							halt = true
+							queue = queue[:0]
+							break
+						}
+					}
 				}
 			}
 		}

@@ -10,7 +10,7 @@ export function CaesiumLogo({ className }: CaesiumLogoProps) {
       xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 512 512"
       fill="none"
-      className={cn("text-primary", className)}
+      className={cn("text-caesium-cyan", className)}
     >
       <circle cx="256" cy="256" r="60" fill="currentColor" opacity="0.15" />
       <ellipse

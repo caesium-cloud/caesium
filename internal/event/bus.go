@@ -22,7 +22,10 @@ const (
 	TypeTaskSucceeded Type = "task_succeeded"
 	TypeTaskFailed    Type = "task_failed"
 	TypeTaskSkipped   Type = "task_skipped"
+	TypeTaskRetrying  Type = "task_retrying"
 	TypeLogChunk      Type = "log_chunk"
+	TypeJobPaused     Type = "job_paused"
+	TypeJobUnpaused   Type = "job_unpaused"
 )
 
 // Event represents a system event.

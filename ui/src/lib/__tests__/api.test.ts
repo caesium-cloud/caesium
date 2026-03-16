@@ -8,8 +8,9 @@ globalThis.fetch = mockFetch;
 function okResponse(body: unknown) {
   return {
     ok: true,
+    status: 200,
     headers: { get: (name: string) => (name === 'content-type' ? 'application/json' : null) },
-    json: () => Promise.resolve(body),
+    text: () => Promise.resolve(JSON.stringify(body)),
   };
 }
 

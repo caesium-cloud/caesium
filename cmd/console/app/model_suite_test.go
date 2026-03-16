@@ -200,6 +200,24 @@ func (s *ModelSuite) TestTriggerSelectedJobSetsState() {
 	s.Contains(model.confirmAction.label, "alias")
 }
 
+func (s *ModelSuite) TestTogglePauseSelectedJobSetsState() {
+	model := s.newReadyModel()
+	model.jobRecords = []api.Job{{ID: "job-1", Alias: "alias", Paused: false}}
+	model.jobs.SetRows([]table.Row{{"alias", "-", "-", "-", "-", "job-1"}})
+
+	cmd := model.togglePauseSelectedJob()
+	s.Nil(cmd)
+	s.NotNil(model.confirmAction)
+	s.Equal(actionPause, model.confirmAction.kind)
+
+	model.confirmAction = nil
+	model.jobRecords[0].Paused = true
+	cmd = model.togglePauseSelectedJob()
+	s.Nil(cmd)
+	s.NotNil(model.confirmAction)
+	s.Equal(actionUnpause, model.confirmAction.kind)
+}
+
 func (s *ModelSuite) TestConfirmActionStartsTrigger() {
 	cfg := &config.Config{BaseURL: s.mustParseURL("http://example.com"), HTTPTimeout: time.Second}
 	model := New(api.New(cfg))
@@ -287,6 +305,24 @@ func (s *ModelSuite) TestRerunCommandsUpdateActionStatus() {
 	res, _ = updated.Update(jobTriggerErrMsg{jobID: "job-1", err: errors.New("bad")})
 	updated = res.(Model)
 	s.Contains(updated.actionNotice, "Re-run failed")
+	s.Error(updated.actionErr)
+}
+
+func (s *ModelSuite) TestPauseCommandsUpdateActionStatus() {
+	model := s.newReadyModel()
+	model.jobRecords = []api.Job{{ID: "job-1", Alias: "alias"}}
+	model.actionPending = &actionRequest{kind: actionPause, jobID: "job-1"}
+
+	res, _ := model.Update(jobPauseToggledMsg{jobID: "job-1", job: &api.Job{ID: "job-1", Alias: "alias", Paused: true}, paused: true})
+	updated := res.(Model)
+	s.Nil(updated.actionPending)
+	s.Contains(updated.actionNotice, "Job paused")
+	s.True(updated.jobRecords[0].Paused)
+
+	updated.actionPending = &actionRequest{kind: actionUnpause, jobID: "job-1"}
+	res, _ = updated.Update(jobPauseErrMsg{jobID: "job-1", paused: false, err: errors.New("bad")})
+	updated = res.(Model)
+	s.Contains(updated.actionNotice, "Unpause failed")
 	s.Error(updated.actionErr)
 }
 

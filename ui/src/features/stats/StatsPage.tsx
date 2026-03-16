@@ -1,8 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { FailureDistributionChart } from "./components/FailureDistributionChart";
-import { SuccessRateTrendChart } from "./components/SuccessRateTrendChart";
 import {
   Table,
   TableBody,
@@ -56,26 +54,6 @@ export function StatsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{stats?.jobs.avg_duration_seconds.toFixed(2)}s</div>
-          </CardContent>
-        </Card>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle>Success Rate Trend (7d)</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <SuccessRateTrendChart data={stats?.success_rate_trend ?? []} />
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Failure Distribution</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <FailureDistributionChart data={stats?.top_failing ?? []} />
           </CardContent>
         </Card>
       </div>

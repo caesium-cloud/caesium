@@ -1,5 +1,13 @@
-import { createRootRoute, createRoute, createRouter, redirect, lazyRouteComponent } from "@tanstack/react-router";
+import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
 import { AppShell } from "./components/layout/AppShell";
+import { AtomsPage } from "./features/atoms/AtomsPage";
+import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
+import { JobsPage } from "./features/jobs/JobsPage";
+import { JobDetailPage } from "./features/jobs/JobDetailPage";
+import { RunDetailPage } from "./features/jobs/RunDetailPage";
+import { StatsPage } from "./features/stats/StatsPage";
+import { SystemPage } from "./features/system/SystemPage";
+import { TriggersPage } from "./features/triggers/TriggersPage";
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -14,49 +22,49 @@ const indexRoute = createRoute({
 const jobsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs",
-  component: lazyRouteComponent(() => import("./features/jobs/JobsPage"), "JobsPage"),
+  component: JobsPage,
 });
 
 const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId",
-  component: lazyRouteComponent(() => import("./features/jobs/JobDetailPage"), "JobDetailPage"),
+  component: JobDetailPage,
 });
 
 const runDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId/runs/$runId",
-  component: lazyRouteComponent(() => import("./features/jobs/RunDetailPage"), "RunDetailPage"),
+  component: RunDetailPage,
 });
 
 const statsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "stats",
-  component: lazyRouteComponent(() => import("./features/stats/StatsPage"), "StatsPage"),
-});
-
-const atomsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "atoms",
-  component: lazyRouteComponent(() => import("./features/atoms/AtomsPage"), "AtomsPage"),
-});
-
-const systemRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "system",
-  component: lazyRouteComponent(() => import("./features/system/SystemPage"), "SystemPage"),
+  component: StatsPage,
 });
 
 const triggersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "triggers",
-  component: lazyRouteComponent(() => import("./features/triggers/TriggersPage"), "TriggersPage"),
+  component: TriggersPage,
+});
+
+const atomsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "atoms",
+  component: AtomsPage,
+});
+
+const systemRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "system",
+  component: SystemPage,
 });
 
 const jobDefsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobdefs",
-  component: lazyRouteComponent(() => import("./features/jobdefs/JobDefsPage"), "JobDefsPage"),
+  component: JobDefsPage,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -65,9 +73,9 @@ const routeTree = rootRoute.addChildren([
   jobDetailRoute,
   runDetailRoute,
   statsRoute,
+  triggersRoute,
   atomsRoute,
   systemRoute,
-  triggersRoute,
   jobDefsRoute,
 ]);
 

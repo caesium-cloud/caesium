@@ -5,7 +5,8 @@ This directory contains user-facing guides, schema references, and planning note
 ## Start Here
 
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, and applying job manifests.
-- [console.md](console.md): Running and using the terminal UI console.
+- [airflow-parity.md](airflow-parity.md): Progress notes for Airflow-compatible job semantics and operator controls.
+- [ui_implementation_plan.md](ui_implementation_plan.md): Embedded web UI architecture and delivery plan.
 - [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Configuration, rollout, and troubleshooting for local/distributed parallel execution.
 
@@ -17,6 +18,7 @@ This directory contains user-facing guides, schema references, and planning note
 ## Planning
 
 - [job-definition-plan.md](job-definition-plan.md): Implementation roadmap and checklist for job definition ingestion and DAG execution.
+- [ui_implementation_plan.md](ui_implementation_plan.md): React/Vite roadmap for the embedded operator UI.
 
 ## Historical Notes
 

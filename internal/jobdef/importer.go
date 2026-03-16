@@ -121,7 +121,14 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 }
 
 func (i *Importer) createTrigger(tx *gorm.DB, alias string, trig *schema.Trigger, opts *ApplyOptions) (*models.Trigger, error) {
-	cfg, err := jsonutil.MarshalMapString(trig.Configuration)
+	cfgMap := trig.Configuration
+	if cfgMap == nil {
+		cfgMap = make(map[string]any)
+	}
+	if len(trig.DefaultParams) > 0 {
+		cfgMap["defaultParams"] = trig.DefaultParams
+	}
+	cfg, err := jsonutil.MarshalMapString(cfgMap)
 	if err != nil {
 		return nil, err
 	}
@@ -179,11 +186,20 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			return nil, err
 		}
 
+		triggerRule := strings.TrimSpace(step.TriggerRule)
+		if triggerRule == "" {
+			triggerRule = schema.TriggerRuleAllSuccess
+		}
+
 		task := &models.Task{
 			ID:           uuid.New(),
 			JobID:        job.ID,
 			AtomID:       atom.ID,
 			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
+			Retries:      step.Retries,
+			RetryDelay:   step.RetryDelay,
+			RetryBackoff: step.RetryBackoff,
+			TriggerRule:  triggerRule,
 		}
 
 		if err := tx.Create(task).Error; err != nil {
@@ -291,4 +307,3 @@ func (i *Importer) createCallbacks(tx *gorm.DB, jobID uuid.UUID, callbacks []sch
 	}
 	return nil
 }
-

@@ -63,3 +63,53 @@ func TestExtractLocationIgnoresEmpty(t *testing.T) {
 		t.Fatalf("expected nil location, got %v", loc)
 	}
 }
+
+func TestExtractDefaultParamsReturnsNilWhenAbsent(t *testing.T) {
+	params, err := extractDefaultParams(map[string]interface{}{})
+	if err != nil {
+		t.Fatalf("extractDefaultParams returned error: %v", err)
+	}
+	if params != nil {
+		t.Fatalf("expected nil params, got %v", params)
+	}
+}
+
+func TestExtractDefaultParamsReturnsNilWhenNilValue(t *testing.T) {
+	params, err := extractDefaultParams(map[string]interface{}{"defaultParams": nil})
+	if err != nil {
+		t.Fatalf("extractDefaultParams returned error: %v", err)
+	}
+	if params != nil {
+		t.Fatalf("expected nil params, got %v", params)
+	}
+}
+
+func TestExtractDefaultParamsParsesStringValues(t *testing.T) {
+	cfg := map[string]interface{}{
+		"defaultParams": map[string]interface{}{
+			"date": "2026-03-10",
+			"env":  "staging",
+		},
+	}
+
+	params, err := extractDefaultParams(cfg)
+	if err != nil {
+		t.Fatalf("extractDefaultParams returned error: %v", err)
+	}
+
+	if params["date"] != "2026-03-10" {
+		t.Fatalf("date = %q, want %q", params["date"], "2026-03-10")
+	}
+	if params["env"] != "staging" {
+		t.Fatalf("env = %q, want %q", params["env"], "staging")
+	}
+}
+
+func TestExtractDefaultParamsReturnsErrorForInvalidType(t *testing.T) {
+	cfg := map[string]interface{}{
+		"defaultParams": "not-a-map",
+	}
+	if _, err := extractDefaultParams(cfg); err == nil {
+		t.Fatal("expected error for non-map defaultParams")
+	}
+}

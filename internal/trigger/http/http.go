@@ -52,6 +52,10 @@ func (h *HTTP) Fire(ctx context.Context) error {
 	log.Info("running jobs", "count", len(jobs))
 
 	for _, j := range jobs {
+		if j.Paused {
+			log.Info("skipping paused job", "id", j.ID)
+			continue
+		}
 		go func() {
 			if err = job.New(j).Run(ctx); err != nil {
 				log.Error("job run failure", "id", j.ID, "error", err)

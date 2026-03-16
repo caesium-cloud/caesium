@@ -13,6 +13,7 @@ type Job struct {
 	ID                 string            `json:"id"`
 	Alias              string            `json:"alias"`
 	TriggerID          string            `json:"trigger_id"`
+	Paused             bool              `json:"paused"`
 	Labels             map[string]string `json:"labels"`
 	Annotations        map[string]string `json:"annotations"`
 	ProvenanceSourceID string            `json:"provenance_source_id"`
@@ -42,4 +43,32 @@ func (s *JobsService) List(ctx context.Context, params url.Values) (JobsResponse
 	}
 
 	return payload, nil
+}
+
+func (s *JobsService) Pause(ctx context.Context, jobID string) (*Job, error) {
+	return s.setPaused(ctx, jobID, true)
+}
+
+func (s *JobsService) Unpause(ctx context.Context, jobID string) (*Job, error) {
+	return s.setPaused(ctx, jobID, false)
+}
+
+func (s *JobsService) setPaused(ctx context.Context, jobID string, paused bool) (*Job, error) {
+	if jobID == "" {
+		return nil, fmt.Errorf("job id is required")
+	}
+
+	action := "pause"
+	if !paused {
+		action = "unpause"
+	}
+
+	endpoint := s.client.resolve(fmt.Sprintf("/v1/jobs/%s/%s", jobID, action))
+
+	var payload Job
+	if err := s.client.do(ctx, http.MethodPut, endpoint, &payload); err != nil {
+		return nil, fmt.Errorf("%s job: %w", action, err)
+	}
+
+	return &payload, nil
 }

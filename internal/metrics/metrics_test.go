@@ -31,6 +31,7 @@ func (s *MetricsSuite) SetupTest() {
 		WorkerClaimsTotal,
 		WorkerClaimContentionTotal,
 		WorkerLeaseExpirationsTotal,
+		TaskRetriesTotal,
 	)
 }
 

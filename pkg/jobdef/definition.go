@@ -22,6 +22,12 @@ const (
 	EngineDocker     = "docker"
 	EngineKubernetes = "kubernetes"
 	EnginePodman     = "podman"
+
+	TriggerRuleAllSuccess = "all_success"
+	TriggerRuleAllDone    = "all_done"
+	TriggerRuleAllFailed  = "all_failed"
+	TriggerRuleOneSuccess = "one_success"
+	TriggerRuleAlways     = "always"
 )
 
 // Definition models the root job document.
@@ -46,8 +52,9 @@ type Metadata struct {
 
 // Trigger defines how the job is triggered.
 type Trigger struct {
-	Type          string         `yaml:"type" json:"type"`
-	Configuration map[string]any `yaml:"configuration" json:"configuration"`
+	Type          string            `yaml:"type" json:"type"`
+	Configuration map[string]any    `yaml:"configuration" json:"configuration"`
+	DefaultParams map[string]string `yaml:"defaultParams,omitempty" json:"defaultParams,omitempty"`
 }
 
 // Callback defines a job callback (notification, etc.).
@@ -65,6 +72,10 @@ type Step struct {
 	NodeSelector   map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
 	Next           []string          `yaml:"next,omitempty" json:"next,omitempty"`
 	DependsOn      []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Retries        int               `yaml:"retries,omitempty" json:"retries,omitempty"`
+	RetryDelay     time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
+	RetryBackoff   bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	TriggerRule    string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -78,6 +89,10 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		NodeSelector   map[string]string `yaml:"nodeSelector"`
 		Next           interface{}       `yaml:"next"`
 		DependsOn      interface{}       `yaml:"dependsOn"`
+		Retries        int               `yaml:"retries"`
+		RetryDelay     time.Duration     `yaml:"retryDelay"`
+		RetryBackoff   bool              `yaml:"retryBackoff"`
+		TriggerRule    string            `yaml:"triggerRule"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -106,6 +121,10 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.NodeSelector = rs.NodeSelector
 	s.Next = nextList
 	s.DependsOn = dependsList
+	s.Retries = rs.Retries
+	s.RetryDelay = rs.RetryDelay
+	s.RetryBackoff = rs.RetryBackoff
+	s.TriggerRule = rs.TriggerRule
 	s.Spec = rs.Spec
 
 	return nil
@@ -234,6 +253,15 @@ func computeStepAdjacency(steps []Step) (map[string]int, map[string]map[string]s
 		}
 		if err := ensureUnique(step.DependsOn, fmt.Sprintf("steps[%d].dependsOn", i)); err != nil {
 			return nil, nil, err
+		}
+
+		if rule := strings.TrimSpace(step.TriggerRule); rule != "" {
+			switch rule {
+			case TriggerRuleAllSuccess, TriggerRuleAllDone, TriggerRuleAllFailed, TriggerRuleOneSuccess, TriggerRuleAlways:
+			default:
+				return nil, nil, fmt.Errorf("steps[%d].triggerRule %q must be one of [%s,%s,%s,%s,%s]",
+					i, rule, TriggerRuleAllSuccess, TriggerRuleAllDone, TriggerRuleAllFailed, TriggerRuleOneSuccess, TriggerRuleAlways)
+			}
 		}
 	}
 

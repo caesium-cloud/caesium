@@ -23,6 +23,7 @@ type Job interface {
 	Get(uuid.UUID) (*models.Job, error)
 	Create(*CreateRequest) (*models.Job, error)
 	Delete(uuid.UUID) error
+	SetPaused(id uuid.UUID, paused bool) (*models.Job, error)
 }
 
 type jobService struct {
@@ -205,4 +206,37 @@ func (j *jobService) Delete(id uuid.UUID) error {
 	}
 
 	return nil
+}
+
+func (j *jobService) SetPaused(id uuid.UUID, paused bool) (*models.Job, error) {
+	q := j.db.WithContext(j.ctx)
+
+	jobModel := &models.Job{ID: id}
+	if err := q.First(jobModel).Error; err != nil {
+		return nil, err
+	}
+
+	jobModel.Paused = paused
+	if err := q.Save(jobModel).Error; err != nil {
+		return nil, err
+	}
+
+	if j.bus != nil {
+		eventType := event.TypeJobPaused
+		if !paused {
+			eventType = event.TypeJobUnpaused
+		}
+		if payload, err := json.Marshal(jobModel); err != nil {
+			log.Error("failed to marshal job pause event", "error", err, "job_id", jobModel.ID)
+		} else {
+			j.bus.Publish(event.Event{
+				Type:      eventType,
+				JobID:     jobModel.ID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			})
+		}
+	}
+
+	return jobModel, nil
 }

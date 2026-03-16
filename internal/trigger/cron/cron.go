@@ -19,9 +19,10 @@ import (
 
 type Cron struct {
 	trigger.Trigger
-	schedule cron.Schedule
-	id       uuid.UUID
-	location *time.Location
+	schedule      cron.Schedule
+	id            uuid.UUID
+	location      *time.Location
+	defaultParams map[string]string
 }
 
 func New(t *models.Trigger) (*Cron, error) {
@@ -48,6 +49,11 @@ func New(t *models.Trigger) (*Cron, error) {
 		return nil, err
 	}
 
+	defaultParams, err := extractDefaultParams(m)
+	if err != nil {
+		return nil, err
+	}
+
 	parser := cron.NewParser(
 		cron.Minute |
 			cron.Hour |
@@ -61,7 +67,7 @@ func New(t *models.Trigger) (*Cron, error) {
 		return nil, err
 	}
 
-	return &Cron{schedule: sched, id: t.ID, location: loc}, nil
+	return &Cron{schedule: sched, id: t.ID, location: loc, defaultParams: defaultParams}, nil
 }
 
 func (c *Cron) Listen(ctx context.Context) {
@@ -98,9 +104,14 @@ func (c *Cron) Fire(ctx context.Context) error {
 	log.Info("running jobs", "count", len(jobs))
 
 	for _, j := range jobs {
+		if j.Paused {
+			log.Info("skipping paused job", "id", j.ID)
+			continue
+		}
 		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
+		params := c.defaultParams
 		go func() {
-			if err = job.New(j).Run(ctx); err != nil {
+			if err = job.New(j, job.WithParams(params)).Run(ctx); err != nil {
 				log.Error("job run failure", "id", j.ID, "error", err)
 			}
 		}()
@@ -143,6 +154,29 @@ func extractLocation(cfg map[string]interface{}) (*time.Location, error) {
 		return loc, nil
 	default:
 		return nil, fmt.Errorf("timezone must be a string")
+	}
+}
+
+func extractDefaultParams(cfg map[string]interface{}) (map[string]string, error) {
+	raw, ok := cfg["defaultParams"]
+	if !ok || raw == nil {
+		return nil, nil
+	}
+
+	switch v := raw.(type) {
+	case map[string]interface{}:
+		out := make(map[string]string, len(v))
+		for key, val := range v {
+			switch s := val.(type) {
+			case string:
+				out[key] = s
+			default:
+				out[key] = fmt.Sprintf("%v", val)
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("defaultParams must be a map of string keys and string values")
 	}
 }
 

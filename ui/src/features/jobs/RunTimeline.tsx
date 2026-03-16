@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { TaskRun } from "@/lib/api";
+import { shortId } from "@/lib/utils";
 
 interface Props {
   tasks: TaskRun[];
@@ -99,8 +100,8 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
           const barW = Math.max(2, ((end - start) / maxEnd) * BAR_AREA);
           const color = STATUS_COLORS[task.status] ?? STATUS_COLORS.pending;
           const label = task.image
-            ? task.image.split("/").pop()?.split(":")[0] ?? task.atom_id.substring(0, 8)
-            : task.atom_id.substring(0, 8);
+            ? task.image.split("/").pop()?.split(":")[0] ?? shortId(task.atom_id)
+            : shortId(task.atom_id);
           const duration = end - start;
 
           return (

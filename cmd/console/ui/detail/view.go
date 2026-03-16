@@ -3,6 +3,7 @@ package detail
 import (
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -73,6 +74,7 @@ func Render(vm ViewModel) string {
 	sections := []string{
 		renderHeader(vm.Job),
 		renderMetadata(vm.Job),
+		renderTrigger(vm.Job.Trigger),
 		renderRunSection(vm.Job, vm.ActiveRun, vm.Spinner),
 		renderRunProgress(vm.ActiveRun),
 		renderGraph(vm.Graph, vm.GraphErr, vm.GraphLayout, vm.GraphViewport, vm.FocusPath, vm.Labeler),
@@ -133,16 +135,36 @@ func renderHeader(detail *api.JobDetail) string {
 	if detail.Trigger != nil {
 		sub += fmt.Sprintf("  •  Trigger: %s (%s)", detail.Trigger.Type, detail.Trigger.Alias)
 	}
+	if detail.Job.Paused {
+		sub += "  •  State: paused"
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, title, labelStyle.Render(sub))
 }
 
 func renderMetadata(detail *api.JobDetail) string {
 	items := []string{
+		fmt.Sprintf("%s: %s", labelStyle.Render("Paused"), valueStyle.Render(boolLabel(detail.Job.Paused))),
 		formatKVPairs("Labels", detail.Job.Labels),
 		formatKVPairs("Annotations", detail.Job.Annotations),
 	}
 	return renderSection("Metadata", strings.Join(items, "\n"))
+}
+
+func renderTrigger(trigger *api.TriggerDetail) string {
+	if trigger == nil {
+		return ""
+	}
+
+	lines := []string{
+		fmt.Sprintf("%s: %s", labelStyle.Render("Alias"), valueStyle.Render(trigger.Alias)),
+		fmt.Sprintf("%s: %s", labelStyle.Render("Type"), valueStyle.Render(trigger.Type)),
+	}
+	if cfg := strings.TrimSpace(trigger.Configuration); cfg != "" {
+		lines = append(lines, fmt.Sprintf("%s: %s", labelStyle.Render("Configuration"), valueStyle.Render(cfg)))
+	}
+
+	return renderSection("Trigger", strings.Join(lines, "\n"))
 }
 
 func renderRunSection(detail *api.JobDetail, active *api.Run, spinnerFrame string) string {
@@ -169,6 +191,9 @@ func renderRunSection(detail *api.JobDetail, active *api.Run, spinnerFrame strin
 	}
 	if strings.TrimSpace(run.Error) != "" {
 		lines = append(lines, errorStyle.Render(run.Error))
+	}
+	if len(run.Params) > 0 {
+		lines = append(lines, fmt.Sprintf("%s: %s", labelStyle.Render("Params"), valueStyle.Render(formatInlineMap(run.Params))))
 	}
 	if summary := taskSummary(run.Tasks, spinnerFrame); summary != "" {
 		lines = append(lines, summary)
@@ -223,6 +248,32 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:8]
+}
+
+func boolLabel(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+func formatInlineMap(values map[string]string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s=%s", key, values[key]))
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 func formatKVPairs(label string, values map[string]string) string {

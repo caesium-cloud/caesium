@@ -27,7 +27,11 @@ export function AppShell() {
       if (e.key === "g") {
         const nextKeyHandler = (nextEvent: KeyboardEvent) => {
           if (nextEvent.key === "j") navigate({ to: "/jobs" });
+          if (nextEvent.key === "t") navigate({ to: "/triggers" });
+          if (nextEvent.key === "a") navigate({ to: "/atoms" });
           if (nextEvent.key === "s") navigate({ to: "/stats" });
+          if (nextEvent.key === "y") navigate({ to: "/system" });
+          if (nextEvent.key === "d") navigate({ to: "/jobdefs" });
           window.removeEventListener("keydown", nextKeyHandler);
         };
         window.addEventListener("keydown", nextKeyHandler, { once: true });
@@ -41,11 +45,11 @@ export function AppShell() {
   }, [navigate]);
 
   return (
-    <div className="flex h-screen w-full bg-background">
+    <div className="flex h-screen w-full bg-transparent text-foreground">
       <Sidebar />
       <div className="flex flex-col flex-1 overflow-hidden">
         <Header />
-        <main className="flex-1 overflow-auto p-6 animate-in fade-in duration-500">
+        <main className="flex-1 overflow-auto p-6 animate-in fade-in duration-500 md:p-8">
           <Outlet />
         </main>
       </div>

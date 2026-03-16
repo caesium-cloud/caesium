@@ -44,6 +44,8 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
+		g.PUT("/jobs/:id/pause", job.Pause)
+		g.PUT("/jobs/:id/unpause", job.Unpause)
 		g.DELETE("/jobs/:id", job.Delete)
 	}
 

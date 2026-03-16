@@ -13,11 +13,9 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-var e *echo.Echo
-
 // Start launches Caesium's API.
 func Start(ctx context.Context, bus event.Bus) error {
-	e = echo.New()
+	e := echo.New()
 
 	// health
 	e.GET("/health", Health)
@@ -33,11 +31,15 @@ func Start(ctx context.Context, bus event.Bus) error {
 	// GraphQL
 	e.GET("/gql", gql.Handler())
 
-	// UI
+	// Embedded web UI
 	RegisterUI(e)
 
 	sc := echo.StartConfig{
 		Address: fmt.Sprintf(":%v", env.Variables().Port),
 	}
 	return sc.Start(ctx, e)
+}
+
+func Shutdown() error {
+	return nil
 }
