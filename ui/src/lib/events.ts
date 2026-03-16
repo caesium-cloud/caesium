@@ -1,4 +1,5 @@
 export interface CaesiumEvent {
+  sequence?: number;
   type: string;
   job_id?: string;
   run_id?: string;
@@ -8,12 +9,17 @@ export interface CaesiumEvent {
 }
 
 type EventHandler = (event: CaesiumEvent) => void;
+type ConnectionHandler = (connected: boolean) => void;
 
 class EventManager {
   private eventSource: EventSource | null = null;
   private listeners: Map<string, EventHandler[]> = new Map();
+  private connectionListeners: ConnectionHandler[] = [];
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private filters: Record<string, string> = {};
+  private connected = false;
+  private lastEventAt = 0;
+  private lastErrorAt = 0;
 
   connect(filters: Record<string, string> = {}) {
     this.filters = filters;
@@ -29,11 +35,19 @@ class EventManager {
     const url = `/v1/events?${params.toString()}`;
 
     this.eventSource = new EventSource(url);
+    this.connected = false;
+    this.emitConnection();
+
+    this.eventSource.onopen = () => {
+      this.connected = true;
+      this.emitConnection();
+    };
 
     const eventTypes = [
       "job_created", "job_deleted", "job_paused", "job_unpaused",
-      "run_started", "run_completed", "run_failed",
-      "task_started", "task_succeeded", "task_failed", "task_skipped",
+      "run_started", "run_completed", "run_failed", "run_terminal",
+      "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying",
+      "task_ready", "task_claimed", "task_lease_expired",
       "log_chunk"
     ];
 
@@ -59,6 +73,9 @@ class EventManager {
     };
 
     this.eventSource.onerror = () => {
+      this.connected = false;
+      this.lastErrorAt = Date.now();
+      this.emitConnection();
       this.eventSource?.close();
       this.eventSource = null;
       if (!this.reconnectTimer) {
@@ -87,6 +104,25 @@ class EventManager {
     }
   }
 
+  subscribeConnection(handler: ConnectionHandler) {
+    this.connectionListeners.push(handler);
+  }
+
+  unsubscribeConnection(handler: ConnectionHandler) {
+    this.connectionListeners = this.connectionListeners.filter((listener) => listener !== handler);
+  }
+
+  isHealthy() {
+    if (this.connected) {
+      // If connected but no events for 60s, consider stale (fallback polling kicks in)
+      if (this.lastEventAt > 0 && Date.now() - this.lastEventAt > 60000) {
+        return false;
+      }
+      return true;
+    }
+    return Date.now() - this.lastErrorAt < 10000;
+  }
+
   disconnect() {
     if (this.eventSource) {
       this.eventSource.close();
@@ -96,14 +132,21 @@ class EventManager {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.connected = false;
+    this.emitConnection();
   }
 
   private emit(event: CaesiumEvent) {
+    this.lastEventAt = Date.now();
     const handlers = this.listeners.get(event.type);
     if (handlers) {
       handlers.forEach((h) => h(event));
     }
     // Also emit to wildcard or general listeners if needed
+  }
+
+  private emitConnection() {
+    this.connectionListeners.forEach((listener) => listener(this.isHealthy()));
   }
 }
 

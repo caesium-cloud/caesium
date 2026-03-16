@@ -41,6 +41,7 @@ type podmanBackend interface {
 	ContainerList(map[string][]string, bool) ([]entities.ListContainer, error)
 	ContainerCreate(*specgen.SpecGenerator) (entities.ContainerCreateResponse, error)
 	ContainerStart(string) error
+	ContainerWait(string, context.Context) error
 	ContainerStop(string, *time.Duration) error
 	ContainerRemove(string, *bool, *bool) error
 	ContainerLogs(string, containers.LogOptions) (io.ReadCloser, error)
@@ -65,6 +66,15 @@ func (cli *podmanClient) ContainerCreate(spec *specgen.SpecGenerator) (entities.
 
 func (cli *podmanClient) ContainerStart(id string) error {
 	return containers.Start(cli.ctx, id, nil)
+}
+
+func (cli *podmanClient) ContainerWait(id string, ctx context.Context) error {
+	waitCtx := cli.ctx
+	if ctx != nil {
+		waitCtx = ctx
+	}
+	_, err := containers.Wait(waitCtx, id, nil)
+	return err
 }
 
 func (cli *podmanClient) ContainerStop(id string, timeout *time.Duration) error {

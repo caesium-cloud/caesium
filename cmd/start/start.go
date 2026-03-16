@@ -192,7 +192,8 @@ func start(cmd *cobra.Command, args []string) error {
 			store := run.Default()
 			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
 			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
-			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn)
+			wakeups := worker.SubscribeWakeups(ctx, bus)
+			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).WithWakeups(wakeups)
 			errs <- w.Run(ctx)
 		}()
 	} else {

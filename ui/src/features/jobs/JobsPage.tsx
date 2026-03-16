@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pause, Play } from "lucide-react";
@@ -22,16 +22,32 @@ import { cn, shortId } from "@/lib/utils";
 export function JobsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const { data: jobs, isLoading, error } = useQuery({
     queryKey: ["jobs"],
     queryFn: api.getJobs,
-    refetchInterval: 30000,
+    refetchInterval: streamHealthy ? false : 15000,
   });
 
   useEffect(() => {
+    const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     const onRunEvent = (e: CaesiumEvent) => {
-      queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      queryClient.invalidateQueries({ queryKey: ["job", e.job_id] });
+      const payload = e.payload as JobRun | undefined;
+      const run = payload && payload.id ? payload : undefined;
+      if (!run?.job_id && !e.job_id) {
+        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        return;
+      }
+
+      const jobID = run?.job_id || e.job_id!;
+      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+        old?.map((job) => (job.id === jobID ? { ...job, latest_run: run ? { ...job.latest_run, ...run } : job.latest_run } : job)),
+      );
+      if (run) {
+        queryClient.setQueryData(["job", jobID], (old: Job | undefined) =>
+          old ? { ...old, latest_run: { ...old.latest_run, ...run } } : old,
+        );
+      }
     };
 
     const onPauseEvent = (e: CaesiumEvent) => {
@@ -49,11 +65,13 @@ export function JobsPage() {
       );
     };
 
-    ["run_started", "run_completed", "run_failed"].forEach((type) => events.subscribe(type, onRunEvent));
+    events.subscribeConnection(onConnection);
+    ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((type) => events.subscribe(type, onRunEvent));
     ["job_paused", "job_unpaused"].forEach((type) => events.subscribe(type, onPauseEvent));
 
     return () => {
-      ["run_started", "run_completed", "run_failed"].forEach((type) => events.unsubscribe(type, onRunEvent));
+      events.unsubscribeConnection(onConnection);
+      ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((type) => events.unsubscribe(type, onRunEvent));
       ["job_paused", "job_unpaused"].forEach((type) => events.unsubscribe(type, onPauseEvent));
     };
   }, [queryClient]);

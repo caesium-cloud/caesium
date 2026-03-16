@@ -13,23 +13,28 @@ import (
 type Type string
 
 const (
-	TypeJobCreated    Type = "job_created"
-	TypeJobDeleted    Type = "job_deleted"
-	TypeRunStarted    Type = "run_started"
-	TypeRunCompleted  Type = "run_completed"
-	TypeRunFailed     Type = "run_failed"
-	TypeTaskStarted   Type = "task_started"
-	TypeTaskSucceeded Type = "task_succeeded"
-	TypeTaskFailed    Type = "task_failed"
-	TypeTaskSkipped   Type = "task_skipped"
-	TypeTaskRetrying  Type = "task_retrying"
-	TypeLogChunk      Type = "log_chunk"
-	TypeJobPaused     Type = "job_paused"
-	TypeJobUnpaused   Type = "job_unpaused"
+	TypeJobCreated       Type = "job_created"
+	TypeJobDeleted       Type = "job_deleted"
+	TypeRunStarted       Type = "run_started"
+	TypeRunCompleted     Type = "run_completed"
+	TypeRunFailed        Type = "run_failed"
+	TypeRunTerminal      Type = "run_terminal"
+	TypeTaskStarted      Type = "task_started"
+	TypeTaskSucceeded    Type = "task_succeeded"
+	TypeTaskFailed       Type = "task_failed"
+	TypeTaskSkipped      Type = "task_skipped"
+	TypeTaskRetrying     Type = "task_retrying"
+	TypeTaskReady        Type = "task_ready"
+	TypeTaskClaimed      Type = "task_claimed"
+	TypeTaskLeaseExpired Type = "task_lease_expired"
+	TypeLogChunk         Type = "log_chunk"
+	TypeJobPaused        Type = "job_paused"
+	TypeJobUnpaused      Type = "job_unpaused"
 )
 
 // Event represents a system event.
 type Event struct {
+	Sequence  uint64          `json:"sequence,omitempty"`
 	Type      Type            `json:"type"`
 	JobID     uuid.UUID       `json:"job_id,omitempty"`
 	RunID     uuid.UUID       `json:"run_id,omitempty"`

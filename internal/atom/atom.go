@@ -1,6 +1,7 @@
 package atom
 
 import (
+	"context"
 	"io"
 	"time"
 
@@ -27,6 +28,7 @@ type Engine interface {
 	Get(*EngineGetRequest) (Atom, error)
 	List(*EngineListRequest) ([]Atom, error)
 	Create(*EngineCreateRequest) (Atom, error)
+	Wait(*EngineWaitRequest) (Atom, error)
 	Stop(*EngineStopRequest) error
 	Logs(*EngineLogsRequest) (io.ReadCloser, error)
 }
@@ -51,6 +53,11 @@ type EngineCreateRequest struct {
 	Image   string
 	Command []string
 	Spec    container.Spec
+}
+
+type EngineWaitRequest struct {
+	ID      string
+	Context context.Context
 }
 
 // EngineStopRequest defines the input parameters to

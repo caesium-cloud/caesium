@@ -111,8 +111,9 @@ type JobRun struct {
 }
 
 type Store struct {
-	db  *gorm.DB
-	bus event.Bus
+	db         *gorm.DB
+	bus        event.Bus
+	eventStore *event.Store
 
 	// startedMu guards startedRuns.
 	startedMu sync.Mutex
@@ -133,7 +134,11 @@ func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
 		panic("run store requires database connection")
 	}
-	return &Store{db: conn, startedRuns: make(map[uuid.UUID]struct{})}
+	return &Store{
+		db:          conn,
+		eventStore:  event.NewStore(conn),
+		startedRuns: make(map[uuid.UUID]struct{}),
+	}
 }
 
 func Default() *Store {
@@ -145,6 +150,21 @@ func Default() *Store {
 
 func (s *Store) SetBus(bus event.Bus) {
 	s.bus = bus
+}
+
+func (s *Store) Bus() event.Bus {
+	return s.bus
+}
+
+func (s *Store) EventStore() *event.Store {
+	return s.eventStore
+}
+
+func (s *Store) RecordEventTx(tx *gorm.DB, evt *event.Event) error {
+	if evt == nil || s.eventStore == nil {
+		return nil
+	}
+	return s.eventStore.AppendTx(tx, evt)
 }
 
 func (s *Store) DB() *gorm.DB {
@@ -170,7 +190,41 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 		model.Params = encoded
 	}
 
-	if err := s.db.Create(model).Error; err != nil {
+	pendingEvents := make([]event.Event, 0, 1)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(model).Error; err != nil {
+			return err
+		}
+
+		if s.eventStore != nil {
+			payload, err := json.Marshal(&JobRun{
+				ID:        model.ID,
+				JobID:     model.JobID,
+				Status:    Status(model.Status),
+				StartedAt: model.StartedAt,
+				CreatedAt: model.CreatedAt,
+				UpdatedAt: model.UpdatedAt,
+				Tasks:     []*TaskRun{},
+			})
+			if err != nil {
+				return err
+			}
+
+			evt := event.Event{
+				Type:      event.TypeRunStarted,
+				JobID:     jobID,
+				RunID:     model.ID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			}
+			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
+		}
+
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 
@@ -180,24 +234,9 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 	s.startedMu.Unlock()
 
 	run, err := s.loadRun(model.ID)
-	if err == nil && s.bus != nil {
-		// Ensure run object has JobID (it should from loadRun, but let's be safe for the event)
-		if run.JobID == uuid.Nil {
-			run.JobID = jobID
-		}
-		if payload, marshalErr := json.Marshal(run); marshalErr != nil {
-			log.Error("failed to marshal run started event", "error", marshalErr, "run_id", model.ID)
-		} else {
-			s.bus.Publish(event.Event{
-				Type:      event.TypeRunStarted,
-				JobID:     jobID,
-				RunID:     model.ID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
-			})
-		}
+	if err == nil {
+		s.publishEvents(pendingEvents...)
 	}
-
 	return run, err
 }
 
@@ -244,46 +283,92 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		OutstandingPredecessors: outstanding,
 	}
 
-	return s.db.Create(record).Error
+	pendingEvents := make([]event.Event, 0, 1)
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(record).Error; err != nil {
+			return err
+		}
+		if outstanding == 0 && s.eventStore != nil {
+			evt := event.Event{
+				Type:      event.TypeTaskReady,
+				RunID:     runID,
+				TaskID:    task.ID,
+				Timestamp: time.Now().UTC(),
+			}
+			var jobRun models.JobRun
+			if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
+				evt.JobID = jobRun.JobID
+			}
+			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
+		}
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
+	}
+	return err
 }
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 	now := time.Now().UTC()
-	err := s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		Updates(map[string]interface{}{
-			"status":     string(TaskStatusRunning),
-			"runtime_id": runtimeID,
-			"started_at": now,
-		}).Error
-
-	if err == nil && s.bus != nil {
-		s.publishTaskEvent(s.db, event.TypeTaskStarted, runID, taskID)
+	pendingEvents := make([]event.Event, 0, 1)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID).
+			Updates(map[string]interface{}{
+				"status":     string(TaskStatusRunning),
+				"runtime_id": runtimeID,
+				"started_at": now,
+			}).Error; err != nil {
+			return err
+		}
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
+		}
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
 	}
-
 	return err
 }
 
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
 	now := time.Now().UTC()
-	result := s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
-		Updates(map[string]interface{}{
-			"runtime_id": runtimeID,
-			"started_at": now,
-		})
-	if result.Error != nil {
-		return result.Error
+	pendingEvents := make([]event.Event, 0, 1)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
+			Updates(map[string]interface{}{
+				"runtime_id": runtimeID,
+				"started_at": now,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected == 0 {
+			return ErrTaskClaimMismatch
+		}
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
+		}
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
 	}
-	if result.RowsAffected == 0 {
-		return ErrTaskClaimMismatch
-	}
-
-	if s.bus != nil {
-		s.publishTaskEvent(s.db, event.TypeTaskStarted, runID, taskID)
-	}
-
-	return nil
+	return err
 }
 
 func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
@@ -295,7 +380,8 @@ func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy s
 }
 
 func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
+	pendingEvents := make([]event.Event, 0, 8)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
 		status := taskStatusFromResult(result)
@@ -358,8 +444,12 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		}
 
 		if status == TaskStatusFailed {
-			if s.bus != nil {
-				s.publishTaskEvent(tx, event.TypeTaskFailed, runID, taskID)
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
+				if err != nil {
+					return err
+				}
+				pendingEvents = append(pendingEvents, *evt)
 			}
 			return nil
 		}
@@ -403,14 +493,42 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 				return err
 			}
+
+			var successor models.TaskRun
+			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
+				successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) && s.eventStore != nil {
+				var jobRun models.JobRun
+				if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+					return err
+				}
+				evt := event.Event{
+					Type:      event.TypeTaskReady,
+					JobID:     jobRun.JobID,
+					RunID:     runID,
+					TaskID:    edge.ToTaskID,
+					Timestamp: time.Now().UTC(),
+				}
+				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+					return err
+				}
+				pendingEvents = append(pendingEvents, evt)
+			}
 		}
 
-		if s.bus != nil {
-			s.publishTaskEvent(tx, event.TypeTaskSucceeded, runID, taskID)
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
 		}
 
 		return nil
 	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
+	}
+	return err
 }
 
 func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
@@ -449,29 +567,39 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		return ErrTaskClaimMismatch
 	}
 
-	updateQuery := s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID)
-	if enforceClaim {
-		updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
-	}
-	resultUpdate := updateQuery.
-		Updates(map[string]interface{}{
-			"status":       string(TaskStatusFailed),
-			"completed_at": now,
-			"error":        errMsg,
-		})
-	if resultUpdate.Error != nil {
-		return resultUpdate.Error
-	}
-	if enforceClaim && resultUpdate.RowsAffected == 0 {
-		return ErrTaskClaimMismatch
-	}
+	pendingEvents := make([]event.Event, 0, 1)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		updateQuery := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+		if enforceClaim {
+			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+		}
+		resultUpdate := updateQuery.
+			Updates(map[string]interface{}{
+				"status":       string(TaskStatusFailed),
+				"completed_at": now,
+				"error":        errMsg,
+			})
+		if resultUpdate.Error != nil {
+			return resultUpdate.Error
+		}
+		if enforceClaim && resultUpdate.RowsAffected == 0 {
+			return ErrTaskClaimMismatch
+		}
 
-	if s.bus != nil {
-		s.publishTaskEvent(s.db, event.TypeTaskFailed, runID, taskID)
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
+		}
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
 	}
-
-	return nil
+	return err
 }
 
 // RetryTask resets a failed task run back to pending and increments its Attempt counter.
@@ -485,48 +613,90 @@ func (s *Store) RetryTaskClaimed(runID, taskID uuid.UUID, attempt int, claimedBy
 }
 
 func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
-	updateQuery := s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID)
-	if enforceClaim {
-		updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
-	}
-	resultUpdate := updateQuery.
-		Updates(map[string]interface{}{
-			"status":       string(TaskStatusPending),
-			"attempt":      attempt,
-			"runtime_id":   "",
-			"started_at":   nil,
-			"completed_at": nil,
-			"error":        "",
-		})
-	if resultUpdate.Error != nil {
-		return resultUpdate.Error
-	}
-	if enforceClaim && resultUpdate.RowsAffected == 0 {
-		return ErrTaskClaimMismatch
-	}
+	pendingEvents := make([]event.Event, 0, 2)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		updateQuery := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+		if enforceClaim {
+			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+		}
+		resultUpdate := updateQuery.
+			Updates(map[string]interface{}{
+				"status":       string(TaskStatusPending),
+				"attempt":      attempt,
+				"runtime_id":   "",
+				"started_at":   nil,
+				"completed_at": nil,
+				"error":        "",
+			})
+		if resultUpdate.Error != nil {
+			return resultUpdate.Error
+		}
+		if enforceClaim && resultUpdate.RowsAffected == 0 {
+			return ErrTaskClaimMismatch
+		}
 
-	if s.bus != nil {
-		s.publishTaskEvent(s.db, event.TypeTaskRetrying, runID, taskID)
-	}
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskRetrying, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
 
-	return nil
+			var taskRun models.TaskRun
+			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil &&
+				taskRun.OutstandingPredecessors == 0 {
+				var jobRun models.JobRun
+				if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+					return err
+				}
+				readyEvt := event.Event{
+					Type:      event.TypeTaskReady,
+					JobID:     jobRun.JobID,
+					RunID:     runID,
+					TaskID:    taskID,
+					Timestamp: time.Now().UTC(),
+				}
+				if err := s.eventStore.AppendTx(tx, &readyEvt); err != nil {
+					return err
+				}
+				pendingEvents = append(pendingEvents, readyEvt)
+			}
+		}
+
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
+	}
+	return err
 }
 
 func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 	now := time.Now().UTC()
-	err := s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
-		Updates(map[string]interface{}{
-			"status":       string(TaskStatusSkipped),
-			"completed_at": now,
-			"error":        reason,
-		}).Error
-
-	if err == nil && s.bus != nil {
-		s.publishTaskEvent(s.db, event.TypeTaskSkipped, runID, taskID)
+	pendingEvents := make([]event.Event, 0, 1)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
+			Updates(map[string]interface{}{
+				"status":       string(TaskStatusSkipped),
+				"completed_at": now,
+				"error":        reason,
+			}).Error; err != nil {
+			return err
+		}
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID)
+			if err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, *evt)
+		}
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
 	}
-
 	return err
 }
 
@@ -558,36 +728,63 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		metrics.JobRunDurationSeconds.WithLabelValues(jobID, string(status)).Observe(duration)
 	}
 
-	err := s.db.Model(&models.JobRun{}).
-		Where("id = ?", runID).
-		Updates(map[string]interface{}{
-			"status":       string(status),
-			"completed_at": now,
-			"error":        errMsg,
-		}).Error
+	pendingEvents := make([]event.Event, 0, 2)
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.JobRun{}).
+			Where("id = ?", runID).
+			Updates(map[string]interface{}{
+				"status":       string(status),
+				"completed_at": now,
+				"error":        errMsg,
+			}).Error; err != nil {
+			return err
+		}
 
-	if err == nil && s.bus != nil {
-		run, loadErr := s.loadRun(runID)
-		if loadErr == nil {
+		if s.eventStore != nil {
+			run, loadErr := s.loadRunWithDB(tx, runID)
+			if loadErr != nil {
+				return loadErr
+			}
+
 			eventType := event.TypeRunCompleted
 			if status == StatusFailed {
 				eventType = event.TypeRunFailed
 			}
-
-			if payload, marshalErr := json.Marshal(run); marshalErr != nil {
-				log.Error("failed to marshal run completed event", "error", marshalErr, "run_id", runID)
-			} else {
-				s.bus.Publish(event.Event{
-					Type:      eventType,
-					JobID:     run.JobID,
-					RunID:     runID,
-					Timestamp: time.Now().UTC(),
-					Payload:   payload,
-				})
+			payload, marshalErr := json.Marshal(run)
+			if marshalErr != nil {
+				return marshalErr
 			}
-		}
-	}
 
+			completionEvent := event.Event{
+				Type:      eventType,
+				JobID:     run.JobID,
+				RunID:     runID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			}
+			if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, completionEvent)
+
+			terminalEvent := event.Event{
+				Type:      event.TypeRunTerminal,
+				JobID:     run.JobID,
+				RunID:     runID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			}
+			if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, terminalEvent)
+		}
+
+		return nil
+	})
+	if err == nil {
+		s.publishEvents(pendingEvents...)
+	}
 	return err
 }
 
@@ -664,6 +861,10 @@ func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 }
 
 func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
+	return s.loadRunWithDB(s.db, runID)
+}
+
+func (s *Store) loadRunWithDB(conn *gorm.DB, runID uuid.UUID) (*JobRun, error) {
 	var result struct {
 		models.JobRun
 		JobAlias     string
@@ -672,7 +873,7 @@ func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 	}
 
 	// Use a JOIN to fetch job and trigger information for human readability
-	err := s.db.Table("job_runs").
+	err := conn.Table("job_runs").
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("left join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
@@ -683,7 +884,7 @@ func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 		return nil, err
 	}
 
-	runValue, err := s.convertRunModel(&result.JobRun)
+	runValue, err := s.convertRunModelWithDB(conn, &result.JobRun)
 	if err != nil {
 		return nil, err
 	}
@@ -696,6 +897,10 @@ func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 }
 
 func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
+	return s.convertRunModelWithDB(s.db, model)
+}
+
+func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*JobRun, error) {
 	if model == nil {
 		return nil, nil
 	}
@@ -730,7 +935,7 @@ func (s *Store) convertRunModel(model *models.JobRun) (*JobRun, error) {
 		runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
 	}
 
-	callbackRuns, err := s.loadCallbackRuns(model.ID)
+	callbackRuns, err := s.loadCallbackRunsWithDB(conn, model.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -789,9 +994,9 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	return task
 }
 
-func (s *Store) loadCallbackRuns(runID uuid.UUID) ([]*CallbackRun, error) {
+func (s *Store) loadCallbackRunsWithDB(conn *gorm.DB, runID uuid.UUID) ([]*CallbackRun, error) {
 	var modelRuns []models.CallbackRun
-	if err := s.db.
+	if err := conn.
 		Where("job_run_id = ?", runID).
 		Order("started_at ASC").
 		Find(&modelRuns).Error; err != nil {
@@ -819,18 +1024,17 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 	}
 }
 
-func (s *Store) publishTaskEvent(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID) {
-	// Need to fetch JobID for the event
+func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID) (*event.Event, error) {
 	var taskRun models.TaskRun
 	if err := db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
 		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
-		return
+		return nil, err
 	}
 
 	var jobRun models.JobRun
 	if err := db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
 		log.Error("failed to fetch job run for event", "error", err, "run_id", runID)
-		return
+		return nil, err
 	}
 
 	taskPayload := convertRunTaskModel(&taskRun)
@@ -841,15 +1045,34 @@ func (s *Store) publishTaskEvent(db *gorm.DB, eventType event.Type, runID, taskI
 	payload, err := json.Marshal(taskPayload)
 	if err != nil {
 		log.Error("failed to marshal task run for event", "error", err, "run_id", runID, "task_id", taskID)
-		return
+		return nil, err
 	}
 
-	s.bus.Publish(event.Event{
+	evt := event.Event{
 		Type:      eventType,
 		JobID:     jobRun.JobID,
 		RunID:     runID,
 		TaskID:    taskID,
 		Timestamp: time.Now().UTC(),
 		Payload:   payload,
-	})
+	}
+	if s.eventStore != nil {
+		if err := s.eventStore.AppendTx(db, &evt); err != nil {
+			return nil, err
+		}
+	}
+	return &evt, nil
+}
+
+func (s *Store) publishEvents(events ...event.Event) {
+	if s.bus == nil {
+		return
+	}
+	for _, evt := range events {
+		s.bus.Publish(evt)
+	}
+}
+
+func (s *Store) PublishEvents(events ...event.Event) {
+	s.publishEvents(events...)
 }

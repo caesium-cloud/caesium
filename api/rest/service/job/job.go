@@ -10,7 +10,6 @@ import (
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
-	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 	"sync"
@@ -27,9 +26,10 @@ type Job interface {
 }
 
 type jobService struct {
-	ctx context.Context
-	db  *gorm.DB
-	bus event.Bus
+	ctx        context.Context
+	db         *gorm.DB
+	bus        event.Bus
+	eventStore *event.Store
 }
 
 var (
@@ -42,14 +42,16 @@ func Service(ctx context.Context) Job {
 	defer defaultServiceMu.Unlock()
 	if defaultService != nil {
 		return &jobService{
-			ctx: ctx,
-			db:  defaultService.db,
-			bus: defaultService.bus,
+			ctx:        ctx,
+			db:         defaultService.db,
+			bus:        defaultService.bus,
+			eventStore: defaultService.eventStore,
 		}
 	}
 	return &jobService{
-		ctx: ctx,
-		db:  db.Connection(),
+		ctx:        ctx,
+		db:         db.Connection(),
+		eventStore: event.NewStore(db.Connection()),
 	}
 }
 
@@ -58,14 +60,24 @@ func (j *jobService) SetBus(bus event.Bus) {
 	defaultServiceMu.Lock()
 	defer defaultServiceMu.Unlock()
 	if defaultService == nil {
-		defaultService = &jobService{db: j.db}
+		defaultService = &jobService{db: j.db, eventStore: j.eventStore}
 	}
 	defaultService.bus = bus
 }
 
 func (j *jobService) WithDatabase(conn *gorm.DB) Job {
 	j.db = conn
+	j.eventStore = event.NewStore(conn)
 	return j
+}
+
+func (j *jobService) publishEvents(events ...event.Event) {
+	if j.bus == nil {
+		return
+	}
+	for _, evt := range events {
+		j.bus.Publish(evt)
+	}
 }
 
 type ListRequest struct {
@@ -168,23 +180,33 @@ func (j *jobService) Create(req *CreateRequest) (*models.Job, error) {
 		Annotations: jsonmap.FromStringMap(req.Annotations),
 	}
 
-	if err := q.Create(job).Error; err != nil {
-		return nil, err
-	}
-
-	if j.bus != nil {
-		if payload, err := json.Marshal(job); err != nil {
-			log.Error("failed to marshal job created event", "error", err, "job_id", job.ID)
-		} else {
-			j.bus.Publish(event.Event{
+	pendingEvents := make([]event.Event, 0, 1)
+	if err := q.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(job).Error; err != nil {
+			return err
+		}
+		if j.eventStore != nil {
+			payload, err := json.Marshal(job)
+			if err != nil {
+				return err
+			}
+			evt := event.Event{
 				Type:      event.TypeJobCreated,
 				JobID:     job.ID,
 				Timestamp: time.Now().UTC(),
 				Payload:   payload,
-			})
+			}
+			if err := j.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
+	j.publishEvents(pendingEvents...)
 	return job, nil
 }
 
@@ -193,19 +215,28 @@ func (j *jobService) Delete(id uuid.UUID) error {
 		q = j.db.WithContext(j.ctx)
 	)
 
-	if err := q.Delete(&models.Job{}, id).Error; err != nil {
-		return err
+	pendingEvents := make([]event.Event, 0, 1)
+	err := q.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&models.Job{}, id).Error; err != nil {
+			return err
+		}
+		if j.eventStore != nil {
+			evt := event.Event{
+				Type:      event.TypeJobDeleted,
+				JobID:     id,
+				Timestamp: time.Now().UTC(),
+			}
+			if err := j.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
+		}
+		return nil
+	})
+	if err == nil {
+		j.publishEvents(pendingEvents...)
 	}
-
-	if j.bus != nil {
-		j.bus.Publish(event.Event{
-			Type:      event.TypeJobDeleted,
-			JobID:     id,
-			Timestamp: time.Now().UTC(),
-		})
-	}
-
-	return nil
+	return err
 }
 
 func (j *jobService) SetPaused(id uuid.UUID, paused bool) (*models.Job, error) {
@@ -216,27 +247,38 @@ func (j *jobService) SetPaused(id uuid.UUID, paused bool) (*models.Job, error) {
 		return nil, err
 	}
 
-	jobModel.Paused = paused
-	if err := q.Save(jobModel).Error; err != nil {
-		return nil, err
-	}
-
-	if j.bus != nil {
-		eventType := event.TypeJobPaused
-		if !paused {
-			eventType = event.TypeJobUnpaused
+	pendingEvents := make([]event.Event, 0, 1)
+	err := q.Transaction(func(tx *gorm.DB) error {
+		jobModel.Paused = paused
+		if err := tx.Save(jobModel).Error; err != nil {
+			return err
 		}
-		if payload, err := json.Marshal(jobModel); err != nil {
-			log.Error("failed to marshal job pause event", "error", err, "job_id", jobModel.ID)
-		} else {
-			j.bus.Publish(event.Event{
+		if j.eventStore != nil {
+			eventType := event.TypeJobPaused
+			if !paused {
+				eventType = event.TypeJobUnpaused
+			}
+			payload, err := json.Marshal(jobModel)
+			if err != nil {
+				return err
+			}
+			evt := event.Event{
 				Type:      eventType,
 				JobID:     jobModel.ID,
 				Timestamp: time.Now().UTC(),
 				Payload:   payload,
-			})
+			}
+			if err := j.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
+	j.publishEvents(pendingEvents...)
 	return jobModel, nil
 }

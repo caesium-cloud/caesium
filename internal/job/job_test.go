@@ -525,6 +525,32 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 	return nil
 }
 
+func (e *fakeEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	if req == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	waitCtx := context.Background()
+	if req.Context != nil {
+		waitCtx = req.Context
+	}
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			return nil, waitCtx.Err()
+		default:
+		}
+		snapshot, err := e.Get(&atom.EngineGetRequest{ID: req.ID})
+		if err != nil {
+			return nil, err
+		}
+		if !snapshot.StoppedAt().IsZero() {
+			return snapshot, nil
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (e *fakeEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }

@@ -149,6 +149,24 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	return e.Get(&atom.EngineGetRequest{ID: created.ID})
 }
 
+func (e *dockerEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	waitCtx := e.ctx
+	if req != nil && req.Context != nil {
+		waitCtx = req.Context
+	}
+	resultC, errC := e.backend.ContainerWait(waitCtx, req.ID, dockercontainer.WaitConditionNotRunning)
+	select {
+	case err := <-errC:
+		if err != nil {
+			return nil, err
+		}
+	case <-resultC:
+	case <-waitCtx.Done():
+		return nil, waitCtx.Err()
+	}
+	return e.Get(&atom.EngineGetRequest{ID: req.ID})
+}
+
 // Stop and remove a Caesium Docker container. Since Caesium
 // doesn't distinguish between a "stopped" and a "removed"
 // container, we encapsulate both functions inside

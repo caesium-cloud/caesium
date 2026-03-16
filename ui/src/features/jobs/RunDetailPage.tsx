@@ -18,11 +18,12 @@ export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
   const queryClient = useQueryClient();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
 
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
     queryFn: () => api.getJobRun(jobId, runId),
-    refetchInterval: 5000,
+    refetchInterval: streamHealthy ? false : 5000,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -50,13 +51,14 @@ export function RunDetailPage() {
   useEffect(() => {
     if (!runId || !jobId) return;
 
+    const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     const onEvent = (e: CaesiumEvent) => {
       if (e.run_id && e.run_id !== runId) return;
 
       queryClient.setQueryData(["job", jobId, "runs", runId], (old: JobRun | undefined) => {
         if (!old) return old;
 
-        if (e.type === "run_completed" || e.type === "run_succeeded") {
+        if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const finalRun = e.payload as JobRun;
           if (finalRun?.tasks) return finalRun;
           toast.success("Run completed");
@@ -84,7 +86,9 @@ export function RunDetailPage() {
                   ? "failed"
                   : e.type === "task_skipped"
                     ? "skipped"
-                    : taskUpdate?.status || "pending";
+                    : e.type === "task_retrying"
+                      ? "pending"
+                      : taskUpdate?.status || "pending";
 
           if (existingIndex >= 0) {
             updatedTasks[existingIndex] = {
@@ -116,12 +120,14 @@ export function RunDetailPage() {
       });
     };
 
-    ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+    events.subscribeConnection(onConnection);
+    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
       events.subscribe(type, onEvent),
     );
 
     return () => {
-      ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+      events.unsubscribeConnection(onConnection);
+      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
         events.unsubscribe(type, onEvent),
       );
     };

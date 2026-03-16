@@ -255,6 +255,18 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 	ticker := time.NewTicker(leaseRenewInterval(e.workerLeaseTTL))
 	defer ticker.Stop()
 
+	waitResult := make(chan struct {
+		atom atom.Atom
+		err  error
+	}, 1)
+	go func() {
+		next, err := engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: ctx})
+		waitResult <- struct {
+			atom atom.Atom
+			err  error
+		}{atom: next, err: err}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -265,19 +277,15 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 				return fmt.Errorf("task %s timed out after %s", taskRun.TaskID, e.taskTimeout)
 			}
 			return ctx.Err()
+		case result := <-waitResult:
+			if result.err != nil {
+				return result.err
+			}
+			a = result.atom
+			return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 		case <-ticker.C:
 			if err := e.renewLease(taskRun); err != nil {
 				log.Error("failed to renew worker task lease", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
-			}
-
-			next, err := engine.Get(&atom.EngineGetRequest{ID: a.ID()})
-			if err != nil {
-				return err
-			}
-			a = next
-
-			if !a.StoppedAt().IsZero() {
-				return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
 			}
 		}
 	}
