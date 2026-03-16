@@ -246,10 +246,9 @@ func (s *DockerTestSuite) TestStop() {
 		On("ContainerStop", testAtomID).
 		Return()
 
-	// ContainerRemove is now skipped to support post-execution logs
-	// s.engine.backend.(*mockDockerBackend).
-	// 	On("ContainerRemove", testAtomID).
-	// 	Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerRemove", testAtomID).
+		Return()
 
 	assert.Nil(s.T(), s.engine.Stop(req))
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
