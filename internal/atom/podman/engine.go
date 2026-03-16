@@ -145,13 +145,11 @@ func (e *podmanEngine) Stop(req *atom.EngineStopRequest) error {
 		return err
 	}
 
-	// TODO: implement garbage collection policy
-	// log.Info("removing podman container", "id", req.ID)
-	//
-	// removeVolumes := true
-	//
-	// return e.backend.ContainerRemove(req.ID, &req.Force, &removeVolumes)
-	return nil
+	log.Info("removing podman container", "id", req.ID)
+
+	removeVolumes := true
+
+	return e.backend.ContainerRemove(req.ID, &req.Force, &removeVolumes)
 }
 
 func (e *podmanEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
