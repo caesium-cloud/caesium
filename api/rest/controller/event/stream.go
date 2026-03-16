@@ -94,6 +94,14 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 		}
 	}
 
+	// Use a fixed high-water mark for deduplication between backlog and
+	// live events.  Do NOT advance it from live events — events may arrive
+	// on the bus out-of-sequence-order when publishers are delayed (e.g.
+	// run_started commits at seq N but reaches the bus after task_started
+	// at seq N+2).  Advancing lastSent from live events would incorrectly
+	// discard the lower-sequenced event.
+	catchupHighWater := lastSent
+
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
@@ -110,16 +118,13 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 			if !ok {
 				return nil
 			}
-			if evt.Sequence > 0 && evt.Sequence <= lastSent {
+			if evt.Sequence > 0 && evt.Sequence <= catchupHighWater {
 				continue
 			}
 			if err := writeEvent(c, evt); err != nil {
 				return nil
 			}
 			flusher.Flush()
-			if evt.Sequence > 0 {
-				lastSent = evt.Sequence
-			}
 		}
 	}
 }

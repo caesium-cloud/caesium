@@ -228,15 +228,17 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 		return nil, err
 	}
 
+	// Publish events immediately after commit, before loadRun, so that
+	// run_started reaches the bus before any task events that the executor
+	// may emit once Start returns.
+	s.publishEvents(pendingEvents...)
+
 	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	s.startedMu.Lock()
 	s.startedRuns[model.ID] = struct{}{}
 	s.startedMu.Unlock()
 
 	run, err := s.loadRun(model.ID)
-	if err == nil {
-		s.publishEvents(pendingEvents...)
-	}
 	return run, err
 }
 
