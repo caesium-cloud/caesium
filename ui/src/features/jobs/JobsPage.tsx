@@ -81,7 +81,9 @@ export function JobsPage() {
     onSuccess: (run) => {
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
       toast.success("Job triggered successfully");
-      navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId: run.job_id, runId: run.id } });
+      if (run?.job_id && run?.id) {
+        navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId: run.job_id, runId: run.id } });
+      }
     },
     onError: (err: Error) => {
       toast.error(`Failed to trigger job: ${err.message}`);

@@ -190,7 +190,7 @@ async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
     throw new ApiError(response.status, await response.text());
   }
 
-  if (response.status === 202 || response.status === 204) {
+  if (response.status === 204) {
     return undefined as T;
   }
 
