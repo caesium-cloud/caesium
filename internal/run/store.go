@@ -994,10 +994,6 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	return task
 }
 
-func (s *Store) loadCallbackRuns(runID uuid.UUID) ([]*CallbackRun, error) {
-	return s.loadCallbackRunsWithDB(s.db, runID)
-}
-
 func (s *Store) loadCallbackRunsWithDB(conn *gorm.DB, runID uuid.UUID) ([]*CallbackRun, error) {
 	var modelRuns []models.CallbackRun
 	if err := conn.

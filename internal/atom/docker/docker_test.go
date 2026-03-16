@@ -83,7 +83,6 @@ func (m *mockDockerBackend) ContainerWait(ctx context.Context, container string,
 	args := m.Called(container)
 	if container == "" {
 		errC <- args.Error(0)
-		close(resultC)
 		close(errC)
 		return resultC, errC
 	}

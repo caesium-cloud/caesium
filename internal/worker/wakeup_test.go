@@ -77,6 +77,9 @@ func TestSubscribeWakeups_Coalesces(t *testing.T) {
 		b.Publish(event.Event{Type: event.TypeTaskReady})
 	}
 
+	// Let the goroutine consume all bus events before we drain.
+	time.Sleep(50 * time.Millisecond)
+
 	// Drain the first signal.
 	assertSignal(t, ch, "first coalesced signal")
 

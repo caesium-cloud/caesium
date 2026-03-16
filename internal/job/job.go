@@ -917,7 +917,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 					return err
 				}
 				if snapshot.Error != "" {
-					return fmt.Errorf(snapshot.Error)
+					return errors.New(snapshot.Error)
 				}
 				return fmt.Errorf("run %s failed", runID)
 			}
@@ -928,7 +928,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				}
 				if snapshot.Status == run.StatusFailed {
 					if snapshot.Error != "" {
-						return fmt.Errorf(snapshot.Error)
+						return errors.New(snapshot.Error)
 					}
 					return fmt.Errorf("run %s failed", runID)
 				}
