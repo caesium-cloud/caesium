@@ -73,7 +73,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			return jobAlias
 		}
 
-		jobAlias = taskRun.JobRunID.String()
+		jobAlias = "unknown"
 		return jobAlias
 	}
 
