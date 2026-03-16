@@ -13,4 +13,5 @@ var All = []interface{}{
 	&JobRun{},
 	&TaskRun{},
 	&CallbackRun{},
+	&ExecutionEvent{},
 }

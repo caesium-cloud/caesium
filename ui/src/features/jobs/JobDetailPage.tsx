@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Pause, Play } from "lucide-react";
@@ -19,29 +19,28 @@ export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.getJob(jobId),
-    refetchInterval: 30000,
+    refetchInterval: streamHealthy ? false : 15000,
   });
 
   const { data: runs, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
     queryFn: () => api.getJobRuns(jobId),
-    refetchInterval: 30000,
+    refetchInterval: streamHealthy ? false : 15000,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
     queryKey: ["job", jobId, "dag"],
     queryFn: () => api.getJobDAG(jobId),
-    refetchInterval: 30000,
   });
 
   const { data: tasks, isLoading: isLoadingTasks } = useQuery({
     queryKey: ["job", jobId, "tasks"],
     queryFn: () => api.getJobTasks(jobId),
-    refetchInterval: 30000,
   });
 
   const { data: atoms, isLoading: isLoadingAtoms } = useQuery({
@@ -63,6 +62,7 @@ export function JobDetailPage() {
   });
 
   useEffect(() => {
+    const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
     const onPauseEvent = (e: CaesiumEvent) => {
       if (e.job_id !== jobId) return;
       const payload = e.payload as Job | undefined;
@@ -76,9 +76,11 @@ export function JobDetailPage() {
       );
     };
 
+    events.subscribeConnection(onConnection);
     ["job_paused", "job_unpaused"].forEach((type) => events.subscribe(type, onPauseEvent));
 
     return () => {
+      events.unsubscribeConnection(onConnection);
       ["job_paused", "job_unpaused"].forEach((type) => events.unsubscribe(type, onPauseEvent));
     };
   }, [jobId, queryClient]);
@@ -129,7 +131,7 @@ export function JobDetailPage() {
     queryKey: ["job", jobId, "runs", featuredRunId],
     queryFn: () => api.getJobRun(jobId, featuredRunId!),
     enabled: !!featuredRunId,
-    refetchInterval: featuredRunSummary?.status === "running" ? 5000 : 30000,
+    refetchInterval: streamHealthy ? false : featuredRunSummary?.status === "running" ? 5000 : 15000,
   });
 
   useEffect(() => {
@@ -149,7 +151,7 @@ export function JobDetailPage() {
           return startedRun?.id === featuredRunId ? { ...old, ...startedRun } : old;
         }
 
-        if (e.type === "run_completed" || e.type === "run_succeeded") {
+        if (e.type === "run_completed" || e.type === "run_succeeded" || e.type === "run_terminal") {
           const completedRun = e.payload as JobRun | undefined;
           if (completedRun?.id === featuredRunId) {
             return completedRun?.tasks ? completedRun : { ...old, ...completedRun, status: "succeeded" };
@@ -181,7 +183,9 @@ export function JobDetailPage() {
                   ? "failed"
                   : e.type === "task_skipped"
                     ? "skipped"
-                    : taskUpdate?.status || "pending";
+                    : e.type === "task_retrying"
+                      ? "pending"
+                      : taskUpdate?.status || "pending";
 
           if (existingIndex >= 0) {
             updatedTasks[existingIndex] = {
@@ -215,12 +219,12 @@ export function JobDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["job", jobId] });
     };
 
-    ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
       events.subscribe(type, onEvent),
     );
 
     return () => {
-      ["run_started", "run_completed", "run_failed", "task_started", "task_succeeded", "task_failed", "task_skipped"].forEach((type) =>
+      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
         events.unsubscribe(type, onEvent),
       );
     };

@@ -24,6 +24,7 @@ type Worker struct {
 	pool         *Pool
 	pollInterval time.Duration
 	executor     TaskExecutor
+	wakeups      <-chan struct{}
 }
 
 func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, executor TaskExecutor) *Worker {
@@ -46,6 +47,11 @@ func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, exec
 		pollInterval: pollInterval,
 		executor:     executor,
 	}
+}
+
+func (w *Worker) WithWakeups(ch <-chan struct{}) *Worker {
+	w.wakeups = ch
+	return w
 }
 
 func (w *Worker) Run(ctx context.Context) error {
@@ -73,7 +79,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		if err != nil || task == nil {
-			if sleepErr := sleepWithContext(ctx, w.pollInterval); sleepErr != nil {
+			if sleepErr := waitForWork(ctx, w.wakeups, w.pollInterval); sleepErr != nil {
 				w.pool.Wait()
 				return nil
 			}
@@ -89,6 +95,24 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			return err
 		}
+	}
+}
+
+func waitForWork(ctx context.Context, wakeups <-chan struct{}, d time.Duration) error {
+	if wakeups == nil {
+		return sleepWithContext(ctx, d)
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-wakeups:
+		return nil
+	case <-timer.C:
+		return nil
 	}
 }
 

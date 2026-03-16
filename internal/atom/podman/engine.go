@@ -131,6 +131,13 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	return e.Get(&atom.EngineGetRequest{ID: created.ID})
 }
 
+func (e *podmanEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	if err := e.backend.ContainerWait(req.ID, req.Context); err != nil {
+		return nil, err
+	}
+	return e.Get(&atom.EngineGetRequest{ID: req.ID})
+}
+
 func (e *podmanEngine) Stop(req *atom.EngineStopRequest) error {
 	log.Info("stopping podman container", "id", req.ID)
 

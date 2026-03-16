@@ -6,7 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,22 +19,27 @@ import (
 type EventType string
 
 const (
-	TypeJobCreated    EventType = "job_created"
-	TypeJobDeleted    EventType = "job_deleted"
-	TypeJobPaused     EventType = "job_paused"
-	TypeJobUnpaused   EventType = "job_unpaused"
-	TypeRunStarted    EventType = "run_started"
-	TypeRunCompleted  EventType = "run_completed"
-	TypeRunFailed     EventType = "run_failed"
-	TypeTaskStarted   EventType = "task_started"
-	TypeTaskSucceeded EventType = "task_succeeded"
-	TypeTaskFailed    EventType = "task_failed"
-	TypeTaskSkipped   EventType = "task_skipped"
-	TypeTaskRetrying  EventType = "task_retrying"
-	TypeLogChunk      EventType = "log_chunk"
+	TypeJobCreated       EventType = "job_created"
+	TypeJobDeleted       EventType = "job_deleted"
+	TypeJobPaused        EventType = "job_paused"
+	TypeJobUnpaused      EventType = "job_unpaused"
+	TypeRunStarted       EventType = "run_started"
+	TypeRunCompleted     EventType = "run_completed"
+	TypeRunFailed        EventType = "run_failed"
+	TypeRunTerminal      EventType = "run_terminal"
+	TypeTaskStarted      EventType = "task_started"
+	TypeTaskSucceeded    EventType = "task_succeeded"
+	TypeTaskFailed       EventType = "task_failed"
+	TypeTaskSkipped      EventType = "task_skipped"
+	TypeTaskRetrying     EventType = "task_retrying"
+	TypeTaskReady        EventType = "task_ready"
+	TypeTaskClaimed      EventType = "task_claimed"
+	TypeTaskLeaseExpired EventType = "task_lease_expired"
+	TypeLogChunk         EventType = "log_chunk"
 )
 
 type Event struct {
+	Sequence  uint64          `json:"sequence,omitempty"`
 	Type      EventType       `json:"type"`
 	JobID     uuid.UUID       `json:"job_id,omitempty"`
 	RunID     uuid.UUID       `json:"run_id,omitempty"`
@@ -46,6 +53,48 @@ type EventsService struct {
 }
 
 func (s *EventsService) Stream(ctx context.Context, jobID, runID string, types []EventType) (<-chan Event, error) {
+	ch := make(chan Event, 100)
+
+	go func() {
+		defer close(ch)
+		var lastEventID string
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+
+			resp, err := s.openStream(ctx, jobID, runID, types, lastEventID)
+			if err != nil {
+				log.Error("[console] failed to open event stream", "error", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(2 * time.Second):
+					continue
+				}
+			}
+
+			lastSeenID, streamErr := s.readStream(ctx, resp.Body, ch)
+			_ = resp.Body.Close()
+			if lastSeenID != "" {
+				lastEventID = lastSeenID
+			}
+			if streamErr != nil && ctx.Err() == nil {
+				log.Error("[console] event stream disconnected", "error", streamErr)
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
+
+	return ch, nil
+}
+
+func (s *EventsService) openStream(ctx context.Context, jobID, runID string, types []EventType, lastEventID string) (*http.Response, error) {
 	path := "/events"
 	queries := []string{}
 	if jobID != "" {
@@ -71,72 +120,86 @@ func (s *EventsService) Stream(ctx context.Context, jobID, runID string, types [
 	req.Header.Set("Accept", "text/event-stream")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Connection", "keep-alive")
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
 
-	//nolint:bodyclose // The SSE response body is intentionally owned by the streaming goroutine below.
 	resp, err := s.client.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-
 	if resp.StatusCode != http.StatusOK {
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("bad status: %s", resp.Status)
 	}
+	return resp, nil
+}
 
-	ch := make(chan Event, 100)
+func (s *EventsService) readStream(ctx context.Context, body io.ReadCloser, ch chan<- Event) (string, error) {
+	scanner := bufio.NewScanner(body)
+	var (
+		currentID   string
+		currentType EventType
+		currentData []byte
+		lastSeenID  string
+	)
 
-	go func() {
-		defer func() { _ = resp.Body.Close() }()
-		defer close(ch)
-
-		scanner := bufio.NewScanner(resp.Body)
-		var currentType EventType
-		var currentData []byte
-
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			if len(line) == 0 {
-				if currentType != "" && len(currentData) > 0 {
-					var evt Event
-					if err := json.Unmarshal(currentData, &evt); err != nil {
-						log.Error("[console] failed to unmarshal event from stream", "error", err, "type", currentType)
-					} else {
-						// Ensure type is set if not in payload (though payload usually matches)
-						if evt.Type == "" {
-							evt.Type = currentType
-						}
-						select {
-						case ch <- evt:
-						case <-ctx.Done():
-							return
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			if currentType != "" && len(currentData) > 0 {
+				var evt Event
+				if err := json.Unmarshal(currentData, &evt); err != nil {
+					log.Error("[console] failed to unmarshal event from stream", "error", err, "type", currentType)
+				} else {
+					if evt.Type == "" {
+						evt.Type = currentType
+					}
+					if evt.Sequence == 0 && currentID != "" {
+						if seq, err := strconv.ParseUint(currentID, 10, 64); err == nil {
+							evt.Sequence = seq
 						}
 					}
+					select {
+					case ch <- evt:
+					case <-ctx.Done():
+						return lastSeenID, ctx.Err()
+					}
+					if currentID != "" {
+						lastSeenID = currentID
+					}
 				}
-				currentType = ""
-				currentData = nil
-				continue
 			}
-
-			if bytes.HasPrefix(line, []byte(":")) {
-				continue // Comment/Ping
-			}
-
-			parts := bytes.SplitN(line, []byte(":"), 2)
-			if len(parts) < 2 {
-				continue
-			}
-
-			field := string(bytes.TrimSpace(parts[0]))
-			value := bytes.TrimPrefix(parts[1], []byte(" "))
-
-			switch field {
-			case "event":
-				currentType = EventType(value)
-			case "data":
-				currentData = value
-			}
+			currentID = ""
+			currentType = ""
+			currentData = nil
+			continue
 		}
-	}()
 
-	return ch, nil
+		if bytes.HasPrefix(line, []byte(":")) {
+			continue
+		}
+
+		parts := bytes.SplitN(line, []byte(":"), 2)
+		if len(parts) < 2 {
+			continue
+		}
+
+		field := string(bytes.TrimSpace(parts[0]))
+		value := bytes.TrimPrefix(parts[1], []byte(" "))
+
+		switch field {
+		case "id":
+			currentID = string(value)
+		case "event":
+			currentType = EventType(value)
+		case "data":
+			currentData = value
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return lastSeenID, err
+	}
+	return lastSeenID, io.EOF
 }

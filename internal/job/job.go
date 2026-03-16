@@ -19,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/callback"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -561,41 +562,41 @@ func (j *job) Run(ctx context.Context) error {
 			return "", err
 		}
 
-		ticker := time.NewTicker(j.atomPollInterval)
-		defer ticker.Stop()
+		waitResult := make(chan struct {
+			atom atom.Atom
+			err  error
+		}, 1)
+		go func() {
+			next, waitErr := runner.engine.Wait(&atom.EngineWaitRequest{ID: a.ID(), Context: taskCtx})
+			waitResult <- struct {
+				atom atom.Atom
+				err  error
+			}{atom: next, err: waitErr}
+		}()
 
-		for {
-			select {
-			case <-taskCtx.Done():
-				if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
-					if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-						ID:    a.ID(),
-						Force: true,
-					}); stopErr != nil {
-						return "", fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
-					}
-					return "", fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+		select {
+		case <-taskCtx.Done():
+			if errors.Is(taskCtx.Err(), context.DeadlineExceeded) {
+				if stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+					ID:    a.ID(),
+					Force: true,
+				}); stopErr != nil {
+					return "", fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
-				return "", taskCtx.Err()
-			case <-ticker.C:
-				var fetchErr error
-				a, fetchErr = runner.engine.Get(&atom.EngineGetRequest{ID: a.ID()})
-				if fetchErr != nil {
-					return "", fetchErr
-				}
-
-				if !a.StoppedAt().IsZero() {
-					log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
-
-					stopErr := runner.engine.Stop(&atom.EngineStopRequest{
-						ID:    a.ID(),
-						Force: true,
-					})
-					return string(a.Result()), stopErr
-				}
-
-				log.Info("atom running", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "state", a.State())
+				return "", fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			}
+			return "", taskCtx.Err()
+		case result := <-waitResult:
+			if result.err != nil {
+				return "", result.err
+			}
+			a = result.atom
+			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
+			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
+				ID:    a.ID(),
+				Force: true,
+			})
+			return string(a.Result()), stopErr
 		}
 	}
 
@@ -885,13 +886,54 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 		pollInterval = 1 * time.Second
 	}
 
-	ticker := time.NewTicker(pollInterval)
+	var (
+		ticker = time.NewTicker(pollInterval)
+		ch     <-chan event.Event
+	)
 	defer ticker.Stop()
+
+	if bus := store.Bus(); bus != nil {
+		events, err := bus.Subscribe(ctx, event.Filter{
+			RunID: runID,
+			Types: []event.Type{event.TypeRunTerminal, event.TypeRunCompleted, event.TypeRunFailed},
+		})
+		if err == nil {
+			ch = events
+		}
+	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case evt, ok := <-ch:
+			if !ok {
+				ch = nil
+				continue
+			}
+			if evt.Type == event.TypeRunFailed {
+				snapshot, err := store.Get(runID)
+				if err != nil {
+					return err
+				}
+				if snapshot.Error != "" {
+					return fmt.Errorf(snapshot.Error)
+				}
+				return fmt.Errorf("run %s failed", runID)
+			}
+			if evt.Type == event.TypeRunCompleted || evt.Type == event.TypeRunTerminal {
+				snapshot, err := store.Get(runID)
+				if err != nil {
+					return err
+				}
+				if snapshot.Status == run.StatusFailed {
+					if snapshot.Error != "" {
+						return fmt.Errorf(snapshot.Error)
+					}
+					return fmt.Errorf("run %s failed", runID)
+				}
+				return nil
+			}
 		case <-ticker.C:
 			snapshot, err := store.Get(runID)
 			if err != nil {

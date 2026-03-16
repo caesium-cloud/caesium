@@ -37,6 +37,7 @@ type dockerBackend interface {
 	ContainerList(context.Context, container.ListOptions) ([]container.Summary, error)
 	ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error)
 	ContainerStart(context.Context, string, container.StartOptions) error
+	ContainerWait(context.Context, string, container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
 	ContainerStop(context.Context, string, container.StopOptions) error
 	ContainerRemove(context.Context, string, container.RemoveOptions) error
 	ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error)

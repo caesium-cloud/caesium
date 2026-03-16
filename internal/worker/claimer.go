@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -62,6 +63,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	leaseExpiry := now.Add(c.leaseTTL)
 	var claimed *models.TaskRun
 
+	pendingEvents := make([]event.Event, 0, 1)
 	err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var candidates []models.TaskRun
 		runningRunIDs := tx.Model(&models.JobRun{}).
@@ -128,6 +130,20 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 				return err
 			}
 			claimed = claimedTask
+			evt := event.Event{
+				Type:      event.TypeTaskClaimed,
+				Timestamp: time.Now().UTC(),
+			}
+			var jobRun models.JobRun
+			if err := tx.Select("job_id").First(&jobRun, "id = ?", claimedTask.JobRunID).Error; err == nil {
+				evt.JobID = jobRun.JobID
+			}
+			evt.RunID = claimedTask.JobRunID
+			evt.TaskID = claimedTask.TaskID
+			if err := c.store.RecordEventTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
 			break
 		}
 		return nil
@@ -138,6 +154,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	if claimed != nil {
 		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
 	}
+	c.store.PublishEvents(pendingEvents...)
 
 	return claimed, nil
 }
@@ -149,23 +166,66 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 		Select("id").
 		Where("status = ?", string(run.StatusRunning))
 
-	result := c.store.DB().WithContext(ctx).
-		Model(&models.TaskRun{}).
-		Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", runningRunIDs, string(run.TaskStatusRunning), now).
-		Updates(map[string]interface{}{
-			"status":           string(run.TaskStatusPending),
-			"claimed_by":       "",
-			"claim_expires_at": nil,
-			"runtime_id":       "",
-			"started_at":       nil,
-		})
-	if result.Error != nil {
-		return result.Error
+	pendingEvents := make([]event.Event, 0, 8)
+	err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var expired []models.TaskRun
+		if err := tx.
+			Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", runningRunIDs, string(run.TaskStatusRunning), now).
+			Find(&expired).Error; err != nil {
+			return err
+		}
+
+		result := tx.Model(&models.TaskRun{}).
+			Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ?", runningRunIDs, string(run.TaskStatusRunning), now).
+			Updates(map[string]interface{}{
+				"status":           string(run.TaskStatusPending),
+				"claimed_by":       "",
+				"claim_expires_at": nil,
+				"runtime_id":       "",
+				"started_at":       nil,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+
+		for _, taskRun := range expired {
+			var jobRun models.JobRun
+			if err := tx.Select("job_id").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
+				return err
+			}
+			leaseEvt := event.Event{
+				Type:      event.TypeTaskLeaseExpired,
+				JobID:     jobRun.JobID,
+				RunID:     taskRun.JobRunID,
+				TaskID:    taskRun.TaskID,
+				Timestamp: time.Now().UTC(),
+			}
+			if err := c.store.RecordEventTx(tx, &leaseEvt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, leaseEvt)
+
+			readyEvt := event.Event{
+				Type:      event.TypeTaskReady,
+				JobID:     jobRun.JobID,
+				RunID:     taskRun.JobRunID,
+				TaskID:    taskRun.TaskID,
+				Timestamp: time.Now().UTC(),
+			}
+			if err := c.store.RecordEventTx(tx, &readyEvt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, readyEvt)
+		}
+		if result.RowsAffected > 0 {
+			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(result.RowsAffected))
+		}
+		return nil
+	})
+	if err == nil {
+		c.store.PublishEvents(pendingEvents...)
 	}
-	if result.RowsAffected > 0 {
-		metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(result.RowsAffected))
-	}
-	return nil
+	return err
 }
 
 func isClaimContentionErr(err error) bool {

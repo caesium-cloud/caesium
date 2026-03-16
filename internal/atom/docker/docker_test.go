@@ -77,6 +77,22 @@ func (m *mockDockerBackend) ContainerStart(ctx context.Context, container string
 	return nil
 }
 
+func (m *mockDockerBackend) ContainerWait(ctx context.Context, container string, condition dockercontainer.WaitCondition) (<-chan dockercontainer.WaitResponse, <-chan error) {
+	resultC := make(chan dockercontainer.WaitResponse, 1)
+	errC := make(chan error, 1)
+	args := m.Called(container)
+	if container == "" {
+		errC <- args.Error(0)
+		close(resultC)
+		close(errC)
+		return resultC, errC
+	}
+	resultC <- dockercontainer.WaitResponse{}
+	close(resultC)
+	close(errC)
+	return resultC, errC
+}
+
 func (m *mockDockerBackend) ContainerStop(ctx context.Context, container string, options dockercontainer.StopOptions) error {
 	args := m.Called(container)
 	if container == "" {
