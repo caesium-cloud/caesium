@@ -49,36 +49,72 @@
     --caesium-cyan: 191 100% 42%;
     --caesium-gold: 38 92% 50%;
     --caesium-void: 240 33% 4%;
+
+    /* Sidebar */
+    --sidebar: 215 30% 97%;
+    --sidebar-foreground: 235 24% 15%;
+    --sidebar-border: 205 25% 88%;
+    --sidebar-muted: 228 12% 55%;
+    --sidebar-accent: 191 60% 94%;
+
+    /* DAG canvas */
+    --dag-bg: 215 25% 96%;
+    --dag-grid: 210 15% 84%;
+
+    /* Node surface (gradient endpoint in task nodes) */
+    --node-surface: 215 25% 97%;
+
+    /* Code / terminal blocks */
+    --code-bg: 220 18% 96%;
+    --code-fg: 152 56% 32%;
   }
- 
+
   .dark {
     --background: 240 33% 4%;
     --foreground: 210 40% 96%;
- 
+
     --card: 240 24% 7%;
     --card-foreground: 210 40% 96%;
- 
+
     --popover: 240 24% 7%;
     --popover-foreground: 210 40% 96%;
- 
+
     --primary: 191 100% 42%;
     --primary-foreground: 240 33% 4%;
- 
+
     --secondary: 236 19% 15%;
     --secondary-foreground: 210 40% 96%;
- 
+
     --muted: 236 18% 18%;
     --muted-foreground: 220 12% 68%;
- 
+
     --accent: 38 92% 50%;
     --accent-foreground: 240 33% 4%;
- 
+
     --destructive: 0 62.8% 30.6%;
     --destructive-foreground: 210 40% 98%;
- 
+
     --border: 236 18% 16%;
     --input: 236 18% 16%;
     --ring: 191 100% 42%;
+
+    /* Sidebar */
+    --sidebar: 240 33% 4%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-border: 236 18% 16%;
+    --sidebar-muted: 220 12% 68%;
+    --sidebar-accent: 240 20% 12%;
+
+    /* DAG canvas */
+    --dag-bg: 240 33% 5%;
+    --dag-grid: 210 30% 22%;
+
+    /* Node surface */
+    --node-surface: 240 33% 4%;
+
+    /* Code / terminal blocks */
+    --code-bg: 240 33% 4%;
+    --code-fg: 142 71% 45%;
   }
 }
  
@@ -112,4 +148,28 @@
   .fill-caesium-gold {
     fill: hsl(var(--caesium-gold));
   }
+}
+
+/* ── ReactFlow background grid — theme-aware ── */
+.react-flow__background pattern line {
+  stroke: hsl(var(--dag-grid)) !important;
+}
+.react-flow__background pattern circle {
+  fill: hsl(var(--dag-grid)) !important;
+}
+
+/* ── ReactFlow controls — theme-aware ── */
+.react-flow__controls-button {
+  background: hsl(var(--card)) !important;
+  border-color: hsl(var(--border)) !important;
+  fill: hsl(var(--foreground)) !important;
+}
+.react-flow__controls-button:hover {
+  background: hsl(var(--muted)) !important;
+}
+.react-flow__attribution {
+  background: transparent !important;
+}
+.react-flow__attribution a {
+  color: hsl(var(--muted-foreground)) !important;
 }

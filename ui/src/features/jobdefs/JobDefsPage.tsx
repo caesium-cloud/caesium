@@ -102,7 +102,7 @@ export function JobDefsPage() {
                   onChange={e => { setYaml(e.target.value); setResult(null); }}
                   spellCheck={false}
                   placeholder={`# Paste your job definition YAML here\n# or click "Load example" to get started`}
-                  className="w-full min-h-[480px] pl-12 pr-4 pt-3 pb-3 font-mono text-sm bg-caesium-void text-green-400 rounded-b-lg focus:outline-none focus:ring-2 focus:ring-ring resize-y placeholder:text-green-900 leading-6"
+                  className="w-full min-h-[480px] pl-12 pr-4 pt-3 pb-3 font-mono text-sm bg-code-bg text-code-fg rounded-b-lg focus:outline-none focus:ring-2 focus:ring-ring resize-y placeholder:text-muted-foreground/40 leading-6"
                   style={{ tabSize: 2 }}
                   onKeyDown={e => {
                     // Tab inserts 2 spaces

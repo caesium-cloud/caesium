@@ -151,7 +151,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
     }, [onNodeClick]);
 
   return (
-    <div className="relative h-full min-h-[500px] w-full overflow-hidden bg-caesium-void/95">
+    <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
       <ReactFlow
         nodes={layoutedNodes}
         edges={layoutedEdges}
@@ -162,8 +162,8 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
         minZoom={0.1}
         maxZoom={1.5}
       >
-        <Background color="#24344b" gap={20} />
-        <Controls className="fill-slate-300" />
+        <Background gap={20} />
+        <Controls />
       </ReactFlow>
     </div>
   );

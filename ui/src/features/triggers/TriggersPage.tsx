@@ -196,7 +196,7 @@ export function TriggersPage() {
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground mb-1">Configuration</p>
-                    <pre className="bg-caesium-void text-green-400 rounded p-3 text-xs overflow-auto max-h-48">
+                    <pre className="bg-code-bg text-code-fg rounded p-3 text-xs overflow-auto max-h-48">
                       {Object.keys(config).length > 0
                         ? JSON.stringify(config, null, 2)
                         : trigger.configuration}
