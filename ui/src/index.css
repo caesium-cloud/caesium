@@ -150,6 +150,14 @@
   }
 }
 
+/* ── ReactFlow background grid — theme-aware ── */
+.react-flow__background pattern line {
+  stroke: hsl(var(--dag-grid)) !important;
+}
+.react-flow__background pattern circle {
+  fill: hsl(var(--dag-grid)) !important;
+}
+
 /* ── ReactFlow controls — theme-aware ── */
 .react-flow__controls-button {
   background: hsl(var(--card)) !important;
