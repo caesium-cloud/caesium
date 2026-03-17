@@ -11,6 +11,7 @@ import 'reactflow/dist/style.css';
 import dagre from 'dagre';
 import type { JobDAGResponse, Atom } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
+import { useTheme } from '@/components/theme-provider';
 
 const nodeWidth = 300;
 const nodeHeight = 148;
@@ -150,8 +151,12 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
       onNodeClick?.(node.id);
     }, [onNodeClick]);
 
+  const { theme } = useTheme();
+  const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const gridColor = isDark ? '#24344b' : '#c5cdd8';
+
   return (
-    <div className="relative h-full min-h-[500px] w-full overflow-hidden bg-caesium-void/95">
+    <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
       <ReactFlow
         nodes={layoutedNodes}
         edges={layoutedEdges}
@@ -162,8 +167,8 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
         minZoom={0.1}
         maxZoom={1.5}
       >
-        <Background color="#24344b" gap={20} />
-        <Controls className="fill-slate-300" />
+        <Background color={gridColor} gap={20} />
+        <Controls />
       </ReactFlow>
     </div>
   );

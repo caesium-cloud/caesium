@@ -224,7 +224,7 @@ export function AtomsPage() {
                         {atom.spec && Object.keys(atom.spec).length > 0 && (
                           <div>
                             <p className="text-xs text-muted-foreground mb-1">Spec</p>
-                            <pre className="bg-caesium-void text-green-400 rounded p-3 text-xs overflow-auto max-h-40">
+                            <pre className="bg-code-bg text-code-fg rounded p-3 text-xs overflow-auto max-h-40">
                               {JSON.stringify(atom.spec, null, 2)}
                             </pre>
                           </div>
