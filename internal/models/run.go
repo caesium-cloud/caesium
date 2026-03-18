@@ -42,6 +42,7 @@ type TaskRun struct {
 	MaxAttempts             int               `gorm:"not null;default:1" json:"max_attempts"`
 	NodeSelector            datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Result                  string            `json:"result,omitempty"`
+	Output                  datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	Error                   string            `json:"error,omitempty"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	OutstandingPredecessors int               `gorm:"not null" json:"outstanding_predecessors"`

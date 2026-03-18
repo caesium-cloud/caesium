@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -223,11 +224,21 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		atomName = fmt.Sprintf("%s-attempt%d", taskRun.TaskID, taskRun.ClaimAttempt)
 	}
 
+	// Query predecessor outputs from the DB and build env vars.
+	spec := container.Spec{}
+	predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
+	if predErr != nil {
+		log.Warn("failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
+	}
+	if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
+		spec.Env = outputEnv
+	}
+
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
 		Image:   taskRun.Image,
 		Command: command,
-		Spec:    container.Spec{},
+		Spec:    spec,
 	})
 	if err != nil {
 		return err
@@ -241,7 +252,22 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy); err != nil {
+	// Capture structured task output from container logs before completing.
+	var taskOutput map[string]string
+	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+	if logErr == nil {
+		parsed, parseErr := pkgtask.ParseOutput(logs)
+		if err := logs.Close(); err != nil {
+			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", err)
+		}
+		if parseErr != nil {
+			log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
+		} else {
+			taskOutput = parsed
+		}
+	}
+
+	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput); err != nil {
 		return err
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {

@@ -86,7 +86,7 @@ func TestResumeWithoutEdges(t *testing.T) {
 	require.NoError(t, store.RegisterTask(runEntry.ID, taskA, atomA, 0))
 	require.NoError(t, store.RegisterTask(runEntry.ID, taskB, atomB, 1))
 	require.NoError(t, store.StartTask(runEntry.ID, taskA.ID, "runtime-a"))
-	require.NoError(t, store.CompleteTask(runEntry.ID, taskA.ID, "ok"))
+	require.NoError(t, store.CompleteTask(runEntry.ID, taskA.ID, "ok", nil))
 
 	var taskRun models.TaskRun
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runEntry.ID, taskB.ID).First(&taskRun).Error)

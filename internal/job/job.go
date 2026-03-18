@@ -28,6 +28,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -426,6 +427,7 @@ func (j *job) Run(ctx context.Context) error {
 	inQueue := make(map[uuid.UUID]bool, len(tasks))
 	processed := make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
+	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
@@ -527,8 +529,8 @@ func (j *job) Run(ctx context.Context) error {
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
-	// It returns the atom result string and any error.
-	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner) (string, error) {
+	// It returns the atom result string, any parsed task outputs, and any error.
+	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, error) {
 		atomName := taskID.String()
 		if attempt > 1 {
 			atomName = fmt.Sprintf("%s-attempt%d", taskID, attempt)
@@ -537,12 +539,15 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
-		if len(paramEnv) > 0 {
-			merged := make(map[string]string, len(spec.Env)+len(paramEnv))
+		if len(paramEnv) > 0 || len(extraEnv) > 0 {
+			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
 			for k, v := range spec.Env {
 				merged[k] = v
 			}
 			for k, v := range paramEnv {
+				merged[k] = v
+			}
+			for k, v := range extraEnv {
 				merged[k] = v
 			}
 			spec.Env = merged
@@ -555,11 +560,11 @@ func (j *job) Run(ctx context.Context) error {
 			Spec:    spec,
 		})
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
 
 		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			return "", err
+			return "", nil, err
 		}
 
 		waitResult := make(chan struct {
@@ -581,22 +586,38 @@ func (j *job) Run(ctx context.Context) error {
 					ID:    a.ID(),
 					Force: true,
 				}); stopErr != nil {
-					return "", fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
-				return "", fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				return "", nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			}
-			return "", taskCtx.Err()
+			return "", nil, taskCtx.Err()
 		case result := <-waitResult:
 			if result.err != nil {
-				return "", result.err
+				return "", nil, result.err
 			}
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
+
+			// Capture structured task output from container logs before stopping.
+			var taskOutput map[string]string
+			logs, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+			if logErr == nil {
+				parsed, parseErr := pkgtask.ParseOutput(logs)
+				if err := logs.Close(); err != nil {
+					log.Warn("failed to close log stream", "task_id", taskID, "error", err)
+				}
+				if parseErr != nil {
+					log.Warn("failed to parse task output", "task_id", taskID, "error", parseErr)
+				} else {
+					taskOutput = parsed
+				}
+			}
+
 			stopErr := runner.engine.Stop(&atom.EngineStopRequest{
 				ID:    a.ID(),
 				Force: true,
 			})
-			return string(a.Result()), stopErr
+			return string(a.Result()), taskOutput, stopErr
 		}
 	}
 
@@ -605,6 +626,22 @@ func (j *job) Run(ctx context.Context) error {
 		if runner == nil {
 			return fmt.Errorf("missing runner for task %s", taskID)
 		}
+
+		// Build predecessor output env vars for this task.
+		predOutputs := make(map[string]map[string]string)
+		for _, predID := range predecessors[taskID] {
+			if outputs, ok := taskOutputs[predID]; ok && len(outputs) > 0 {
+				stepName := ""
+				if t := tasksByID[predID]; t != nil {
+					stepName = t.Name
+				}
+				if stepName == "" {
+					stepName = predID.String()
+				}
+				predOutputs[stepName] = outputs
+			}
+		}
+		outputEnv := pkgtask.BuildOutputEnv(predOutputs)
 
 		taskModel := tasksByID[taskID]
 		maxAttempts := 1
@@ -620,12 +657,15 @@ func (j *job) Run(ctx context.Context) error {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, execErr := executeAtom(taskCtx, taskID, attempt, runner)
+			result, output, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
 			cancel()
 
 			if execErr == nil {
-				if err := store.CompleteTask(runID, taskID, result); err != nil {
+				if err := store.CompleteTask(runID, taskID, result, output); err != nil {
 					return err
+				}
+				if len(output) > 0 {
+					taskOutputs[taskID] = output
 				}
 				if !run.IsSuccessfulTaskResult(result) {
 					return fmt.Errorf("task %s failed with result %q", taskID, result)

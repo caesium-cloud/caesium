@@ -85,6 +85,7 @@ type TaskRun struct {
 	Attempt                 int               `json:"attempt"`
 	MaxAttempts             int               `json:"max_attempts"`
 	Result                  string            `json:"result,omitempty"`
+	Output                  map[string]string `json:"output,omitempty"`
 	StartedAt               *time.Time        `json:"started_at,omitempty"`
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
 	Error                   string            `json:"error,omitempty"`
@@ -373,15 +374,15 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 	return err
 }
 
-func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string) error {
-	return s.completeTask(runID, taskID, result, "", false)
+func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string, output map[string]string) error {
+	return s.completeTask(runID, taskID, result, "", false, output)
 }
 
-func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string) error {
-	return s.completeTask(runID, taskID, result, claimedBy, true)
+func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string) error {
+	return s.completeTask(runID, taskID, result, claimedBy, true, output)
 }
 
-func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool) error {
+func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string) error {
 	pendingEvents := make([]event.Event, 0, 8)
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
@@ -419,6 +420,13 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			"status":       string(status),
 			"completed_at": now,
 			"result":       result,
+		}
+		if len(output) > 0 {
+			encoded, marshalErr := json.Marshal(output)
+			if marshalErr != nil {
+				return fmt.Errorf("marshalling task output: %w", marshalErr)
+			}
+			updates["output"] = encoded
 		}
 		if status == TaskStatusFailed {
 			msg := result
@@ -980,6 +988,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		UpdatedAt:               model.UpdatedAt,
 	}
 
+	if len(model.Output) > 0 {
+		var out map[string]string
+		if err := json.Unmarshal(model.Output, &out); err == nil {
+			task.Output = out
+		}
+	}
+
 	if model.StartedAt != nil {
 		started := *model.StartedAt
 		task.StartedAt = &started
@@ -1077,4 +1092,74 @@ func (s *Store) publishEvents(events ...event.Event) {
 
 func (s *Store) PublishEvents(events ...event.Event) {
 	s.publishEvents(events...)
+}
+
+// PredecessorOutputs returns a map of step-name → output key-values for all
+// predecessors of the given task within a run.  This is used by the distributed
+// executor to inject CAESIUM_OUTPUT_* env vars before starting a task.
+func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[string]string, error) {
+	// Find predecessor task IDs via edges.
+	var edges []models.TaskEdge
+	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		return nil, err
+	}
+
+	if len(edges) == 0 {
+		return nil, nil
+	}
+
+	// Batch-fetch predecessor tasks and task runs to avoid N+1 queries.
+	predTaskIDs := make([]uuid.UUID, len(edges))
+	for i, edge := range edges {
+		predTaskIDs[i] = edge.FromTaskID
+	}
+
+	var tasks []models.Task
+	if err := s.db.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
+		log.Warn("failed to find predecessor tasks for output", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	tasksByID := make(map[uuid.UUID]models.Task, len(tasks))
+	for i := range tasks {
+		tasksByID[tasks[i].ID] = tasks[i]
+	}
+
+	var taskRuns []models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+		log.Warn("failed to find predecessor task runs for output", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	taskRunsByTaskID := make(map[uuid.UUID]models.TaskRun, len(taskRuns))
+	for i := range taskRuns {
+		taskRunsByTaskID[taskRuns[i].TaskID] = taskRuns[i]
+	}
+
+	result := make(map[string]map[string]string, len(edges))
+	for _, edge := range edges {
+		task, ok := tasksByID[edge.FromTaskID]
+		if !ok {
+			continue
+		}
+		taskRun, ok := taskRunsByTaskID[edge.FromTaskID]
+		if !ok || len(taskRun.Output) == 0 {
+			continue
+		}
+
+		var output map[string]string
+		if err := json.Unmarshal(taskRun.Output, &output); err != nil {
+			log.Warn("failed to unmarshal predecessor task output", "run_id", runID, "task_id", taskID, "predecessor_task_id", edge.FromTaskID, "error", err)
+			continue
+		}
+
+		stepName := task.Name
+		if stepName == "" {
+			stepName = task.ID.String()
+		}
+		result[stepName] = output
+	}
+
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
 }

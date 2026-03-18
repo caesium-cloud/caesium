@@ -221,6 +221,7 @@ export function RunDetailPage() {
             dag={dag}
             atoms={atoms}
             taskMetadata={taskMetadata}
+            taskRunData={runTasks}
             onNodeClick={setSelectedTaskId}
             selectedTaskId={selectedTaskId}
           />

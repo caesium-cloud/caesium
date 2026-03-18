@@ -46,6 +46,7 @@ export interface TaskRun {
   attempt?: number;
   max_attempts?: number;
   result?: string;
+  output?: Record<string, string>;
   error?: string;
   outstanding_predecessors?: number;
   started_at?: string;

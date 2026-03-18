@@ -195,6 +195,7 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			ID:           uuid.New(),
 			JobID:        job.ID,
 			AtomID:       atom.ID,
+			Name:         step.Name,
 			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
 			Retries:      step.Retries,
 			RetryDelay:   step.RetryDelay,
