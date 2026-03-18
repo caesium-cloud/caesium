@@ -48,6 +48,7 @@ type Metadata struct {
 	Annotations      map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
 	MaxParallelTasks int               `yaml:"maxParallelTasks,omitempty" json:"maxParallelTasks,omitempty"`
 	TaskTimeout      time.Duration     `yaml:"taskTimeout,omitempty" json:"taskTimeout,omitempty"`
+	RunTimeout       time.Duration     `yaml:"runTimeout,omitempty" json:"runTimeout,omitempty"`
 }
 
 // Trigger defines how the job is triggered.

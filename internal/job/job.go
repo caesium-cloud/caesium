@@ -43,6 +43,7 @@ type job struct {
 	triggerID              *uuid.UUID
 	maxParallelTasks       int
 	taskTimeout            time.Duration
+	runTimeout             time.Duration
 	alias                  string
 	params                 map[string]string
 	runStoreFactory        func() *run.Store
@@ -65,6 +66,7 @@ func New(m *models.Job, opts ...jobOption) Job {
 		triggerID:              &m.TriggerID,
 		maxParallelTasks:       m.MaxParallelTasks,
 		taskTimeout:            m.TaskTimeout,
+		runTimeout:             m.RunTimeout,
 		alias:                  m.Alias,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
@@ -221,6 +223,14 @@ func (j *job) Run(ctx context.Context) error {
 	taskTimeout := j.taskTimeout
 	if taskTimeout == 0 {
 		taskTimeout = vars.TaskTimeout
+	}
+
+	// Apply run-level timeout if configured.
+	runTimeout := j.runTimeout
+	if runTimeout > 0 {
+		var runCancel context.CancelFunc
+		ctx, runCancel = context.WithTimeout(ctx, runTimeout)
+		defer runCancel()
 	}
 
 	maxParallel := j.maxParallelTasks
@@ -892,6 +902,11 @@ func (j *job) Run(ctx context.Context) error {
 				}
 			}
 		}
+	}
+
+	// Wrap deadline-exceeded errors with a human-readable message.
+	if runTimeout > 0 && runErr != nil && errors.Is(runErr, context.DeadlineExceeded) {
+		runErr = fmt.Errorf("run timed out after %s", runTimeout)
 	}
 
 	if terminalTasks != len(tasks) {
