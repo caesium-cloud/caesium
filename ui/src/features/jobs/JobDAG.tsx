@@ -9,14 +9,19 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
-import type { JobDAGResponse, Atom } from '@/lib/api';
+import type { JobDAGResponse, Atom, TaskRun } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
+import { DataFlowEdge } from './components/DataFlowEdge';
 
 const nodeWidth = 300;
 const nodeHeight = 148;
 
 const nodeTypes = {
   task: TaskNode,
+};
+
+const edgeTypes = {
+  dataflow: DataFlowEdge,
 };
 
 const getLayoutedElements = (nodes: Node[], edges: Edge[], direction = 'LR') => {
@@ -63,6 +68,7 @@ interface TaskRunMetadata {
   started_at?: string;
   completed_at?: string;
   error?: string;
+  output?: Record<string, string>;
 }
 
 interface JobDAGProps {
@@ -70,11 +76,12 @@ interface JobDAGProps {
   atoms: Record<string, Atom>;
   taskStatus?: Record<string, string>;
   taskMetadata?: Record<string, TaskRunMetadata>;
+  taskRunData?: Record<string, TaskRun>;
   onNodeClick?: (taskId: string) => void;
   selectedTaskId?: string | null;
 }
 
-export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, selectedTaskId }: JobDAGProps) {
+export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
     const resolvedTaskStatus = useMemo(() => {
         const statusByTask: Record<string, string> = {};
 
@@ -91,17 +98,32 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
         return statusByTask;
     }, [taskMetadata, taskStatus]);
 
+    // Build a set of task IDs that receive outputs from predecessors.
+    const taskReceivesOutputs = useMemo(() => {
+        const receivers = new Set<string>();
+        if (!dag.edges) return receivers;
+        for (const e of dag.edges) {
+            const sourceRun = taskRunData?.[e.from];
+            if (sourceRun?.output && Object.keys(sourceRun.output).length > 0) {
+                receivers.add(e.to);
+            }
+        }
+        return receivers;
+    }, [dag.edges, taskRunData]);
+
     const initialNodes: Node[] = useMemo(() => {
         if (!dag.nodes) return [];
         return dag.nodes.map(n => {
             const atom = atoms[n.atom_id];
             const meta = taskMetadata?.[n.id];
             const status = resolvedTaskStatus[n.id] || 'pending';
-            
+            const runTask = taskRunData?.[n.id];
+            const outputCount = runTask?.output ? Object.keys(runTask.output).length : 0;
+
             return {
                 id: n.id,
                 type: 'task',
-                data: { 
+                data: {
                   label: n.id,
                   atom: atom,
                   status: status,
@@ -109,37 +131,43 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
                   startedAt: meta?.started_at,
                   completedAt: meta?.completed_at,
                   error: meta?.error,
+                  outputCount,
+                  receivesOutputs: taskReceivesOutputs.has(n.id),
                 },
-                position: { x: 0, y: 0 } 
+                position: { x: 0, y: 0 }
             }
         });
-    }, [dag, atoms, resolvedTaskStatus, taskMetadata, selectedTaskId]);
+    }, [dag, atoms, resolvedTaskStatus, taskMetadata, taskRunData, selectedTaskId, taskReceivesOutputs]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
         return dag.edges.map((e) => {
             const sourceStatus = resolvedTaskStatus[e.from] || 'pending';
-            const stroke = edgeColor(sourceStatus);
+            const sourceRun = taskRunData?.[e.from];
+            const outputCount = sourceRun?.output ? Object.keys(sourceRun.output).length : 0;
+            const hasOutputs = outputCount > 0;
+            const stroke = hasOutputs && sourceStatus === 'succeeded' ? '#10b981' : edgeColor(sourceStatus);
 
             return {
                 id: `e${e.from}-${e.to}`,
                 source: e.from,
                 target: e.to,
-                type: 'simplebezier',
+                type: 'dataflow',
                 animated: sourceStatus === 'running',
-                markerEnd: { 
+                data: { outputCount },
+                markerEnd: {
                   type: MarkerType.ArrowClosed,
                   width: 20,
                   height: 20,
                   color: stroke,
                 },
                 style: {
-                  strokeWidth: 2,
+                  strokeWidth: hasOutputs ? 3 : 2,
                   stroke,
                 }
             };
         });
-    }, [dag, resolvedTaskStatus]);
+    }, [dag, resolvedTaskStatus, taskRunData]);
 
     const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
         () => getLayoutedElements(initialNodes, initialEdges),
@@ -156,6 +184,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, onNodeClick, sele
         nodes={layoutedNodes}
         edges={layoutedEdges}
         nodeTypes={nodeTypes}
+        edgeTypes={edgeTypes}
         onNodeClick={handleNodeClick}
         fitView
         fitViewOptions={{ padding: 0.2 }}
