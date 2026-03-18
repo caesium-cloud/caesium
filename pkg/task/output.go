@@ -1,0 +1,118 @@
+package task
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"strings"
+)
+
+const (
+	// outputMarker is the stdout line prefix that tasks use to emit structured
+	// output key-value pairs.  Example:
+	//
+	//   ##caesium::output {"row_count": "42", "path": "/data/out.parquet"}
+	outputMarker = "##caesium::output "
+
+	// MaxOutputBytes caps the total serialised size of collected outputs per
+	// task to prevent unbounded memory/DB usage.  Tasks that need to pass
+	// larger payloads should use shared storage and pass the reference.
+	MaxOutputBytes = 65536 // 64 KB
+)
+
+// ParseOutput reads container log output and extracts structured key-value
+// pairs from lines matching the ##caesium::output marker protocol.
+//
+// Multiple marker lines are merged with last-write-wins semantics per key.
+// All values are coerced to strings.  If the total serialised output exceeds
+// MaxOutputBytes an error is returned.
+//
+// Lines that do not match the marker prefix are silently ignored (they are
+// normal log output).
+func ParseOutput(logs io.Reader) (map[string]string, error) {
+	result := make(map[string]string)
+
+	scanner := bufio.NewScanner(logs)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Docker multiplexed log lines may have an 8-byte binary header.
+		// The marker will still appear in the text portion of the line.
+		idx := strings.Index(line, outputMarker)
+		if idx < 0 {
+			continue
+		}
+
+		payload := line[idx+len(outputMarker):]
+		payload = strings.TrimSpace(payload)
+		if payload == "" {
+			continue
+		}
+
+		var raw map[string]any
+		if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+			// Malformed JSON on an output line — skip rather than failing
+			// the entire task.
+			continue
+		}
+
+		for k, v := range raw {
+			result[k] = fmt.Sprintf("%v", v)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading task output logs: %w", err)
+	}
+
+	if len(result) == 0 {
+		return nil, nil
+	}
+
+	// Enforce size limit.
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling task output: %w", err)
+	}
+	if len(encoded) > MaxOutputBytes {
+		return nil, fmt.Errorf("task output exceeds %d byte limit (%d bytes)", MaxOutputBytes, len(encoded))
+	}
+
+	return result, nil
+}
+
+// NormalizeStepName converts a step name to an environment-variable-safe
+// prefix.  Hyphens and dots are replaced with underscores and the result is
+// uppercased.
+//
+//	"etl-extract" → "ETL_EXTRACT"
+//	"step.one"    → "STEP_ONE"
+func NormalizeStepName(name string) string {
+	name = strings.ReplaceAll(name, "-", "_")
+	name = strings.ReplaceAll(name, ".", "_")
+	return strings.ToUpper(name)
+}
+
+// BuildOutputEnv constructs CAESIUM_OUTPUT_<STEP>_<KEY>=<VALUE> environment
+// variables from a map of predecessor step names to their output key-value
+// pairs.
+func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]string {
+	if len(predecessorOutputs) == 0 {
+		return nil
+	}
+
+	env := make(map[string]string)
+	for stepName, outputs := range predecessorOutputs {
+		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
+		for k, v := range outputs {
+			envKey := prefix + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(k, "-", "_"), ".", "_"))
+			env[envKey] = v
+		}
+	}
+
+	if len(env) == 0 {
+		return nil
+	}
+	return env
+}

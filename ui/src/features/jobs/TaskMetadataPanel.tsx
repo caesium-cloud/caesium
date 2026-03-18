@@ -27,6 +27,19 @@ export function TaskMetadataPanel({ task, runTask, framed = true }: TaskMetadata
         <MetadataRow label="Node Selector" value={formatKeyValueMap((task?.node_selector || runTask?.node_selector) as Record<string, unknown>)} />
         <MetadataRow label="Outstanding Predecessors" value={String(runTask?.outstanding_predecessors ?? 0)} mono />
         {runTask?.error ? <MetadataRow label="Error" value={runTask.error} className="md:col-span-2" /> : null}
+        {runTask?.output && Object.keys(runTask.output).length > 0 ? (
+          <div className="md:col-span-2">
+            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Output</div>
+            <div className="rounded-md border bg-muted/50 p-2">
+              {Object.entries(runTask.output).map(([key, value]) => (
+                <div key={key} className="flex gap-2 font-mono text-xs">
+                  <span className="font-semibold text-muted-foreground">{key}:</span>
+                  <span className="text-foreground">{value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
   );
 

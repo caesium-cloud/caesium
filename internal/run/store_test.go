@@ -89,7 +89,7 @@ func TestStorePersistsRunState(t *testing.T) {
 	require.NoError(t, secondStore.ResetInFlightTasks(runRecord.ID))
 
 	// Completing the first task should decrement the successor outstanding count.
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil))
 
 	state, err = store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestStorePersistsRunState(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "ok"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "ok", nil))
 	require.NoError(t, store.Complete(runRecord.ID, nil))
 
 	finalStore := NewStore(db)
@@ -182,7 +182,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskC, atomC, 0))
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "ok"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "ok", nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil))
 
 	state, err = store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -246,10 +246,10 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 
 	require.NoError(t, store.StartTaskClaimed(runRecord.ID, task.ID, "runtime-a", claimOwner))
 
-	err = store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", "node-b")
+	err = store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", "node-b", nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
 
-	require.NoError(t, store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", claimOwner))
+	require.NoError(t, store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", claimOwner, nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -266,4 +266,185 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 	require.Equal(t, "runtime-a", taskState.RuntimeID)
 	require.Equal(t, claimOwner, taskState.ClaimedBy)
 	require.NotNil(t, taskState.StartedAt)
+}
+
+func TestCompleteTaskWithOutput(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomModel := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","hello"]`,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+
+	task := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomModel.ID,
+		Name:   "step-one",
+	}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atomModel, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+
+	output := map[string]string{
+		"row_count": "42",
+		"path":      "/data/out.parquet",
+	}
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", output))
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	var taskState *TaskRun
+	for _, candidate := range state.Tasks {
+		if candidate.ID == task.ID {
+			taskState = candidate
+			break
+		}
+	}
+	require.NotNil(t, taskState)
+	require.Equal(t, TaskStatusSucceeded, taskState.Status)
+	require.Equal(t, map[string]string{
+		"row_count": "42",
+		"path":      "/data/out.parquet",
+	}, taskState.Output)
+}
+
+func TestCompleteTaskWithNilOutput(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomModel := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","hello"]`,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+
+	task := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomModel.ID,
+	}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atomModel, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", nil))
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	var taskState *TaskRun
+	for _, candidate := range state.Tasks {
+		if candidate.ID == task.ID {
+			taskState = candidate
+			break
+		}
+	}
+	require.NotNil(t, taskState)
+	require.Equal(t, TaskStatusSucceeded, taskState.Status)
+	require.Nil(t, taskState.Output)
+}
+
+func TestPredecessorOutputs(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomA := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","a"]`,
+	}
+	atomB := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","b"]`,
+	}
+	require.NoError(t, db.Create(atomA).Error)
+	require.NoError(t, db.Create(atomB).Error)
+
+	taskA := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomA.ID,
+		Name:   "step-a",
+	}
+	taskB := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomB.ID,
+		Name:   "step-b",
+	}
+	require.NoError(t, db.Create(taskA).Error)
+	require.NoError(t, db.Create(taskB).Error)
+
+	edge := &models.TaskEdge{
+		ID:         uuid.New(),
+		JobID:      jobID,
+		FromTaskID: taskA.ID,
+		ToTaskID:   taskB.ID,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	require.NoError(t, db.Create(edge).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskA, atomA, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
+
+	require.NoError(t, store.StartTask(runRecord.ID, taskA.ID, "runtime-a"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", map[string]string{
+		"row_count": "42",
+	}))
+
+	outputs, err := store.PredecessorOutputs(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Len(t, outputs, 1)
+	require.Equal(t, map[string]string{"row_count": "42"}, outputs["step-a"])
+}
+
+func TestPredecessorOutputs_NoPredecessors(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	taskID := uuid.New()
+	runID := uuid.New()
+
+	outputs, err := store.PredecessorOutputs(runID, taskID)
+	require.NoError(t, err)
+	require.Nil(t, outputs)
 }
