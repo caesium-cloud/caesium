@@ -257,7 +257,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
 		parsed, parseErr := pkgtask.ParseOutput(logs)
-		_ = logs.Close()
+		if err := logs.Close(); err != nil {
+			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", err)
+		}
 		if parseErr != nil {
 			log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
 		} else {

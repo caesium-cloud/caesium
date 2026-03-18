@@ -539,20 +539,16 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
-		envSources := []map[string]string{paramEnv, extraEnv}
-		totalExtra := 0
-		for _, src := range envSources {
-			totalExtra += len(src)
-		}
-		if totalExtra > 0 {
-			merged := make(map[string]string, len(spec.Env)+totalExtra)
+		if len(paramEnv) > 0 || len(extraEnv) > 0 {
+			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
 			for k, v := range spec.Env {
 				merged[k] = v
 			}
-			for _, src := range envSources {
-				for k, v := range src {
-					merged[k] = v
-				}
+			for k, v := range paramEnv {
+				merged[k] = v
+			}
+			for k, v := range extraEnv {
+				merged[k] = v
 			}
 			spec.Env = merged
 		}
@@ -607,7 +603,9 @@ func (j *job) Run(ctx context.Context) error {
 			logs, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 			if logErr == nil {
 				parsed, parseErr := pkgtask.ParseOutput(logs)
-				_ = logs.Close()
+				if err := logs.Close(); err != nil {
+					log.Warn("failed to close log stream", "task_id", taskID, "error", err)
+				}
 				if parseErr != nil {
 					log.Warn("failed to parse task output", "task_id", taskID, "error", parseErr)
 				} else {

@@ -1108,24 +1108,46 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 		return nil, nil
 	}
 
+	// Batch-fetch predecessor tasks and task runs to avoid N+1 queries.
+	predTaskIDs := make([]uuid.UUID, len(edges))
+	for i, edge := range edges {
+		predTaskIDs[i] = edge.FromTaskID
+	}
+
+	var tasks []models.Task
+	if err := s.db.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
+		log.Warn("failed to find predecessor tasks for output", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	tasksByID := make(map[uuid.UUID]models.Task, len(tasks))
+	for i := range tasks {
+		tasksByID[tasks[i].ID] = tasks[i]
+	}
+
+	var taskRuns []models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+		log.Warn("failed to find predecessor task runs for output", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	taskRunsByTaskID := make(map[uuid.UUID]models.TaskRun, len(taskRuns))
+	for i := range taskRuns {
+		taskRunsByTaskID[taskRuns[i].TaskID] = taskRuns[i]
+	}
+
 	result := make(map[string]map[string]string, len(edges))
 	for _, edge := range edges {
-		var task models.Task
-		if err := s.db.First(&task, "id = ?", edge.FromTaskID).Error; err != nil {
+		task, ok := tasksByID[edge.FromTaskID]
+		if !ok {
 			continue
 		}
-
-		var taskRun models.TaskRun
-		if err := s.db.Where("job_run_id = ? AND task_id = ?", runID, edge.FromTaskID).First(&taskRun).Error; err != nil {
-			continue
-		}
-
-		if len(taskRun.Output) == 0 {
+		taskRun, ok := taskRunsByTaskID[edge.FromTaskID]
+		if !ok || len(taskRun.Output) == 0 {
 			continue
 		}
 
 		var output map[string]string
 		if err := json.Unmarshal(taskRun.Output, &output); err != nil {
+			log.Warn("failed to unmarshal predecessor task output", "run_id", runID, "task_id", taskID, "predecessor_task_id", edge.FromTaskID, "error", err)
 			continue
 		}
 

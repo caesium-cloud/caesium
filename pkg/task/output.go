@@ -106,7 +106,7 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 	for stepName, outputs := range predecessorOutputs {
 		prefix := "CAESIUM_OUTPUT_" + NormalizeStepName(stepName) + "_"
 		for k, v := range outputs {
-			envKey := prefix + strings.ToUpper(strings.ReplaceAll(strings.ReplaceAll(k, "-", "_"), ".", "_"))
+			envKey := prefix + NormalizeStepName(k)
 			env[envKey] = v
 		}
 	}
