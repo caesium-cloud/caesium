@@ -171,11 +171,19 @@ func (e *dockerEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 // doesn't distinguish between a "stopped" and a "removed"
 // container, we encapsulate both functions inside
 // docker.Atom.Stop.
+//
+// We use context.Background() for the Docker API calls so that
+// cleanup succeeds even when the parent context has been
+// cancelled (e.g. by a run-level timeout).
 func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 	log.Info("stopping docker container", "id", req.ID)
 
+	// Use a detached context so that container cleanup is not
+	// short-circuited by a cancelled parent (run timeout, etc.).
+	cleanupCtx := context.Background()
+
 	timeout := int(req.Timeout.Seconds())
-	if err := e.backend.ContainerStop(e.ctx, req.ID, dockercontainer.StopOptions{Timeout: &timeout}); err != nil {
+	if err := e.backend.ContainerStop(cleanupCtx, req.ID, dockercontainer.StopOptions{Timeout: &timeout}); err != nil {
 		return err
 	}
 
@@ -186,7 +194,7 @@ func (e *dockerEngine) Stop(req *atom.EngineStopRequest) error {
 		RemoveVolumes: true,
 	}
 
-	return e.backend.ContainerRemove(e.ctx, req.ID, opts)
+	return e.backend.ContainerRemove(cleanupCtx, req.ID, opts)
 }
 
 // Logs streams the log output from a Caesium Docker container

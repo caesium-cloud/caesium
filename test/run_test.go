@@ -67,9 +67,10 @@ func (s *IntegrationTestSuite) triggerRun(jobID string) string {
 // Run Timeout
 // --------------------------------------------------------------------------
 
-// TestRunTimeout applies a job with a 5 s runTimeout and a task that sleeps for
+// TestRunTimeout applies a job with a 15 s runTimeout and a task that sleeps for
 // 120 s.  The run should be marked failed with a timeout error well before the
-// task would naturally finish.
+// task would naturally finish.  We use 15 s (not 5 s) to give ARM64 CI runners
+// enough headroom for container startup.
 func (s *IntegrationTestSuite) TestRunTimeout() {
 	dir := s.writeJobManifest(runTimeoutManifest())
 	defer os.RemoveAll(dir)
@@ -81,7 +82,7 @@ func (s *IntegrationTestSuite) TestRunTimeout() {
 
 	runID := s.triggerRun(job.ID)
 
-	// The run timeout is 5 s; allow generous headroom for container startup.
+	// The run timeout is 15 s; allow generous headroom for container startup.
 	run := s.awaitRun(job.ID, runID, 60*time.Second)
 
 	s.Equal("failed", run.Status, "run should fail due to timeout")
@@ -240,12 +241,12 @@ steps:
 // --------------------------------------------------------------------------
 
 func runTimeoutManifest() string {
-	return fmt.Sprintf(`
+	return `
 apiVersion: v1
 kind: Job
 metadata:
   alias: integration-job-run-timeout
-  runTimeout: 5s
+  runTimeout: 15s
 trigger:
   type: cron
   configuration:
@@ -254,7 +255,7 @@ steps:
   - name: slow-task
     image: alpine
     command: ["sh", "-c", "sleep 120"]
-`)
+`
 }
 
 func taskOutputManifest() string {
