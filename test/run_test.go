@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -209,21 +208,6 @@ steps:
 
 	s.Equal("succeeded", run.Status, "three-step DAG should succeed")
 
-	// Verify outputs are captured on the right tasks.
-	taskOutputs := make(map[string]map[string]string)
-	for _, task := range run.Tasks {
-		if task.Output != nil {
-			// We can't easily map task ID to step name from this API response,
-			// so match by output content.
-			for k, v := range task.Output {
-				if taskOutputs[k] == nil {
-					taskOutputs[k] = make(map[string]string)
-				}
-				taskOutputs[k][k] = v
-			}
-		}
-	}
-
 	// The extract step should have row_count and source.
 	var extractTask, transformTask *struct {
 		ID     string
@@ -303,14 +287,4 @@ func extractAlias(manifest string) string {
 		}
 	}
 	return ""
-}
-
-// writeJobManifestFile writes a manifest to a specific filename within a temp dir.
-func (s *IntegrationTestSuite) writeJobManifestFile(contents, filename string) string {
-	dir, err := os.MkdirTemp("", "caesium-job-*")
-	s.Require().NoError(err)
-
-	path := filepath.Join(dir, filename)
-	s.Require().NoError(os.WriteFile(path, []byte(strings.TrimSpace(contents)), 0o644))
-	return dir
 }

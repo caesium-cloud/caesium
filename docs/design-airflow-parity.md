@@ -392,47 +392,43 @@ steps:
 
 ---
 
-## Workstream 8: XCom / Inter-Task Data Passing (P1)
+## Workstream 8: XCom / Inter-Task Data Passing (P1) — DONE
+
+**Status**: Implemented in PR #107 (merged).
 
 **Why**: Tasks in a pipeline need to pass small data (file paths, row counts, status flags) to downstream tasks without requiring an external system.
 
-### Concept
+### Implementation (differs from original design)
 
-Container-native approach: tasks write output to a convention path (`/caesium/output/`). The executor captures these files after the container exits and stores them. Downstream tasks receive predecessor outputs as env vars or mounted files.
+Instead of the file-based `/caesium/output/` approach, a simpler stdout marker protocol was implemented:
 
-### Implementation Steps
+- Tasks emit `##caesium::output {"key": "value"}` to stdout
+- After container completion, logs are scanned for markers, parsed into `map[string]string`, and stored on the `TaskRun` model (`Output` field, `json` column)
+- Downstream tasks receive predecessor outputs as `CAESIUM_OUTPUT_<STEP_NAME>_<KEY>=<VALUE>` environment variables
+- Works in both local and distributed (worker) execution modes
+- 64KB size limit per task output
+- Last-write-wins merge semantics for multiple marker lines
+- Non-string JSON values are coerced to strings; malformed JSON is silently skipped
+- UI displays task outputs in the TaskMetadataPanel
 
-1. **Output capture**: After a task container exits successfully, check for files in `/caesium/output/`:
-   - `/caesium/output/result.json` — parsed as key-value pairs.
-   - Any file in `/caesium/output/` is stored.
-2. **Storage model**: New `TaskOutput` model (`internal/models/task_output.go`):
-   ```go
-   type TaskOutput struct {
-       ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-       TaskRunID uuid.UUID `gorm:"type:uuid;index;not null"`
-       Key       string    `gorm:"type:text;not null"`
-       Value     string    `gorm:"type:text;not null"`
-       CreatedAt time.Time `gorm:"not null"`
-   }
-   ```
-3. **Env injection**: When a downstream task starts, inject predecessor outputs as `CAESIUM_OUTPUT_<STEP_NAME>_<KEY>=<VALUE>`.
-4. **Size limit**: Cap individual values at 64KB. Larger data should use shared mounts or external storage — log a warning if exceeded.
-5. **API**: Add `GET /v1/jobs/{id}/runs/{run_id}/tasks/{task_id}/outputs` endpoint.
-6. **Mount option**: Optionally mount predecessor output files into the downstream container at `/caesium/input/<step_name>/`.
-7. **Tests**: Unit tests for output capture, env injection, size limit enforcement.
-8. **Docs**: Add `docs/data-passing.md`.
+### Files Changed
 
-### Files to Touch
+- `pkg/task/output.go` — `ParseOutput`, `NormalizeStepName`, `BuildOutputEnv`
+- `pkg/task/output_test.go` — unit tests for parsing and env building
+- `internal/models/run.go` — `Output` field on `TaskRun`
+- `internal/run/store.go` — `CompleteTask` accepts output map
+- `internal/run/store_test.go` — store-level tests
+- `internal/job/job.go` — output capture + env injection (local mode)
+- `internal/worker/runtime_executor.go` — output capture (distributed mode)
+- `internal/jobdef/importer.go` — step name stored on Task model
+- `ui/src/features/jobs/TaskMetadataPanel.tsx` — output display
+- `ui/src/lib/api.ts` — `output` field on `TaskRun` interface
 
-- `internal/models/task_output.go` — new model
-- `internal/models/models.go` — register model
-- `internal/job/job.go` — output capture + env injection
-- `internal/atom/docker/engine.go` — mount `/caesium/output/`
-- `internal/atom/kubernetes/engine.go` — mount output volume
-- `internal/atom/podman/engine.go` — mount `/caesium/output/`
-- `api/rest/controller/job/` — outputs endpoint
-- `api/rest/bind/bind.go` — route registration
-- `docs/data-passing.md`
+### Remaining items (not yet implemented)
+
+- Dedicated API endpoint for task outputs (`GET /v1/jobs/{id}/runs/{run_id}/tasks/{task_id}/outputs`)
+- Mount-based option for larger data passing (`/caesium/input/<step_name>/`)
+- Documentation (`docs/data-passing.md`)
 
 ---
 
@@ -549,28 +545,38 @@ Container-native approach: tasks write output to a convention path (`/caesium/ou
 
 ---
 
-## Workstream 12: DAG Run Timeout (P1)
+## Workstream 12: DAG Run Timeout (P1) — DONE
+
+**Status**: Implemented in PR #109 (pending merge).
 
 **Why**: A job with many tasks needs an overall time cap to prevent runaway pipelines from consuming resources indefinitely.
 
-### Implementation Steps
+### Implementation
 
-1. **Schema**: Add `runTimeout` to `Metadata` in `pkg/jobdef/definition.go`.
-2. **Model**: Add `RunTimeout time.Duration` to `Job` model.
-3. **Executor**: In `internal/job/job.go`, wrap the entire job execution in a `context.WithTimeout` using `RunTimeout`. When the context expires:
-   - Cancel all running task contexts.
-   - Mark remaining pending/running tasks as `failed` with error "run timeout exceeded".
-   - Mark the JobRun as `failed`.
-4. **Tests**: Unit test for run timeout cancellation.
-5. **Docs**: Update `docs/job-schema-reference.md`.
+1. **Schema**: Added `RunTimeout time.Duration` to `Metadata` in `pkg/jobdef/definition.go` (`yaml:"runTimeout"`).
+2. **Model**: Added `RunTimeout time.Duration` to `Job` model (auto-migrated by GORM).
+3. **Importer**: Propagates `RunTimeout` from definition to model in `internal/jobdef/importer.go`.
+4. **Executor**: In `internal/job/job.go`, the `Run()` method wraps the entire execution in `context.WithTimeout` when `runTimeout > 0`. When the deadline expires:
+   - All in-flight task contexts are cancelled (derived from the parent context).
+   - Running containers are force-stopped.
+   - The error is wrapped as `"run timed out after <duration>"`.
+   - The deferred `store.Complete()` marks the JobRun as `failed`.
+5. **Run vs task timeout disambiguation**: When a task context is cancelled, the executor checks `ctx.Err()` to distinguish run-level timeouts from task-level timeouts, ensuring correct error messages.
+6. **UI**: Job detail page shows `runTimeout`, `taskTimeout`, and `maxParallelTasks` in the Configuration tab's Job Metadata card.
+7. **Tests**: Unit test (`TestRunLocalRunTimeoutFailsRun`) + 4 integration tests in `test/run_test.go`.
+8. **Docs**: `docs/job-schema-reference.md` updated with `runTimeout`, `taskTimeout`, and `maxParallelTasks` fields.
 
-### Files to Touch
+### Files Changed
 
-- `pkg/jobdef/definition.go` — Metadata struct
-- `internal/models/job.go` — RunTimeout field
+- `pkg/jobdef/definition.go` — `RunTimeout` on `Metadata` struct
+- `internal/models/job.go` — `RunTimeout` field
 - `internal/jobdef/importer.go` — propagate field
-- `internal/job/job.go` — context timeout
-- `docs/job-schema-reference.md`
+- `internal/job/job.go` — `context.WithTimeout` wrapping + run/task timeout disambiguation
+- `internal/job/job_test.go` — unit test
+- `test/run_test.go` — integration tests
+- `ui/src/lib/api.ts` — timeout fields on `Job` interface
+- `ui/src/features/jobs/JobDetailPage.tsx` — display timeout fields
+- `docs/job-schema-reference.md` — document all metadata fields
 
 ---
 

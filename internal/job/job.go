@@ -598,6 +598,10 @@ func (j *job) Run(ctx context.Context) error {
 				}); stopErr != nil {
 					return "", nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
+				// Distinguish run-level timeout from task-level timeout.
+				if ctx.Err() != nil {
+					return "", nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+				}
 				return "", nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			}
 			return "", nil, taskCtx.Err()

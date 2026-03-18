@@ -6,6 +6,9 @@ export interface Job {
   trigger_id: string;
   labels: Record<string, unknown>;
   annotations: Record<string, unknown>;
+  max_parallel_tasks?: number;
+  task_timeout?: number;
+  run_timeout?: number;
   paused: boolean;
   created_at: string;
   updated_at: string;
