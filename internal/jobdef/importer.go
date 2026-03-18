@@ -82,6 +82,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			Annotations:      jsonmap.FromStringMap(def.Metadata.Annotations),
 			MaxParallelTasks: def.Metadata.MaxParallelTasks,
 			TaskTimeout:      def.Metadata.TaskTimeout,
+			RunTimeout:       def.Metadata.RunTimeout,
 		}
 
 		if opts != nil && opts.Provenance != nil {

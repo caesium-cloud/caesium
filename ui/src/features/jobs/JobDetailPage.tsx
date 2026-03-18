@@ -13,7 +13,7 @@ import { JobDAG } from "./JobDAG";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { api, type Atom, type Job, type JobRun, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
+import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
@@ -433,6 +433,24 @@ export function JobDetailPage() {
                 <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Pause State</div>
                 <div>{job.paused ? "Paused (blocks new runs)" : "Active"}</div>
               </div>
+              {job.run_timeout ? (
+                <div>
+                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Run Timeout</div>
+                  <div className="font-mono text-xs">{formatDurationNs(job.run_timeout)}</div>
+                </div>
+              ) : null}
+              {job.task_timeout ? (
+                <div>
+                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Task Timeout</div>
+                  <div className="font-mono text-xs">{formatDurationNs(job.task_timeout)}</div>
+                </div>
+              ) : null}
+              {job.max_parallel_tasks ? (
+                <div>
+                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Max Parallel Tasks</div>
+                  <div className="font-mono text-xs">{job.max_parallel_tasks}</div>
+                </div>
+              ) : null}
               <div>
                 <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
                 <div className="font-mono text-xs">{formatKeyValueMap(job.labels)}</div>

@@ -175,10 +175,14 @@ func (e *kubernetesEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) 
 
 // Stop the Caesium Kubernetes pod. Stop makes a Kubernetes
 // DeletePod call under the covers.
+//
+// We use context.Background() as the base so that pod cleanup
+// succeeds even when the parent context has been cancelled
+// (e.g. by a run-level timeout).
 func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 	var (
 		cancel context.CancelFunc
-		ctx    = e.ctx
+		ctx    = context.Background()
 		bg     = metav1.DeletePropagationBackground
 		fg     = metav1.DeletePropagationForeground
 		opts   = metav1.DeleteOptions{PropagationPolicy: &fg}
@@ -189,7 +193,7 @@ func (e *kubernetesEngine) Stop(req *atom.EngineStopRequest) error {
 	}
 
 	if req.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(e.ctx, req.Timeout)
+		ctx, cancel = context.WithTimeout(ctx, req.Timeout)
 		defer cancel()
 	}
 

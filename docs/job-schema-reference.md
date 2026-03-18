@@ -22,6 +22,9 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `alias` | string | required | Unique identifier used across APIs and console. |
 | `labels` | map[string]string | optional | Attach metadata for filtering. |
 | `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |
+| `maxParallelTasks` | int | optional | Maximum number of tasks to run concurrently. Defaults to `CAESIUM_MAX_PARALLEL_TASKS` or number of CPUs. |
+| `taskTimeout` | duration | optional | Per-task timeout (e.g. `5m`, `1h`). Overrides `CAESIUM_TASK_TIMEOUT`. |
+| `runTimeout` | duration | optional | Maximum wall-clock time for the entire run (e.g. `30m`, `2h`). When exceeded, all in-flight tasks are cancelled and the run is marked as failed. |
 
 ## Trigger
 

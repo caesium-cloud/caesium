@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — Ready for implementation
+Phase 1 complete. Six of fifteen workstreams are implemented (WS1, WS2, WS3, WS8, WS10, WS12).
 
 ## Overview
 
@@ -10,174 +10,55 @@ This plan closes the feature gaps between Caesium and Apache Airflow while prese
 
 ---
 
-## Workstream 1: Task Retries (P0)
+## Workstream 1: Task Retries (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Table stakes for any production scheduler. Transient failures (OOM, network blip, image pull timeout) should not require manual intervention.
 
-### Data Model
+### Implementation
 
-Add fields to `Task` model (`internal/models/task.go`):
-
-```go
-Retries           int           `gorm:"not null;default:0" json:"retries"`
-RetryDelay        time.Duration `gorm:"not null;default:0" json:"retry_delay"`
-RetryBackoff      bool          `gorm:"not null;default:false" json:"retry_backoff"`
-```
-
-Add fields to `TaskRun` model (`internal/models/run.go`):
-
-```go
-Attempt     int `gorm:"not null;default:1" json:"attempt"`
-MaxAttempts int `gorm:"not null;default:1" json:"max_attempts"`
-```
-
-### Job Definition Schema
-
-Add to `Step` struct (`pkg/jobdef/definition.go`):
-
-```yaml
-steps:
-  - name: etl-extract
-    image: etl:latest
-    retries: 3
-    retryDelay: 30s
-    retryBackoff: true    # doubles delay each attempt
-```
-
-### Implementation Steps
-
-1. **Schema**: Add `Retries`, `RetryDelay`, `RetryBackoff` to `Step` in `pkg/jobdef/definition.go`. Add `Attempt`, `MaxAttempts` to `TaskRun` in `internal/models/run.go`. GORM automigrate handles the column additions.
-2. **Importer**: In `internal/jobdef/importer.go`, propagate the new step fields into the `Task` model when importing a job definition.
-3. **Executor retry loop**: In `internal/job/job.go`, when a task fails and `task.Retries > 0 && taskRun.Attempt < taskRun.MaxAttempts`:
-   - Compute delay: `retryDelay * 2^(attempt-1)` if backoff, else `retryDelay`.
-   - Sleep for delay.
-   - Create a new container execution (same atom, incremented attempt).
-   - Update `TaskRun.Attempt`.
-   - Only mark the task as permanently `failed` when all attempts are exhausted.
-4. **Distributed mode**: In `internal/worker/worker.go`, the retry loop runs within the worker that claimed the task. If the worker dies mid-retry, lease expiry allows another worker to reclaim — the new worker reads `Attempt` from the DB and continues from the correct attempt number.
-5. **Metrics**: Add `caesium_task_retries_total` counter to `internal/metrics/metrics.go`, labeled by `{job_alias, task_name, attempt}`.
-6. **Events**: Emit a `TaskRetrying` event type from the event bus.
-7. **UI/Console**: Show attempt number in task run detail view. Show retry count in run summary.
-8. **Tests**: Unit tests for retry loop logic, backoff calculation, max-attempt exhaustion. Integration test with a container that fails N-1 times then succeeds.
-9. **Docs**: Update `docs/job-schema-reference.md` with the new step fields.
-
-### Files to Touch
-
-- `pkg/jobdef/definition.go` — Step struct + validation
-- `internal/models/task.go` — Task model
-- `internal/models/run.go` — TaskRun model
-- `internal/jobdef/importer.go` — propagate fields
-- `internal/job/job.go` — retry loop in executor
-- `internal/worker/worker.go` — distributed retry
-- `internal/metrics/metrics.go` — retry counter
-- `internal/event/bus.go` — TaskRetrying event type
-- `ui/src/` — attempt display
-- `docs/job-schema-reference.md`
+- `Retries`, `RetryDelay`, `RetryBackoff` on Step definition and Task model
+- `Attempt`, `MaxAttempts` on TaskRun model
+- Retry loop in `internal/job/job.go` with exponential backoff (`retryDelay * 2^(attempt-1)`)
+- `computeRetryDelay()` in `internal/job/failure_policy.go`
+- `caesium_task_retries_total` metric with labels `{job_alias, task_name, attempt}`
+- `task_retrying` event type emitted via `store.RetryTask()`
+- UI shows attempt number and retry configuration in TaskMetadataPanel
 
 ---
 
-## Workstream 2: Trigger Rules (P0)
+## Workstream 2: Trigger Rules (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Unlocks error-handling DAG patterns — cleanup-on-failure tasks, always-run notification steps, conditional joins. Without this, DAGs can only express the happy path.
 
-### Supported Rules
+### Implementation
 
-| Rule | Behavior |
-|------|----------|
-| `all_success` | Run when all predecessors succeeded (default, current behavior) |
-| `all_done` | Run when all predecessors finished, regardless of status |
-| `all_failed` | Run only when all predecessors failed |
-| `one_success` | Run when at least one predecessor succeeded |
-| `always` | Alias for `all_done` (provided for Airflow familiarity) |
-
-### Data Model
-
-Add to `Task` model (`internal/models/task.go`):
-
-```go
-TriggerRule string `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
-```
-
-### Job Definition Schema
-
-```yaml
-steps:
-  - name: cleanup
-    image: cleanup:latest
-    dependsOn: [etl-load]
-    triggerRule: all_done
-```
-
-### Implementation Steps
-
-1. **Schema**: Add `TriggerRule` to `Step` in `pkg/jobdef/definition.go` with validation against the allowed values. Add `TriggerRule` to `Task` model.
-2. **Importer**: Propagate `triggerRule` from step definition to Task model. Default to `all_success` when omitted.
-3. **Executor logic**: In `internal/job/job.go`, modify the task-readiness check. Currently a task is ready when `outstanding_predecessors == 0`. Change to:
-   - Decrement `outstanding_predecessors` as predecessors complete (any terminal status).
-   - When `outstanding_predecessors == 0`, evaluate the trigger rule against the actual statuses of all predecessors.
-   - If the rule is satisfied → run the task.
-   - If the rule is not satisfied → mark the task `skipped`.
-   - `always` rule: task is ready immediately when `outstanding_predecessors == 0`, regardless of statuses.
-4. **Failure policy interaction**: The `continue` failure policy already skips descendants on failure. Trigger rules should be evaluated *before* the skip-descendants logic — a task with `all_done` or `all_failed` should not be skipped by the continue policy.
-5. **Run store**: Add a method to `internal/run/store.go` to query predecessor statuses for a given task run.
-6. **Tests**: Unit tests for each trigger rule. Integration tests for a DAG with mixed rules (happy path + failure path + cleanup).
-7. **Docs**: Update `docs/job-schema-reference.md`.
-
-### Files to Touch
-
-- `pkg/jobdef/definition.go` — Step struct + validation
-- `internal/models/task.go` — Task model
-- `internal/jobdef/importer.go` — propagate field
-- `internal/job/job.go` — readiness evaluation
-- `internal/job/failure_policy.go` — interaction with trigger rules
-- `internal/run/store.go` — predecessor status query
-- `docs/job-schema-reference.md`
+- `TriggerRule` field on Step definition (validated against `all_success`, `all_done`, `all_failed`, `one_success`, `always`) and Task model
+- `satisfiesTriggerRule()` in `internal/job/failure_policy.go` evaluates all 5 rules against predecessor statuses
+- `collectPredecessorStatuses()` gathers in-memory outcome state for evaluation
+- `skipDescendantsFiltered()` walks the DAG to skip non-tolerant descendants when upstream fails
+- `isTolerantRule()` identifies rules that handle failures (all_done, all_failed, always, one_success) to prevent incorrect skipping
+- Integrated into the main execution loop in `internal/job/job.go`
 
 ---
 
-## Workstream 3: Run Parameters (P0)
+## Workstream 3: Run Parameters (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Enables parameterized triggers — pass a date, environment name, feature flag, or any config to a run. Without this, every variation requires a separate job definition.
 
-### Data Model
+### Implementation
 
-Add to `JobRun` model (`internal/models/run.go`):
-
-```go
-Params datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-```
-
-### API
-
-Modify `POST /v1/jobs/{id}/run` to accept an optional JSON body:
-
-```json
-{ "params": { "date": "2026-03-10", "env": "staging" } }
-```
-
-### Implementation Steps
-
-1. **Model**: Add `Params` field to `JobRun`.
-2. **API handler**: In `api/rest/controller/job/post.go`, parse optional `params` from the request body. Store on the `JobRun`.
-3. **Env injection**: In `internal/job/job.go`, when building the container env map for a task, merge `JobRun.Params` as `CAESIUM_PARAM_<KEY>=<VALUE>` (upper-cased, prefixed). Also inject `CAESIUM_RUN_ID` and `CAESIUM_JOB_ALIAS`.
-4. **Cron trigger params**: Allow `defaultParams` in the cron trigger configuration. These are used when a cron trigger fires, but can be overridden by HTTP trigger params.
-5. **GraphQL**: Expose `params` on the `JobRun` type in `api/gql/schema/schema.go`.
-6. **Callback metadata**: Include `params` in the callback `Metadata` struct so downstream webhooks receive them.
-7. **UI**: Show params in the run detail view. Add a "Trigger with params" form to the job detail page.
-8. **Console**: Display params in the run detail panel.
-9. **Tests**: Unit tests for param merging, env injection, and cron default params.
-10. **Docs**: Update `docs/job-schema-reference.md` and `docs/job-definitions.md`.
-
-### Files to Touch
-
-- `internal/models/run.go` — JobRun model
-- `api/rest/controller/job/post.go` — HTTP trigger handler
-- `internal/job/job.go` — env injection
-- `internal/trigger/` — default params for cron
-- `api/gql/schema/schema.go` — GraphQL
-- `internal/callback/callback.go` — Metadata struct
-- `ui/src/` — trigger form + run detail
-- `docs/job-schema-reference.md`
+- `Params` field (datatypes.JSON) on JobRun model
+- `POST /v1/jobs/{id}/run` accepts optional `{"params": {...}}` body
+- `buildParamEnv()` injects `CAESIUM_PARAM_<UPPERCASE_KEY>`, `CAESIUM_RUN_ID`, and `CAESIUM_JOB_ALIAS` into each task's container environment
+- `WithParams()` exported option on job constructor
+- `defaultParams` on Trigger definition, extracted and used by cron trigger's `Fire()` method
+- UI shows run params in the run detail view and latest run panel
 
 ---
 
@@ -392,47 +273,43 @@ steps:
 
 ---
 
-## Workstream 8: XCom / Inter-Task Data Passing (P1)
+## Workstream 8: XCom / Inter-Task Data Passing (P1) — DONE
+
+**Status**: Implemented in PR #107 (merged).
 
 **Why**: Tasks in a pipeline need to pass small data (file paths, row counts, status flags) to downstream tasks without requiring an external system.
 
-### Concept
+### Implementation (differs from original design)
 
-Container-native approach: tasks write output to a convention path (`/caesium/output/`). The executor captures these files after the container exits and stores them. Downstream tasks receive predecessor outputs as env vars or mounted files.
+Instead of the file-based `/caesium/output/` approach, a simpler stdout marker protocol was implemented:
 
-### Implementation Steps
+- Tasks emit `##caesium::output {"key": "value"}` to stdout
+- After container completion, logs are scanned for markers, parsed into `map[string]string`, and stored on the `TaskRun` model (`Output` field, `json` column)
+- Downstream tasks receive predecessor outputs as `CAESIUM_OUTPUT_<STEP_NAME>_<KEY>=<VALUE>` environment variables
+- Works in both local and distributed (worker) execution modes
+- 64KB size limit per task output
+- Last-write-wins merge semantics for multiple marker lines
+- Non-string JSON values are coerced to strings; malformed JSON is silently skipped
+- UI displays task outputs in the TaskMetadataPanel
 
-1. **Output capture**: After a task container exits successfully, check for files in `/caesium/output/`:
-   - `/caesium/output/result.json` — parsed as key-value pairs.
-   - Any file in `/caesium/output/` is stored.
-2. **Storage model**: New `TaskOutput` model (`internal/models/task_output.go`):
-   ```go
-   type TaskOutput struct {
-       ID        uuid.UUID `gorm:"type:uuid;primaryKey"`
-       TaskRunID uuid.UUID `gorm:"type:uuid;index;not null"`
-       Key       string    `gorm:"type:text;not null"`
-       Value     string    `gorm:"type:text;not null"`
-       CreatedAt time.Time `gorm:"not null"`
-   }
-   ```
-3. **Env injection**: When a downstream task starts, inject predecessor outputs as `CAESIUM_OUTPUT_<STEP_NAME>_<KEY>=<VALUE>`.
-4. **Size limit**: Cap individual values at 64KB. Larger data should use shared mounts or external storage — log a warning if exceeded.
-5. **API**: Add `GET /v1/jobs/{id}/runs/{run_id}/tasks/{task_id}/outputs` endpoint.
-6. **Mount option**: Optionally mount predecessor output files into the downstream container at `/caesium/input/<step_name>/`.
-7. **Tests**: Unit tests for output capture, env injection, size limit enforcement.
-8. **Docs**: Add `docs/data-passing.md`.
+### Files Changed
 
-### Files to Touch
+- `pkg/task/output.go` — `ParseOutput`, `NormalizeStepName`, `BuildOutputEnv`
+- `pkg/task/output_test.go` — unit tests for parsing and env building
+- `internal/models/run.go` — `Output` field on `TaskRun`
+- `internal/run/store.go` — `CompleteTask` accepts output map
+- `internal/run/store_test.go` — store-level tests
+- `internal/job/job.go` — output capture + env injection (local mode)
+- `internal/worker/runtime_executor.go` — output capture (distributed mode)
+- `internal/jobdef/importer.go` — step name stored on Task model
+- `ui/src/features/jobs/TaskMetadataPanel.tsx` — output display
+- `ui/src/lib/api.ts` — `output` field on `TaskRun` interface
 
-- `internal/models/task_output.go` — new model
-- `internal/models/models.go` — register model
-- `internal/job/job.go` — output capture + env injection
-- `internal/atom/docker/engine.go` — mount `/caesium/output/`
-- `internal/atom/kubernetes/engine.go` — mount output volume
-- `internal/atom/podman/engine.go` — mount `/caesium/output/`
-- `api/rest/controller/job/` — outputs endpoint
-- `api/rest/bind/bind.go` — route registration
-- `docs/data-passing.md`
+### Remaining items (not yet implemented)
+
+- Dedicated API endpoint for task outputs (`GET /v1/jobs/{id}/runs/{run_id}/tasks/{task_id}/outputs`)
+- Mount-based option for larger data passing (`/caesium/input/<step_name>/`)
+- Documentation (`docs/data-passing.md`)
 
 ---
 
@@ -477,30 +354,20 @@ Container-native approach: tasks write output to a convention path (`/caesium/ou
 
 ---
 
-## Workstream 10: Pause/Unpause Jobs (P0)
+## Workstream 10: Pause/Unpause Jobs (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Operators need to temporarily suspend a job's schedule without deleting it — during maintenance windows, incident response, or when a downstream system is unavailable.
 
-### Implementation Steps
+### Implementation
 
-1. **Model**: Add `Paused bool` to `Job` model (`internal/models/job.go`). Default `false`.
-2. **Trigger executor**: In `internal/trigger/`, skip firing triggers for jobs where `Paused == true`.
-3. **API**: Add `PUT /v1/jobs/{id}/pause` and `PUT /v1/jobs/{id}/unpause` endpoints. Return the updated job.
-4. **UI/Console**: Add pause/unpause toggle to the job list and job detail views.
-5. **Events**: Emit `JobPaused` and `JobUnpaused` events.
-6. **HTTP trigger**: Return `409 Conflict` when attempting to trigger a paused job via HTTP.
-7. **Tests**: Unit tests for pause/unpause, trigger skip behavior.
-8. **Docs**: Update `docs/job-schema-reference.md`.
-
-### Files to Touch
-
-- `internal/models/job.go` — Paused field
-- `internal/trigger/` — skip paused jobs
-- `api/rest/controller/job/` — pause/unpause handlers
-- `api/rest/bind/bind.go` — route registration
-- `internal/event/bus.go` — event types
-- `ui/src/` — toggle UI
-- `docs/job-schema-reference.md`
+- `Paused bool` field on Job model (default false)
+- `PUT /v1/jobs/{id}/pause` and `PUT /v1/jobs/{id}/unpause` endpoints in `api/rest/controller/job/pause.go`
+- Cron trigger's `Fire()` skips paused jobs with log message
+- `POST /v1/jobs/{id}/run` returns 409 Conflict for paused jobs
+- `job_paused` and `job_unpaused` event types emitted
+- UI pause/unpause toggle on jobs list page with real-time SSE event updates
 
 ---
 
@@ -549,28 +416,38 @@ Container-native approach: tasks write output to a convention path (`/caesium/ou
 
 ---
 
-## Workstream 12: DAG Run Timeout (P1)
+## Workstream 12: DAG Run Timeout (P1) — DONE
+
+**Status**: Implemented in PR #109 (pending merge).
 
 **Why**: A job with many tasks needs an overall time cap to prevent runaway pipelines from consuming resources indefinitely.
 
-### Implementation Steps
+### Implementation
 
-1. **Schema**: Add `runTimeout` to `Metadata` in `pkg/jobdef/definition.go`.
-2. **Model**: Add `RunTimeout time.Duration` to `Job` model.
-3. **Executor**: In `internal/job/job.go`, wrap the entire job execution in a `context.WithTimeout` using `RunTimeout`. When the context expires:
-   - Cancel all running task contexts.
-   - Mark remaining pending/running tasks as `failed` with error "run timeout exceeded".
-   - Mark the JobRun as `failed`.
-4. **Tests**: Unit test for run timeout cancellation.
-5. **Docs**: Update `docs/job-schema-reference.md`.
+1. **Schema**: Added `RunTimeout time.Duration` to `Metadata` in `pkg/jobdef/definition.go` (`yaml:"runTimeout"`).
+2. **Model**: Added `RunTimeout time.Duration` to `Job` model (auto-migrated by GORM).
+3. **Importer**: Propagates `RunTimeout` from definition to model in `internal/jobdef/importer.go`.
+4. **Executor**: In `internal/job/job.go`, the `Run()` method wraps the entire execution in `context.WithTimeout` when `runTimeout > 0`. When the deadline expires:
+   - All in-flight task contexts are cancelled (derived from the parent context).
+   - Running containers are force-stopped.
+   - The error is wrapped as `"run timed out after <duration>"`.
+   - The deferred `store.Complete()` marks the JobRun as `failed`.
+5. **Run vs task timeout disambiguation**: When a task context is cancelled, the executor checks `ctx.Err()` to distinguish run-level timeouts from task-level timeouts, ensuring correct error messages.
+6. **UI**: Job detail page shows `runTimeout`, `taskTimeout`, and `maxParallelTasks` in the Configuration tab's Job Metadata card.
+7. **Tests**: Unit test (`TestRunLocalRunTimeoutFailsRun`) + 4 integration tests in `test/run_test.go`.
+8. **Docs**: `docs/job-schema-reference.md` updated with `runTimeout`, `taskTimeout`, and `maxParallelTasks` fields.
 
-### Files to Touch
+### Files Changed
 
-- `pkg/jobdef/definition.go` — Metadata struct
-- `internal/models/job.go` — RunTimeout field
+- `pkg/jobdef/definition.go` — `RunTimeout` on `Metadata` struct
+- `internal/models/job.go` — `RunTimeout` field
 - `internal/jobdef/importer.go` — propagate field
-- `internal/job/job.go` — context timeout
-- `docs/job-schema-reference.md`
+- `internal/job/job.go` — `context.WithTimeout` wrapping + run/task timeout disambiguation
+- `internal/job/job_test.go` — unit test
+- `test/run_test.go` — integration tests
+- `ui/src/lib/api.ts` — timeout fields on `Job` interface
+- `ui/src/features/jobs/JobDetailPage.tsx` — display timeout fields
+- `docs/job-schema-reference.md` — document all metadata fields
 
 ---
 
@@ -684,7 +561,7 @@ Workstream 9 (Task Pools)     ← Workstream 13 (Priority) uses pools for orderi
 All other workstreams can proceed in parallel from day one. Recommended execution order:
 
 ```
-Phase 1 (parallel): WS1 (Retries), WS2 (Trigger Rules), WS3 (Run Parameters), WS10 (Pause/Unpause)
-Phase 2 (parallel): WS4 (Backfill), WS5 (Sensors), WS6 (Branching), WS8 (XCom), WS9 (Pools), WS12 (Run Timeout)
-Phase 3 (parallel): WS7 (Dynamic Mapping), WS11 (SLA), WS13 (Priority), WS14 (Templating), WS15 (Auth)
+Phase 1 (DONE):     WS1 (Retries), WS2 (Trigger Rules), WS3 (Run Parameters), WS10 (Pause/Unpause)
+Phase 2 (partial):  WS4 (Backfill), WS5 (Sensors), WS6 (Branching), WS8 (XCom ✓), WS9 (Pools), WS12 (Run Timeout ✓)
+Phase 3 (pending):  WS7 (Dynamic Mapping), WS11 (SLA), WS13 (Priority), WS14 (Templating), WS15 (Auth)
 ```
