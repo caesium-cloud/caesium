@@ -2,7 +2,7 @@
 
 ## Status
 
-Draft — Ready for implementation
+Phase 1 complete. Six of fifteen workstreams are implemented (WS1, WS2, WS3, WS8, WS10, WS12).
 
 ## Overview
 
@@ -10,174 +10,55 @@ This plan closes the feature gaps between Caesium and Apache Airflow while prese
 
 ---
 
-## Workstream 1: Task Retries (P0)
+## Workstream 1: Task Retries (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Table stakes for any production scheduler. Transient failures (OOM, network blip, image pull timeout) should not require manual intervention.
 
-### Data Model
+### Implementation
 
-Add fields to `Task` model (`internal/models/task.go`):
-
-```go
-Retries           int           `gorm:"not null;default:0" json:"retries"`
-RetryDelay        time.Duration `gorm:"not null;default:0" json:"retry_delay"`
-RetryBackoff      bool          `gorm:"not null;default:false" json:"retry_backoff"`
-```
-
-Add fields to `TaskRun` model (`internal/models/run.go`):
-
-```go
-Attempt     int `gorm:"not null;default:1" json:"attempt"`
-MaxAttempts int `gorm:"not null;default:1" json:"max_attempts"`
-```
-
-### Job Definition Schema
-
-Add to `Step` struct (`pkg/jobdef/definition.go`):
-
-```yaml
-steps:
-  - name: etl-extract
-    image: etl:latest
-    retries: 3
-    retryDelay: 30s
-    retryBackoff: true    # doubles delay each attempt
-```
-
-### Implementation Steps
-
-1. **Schema**: Add `Retries`, `RetryDelay`, `RetryBackoff` to `Step` in `pkg/jobdef/definition.go`. Add `Attempt`, `MaxAttempts` to `TaskRun` in `internal/models/run.go`. GORM automigrate handles the column additions.
-2. **Importer**: In `internal/jobdef/importer.go`, propagate the new step fields into the `Task` model when importing a job definition.
-3. **Executor retry loop**: In `internal/job/job.go`, when a task fails and `task.Retries > 0 && taskRun.Attempt < taskRun.MaxAttempts`:
-   - Compute delay: `retryDelay * 2^(attempt-1)` if backoff, else `retryDelay`.
-   - Sleep for delay.
-   - Create a new container execution (same atom, incremented attempt).
-   - Update `TaskRun.Attempt`.
-   - Only mark the task as permanently `failed` when all attempts are exhausted.
-4. **Distributed mode**: In `internal/worker/worker.go`, the retry loop runs within the worker that claimed the task. If the worker dies mid-retry, lease expiry allows another worker to reclaim — the new worker reads `Attempt` from the DB and continues from the correct attempt number.
-5. **Metrics**: Add `caesium_task_retries_total` counter to `internal/metrics/metrics.go`, labeled by `{job_alias, task_name, attempt}`.
-6. **Events**: Emit a `TaskRetrying` event type from the event bus.
-7. **UI/Console**: Show attempt number in task run detail view. Show retry count in run summary.
-8. **Tests**: Unit tests for retry loop logic, backoff calculation, max-attempt exhaustion. Integration test with a container that fails N-1 times then succeeds.
-9. **Docs**: Update `docs/job-schema-reference.md` with the new step fields.
-
-### Files to Touch
-
-- `pkg/jobdef/definition.go` — Step struct + validation
-- `internal/models/task.go` — Task model
-- `internal/models/run.go` — TaskRun model
-- `internal/jobdef/importer.go` — propagate fields
-- `internal/job/job.go` — retry loop in executor
-- `internal/worker/worker.go` — distributed retry
-- `internal/metrics/metrics.go` — retry counter
-- `internal/event/bus.go` — TaskRetrying event type
-- `ui/src/` — attempt display
-- `docs/job-schema-reference.md`
+- `Retries`, `RetryDelay`, `RetryBackoff` on Step definition and Task model
+- `Attempt`, `MaxAttempts` on TaskRun model
+- Retry loop in `internal/job/job.go` with exponential backoff (`retryDelay * 2^(attempt-1)`)
+- `computeRetryDelay()` in `internal/job/failure_policy.go`
+- `caesium_task_retries_total` metric with labels `{job_alias, task_name, attempt}`
+- `task_retrying` event type emitted via `store.RetryTask()`
+- UI shows attempt number and retry configuration in TaskMetadataPanel
 
 ---
 
-## Workstream 2: Trigger Rules (P0)
+## Workstream 2: Trigger Rules (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Unlocks error-handling DAG patterns — cleanup-on-failure tasks, always-run notification steps, conditional joins. Without this, DAGs can only express the happy path.
 
-### Supported Rules
+### Implementation
 
-| Rule | Behavior |
-|------|----------|
-| `all_success` | Run when all predecessors succeeded (default, current behavior) |
-| `all_done` | Run when all predecessors finished, regardless of status |
-| `all_failed` | Run only when all predecessors failed |
-| `one_success` | Run when at least one predecessor succeeded |
-| `always` | Alias for `all_done` (provided for Airflow familiarity) |
-
-### Data Model
-
-Add to `Task` model (`internal/models/task.go`):
-
-```go
-TriggerRule string `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
-```
-
-### Job Definition Schema
-
-```yaml
-steps:
-  - name: cleanup
-    image: cleanup:latest
-    dependsOn: [etl-load]
-    triggerRule: all_done
-```
-
-### Implementation Steps
-
-1. **Schema**: Add `TriggerRule` to `Step` in `pkg/jobdef/definition.go` with validation against the allowed values. Add `TriggerRule` to `Task` model.
-2. **Importer**: Propagate `triggerRule` from step definition to Task model. Default to `all_success` when omitted.
-3. **Executor logic**: In `internal/job/job.go`, modify the task-readiness check. Currently a task is ready when `outstanding_predecessors == 0`. Change to:
-   - Decrement `outstanding_predecessors` as predecessors complete (any terminal status).
-   - When `outstanding_predecessors == 0`, evaluate the trigger rule against the actual statuses of all predecessors.
-   - If the rule is satisfied → run the task.
-   - If the rule is not satisfied → mark the task `skipped`.
-   - `always` rule: task is ready immediately when `outstanding_predecessors == 0`, regardless of statuses.
-4. **Failure policy interaction**: The `continue` failure policy already skips descendants on failure. Trigger rules should be evaluated *before* the skip-descendants logic — a task with `all_done` or `all_failed` should not be skipped by the continue policy.
-5. **Run store**: Add a method to `internal/run/store.go` to query predecessor statuses for a given task run.
-6. **Tests**: Unit tests for each trigger rule. Integration tests for a DAG with mixed rules (happy path + failure path + cleanup).
-7. **Docs**: Update `docs/job-schema-reference.md`.
-
-### Files to Touch
-
-- `pkg/jobdef/definition.go` — Step struct + validation
-- `internal/models/task.go` — Task model
-- `internal/jobdef/importer.go` — propagate field
-- `internal/job/job.go` — readiness evaluation
-- `internal/job/failure_policy.go` — interaction with trigger rules
-- `internal/run/store.go` — predecessor status query
-- `docs/job-schema-reference.md`
+- `TriggerRule` field on Step definition (validated against `all_success`, `all_done`, `all_failed`, `one_success`, `always`) and Task model
+- `satisfiesTriggerRule()` in `internal/job/failure_policy.go` evaluates all 5 rules against predecessor statuses
+- `collectPredecessorStatuses()` gathers in-memory outcome state for evaluation
+- `skipDescendantsFiltered()` walks the DAG to skip non-tolerant descendants when upstream fails
+- `isTolerantRule()` identifies rules that handle failures (all_done, all_failed, always, one_success) to prevent incorrect skipping
+- Integrated into the main execution loop in `internal/job/job.go`
 
 ---
 
-## Workstream 3: Run Parameters (P0)
+## Workstream 3: Run Parameters (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Enables parameterized triggers — pass a date, environment name, feature flag, or any config to a run. Without this, every variation requires a separate job definition.
 
-### Data Model
+### Implementation
 
-Add to `JobRun` model (`internal/models/run.go`):
-
-```go
-Params datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-```
-
-### API
-
-Modify `POST /v1/jobs/{id}/run` to accept an optional JSON body:
-
-```json
-{ "params": { "date": "2026-03-10", "env": "staging" } }
-```
-
-### Implementation Steps
-
-1. **Model**: Add `Params` field to `JobRun`.
-2. **API handler**: In `api/rest/controller/job/post.go`, parse optional `params` from the request body. Store on the `JobRun`.
-3. **Env injection**: In `internal/job/job.go`, when building the container env map for a task, merge `JobRun.Params` as `CAESIUM_PARAM_<KEY>=<VALUE>` (upper-cased, prefixed). Also inject `CAESIUM_RUN_ID` and `CAESIUM_JOB_ALIAS`.
-4. **Cron trigger params**: Allow `defaultParams` in the cron trigger configuration. These are used when a cron trigger fires, but can be overridden by HTTP trigger params.
-5. **GraphQL**: Expose `params` on the `JobRun` type in `api/gql/schema/schema.go`.
-6. **Callback metadata**: Include `params` in the callback `Metadata` struct so downstream webhooks receive them.
-7. **UI**: Show params in the run detail view. Add a "Trigger with params" form to the job detail page.
-8. **Console**: Display params in the run detail panel.
-9. **Tests**: Unit tests for param merging, env injection, and cron default params.
-10. **Docs**: Update `docs/job-schema-reference.md` and `docs/job-definitions.md`.
-
-### Files to Touch
-
-- `internal/models/run.go` — JobRun model
-- `api/rest/controller/job/post.go` — HTTP trigger handler
-- `internal/job/job.go` — env injection
-- `internal/trigger/` — default params for cron
-- `api/gql/schema/schema.go` — GraphQL
-- `internal/callback/callback.go` — Metadata struct
-- `ui/src/` — trigger form + run detail
-- `docs/job-schema-reference.md`
+- `Params` field (datatypes.JSON) on JobRun model
+- `POST /v1/jobs/{id}/run` accepts optional `{"params": {...}}` body
+- `buildParamEnv()` injects `CAESIUM_PARAM_<UPPERCASE_KEY>`, `CAESIUM_RUN_ID`, and `CAESIUM_JOB_ALIAS` into each task's container environment
+- `WithParams()` exported option on job constructor
+- `defaultParams` on Trigger definition, extracted and used by cron trigger's `Fire()` method
+- UI shows run params in the run detail view and latest run panel
 
 ---
 
@@ -473,30 +354,20 @@ Instead of the file-based `/caesium/output/` approach, a simpler stdout marker p
 
 ---
 
-## Workstream 10: Pause/Unpause Jobs (P0)
+## Workstream 10: Pause/Unpause Jobs (P0) — DONE
+
+**Status**: Implemented.
 
 **Why**: Operators need to temporarily suspend a job's schedule without deleting it — during maintenance windows, incident response, or when a downstream system is unavailable.
 
-### Implementation Steps
+### Implementation
 
-1. **Model**: Add `Paused bool` to `Job` model (`internal/models/job.go`). Default `false`.
-2. **Trigger executor**: In `internal/trigger/`, skip firing triggers for jobs where `Paused == true`.
-3. **API**: Add `PUT /v1/jobs/{id}/pause` and `PUT /v1/jobs/{id}/unpause` endpoints. Return the updated job.
-4. **UI/Console**: Add pause/unpause toggle to the job list and job detail views.
-5. **Events**: Emit `JobPaused` and `JobUnpaused` events.
-6. **HTTP trigger**: Return `409 Conflict` when attempting to trigger a paused job via HTTP.
-7. **Tests**: Unit tests for pause/unpause, trigger skip behavior.
-8. **Docs**: Update `docs/job-schema-reference.md`.
-
-### Files to Touch
-
-- `internal/models/job.go` — Paused field
-- `internal/trigger/` — skip paused jobs
-- `api/rest/controller/job/` — pause/unpause handlers
-- `api/rest/bind/bind.go` — route registration
-- `internal/event/bus.go` — event types
-- `ui/src/` — toggle UI
-- `docs/job-schema-reference.md`
+- `Paused bool` field on Job model (default false)
+- `PUT /v1/jobs/{id}/pause` and `PUT /v1/jobs/{id}/unpause` endpoints in `api/rest/controller/job/pause.go`
+- Cron trigger's `Fire()` skips paused jobs with log message
+- `POST /v1/jobs/{id}/run` returns 409 Conflict for paused jobs
+- `job_paused` and `job_unpaused` event types emitted
+- UI pause/unpause toggle on jobs list page with real-time SSE event updates
 
 ---
 
@@ -690,7 +561,7 @@ Workstream 9 (Task Pools)     ← Workstream 13 (Priority) uses pools for orderi
 All other workstreams can proceed in parallel from day one. Recommended execution order:
 
 ```
-Phase 1 (parallel): WS1 (Retries), WS2 (Trigger Rules), WS3 (Run Parameters), WS10 (Pause/Unpause)
-Phase 2 (parallel): WS4 (Backfill), WS5 (Sensors), WS6 (Branching), WS8 (XCom), WS9 (Pools), WS12 (Run Timeout)
-Phase 3 (parallel): WS7 (Dynamic Mapping), WS11 (SLA), WS13 (Priority), WS14 (Templating), WS15 (Auth)
+Phase 1 (DONE):     WS1 (Retries), WS2 (Trigger Rules), WS3 (Run Parameters), WS10 (Pause/Unpause)
+Phase 2 (partial):  WS4 (Backfill), WS5 (Sensors), WS6 (Branching), WS8 (XCom ✓), WS9 (Pools), WS12 (Run Timeout ✓)
+Phase 3 (pending):  WS7 (Dynamic Mapping), WS11 (SLA), WS13 (Priority), WS14 (Templating), WS15 (Auth)
 ```
