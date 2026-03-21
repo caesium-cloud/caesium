@@ -22,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { api, type DatabaseQueryResponse, type DatabaseSchemaTable } from "@/lib/api";
+import { ApiError, api, type DatabaseQueryResponse, type DatabaseSchemaTable } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import {
   applySqlSuggestion,
@@ -148,6 +148,7 @@ export function DatabaseConsolePage() {
   }, [autocompleteVisible, cursorPosition, sql, suggestions.length]);
 
   const result = runQuery.data;
+  const databaseConsoleUnavailable = schemaError instanceof ApiError && schemaError.status === 404;
 
   function execute(sqlToRun = sql) {
     const trimmed = sqlToRun.trim();
@@ -269,16 +270,35 @@ export function DatabaseConsolePage() {
           </div>
         </div>
         <div className="flex items-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => refetch()} disabled={schemaLoading}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => refetch()}
+            disabled={schemaLoading || databaseConsoleUnavailable}
+          >
             <RefreshCw className={cn("mr-1.5 h-3.5 w-3.5", schemaLoading && "animate-spin")} />
             Refresh schema
           </Button>
-          <Button size="sm" onClick={() => execute()} disabled={runQuery.isPending}>
+          <Button size="sm" onClick={() => execute()} disabled={runQuery.isPending || databaseConsoleUnavailable}>
             <Play className="mr-1.5 h-3.5 w-3.5" />
             Run query
           </Button>
         </div>
       </div>
+
+      {databaseConsoleUnavailable ? (
+        <Card className="border-amber-500/30 bg-amber-500/5">
+          <CardHeader>
+            <CardTitle className="text-base">Database Console Disabled</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2 text-sm text-muted-foreground">
+            <p>The database console endpoints are not enabled on this server.</p>
+            <p className="font-mono text-xs text-foreground">
+              Set <code>CAESIUM_DATABASE_CONSOLE_ENABLED=true</code> and restart Caesium to expose the operator database console.
+            </p>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1.45fr)_360px]">
         <div className="space-y-6">
@@ -338,6 +358,7 @@ export function DatabaseConsolePage() {
                   }}
                   onSelect={(event) => setCursorPosition(event.currentTarget.selectionStart)}
                   spellCheck={false}
+                  disabled={databaseConsoleUnavailable}
                   className="min-h-[220px] w-full resize-y bg-transparent px-4 py-4 font-mono text-sm leading-6 text-slate-100 outline-none placeholder:text-slate-500"
                   placeholder="SELECT * FROM job_runs ORDER BY started_at DESC LIMIT 25;"
                 />
@@ -382,6 +403,7 @@ export function DatabaseConsolePage() {
                     key={snippet.id}
                     type="button"
                     onClick={() => applySnippet(snippet.sql)}
+                    disabled={databaseConsoleUnavailable}
                     className="rounded-full border border-white/10 bg-white/5 px-3 py-1.5 text-left transition hover:border-primary/40 hover:bg-primary/10"
                   >
                     <div className="text-sm font-medium text-slate-100">{snippet.label}</div>
@@ -430,7 +452,7 @@ export function DatabaseConsolePage() {
                 <ResultTable result={result} />
               ) : null}
 
-              {!runQuery.isPending && !runQuery.error && !result ? (
+              {!runQuery.isPending && !runQuery.error && !result && !databaseConsoleUnavailable ? (
                 <div className="rounded-xl border border-dashed border-border/80 bg-muted/20 px-4 py-10 text-center text-sm text-muted-foreground">
                   No query executed yet. Start with a snippet or browse a table from the schema explorer.
                 </div>
@@ -466,7 +488,7 @@ export function DatabaseConsolePage() {
                   </div>
                 ) : null}
 
-                {schemaError ? (
+                {schemaError && !databaseConsoleUnavailable ? (
                   <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-4 text-sm text-destructive">
                     {schemaError.message}
                   </div>
@@ -582,7 +604,11 @@ function SchemaTableCard({
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="font-mono text-sm font-medium text-foreground">{table.name}</div>
-          <div className="mt-1 text-xs text-muted-foreground">{table.row_count.toLocaleString()} rows</div>
+          {table.row_count == null ? (
+            <div className="mt-1 text-xs text-muted-foreground">Row count on demand</div>
+          ) : (
+            <div className="mt-1 text-xs text-muted-foreground">{table.row_count.toLocaleString()} rows</div>
+          )}
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={onBrowse}>

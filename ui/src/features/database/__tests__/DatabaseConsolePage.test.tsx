@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { DatabaseConsolePage } from "../DatabaseConsolePage";
-import type { DatabaseQueryResponse, DatabaseSchemaResponse } from "@/lib/api";
+import { ApiError, type DatabaseQueryResponse, type DatabaseSchemaResponse } from "@/lib/api";
 
 vi.mock("@/lib/api", () => {
   const mockApi = {
@@ -30,7 +30,6 @@ const schema: DatabaseSchemaResponse = {
   tables: [
     {
       name: "jobs",
-      row_count: 2,
       columns: [
         { name: "id", data_type: "uuid", nullable: false, primary_key: true },
         { name: "alias", data_type: "text", nullable: false, primary_key: false },
@@ -81,7 +80,7 @@ describe("DatabaseConsolePage", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByText("2 rows")).toBeInTheDocument();
+      expect(screen.getByText("Row count on demand")).toBeInTheDocument();
     });
 
     const editor = screen.getByLabelText("SQL query editor");
@@ -113,5 +112,16 @@ describe("DatabaseConsolePage", () => {
     await waitFor(() => {
       expect((editor as HTMLTextAreaElement).value).toBe("");
     });
+  });
+
+  it("shows a disabled message when the backend route is unavailable", async () => {
+    vi.mocked(api.getDatabaseSchema).mockRejectedValue(new ApiError(404, "Not Found"));
+
+    render(<DatabaseConsolePage />, { wrapper: createWrapper() });
+
+    await waitFor(() => {
+      expect(screen.getByText("Database Console Disabled")).toBeInTheDocument();
+    });
+    expect(screen.getByText(/CAESIUM_DATABASE_CONSOLE_ENABLED=true/)).toBeInTheDocument();
   });
 });

@@ -17,14 +17,12 @@ func Query(c *echo.Context) error {
 	svc := dbsvc.New(c.Request().Context())
 	resp, err := svc.Query(req)
 	if err != nil {
-		switch {
-		case errors.Is(err, dbsvc.ErrEmptyQuery),
-			errors.Is(err, dbsvc.ErrMultipleStatements),
-			errors.Is(err, dbsvc.ErrUnsafeQuery):
-			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
-		default:
+		if errors.Is(err, dbsvc.ErrEmptyQuery) ||
+			errors.Is(err, dbsvc.ErrMultipleStatements) ||
+			errors.Is(err, dbsvc.ErrUnsafeQuery) {
 			return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "failed to execute query").Wrap(err)
 	}
 
 	return c.JSON(http.StatusOK, resp)

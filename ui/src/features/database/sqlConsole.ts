@@ -79,7 +79,7 @@ export function buildSqlSuggestions(schema: DatabaseSchemaResponse | undefined, 
         kind: "table",
         value: table.name,
         label: table.name,
-        detail: `${table.row_count.toLocaleString()} rows`,
+        detail: table.row_count != null ? `${table.row_count.toLocaleString()} rows` : "Table",
       });
 
       for (const column of table.columns) {

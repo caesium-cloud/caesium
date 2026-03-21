@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestSchemaIncludesTablesColumnsAndCounts(t *testing.T) {
+func TestSchemaIncludesTablesAndColumns(t *testing.T) {
 	svc := newTestService(t)
 
 	schema, err := svc.Schema()
@@ -36,8 +36,8 @@ func TestSchemaIncludesTablesColumnsAndCounts(t *testing.T) {
 	if jobsTable == nil {
 		t.Fatalf("jobs table not found in schema")
 	}
-	if jobsTable.RowCount != 2 {
-		t.Fatalf("jobs row_count = %d, want 2", jobsTable.RowCount)
+	if jobsTable.RowCount != nil {
+		t.Fatalf("jobs row_count = %v, want nil", *jobsTable.RowCount)
 	}
 
 	var foundAlias bool
@@ -90,10 +90,25 @@ func TestQueryRejectsUnsafeStatements(t *testing.T) {
 		"DELETE FROM jobs",
 		"SELECT * FROM jobs; SELECT * FROM triggers",
 		"CREATE TABLE debug(id INTEGER)",
+		"SELECT  INTO archive_jobs FROM jobs",
 	} {
 		if _, err := svc.Query(QueryRequest{SQL: query}); err == nil {
 			t.Fatalf("Query(%q) unexpectedly succeeded", query)
 		}
+	}
+}
+
+func TestQueryAllowsKeywordsInsideLiterals(t *testing.T) {
+	svc := newTestService(t)
+
+	resp, err := svc.Query(QueryRequest{
+		SQL: "SELECT 'DELETE' AS verb, alias FROM jobs ORDER BY alias ASC",
+	})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if resp.RowCount != 2 {
+		t.Fatalf("row_count = %d, want 2", resp.RowCount)
 	}
 }
 

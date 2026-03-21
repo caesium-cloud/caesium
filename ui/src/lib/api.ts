@@ -200,7 +200,7 @@ export interface DatabaseSchemaColumn {
 
 export interface DatabaseSchemaTable {
   name: string;
-  row_count: number;
+  row_count?: number;
   columns: DatabaseSchemaColumn[];
 }
 

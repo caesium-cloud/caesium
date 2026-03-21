@@ -30,6 +30,7 @@ var (
 	ErrUnsafeQuery        = errors.New("only read-only SQL statements are allowed")
 
 	forbiddenReadOnlyPattern = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|REPLACE|TRUNCATE|ATTACH|DETACH|VACUUM|REINDEX|MERGE|COPY|CALL|GRANT|REVOKE|COMMENT|CLUSTER|ANALYZE|REFRESH|DO)\b`)
+	selectIntoPattern        = regexp.MustCompile(`(?i)\bSELECT\s+INTO\b`)
 )
 
 type SchemaResponse struct {
@@ -41,7 +42,7 @@ type SchemaResponse struct {
 
 type TableSchema struct {
 	Name     string         `json:"name"`
-	RowCount int64          `json:"row_count"`
+	RowCount *int64         `json:"row_count,omitempty"`
 	Columns  []ColumnSchema `json:"columns"`
 }
 
@@ -114,15 +115,9 @@ func (s *Service) Schema() (*SchemaResponse, error) {
 			return nil, err
 		}
 
-		var rowCount int64
-		if err := s.db.WithContext(s.ctx).Table(tableName).Count(&rowCount).Error; err != nil {
-			return nil, err
-		}
-
 		table := TableSchema{
-			Name:     tableName,
-			RowCount: rowCount,
-			Columns:  columns,
+			Name:    tableName,
+			Columns: columns,
 		}
 
 		resp.Tables = append(resp.Tables, table)
@@ -367,7 +362,8 @@ func validateReadOnlyQuery(query string) error {
 		return ErrEmptyQuery
 	}
 
-	upper := strings.ToUpper(trimmed)
+	normalized := sanitizeSQL(trimmed)
+	upper := strings.ToUpper(normalized)
 	switch {
 	case strings.HasPrefix(upper, "SELECT "),
 		strings.HasPrefix(upper, "WITH "),
@@ -381,7 +377,7 @@ func validateReadOnlyQuery(query string) error {
 	if forbiddenReadOnlyPattern.MatchString(upper) {
 		return ErrUnsafeQuery
 	}
-	if strings.Contains(upper, "SELECT INTO ") || strings.Contains(upper, "SELECT\nINTO ") || strings.Contains(upper, "SELECT\r\nINTO ") {
+	if selectIntoPattern.MatchString(upper) {
 		return ErrUnsafeQuery
 	}
 
@@ -531,4 +527,91 @@ func normalizeQueryValue(value any) any {
 
 func quoteSQLiteIdentifier(identifier string) string {
 	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+}
+
+func sanitizeSQL(query string) string {
+	var builder strings.Builder
+	builder.Grow(len(query))
+
+	inSingleQuote := false
+	inDoubleQuote := false
+	inBacktick := false
+	inLineComment := false
+	inBlockComment := false
+
+	for i := 0; i < len(query); i++ {
+		ch := query[i]
+
+		switch {
+		case inLineComment:
+			if ch == '\n' {
+				inLineComment = false
+				builder.WriteByte('\n')
+			} else {
+				builder.WriteByte(' ')
+			}
+			continue
+		case inBlockComment:
+			if i+1 < len(query) && ch == '*' && query[i+1] == '/' {
+				inBlockComment = false
+				builder.WriteString("  ")
+				i++
+			} else {
+				builder.WriteByte(' ')
+			}
+			continue
+		case inSingleQuote:
+			if ch == '\'' {
+				if i+1 < len(query) && query[i+1] == '\'' {
+					builder.WriteString("  ")
+					i++
+					continue
+				}
+				inSingleQuote = false
+			}
+			builder.WriteByte(' ')
+			continue
+		case inDoubleQuote:
+			if ch == '"' {
+				inDoubleQuote = false
+			}
+			builder.WriteByte(' ')
+			continue
+		case inBacktick:
+			if ch == '`' {
+				inBacktick = false
+			}
+			builder.WriteByte(' ')
+			continue
+		}
+
+		if i+1 < len(query) && ch == '-' && query[i+1] == '-' {
+			inLineComment = true
+			builder.WriteString("  ")
+			i++
+			continue
+		}
+		if i+1 < len(query) && ch == '/' && query[i+1] == '*' {
+			inBlockComment = true
+			builder.WriteString("  ")
+			i++
+			continue
+		}
+
+		switch ch {
+		case '\'':
+			inSingleQuote = true
+			builder.WriteByte(' ')
+		case '"':
+			inDoubleQuote = true
+			builder.WriteByte(' ')
+		case '`':
+			inBacktick = true
+			builder.WriteByte(' ')
+		default:
+			builder.WriteByte(ch)
+		}
+	}
+
+	return builder.String()
 }
