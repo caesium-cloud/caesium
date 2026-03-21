@@ -7,12 +7,12 @@ import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type JobTask, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
 import { JobDAG } from "./JobDAG";
-import { LogViewer } from "./LogViewer";
-import { TaskMetadataPanel } from "./TaskMetadataPanel";
+import { TaskDetailPanel } from "./TaskDetailPanel";
 
 export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
@@ -47,6 +47,10 @@ export function RunDetailPage() {
       return map;
     },
   });
+
+  const isLoading = isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks;
+
+  const [dagContainerRef, dagHeight] = useDagHeight(isLoading);
 
   useEffect(() => {
     if (!runId || !jobId) return;
@@ -162,7 +166,7 @@ export function RunDetailPage() {
     return map;
   }, [run?.tasks]);
 
-  if (isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks) {
+  if (isLoading) {
     return (
       <div className="space-y-4 p-8">
         <Skeleton className="h-8 w-[220px]" />
@@ -215,7 +219,11 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
-      <div className="h-[600px] overflow-hidden rounded-md border bg-card">
+      <div
+        ref={dagContainerRef}
+        className="relative overflow-hidden rounded-md border bg-card"
+        style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
+      >
         {dag && atoms ? (
           <JobDAG
             dag={dag}
@@ -226,23 +234,20 @@ export function RunDetailPage() {
             selectedTaskId={selectedTaskId}
           />
         ) : null}
-      </div>
 
-      {selectedTaskId ? (
-        <div className="space-y-4">
-          <TaskMetadataPanel task={selectedTask} runTask={selectedRunTask} taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type} />
-          <div className="h-[400px]">
-            <LogViewer
-              jobId={jobId}
-              runId={runId}
-              taskId={selectedTaskId}
-              error={selectedRunTask?.error}
-              status={selectedRunTask?.status}
-              onClose={() => setSelectedTaskId(null)}
-            />
-          </div>
-        </div>
-      ) : null}
+        {selectedTaskId ? (
+          <TaskDetailPanel
+            key={selectedTaskId}
+            taskId={selectedTaskId}
+            task={selectedTask}
+            runTask={selectedRunTask}
+            taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
+            jobId={jobId}
+            runId={runId}
+            onClose={() => setSelectedTaskId(null)}
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
