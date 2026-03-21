@@ -896,8 +896,31 @@ func (j *job) Run(ctx context.Context) error {
 		branchSelected := map[uuid.UUID]bool(nil)
 		if taskModel := tasksByID[result.id]; taskModel != nil && taskModel.Type == jobdefschema.StepTypeBranch {
 			if branchNames, ok := taskBranches[result.id]; ok && len(branchNames) > 0 {
-				branchSelected = make(map[uuid.UUID]bool, len(branchNames))
-				for _, name := range branchNames {
+				// Build valid target names from the adjacency list.
+				validTargets := make([]string, 0, len(adjacency[result.id]))
+				for _, succID := range adjacency[result.id] {
+					if succTask := tasksByID[succID]; succTask != nil && succTask.Name != "" {
+						validTargets = append(validTargets, succTask.Name)
+					}
+				}
+
+				selected, selErr := validateBranchSelection(branchNames, validTargets)
+				if selErr != nil {
+					// Invalid branch name — fail the run.
+					if persistErr := store.FailTask(runID, result.id, selErr); persistErr != nil {
+						log.Error("failed to persist branch validation failure", "run_id", runID, "task_id", result.id, "error", persistErr)
+					}
+					taskOutcomes[result.id] = run.TaskStatusFailed
+					if runErr == nil {
+						runErr = selErr
+					}
+					halt = true
+					queue = queue[:0]
+					continue
+				}
+
+				branchSelected = make(map[uuid.UUID]bool, len(selected))
+				for name := range selected {
 					if id, found := taskNameToID[name]; found {
 						branchSelected[id] = true
 					}

@@ -22,6 +22,13 @@ func parseBranchSelection(logs io.Reader, validNextSteps []string) (map[string]b
 		return nil, err
 	}
 
+	return validateBranchSelection(branches, validNextSteps)
+}
+
+// validateBranchSelection checks that every name in branches is present in
+// validNextSteps and returns the set of selected names.  An error is returned
+// if any name is invalid.
+func validateBranchSelection(branches []string, validNextSteps []string) (map[string]bool, error) {
 	validSet := make(map[string]bool, len(validNextSteps))
 	for _, name := range validNextSteps {
 		validSet[name] = true

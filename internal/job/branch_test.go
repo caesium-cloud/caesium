@@ -38,3 +38,24 @@ func TestParseBranchSelection_SingleBranch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]bool{"fast-path": true}, selected)
 }
+
+func TestValidateBranchSelection_Valid(t *testing.T) {
+	selected, err := validateBranchSelection([]string{"a", "b"}, []string{"a", "b", "c"})
+	require.NoError(t, err)
+	assert.True(t, selected["a"])
+	assert.True(t, selected["b"])
+	assert.False(t, selected["c"])
+}
+
+func TestValidateBranchSelection_InvalidName(t *testing.T) {
+	_, err := validateBranchSelection([]string{"bogus"}, []string{"a", "b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown step")
+	assert.Contains(t, err.Error(), "bogus")
+}
+
+func TestValidateBranchSelection_Empty(t *testing.T) {
+	selected, err := validateBranchSelection(nil, []string{"a", "b"})
+	require.NoError(t, err)
+	assert.Empty(t, selected)
+}
