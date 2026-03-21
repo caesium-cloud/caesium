@@ -42,7 +42,7 @@ TaskIdentityHash = SHA-256(
     workdir,
     mounts,                   # sorted serialized mount specs
     predecessor_hashes,       # sorted list of predecessor task identity hashes
-    predecessor_outputs,      # sorted predecessor structured outputs (from cache or live)
+    predecessor_outputs,      # sorted by step name, then sorted key=value within each step
     run_params,               # sorted CAESIUM_PARAM_* values
     cache_version,            # user-settable version to force invalidation
 )
@@ -164,24 +164,27 @@ Step-level `cache` overrides job-level defaults. `cache: false` on a step disabl
 
 A new `internal/cache` package with a `Store` backed by a `task_cache` database table:
 
+PostgreSQL schema (dqlite equivalent uses TEXT for UUID columns):
+
 ```sql
 CREATE TABLE task_cache (
-    hash         TEXT PRIMARY KEY,
-    job_id       TEXT NOT NULL,
-    task_name    TEXT NOT NULL,
-    result       TEXT NOT NULL,
-    output       TEXT,           -- JSON structured output
-    branch_selections TEXT,      -- JSON array
-    run_id       TEXT NOT NULL,
-    task_run_id  TEXT NOT NULL,
-    created_at   TIMESTAMP NOT NULL,
-    expires_at   TIMESTAMP,
-
-    -- Index for job-level invalidation and pruning
-    INDEX idx_task_cache_job (job_id),
-    INDEX idx_task_cache_expires (expires_at)
+    hash              TEXT PRIMARY KEY,
+    job_id            UUID NOT NULL,
+    task_name         TEXT NOT NULL,
+    result            TEXT NOT NULL,
+    output            JSONB,
+    branch_selections JSONB,
+    run_id            UUID NOT NULL,
+    task_run_id       UUID NOT NULL,
+    created_at        TIMESTAMP WITH TIME ZONE NOT NULL,
+    expires_at        TIMESTAMP WITH TIME ZONE
 );
+
+CREATE INDEX idx_task_cache_job ON task_cache (job_id);
+CREATE INDEX idx_task_cache_expires ON task_cache (expires_at);
 ```
+
+For dqlite, GORM's AutoMigrate handles the dialect differences (UUID → TEXT, JSONB → TEXT, TIMESTAMPTZ → TIMESTAMP). The Go model uses `uuid.UUID` and `datatypes.JSON` which map correctly to both backends.
 
 The store interface:
 
@@ -227,8 +230,8 @@ type HashInput struct {
     Env                map[string]string
     WorkDir            string
     Mounts             []container.Mount
-    PredecessorHashes  []string            // sorted
-    PredecessorOutputs map[string]string   // flattened, sorted
+    PredecessorHashes  []string                       // sorted
+    PredecessorOutputs map[string]map[string]string   // keyed by step name, preserving namespace
     RunParams          map[string]string
     CacheVersion       int
 }
@@ -276,7 +279,23 @@ runTask(taskID):
 
 ### Distributed Mode (`internal/worker/runtime_executor.go`)
 
-In distributed mode, the cache check happens in the worker before creating a container:
+In distributed mode, the scheduler propagates predecessor context to workers via the `TaskRun` model. This avoids a circular dependency where the worker would need to independently reconstruct predecessor hashes.
+
+**Model changes**: Add two columns to `TaskRun`:
+
+```go
+// PredecessorCacheHashes stores the identity hashes of immediate
+// predecessors, written by the scheduler when it dispatches the task.
+PredecessorCacheHashes datatypes.JSON `gorm:"type:json" json:"predecessor_cache_hashes,omitempty"`
+
+// PredecessorCacheOutputs stores the namespaced outputs of immediate
+// predecessors (from cache or live execution), written by the scheduler.
+PredecessorCacheOutputs datatypes.JSON `gorm:"type:json" json:"predecessor_cache_outputs,omitempty"`
+```
+
+**Scheduler-side** (`internal/job/job.go` or the distributed task registration path): When a task becomes ready for dispatch (indegree reaches 0), the scheduler writes the predecessor hashes and outputs into these fields before the worker claims the task.
+
+**Worker-side** (`internal/worker/runtime_executor.go`): The cache check uses the pre-computed values from the task run record:
 
 ```
 executeTask(taskRun):
@@ -284,29 +303,37 @@ executeTask(taskRun):
         → execute normally (existing path)
 
     compute TaskIdentityHash:
-        - use taskRun fields (image, command) + predecessor outputs from DB
-        - predecessor hashes: query from task_cache by (job_id, predecessor_task_name, run params)
+        - use taskRun fields (image, command)
+        - predecessor hashes: read from taskRun.PredecessorCacheHashes (set by scheduler)
+        - predecessor outputs: read from taskRun.PredecessorCacheOutputs (set by scheduler)
 
     query CacheStore.Get(hash):
         if HIT and not expired:
-            → call store.CacheHitTask(runID, taskID, cachedResult, cachedOutput)
+            → call store.CacheHitTaskClaimed(runID, taskID, cachedResult, cachedOutput, claimedBy)
             → return (no container created)
 
         if MISS:
             → execute normally
             → on success: CacheStore.Put(...)
+            → store computed hash back to taskRun for downstream propagation
 ```
+
+This mirrors the local execution flow where hashes propagate along the DAG during traversal — the scheduler is the single source of truth for predecessor context in both modes.
 
 ### Restart-from-Failure
 
-This builds on existing resumption logic in `resolveRun()`. When a run is re-triggered:
+**Important**: The current codebase does NOT support restart-from-failure out of the box. `resolveRun()` only looks for runs with status `running` (via `FindRunning`), and `ResetInFlightTasks()` only resets tasks that are still `running` — it does not touch tasks with status `failed`. A re-trigger after a fully failed run creates a brand-new run.
 
-1. `resolveRun()` finds the existing failed run (existing behavior).
-2. `ResetInFlightTasks()` resets failed tasks to pending (existing behavior).
-3. The DAG traversal skips already-succeeded tasks (existing behavior via `processed` map).
+This design requires new resumption infrastructure as a prerequisite:
+
+1. **New**: `resolveRun()` must also look for the most recent failed run for the job (not just running runs). Add `FindLastFailed(jobID)` to the run store.
+2. **New**: `ResetFailedTasks(runID)` method that resets tasks with status `failed` back to `pending`, preserving succeeded/cached/skipped tasks.
+3. The DAG traversal then skips already-succeeded/cached tasks (existing behavior via `processed` map).
 4. **New**: For pending tasks whose predecessors all succeeded, compute the identity hash. If cached, skip. If not, execute.
 
-The key insight: restart-from-failure is *already implemented* by the existing resumption logic. The cache adds value by also skipping tasks that are downstream of the failure point but whose inputs haven't actually changed (e.g., a parallel branch that was never reached).
+This resumption logic should be gated behind an explicit re-run API (`POST /v1/jobs/{id}/runs/{run_id}/retry`) rather than implicit in the trigger path, to avoid accidentally resuming a stale failed run when the user intended a fresh start.
+
+The cache adds value on top of restart-from-failure by also skipping tasks that are downstream of the failure point but whose inputs haven't actually changed (e.g., a parallel branch that was never reached).
 
 ---
 
@@ -322,6 +349,18 @@ This is a terminal success status (like `succeeded`) but indicates the task was 
 - **UI**: Show a cache icon on cached tasks in the DAG view
 - **Metrics**: Track cache hit rate (`caesium_task_cache_hits_total`, `caesium_task_cache_misses_total`)
 - **Debugging**: Users can see which tasks actually ran vs. were cached
+
+### Trigger-Rule Compatibility
+
+The `cached` status **must be treated as equivalent to `succeeded`** in all trigger-rule evaluation paths. Without this, downstream tasks behind `all_success` or `one_success` rules will stay blocked when a predecessor is served from cache.
+
+Required changes:
+
+1. **`internal/job/failure_policy.go`**: Update `collectPredecessorStatuses()` and `satisfiesTriggerRule()` to treat `cached` the same as `succeeded`. Specifically, in any predicate that checks for `TaskStatusSucceeded`, also match `TaskStatusCached`.
+2. **`internal/run/store.go`**: The distributed-mode trigger-rule evaluation in `CompleteTaskClaimed` / `CacheHitTaskClaimed` must also count `cached` as a success when decrementing indegree and evaluating downstream readiness.
+3. **`IsSuccessfulTaskResult()`**: Not affected — cache hits don't go through result parsing; they use the stored status directly. But `CacheHitTask` must explicitly set the task outcome to a success-equivalent.
+
+A clean way to implement this: add a helper `IsTerminalSuccess(status TaskStatus) bool` that returns `true` for both `succeeded` and `cached`, and use it consistently in trigger-rule evaluation, indegree propagation, and the `processed` map checks in the DAG traversal loop.
 
 ### Run Store Changes
 
@@ -511,24 +550,33 @@ caesium job run <alias> --dry-run
 ### Phase 1: Core Cache Infrastructure (P0)
 
 1. **Cache store** (`internal/cache/store.go`): `Get`, `Put`, `Invalidate`, `Prune`
-2. **Hash computation** (`internal/cache/hash.go`): `HashInput.Compute()`
-3. **Database migration**: `task_cache` table
+2. **Hash computation** (`internal/cache/hash.go`): `HashInput.Compute()` with namespaced predecessor outputs (`map[string]map[string]string`)
+3. **Database migration**: `task_cache` table (PostgreSQL-native types, separate index statements)
 4. **Step definition changes** (`pkg/jobdef/definition.go`): Parse `cache` field
 5. **TaskStatus addition**: `cached` status in `internal/run`
-6. **`CacheHitTask` method** on `run.Store`
+6. **`IsTerminalSuccess()` helper**: Returns true for both `succeeded` and `cached`; update `satisfiesTriggerRule()`, `collectPredecessorStatuses()`, and all trigger-rule evaluation paths to use it
+7. **`CacheHitTask` method** on `run.Store`
 
 ### Phase 2: Local Execution Integration (P0)
 
-7. **Cache check in `runTask`** (`internal/job/job.go`): Hash computation, cache lookup, skip-on-hit
-8. **Cache write on success**: Store result after successful execution
-9. **Predecessor hash propagation**: In-memory map of task → hash during DAG traversal
-10. **Event emission**: `task_cached` event type
+8. **Cache check in `runTask`** (`internal/job/job.go`): Hash computation, cache lookup, skip-on-hit
+9. **Cache write on success**: Store result after successful execution
+10. **Predecessor hash propagation**: In-memory map of task → hash during DAG traversal
+11. **Event emission**: `task_cached` event type
 
 ### Phase 3: Distributed Execution Integration (P1)
 
-11. **Cache check in `executeTask`** (`internal/worker/runtime_executor.go`)
-12. **Predecessor hash resolution from DB**: Query cache entries for predecessor tasks
-13. **`CacheHitTaskClaimed`** method for distributed claim semantics
+12. **Predecessor context propagation**: Add `PredecessorCacheHashes` and `PredecessorCacheOutputs` columns to `TaskRun`; scheduler writes these when dispatching tasks
+13. **Cache check in `executeTask`** (`internal/worker/runtime_executor.go`): Use propagated predecessor context (not independent DB queries)
+14. **`CacheHitTaskClaimed`** method for distributed claim semantics
+15. **Hash write-back**: Worker stores computed hash on `TaskRun` for downstream propagation
+
+### Phase 3.5: Restart-from-Failure Infrastructure (P1)
+
+16. **`FindLastFailed(jobID)`** on run store: Find most recent failed run for a job
+17. **`ResetFailedTasks(runID)`** on run store: Reset `failed` tasks to `pending`, preserving `succeeded`/`cached`/`skipped`
+18. **Retry API**: `POST /v1/jobs/{id}/runs/{run_id}/retry` endpoint (explicit, not implicit in trigger path)
+19. **CLI**: `caesium job retry <alias> [--run-id <id>]`
 
 ### Phase 4: API & CLI (P1)
 
