@@ -17,8 +17,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
-	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -252,22 +252,27 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	// Capture structured task output from container logs before completing.
+	// Parse structured task output and branch markers in a single pass
+	// over the log stream (no full buffering).
 	var taskOutput map[string]string
+	var branchSelections []string
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
-		parsed, parseErr := pkgtask.ParseOutput(logs)
-		if err := logs.Close(); err != nil {
-			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", err)
+		markers, parseErr := pkgtask.ParseMarkers(logs)
+		if closeErr := logs.Close(); closeErr != nil {
+			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
 		if parseErr != nil {
-			log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
-		} else {
-			taskOutput = parsed
+			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)
+		} else if markers != nil {
+			taskOutput = markers.Output
+			if len(markers.Branches) > 0 {
+				branchSelections = markers.Branches
+			}
 		}
 	}
 
-	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput); err != nil {
+	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
 		return err
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {

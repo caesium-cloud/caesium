@@ -59,7 +59,7 @@ func TestDispatchNotificationSuccess(t *testing.T) {
 
 	require.NoError(t, store.RegisterTask(runEntry.ID, task, atom, 0))
 	require.NoError(t, store.StartTask(runEntry.ID, task.ID, "runtime-1"))
-	require.NoError(t, store.CompleteTask(runEntry.ID, task.ID, "success", nil))
+	require.NoError(t, store.CompleteTask(runEntry.ID, task.ID, "success", nil, nil))
 	require.NoError(t, store.Complete(runEntry.ID, nil))
 
 	var received atomic.Bool
@@ -178,7 +178,7 @@ func TestRetryFailedCallbacks(t *testing.T) {
 
 	require.NoError(t, store.RegisterTask(runEntry.ID, task, atom, 0))
 	require.NoError(t, store.StartTask(runEntry.ID, task.ID, "runtime-1"))
-	require.NoError(t, store.CompleteTask(runEntry.ID, task.ID, "success", nil))
+	require.NoError(t, store.CompleteTask(runEntry.ID, task.ID, "success", nil, nil))
 	require.NoError(t, store.Complete(runEntry.ID, nil))
 
 	var attempt int32
