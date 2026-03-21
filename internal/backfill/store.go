@@ -56,7 +56,19 @@ func (s *Store) List(jobID uuid.UUID) ([]*models.Backfill, error) {
 	return backfills, nil
 }
 
-func (s *Store) Cancel(id uuid.UUID) error {
+// RequestCancel persists a cancellation request for a running backfill.
+func (s *Store) RequestCancel(id uuid.UUID) error {
+	now := time.Now().UTC()
+	return s.db.Model(&models.Backfill{}).
+		Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
+		Updates(map[string]interface{}{
+			"cancel_requested_at": now,
+		}).Error
+}
+
+// MarkCancelled marks a running backfill as fully cancelled after in-flight
+// work has drained.
+func (s *Store) MarkCancelled(id uuid.UUID) error {
 	now := time.Now().UTC()
 	return s.db.Model(&models.Backfill{}).
 		Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
@@ -73,7 +85,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 		status = models.BackfillStatusFailed
 	}
 	return s.db.Model(&models.Backfill{}).
-		Where("id = ?", id).
+		Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
 		Updates(map[string]interface{}{
 			"status":       string(status),
 			"completed_at": now,
@@ -110,6 +122,20 @@ func (s *Store) IsRunning(id uuid.UUID) (bool, error) {
 		return false, err
 	}
 	return b.Status == string(models.BackfillStatusRunning), nil
+}
+
+// IsCancelRequested returns true if a running backfill has a persisted cancel
+// request.
+func (s *Store) IsCancelRequested(id uuid.UUID) (bool, error) {
+	var b models.Backfill
+	err := s.db.Select("status", "cancel_requested_at").First(&b, "id = ?", id).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return b.Status == string(models.BackfillStatusRunning) && b.CancelRequestedAt != nil, nil
 }
 
 // LatestRunForLogicalDate returns the status of the most recent run for a job

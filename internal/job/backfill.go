@@ -2,6 +2,7 @@ package job
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -15,6 +16,8 @@ import (
 	"github.com/robfig/cron"
 	"golang.org/x/sync/semaphore"
 )
+
+const backfillAcquirePollInterval = 250 * time.Millisecond
 
 // EnumerateLogicalDates returns all cron fire times in [start, end).
 // loc sets the timezone used when computing schedule boundaries; pass time.UTC
@@ -63,6 +66,60 @@ func FilterDates(store *backfillstore.Store, jobID uuid.UUID, dates []time.Time,
 		filtered = append(filtered, d)
 	}
 	return filtered, nil
+}
+
+type backfillStateReader interface {
+	IsRunning(id uuid.UUID) (bool, error)
+	IsCancelRequested(id uuid.UUID) (bool, error)
+}
+
+func shouldStopBackfill(ctx context.Context, store backfillStateReader, backfillID uuid.UUID) bool {
+	select {
+	case <-ctx.Done():
+		return true
+	default:
+	}
+
+	cancelRequested, err := store.IsCancelRequested(backfillID)
+	if err != nil {
+		log.Warn("backfill: failed to check cancel request", "backfill_id", backfillID, "error", err)
+	} else if cancelRequested {
+		return true
+	}
+
+	running, err := store.IsRunning(backfillID)
+	if err != nil {
+		log.Warn("backfill: failed to check running state", "backfill_id", backfillID, "error", err)
+		return false
+	}
+
+	return !running
+}
+
+func waitForBackfillSlot(
+	ctx context.Context,
+	sem *semaphore.Weighted,
+	shouldStop func() bool,
+) bool {
+	for {
+		if shouldStop() {
+			return false
+		}
+
+		acquireCtx, cancel := context.WithTimeout(ctx, backfillAcquirePollInterval)
+		err := sem.Acquire(acquireCtx, 1)
+		cancel()
+
+		switch {
+		case err == nil:
+			return true
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			continue
+		default:
+			log.Error("backfill: failed to acquire concurrency slot", "error", err)
+			return false
+		}
+	}
 }
 
 // RunBackfill executes a backfill by enumerating logical dates, filtering by
@@ -118,24 +175,20 @@ func RunBackfill(
 	cancelled := false
 
 	for _, d := range filtered {
-		select {
-		case <-ctx.Done():
-			cancelled = true
-		default:
-		}
-
-		if cancelled {
-			break
-		}
-
-		// Also poll the DB so that a cancel issued by a different process
-		// (where no in-memory context exists) is honoured.
-		if running, err := bStore.IsRunning(b.ID); err == nil && !running {
+		if shouldStopBackfill(ctx, bStore, b.ID) {
 			cancelled = true
 			break
 		}
 
-		if err := sem.Acquire(ctx, 1); err != nil {
+		if !waitForBackfillSlot(ctx, sem, func() bool {
+			return shouldStopBackfill(ctx, bStore, b.ID)
+		}) {
+			cancelled = true
+			break
+		}
+
+		if shouldStopBackfill(ctx, bStore, b.ID) {
+			sem.Release(1)
 			cancelled = true
 			break
 		}
@@ -183,9 +236,9 @@ func RunBackfill(
 	wg.Wait()
 
 	if cancelled {
-		// Cancel writes the DB record; if it was already marked cancelled by
-		// another process the WHERE status=running guard is a no-op.
-		if cancelErr := bStore.Cancel(b.ID); cancelErr != nil {
+		// Mark terminal cancellation only after the backfill has stopped
+		// launching new runs and all in-flight work has drained.
+		if cancelErr := bStore.MarkCancelled(b.ID); cancelErr != nil {
 			log.Error("backfill: failed to cancel", "backfill_id", b.ID, "error", cancelErr)
 		}
 		return
