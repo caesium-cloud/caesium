@@ -543,9 +543,9 @@ func (j *job) Run(ctx context.Context) error {
 	// It returns the atom result string, any parsed task outputs, any branch
 	// selections (for branch-type tasks), and any error.
 	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, error) {
-		atomName := taskID.String()
+		atomName := fmt.Sprintf("%s-%s", taskID, runID)
 		if attempt > 1 {
-			atomName = fmt.Sprintf("%s-attempt%d", taskID, attempt)
+			atomName = fmt.Sprintf("%s-attempt%d", atomName, attempt)
 		}
 
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)

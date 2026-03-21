@@ -94,6 +94,22 @@ var (
 		},
 		[]string{"job_alias", "task_name", "attempt"},
 	)
+
+	BackfillRunsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_backfill_runs_total",
+			Help: "Total number of runs spawned by backfills by status.",
+		},
+		[]string{"job_alias", "status"},
+	)
+
+	BackfillsActive = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "caesium_backfills_active",
+			Help: "Number of currently running backfills.",
+		},
+		[]string{"job_alias"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -110,5 +126,7 @@ func Register() {
 		WorkerClaimContentionTotal,
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
+		BackfillRunsTotal,
+		BackfillsActive,
 	)
 }

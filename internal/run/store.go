@@ -99,6 +99,7 @@ type TaskRun struct {
 type JobRun struct {
 	ID           uuid.UUID         `json:"id"`
 	JobID        uuid.UUID         `json:"job_id"`
+	BackfillID   *uuid.UUID        `json:"backfill_id,omitempty"`
 	JobAlias     string            `json:"job_alias,omitempty"`
 	TriggerType  string            `json:"trigger_type,omitempty"`
 	TriggerAlias string            `json:"trigger_alias,omitempty"`
@@ -243,6 +244,74 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 
 	run, err := s.loadRun(model.ID)
 	return run, err
+}
+
+// StartForBackfill creates a JobRun pre-linked to a backfill ID. The caller
+// should then execute the job with run.WithContext(ctx, r.ID) so the executor
+// resumes from this pre-created record rather than creating a new one.
+func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]string) (*JobRun, error) {
+	model := &models.JobRun{
+		ID:         uuid.New(),
+		JobID:      jobID,
+		BackfillID: &backfillID,
+		Status:     string(StatusRunning),
+		StartedAt:  time.Now().UTC(),
+	}
+
+	if len(params) > 0 {
+		encoded, err := json.Marshal(params)
+		if err != nil {
+			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
+		}
+		model.Params = encoded
+	}
+
+	pendingEvents := make([]event.Event, 0, 1)
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(model).Error; err != nil {
+			return err
+		}
+
+		if s.eventStore != nil {
+			payload, err := json.Marshal(&JobRun{
+				ID:        model.ID,
+				JobID:     model.JobID,
+				Status:    Status(model.Status),
+				StartedAt: model.StartedAt,
+				CreatedAt: model.CreatedAt,
+				UpdatedAt: model.UpdatedAt,
+				Tasks:     []*TaskRun{},
+			})
+			if err != nil {
+				return err
+			}
+
+			evt := event.Event{
+				Type:      event.TypeRunStarted,
+				JobID:     jobID,
+				RunID:     model.ID,
+				Timestamp: time.Now().UTC(),
+				Payload:   payload,
+			}
+			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+				return err
+			}
+			pendingEvents = append(pendingEvents, evt)
+		}
+
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	s.publishEvents(pendingEvents...)
+
+	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	s.startedMu.Lock()
+	s.startedRuns[model.ID] = struct{}{}
+	s.startedMu.Unlock()
+
+	return s.loadRun(model.ID)
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
@@ -1235,13 +1304,14 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 	}
 
 	runValue := &JobRun{
-		ID:        model.ID,
-		JobID:     model.JobID,
-		Status:    Status(model.Status),
-		StartedAt: model.StartedAt,
-		CreatedAt: model.CreatedAt,
-		UpdatedAt: model.UpdatedAt,
-		Error:     model.Error,
+		ID:         model.ID,
+		JobID:      model.JobID,
+		BackfillID: model.BackfillID,
+		Status:     Status(model.Status),
+		StartedAt:  model.StartedAt,
+		CreatedAt:  model.CreatedAt,
+		UpdatedAt:  model.UpdatedAt,
+		Error:      model.Error,
 	}
 
 	if len(model.Params) > 0 {
