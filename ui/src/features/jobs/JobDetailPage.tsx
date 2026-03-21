@@ -1,25 +1,46 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Pause, Play } from "lucide-react";
+import { History, List, Pause, Play, Settings2, FileText } from "lucide-react";
+import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { JobDAG } from "./JobDAG";
+import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { api, type Atom, type Job, type JobRun, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
+
+type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | null;
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
+  const dagContainerRef = useRef<HTMLDivElement>(null);
+  const [dagHeight, setDagHeight] = useState<number | null>(null);
+
+  const measureDag = useCallback(() => {
+    const el = dagContainerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const bottom = window.innerHeight - rect.top - 32;
+    setDagHeight(Math.max(400, bottom));
+  }, []);
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
@@ -60,6 +81,17 @@ export function JobDetailPage() {
     queryFn: () => (job?.trigger_id ? api.getTrigger(job.trigger_id) : Promise.resolve(null)),
     enabled: !!job?.trigger_id,
   });
+
+  const isLoading = isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger;
+
+  useEffect(() => {
+    window.addEventListener("resize", measureDag);
+    return () => window.removeEventListener("resize", measureDag);
+  }, [measureDag]);
+
+  useLayoutEffect(() => {
+    if (!isLoading) measureDag();
+  }, [isLoading, measureDag]);
 
   useEffect(() => {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
@@ -234,9 +266,14 @@ export function JobDetailPage() {
   const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskStatus = useMemo(() => buildTaskStatusLookup(featuredRun?.tasks), [featuredRun?.tasks]);
+  const taskDefinitions = useMemo(() => {
+    const map: Record<string, (typeof tasks extends (infer T)[] | undefined ? T : never)> = {};
+    tasks?.forEach((t) => { map[t.id] = t; });
+    return map;
+  }, [tasks]);
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
 
-  if (isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger || (featuredRunId && isLoadingFeaturedRun)) {
+  if (isLoading || (featuredRunId && isLoadingFeaturedRun)) {
     return <div className="p-8">Loading...</div>;
   }
 
@@ -244,9 +281,13 @@ export function JobDetailPage() {
     return <div className="p-8">Job not found</div>;
   }
 
+  const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
+  const selectedRunTask = selectedTaskId ? featuredRunTasks[selectedTaskId] : undefined;
+
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+    <div className="space-y-4">
+      {/* Header row */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight">{job.alias}</h1>
@@ -255,13 +296,13 @@ export function JobDetailPage() {
             </Badge>
             {featuredRun ? renderRunStatus(featuredRun.status) : null}
           </div>
-          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
             <span className="font-mono">{job.id}</span>
             {featuredRun ? (
               <>
-                <span>•</span>
+                <span>·</span>
                 <span>{activeRun ? "Active run started" : "Last run"} <RelativeTime date={featuredRun.started_at} /></span>
-                <span>•</span>
+                <span>·</span>
                 <span className="font-mono">
                   <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
                 </span>
@@ -269,207 +310,286 @@ export function JobDetailPage() {
             ) : null}
           </div>
         </div>
-        <div className="flex gap-2">
-          <Button onClick={() => triggerMutation.mutate({ jobId: job.id })} disabled={triggerMutation.isPending || job.paused}>
-            <Play className="mr-2 h-4 w-4" />
+        <div className="flex items-center gap-2">
+          {/* Secondary view buttons */}
+          <div className="flex items-center gap-1 mr-2">
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("runs")}>
+              <History className="mr-1.5 h-3.5 w-3.5" />
+              Runs
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("tasks")}>
+              <List className="mr-1.5 h-3.5 w-3.5" />
+              Tasks
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("configuration")}>
+              <Settings2 className="mr-1.5 h-3.5 w-3.5" />
+              Config
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("definition")}>
+              <FileText className="mr-1.5 h-3.5 w-3.5" />
+              YAML
+            </Button>
+          </div>
+          <div className="h-6 w-px bg-border" />
+          <Button size="sm" onClick={() => triggerMutation.mutate({ jobId: job.id })} disabled={triggerMutation.isPending || job.paused}>
+            <Play className="mr-1.5 h-3.5 w-3.5" />
             Trigger
           </Button>
           <Button
             variant="outline"
+            size="sm"
             onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
             disabled={pauseMutation.isPending}
           >
-            <Pause className="mr-2 h-4 w-4" />
+            <Pause className="mr-1.5 h-3.5 w-3.5" />
             {job.paused ? "Unpause" : "Pause"}
           </Button>
         </div>
       </div>
 
-      {job.paused || activeRun ? (
-        <Card className="border-primary/15 bg-card/80">
-          <CardContent className="flex flex-col gap-4 p-4 md:flex-row md:items-center md:justify-between">
-            <div className="space-y-1">
-              <div className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">Execution State</div>
-              <p className="text-sm text-foreground">
-                {job.paused
-                  ? activeRun
-                    ? "This job is paused for new runs. The active run will keep draining until completion."
-                    : "This job is paused. Triggering is blocked until it is unpaused."
-                  : "The DAG below is following the most relevant run in real time."}
-              </p>
-            </div>
-          </CardContent>
-        </Card>
-      ) : null}
-
-      {featuredRun?.params && Object.keys(featuredRun.params).length > 0 ? (
-        <Card>
-          <CardHeader className="pb-3">
-            <CardTitle className="text-sm">{activeRun ? "Active Run Parameters" : "Latest Run Parameters"}</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-2 md:grid-cols-2">
-            {Object.entries(featuredRun.params).map(([key, value]) => (
-              <div key={key}>
-                <div className="text-xs uppercase tracking-wide text-muted-foreground">{key}</div>
-                <div className="font-mono text-sm">{value}</div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-      ) : null}
-
-      <Tabs defaultValue="dag">
-        <TabsList>
-          <TabsTrigger value="dag">DAG</TabsTrigger>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-          <TabsTrigger value="tasks">Tasks</TabsTrigger>
-          <TabsTrigger value="configuration">Configuration</TabsTrigger>
-          <TabsTrigger value="definition">Definition</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="dag" className="mt-4">
-          <div className="flex h-[600px] flex-col overflow-hidden rounded-md border bg-card">
-            <div className="border-b border-border/70 px-4 py-3">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                <div>
-                  <div className="text-xs font-medium uppercase tracking-[0.28em] text-muted-foreground">DAG Overlay</div>
-                  <div className="mt-1 text-sm text-foreground">
-                    {featuredRun
-                      ? `${activeRun ? "Showing live task state from" : "Showing the latest task state from"} run ${shortId(featuredRun.id)}`
-                      : "Showing DAG topology only. Trigger a run to populate live task state."}
-                  </div>
-                </div>
-                {featuredRun ? <Badge variant={activeRun ? "running" : "secondary"}>{activeRun ? "Live Overlay" : "Latest Overlay"}</Badge> : null}
-              </div>
-            </div>
-            <div className="flex-1">
-              {dag && atoms ? <JobDAG dag={dag} atoms={atoms} taskMetadata={taskMetadata} taskStatus={taskStatus} /> : null}
-            </div>
+      {/* DAG — fills to bottom of viewport */}
+      <div
+        ref={dagContainerRef}
+        className="relative flex flex-col overflow-hidden rounded-md border bg-card"
+        style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
+      >
+        {/* Compact overlay status bar */}
+        <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {featuredRun ? (
+              <>
+                <span>
+                  {activeRun ? "Live overlay from" : "Latest overlay from"} run{" "}
+                  <Link
+                    to="/jobs/$jobId/runs/$runId"
+                    params={{ jobId, runId: featuredRun.id }}
+                    className="font-mono text-blue-400 hover:underline"
+                  >
+                    {shortId(featuredRun.id)}
+                  </Link>
+                </span>
+                {featuredRun ? (
+                  <Badge variant={activeRun ? "running" : "secondary"} className="text-[10px] px-1.5 py-0">
+                    {activeRun ? "Live" : "Latest"}
+                  </Badge>
+                ) : null}
+              </>
+            ) : (
+              <span>DAG topology only — trigger a run to populate task state</span>
+            )}
           </div>
-        </TabsContent>
+          {job.paused && (
+            <Badge variant="outline" className="border-amber-500/40 text-amber-300 text-[10px] px-1.5 py-0">
+              Paused
+            </Badge>
+          )}
+        </div>
 
-        <TabsContent value="runs" className="mt-4">
-          <div className="rounded-md border bg-card divide-y">
-            {sortedRuns.length === 0 ? (
-              <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
-            ) : null}
-            {sortedRuns.map((run) => (
-              <Link
-                key={run.id}
-                to="/jobs/$jobId/runs/$runId"
-                params={{ jobId: job.id, runId: run.id }}
-                className="flex items-center justify-between gap-3 p-4 transition-colors hover:bg-muted/50"
-              >
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{new Date(run.started_at).toLocaleString()}</span>
-                    {run.params && Object.keys(run.params).length > 0 ? (
-                      <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
-                    ) : null}
-                  </div>
-                  <div className="text-xs text-muted-foreground">
-                    <RelativeTime date={run.started_at} /> • <span className="font-mono">{shortId(run.id)}</span> •{" "}
-                    <span className="font-mono">
-                      <Duration start={run.started_at} end={run.completed_at} />
-                    </span>
-                  </div>
-                </div>
-                {renderRunStatus(run.status)}
-              </Link>
-            ))}
+        {/* DAG canvas */}
+        <div className="flex-1 min-h-0">
+          {dag && atoms ? (
+            <JobDAG
+              dag={dag}
+              atoms={atoms}
+              taskMetadata={taskMetadata}
+              taskStatus={taskStatus}
+              taskRunData={featuredRunTasks}
+              onNodeClick={featuredRun ? setSelectedTaskId : undefined}
+              selectedTaskId={selectedTaskId}
+            />
+          ) : null}
+        </div>
+
+        {/* Slide-over task detail panel */}
+        {selectedTaskId && featuredRun ? (
+          <TaskDetailPanel
+            key={selectedTaskId}
+            taskId={selectedTaskId}
+            task={selectedTask}
+            runTask={selectedRunTask}
+            taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
+            jobId={jobId}
+            runId={featuredRun.id}
+            onClose={() => setSelectedTaskId(null)}
+          />
+        ) : null}
+      </div>
+
+      {/* Secondary views dialog */}
+      <Dialog open={secondaryView !== null} onOpenChange={(open) => !open && setSecondaryView(null)}>
+        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
+            <DialogTitle>
+              {secondaryView === "runs" && "Run History"}
+              {secondaryView === "tasks" && "Task Definitions"}
+              {secondaryView === "configuration" && "Configuration"}
+              {secondaryView === "definition" && "Job Definition (YAML)"}
+            </DialogTitle>
+          </DialogHeader>
+          <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
+            {secondaryView === "runs" && (
+              <RunsView runs={sortedRuns} job={job} />
+            )}
+            {secondaryView === "tasks" && (
+              <TasksView tasks={tasks} atoms={atoms} dag={dag} featuredRunTasks={featuredRunTasks} />
+            )}
+            {secondaryView === "configuration" && (
+              <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
+            )}
+            {secondaryView === "definition" && (
+              <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">{yamlStringify(job)}</pre>
+            )}
           </div>
-        </TabsContent>
-
-        <TabsContent value="tasks" className="mt-4 space-y-4">
-          {tasks?.map((task) => (
-            <div key={task.id} className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(320px,1fr)]">
-              <Card>
-                <CardHeader className="pb-3">
-                  <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
-                </CardHeader>
-                <CardContent className="grid gap-3 text-sm md:grid-cols-2">
-                    <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} taskType={dag?.nodes?.find(n => n.id === task.id)?.type} framed={false} />
-                  <div className="space-y-3">
-                    <div>
-                      <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Atom ID</div>
-                      <div className="font-mono text-xs">{task.atom_id}</div>
-                    </div>
-                    <div>
-                      <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Command</div>
-                      <div className="font-mono text-xs break-all">{formatCommand(atoms?.[task.atom_id]?.command)}</div>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            </div>
-          ))}
-        </TabsContent>
-
-        <TabsContent value="configuration" className="mt-4 grid gap-4 md:grid-cols-2">
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Trigger Configuration</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              {renderTriggerSummary(trigger)}
-              {triggerConfig?.defaultParams && typeof triggerConfig.defaultParams === "object" ? (
-                <div>
-                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Default Params</div>
-                  <div className="font-mono text-xs">{formatKeyValueMap(triggerConfig.defaultParams as Record<string, unknown>)}</div>
-                </div>
-              ) : null}
-              <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Raw Config</div>
-                <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{trigger?.configuration || "{}"}</pre>
-              </div>
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader className="pb-3">
-              <CardTitle className="text-sm">Job Metadata</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Pause State</div>
-                <div>{job.paused ? "Paused (blocks new runs)" : "Active"}</div>
-              </div>
-              {job.run_timeout ? (
-                <div>
-                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Run Timeout</div>
-                  <div className="font-mono text-xs">{formatDurationNs(job.run_timeout)}</div>
-                </div>
-              ) : null}
-              {job.task_timeout ? (
-                <div>
-                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Task Timeout</div>
-                  <div className="font-mono text-xs">{formatDurationNs(job.task_timeout)}</div>
-                </div>
-              ) : null}
-              {job.max_parallel_tasks ? (
-                <div>
-                  <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Max Parallel Tasks</div>
-                  <div className="font-mono text-xs">{job.max_parallel_tasks}</div>
-                </div>
-              ) : null}
-              <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
-                <div className="font-mono text-xs">{formatKeyValueMap(job.labels)}</div>
-              </div>
-              <div>
-                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Annotations</div>
-                <div className="font-mono text-xs">{formatKeyValueMap(job.annotations)}</div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="definition" className="mt-4">
-          <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">{JSON.stringify(job, null, 2)}</pre>
-        </TabsContent>
-      </Tabs>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
+
+/* ── Secondary view components ── */
+
+function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
+  return (
+    <div className="rounded-md border bg-card divide-y">
+      {runs.length === 0 ? (
+        <div className="p-8 text-center text-muted-foreground">No runs found for this job.</div>
+      ) : null}
+      {runs.map((run) => (
+        <Link
+          key={run.id}
+          to="/jobs/$jobId/runs/$runId"
+          params={{ jobId: job.id, runId: run.id }}
+          className="flex items-center justify-between gap-3 p-4 transition-colors hover:bg-muted/50"
+        >
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="font-medium">{new Date(run.started_at).toLocaleString()}</span>
+              {run.params && Object.keys(run.params).length > 0 ? (
+                <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
+              ) : null}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              <RelativeTime date={run.started_at} /> · <span className="font-mono">{shortId(run.id)}</span> ·{" "}
+              <span className="font-mono">
+                <Duration start={run.started_at} end={run.completed_at} />
+              </span>
+            </div>
+          </div>
+          {renderRunStatus(run.status)}
+        </Link>
+      ))}
+    </div>
+  );
+}
+
+function TasksView({
+  tasks,
+  atoms,
+  dag,
+  featuredRunTasks,
+}: {
+  tasks: Parameters<typeof api.getJobTasks> extends [string] ? Awaited<ReturnType<typeof api.getJobTasks>> | undefined : never;
+  atoms: Record<string, Atom> | undefined;
+  dag: Awaited<ReturnType<typeof api.getJobDAG>> | undefined;
+  featuredRunTasks: Record<string, TaskRun>;
+}) {
+  return (
+    <div className="space-y-4">
+      {tasks?.map((task) => (
+        <Card key={task.id}>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
+          </CardHeader>
+          <CardContent className="grid gap-3 text-sm md:grid-cols-2">
+            <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} taskType={dag?.nodes?.find(n => n.id === task.id)?.type} framed={false} />
+            <div className="space-y-3">
+              <div>
+                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Atom ID</div>
+                <div className="font-mono text-xs">{task.atom_id}</div>
+              </div>
+              <div>
+                <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Command</div>
+                <div className="font-mono text-xs break-all">{formatCommand(atoms?.[task.atom_id]?.command)}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+function ConfigurationView({
+  job,
+  trigger,
+  triggerConfig,
+}: {
+  job: Job;
+  trigger: Trigger | null | undefined;
+  triggerConfig: Record<string, unknown> | null;
+}) {
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Trigger Configuration</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          {renderTriggerSummary(trigger)}
+          {triggerConfig?.defaultParams && typeof triggerConfig.defaultParams === "object" ? (
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Default Params</div>
+              <div className="font-mono text-xs">{formatKeyValueMap(triggerConfig.defaultParams as Record<string, unknown>)}</div>
+            </div>
+          ) : null}
+          <div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Raw Config</div>
+            <pre className="overflow-x-auto rounded-md bg-muted p-3 text-xs">{trigger?.configuration || "{}"}</pre>
+          </div>
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Job Metadata</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 text-sm">
+          <div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Pause State</div>
+            <div>{job.paused ? "Paused (blocks new runs)" : "Active"}</div>
+          </div>
+          {job.run_timeout ? (
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Run Timeout</div>
+              <div className="font-mono text-xs">{formatDurationNs(job.run_timeout)}</div>
+            </div>
+          ) : null}
+          {job.task_timeout ? (
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Task Timeout</div>
+              <div className="font-mono text-xs">{formatDurationNs(job.task_timeout)}</div>
+            </div>
+          ) : null}
+          {job.max_parallel_tasks ? (
+            <div>
+              <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Max Parallel Tasks</div>
+              <div className="font-mono text-xs">{job.max_parallel_tasks}</div>
+            </div>
+          ) : null}
+          <div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
+            <div className="font-mono text-xs">{formatKeyValueMap(job.labels)}</div>
+          </div>
+          <div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Annotations</div>
+            <div className="font-mono text-xs">{formatKeyValueMap(job.annotations)}</div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+/* ── Helpers ── */
 
 function buildTaskStatusMap(tasks?: TaskRun[]) {
   const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string }> = {};
