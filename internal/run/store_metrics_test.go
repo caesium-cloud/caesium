@@ -118,7 +118,7 @@ func (s *StoreMetricsSuite) TestCompleteTaskRecordsMetrics() {
 		Where("job_run_id = ? AND task_id = ?", run.ID, taskID).
 		Update("started_at", time.Now().UTC().Add(-5*time.Second))
 
-	err = s.store.CompleteTask(run.ID, taskID, "ok", nil)
+	err = s.store.CompleteTask(run.ID, taskID, "ok", nil, nil)
 	s.Require().NoError(err)
 
 	ctr := s.counterValue(metrics.TaskRunsTotal, jobID.String(), taskID.String(), "docker", "succeeded")

@@ -175,7 +175,9 @@ steps:
 - Branch stdout marker protocol: `##caesium::branch <step-name>` (one per line, multiple allowed, deduplicated)
 - `ParseBranches()` in `pkg/task/output.go` extracts branch markers from container logs
 - `parseBranchSelection()` in `internal/job/branch.go` validates selected names against the step's `next` targets
-- After a branch task succeeds, the job executor skips non-selected successors and propagates skips through their descendants via `propagateSkipped()`
+- Branch filtering (skip non-selected successors + propagate skips) is performed atomically inside `completeTask()` in the store layer, ensuring correctness in both local and distributed execution modes
+- `BranchSelections` field on `TaskRun` model persists branch decisions to the database, eliminating crash-window during run resumption
+- Distributed workers (`runtime_executor.go`) buffer logs and parse both output and branch markers, passing selections to `CompleteTaskClaimed()`
 - Empty branch output (no markers) short-circuits: all downstream steps are skipped
 - Branch markers coexist with `##caesium::output` markers (orthogonal protocols)
 - Validation: branch steps must have at least one `next` entry; invalid branch names fail the task
@@ -194,7 +196,10 @@ steps:
 - `internal/jobdef/importer.go` — propagate `Type`
 - `internal/job/branch.go` — new file: `parseBranchSelection()`
 - `internal/job/branch_test.go` — new file: 4 unit tests
-- `internal/job/job.go` — branch-aware success handler, buffered log parsing, `taskBranches`/`taskNameToID` maps
+- `internal/models/run.go` — `BranchSelections` field on `TaskRun`
+- `internal/run/store.go` — branch filtering + skip propagation in `completeTask()` transaction; `skipTaskAndDescendantsTx()` helper; `CompleteTaskWithResult()` returns skipped IDs
+- `internal/worker/runtime_executor.go` — buffer logs, parse branch markers, pass to `CompleteTaskClaimed()`
+- `internal/job/job.go` — uses `CompleteTaskWithResult()`, removed in-memory branch filtering (now handled atomically in store)
 - `api/rest/controller/job/dag.go` — `Type` field on `DAGNode`
 - `ui/src/lib/api.ts` — `type` field on `DAGNode`
 - `ui/src/features/jobs/components/BranchNode.tsx` — new file

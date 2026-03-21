@@ -1,12 +1,10 @@
 package job
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"runtime"
 	"slices"
 	"strconv"
@@ -314,16 +312,12 @@ func (j *job) Run(ctx context.Context) error {
 	taskOrder := make(map[uuid.UUID]int, len(tasks))
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
 	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
-	taskNameToID := make(map[string]uuid.UUID, len(tasks))
 	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
 	triggerRuleByTask := make(map[uuid.UUID]string, len(tasks))
 
 	for idx, t := range tasks {
 		taskOrder[t.ID] = idx
 		tasksByID[t.ID] = t
-		if t.Name != "" {
-			taskNameToID[t.Name] = t.ID
-		}
 
 		rule := t.TriggerRule
 		if rule == "" {
@@ -444,7 +438,6 @@ func (j *job) Run(ctx context.Context) error {
 	processed := make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
-	taskBranches := make(map[uuid.UUID][]string, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
@@ -539,8 +532,9 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	type taskResult struct {
-		id  uuid.UUID
-		err error
+		id              uuid.UUID
+		err             error
+		skippedByBranch []uuid.UUID
 	}
 
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
@@ -620,32 +614,21 @@ func (j *job) Run(ctx context.Context) error {
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
 
-			// Buffer container logs so we can parse both structured outputs
-			// and branch markers in a single read.
+			// Parse both structured outputs and branch markers in a single
+			// pass over the log stream (no full buffering).
 			var taskOutput map[string]string
 			var branchNames []string
 			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 			if logErr == nil {
-				logData, readErr := io.ReadAll(logStream)
+				markers, parseErr := pkgtask.ParseMarkers(logStream)
 				if closeErr := logStream.Close(); closeErr != nil {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
-				if readErr != nil {
-					log.Warn("failed to read task logs", "task_id", taskID, "error", readErr)
-				} else {
-					parsed, parseErr := pkgtask.ParseOutput(bytes.NewReader(logData))
-					if parseErr != nil {
-						log.Warn("failed to parse task output", "task_id", taskID, "error", parseErr)
-					} else {
-						taskOutput = parsed
-					}
-
-					branches, branchErr := pkgtask.ParseBranches(bytes.NewReader(logData))
-					if branchErr != nil {
-						log.Warn("failed to parse branch markers", "task_id", taskID, "error", branchErr)
-					} else {
-						branchNames = branches
-					}
+				if parseErr != nil {
+					log.Warn("failed to parse task markers", "task_id", taskID, "error", parseErr)
+				} else if markers != nil {
+					taskOutput = markers.Output
+					branchNames = markers.Branches
 				}
 			}
 
@@ -657,10 +640,10 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}
 
-	runTask := func(taskID uuid.UUID) error {
+	runTask := func(taskID uuid.UUID) ([]uuid.UUID, error) {
 		runner := runners[taskID]
 		if runner == nil {
-			return fmt.Errorf("missing runner for task %s", taskID)
+			return nil, fmt.Errorf("missing runner for task %s", taskID)
 		}
 
 		// Build predecessor output env vars for this task.
@@ -697,19 +680,21 @@ func (j *job) Run(ctx context.Context) error {
 			cancel()
 
 			if execErr == nil {
-				if err := store.CompleteTask(runID, taskID, result, output); err != nil {
-					return err
+				completeResult, completeErr := store.CompleteTaskWithResult(runID, taskID, result, output, branchNames)
+				if completeErr != nil {
+					return nil, completeErr
 				}
 				if len(output) > 0 {
 					taskOutputs[taskID] = output
 				}
-				if len(branchNames) > 0 {
-					taskBranches[taskID] = branchNames
+				var skipped []uuid.UUID
+				if completeResult != nil && len(completeResult.SkippedTaskIDs) > 0 {
+					skipped = completeResult.SkippedTaskIDs
 				}
 				if !run.IsSuccessfulTaskResult(result) {
-					return fmt.Errorf("task %s failed with result %q", taskID, result)
+					return skipped, fmt.Errorf("task %s failed with result %q", taskID, result)
 				}
-				return nil
+				return skipped, nil
 			}
 			lastErr = execErr
 
@@ -732,7 +717,7 @@ func (j *job) Run(ctx context.Context) error {
 			if delay > 0 {
 				select {
 				case <-ctx.Done():
-					return ctx.Err()
+					return nil, ctx.Err()
 				case <-time.After(delay):
 				}
 			}
@@ -741,7 +726,7 @@ func (j *job) Run(ctx context.Context) error {
 		if persistErr := store.FailTask(runID, taskID, lastErr); persistErr != nil {
 			log.Error("failed to persist task failure", "run_id", runID, "task_id", taskID, "error", persistErr)
 		}
-		return lastErr
+		return nil, lastErr
 	}
 
 	taskPool := worker.NewPool(maxParallel)
@@ -753,7 +738,8 @@ func (j *job) Run(ctx context.Context) error {
 	dispatch := func(taskID uuid.UUID) error {
 		active++
 		if err := taskPool.Submit(ctx, func() {
-			results <- taskResult{id: taskID, err: runTask(taskID)}
+			skipped, err := runTask(taskID)
+			results <- taskResult{id: taskID, err: err, skippedByBranch: skipped}
 		}); err != nil {
 			active--
 			return err
@@ -891,45 +877,29 @@ func (j *job) Run(ctx context.Context) error {
 
 		taskOutcomes[result.id] = run.TaskStatusSucceeded
 
-		// For branch-type tasks, determine which successors were selected
-		// and skip the rest (plus their descendants).
-		branchSelected := map[uuid.UUID]bool(nil)
-		if taskModel := tasksByID[result.id]; taskModel != nil && taskModel.Type == jobdefschema.StepTypeBranch {
-			if branchNames, ok := taskBranches[result.id]; ok && len(branchNames) > 0 {
-				// Build valid target names from the adjacency list.
-				validTargets := make([]string, 0, len(adjacency[result.id]))
-				for _, succID := range adjacency[result.id] {
-					if succTask := tasksByID[succID]; succTask != nil && succTask.Name != "" {
-						validTargets = append(validTargets, succTask.Name)
-					}
-				}
+		// Update local state for any tasks the run store skipped while
+		// resolving branch filtering or trigger-rule evaluation.
+		skippedSet := make(map[uuid.UUID]bool, len(result.skippedByBranch))
+		for _, skippedID := range result.skippedByBranch {
+			if processed[skippedID] {
+				skippedSet[skippedID] = true
+				continue
+			}
 
-				selected, selErr := validateBranchSelection(branchNames, validTargets)
-				if selErr != nil {
-					// Invalid branch name — fail the run.
-					if persistErr := store.FailTask(runID, result.id, selErr); persistErr != nil {
-						log.Error("failed to persist branch validation failure", "run_id", runID, "task_id", result.id, "error", persistErr)
-					}
-					taskOutcomes[result.id] = run.TaskStatusFailed
-					if runErr == nil {
-						runErr = selErr
-					}
-					halt = true
-					queue = queue[:0]
-					continue
-				}
+			skippedSet[skippedID] = true
+			taskOutcomes[skippedID] = run.TaskStatusSkipped
+			processed[skippedID] = true
+			terminalTasks++
+			delete(inQueue, skippedID)
 
-				branchSelected = make(map[uuid.UUID]bool, len(selected))
-				for name := range selected {
-					if id, found := taskNameToID[name]; found {
-						branchSelected[id] = true
-					}
+			if err := propagateSkipped(skippedID); err != nil {
+				log.Error("failed to propagate skipped task", "run_id", runID, "task_id", skippedID, "error", err)
+				if runErr == nil {
+					runErr = err
 				}
-				log.Info("branch selected paths", "job_id", j.id, "task_id", result.id, "selected", branchNames)
-			} else {
-				// No branch markers emitted — short-circuit: skip all downstream.
-				branchSelected = make(map[uuid.UUID]bool)
-				log.Info("branch emitted no selections, skipping all downstream", "job_id", j.id, "task_id", result.id)
+				halt = true
+				queue = queue[:0]
+				break
 			}
 		}
 
@@ -939,31 +909,8 @@ func (j *job) Run(ctx context.Context) error {
 					continue
 				}
 
-				// Branch filtering: skip successors not selected by the branch.
-				if branchSelected != nil && !branchSelected[successor] {
-					skipReason := fmt.Sprintf("not selected by branch task %s", result.id)
-					if err := store.SkipTask(runID, successor, skipReason); err != nil {
-						log.Error("failed to persist branch skip", "run_id", runID, "task_id", successor, "error", err)
-						if runErr == nil {
-							runErr = err
-						}
-						halt = true
-						queue = queue[:0]
-						break
-					}
-					taskOutcomes[successor] = run.TaskStatusSkipped
-					processed[successor] = true
-					terminalTasks++
-					delete(inQueue, successor)
-					if err := propagateSkipped(successor); err != nil {
-						log.Error("failed to propagate branch-skipped task", "run_id", runID, "task_id", successor, "error", err)
-						if runErr == nil {
-							runErr = err
-						}
-						halt = true
-						queue = queue[:0]
-						break
-					}
+				// Skip successors already handled by branch filtering in the store.
+				if skippedSet[successor] {
 					continue
 				}
 

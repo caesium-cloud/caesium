@@ -8,20 +8,20 @@ import (
 )
 
 type JobRun struct {
-	ID           uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID        uuid.UUID  `gorm:"type:uuid;index;not null" json:"job_id"`
-	Job          Job        `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	TriggerID    uuid.UUID  `gorm:"type:uuid;index" json:"trigger_id"`
-	TriggerType  string     `gorm:"type:text" json:"trigger_type"`
-	TriggerAlias string     `gorm:"type:text" json:"trigger_alias"`
-	Status       string     `gorm:"type:text;index;not null" json:"status"`
-	Error        string     `json:"error,omitempty"`
+	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
+	Job          Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TriggerID    uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`
+	Status       string         `gorm:"type:text;index;not null" json:"status"`
+	Error        string         `json:"error,omitempty"`
 	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-	StartedAt    time.Time  `gorm:"not null" json:"started_at"`
-	CompletedAt  *time.Time `json:"completed_at,omitempty"`
-	CreatedAt    time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt    time.Time  `gorm:"not null" json:"updated_at"`
-	Tasks        []*TaskRun `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	StartedAt    time.Time      `gorm:"not null" json:"started_at"`
+	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt    time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt    time.Time      `gorm:"not null" json:"updated_at"`
+	Tasks        []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
 }
 
 type TaskRun struct {
@@ -43,6 +43,7 @@ type TaskRun struct {
 	NodeSelector            datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Result                  string            `json:"result,omitempty"`
 	Output                  datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
+	BranchSelections        datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
 	Error                   string            `json:"error,omitempty"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	OutstandingPredecessors int               `gorm:"not null" json:"outstanding_predecessors"`
