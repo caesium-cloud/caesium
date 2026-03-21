@@ -1258,6 +1258,21 @@ func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 	return s.loadRun(model.ID)
 }
 
+// LatestSuccessfulCronRun returns the most recent cron-triggered run for a job
+// that completed with status "succeeded". It returns gorm.ErrRecordNotFound
+// when no such run exists.
+func (s *Store) LatestSuccessfulCronRun(jobID uuid.UUID) (*JobRun, error) {
+	var model models.JobRun
+	err := s.db.
+		Where("job_id = ? AND status = ? AND trigger_type = ?", jobID, string(StatusSucceeded), "cron").
+		Order("started_at DESC").
+		First(&model).Error
+	if err != nil {
+		return nil, err
+	}
+	return s.loadRun(model.ID)
+}
+
 func (s *Store) loadRun(runID uuid.UUID) (*JobRun, error) {
 	return s.loadRunWithDB(s.db, runID)
 }

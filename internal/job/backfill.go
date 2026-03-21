@@ -17,9 +17,14 @@ import (
 )
 
 // EnumerateLogicalDates returns all cron fire times in [start, end).
-func EnumerateLogicalDates(schedule cron.Schedule, start, end time.Time) []time.Time {
+// loc sets the timezone used when computing schedule boundaries; pass time.UTC
+// when the trigger has no timezone configured.
+func EnumerateLogicalDates(schedule cron.Schedule, start, end time.Time, loc *time.Location) []time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
 	var dates []time.Time
-	t := schedule.Next(start.Add(-time.Second))
+	t := schedule.Next(start.In(loc).Add(-time.Second))
 	for !t.IsZero() && t.Before(end) {
 		dates = append(dates, t)
 		t = schedule.Next(t)
@@ -71,6 +76,7 @@ func RunBackfill(
 	b *models.Backfill,
 	j *models.Job,
 	schedule cron.Schedule,
+	loc *time.Location,
 ) {
 	bStore := backfillstore.Default()
 	rStore := runstore.Default()
@@ -78,7 +84,7 @@ func RunBackfill(
 	metrics.BackfillsActive.WithLabelValues(j.Alias).Inc()
 	defer metrics.BackfillsActive.WithLabelValues(j.Alias).Dec()
 
-	dates := EnumerateLogicalDates(schedule, b.Start, b.End)
+	dates := EnumerateLogicalDates(schedule, b.Start, b.End, loc)
 
 	filtered, err := FilterDates(bStore, b.JobID, dates, b.Reprocess)
 	if err != nil {
@@ -119,6 +125,13 @@ func RunBackfill(
 		}
 
 		if cancelled {
+			break
+		}
+
+		// Also poll the DB so that a cancel issued by a different process
+		// (where no in-memory context exists) is honoured.
+		if running, err := bStore.IsRunning(b.ID); err == nil && !running {
+			cancelled = true
 			break
 		}
 
@@ -170,9 +183,16 @@ func RunBackfill(
 	wg.Wait()
 
 	if cancelled {
+		// Cancel writes the DB record; if it was already marked cancelled by
+		// another process the WHERE status=running guard is a no-op.
 		if cancelErr := bStore.Cancel(b.ID); cancelErr != nil {
 			log.Error("backfill: failed to cancel", "backfill_id", b.ID, "error", cancelErr)
 		}
+		return
+	}
+
+	// Only mark complete if the record is still running (not externally cancelled).
+	if running, err := bStore.IsRunning(b.ID); err != nil || !running {
 		return
 	}
 

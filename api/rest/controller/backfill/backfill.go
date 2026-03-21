@@ -77,7 +77,7 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, "backfill requires a cron trigger")
 	}
 
-	schedule, err := croncfg.ParseSchedule(trigger.Configuration)
+	schedule, loc, err := croncfg.ParseSchedule(trigger.Configuration)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, "invalid cron expression in trigger").Wrap(err)
 	}
@@ -124,7 +124,7 @@ func Post(c *echo.Context) error {
 			cancelFuncsMu.Unlock()
 			cancel()
 		}()
-		internalJob.RunBackfill(bCtx, b, j, schedule)
+		internalJob.RunBackfill(bCtx, b, j, schedule, loc)
 	}()
 
 	return c.JSON(http.StatusAccepted, b)

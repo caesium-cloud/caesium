@@ -1,6 +1,7 @@
 package backfill
 
 import (
+	"encoding/json"
 	"errors"
 	"sync"
 	"time"
@@ -111,20 +112,30 @@ func (s *Store) IsRunning(id uuid.UUID) (bool, error) {
 	return b.Status == string(models.BackfillStatusRunning), nil
 }
 
-// LatestRunForLogicalDate returns the latest run for a job matching a logical_date param value, or nil if not found.
+// LatestRunForLogicalDate returns the status of the most recent run for a job
+// whose params contain the given logical_date value, or "" if none exists.
+// It uses Go-side filtering to remain portable across SQLite and Postgres.
 func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, logicalDate string) (string, error) {
-	// Query job_runs where job_id matches and params JSON contains the logical_date.
-	// Use JSON extraction compatible with SQLite and Postgres.
-	type result struct {
+	type runRow struct {
 		Status string
+		Params []byte
 	}
-	var r result
+	var rows []runRow
 	err := s.db.Raw(
-		`SELECT status FROM job_runs WHERE job_id = ? AND json_extract(params, '$.logical_date') = ? ORDER BY created_at DESC LIMIT 1`,
-		jobID, logicalDate,
-	).Scan(&r).Error
+		`SELECT status, params FROM job_runs WHERE job_id = ? AND params IS NOT NULL ORDER BY created_at DESC`,
+		jobID,
+	).Scan(&rows).Error
 	if err != nil {
 		return "", err
 	}
-	return r.Status, nil
+	for _, row := range rows {
+		var p map[string]string
+		if err := json.Unmarshal(row.Params, &p); err != nil {
+			continue
+		}
+		if p["logical_date"] == logicalDate {
+			return row.Status, nil
+		}
+	}
+	return "", nil
 }

@@ -32,7 +32,7 @@ func TestEnumerateLogicalDates_HourlyInOneHourWindow(t *testing.T) {
 	start := mustParseTime(t, "2024-01-01T00:00:00Z")
 	end := mustParseTime(t, "2024-01-01T01:00:00Z") // exclusive
 
-	dates := EnumerateLogicalDates(sched, start, end)
+	dates := EnumerateLogicalDates(sched, start, end, time.UTC)
 	if len(dates) != 1 {
 		t.Fatalf("expected 1 date, got %d: %v", len(dates), dates)
 	}
@@ -48,7 +48,7 @@ func TestEnumerateLogicalDates_HourlyInTwelveHourWindow(t *testing.T) {
 	start := mustParseTime(t, "2024-01-01T00:00:00Z")
 	end := mustParseTime(t, "2024-01-01T12:00:00Z")
 
-	dates := EnumerateLogicalDates(sched, start, end)
+	dates := EnumerateLogicalDates(sched, start, end, time.UTC)
 	if len(dates) != 12 {
 		t.Fatalf("expected 12 dates, got %d", len(dates))
 	}
@@ -60,7 +60,7 @@ func TestEnumerateLogicalDates_EndBeforeStart(t *testing.T) {
 	start := mustParseTime(t, "2024-01-01T12:00:00Z")
 	end := mustParseTime(t, "2024-01-01T00:00:00Z")
 
-	dates := EnumerateLogicalDates(sched, start, end)
+	dates := EnumerateLogicalDates(sched, start, end, time.UTC)
 	if len(dates) != 0 {
 		t.Fatalf("expected 0 dates, got %d", len(dates))
 	}
@@ -72,7 +72,7 @@ func TestEnumerateLogicalDates_FiveMinuteSchedule(t *testing.T) {
 	start := mustParseTime(t, "2024-01-01T00:00:00Z")
 	end := mustParseTime(t, "2024-01-01T01:00:00Z")
 
-	dates := EnumerateLogicalDates(sched, start, end)
+	dates := EnumerateLogicalDates(sched, start, end, time.UTC)
 	if len(dates) != 12 {
 		t.Fatalf("expected 12 dates, got %d: %v", len(dates), dates)
 	}
@@ -85,7 +85,7 @@ func TestEnumerateLogicalDates_ExactBoundary(t *testing.T) {
 	// end is exactly on a fire time — should NOT be included
 	end := mustParseTime(t, "2024-01-01T02:00:00Z")
 
-	dates := EnumerateLogicalDates(sched, start, end)
+	dates := EnumerateLogicalDates(sched, start, end, time.UTC)
 	if len(dates) != 2 {
 		t.Fatalf("expected 2 dates (00:00 and 01:00), got %d: %v", len(dates), dates)
 	}

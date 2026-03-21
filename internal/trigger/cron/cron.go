@@ -143,8 +143,8 @@ func (c *Cron) Fire(ctx context.Context) error {
 	return nil
 }
 
-// fireCatchup enumerates missed fire times since the last successful run for
-// each job and queues them as runs with logical_date and is_catchup params.
+// fireCatchup enumerates missed fire times since the last successful cron run
+// for each job and queues them as runs with logical_date and is_catchup params.
 func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 	rStore := runstore.Default()
 	now := time.Now().UTC()
@@ -154,14 +154,16 @@ func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 			continue
 		}
 
-		latest, err := rStore.Latest(j.ID)
+		// Use the last successful cron-triggered run as the watermark so that
+		// manual triggers, backfill runs, and failed runs do not skew the range.
+		latest, err := rStore.LatestSuccessfulCronRun(j.ID)
 		if err != nil || latest == nil {
-			// No prior runs — nothing to catch up.
+			// No prior successful cron run — nothing to catch up.
 			continue
 		}
 
 		since := latest.StartedAt
-		missed := job.EnumerateLogicalDates(c.schedule, since, now)
+		missed := job.EnumerateLogicalDates(c.schedule, since, now, c.location)
 		if len(missed) == 0 {
 			continue
 		}
@@ -201,18 +203,28 @@ func (c *Cron) ID() uuid.UUID {
 	return c.id
 }
 
-// ParseSchedule parses the cron schedule from a trigger's Configuration JSON
-// string. It is exported so that callers (e.g. the backfill API handler) can
-// enumerate fire times without instantiating a full Cron trigger.
-func ParseSchedule(configuration string) (cron.Schedule, error) {
+// ParseSchedule parses the cron schedule and timezone from a trigger's
+// Configuration JSON string. The returned location is never nil — it defaults
+// to UTC when no timezone is configured. Callers should enumerate logical dates
+// using times anchored to the returned location so that date boundaries respect
+// the job's configured timezone.
+func ParseSchedule(configuration string) (cron.Schedule, *time.Location, error) {
 	m := map[string]interface{}{}
 	if err := json.Unmarshal([]byte(configuration), &m); err != nil {
-		return nil, fmt.Errorf("cron: invalid trigger configuration: %w", err)
+		return nil, nil, fmt.Errorf("cron: invalid trigger configuration: %w", err)
 	}
 
 	expr, err := extractExpression(m)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+
+	loc, err := extractLocation(m)
+	if err != nil {
+		return nil, nil, err
+	}
+	if loc == nil {
+		loc = time.UTC
 	}
 
 	parser := cron.NewParser(
@@ -223,7 +235,11 @@ func ParseSchedule(configuration string) (cron.Schedule, error) {
 			cron.Dow,
 	)
 
-	return parser.Parse(expr)
+	sched, err := parser.Parse(expr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sched, loc, nil
 }
 
 func extractExpression(cfg map[string]interface{}) (string, error) {
