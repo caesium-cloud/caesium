@@ -40,11 +40,14 @@ const STORAGE_KEYS = {
 
 const DEFAULT_LIMIT = 200;
 
+function readInitialSql() {
+  return readStoredString(STORAGE_KEYS.sql, "");
+}
+
 export function DatabaseConsolePage() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const initialStoredSqlRef = useRef(readStoredString(STORAGE_KEYS.sql, ""));
-  const [sql, setSql] = useState(() => initialStoredSqlRef.current);
+  const [sql, setSql] = useState(readInitialSql);
   const [history, setHistory] = useState<string[]>(() => readStoredJSON(STORAGE_KEYS.history, []));
   const [limit, setLimit] = useState<number>(() => readStoredNumber(STORAGE_KEYS.limit, DEFAULT_LIMIT));
   const [schemaSearch, setSchemaSearch] = useState("");
@@ -52,9 +55,7 @@ export function DatabaseConsolePage() {
   const [autocompleteVisible, setAutocompleteVisible] = useState(false);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
   const [autocompletePosition, setAutocompletePosition] = useState({ top: 16, left: 16 });
-  const [hasSeededInitialQuery, setHasSeededInitialQuery] = useState(
-    () => initialStoredSqlRef.current.trim().length > 0,
-  );
+  const [hasSeededInitialQuery, setHasSeededInitialQuery] = useState(() => readInitialSql().trim().length > 0);
 
   const deferredSchemaSearch = useDeferredValue(schemaSearch);
 
@@ -84,10 +85,13 @@ export function DatabaseConsolePage() {
   });
 
   const snippets = useMemo(() => buildDefaultSnippets(schema), [schema]);
+  const editorSql = !hasSeededInitialQuery && !sql && snippets.length > 0 ? snippets[0].sql : sql;
   const suggestions = useMemo(
-    () => buildSqlSuggestions(schema, sql, cursorPosition),
-    [schema, sql, cursorPosition],
+    () => buildSqlSuggestions(schema, editorSql, cursorPosition),
+    [schema, editorSql, cursorPosition],
   );
+  const activeSuggestionIndex =
+    suggestions.length === 0 ? 0 : Math.min(selectedSuggestionIndex, suggestions.length - 1);
 
   const filteredTables = useMemo(() => {
     if (!schema) return [];
@@ -101,20 +105,6 @@ export function DatabaseConsolePage() {
       ),
     );
   }, [deferredSchemaSearch, schema]);
-
-  useEffect(() => {
-    if (!hasSeededInitialQuery && !sql && snippets.length > 0) {
-      setSql(snippets[0].sql);
-      persistString(STORAGE_KEYS.sql, snippets[0].sql);
-      setHasSeededInitialQuery(true);
-    }
-  }, [hasSeededInitialQuery, snippets, sql]);
-
-  useEffect(() => {
-    if (selectedSuggestionIndex >= suggestions.length) {
-      setSelectedSuggestionIndex(0);
-    }
-  }, [selectedSuggestionIndex, suggestions.length]);
 
   useEffect(() => {
     if (!autocompleteVisible) {
@@ -145,12 +135,12 @@ export function DatabaseConsolePage() {
       textarea.removeEventListener("scroll", updatePosition);
       window.removeEventListener("resize", updatePosition);
     };
-  }, [autocompleteVisible, cursorPosition, sql, suggestions.length]);
+  }, [autocompleteVisible, cursorPosition, editorSql, suggestions.length]);
 
   const result = runQuery.data;
   const databaseConsoleUnavailable = schemaError instanceof ApiError && schemaError.status === 404;
 
-  function execute(sqlToRun = sql) {
+  function execute(sqlToRun = editorSql) {
     const trimmed = sqlToRun.trim();
     if (!trimmed) {
       toast.error("Enter a query first");
@@ -161,6 +151,7 @@ export function DatabaseConsolePage() {
 
   function applySnippet(nextSql: string) {
     setSql(nextSql);
+    setHasSeededInitialQuery(true);
     setCursorPosition(nextSql.length);
     setAutocompleteVisible(false);
     persistString(STORAGE_KEYS.sql, nextSql);
@@ -170,10 +161,11 @@ export function DatabaseConsolePage() {
     });
   }
 
-  function acceptSuggestion(index = selectedSuggestionIndex) {
+  function acceptSuggestion(index = activeSuggestionIndex) {
     if (!suggestions[index]) return;
-    const applied = applySqlSuggestion(sql, cursorPosition, suggestions[index]);
+    const applied = applySqlSuggestion(editorSql, cursorPosition, suggestions[index]);
     setSql(applied.sql);
+    setHasSeededInitialQuery(true);
     setCursorPosition(applied.cursor);
     setAutocompleteVisible(false);
     persistString(STORAGE_KEYS.sql, applied.sql);
@@ -203,6 +195,7 @@ export function DatabaseConsolePage() {
     }
     if ((event.metaKey || event.ctrlKey) && event.key === " ") {
       event.preventDefault();
+      setSelectedSuggestionIndex(0);
       setAutocompleteVisible(true);
       return;
     }
@@ -228,7 +221,9 @@ export function DatabaseConsolePage() {
 
   function handleSqlChange(nextValue: string, selectionStart: number) {
     setSql(nextValue);
+    setHasSeededInitialQuery(true);
     setCursorPosition(selectionStart);
+    setSelectedSuggestionIndex(0);
     setAutocompleteVisible(true);
     persistString(STORAGE_KEYS.sql, nextValue);
   }
@@ -348,7 +343,7 @@ export function DatabaseConsolePage() {
                 <textarea
                   ref={textareaRef}
                   aria-label="SQL query editor"
-                  value={sql}
+                  value={editorSql}
                   onChange={(event) => handleSqlChange(event.target.value, event.target.selectionStart)}
                   onClick={(event) => setCursorPosition(event.currentTarget.selectionStart)}
                   onKeyDown={handleEditorKeyDown}
@@ -380,7 +375,7 @@ export function DatabaseConsolePage() {
                             }}
                             className={cn(
                               "flex items-center justify-between rounded-xl px-3 py-2 text-left font-mono text-sm transition",
-                              index === selectedSuggestionIndex
+                              index === activeSuggestionIndex
                                 ? "bg-primary/15 text-primary"
                                 : "text-slate-200 hover:bg-white/5",
                             )}
