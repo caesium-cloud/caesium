@@ -126,6 +126,75 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 	return result, nil
 }
 
+// Markers holds the results of a unified single-pass parse of container logs,
+// extracting both structured output key-value pairs and branch selection markers
+// without buffering the entire log stream in memory.
+type Markers struct {
+	Output   map[string]string
+	Branches []string
+}
+
+// ParseMarkers reads container log output in a single pass and extracts both
+// structured output (##caesium::output) and branch selection (##caesium::branch)
+// markers.  This is more memory-efficient than calling ParseOutput and
+// ParseBranches separately, as it avoids buffering the entire log stream.
+func ParseMarkers(logs io.Reader) (*Markers, error) {
+	output := make(map[string]string)
+	var branches []string
+	branchSeen := make(map[string]struct{})
+
+	scanner := bufio.NewScanner(logs)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		// Check for output marker.
+		if idx := strings.Index(line, outputMarker); idx >= 0 {
+			payload := strings.TrimSpace(line[idx+len(outputMarker):])
+			if payload != "" {
+				var raw map[string]any
+				if err := json.Unmarshal([]byte(payload), &raw); err == nil {
+					for k, v := range raw {
+						output[k] = fmt.Sprintf("%v", v)
+					}
+				}
+			}
+		}
+
+		// Check for branch marker (same line could theoretically match both,
+		// but in practice markers are distinct).
+		if idx := strings.Index(line, branchMarker); idx >= 0 {
+			name := strings.TrimSpace(line[idx+len(branchMarker):])
+			if name != "" {
+				if _, ok := branchSeen[name]; !ok {
+					branchSeen[name] = struct{}{}
+					branches = append(branches, name)
+				}
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading task log markers: %w", err)
+	}
+
+	result := &Markers{}
+
+	if len(output) > 0 {
+		// Enforce size limit.
+		encoded, err := json.Marshal(output)
+		if err != nil {
+			return nil, fmt.Errorf("marshalling task output: %w", err)
+		}
+		if len(encoded) > MaxOutputBytes {
+			return nil, fmt.Errorf("task output exceeds %d byte limit (%d bytes)", MaxOutputBytes, len(encoded))
+		}
+		result.Output = output
+	}
+
+	result.Branches = branches
+	return result, nil
+}
+
 // NormalizeStepName converts a step name to an environment-variable-safe
 // prefix.  Hyphens and dots are replaced with underscores and the result is
 // uppercased.

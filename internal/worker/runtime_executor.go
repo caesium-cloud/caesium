@@ -1,12 +1,10 @@
 package worker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -254,30 +252,22 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	// Capture structured task output and branch markers from container logs.
+	// Parse structured task output and branch markers in a single pass
+	// over the log stream (no full buffering).
 	var taskOutput map[string]string
 	var branchSelections []string
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
-		logData, readErr := io.ReadAll(logs)
+		markers, parseErr := pkgtask.ParseMarkers(logs)
 		if closeErr := logs.Close(); closeErr != nil {
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
-		if readErr != nil {
-			log.Warn("failed to read task logs", "task_id", taskRun.TaskID, "error", readErr)
-		} else {
-			parsed, parseErr := pkgtask.ParseOutput(bytes.NewReader(logData))
-			if parseErr != nil {
-				log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
-			} else {
-				taskOutput = parsed
-			}
-
-			branches, branchErr := pkgtask.ParseBranches(bytes.NewReader(logData))
-			if branchErr != nil {
-				log.Warn("failed to parse branch markers", "task_id", taskRun.TaskID, "error", branchErr)
-			} else if len(branches) > 0 {
-				branchSelections = branches
+		if parseErr != nil {
+			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)
+		} else if markers != nil {
+			taskOutput = markers.Output
+			if len(markers.Branches) > 0 {
+				branchSelections = markers.Branches
 			}
 		}
 	}
