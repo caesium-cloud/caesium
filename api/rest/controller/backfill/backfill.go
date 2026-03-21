@@ -27,6 +27,13 @@ type PostRequest struct {
 }
 
 // cancelFuncs stores in-memory cancel functions for running backfills.
+// TODO(multi-process): this map is local to one process. In a multi-replica
+// deployment a Cancel() call on a different instance will not find the func
+// and falls back to writing the status directly to the DB; RunBackfill picks
+// that up via its IsRunning() poll. To make instant cancellation work across
+// instances the cancel signal should be propagated through the DB (e.g. a
+// dedicated backfill_cancels table or a status check before each semaphore
+// acquire) rather than relying solely on the poll interval.
 var (
 	cancelFuncsMu sync.Mutex
 	cancelFuncs   = make(map[uuid.UUID]context.CancelFunc)
