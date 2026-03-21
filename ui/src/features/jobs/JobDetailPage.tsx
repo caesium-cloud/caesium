@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { History, List, Pause, Play, Settings2, FileText } from "lucide-react";
@@ -18,7 +18,8 @@ import {
 import { JobDAG } from "./JobDAG";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
-import { api, type Atom, type Job, type JobRun, type TaskRun, type Trigger } from "@/lib/api";
+import { useDagHeight } from "@/hooks/useDagHeight";
+import { api, type Atom, type Job, type JobRun, type JobTask, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
@@ -31,16 +32,6 @@ export function JobDetailPage() {
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
-  const dagContainerRef = useRef<HTMLDivElement>(null);
-  const [dagHeight, setDagHeight] = useState<number | null>(null);
-
-  const measureDag = useCallback(() => {
-    const el = dagContainerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const bottom = window.innerHeight - rect.top - 32;
-    setDagHeight(Math.max(400, bottom));
-  }, []);
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
@@ -84,14 +75,7 @@ export function JobDetailPage() {
 
   const isLoading = isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger;
 
-  useEffect(() => {
-    window.addEventListener("resize", measureDag);
-    return () => window.removeEventListener("resize", measureDag);
-  }, [measureDag]);
-
-  useLayoutEffect(() => {
-    if (!isLoading) measureDag();
-  }, [isLoading, measureDag]);
+  const [dagContainerRef, dagHeight] = useDagHeight(isLoading);
 
   useEffect(() => {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
@@ -266,11 +250,10 @@ export function JobDetailPage() {
   const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskStatus = useMemo(() => buildTaskStatusLookup(featuredRun?.tasks), [featuredRun?.tasks]);
-  const taskDefinitions = useMemo(() => {
-    const map: Record<string, (typeof tasks extends (infer T)[] | undefined ? T : never)> = {};
-    tasks?.forEach((t) => { map[t.id] = t; });
-    return map;
-  }, [tasks]);
+  const taskDefinitions = useMemo(
+    () => tasks?.reduce<Record<string, JobTask>>((acc, task) => { acc[task.id] = task; return acc; }, {}) ?? {},
+    [tasks],
+  );
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
 
   if (isLoading || (featuredRunId && isLoadingFeaturedRun)) {
@@ -463,7 +446,7 @@ function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
         >
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className="font-medium">{new Date(run.started_at).toLocaleString()}</span>
+              <span className="font-medium">{new Date(run.started_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</span>
               {run.params && Object.keys(run.params).length > 0 ? (
                 <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
               ) : null}

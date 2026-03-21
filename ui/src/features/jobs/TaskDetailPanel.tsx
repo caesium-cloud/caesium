@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
@@ -38,15 +38,32 @@ export function TaskDetailPanel({
 }: TaskDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("logs");
   const [isVisible, setIsVisible] = useState(false);
+  // Tracks the pending close animation timer so stale timers can be cancelled.
+  // Without this, quickly switching from task A → B could have A's timer fire
+  // and call onClose after B's panel has already opened.
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Animate in on mount
-  useEffect(() => {
+  useLayoutEffect(() => {
     requestAnimationFrame(() => setIsVisible(true));
   }, []);
 
+  // Clear any pending close timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    };
+  }, []);
+
   const handleClose = useCallback(() => {
+    // Cancel any in-flight close before scheduling a new one.
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
     setIsVisible(false);
-    setTimeout(onClose, 200);
+    // 200 ms matches the `duration-200` slide-out transition on the panel.
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      onClose();
+    }, 200);
   }, [onClose]);
 
   // Close on Escape key
@@ -219,7 +236,6 @@ function EmbeddedLogViewer({
   status?: string;
 }) {
   const terminalRef = useRef<HTMLDivElement>(null);
-  const xtermRef = useRef<Terminal | null>(null);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -240,14 +256,13 @@ function EmbeddedLogViewer({
     term.loadAddon(fitAddon);
     term.open(terminalRef.current);
     fitAddon.fit();
-    xtermRef.current = term;
 
     const abortController = new AbortController();
 
     async function streamLogs() {
       try {
         const response = await fetch(
-          `/v1/jobs/${jobId}/runs/${runId}/logs?task_id=${taskId}`,
+          `/v1/jobs/${jobId}/runs/${runId}/logs?${new URLSearchParams({ task_id: taskId })}`,
           { signal: abortController.signal },
         );
         if (!response.ok) {

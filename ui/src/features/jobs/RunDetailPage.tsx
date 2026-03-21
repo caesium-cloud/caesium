@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Clock } from "lucide-react";
@@ -7,6 +7,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type JobTask, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
@@ -18,16 +19,6 @@ export function RunDetailPage() {
   const queryClient = useQueryClient();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
-  const dagContainerRef = useRef<HTMLDivElement>(null);
-  const [dagHeight, setDagHeight] = useState<number | null>(null);
-
-  const measureDag = useCallback(() => {
-    const el = dagContainerRef.current;
-    if (!el) return;
-    const rect = el.getBoundingClientRect();
-    const bottom = window.innerHeight - rect.top - 32; // 32px bottom padding
-    setDagHeight(Math.max(400, bottom));
-  }, []);
 
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
@@ -59,15 +50,7 @@ export function RunDetailPage() {
 
   const isLoading = isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks;
 
-  useEffect(() => {
-    window.addEventListener("resize", measureDag);
-    return () => window.removeEventListener("resize", measureDag);
-  }, [measureDag]);
-
-  // Re-measure after content renders (loading → loaded transitions change layout)
-  useLayoutEffect(() => {
-    if (!isLoading) measureDag();
-  }, [isLoading, measureDag]);
+  const [dagContainerRef, dagHeight] = useDagHeight(isLoading);
 
   useEffect(() => {
     if (!runId || !jobId) return;
