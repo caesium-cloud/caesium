@@ -9,7 +9,6 @@ import {
   Radio,
   Server,
   Search,
-  TerminalSquare,
 } from "lucide-react"
 
 import {
@@ -86,10 +85,6 @@ export function CommandMenu() {
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
               <Database className="mr-2 h-4 w-4" />
               <span>Atoms</span>
-            </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/database" }))}>
-              <TerminalSquare className="mr-2 h-4 w-4" />
-              <span>Database</span>
             </CommandItem>
             <CommandItem onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
               <Server className="mr-2 h-4 w-4" />

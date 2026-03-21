@@ -56,9 +56,15 @@ const atomsRoute = createRoute({
   component: AtomsPage,
 });
 
-const databaseRoute = createRoute({
+const databaseLegacyRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "database",
+  loader: () => { throw redirect({ to: "/system/database" }) },
+});
+
+const databaseRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "system/database",
   component: DatabaseConsolePage,
 });
 
@@ -82,8 +88,9 @@ const routeTree = rootRoute.addChildren([
   statsRoute,
   triggersRoute,
   atomsRoute,
-  databaseRoute,
   systemRoute,
+  databaseLegacyRoute,
+  databaseRoute,
   jobDefsRoute,
 ]);
 

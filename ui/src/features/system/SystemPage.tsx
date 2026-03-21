@@ -1,10 +1,11 @@
+import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
-import { Activity, Database, CheckCircle2, XCircle, Clock, Server, Zap, RefreshCw } from "lucide-react";
+import { Activity, Database, CheckCircle2, XCircle, Clock, Server, Zap, RefreshCw, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -156,6 +157,35 @@ export function SystemPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="border-primary/20 bg-primary/5">
+        <CardHeader className="flex flex-row items-start justify-between gap-4">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-base">
+              <TerminalSquare className="h-4 w-4" />
+              Operator Tools
+            </CardTitle>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Read-only debugging surfaces for operators and power users.
+            </p>
+          </div>
+          <Badge variant="outline">Power feature</Badge>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="space-y-1">
+            <p className="font-medium">Database Console</p>
+            <p className="text-sm text-muted-foreground">
+              Inspect the embedded database with schema-aware SQL when diagnosing jobs, runs, and scheduler state.
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_DATABASE_CONSOLE_ENABLED=true</code>.
+            </p>
+          </div>
+          <Button asChild variant="outline">
+            <Link to="/system/database">Open database console</Link>
+          </Button>
+        </CardContent>
+      </Card>
 
       {/* Checks breakdown */}
       {!isLoading && health?.checks && (
