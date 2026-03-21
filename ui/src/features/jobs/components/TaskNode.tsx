@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   ArrowRightFromLine,
   ArrowLeftToLine,
+  SkipForward,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
@@ -31,6 +32,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-red-400 fill-red-500/10" />;
       case 'running':
         return <Activity data-testid="status-icon-running" className="w-5 h-5 text-blue-400 animate-spin" />;
+      case 'skipped':
+        return <SkipForward data-testid="status-icon-skipped" className="w-5 h-5 text-slate-400" />;
       case 'pending':
         return <Clock data-testid="status-icon-pending" className="w-5 h-5 text-slate-500" />;
       default:
@@ -78,6 +81,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         return 'border-red-400/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(8_86%_58%/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_rgba(248,113,113,0.16)]';
       case 'running':
         return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_rgba(0,180,216,0.28)]';
+      case 'skipped':
+        return 'border-slate-500/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
       default:
         return 'border-caesium-cyan/35 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--caesium-cyan)/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_rgba(0,180,216,0.14)]';
     }
@@ -145,13 +150,25 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         <div
           className={cn(
             "custom-scrollbar h-[72px] overflow-y-auto rounded-lg border px-2.5 py-1.5 shadow-inner",
-            error
+            error && status !== 'skipped'
               ? "border-red-500/20 bg-red-500/10"
-              : "border-caesium-cyan/20 bg-muted/70",
+              : error && status === 'skipped'
+                ? "border-slate-500/20 bg-slate-500/5"
+                : "border-caesium-cyan/20 bg-muted/70",
             isShell && !error && "border-caesium-cyan/30"
           )}
         >
-          {error ? (
+          {error && status === 'skipped' ? (
+            <div className="flex gap-2 items-start">
+              <SkipForward className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-[8px] font-bold text-slate-400/80 uppercase tracking-wider">Skipped</span>
+                <span className="text-[9px] text-slate-400/70 font-mono leading-relaxed break-all line-clamp-3">
+                  {error}
+                </span>
+              </div>
+            </div>
+          ) : error ? (
             <div className="flex gap-2 items-start">
               <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
               <div className="flex flex-col gap-0.5 min-w-0">

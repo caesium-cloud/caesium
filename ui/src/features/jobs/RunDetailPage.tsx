@@ -237,6 +237,7 @@ export function RunDetailPage() {
               runId={runId}
               taskId={selectedTaskId}
               error={selectedRunTask?.error}
+              status={selectedRunTask?.status}
               onClose={() => setSelectedTaskId(null)}
             />
           </div>

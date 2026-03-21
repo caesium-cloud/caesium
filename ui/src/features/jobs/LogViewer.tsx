@@ -3,17 +3,18 @@ import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 import { Button } from "@/components/ui/button";
-import { X, AlertTriangle } from "lucide-react";
+import { X, AlertTriangle, SkipForward } from "lucide-react";
 
 interface LogViewerProps {
   jobId: string;
   runId: string;
   taskId: string;
   error?: string | null;
+  status?: string;
   onClose: () => void;
 }
 
-export function LogViewer({ jobId, runId, taskId, error, onClose }: LogViewerProps) {
+export function LogViewer({ jobId, runId, taskId, error, status, onClose }: LogViewerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
 
@@ -90,7 +91,17 @@ export function LogViewer({ jobId, runId, taskId, error, onClose }: LogViewerPro
         </Button>
       </div>
 
-      {error && (
+      {error && status === 'skipped' ? (
+        <div className="px-4 py-3 bg-slate-500/10 border-b border-slate-500/20 flex gap-3 items-start overflow-y-auto max-h-32">
+          <SkipForward className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+          <div className="flex flex-col gap-1">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Skipped</span>
+            <span className="text-xs text-slate-400/80 font-mono leading-relaxed">
+              {error}
+            </span>
+          </div>
+        </div>
+      ) : error ? (
         <div className="px-4 py-3 bg-red-500/10 border-b border-red-500/20 flex gap-3 items-start overflow-y-auto max-h-32">
           <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
           <div className="flex flex-col gap-1">
@@ -100,7 +111,7 @@ export function LogViewer({ jobId, runId, taskId, error, onClose }: LogViewerPro
             </span>
           </div>
         </div>
-      )}
+      ) : null}
 
       {/* Terminal pane stays dark — standard UX for log/terminal output */}
       <div ref={terminalRef} className="flex-1 overflow-hidden bg-[#0f172a] p-2" />
