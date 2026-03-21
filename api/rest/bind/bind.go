@@ -3,6 +3,7 @@ package bind
 import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
+	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
@@ -11,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo/v5"
 )
 
@@ -71,6 +73,12 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 	// stats
 	{
 		g.GET("/stats", stats.Get)
+	}
+
+	// database
+	if env.Variables().DatabaseConsoleEnabled {
+		g.GET("/database/schema", database.Schema)
+		g.POST("/database/query", database.Query)
 	}
 
 	// nodes

@@ -190,6 +190,50 @@ export interface TriggerRunRequest {
   params?: Record<string, string>;
 }
 
+export interface DatabaseSchemaColumn {
+  name: string;
+  data_type: string;
+  nullable: boolean;
+  primary_key: boolean;
+  default_value?: string;
+}
+
+export interface DatabaseSchemaTable {
+  name: string;
+  row_count?: number;
+  columns: DatabaseSchemaColumn[];
+}
+
+export interface DatabaseSchemaResponse {
+  dialect: string;
+  version?: string;
+  read_only: boolean;
+  tables: DatabaseSchemaTable[];
+}
+
+export interface DatabaseQueryRequest {
+  sql: string;
+  limit?: number;
+}
+
+export interface DatabaseQueryColumn {
+  name: string;
+  data_type: string;
+}
+
+export interface DatabaseQueryResponse {
+  dialect: string;
+  read_only: boolean;
+  statement_type: string;
+  query: string;
+  limit: number;
+  duration_ms: number;
+  row_count: number;
+  truncated: boolean;
+  columns: DatabaseQueryColumn[];
+  rows: unknown[][];
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/v1";
 
 export class ApiError extends Error {
@@ -265,6 +309,12 @@ export const api = {
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
   getHealth: () => requestURL<HealthResponse>("/health"),
+  getDatabaseSchema: () => request<DatabaseSchemaResponse>("/database/schema"),
+  queryDatabase: (body: DatabaseQueryRequest) =>
+    request<DatabaseQueryResponse>("/database/query", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   applyJobDef: (yaml: string) =>
     request<ApplyJobDefResponse>("/jobdefs/apply", {
       method: "POST",
