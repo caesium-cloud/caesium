@@ -495,23 +495,43 @@ func (e *fakeEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) {
 	return nil, nil
 }
 
+// atomLookupKey derives the fake-engine map key from an atom name.
+// Atom names are "{taskID}-{runID}" (attempt 1) or "{taskID}-{runID}-attempt{N}" (retries).
+// The returned key is "{taskID}" for attempt 1 and "{taskID}-attempt{N}" for retries,
+// matching the convention used in test fixtures.
+func atomLookupKey(name string) string {
+	const uuidLen = 36
+	const prefixLen = uuidLen + 1 + uuidLen // "taskID-runID" = 73 chars
+	if len(name) < uuidLen {
+		return name
+	}
+	taskKey := name[:uuidLen]
+	if len(name) <= prefixLen {
+		// attempt 1 — no "-attemptN" suffix
+		return taskKey
+	}
+	// has "-attemptN" suffix after the second UUID
+	return taskKey + name[prefixLen:]
+}
+
 func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	name := req.Name
+	key := atomLookupKey(name)
 
-	if err, ok := e.createErrByName[name]; ok {
+	if err, ok := e.createErrByName[key]; ok {
 		return nil, err
 	}
 
 	duration := 10 * time.Millisecond
-	if configured, ok := e.runDurationByName[name]; ok {
+	if configured, ok := e.runDurationByName[key]; ok {
 		duration = configured
 	}
 
 	result := atom.Success
-	if configured, ok := e.resultByName[name]; ok {
+	if configured, ok := e.resultByName[key]; ok {
 		result = configured
 	}
 
@@ -544,7 +564,7 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 	}
 
 	if req.Force {
-		e.stopForceByID[req.ID] = true
+		e.stopForceByID[atomLookupKey(req.ID)] = true
 	}
 
 	if state.stoppedAt.IsZero() {
