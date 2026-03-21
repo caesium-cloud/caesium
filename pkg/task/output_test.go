@@ -171,3 +171,64 @@ func TestBuildOutputEnv_KeyNormalization(t *testing.T) {
 	assert.Equal(t, "val", env["CAESIUM_OUTPUT_STEP_ONE_SOME_KEY"])
 	assert.Equal(t, "val2", env["CAESIUM_OUTPUT_STEP_ONE_DOT_KEY"])
 }
+
+// ── ParseBranches tests ─────────────────────────────────────────────
+
+func TestParseBranches_NoMarkers(t *testing.T) {
+	logs := strings.NewReader("hello world\nsome log line\n")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+func TestParseBranches_EmptyInput(t *testing.T) {
+	logs := strings.NewReader("")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Nil(t, result)
+}
+
+func TestParseBranches_SingleBranch(t *testing.T) {
+	logs := strings.NewReader("some log\n##caesium::branch full-refresh\nmore logs\n")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"full-refresh"}, result)
+}
+
+func TestParseBranches_MultipleBranches(t *testing.T) {
+	logs := strings.NewReader("##caesium::branch path-a\n##caesium::branch path-b\n")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"path-a", "path-b"}, result)
+}
+
+func TestParseBranches_Deduplication(t *testing.T) {
+	logs := strings.NewReader("##caesium::branch fast-path\n##caesium::branch fast-path\n##caesium::branch slow-path\n")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"fast-path", "slow-path"}, result)
+}
+
+func TestParseBranches_EmptyName_Skipped(t *testing.T) {
+	logs := strings.NewReader("##caesium::branch \n##caesium::branch valid\n")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"valid"}, result)
+}
+
+func TestParseBranches_MixedWithOutputMarkers(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output {"key": "value"}
+##caesium::branch selected-path
+more logs
+`)
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"selected-path"}, result)
+}
+
+func TestParseBranches_DockerMultiplexedPrefix(t *testing.T) {
+	logs := strings.NewReader("\x01\x00\x00\x00\x00\x00\x00\x1e" + "##caesium::branch my-step")
+	result, err := ParseBranches(logs)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"my-step"}, result)
+}

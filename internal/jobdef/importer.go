@@ -192,11 +192,17 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			triggerRule = schema.TriggerRuleAllSuccess
 		}
 
+		stepType := strings.TrimSpace(step.Type)
+		if stepType == "" {
+			stepType = schema.StepTypeTask
+		}
+
 		task := &models.Task{
 			ID:           uuid.New(),
 			JobID:        job.ID,
 			AtomID:       atom.ID,
 			Name:         step.Name,
+			Type:         stepType,
 			NodeSelector: jsonmap.FromStringMap(step.NodeSelector),
 			Retries:      step.Retries,
 			RetryDelay:   step.RetryDelay,

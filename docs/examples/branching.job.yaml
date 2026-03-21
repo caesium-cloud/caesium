@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: branching-demo
+  labels:
+    team: platform
+  annotations:
+    owner: oncall
+    purpose: demonstrates conditional branching based on runtime decisions
+trigger:
+  type: http
+steps:
+  - name: decide-path
+    type: branch
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo '##caesium::branch fast-path'"]
+    next: [fast-path, slow-path]
+
+  - name: fast-path
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Taking the fast path' && echo '##caesium::output {\"route\": \"fast\"}'"]
+    dependsOn: [decide-path]
+    next: [finalize]
+
+  - name: slow-path
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Taking the slow path' && echo '##caesium::output {\"route\": \"slow\"}'"]
+    dependsOn: [decide-path]
+    next: [finalize]
+
+  - name: finalize
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo Done via $CAESIUM_OUTPUT_FAST_PATH_ROUTE$CAESIUM_OUTPUT_SLOW_PATH_ROUTE"]
+    dependsOn: [fast-path, slow-path]
+    triggerRule: one_success
+---
+apiVersion: v1
+kind: Job
+metadata:
+  alias: branching-multi-path
+  labels:
+    team: platform
+  annotations:
+    owner: oncall
+    purpose: demonstrates multi-branch selection where two of three paths are taken
+trigger:
+  type: http
+steps:
+  - name: check-conditions
+    type: branch
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo '##caesium::branch validate' && echo '##caesium::branch notify'"]
+    next: [validate, transform, notify]
+
+  - name: validate
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Validating data'"]
+    dependsOn: [check-conditions]
+
+  - name: transform
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Transforming data'"]
+    dependsOn: [check-conditions]
+
+  - name: notify
+    engine: docker
+    image: alpine:3.20
+    command: ["sh", "-c", "echo 'Sending notification'"]
+    dependsOn: [check-conditions]

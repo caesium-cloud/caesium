@@ -94,6 +94,7 @@ export interface JobTask {
 export interface DAGNode {
   id: string;
   atom_id: string;
+  type?: string;
   next_id?: string;
   successors?: string[];
 }

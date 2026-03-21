@@ -388,7 +388,7 @@ export function JobDetailPage() {
                   <CardTitle className="text-sm">{atoms?.[task.atom_id]?.image || `Task ${shortId(task.id)}`}</CardTitle>
                 </CardHeader>
                 <CardContent className="grid gap-3 text-sm md:grid-cols-2">
-                    <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} framed={false} />
+                    <TaskMetadataPanel task={task} runTask={featuredRunTasks[task.id]} taskType={dag?.nodes?.find(n => n.id === task.id)?.type} framed={false} />
                   <div className="space-y-3">
                     <div>
                       <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Atom ID</div>

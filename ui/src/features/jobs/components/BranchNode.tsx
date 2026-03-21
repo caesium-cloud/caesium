@@ -15,11 +15,12 @@ import {
   AlertTriangle,
   ArrowRightFromLine,
   ArrowLeftToLine,
+  GitBranch,
   SkipForward,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
-export const TaskNode = memo(({ data }: NodeProps) => {
+export const BranchNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, outputCount, receivesOutputs } = data;
   const taskLabel = typeof label === 'string' ? label : '';
 
@@ -43,11 +44,11 @@ export const TaskNode = memo(({ data }: NodeProps) => {
 
   const getEngineIcon = () => {
     const e = (engine || atom?.engine || '').toLowerCase();
-    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-purple-400" />;
-    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-yellow-400" />;
-    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-slate-500" />;
+    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-amber-400" />;
+    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-amber-400" />;
+    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-amber-400" />;
+    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-amber-400" />;
+    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-amber-400" />;
   };
 
   const getProcessedCommand = () => {
@@ -76,15 +77,15 @@ export const TaskNode = memo(({ data }: NodeProps) => {
     switch (status) {
       case 'completed':
       case 'succeeded':
-        return 'border-emerald-400/45 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.16),hsl(160_84%_36%/0.2)_30%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_rgba(16,185,129,0.16)]';
+        return 'border-amber-400/50 bg-[linear-gradient(160deg,hsl(38_92%_50%/0.18),hsl(160_84%_36%/0.15)_30%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_rgba(245,158,11,0.18)]';
       case 'failed':
-        return 'border-red-400/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(8_86%_58%/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_rgba(248,113,113,0.16)]';
+        return 'border-red-400/50 bg-[linear-gradient(160deg,hsl(38_92%_50%/0.14),hsl(8_86%_58%/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_rgba(248,113,113,0.16)]';
       case 'running':
-        return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_rgba(0,180,216,0.28)]';
+        return 'border-amber-400/70 bg-[linear-gradient(155deg,hsl(38_92%_50%/0.28),hsl(38_92%_50%/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_rgba(245,158,11,0.28)]';
       case 'skipped':
-        return 'border-slate-500/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
+        return 'border-slate-500/30 bg-[linear-gradient(155deg,hsl(38_92%_50%/0.04),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
       default:
-        return 'border-caesium-cyan/35 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--caesium-cyan)/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_rgba(0,180,216,0.14)]';
+        return 'border-amber-400/35 bg-[linear-gradient(155deg,hsl(38_92%_50%/0.18),hsl(38_92%_50%/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_rgba(245,158,11,0.14)]';
     }
   };
 
@@ -102,7 +103,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
       )}
     >
-      <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+      <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-amber-400" />
       {receivesOutputs && (
         <div className="absolute -left-1 top-1/2 -translate-y-1/2 translate-x-3">
           <div className="flex items-center gap-0.5 rounded-full border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5">
@@ -116,7 +117,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         {/* Row 1: Image & Status */}
         <div className="flex min-h-[44px] items-start justify-between gap-3">
           <div className="flex items-center gap-2 overflow-hidden">
-            <div className="rounded-lg border border-caesium-cyan/20 bg-muted p-1.5 shadow-inner shadow-caesium-cyan/10">
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/10 p-1.5 shadow-inner shadow-amber-400/10">
               {getEngineIcon()}
             </div>
             <div className="flex flex-col min-w-0">
@@ -124,11 +125,9 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                 {shortImage(atom?.image)}
               </span>
               <div className="flex items-center gap-1">
-                {isShell && (
-                  <span className="rounded border border-caesium-cyan/40 bg-caesium-cyan/15 px-1 text-[8px] font-black tracking-tighter text-caesium-cyan">
-                    SHELL
-                  </span>
-                )}
+                <span className="rounded border border-amber-400/50 bg-amber-400/15 px-1 text-[8px] font-black tracking-tighter text-amber-400">
+                  BRANCH
+                </span>
                 <span className="truncate text-[9px] font-mono text-muted-foreground">
                   {shortId(taskLabel)}
                 </span>
@@ -154,8 +153,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
               ? "border-red-500/20 bg-red-500/10"
               : error && status === 'skipped'
                 ? "border-slate-500/20 bg-slate-500/5"
-                : "border-caesium-cyan/20 bg-muted/70",
-            isShell && !error && "border-caesium-cyan/30"
+                : "border-amber-400/20 bg-muted/70",
+            isShell && !error && "border-amber-400/30"
           )}
         >
           {error && status === 'skipped' ? (
@@ -182,7 +181,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
             <div className="flex flex-col gap-1">
               {commandArray.map((arg: string, i: number) => (
                 <div key={i} className="flex items-start gap-2 group">
-                  <span className="mt-0.5 text-[10px] font-bold leading-none text-caesium-cyan/70 select-none">{isShell ? ">" : "-"}</span>
+                  <GitBranch className="mt-0.5 h-2.5 w-2.5 shrink-0 text-amber-400/70" />
                   <span className="break-all font-mono text-[10px] leading-relaxed text-foreground/70 transition-colors group-hover:text-foreground">
                     {arg}
                   </span>
@@ -191,7 +190,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
             </div>
           ) : (
             <div className="flex h-full items-center gap-2 opacity-50">
-              <TerminalIcon className="h-3 w-3 text-caesium-cyan/55" />
+              <TerminalIcon className="h-3 w-3 text-amber-400/55" />
               <span className="text-[10px] font-mono italic text-muted-foreground">no command</span>
             </div>
           )}
@@ -206,9 +205,9 @@ export const TaskNode = memo(({ data }: NodeProps) => {
           </div>
         </div>
       )}
-      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-amber-400" />
     </div>
   );
 });
 
-TaskNode.displayName = 'TaskNode';
+BranchNode.displayName = 'BranchNode';

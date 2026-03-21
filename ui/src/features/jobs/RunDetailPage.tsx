@@ -230,13 +230,14 @@ export function RunDetailPage() {
 
       {selectedTaskId ? (
         <div className="space-y-4">
-          <TaskMetadataPanel task={selectedTask} runTask={selectedRunTask} />
+          <TaskMetadataPanel task={selectedTask} runTask={selectedRunTask} taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type} />
           <div className="h-[400px]">
             <LogViewer
               jobId={jobId}
               runId={runId}
               taskId={selectedTaskId}
               error={selectedRunTask?.error}
+              status={selectedRunTask?.status}
               onClose={() => setSelectedTaskId(null)}
             />
           </div>

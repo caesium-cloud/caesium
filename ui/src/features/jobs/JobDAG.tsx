@@ -11,6 +11,7 @@ import 'reactflow/dist/style.css';
 import dagre from 'dagre';
 import type { JobDAGResponse, Atom, TaskRun } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
+import { BranchNode } from './components/BranchNode';
 import { DataFlowEdge } from './components/DataFlowEdge';
 
 const nodeWidth = 300;
@@ -18,6 +19,7 @@ const nodeHeight = 148;
 
 const nodeTypes = {
   task: TaskNode,
+  branch: BranchNode,
 };
 
 const edgeTypes = {
@@ -120,9 +122,11 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
             const runTask = taskRunData?.[n.id];
             const outputCount = runTask?.output ? Object.keys(runTask.output).length : 0;
 
+            const nodeType = n.type === 'branch' ? 'branch' : 'task';
+
             return {
                 id: n.id,
-                type: 'task',
+                type: nodeType,
                 data: {
                   label: n.id,
                   atom: atom,
@@ -133,6 +137,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                   error: meta?.error,
                   outputCount,
                   receivesOutputs: taskReceivesOutputs.has(n.id),
+                  taskType: n.type,
                 },
                 position: { x: 0, y: 0 }
             }
@@ -143,10 +148,12 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
         if (!dag.edges) return [];
         return dag.edges.map((e) => {
             const sourceStatus = resolvedTaskStatus[e.from] || 'pending';
+            const targetStatus = resolvedTaskStatus[e.to] || 'pending';
             const sourceRun = taskRunData?.[e.from];
             const outputCount = sourceRun?.output ? Object.keys(sourceRun.output).length : 0;
             const hasOutputs = outputCount > 0;
-            const stroke = hasOutputs && sourceStatus === 'succeeded' ? '#10b981' : edgeColor(sourceStatus);
+            const isBranchSkipped = targetStatus === 'skipped' && sourceStatus === 'succeeded';
+            const stroke = isBranchSkipped ? '#64748b' : hasOutputs && sourceStatus === 'succeeded' ? '#10b981' : edgeColor(sourceStatus);
 
             return {
                 id: `e${e.from}-${e.to}`,
@@ -164,6 +171,8 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                 style: {
                   strokeWidth: hasOutputs ? 3 : 2,
                   stroke,
+                  strokeDasharray: isBranchSkipped ? '6 3' : undefined,
+                  opacity: isBranchSkipped ? 0.5 : 1,
                 }
             };
         });
