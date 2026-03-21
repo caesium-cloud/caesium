@@ -29,6 +29,7 @@ export function AppShell() {
           if (nextEvent.key === "j") navigate({ to: "/jobs" });
           if (nextEvent.key === "t") navigate({ to: "/triggers" });
           if (nextEvent.key === "a") navigate({ to: "/atoms" });
+          if (nextEvent.key === "b") navigate({ to: "/database" });
           if (nextEvent.key === "s") navigate({ to: "/stats" });
           if (nextEvent.key === "y") navigate({ to: "/system" });
           if (nextEvent.key === "d") navigate({ to: "/jobdefs" });
