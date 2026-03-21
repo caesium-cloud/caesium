@@ -77,8 +77,15 @@ func (c *Cron) Listen(ctx context.Context) {
 		"type", models.TriggerTypeCron,
 	)
 
+	next := c.nextTick()
+	if next.IsZero() {
+		log.Warn("trigger has no future occurrence, skipping", "id", c.id)
+		<-ctx.Done()
+		return
+	}
+
 	select {
-	case <-time.After(time.Until(c.nextTick())):
+	case <-time.After(time.Until(next)):
 		if err := c.Fire(ctx); err != nil {
 			log.Error("trigger fire failure", "id", c.id, "error", err)
 		}
