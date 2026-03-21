@@ -7,7 +7,6 @@ For current behavior, use:
 - [job-definitions.md](job-definitions.md)
 - [job-schema-reference.md](job-schema-reference.md)
 - [job-definition-plan.md](job-definition-plan.md)
-- [console.md](console.md)
 
 ## Core Design Intent
 

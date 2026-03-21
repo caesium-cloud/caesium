@@ -8,7 +8,7 @@ metadata:
     scenario: dag-join
   annotations:
     owner: platform-oncall
-    purpose: "Exercise fan-out/fan-in DAG rendering in the console"
+    purpose: "Exercise fan-out/fan-in DAG rendering in the web UI"
 trigger:
   type: cron
   configuration:

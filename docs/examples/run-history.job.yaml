@@ -41,4 +41,4 @@ steps:
     command: ["sh", "-c", "echo start failing pipeline"]
   - name: fail
     image: alpine:3.20
-    command: ["sh", "-c", "echo intentional failure for TUI status surfaces; exit 1"]
+    command: ["sh", "-c", "echo intentional failure for web UI status surfaces; exit 1"]

@@ -72,7 +72,7 @@ func Markdown() string {
 	b.WriteString("## Metadata\n\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
-	b.WriteString("| `alias` | string | required | Unique identifier used across APIs and console. |\n")
+	b.WriteString("| `alias` | string | required | Unique identifier used across APIs and web UI. |\n")
 	b.WriteString("| `labels` | map[string]string | optional | Attach metadata for filtering. |\n")
 	b.WriteString("| `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |\n\n")
 
@@ -87,7 +87,7 @@ func Markdown() string {
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
 	b.WriteString("| `path` | string | required | Route served under `/v1/jobs/:id`. |\n")
-	b.WriteString("| `secret` | string | optional | Shared secret validated by console/API clients. |\n\n")
+	b.WriteString("| `secret` | string | optional | Shared secret validated by web UI/API clients. |\n\n")
 
 	b.WriteString("## Callbacks\n\n")
 	b.WriteString("Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.\n\n")

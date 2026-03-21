@@ -19,7 +19,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `alias` | string | required | Unique identifier used across APIs and console. |
+| `alias` | string | required | Unique identifier used across APIs and web UI. |
 | `labels` | map[string]string | optional | Attach metadata for filtering. |
 | `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |
 | `maxParallelTasks` | int | optional | Maximum number of tasks to run concurrently. Defaults to `CAESIUM_MAX_PARALLEL_TASKS` or number of CPUs. |
@@ -46,7 +46,7 @@ Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `path` | string | required | Route served under `/v1/jobs/:id`. |
-| `secret` | string | optional | Shared secret validated by console/API clients. |
+| `secret` | string | optional | Shared secret validated by web UI/API clients. |
 
 ## Callbacks
 
