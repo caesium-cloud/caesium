@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -23,6 +25,8 @@ type Cron struct {
 	id            uuid.UUID
 	location      *time.Location
 	defaultParams map[string]string
+	catchup       bool
+	catchupOnce   sync.Once
 }
 
 func New(t *models.Trigger) (*Cron, error) {
@@ -67,7 +71,12 @@ func New(t *models.Trigger) (*Cron, error) {
 		return nil, err
 	}
 
-	return &Cron{schedule: sched, id: t.ID, location: loc, defaultParams: defaultParams}, nil
+	catchup, err := extractCatchup(m)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Cron{schedule: sched, id: t.ID, location: loc, defaultParams: defaultParams, catchup: catchup}, nil
 }
 
 func (c *Cron) Listen(ctx context.Context) {
@@ -110,6 +119,13 @@ func (c *Cron) Fire(ctx context.Context) error {
 
 	log.Info("running jobs", "count", len(jobs))
 
+	// On first fire after startup, queue any missed runs for catchup-enabled jobs.
+	if c.catchup {
+		c.catchupOnce.Do(func() {
+			c.fireCatchup(ctx, jobs)
+		})
+	}
+
 	for _, j := range jobs {
 		if j.Paused {
 			log.Info("skipping paused job", "id", j.ID)
@@ -127,8 +143,103 @@ func (c *Cron) Fire(ctx context.Context) error {
 	return nil
 }
 
+// fireCatchup enumerates missed fire times since the last successful cron run
+// for each job and queues them as runs with logical_date and is_catchup params.
+func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
+	rStore := runstore.Default()
+	now := time.Now().UTC()
+
+	for _, j := range jobs {
+		if j.Paused {
+			continue
+		}
+
+		// Use the last successful cron-triggered run as the watermark so that
+		// manual triggers, backfill runs, and failed runs do not skew the range.
+		latest, err := rStore.LatestSuccessfulCronRun(j.ID)
+		if err != nil || latest == nil {
+			// No prior successful cron run — nothing to catch up.
+			continue
+		}
+
+		since := latest.StartedAt
+		missed := job.EnumerateLogicalDates(c.schedule, since, now, c.location)
+		if len(missed) == 0 {
+			continue
+		}
+
+		log.Info("catchup: queuing missed runs",
+			"job_id", j.ID,
+			"count", len(missed),
+			"since", since,
+		)
+
+		for _, d := range missed {
+			logicalDate := d.UTC().Format(time.RFC3339)
+			params := map[string]string{
+				"logical_date": logicalDate,
+				"is_catchup":   "true",
+			}
+			for k, v := range c.defaultParams {
+				if _, exists := params[k]; !exists {
+					params[k] = v
+				}
+			}
+
+			metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
+			capturedJob := j
+			capturedParams := params
+			capturedLD := logicalDate
+			go func() {
+				if err := job.New(capturedJob, job.WithParams(capturedParams)).Run(ctx); err != nil {
+					log.Error("catchup run failure", "job_id", capturedJob.ID, "logical_date", capturedLD, "error", err)
+				}
+			}()
+		}
+	}
+}
+
 func (c *Cron) ID() uuid.UUID {
 	return c.id
+}
+
+// ParseSchedule parses the cron schedule and timezone from a trigger's
+// Configuration JSON string. The returned location is never nil — it defaults
+// to UTC when no timezone is configured. Callers should enumerate logical dates
+// using times anchored to the returned location so that date boundaries respect
+// the job's configured timezone.
+func ParseSchedule(configuration string) (cron.Schedule, *time.Location, error) {
+	m := map[string]interface{}{}
+	if err := json.Unmarshal([]byte(configuration), &m); err != nil {
+		return nil, nil, fmt.Errorf("cron: invalid trigger configuration: %w", err)
+	}
+
+	expr, err := extractExpression(m)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	loc, err := extractLocation(m)
+	if err != nil {
+		return nil, nil, err
+	}
+	if loc == nil {
+		loc = time.UTC
+	}
+
+	parser := cron.NewParser(
+		cron.Minute |
+			cron.Hour |
+			cron.Dom |
+			cron.Month |
+			cron.Dow,
+	)
+
+	sched, err := parser.Parse(expr)
+	if err != nil {
+		return nil, nil, err
+	}
+	return sched, loc, nil
 }
 
 func extractExpression(cfg map[string]interface{}) (string, error) {
@@ -161,6 +272,19 @@ func extractLocation(cfg map[string]interface{}) (*time.Location, error) {
 		return loc, nil
 	default:
 		return nil, fmt.Errorf("timezone must be a string")
+	}
+}
+
+func extractCatchup(cfg map[string]interface{}) (bool, error) {
+	raw, ok := cfg["catchup"]
+	if !ok || raw == nil {
+		return false, nil
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v, nil
+	default:
+		return false, fmt.Errorf("catchup must be a boolean")
 	}
 }
 

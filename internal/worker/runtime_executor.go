@@ -219,9 +219,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 
 	command := parseTaskCommand(taskRun.Command)
-	atomName := taskRun.TaskID.String()
+	atomName := fmt.Sprintf("%s-%s", taskRun.TaskID, taskRun.JobRunID)
 	if taskRun.ClaimAttempt > 0 {
-		atomName = fmt.Sprintf("%s-attempt%d", taskRun.TaskID, taskRun.ClaimAttempt)
+		atomName = fmt.Sprintf("%s-attempt%d", atomName, taskRun.ClaimAttempt)
 	}
 
 	// Query predecessor outputs from the DB and build env vars.

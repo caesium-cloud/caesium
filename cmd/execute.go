@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	backfillcmd "github.com/caesium-cloud/caesium/cmd/backfill"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	runcmd "github.com/caesium-cloud/caesium/cmd/run"
 	"github.com/caesium-cloud/caesium/cmd/start"
@@ -11,6 +12,7 @@ var cmds = []*cobra.Command{
 	start.Cmd,
 	job.Cmd,
 	runcmd.Cmd,
+	backfillcmd.Cmd,
 }
 
 // Execute builds the command tree and executes commands.
