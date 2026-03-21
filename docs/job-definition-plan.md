@@ -72,7 +72,7 @@
 - [x] Persist `job_runs`/`task_runs` tables and a run service so restart-safe history can be queried via the API.
 - [x] Cover new behaviour with executor-focused unit tests and integration scenarios.
 
-#### API, CLI, & Console
+#### API, CLI, & Web UI
 - [x] Expose DAG structure via REST (`/v1/jobs/:id/tasks`, `/v1/jobs/:id/runs/:run_id/tasks`) and ensure operator-facing surfaces reflect branching-specific successors and run history.
 - [ ] Add serializer helpers so clients can render adjacency information cleanly (e.g., topological order, grouped successors).
 - [x] Update embedded web UI planning docs and React surfaces to visualise branches.

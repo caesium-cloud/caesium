@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"github.com/caesium-cloud/caesium/cmd/console"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	runcmd "github.com/caesium-cloud/caesium/cmd/run"
 	"github.com/caesium-cloud/caesium/cmd/start"
@@ -10,7 +9,6 @@ import (
 
 var cmds = []*cobra.Command{
 	start.Cmd,
-	console.Cmd,
 	job.Cmd,
 	runcmd.Cmd,
 }

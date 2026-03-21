@@ -15,7 +15,6 @@
 - `just build` – build the runtime image `caesiumcloud/caesium:latest`.
 - `just run` – start the server container locally (host network).
 - `just rm` – remove the running container.
-- `just console` – open the interactive console.
 - `just unit-test` – run unit tests with race + coverage.
 - `just integration-test` – run tests in `./test` with `-tags=integration`.
 - Containerized builds are required: use `just build` (or `just builder` + `just run`). Avoid invoking `go build` directly on the host so the toolchain and CGO deps stay consistent.
@@ -41,10 +40,3 @@
 - Configuration is via environment variables (parsed with `envconfig`); prefer explicit envs over flags in examples.
 - Do not commit secrets; use local env files or CI secrets.
 - Review Dockerfiles under `build/` for any changes affecting supply chain or runtime permissions.
-
-## Current TUI & API Notes
-- `cmd/console/` now houses `config`, `api`, and `app` packages; the console boots a Bubble Tea program that lists jobs, triggers, and atoms with loading/error states.
-- REST API mounts `/v1/atoms`, `/v1/jobs`, and `/v1/triggers` via Echo; job routes include tasks, DAG, run history, and log streaming helpers for the console (`api/rest/controller/job/`).
-- An in-memory run store under `internal/run` tracks active and historical executions so the console can list runs and retrieve metadata without persisting to the database yet.
-- Job execution (cron + HTTP triggers) records task lifecycle information and exposes `/v1/jobs/:id/runs/:run_id/logs` to tail engine output.
-- Console roadmap and progress notes live in `docs/console-tui-plan.md`; Phase 1 checklist is tracked in `docs/console-tui-foundation-todo.md`, and user-facing instructions are available in `docs/console.md`.

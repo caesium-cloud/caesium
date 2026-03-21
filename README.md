@@ -5,7 +5,7 @@
 <h1 align="center">caesium</h1>
 
 <p align="center">
-  <strong>Open-source distributed job scheduler with DAG pipelines, multi-runtime support, and built-in web and terminal UIs</strong>
+  <strong>Open-source distributed job scheduler with DAG pipelines, multi-runtime support, and built-in web UI</strong>
 </p>
 
 <p align="center">
@@ -18,7 +18,7 @@
 
 ---
 
-Caesium is an open-source distributed job scheduler named after the element whose atoms define the second, a nod to the precision it aims to bring to task orchestration. Define jobs as declarative YAML manifests, express complex task dependencies as DAGs, and execute them across Docker, Podman, or Kubernetes with full visibility through a web UI and terminal console.
+Caesium is an open-source distributed job scheduler named after the element whose atoms define the second, a nod to the precision it aims to bring to task orchestration. Define jobs as declarative YAML manifests, express complex task dependencies as DAGs, and execute them across Docker, Podman, or Kubernetes with full visibility through a web UI.
 
 ## Features
 
@@ -28,7 +28,6 @@ Caesium is an open-source distributed job scheduler named after the element whos
 - **Multiple trigger types**: schedule jobs with cron expressions or fire them via HTTP triggers
 - **Run parameters and retry rules**: pass per-run params and configure task retries, backoff, and trigger rules
 - **Web UI**: embedded React application with DAG visualization, live log streaming, and run history
-- **Terminal console**: interactive TUI for job inspection, log tailing, trigger management, and pause controls
 - **REST and GraphQL APIs**: programmatic control over jobs, runs, triggers, and atoms
 - **OpenLineage integration**: emit lineage events for cross-platform data observability
 - **Distributed execution**: consensus-based clustering via dqlite; mixed `amd64`/`arm64` clusters supported
@@ -60,14 +59,6 @@ just hydrate
 ```bash
 curl -X POST http://localhost:8080/v1/jobs/<job-id>/run
 ```
-
-### Open the terminal console
-
-```bash
-just console
-```
-
-See [docs/console.md](docs/console.md) for keyboard shortcuts and operator workflows.
 
 ## Job Definitions
 
@@ -169,7 +160,6 @@ The server exposes a REST API on port `8080` and a GraphQL endpoint at `/gql`.
 | [docs/README.md](docs/README.md) | Documentation index |
 | [docs/job-definitions.md](docs/job-definitions.md) | Authoring, linting, diffing, and applying job manifests |
 | [docs/job-schema-reference.md](docs/job-schema-reference.md) | Full YAML schema reference |
-| [docs/console.md](docs/console.md) | Terminal UI usage and keyboard shortcuts |
 | [docs/airflow-parity.md](docs/airflow-parity.md) | Airflow parity progress and semantics |
 | [docs/ui_implementation_plan.md](docs/ui_implementation_plan.md) | Embedded web UI architecture and roadmap |
 | [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md) | Helm-based Kubernetes deployment |

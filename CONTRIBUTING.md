@@ -31,7 +31,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 ```
 caesium/
-├── cmd/                  # CLI entrypoints (start, console, job, run)
+├── cmd/                  # CLI entrypoints (start, job, run)
 ├── internal/             # Private application packages
 │   ├── executor/         # Trigger polling and job queuing
 │   ├── worker/           # Task claimer and concurrent worker pool
@@ -121,7 +121,6 @@ Use `develop` as the base for all PRs. `master` is the stable release branch and
 |---|---|
 | `just run` | Start the server (Docker, port 8080) |
 | `just rm` | Stop and remove the server container |
-| `just console` | Launch the interactive terminal UI |
 | `just unit-test` | Run Go unit tests (race detector + coverage) |
 | `just ui-test` | Run React unit tests (Vitest) |
 | `just lint` | Run `go fmt`, `go vet`, and `golangci-lint` |

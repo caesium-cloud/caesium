@@ -116,21 +116,8 @@ integration-test:
       exit 1; \
     fi
 
-console: build
-    docker run --platform {{platform}} \
-        -e TERM=xterm-256color \
-        -e CAESIUM_HOST \
-        -e CAESIUM_BASE_URL \
-        -it --rm --name caesium-console \
-        --network=host \
-        {{repo}}/{{image}}:{{tag}} console
-
-console-integration:
-    docker run --platform {{platform}} \
-        -e TERM=xterm-256color \
-        -it --rm --name caesium-console \
-        --network=container:{{it_container}} \
-        {{repo}}/{{image}}:{{tag}} console
+integration-down:
+    docker rm -f {{it_container}}
 
 hydrate:
     docker run --platform {{platform}} \
@@ -149,9 +136,6 @@ integration-up: build-test
         --user 0:0 \
         -e CAESIUM_LOG_LEVEL=debug \
         {{repo}}/{{image}}:{{tag}}-test start
-
-integration-down:
-    docker rm -f {{it_container}}
 
 lint: builder
     docker run --rm --platform {{platform}} \
