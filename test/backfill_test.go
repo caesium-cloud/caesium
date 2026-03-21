@@ -108,6 +108,16 @@ func (s *IntegrationTestSuite) listJobRunSummaries(jobID string) []backfillRunSu
 	return runs
 }
 
+func countBackfillRuns(runs []backfillRunSummary, backfillID string) int {
+	count := 0
+	for _, run := range runs {
+		if run.BackfillID == backfillID {
+			count++
+		}
+	}
+	return count
+}
+
 // cancelBackfillRequest sends PUT /v1/jobs/:id/backfills/:backfill_id/cancel
 // and returns the HTTP response.
 func (s *IntegrationTestSuite) cancelBackfillRequest(jobID, backfillID string) *http.Response {
@@ -329,6 +339,9 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 	// Wait briefly to allow the backfill goroutine to spin up.
 	time.Sleep(2 * time.Second)
 
+	runsBeforeCancel := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
+	s.Require().Equal(1, runsBeforeCancel, "expected exactly one in-flight run before cancellation")
+
 	cancelResp := s.cancelBackfillRequest(job.ID, b.ID)
 	defer cancelResp.Body.Close()
 	s.Require().Equal(http.StatusOK, cancelResp.StatusCode)
@@ -337,6 +350,13 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 	// and for the backfill goroutine to mark the record cancelled.
 	result := s.awaitBackfill(job.ID, b.ID, 90*time.Second)
 	s.Equal("cancelled", result.Status, "backfill should be marked cancelled")
+
+	runsAfterCancel := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
+	s.Equal(runsBeforeCancel, runsAfterCancel, "cancel should not launch any additional backfill runs")
+
+	time.Sleep(2 * time.Second)
+	runsAfterDrain := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
+	s.Equal(runsBeforeCancel, runsAfterDrain, "no late backfill runs should appear after cancellation")
 }
 
 // TestBackfillValidationEndBeforeStart verifies that end ≤ start returns 400.
