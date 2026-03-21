@@ -10,6 +10,7 @@ var All = []interface{}{
 	&Task{},
 	&TaskEdge{},
 	&Callback{},
+	&Backfill{},
 	&JobRun{},
 	&TaskRun{},
 	&CallbackRun{},

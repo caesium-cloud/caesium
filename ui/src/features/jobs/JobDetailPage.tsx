@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { History, List, Pause, Play, Settings2, FileText } from "lucide-react";
+import { CalendarRange, History, List, Pause, Play, Settings2, FileText } from "lucide-react";
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
@@ -15,6 +15,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { BackfillDialog } from "./BackfillDialog";
+import { BackfillsView } from "./BackfillsView";
 import { JobDAG } from "./JobDAG";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
@@ -23,7 +25,7 @@ import { api, type Atom, type Job, type JobRun, type JobTask, type TaskRun, type
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
-type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | null;
+type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | null;
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
@@ -32,6 +34,7 @@ export function JobDetailPage() {
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
+  const [backfillDialogOpen, setBackfillDialogOpen] = useState(false);
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
@@ -312,11 +315,25 @@ export function JobDetailPage() {
               <FileText className="mr-1.5 h-3.5 w-3.5" />
               YAML
             </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("backfills")}>
+              <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
+              Backfills
+            </Button>
           </div>
           <div className="h-6 w-px bg-border" />
           <Button size="sm" onClick={() => triggerMutation.mutate({ jobId: job.id })} disabled={triggerMutation.isPending || job.paused}>
             <Play className="mr-1.5 h-3.5 w-3.5" />
             Trigger
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setBackfillDialogOpen(true)}
+            disabled={job.paused || trigger?.type !== "cron"}
+            title={trigger?.type !== "cron" ? "Backfill requires a cron trigger" : undefined}
+          >
+            <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
+            Backfill
           </Button>
           <Button
             variant="outline"
@@ -407,6 +424,7 @@ export function JobDetailPage() {
               {secondaryView === "tasks" && "Task Definitions"}
               {secondaryView === "configuration" && "Configuration"}
               {secondaryView === "definition" && "Job Definition (YAML)"}
+              {secondaryView === "backfills" && "Backfills"}
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
@@ -422,9 +440,19 @@ export function JobDetailPage() {
             {secondaryView === "definition" && (
               <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">{yamlStringify(job)}</pre>
             )}
+            {secondaryView === "backfills" && (
+              <BackfillsView jobId={jobId} />
+            )}
           </div>
         </DialogContent>
       </Dialog>
+
+      <BackfillDialog
+        jobId={jobId}
+        open={backfillDialogOpen}
+        onOpenChange={setBackfillDialogOpen}
+        disabled={job.paused}
+      />
     </div>
   );
 }

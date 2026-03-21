@@ -11,6 +11,8 @@ type JobRun struct {
 	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
 	Job          Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	BackfillID   *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
+	Backfill     *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
 	TriggerID    uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
 	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
 	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`

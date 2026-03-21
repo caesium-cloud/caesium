@@ -19,6 +19,7 @@ export interface Job {
 export interface JobRun {
   id: string;
   job_id: string;
+  backfill_id?: string;
   job_alias?: string;
   trigger_type?: string;
   trigger_alias?: string;
@@ -30,6 +31,29 @@ export interface JobRun {
   created_at: string;
   updated_at: string;
   tasks?: TaskRun[];
+}
+
+export interface Backfill {
+  id: string;
+  job_id: string;
+  status: "running" | "succeeded" | "failed" | "cancelled";
+  start: string;
+  end: string;
+  max_concurrent: number;
+  reprocess: "none" | "failed" | "all";
+  total_runs: number;
+  completed_runs: number;
+  failed_runs: number;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateBackfillRequest {
+  start: string;
+  end: string;
+  max_concurrent?: number;
+  reprocess?: "none" | "failed" | "all";
 }
 
 export interface TaskRun {
@@ -245,5 +269,18 @@ export const api = {
     request<ApplyJobDefResponse>("/jobdefs/apply", {
       method: "POST",
       body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
+    }),
+  getBackfills: (jobId: string) =>
+    request<Backfill[]>(`/jobs/${jobId}/backfills`),
+  getBackfill: (jobId: string, backfillId: string) =>
+    request<Backfill>(`/jobs/${jobId}/backfills/${backfillId}`),
+  createBackfill: (jobId: string, body: CreateBackfillRequest) =>
+    request<Backfill>(`/jobs/${jobId}/backfill`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  cancelBackfill: (jobId: string, backfillId: string) =>
+    request<Backfill>(`/jobs/${jobId}/backfills/${backfillId}/cancel`, {
+      method: "PUT",
     }),
 };

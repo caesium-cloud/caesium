@@ -2,6 +2,7 @@ package bind
 
 import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
+	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
@@ -47,6 +48,12 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 		g.PUT("/jobs/:id/pause", job.Pause)
 		g.PUT("/jobs/:id/unpause", job.Unpause)
 		g.DELETE("/jobs/:id", job.Delete)
+
+		// backfills
+		g.POST("/jobs/:id/backfill", backfill.Post)
+		g.GET("/jobs/:id/backfills", backfill.List)
+		g.GET("/jobs/:id/backfills/:backfill_id", backfill.Get)
+		g.PUT("/jobs/:id/backfills/:backfill_id/cancel", backfill.Cancel)
 	}
 
 	// job definitions
