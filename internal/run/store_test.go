@@ -89,7 +89,7 @@ func TestStorePersistsRunState(t *testing.T) {
 	require.NoError(t, secondStore.ResetInFlightTasks(runRecord.ID))
 
 	// Completing the first task should decrement the successor outstanding count.
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil, nil))
 
 	state, err = store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -99,7 +99,7 @@ func TestStorePersistsRunState(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "ok", nil))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskB.ID, "ok", nil, nil))
 	require.NoError(t, store.Complete(runRecord.ID, nil))
 
 	finalStore := NewStore(db)
@@ -182,7 +182,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
 	require.NoError(t, store.RegisterTask(runRecord.ID, taskC, atomC, 0))
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "ok", nil))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskC.ID, "ok", nil, nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -192,7 +192,7 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 		}
 	}
 
-	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", nil, nil))
 
 	state, err = store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -246,10 +246,10 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 
 	require.NoError(t, store.StartTaskClaimed(runRecord.ID, task.ID, "runtime-a", claimOwner))
 
-	err = store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", "node-b", nil)
+	err = store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", "node-b", nil, nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
 
-	require.NoError(t, store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", claimOwner, nil))
+	require.NoError(t, store.CompleteTaskClaimed(runRecord.ID, task.ID, "ok", claimOwner, nil, nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -302,7 +302,7 @@ func TestCompleteTaskWithOutput(t *testing.T) {
 		"row_count": "42",
 		"path":      "/data/out.parquet",
 	}
-	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", output))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", output, nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -350,7 +350,7 @@ func TestCompleteTaskWithNilOutput(t *testing.T) {
 	require.NoError(t, db.Create(task).Error)
 	require.NoError(t, store.RegisterTask(runRecord.ID, task, atomModel, 0))
 	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
-	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", nil))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "ok", nil, nil))
 
 	state, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
@@ -425,7 +425,7 @@ func TestPredecessorOutputs(t *testing.T) {
 	require.NoError(t, store.StartTask(runRecord.ID, taskA.ID, "runtime-a"))
 	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", map[string]string{
 		"row_count": "42",
-	}))
+	}, nil))
 
 	outputs, err := store.PredecessorOutputs(runRecord.ID, taskB.ID)
 	require.NoError(t, err)

@@ -86,6 +86,7 @@ type TaskRun struct {
 	MaxAttempts             int               `json:"max_attempts"`
 	Result                  string            `json:"result,omitempty"`
 	Output                  map[string]string `json:"output,omitempty"`
+	BranchSelections        []string          `json:"branch_selections,omitempty"`
 	StartedAt               *time.Time        `json:"started_at,omitempty"`
 	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
 	Error                   string            `json:"error,omitempty"`
@@ -374,16 +375,36 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 	return err
 }
 
-func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string, output map[string]string) error {
-	return s.completeTask(runID, taskID, result, "", false, output)
+func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) error {
+	skipped, err := s.completeTask(runID, taskID, result, "", false, output, branchSelections)
+	_ = skipped
+	return err
 }
 
-func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string) error {
-	return s.completeTask(runID, taskID, result, claimedBy, true, output)
+// CompleteTaskResult holds the result of a task completion, including any
+// tasks that were skipped due to branch filtering.
+type CompleteTaskResult struct {
+	SkippedTaskIDs []uuid.UUID
 }
 
-func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string) error {
+// CompleteTaskWithResult completes a task and returns details about branch
+// skips so the local executor can update its in-memory state.
+func (s *Store) CompleteTaskWithResult(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
+	skipped, err := s.completeTask(runID, taskID, result, "", false, output, branchSelections)
+	if err != nil {
+		return nil, err
+	}
+	return &CompleteTaskResult{SkippedTaskIDs: skipped}, nil
+}
+
+func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string, branchSelections []string) error {
+	_, err := s.completeTask(runID, taskID, result, claimedBy, true, output, branchSelections)
+	return err
+}
+
+func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
 	pendingEvents := make([]event.Event, 0, 8)
+	var skippedTaskIDs []uuid.UUID
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UTC()
 
@@ -428,6 +449,13 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			}
 			updates["output"] = encoded
 		}
+		if len(branchSelections) > 0 {
+			encoded, marshalErr := json.Marshal(branchSelections)
+			if marshalErr != nil {
+				return fmt.Errorf("marshalling branch selections: %w", marshalErr)
+			}
+			updates["branch_selections"] = encoded
+		}
 		if status == TaskStatusFailed {
 			msg := result
 			switch Result(result) {
@@ -464,6 +492,13 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			return nil
 		}
 
+		// Load the task model once — needed for both edge fallback and branch
+		// type detection.
+		var taskModel models.Task
+		if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+			return err
+		}
+
 		var edges []models.TaskEdge
 		if err := tx.Where("from_task_id = ?", taskID).Find(&edges).Error; err != nil {
 			return err
@@ -472,13 +507,9 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			// No explicit edges from this task. Check whether the job
 			// uses edges at all; if it does, this task is simply a leaf
 			// node. Otherwise fall back to creation-order sequencing.
-			var task models.Task
-			if err := tx.First(&task, "id = ?", taskID).Error; err != nil {
-				return err
-			}
 			var jobEdgeCount int64
 			if err := tx.Model(&models.TaskEdge{}).
-				Where("job_id = ?", task.JobID).
+				Where("job_id = ?", taskModel.JobID).
 				Limit(1).
 				Count(&jobEdgeCount).Error; err != nil {
 				return err
@@ -486,7 +517,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if jobEdgeCount == 0 {
 				// No edges defined for the entire job — use creation order.
 				var next models.Task
-				err := tx.Where("job_id = ? AND created_at > ?", task.JobID, task.CreatedAt).
+				err := tx.Where("job_id = ? AND created_at > ?", taskModel.JobID, taskModel.CreatedAt).
 					Order("created_at asc").
 					First(&next).Error
 				if err == nil {
@@ -497,7 +528,60 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			}
 		}
 
+		// Determine branch filtering if this is a branch-type task.
+		var branchSelectedIDs map[uuid.UUID]bool
+		if len(edges) > 0 && taskModel.Type == "branch" {
+			// Build valid target names from successor tasks.
+			successorIDs := make([]uuid.UUID, 0, len(edges))
+			for _, edge := range edges {
+				successorIDs = append(successorIDs, edge.ToTaskID)
+			}
+			var successorTasks []models.Task
+			if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+				return err
+			}
+			successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
+			validTargets := make([]string, 0, len(successorTasks))
+			for _, st := range successorTasks {
+				if st.Name != "" {
+					successorNameToID[st.Name] = st.ID
+					validTargets = append(validTargets, st.Name)
+				}
+			}
+
+			// Validate selections.
+			validSet := make(map[string]bool, len(validTargets))
+			for _, name := range validTargets {
+				validSet[name] = true
+			}
+			for _, name := range branchSelections {
+				if !validSet[name] {
+					return fmt.Errorf("branch selected unknown step %q; valid targets: %v", name, validTargets)
+				}
+			}
+
+			// Build the set of selected successor IDs.
+			// An empty set means "skip all downstream" (no markers emitted).
+			branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
+			for _, name := range branchSelections {
+				if id, ok := successorNameToID[name]; ok {
+					branchSelectedIDs[id] = true
+				}
+			}
+		}
+
 		for _, edge := range edges {
+			// Branch filtering: skip successors not selected by the branch.
+			if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
+				reason := fmt.Sprintf("not selected by branch task %s", taskID)
+				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &pendingEvents)
+				if err != nil {
+					return err
+				}
+				skippedTaskIDs = append(skippedTaskIDs, skipped...)
+				continue
+			}
+
 			if err := tx.Model(&models.TaskRun{}).
 				Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
 				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
@@ -538,7 +622,57 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	if err == nil {
 		s.publishEvents(pendingEvents...)
 	}
-	return err
+	return skippedTaskIDs, err
+}
+
+// skipTaskAndDescendantsTx marks a task and all its transitive descendants as
+// skipped within the given transaction.  It returns the list of all task IDs
+// that were skipped (including the initial task).
+func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event) ([]uuid.UUID, error) {
+	now := time.Now().UTC()
+	queue := []uuid.UUID{taskID}
+	var skipped []uuid.UUID
+
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+
+		result := tx.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ? AND status = ?", runID, current, string(TaskStatusPending)).
+			Updates(map[string]interface{}{
+				"status":       string(TaskStatusSkipped),
+				"completed_at": now,
+				"error":        reason,
+			})
+		if result.Error != nil {
+			return skipped, result.Error
+		}
+		if result.RowsAffected == 0 {
+			// Task was not pending (already completed/skipped) — don't propagate.
+			continue
+		}
+
+		skipped = append(skipped, current)
+
+		if s.eventStore != nil {
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, current)
+			if err != nil {
+				return skipped, err
+			}
+			*pendingEvents = append(*pendingEvents, *evt)
+		}
+
+		// Find downstream edges and propagate skip.
+		var edges []models.TaskEdge
+		if err := tx.Where("from_task_id = ?", current).Find(&edges).Error; err != nil {
+			return skipped, err
+		}
+		for _, edge := range edges {
+			queue = append(queue, edge.ToTaskID)
+		}
+	}
+
+	return skipped, nil
 }
 
 func (s *Store) FailTask(runID, taskID uuid.UUID, failure error) error {
@@ -992,6 +1126,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		var out map[string]string
 		if err := json.Unmarshal(model.Output, &out); err == nil {
 			task.Output = out
+		}
+	}
+
+	if len(model.BranchSelections) > 0 {
+		var bs []string
+		if err := json.Unmarshal(model.BranchSelections, &bs); err == nil {
+			task.BranchSelections = bs
 		}
 	}
 

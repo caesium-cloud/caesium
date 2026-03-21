@@ -1,10 +1,12 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +19,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
-	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -252,22 +254,35 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	// Capture structured task output from container logs before completing.
+	// Capture structured task output and branch markers from container logs.
 	var taskOutput map[string]string
+	var branchSelections []string
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
-		parsed, parseErr := pkgtask.ParseOutput(logs)
-		if err := logs.Close(); err != nil {
-			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", err)
+		logData, readErr := io.ReadAll(logs)
+		if closeErr := logs.Close(); closeErr != nil {
+			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
-		if parseErr != nil {
-			log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
+		if readErr != nil {
+			log.Warn("failed to read task logs", "task_id", taskRun.TaskID, "error", readErr)
 		} else {
-			taskOutput = parsed
+			parsed, parseErr := pkgtask.ParseOutput(bytes.NewReader(logData))
+			if parseErr != nil {
+				log.Warn("failed to parse task output", "task_id", taskRun.TaskID, "error", parseErr)
+			} else {
+				taskOutput = parsed
+			}
+
+			branches, branchErr := pkgtask.ParseBranches(bytes.NewReader(logData))
+			if branchErr != nil {
+				log.Warn("failed to parse branch markers", "task_id", taskRun.TaskID, "error", branchErr)
+			} else if len(branches) > 0 {
+				branchSelections = branches
+			}
 		}
 	}
 
-	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput); err != nil {
+	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
 		return err
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {
