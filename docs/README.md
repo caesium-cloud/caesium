@@ -20,8 +20,8 @@ This directory contains user-facing guides, schema references, and planning note
 
 - [job-definition-plan.md](job-definition-plan.md): Implementation roadmap and checklist for job definition ingestion and DAG execution.
 - [ui_implementation_plan.md](ui_implementation_plan.md): React/Vite roadmap for the embedded operator UI.
+- [design-tui-improvements.md](design-tui-improvements.md): Design notes for making the console's non-job surfaces more useful.
 
 ## Historical Notes
 
 - [architecture-history.md](architecture-history.md): Consolidated early design notes (primitives, dependency strategy, and scheduler landscape research).
-- [design-tui-improvements.md](design-tui-improvements.md): Design notes for making the console's non-job surfaces more useful.

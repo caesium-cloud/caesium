@@ -160,7 +160,7 @@ The server exposes a REST API on port `8080` and a GraphQL endpoint at `/gql`.
 | `GET /v1/triggers` | List triggers |
 | `GET /v1/atoms` | List registered execution atoms |
 | `GET /v1/events` | Subscribe to lifecycle events (SSE) |
-| `GET/POST /gql` | GraphQL endpoint |
+| `GET`, `POST` /gql | GraphQL endpoint |
 
 ## Documentation
 
