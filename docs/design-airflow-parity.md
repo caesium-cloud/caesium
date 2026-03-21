@@ -205,6 +205,12 @@ steps:
 - `docs/examples/branching.job.yaml` — new example with two job definitions (single-branch, multi-branch)
 - `test/run_test.go` — 6 integration tests + `taskStatusesByName` helper
 
+### Known Limitations
+
+1. **Run resumption after crash**: Branch decisions are stored only in the in-memory `taskBranches` map during execution. If the scheduler crashes between `CompleteTask` and the subsequent `SkipTask` calls for non-selected branches, a resumed run will treat the branch task as already completed and every successor whose `outstanding_predecessors` reaches zero in the DB will become runnable — including branches that were supposed to be skipped. This is the same crash window that exists for trigger rule evaluation. A transactional successor resolution or WAL-based recovery mechanism would fix both cases.
+
+2. **Distributed execution mode**: Branch filtering only runs in the local scheduler path (`job.Run`). In distributed mode (`CAESIUM_EXECUTION_MODE=distributed`), the worker parses task outputs and calls `CompleteTaskClaimed`, which unblocks all successors without evaluating branch selections. Supporting branches in distributed mode requires the orchestrator to parse branch selections from task logs after a worker completes a branch task, then apply skip decisions before successors become claimable.
+
 ---
 
 ## Workstream 7: Dynamic Task Mapping (P2)
