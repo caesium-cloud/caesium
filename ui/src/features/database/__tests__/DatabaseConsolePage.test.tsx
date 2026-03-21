@@ -97,4 +97,21 @@ describe("DatabaseConsolePage", () => {
       limit: 200,
     });
   });
+
+  it("does not repopulate the editor after the user clears it", async () => {
+    vi.mocked(api.getDatabaseSchema).mockResolvedValue(schema);
+
+    render(<DatabaseConsolePage />, { wrapper: createWrapper() });
+
+    const editor = await screen.findByLabelText("SQL query editor");
+    await waitFor(() => {
+      expect((editor as HTMLTextAreaElement).value).toContain("SELECT");
+    });
+
+    fireEvent.change(editor, { target: { value: "", selectionStart: 0 } });
+
+    await waitFor(() => {
+      expect((editor as HTMLTextAreaElement).value).toBe("");
+    });
+  });
 });

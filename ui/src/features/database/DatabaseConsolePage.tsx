@@ -43,7 +43,8 @@ const DEFAULT_LIMIT = 200;
 export function DatabaseConsolePage() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const editorSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const [sql, setSql] = useState(() => readStoredString(STORAGE_KEYS.sql, ""));
+  const initialStoredSqlRef = useRef(readStoredString(STORAGE_KEYS.sql, ""));
+  const [sql, setSql] = useState(() => initialStoredSqlRef.current);
   const [history, setHistory] = useState<string[]>(() => readStoredJSON(STORAGE_KEYS.history, []));
   const [limit, setLimit] = useState<number>(() => readStoredNumber(STORAGE_KEYS.limit, DEFAULT_LIMIT));
   const [schemaSearch, setSchemaSearch] = useState("");
@@ -51,6 +52,9 @@ export function DatabaseConsolePage() {
   const [autocompleteVisible, setAutocompleteVisible] = useState(false);
   const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
   const [autocompletePosition, setAutocompletePosition] = useState({ top: 16, left: 16 });
+  const [hasSeededInitialQuery, setHasSeededInitialQuery] = useState(
+    () => initialStoredSqlRef.current.trim().length > 0,
+  );
 
   const deferredSchemaSearch = useDeferredValue(schemaSearch);
 
@@ -99,11 +103,12 @@ export function DatabaseConsolePage() {
   }, [deferredSchemaSearch, schema]);
 
   useEffect(() => {
-    if (!sql && snippets.length > 0) {
+    if (!hasSeededInitialQuery && !sql && snippets.length > 0) {
       setSql(snippets[0].sql);
       persistString(STORAGE_KEYS.sql, snippets[0].sql);
+      setHasSeededInitialQuery(true);
     }
-  }, [snippets, sql]);
+  }, [hasSeededInitialQuery, snippets, sql]);
 
   useEffect(() => {
     if (selectedSuggestionIndex >= suggestions.length) {
