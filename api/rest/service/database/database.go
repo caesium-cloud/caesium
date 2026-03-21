@@ -126,7 +126,7 @@ func (s *Service) Schema() (*SchemaResponse, error) {
 	return resp, nil
 }
 
-func (s *Service) Query(req QueryRequest) (*QueryResponse, error) {
+func (s *Service) Query(req QueryRequest) (resp *QueryResponse, err error) {
 	query := strings.TrimSpace(req.SQL)
 	if query == "" {
 		return nil, ErrEmptyQuery
@@ -148,21 +148,29 @@ func (s *Service) Query(req QueryRequest) (*QueryResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer func() {
+		if closeErr := conn.Close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
+	}()
 
 	started := time.Now()
 	rows, cleanup, err := s.queryRows(ctx, conn, query)
 	if err != nil {
 		return nil, err
 	}
-	defer cleanup()
+	defer func() {
+		if cleanupErr := cleanup(); err == nil && cleanupErr != nil {
+			err = cleanupErr
+		}
+	}()
 
 	columnTypes, err := rows.ColumnTypes()
 	if err != nil {
 		return nil, err
 	}
 
-	resp := &QueryResponse{
+	resp = &QueryResponse{
 		Dialect:       s.db.Name(),
 		ReadOnly:      true,
 		StatementType: queryStatementType(query),
