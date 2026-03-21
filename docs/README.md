@@ -19,6 +19,8 @@ This directory contains user-facing guides, schema references, and planning note
 
 - [job-definition-plan.md](job-definition-plan.md): Implementation roadmap and checklist for job definition ingestion and DAG execution.
 - [ui_implementation_plan.md](ui_implementation_plan.md): React/Vite roadmap for the embedded operator UI.
+- [brainstorm-differentiators.md](brainstorm-differentiators.md): Killer feature ideas that go beyond Airflow parity.
+- [design-incremental-execution.md](design-incremental-execution.md): Full design for smart incremental execution (task-level caching).
 
 ## Historical Notes
 
