@@ -2,7 +2,7 @@
 
 ## Status
 
-Phase 1 complete. Six of fifteen workstreams are implemented (WS1, WS2, WS3, WS8, WS10, WS12).
+Phase 1 complete. Seven of fifteen workstreams are implemented (WS1, WS2, WS3, WS6, WS8, WS10, WS12).
 
 ## Overview
 
@@ -163,64 +163,47 @@ steps:
 
 ---
 
-## Workstream 6: Branching & Conditional Execution (P1)
+## Workstream 6: Branching & Conditional Execution (P1) — DONE
+
+**Status**: Implemented.
 
 **Why**: Enables dynamic DAGs where the execution path depends on runtime conditions — run different pipelines for weekdays vs weekends, skip expensive steps when data hasn't changed, fan into error-specific handlers.
 
-### Concept
+### Implementation
 
-A branch step runs a container whose stdout (or a designated output file) emits the name(s) of the downstream step(s) to execute. All other downstream steps are marked `skipped`.
+- `Type` field added to `Step` (schema) and `Task` (model); valid values: `task` (default), `branch`
+- Branch stdout marker protocol: `##caesium::branch <step-name>` (one per line, multiple allowed, deduplicated)
+- `ParseBranches()` in `pkg/task/output.go` extracts branch markers from container logs
+- `parseBranchSelection()` in `internal/job/branch.go` validates selected names against the step's `next` targets
+- After a branch task succeeds, the job executor skips non-selected successors and propagates skips through their descendants via `propagateSkipped()`
+- Empty branch output (no markers) short-circuits: all downstream steps are skipped
+- Branch markers coexist with `##caesium::output` markers (orthogonal protocols)
+- Validation: branch steps must have at least one `next` entry; invalid branch names fail the task
+- Container logs are buffered once and parsed for both output and branch markers
+- UI: `BranchNode` component renders branch tasks with amber-themed styling and `BRANCH` badge in the DAG view
+- UI: Edges to branch-skipped targets rendered with dashed lines at reduced opacity
+- UI: `TaskMetadataPanel` displays task type for non-default types
+- DAG API returns task `type` field for branch nodes
 
-### Job Definition Schema
+### Files Changed
 
-```yaml
-steps:
-  - name: check-data-freshness
-    type: branch
-    image: branch-check:latest
-    next: [full-refresh, incremental-update, skip-entirely]
-
-  - name: full-refresh
-    image: etl:latest
-    command: ["full"]
-    dependsOn: [check-data-freshness]
-
-  - name: incremental-update
-    image: etl:latest
-    command: ["incremental"]
-    dependsOn: [check-data-freshness]
-
-  - name: skip-entirely
-    image: alpine:latest
-    command: ["echo", "no-op"]
-    dependsOn: [check-data-freshness]
-```
-
-The container for `check-data-freshness` prints `full-refresh` to stdout → only that branch runs.
-
-### Implementation Steps
-
-1. **Schema**: Add `branch` as a `Type` option for steps. Branch steps with `next` entries define the set of selectable paths; an empty `next` list is valid and enables short-circuit behavior (all downstream steps are skipped).
-2. **Model**: Add `branch` to `TaskType` constants.
-3. **Branch executor**: In `internal/job/branch.go`:
-   - Run the container, capture stdout.
-   - Parse stdout as a newline-separated list of step names.
-   - Validate each name is a valid `next` target.
-   - Mark non-selected downstream steps as `skipped` (BFS through their descendants).
-   - Continue DAG execution with only the selected branches.
-4. **Integration with job executor**: In `internal/job/job.go`, dispatch to branch executor when `task.Type == "branch"`.
-5. **Short-circuit**: If a branch step outputs no step names (empty stdout), all downstream steps are skipped.
-6. **Tests**: Unit tests for branch selection, skip propagation, invalid branch names. Integration test with a multi-branch DAG.
-7. **Docs**: Update `docs/job-schema-reference.md`. Add branching examples to `docs/examples/`.
-
-### Files to Touch
-
-- `pkg/jobdef/definition.go` — Step type validation
-- `internal/models/task.go` — TaskType constant
-- `internal/job/branch.go` — new file
-- `internal/job/job.go` — dispatch to branch executor
-- `docs/job-schema-reference.md`
-- `docs/examples/`
+- `pkg/task/output.go` — `ParseBranches()`, `branchMarker` constant
+- `pkg/task/output_test.go` — 8 branch parsing unit tests
+- `pkg/jobdef/definition.go` — `Type` field on `Step`, `StepTypeTask`/`StepTypeBranch` constants, validation
+- `internal/models/task.go` — `Type` field
+- `internal/jobdef/importer.go` — propagate `Type`
+- `internal/job/branch.go` — new file: `parseBranchSelection()`
+- `internal/job/branch_test.go` — new file: 4 unit tests
+- `internal/job/job.go` — branch-aware success handler, buffered log parsing, `taskBranches`/`taskNameToID` maps
+- `api/rest/controller/job/dag.go` — `Type` field on `DAGNode`
+- `ui/src/lib/api.ts` — `type` field on `DAGNode`
+- `ui/src/features/jobs/components/BranchNode.tsx` — new file
+- `ui/src/features/jobs/JobDAG.tsx` — register `BranchNode`, type-aware node creation, dashed edges for skipped branches
+- `ui/src/features/jobs/TaskMetadataPanel.tsx` — show task type
+- `ui/src/features/jobs/JobDetailPage.tsx` — pass `taskType` to panel
+- `ui/src/features/jobs/RunDetailPage.tsx` — pass `taskType` to panel
+- `docs/examples/branching.job.yaml` — new example with two job definitions (single-branch, multi-branch)
+- `test/run_test.go` — 6 integration tests + `taskStatusesByName` helper
 
 ---
 
@@ -562,6 +545,6 @@ All other workstreams can proceed in parallel from day one. Recommended executio
 
 ```
 Phase 1 (DONE):     WS1 (Retries), WS2 (Trigger Rules), WS3 (Run Parameters), WS10 (Pause/Unpause)
-Phase 2 (partial):  WS4 (Backfill), WS5 (Sensors), WS6 (Branching), WS8 (XCom ✓), WS9 (Pools), WS12 (Run Timeout ✓)
+Phase 2 (partial):  WS4 (Backfill), WS5 (Sensors), WS6 (Branching ✓), WS8 (XCom ✓), WS9 (Pools), WS12 (Run Timeout ✓)
 Phase 3 (pending):  WS7 (Dynamic Mapping), WS11 (SLA), WS13 (Priority), WS14 (Templating), WS15 (Auth)
 ```

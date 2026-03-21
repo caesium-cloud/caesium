@@ -1,10 +1,12 @@
 package job
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"runtime"
 	"slices"
 	"strconv"
@@ -312,12 +314,16 @@ func (j *job) Run(ctx context.Context) error {
 	taskOrder := make(map[uuid.UUID]int, len(tasks))
 	atomsByTask := make(map[uuid.UUID]*models.Atom, len(tasks))
 	tasksByID := make(map[uuid.UUID]*models.Task, len(tasks))
+	taskNameToID := make(map[string]uuid.UUID, len(tasks))
 	runners := make(map[uuid.UUID]*atomRunner, len(tasks))
 	triggerRuleByTask := make(map[uuid.UUID]string, len(tasks))
 
 	for idx, t := range tasks {
 		taskOrder[t.ID] = idx
 		tasksByID[t.ID] = t
+		if t.Name != "" {
+			taskNameToID[t.Name] = t.ID
+		}
 
 		rule := t.TriggerRule
 		if rule == "" {
@@ -438,6 +444,7 @@ func (j *job) Run(ctx context.Context) error {
 	processed := make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
+	taskBranches := make(map[uuid.UUID][]string, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
@@ -539,8 +546,9 @@ func (j *job) Run(ctx context.Context) error {
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
-	// It returns the atom result string, any parsed task outputs, and any error.
-	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, error) {
+	// It returns the atom result string, any parsed task outputs, any branch
+	// selections (for branch-type tasks), and any error.
+	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, error) {
 		atomName := taskID.String()
 		if attempt > 1 {
 			atomName = fmt.Sprintf("%s-attempt%d", taskID, attempt)
@@ -570,11 +578,11 @@ func (j *job) Run(ctx context.Context) error {
 			Spec:    spec,
 		})
 		if err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 
 		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			return "", nil, err
+			return "", nil, nil, err
 		}
 
 		waitResult := make(chan struct {
@@ -596,34 +604,48 @@ func (j *job) Run(ctx context.Context) error {
 					ID:    a.ID(),
 					Force: true,
 				}); stopErr != nil {
-					return "", nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
 				if ctx.Err() != nil {
-					return "", nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+					return "", nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
-				return "", nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				return "", nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			}
-			return "", nil, taskCtx.Err()
+			return "", nil, nil, taskCtx.Err()
 		case result := <-waitResult:
 			if result.err != nil {
-				return "", nil, result.err
+				return "", nil, nil, result.err
 			}
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
 
-			// Capture structured task output from container logs before stopping.
+			// Buffer container logs so we can parse both structured outputs
+			// and branch markers in a single read.
 			var taskOutput map[string]string
-			logs, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
+			var branchNames []string
+			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 			if logErr == nil {
-				parsed, parseErr := pkgtask.ParseOutput(logs)
-				if err := logs.Close(); err != nil {
-					log.Warn("failed to close log stream", "task_id", taskID, "error", err)
+				logData, readErr := io.ReadAll(logStream)
+				if closeErr := logStream.Close(); closeErr != nil {
+					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
-				if parseErr != nil {
-					log.Warn("failed to parse task output", "task_id", taskID, "error", parseErr)
+				if readErr != nil {
+					log.Warn("failed to read task logs", "task_id", taskID, "error", readErr)
 				} else {
-					taskOutput = parsed
+					parsed, parseErr := pkgtask.ParseOutput(bytes.NewReader(logData))
+					if parseErr != nil {
+						log.Warn("failed to parse task output", "task_id", taskID, "error", parseErr)
+					} else {
+						taskOutput = parsed
+					}
+
+					branches, branchErr := pkgtask.ParseBranches(bytes.NewReader(logData))
+					if branchErr != nil {
+						log.Warn("failed to parse branch markers", "task_id", taskID, "error", branchErr)
+					} else {
+						branchNames = branches
+					}
 				}
 			}
 
@@ -631,7 +653,7 @@ func (j *job) Run(ctx context.Context) error {
 				ID:    a.ID(),
 				Force: true,
 			})
-			return string(a.Result()), taskOutput, stopErr
+			return string(a.Result()), taskOutput, branchNames, stopErr
 		}
 	}
 
@@ -671,7 +693,7 @@ func (j *job) Run(ctx context.Context) error {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
+			result, output, branchNames, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
 			cancel()
 
 			if execErr == nil {
@@ -680,6 +702,9 @@ func (j *job) Run(ctx context.Context) error {
 				}
 				if len(output) > 0 {
 					taskOutputs[taskID] = output
+				}
+				if len(branchNames) > 0 {
+					taskBranches[taskID] = branchNames
 				}
 				if !run.IsSuccessfulTaskResult(result) {
 					return fmt.Errorf("task %s failed with result %q", taskID, result)
@@ -866,11 +891,59 @@ func (j *job) Run(ctx context.Context) error {
 
 		taskOutcomes[result.id] = run.TaskStatusSucceeded
 
+		// For branch-type tasks, determine which successors were selected
+		// and skip the rest (plus their descendants).
+		branchSelected := map[uuid.UUID]bool(nil)
+		if taskModel := tasksByID[result.id]; taskModel != nil && taskModel.Type == jobdefschema.StepTypeBranch {
+			if branchNames, ok := taskBranches[result.id]; ok && len(branchNames) > 0 {
+				branchSelected = make(map[uuid.UUID]bool, len(branchNames))
+				for _, name := range branchNames {
+					if id, found := taskNameToID[name]; found {
+						branchSelected[id] = true
+					}
+				}
+				log.Info("branch selected paths", "job_id", j.id, "task_id", result.id, "selected", branchNames)
+			} else {
+				// No branch markers emitted — short-circuit: skip all downstream.
+				branchSelected = make(map[uuid.UUID]bool)
+				log.Info("branch emitted no selections, skipping all downstream", "job_id", j.id, "task_id", result.id)
+			}
+		}
+
 		if !halt {
 			for _, successor := range adjacency[result.id] {
 				if _, ok := indegree[successor]; !ok {
 					continue
 				}
+
+				// Branch filtering: skip successors not selected by the branch.
+				if branchSelected != nil && !branchSelected[successor] {
+					skipReason := fmt.Sprintf("not selected by branch task %s", result.id)
+					if err := store.SkipTask(runID, successor, skipReason); err != nil {
+						log.Error("failed to persist branch skip", "run_id", runID, "task_id", successor, "error", err)
+						if runErr == nil {
+							runErr = err
+						}
+						halt = true
+						queue = queue[:0]
+						break
+					}
+					taskOutcomes[successor] = run.TaskStatusSkipped
+					processed[successor] = true
+					terminalTasks++
+					delete(inQueue, successor)
+					if err := propagateSkipped(successor); err != nil {
+						log.Error("failed to propagate branch-skipped task", "run_id", runID, "task_id", successor, "error", err)
+						if runErr == nil {
+							runErr = err
+						}
+						halt = true
+						queue = queue[:0]
+						break
+					}
+					continue
+				}
+
 				if indegree[successor] > 0 {
 					indegree[successor]--
 				}

@@ -23,6 +23,7 @@ type DAGResponse struct {
 type DAGNode struct {
 	ID         uuid.UUID   `json:"id"`
 	AtomID     uuid.UUID   `json:"atom_id"`
+	Type       string      `json:"type,omitempty"`
 	Successors []uuid.UUID `json:"successors"`
 }
 
@@ -101,9 +102,15 @@ func DAG(c *echo.Context) error {
 			})
 		}
 
+		nodeType := t.Type
+		if nodeType == "task" {
+			nodeType = "" // omit default type to keep response compact
+		}
+
 		nodes = append(nodes, DAGNode{
 			ID:         t.ID,
 			AtomID:     t.AtomID,
+			Type:       nodeType,
 			Successors: successors,
 		})
 	}

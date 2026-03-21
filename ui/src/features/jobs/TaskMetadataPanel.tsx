@@ -6,18 +6,22 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 interface TaskMetadataPanelProps {
   task?: JobTask;
   runTask?: TaskRun;
+  taskType?: string;
   framed?: boolean;
 }
 
-export function TaskMetadataPanel({ task, runTask, framed = true }: TaskMetadataPanelProps) {
+export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: TaskMetadataPanelProps) {
   if (!task && !runTask) {
     return null;
   }
+
+  const resolvedType = taskType || 'task';
 
   const content = (
     <div className="grid gap-3 text-sm md:grid-cols-2">
         <MetadataRow label="Task ID" value={task?.id ?? runTask?.task_id ?? "Unknown"} mono />
         <MetadataRow label="Status" value={runTask?.status ?? "pending"} badge />
+        {resolvedType !== 'task' && <MetadataRow label="Type" value={resolvedType} badge />}
         <MetadataRow label="Trigger Rule" value={task?.trigger_rule ?? "all_success"} mono />
         <MetadataRow label="Attempts" value={formatAttempts(runTask)} mono />
         <MetadataRow label="Retries" value={String(task?.retries ?? 0)} mono />

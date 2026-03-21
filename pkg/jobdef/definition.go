@@ -28,6 +28,9 @@ const (
 	TriggerRuleAllFailed  = "all_failed"
 	TriggerRuleOneSuccess = "one_success"
 	TriggerRuleAlways     = "always"
+
+	StepTypeTask   = "task"
+	StepTypeBranch = "branch"
 )
 
 // Definition models the root job document.
@@ -67,6 +70,7 @@ type Callback struct {
 // Step defines an execution step.
 type Step struct {
 	Name           string            `yaml:"name" json:"name"`
+	Type           string            `yaml:"type,omitempty" json:"type,omitempty"`
 	Engine         string            `yaml:"engine,omitempty" json:"engine,omitempty"`
 	Image          string            `yaml:"image" json:"image"`
 	Command        []string          `yaml:"command,omitempty" json:"command,omitempty"`
@@ -84,6 +88,7 @@ type Step struct {
 func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	type rawStep struct {
 		Name           string            `yaml:"name"`
+		Type           string            `yaml:"type"`
 		Engine         string            `yaml:"engine"`
 		Image          string            `yaml:"image"`
 		Command        []string          `yaml:"command"`
@@ -113,6 +118,10 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	s.Name = rs.Name
+	s.Type = rs.Type
+	if s.Type == "" {
+		s.Type = StepTypeTask
+	}
 	s.Engine = rs.Engine
 	if s.Engine == "" {
 		s.Engine = EngineDocker
@@ -247,6 +256,15 @@ func computeStepAdjacency(steps []Step) (map[string]int, map[string]map[string]s
 		case EngineDocker, EngineKubernetes, EnginePodman:
 		default:
 			return nil, nil, fmt.Errorf("steps[%d].engine must be one of [%s,%s,%s]", i, EngineDocker, EngineKubernetes, EnginePodman)
+		}
+
+		switch step.Type {
+		case StepTypeTask, StepTypeBranch:
+		default:
+			return nil, nil, fmt.Errorf("steps[%d].type %q must be one of [%s,%s]", i, step.Type, StepTypeTask, StepTypeBranch)
+		}
+		if step.Type == StepTypeBranch && len(step.Next) == 0 {
+			return nil, nil, fmt.Errorf("steps[%d] is a branch step and must have at least one next entry", i)
 		}
 
 		if err := ensureUnique(step.Next, fmt.Sprintf("steps[%d].next", i)); err != nil {

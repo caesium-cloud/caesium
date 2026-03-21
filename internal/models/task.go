@@ -14,6 +14,7 @@ type Task struct {
 	AtomID       uuid.UUID         `gorm:"type:uuid;index;not null"`
 	Atom         Atom              `gorm:"constraint:OnDelete:RESTRICT" json:"-"`
 	Name         string            `gorm:"type:text;not null;default:''" json:"name"`
+	Type         string            `gorm:"type:text;not null;default:'task'" json:"type"`
 	NodeSelector datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Retries      int               `gorm:"not null;default:0" json:"retries"`
 	RetryDelay   time.Duration     `gorm:"not null;default:0" json:"retry_delay"`

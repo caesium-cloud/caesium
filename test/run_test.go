@@ -237,6 +237,353 @@ steps:
 }
 
 // --------------------------------------------------------------------------
+// Branching & Conditional Execution
+// --------------------------------------------------------------------------
+
+// TestBranchSelectsOnePath applies a branch step that selects one of two paths.
+// The selected path should succeed, the other should be skipped.
+func (s *IntegrationTestSuite) TestBranchSelectsOnePath() {
+	alias := fmt.Sprintf("integration-branch-one-path-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::branch path-a'"]
+    next: [path-a, path-b]
+  - name: path-a
+    image: alpine
+    command: ["sh", "-c", "echo 'selected'"]
+    dependsOn: [decide]
+  - name: path-b
+    image: alpine
+    command: ["sh", "-c", "echo 'not selected'"]
+    dependsOn: [decide]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status, "run with branch should succeed")
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"], "branch step should succeed")
+	s.Equal("succeeded", taskStatusByName["path-a"], "selected branch should succeed")
+	s.Equal("skipped", taskStatusByName["path-b"], "non-selected branch should be skipped")
+}
+
+// TestBranchSelectsMultiplePaths applies a branch step that selects two of
+// three downstream paths.
+func (s *IntegrationTestSuite) TestBranchSelectsMultiplePaths() {
+	alias := fmt.Sprintf("integration-branch-multi-path-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::branch path-a' && echo '##caesium::branch path-c'"]
+    next: [path-a, path-b, path-c]
+  - name: path-a
+    image: alpine
+    command: ["sh", "-c", "echo a"]
+    dependsOn: [decide]
+  - name: path-b
+    image: alpine
+    command: ["sh", "-c", "echo b"]
+    dependsOn: [decide]
+  - name: path-c
+    image: alpine
+    command: ["sh", "-c", "echo c"]
+    dependsOn: [decide]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status)
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"])
+	s.Equal("succeeded", taskStatusByName["path-a"], "selected branch a should succeed")
+	s.Equal("skipped", taskStatusByName["path-b"], "non-selected branch b should be skipped")
+	s.Equal("succeeded", taskStatusByName["path-c"], "selected branch c should succeed")
+}
+
+// TestBranchEmptyOutputSkipsAll verifies that when a branch step emits no
+// ##caesium::branch markers, all downstream steps are skipped.
+func (s *IntegrationTestSuite) TestBranchEmptyOutputSkipsAll() {
+	alias := fmt.Sprintf("integration-branch-empty-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo 'no branch markers here'"]
+    next: [path-a, path-b]
+  - name: path-a
+    image: alpine
+    command: ["sh", "-c", "echo a"]
+    dependsOn: [decide]
+  - name: path-b
+    image: alpine
+    command: ["sh", "-c", "echo b"]
+    dependsOn: [decide]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status, "run should succeed even with all branches skipped")
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"])
+	s.Equal("skipped", taskStatusByName["path-a"], "all downstream should be skipped")
+	s.Equal("skipped", taskStatusByName["path-b"], "all downstream should be skipped")
+}
+
+// TestBranchWithDownstreamJoin verifies branching works with a join step that
+// uses triggerRule: one_success to run after only the selected branch completes.
+func (s *IntegrationTestSuite) TestBranchWithDownstreamJoin() {
+	alias := fmt.Sprintf("integration-branch-join-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::branch fast-path'"]
+    next: [fast-path, slow-path]
+  - name: fast-path
+    image: alpine
+    command: ["sh", "-c", "echo fast && echo '##caesium::output {\"route\": \"fast\"}'"]
+    dependsOn: [decide]
+    next: [join]
+  - name: slow-path
+    image: alpine
+    command: ["sh", "-c", "echo slow"]
+    dependsOn: [decide]
+    next: [join]
+  - name: join
+    image: alpine
+    command: ["sh", "-c", "echo joined via $CAESIUM_OUTPUT_FAST_PATH_ROUTE"]
+    dependsOn: [fast-path, slow-path]
+    triggerRule: one_success
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status, "run with branch+join should succeed")
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"])
+	s.Equal("succeeded", taskStatusByName["fast-path"])
+	s.Equal("skipped", taskStatusByName["slow-path"])
+	s.Equal("succeeded", taskStatusByName["join"], "join with one_success should run after selected branch")
+}
+
+// TestBranchCoexistsWithOutputs verifies that a branch step can emit both
+// ##caesium::branch and ##caesium::output markers simultaneously.
+func (s *IntegrationTestSuite) TestBranchCoexistsWithOutputs() {
+	alias := fmt.Sprintf("integration-branch-outputs-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::output {\"reason\": \"data-stale\"}' && echo '##caesium::branch refresh'"]
+    next: [refresh, skip]
+  - name: refresh
+    image: alpine
+    command: ["sh", "-c", "echo refreshing because $CAESIUM_OUTPUT_DECIDE_REASON"]
+    dependsOn: [decide]
+  - name: skip
+    image: alpine
+    command: ["sh", "-c", "echo skipping"]
+    dependsOn: [decide]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status)
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"])
+	s.Equal("succeeded", taskStatusByName["refresh"])
+	s.Equal("skipped", taskStatusByName["skip"])
+
+	// Verify the branch step also captured structured output.
+	for _, task := range run.Tasks {
+		if taskStatusByName["decide"] == "succeeded" && task.Output != nil && task.Output["reason"] == "data-stale" {
+			return // found it
+		}
+	}
+	s.Fail("branch step should have captured structured output with reason=data-stale")
+}
+
+// TestBranchSkipPropagates verifies that when a branch skips a step, the
+// skip propagates to that step's descendants.
+func (s *IntegrationTestSuite) TestBranchSkipPropagates() {
+	alias := fmt.Sprintf("integration-branch-propagate-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: decide
+    type: branch
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::branch path-a'"]
+    next: [path-a, path-b]
+  - name: path-a
+    image: alpine
+    command: ["sh", "-c", "echo a"]
+    dependsOn: [decide]
+  - name: path-b
+    image: alpine
+    command: ["sh", "-c", "echo b"]
+    dependsOn: [decide]
+    next: [path-b-child]
+  - name: path-b-child
+    image: alpine
+    command: ["sh", "-c", "echo bc"]
+    dependsOn: [path-b]
+`, alias)
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 60*time.Second)
+
+	s.Equal("succeeded", run.Status)
+
+	taskStatusByName := s.taskStatusesByName(job.ID, run)
+	s.Equal("succeeded", taskStatusByName["decide"])
+	s.Equal("succeeded", taskStatusByName["path-a"])
+	s.Equal("skipped", taskStatusByName["path-b"], "non-selected branch should be skipped")
+	s.Equal("skipped", taskStatusByName["path-b-child"], "descendant of skipped branch should also be skipped")
+}
+
+// taskStatusesByName fetches the task list for a job and maps step names to
+// their run statuses using the run response.
+func (s *IntegrationTestSuite) taskStatusesByName(jobID string, run *runResponse) map[string]string {
+	s.T().Helper()
+
+	// Fetch task metadata to get names.
+	var tasks []struct {
+		ID   string `json:"ID"`
+		Name string `json:"Name"`
+	}
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/tasks", jobID), &tasks)
+
+	nameByID := make(map[string]string, len(tasks))
+	for _, t := range tasks {
+		nameByID[t.ID] = t.Name
+	}
+
+	result := make(map[string]string, len(run.Tasks))
+	for _, t := range run.Tasks {
+		name := nameByID[t.ID]
+		if name == "" {
+			name = t.ID
+		}
+		result[name] = t.Status
+	}
+	return result
+}
+
+// --------------------------------------------------------------------------
 // Helpers
 // --------------------------------------------------------------------------
 

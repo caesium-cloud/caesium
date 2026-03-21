@@ -15,6 +15,12 @@ const (
 	//   ##caesium::output {"row_count": "42", "path": "/data/out.parquet"}
 	outputMarker = "##caesium::output "
 
+	// branchMarker is the stdout line prefix that branch-type tasks use to
+	// indicate which downstream steps should execute.  Example:
+	//
+	//   ##caesium::branch full-refresh
+	branchMarker = "##caesium::branch "
+
 	// MaxOutputBytes caps the total serialised size of collected outputs per
 	// task to prevent unbounded memory/DB usage.  Tasks that need to pass
 	// larger payloads should use shared storage and pass the reference.
@@ -77,6 +83,44 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 	}
 	if len(encoded) > MaxOutputBytes {
 		return nil, fmt.Errorf("task output exceeds %d byte limit (%d bytes)", MaxOutputBytes, len(encoded))
+	}
+
+	return result, nil
+}
+
+// ParseBranches reads container log output and extracts branch selection
+// markers.  Each line matching "##caesium::branch <step-name>" adds the
+// step name to the returned slice.  Duplicate names are deduplicated while
+// preserving first-seen order.
+//
+// Lines that do not match the marker prefix are silently ignored.
+func ParseBranches(logs io.Reader) ([]string, error) {
+	var result []string
+	seen := make(map[string]struct{})
+
+	scanner := bufio.NewScanner(logs)
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		idx := strings.Index(line, branchMarker)
+		if idx < 0 {
+			continue
+		}
+
+		name := strings.TrimSpace(line[idx+len(branchMarker):])
+		if name == "" {
+			continue
+		}
+
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		result = append(result, name)
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading branch markers: %w", err)
 	}
 
 	return result, nil
