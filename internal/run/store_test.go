@@ -448,3 +448,140 @@ func TestPredecessorOutputs_NoPredecessors(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, outputs)
 }
+
+func TestCompleteTaskWithBranchSkipLeavesOneSuccessJoinRunnable(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","ok"]`,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	decide := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "decide", Type: "branch"}
+	fast := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "fast-path"}
+	slow := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "slow-path"}
+	join := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "join", TriggerRule: "one_success"}
+	require.NoError(t, db.Create(decide).Error)
+	require.NoError(t, db.Create(fast).Error)
+	require.NoError(t, db.Create(slow).Error)
+	require.NoError(t, db.Create(join).Error)
+
+	edges := []models.TaskEdge{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: decide.ID, ToTaskID: fast.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: decide.ID, ToTaskID: slow.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: fast.ID, ToTaskID: join.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: slow.ID, ToTaskID: join.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+	}
+	require.NoError(t, db.Create(&edges).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, decide, atom, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, fast, atom, 1))
+	require.NoError(t, store.RegisterTask(runRecord.ID, slow, atom, 1))
+	require.NoError(t, store.RegisterTask(runRecord.ID, join, atom, 2))
+
+	require.NoError(t, store.StartTask(runRecord.ID, decide.ID, "runtime-decide"))
+	completeResult, err := store.CompleteTaskWithResult(runRecord.ID, decide.ID, "ok", nil, []string{"fast-path"})
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{slow.ID}, completeResult.SkippedTaskIDs)
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	statusByTask := make(map[uuid.UUID]*TaskRun, len(state.Tasks))
+	for _, task := range state.Tasks {
+		statusByTask[task.TaskID] = task
+	}
+	require.Equal(t, TaskStatusSkipped, statusByTask[slow.ID].Status)
+	require.Equal(t, TaskStatusPending, statusByTask[join.ID].Status)
+	require.Equal(t, 1, statusByTask[join.ID].OutstandingPredecessors)
+
+	require.NoError(t, store.StartTask(runRecord.ID, fast.ID, "runtime-fast"))
+	completeResult, err = store.CompleteTaskWithResult(runRecord.ID, fast.ID, "ok", nil, nil)
+	require.NoError(t, err)
+	require.Empty(t, completeResult.SkippedTaskIDs)
+
+	state, err = store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	statusByTask = make(map[uuid.UUID]*TaskRun, len(state.Tasks))
+	for _, task := range state.Tasks {
+		statusByTask[task.TaskID] = task
+	}
+	require.Equal(t, TaskStatusPending, statusByTask[join.ID].Status)
+	require.Equal(t, 0, statusByTask[join.ID].OutstandingPredecessors)
+}
+
+func TestCompleteTaskWithBranchSkipSkipsAllSuccessJoin(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","ok"]`,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	decide := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "decide", Type: "branch"}
+	fast := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "fast-path"}
+	slow := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "slow-path"}
+	join := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atom.ID, Name: "join", TriggerRule: "all_success"}
+	require.NoError(t, db.Create(decide).Error)
+	require.NoError(t, db.Create(fast).Error)
+	require.NoError(t, db.Create(slow).Error)
+	require.NoError(t, db.Create(join).Error)
+
+	edges := []models.TaskEdge{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: decide.ID, ToTaskID: fast.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: decide.ID, ToTaskID: slow.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: fast.ID, ToTaskID: join.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: slow.ID, ToTaskID: join.ID, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()},
+	}
+	require.NoError(t, db.Create(&edges).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, decide, atom, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, fast, atom, 1))
+	require.NoError(t, store.RegisterTask(runRecord.ID, slow, atom, 1))
+	require.NoError(t, store.RegisterTask(runRecord.ID, join, atom, 2))
+
+	require.NoError(t, store.StartTask(runRecord.ID, decide.ID, "runtime-decide"))
+	completeResult, err := store.CompleteTaskWithResult(runRecord.ID, decide.ID, "ok", nil, []string{"fast-path"})
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{slow.ID}, completeResult.SkippedTaskIDs)
+
+	require.NoError(t, store.StartTask(runRecord.ID, fast.ID, "runtime-fast"))
+	completeResult, err = store.CompleteTaskWithResult(runRecord.ID, fast.ID, "ok", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, []uuid.UUID{join.ID}, completeResult.SkippedTaskIDs)
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	statusByTask := make(map[uuid.UUID]*TaskRun, len(state.Tasks))
+	for _, task := range state.Tasks {
+		statusByTask[task.TaskID] = task
+	}
+	require.Equal(t, TaskStatusSkipped, statusByTask[join.ID].Status)
+	require.Equal(t, 0, statusByTask[join.ID].OutstandingPredecessors)
+}

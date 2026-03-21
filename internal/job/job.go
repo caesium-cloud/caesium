@@ -877,15 +877,30 @@ func (j *job) Run(ctx context.Context) error {
 
 		taskOutcomes[result.id] = run.TaskStatusSucceeded
 
-		// Update local state for any tasks skipped by branch filtering
-		// (already persisted atomically in completeTask).
+		// Update local state for any tasks the run store skipped while
+		// resolving branch filtering or trigger-rule evaluation.
 		skippedSet := make(map[uuid.UUID]bool, len(result.skippedByBranch))
 		for _, skippedID := range result.skippedByBranch {
+			if processed[skippedID] {
+				skippedSet[skippedID] = true
+				continue
+			}
+
 			skippedSet[skippedID] = true
 			taskOutcomes[skippedID] = run.TaskStatusSkipped
 			processed[skippedID] = true
 			terminalTasks++
 			delete(inQueue, skippedID)
+
+			if err := propagateSkipped(skippedID); err != nil {
+				log.Error("failed to propagate skipped task", "run_id", runID, "task_id", skippedID, "error", err)
+				if runErr == nil {
+					runErr = err
+				}
+				halt = true
+				queue = queue[:0]
+				break
+			}
 		}
 
 		if !halt {
