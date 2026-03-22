@@ -92,7 +92,7 @@ Returns a backfill ID and the list of logical dates that will be processed.
 6. **Status tracking**: The backfill model tracks overall progress (total/completed/failed counts). Expose via API.
 7. **CLI**: Add `caesium backfill create --job <alias> --start <date> --end <date>` to `cmd/`.
 8. **Tests**: Unit tests for logical date enumeration, reprocess filtering, concurrency limiting.
-9. **Docs**: New `docs/backfill.md` explaining backfill and catchup behavior.
+9. **Docs**: `docs/backfill.md` explains backfill and catchup behavior.
 
 ### Files to Touch
 

@@ -11,7 +11,16 @@ interface BackfillsViewProps {
   jobId: string;
 }
 
-function renderBackfillStatus(status: Backfill["status"]) {
+function renderBackfillStatus(backfill: Backfill) {
+  if (backfill.status === "running" && backfill.cancel_requested_at) {
+    return (
+      <Badge variant="outline" className="border-amber-500/40 text-amber-300">
+        Cancelling
+      </Badge>
+    );
+  }
+
+  const { status } = backfill;
   switch (status) {
     case "running":
       return <Badge variant="running">Running</Badge>;
@@ -39,7 +48,7 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
   const cancelMutation = useMutation({
     mutationFn: () => api.cancelBackfill(jobId, backfill.id),
     onSuccess: () => {
-      toast.success("Backfill cancelled");
+      toast.success("Backfill cancellation requested");
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "backfills"] });
     },
     onError: (err: Error) => {
@@ -48,6 +57,7 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
   });
 
   const isRunning = backfill.status === "running";
+  const isCancelling = isRunning && Boolean(backfill.cancel_requested_at);
   const progressPct =
     backfill.total_runs > 0
       ? Math.round((backfill.completed_runs / backfill.total_runs) * 100)
@@ -85,6 +95,7 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
               {backfill.failed_runs > 0 && (
                 <span className="text-destructive"> · {backfill.failed_runs} failed</span>
               )}
+              {isCancelling && <span> · cancellation requested</span>}
             </div>
           </div>
         )}
@@ -96,17 +107,17 @@ function BackfillRow({ jobId, backfill }: { jobId: string; backfill: Backfill })
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
-        {renderBackfillStatus(backfill.status)}
+        {renderBackfillStatus(backfill)}
         {isRunning && (
           <Button
             variant="outline"
             size="sm"
             className="h-7 px-2 text-xs"
             onClick={() => cancelMutation.mutate()}
-            disabled={cancelMutation.isPending}
+            disabled={cancelMutation.isPending || isCancelling}
           >
             <XCircle className="mr-1 h-3.5 w-3.5" />
-            Cancel
+            {isCancelling ? "Cancelling" : "Cancel"}
           </Button>
         )}
       </div>

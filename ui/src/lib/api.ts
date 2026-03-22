@@ -44,6 +44,7 @@ export interface Backfill {
   total_runs: number;
   completed_runs: number;
   failed_runs: number;
+  cancel_requested_at?: string;
   completed_at?: string;
   created_at: string;
   updated_at: string;
