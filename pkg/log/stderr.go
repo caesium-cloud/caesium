@@ -52,7 +52,18 @@ func CaptureStderr() error {
 			if line == "" {
 				continue
 			}
-			Debug("dqlite/c", "msg", line)
+			// Infer log level from C-layer output to preserve severity.
+			lowerLine := strings.ToLower(line)
+			switch {
+			case strings.Contains(lowerLine, "error"):
+				Error("dqlite/c", "msg", line)
+			case strings.Contains(lowerLine, "warn"):
+				Warn("dqlite/c", "msg", line)
+			case strings.Contains(lowerLine, "info"):
+				Info("dqlite/c", "msg", line)
+			default:
+				Debug("dqlite/c", "msg", line)
+			}
 		}
 		// If the pipe breaks (e.g. during shutdown), restore stderr.
 		syscall.Dup2(origFd, 2)

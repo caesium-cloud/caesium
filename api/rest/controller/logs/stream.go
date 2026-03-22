@@ -128,13 +128,13 @@ func parseLevel(s string) (zapcore.Level, error) {
 }
 
 var levelOrder = map[string]int{
-	"debug": 0,
-	"info":  1,
-	"warn":  2,
-	"error": 3,
-	"dpanic": 4,
-	"panic": 5,
-	"fatal": 6,
+	"debug":  int(zapcore.DebugLevel),
+	"info":   int(zapcore.InfoLevel),
+	"warn":   int(zapcore.WarnLevel),
+	"error":  int(zapcore.ErrorLevel),
+	"dpanic": int(zapcore.DPanicLevel),
+	"panic":  int(zapcore.PanicLevel),
+	"fatal":  int(zapcore.FatalLevel),
 }
 
 func levelAtLeast(entryLevel string, minLevel zapcore.Level) bool {
