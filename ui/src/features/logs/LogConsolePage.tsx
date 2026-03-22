@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   ArrowDown,
@@ -6,17 +6,22 @@ import {
   Pause,
   Play,
   ScrollText,
-  Search,
   Trash2,
   Wifi,
   WifiOff,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import {
+  LogBadge,
+  LogSearchInput,
+  LogShell,
+  LogToolbar,
+  useAutoScroll,
+} from "@/components/logs";
 import { useLogStream, type LogEntry } from "./useLogStream";
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -45,7 +50,6 @@ export function LogConsolePage() {
   const [minLevel, setMinLevel] = useState<string>("debug");
   const [search, setSearch] = useState("");
   const [expandedSeqs, setExpandedSeqs] = useState<Set<number>>(new Set());
-  const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -81,25 +85,11 @@ export function LogConsolePage() {
     });
   }, [entries, minLevel, search]);
 
-  // Auto-scroll to bottom.
-  useEffect(() => {
-    if (autoScroll && bottomRef.current) {
-      bottomRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [filtered.length, autoScroll]);
-
-  // Detect manual scroll to disable auto-scroll.
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-    setAutoScroll(atBottom);
-  }, []);
-
-  const jumpToBottom = useCallback(() => {
-    setAutoScroll(true);
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, []);
+  const { autoScroll, handleScroll, jumpToBottom } = useAutoScroll({
+    scrollRef,
+    bottomRef,
+    dependency: filtered.length,
+  });
 
   const toggleExpand = useCallback((seq: number) => {
     setExpandedSeqs((prev) => {
@@ -141,112 +131,124 @@ export function LogConsolePage() {
     );
   }
 
+  const emptyState = entries.length === 0
+    ? { title: "Waiting for log entries...", body: "Entries will appear as the server emits them." }
+    : filtered.length === 0
+      ? { title: "No entries match filters", body: "Try broadening the level or search filter." }
+      : null;
+
+  const toolbar = (
+    <LogToolbar
+      status={
+        <>
+          <LogBadge
+            className={
+              connected
+                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
+                : "border-red-500/30 bg-red-500/10 text-red-300"
+            }
+          >
+            {connected ? (
+              <span className="inline-flex items-center gap-1.5">
+                <Wifi className="h-3 w-3" /> Connected
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1.5">
+                <WifiOff className="h-3 w-3" /> Disconnected
+              </span>
+            )}
+          </LogBadge>
+          {levelData?.level && (
+            <LogBadge className="font-mono">{levelData.level}</LogBadge>
+          )}
+        </>
+      }
+    >
+      {/* Level filter */}
+      <div className="flex items-center rounded-md border border-slate-700 overflow-hidden">
+        {LEVELS.map((lvl) => (
+          <button
+            key={lvl}
+            onClick={() => setMinLevel(lvl)}
+            className={cn(
+              "px-2.5 py-1 text-xs font-medium capitalize transition-colors",
+              minLevel === lvl
+                ? "bg-primary text-primary-foreground"
+                : "bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-slate-200",
+            )}
+          >
+            {lvl}
+          </button>
+        ))}
+      </div>
+
+      {/* Server level changer */}
+      <select
+        value={levelData?.level ?? "info"}
+        onChange={(e) => setLevelMutation.mutate({ level: e.target.value })}
+        className="h-7 rounded-md border border-slate-700 bg-slate-900 px-2 text-xs text-slate-300"
+        title="Server log level"
+      >
+        {LEVELS.map((lvl) => (
+          <option key={lvl} value={lvl}>
+            Server: {lvl}
+          </option>
+        ))}
+      </select>
+
+      {/* Search */}
+      <LogSearchInput
+        value={search}
+        onChange={setSearch}
+        placeholder="Filter messages..."
+        className="max-w-xs"
+      />
+
+      <div className="flex items-center gap-1">
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+          onClick={paused ? resume : pause}
+        >
+          {paused ? <Play className="h-3 w-3 mr-1" /> : <Pause className="h-3 w-3 mr-1" />}
+          {paused ? "Resume" : "Pause"}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 px-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+          onClick={clear}
+        >
+          <Trash2 className="h-3 w-3 mr-1" />
+          Clear
+        </Button>
+      </div>
+    </LogToolbar>
+  );
+
   return (
     <div className="flex flex-col h-[calc(100vh-7rem)] space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between shrink-0">
-        <div>
-          <h1 className="text-2xl font-bold tracking-tight">Log Console</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Real-time server log stream
-          </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="gap-1.5">
-            {connected ? (
-              <Wifi className="h-3 w-3 text-green-500" />
-            ) : (
-              <WifiOff className="h-3 w-3 text-destructive" />
-            )}
-            {connected ? "Connected" : "Disconnected"}
-          </Badge>
-          {levelData?.level && (
-            <Badge variant="secondary" className="font-mono text-xs">
-              {levelData.level}
-            </Badge>
-          )}
-        </div>
+      {/* Page header */}
+      <div className="shrink-0">
+        <h1 className="text-2xl font-bold tracking-tight">Log Console</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          Real-time server log stream
+        </p>
       </div>
 
-      {/* Controls toolbar */}
-      <div className="flex flex-wrap items-center gap-2 shrink-0">
-        {/* Level filter */}
-        <div className="flex items-center rounded-md border border-border overflow-hidden">
-          {LEVELS.map((lvl) => (
-            <button
-              key={lvl}
-              onClick={() => setMinLevel(lvl)}
-              className={cn(
-                "px-2.5 py-1 text-xs font-medium capitalize transition-colors",
-                minLevel === lvl
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-background text-muted-foreground hover:bg-muted",
-              )}
-            >
-              {lvl}
-            </button>
-          ))}
-        </div>
-
-        {/* Server level changer */}
-        <select
-          value={levelData?.level ?? "info"}
-          onChange={(e) => setLevelMutation.mutate({ level: e.target.value })}
-          className="h-7 rounded-md border border-border bg-background px-2 text-xs"
-          title="Server log level"
-        >
-          {LEVELS.map((lvl) => (
-            <option key={lvl} value={lvl}>
-              Server: {lvl}
-            </option>
-          ))}
-        </select>
-
-        {/* Search */}
-        <div className="relative flex-1 min-w-[180px] max-w-xs">
-          <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <input
-            type="text"
-            placeholder="Filter messages..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="h-7 w-full rounded-md border border-border bg-background pl-7 pr-2 text-xs placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
-          />
-        </div>
-
-        <div className="flex items-center gap-1 ml-auto">
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 text-xs"
-            onClick={paused ? resume : pause}
-          >
-            {paused ? <Play className="h-3 w-3 mr-1" /> : <Pause className="h-3 w-3 mr-1" />}
-            {paused ? "Resume" : "Pause"}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 text-xs"
-            onClick={clear}
-          >
-            <Trash2 className="h-3 w-3 mr-1" />
-            Clear
-          </Button>
-        </div>
-      </div>
-
-      {/* Log entries */}
-      <div
-        ref={scrollRef}
-        onScroll={handleScroll}
-        className="flex-1 overflow-auto rounded-md border border-border bg-[#0f172a] font-mono text-xs"
+      {/* Log viewer */}
+      <LogShell
+        toolbar={toolbar}
+        emptyState={emptyState}
+        hasVisibleOutput={filtered.length > 0}
+        className="flex-1 rounded-md border border-border"
       >
-        {filtered.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-slate-500">
-            {entries.length === 0 ? "Waiting for log entries..." : "No entries match filters"}
-          </div>
-        ) : (
+        <div
+          ref={scrollRef}
+          onScroll={handleScroll}
+          className="h-full overflow-auto font-mono text-xs"
+        >
           <table className="w-full">
             <tbody>
               {filtered.map((entry) => (
@@ -259,24 +261,24 @@ export function LogConsolePage() {
               ))}
             </tbody>
           </table>
-        )}
-        <div ref={bottomRef} />
-      </div>
-
-      {/* Jump to bottom */}
-      {!autoScroll && (
-        <div className="absolute bottom-20 right-10">
-          <Button
-            variant="secondary"
-            size="sm"
-            className="shadow-lg"
-            onClick={jumpToBottom}
-          >
-            <ArrowDown className="h-3 w-3 mr-1" />
-            Jump to latest
-          </Button>
+          <div ref={bottomRef} />
         </div>
-      )}
+
+        {/* Jump to bottom */}
+        {!autoScroll && (
+          <div className="absolute bottom-4 right-4 z-10">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="shadow-lg"
+              onClick={jumpToBottom}
+            >
+              <ArrowDown className="h-3 w-3 mr-1" />
+              Jump to latest
+            </Button>
+          </div>
+        )}
+      </LogShell>
     </div>
   );
 }
