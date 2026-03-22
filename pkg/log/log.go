@@ -11,25 +11,58 @@ import (
 
 var (
 	logLevel zap.AtomicLevel
+	ring     *RingBuffer
 )
+
+const defaultRingSize = 2000
 
 func init() {
 	logLevel = zap.NewAtomicLevelAt(zapcore.DebugLevel)
 
-	logger := zap.New(zapcore.NewCore(
-		zapcore.NewJSONEncoder(config()),
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("CAESIUM_LOG_FORMAT")))
+
+	var encoder zapcore.Encoder
+	switch format {
+	case "text":
+		encoder = zapcore.NewConsoleEncoder(textConfig())
+	default:
+		encoder = zapcore.NewJSONEncoder(jsonConfig())
+	}
+
+	stdoutCore := zapcore.NewCore(
+		encoder,
 		zapcore.Lock(os.Stdout),
 		logLevel,
-	))
+	)
+
+	ring = NewRingBuffer(defaultRingSize, zapcore.DebugLevel)
+
+	logger := zap.New(
+		zapcore.NewTee(stdoutCore, ring),
+		zap.AddCaller(),
+		zap.AddCallerSkip(1), // skip the wrapper functions in this package
+	)
 
 	zap.ReplaceGlobals(logger)
 }
 
-func config() zapcore.EncoderConfig {
+func jsonConfig() zapcore.EncoderConfig {
 	cfg := zap.NewProductionEncoderConfig()
 	cfg.TimeKey = "ts"
 	cfg.EncodeTime = zapcore.ISO8601TimeEncoder
 	return cfg
+}
+
+func textConfig() zapcore.EncoderConfig {
+	cfg := zap.NewDevelopmentEncoderConfig()
+	cfg.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	cfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	return cfg
+}
+
+// Buffer returns the global ring buffer for log streaming.
+func Buffer() *RingBuffer {
+	return ring
 }
 
 // Debug logs a debug message. Refer to:

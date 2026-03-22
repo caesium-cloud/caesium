@@ -224,6 +224,27 @@ func (s *IntegrationTestSuite) getJSON(path string, target any) {
 	require.NoError(s.T(), json.Unmarshal(body, target))
 }
 
+// tryGetJSON is like getJSON but returns an error instead of calling
+// require.  This is safe to call from testify's Eventually/Never callbacks
+// which run the condition function in a separate goroutine.
+func (s *IntegrationTestSuite) tryGetJSON(path string, target any) error {
+	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, body)
+	}
+	return json.Unmarshal(body, target)
+}
+
 func (s *IntegrationTestSuite) doRequest(method, target string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(s.T().Context(), method, target, body)
 	if err != nil {

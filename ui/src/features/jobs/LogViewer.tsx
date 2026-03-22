@@ -1,16 +1,21 @@
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 import {
   AlertTriangle,
   Copy,
-  Search,
   SkipForward,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  LogBadge,
+  LogSearchInput,
+  LogShell,
+  LogToolbar,
+} from "@/components/logs";
 import { buildLogFilterResult } from "./logFiltering";
 
 const logHeaderState = "X-Caesium-Log-State";
@@ -271,98 +276,98 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
         }
       : null;
 
-  return (
-    <div className="flex h-full min-h-0 flex-col bg-slate-950">
-      {error && status === "skipped" ? (
-        <div className="border-b border-slate-500/20 bg-slate-500/10 px-4 py-2.5">
-          <div className="flex items-start gap-3">
-            <SkipForward className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Skipped</div>
-              <div className="font-mono text-[10px] leading-relaxed text-slate-400/80">{error}</div>
-            </div>
-          </div>
+  const banner = error && status === "skipped" ? (
+    <div className="border-b border-slate-500/20 bg-slate-500/10 px-4 py-2.5">
+      <div className="flex items-start gap-3">
+        <SkipForward className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Skipped</div>
+          <div className="font-mono text-[10px] leading-relaxed text-slate-400/80">{error}</div>
         </div>
-      ) : error ? (
-        <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2.5">
-          <div className="flex items-start gap-3">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
-            <div className="min-w-0">
-              <div className="text-[10px] font-bold uppercase tracking-wider text-red-400">Task Error</div>
-              <div className="font-mono text-[10px] leading-relaxed text-red-300">{error}</div>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950/80 px-3 py-2">
-        <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-md border border-slate-800 bg-slate-900/80 px-2.5 py-1.5">
-          <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-          <input
-            value={searchTerm}
-            onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="Filter visible rows"
-            className="w-full bg-transparent text-xs text-slate-100 outline-none placeholder:text-slate-500"
-          />
-        </div>
-
-        <button
-          type="button"
-          onClick={() => setCaseSensitive((current) => !current)}
-          className={cn(
-            "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition-colors",
-            caseSensitive
-              ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-200"
-              : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200",
-          )}
-        >
-          Aa
-        </button>
-
-        <Button
-          type="button"
-          variant="ghost"
-          className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-300 hover:bg-slate-800 hover:text-slate-50"
-          onClick={handleCopy}
-          disabled={!hasVisibleOutput}
-        >
-          <Copy className="h-3.5 w-3.5" />
-          Copy
-        </Button>
-
-        {searchTerm && searchSummary ? (
-          <div className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300">
-            {`${searchSummary.visibleLines}/${searchSummary.totalLines} lines`}
-          </div>
-        ) : null}
-
-        <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
-          <LogBadge>{renderStateLabel(logState)}</LogBadge>
-          {logSource === "live" ? <LogBadge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-200">Live</LogBadge> : null}
-          {logSource === "persisted" ? <LogBadge className="border-blue-500/30 bg-blue-500/10 text-blue-200">Retained</LogBadge> : null}
-          {logTruncated ? <LogBadge className="border-amber-500/30 bg-amber-500/10 text-amber-200">Truncated</LogBadge> : null}
-        </div>
-      </div>
-
-      {transportError ? (
-        <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2.5 text-[11px] text-red-200">
-          {transportError}
-        </div>
-      ) : null}
-
-      <div className="relative flex-1 overflow-hidden">
-        <div ref={terminalRef} className="h-full w-full overflow-hidden bg-slate-950 px-3 py-2" />
-
-        {!hasVisibleOutput && (filteredEmptyState || emptyState) ? (
-          <div className="absolute inset-0 flex items-center justify-center bg-slate-950/96 px-6 text-center">
-            <div className="max-w-sm space-y-2">
-              <div className="text-sm font-semibold text-slate-100">{(filteredEmptyState || emptyState)?.title}</div>
-              <div className="text-xs leading-relaxed text-slate-400">{(filteredEmptyState || emptyState)?.body}</div>
-            </div>
-          </div>
-        ) : null}
       </div>
     </div>
+  ) : error ? (
+    <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2.5">
+      <div className="flex items-start gap-3">
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+        <div className="min-w-0">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-red-400">Task Error</div>
+          <div className="font-mono text-[10px] leading-relaxed text-red-300">{error}</div>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const toolbar = (
+    <LogToolbar
+      status={
+        <>
+          <LogBadge>{renderStateLabel(logState)}</LogBadge>
+          {logSource === "live" && (
+            <LogBadge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-200">Live</LogBadge>
+          )}
+          {logSource === "persisted" && (
+            <LogBadge className="border-blue-500/30 bg-blue-500/10 text-blue-200">Retained</LogBadge>
+          )}
+          {logTruncated && (
+            <LogBadge className="border-amber-500/30 bg-amber-500/10 text-amber-200">Truncated</LogBadge>
+          )}
+        </>
+      }
+    >
+      <LogSearchInput
+        value={searchTerm}
+        onChange={setSearchTerm}
+        placeholder="Filter visible rows"
+        className="min-w-[220px]"
+      />
+
+      <button
+        type="button"
+        onClick={() => setCaseSensitive((current) => !current)}
+        className={cn(
+          "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition-colors",
+          caseSensitive
+            ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-200"
+            : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200",
+        )}
+      >
+        Aa
+      </button>
+
+      <Button
+        type="button"
+        variant="ghost"
+        className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+        onClick={handleCopy}
+        disabled={!hasVisibleOutput}
+      >
+        <Copy className="h-3.5 w-3.5" />
+        Copy
+      </Button>
+
+      {searchTerm && searchSummary && (
+        <LogBadge>
+          {`${searchSummary.visibleLines}/${searchSummary.totalLines} lines`}
+        </LogBadge>
+      )}
+    </LogToolbar>
+  );
+
+  return (
+    <LogShell
+      banner={banner}
+      toolbar={toolbar}
+      emptyState={filteredEmptyState || emptyState}
+      hasVisibleOutput={hasVisibleOutput}
+    >
+      <div ref={terminalRef} className="h-full w-full overflow-hidden bg-slate-950 px-3 py-2" />
+      {transportError && (
+        <div className="absolute inset-x-0 top-0 border-b border-red-500/20 bg-red-500/10 px-4 py-2.5 text-[11px] text-red-200">
+          {transportError}
+        </div>
+      )}
+    </LogShell>
   );
 }
 
@@ -450,12 +455,4 @@ function getEmptyState(state: LogState, status?: string, source?: LogSource) {
     default:
       return null;
   }
-}
-
-function LogBadge({ children, className }: { children: ReactNode; className?: string }) {
-  return (
-    <span className={cn("rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300", className)}>
-      {children}
-    </span>
-  );
 }

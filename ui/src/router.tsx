@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { AppShell } from "./components/layout/AppShell";
 import { AtomsPage } from "./features/atoms/AtomsPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
+import { LogConsolePage } from "./features/logs/LogConsolePage";
 import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
 import { JobsPage } from "./features/jobs/JobsPage";
 import { JobDetailPage } from "./features/jobs/JobDetailPage";
@@ -68,6 +69,12 @@ const databaseRoute = createRoute({
   component: DatabaseConsolePage,
 });
 
+const logsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "system/logs",
+  component: LogConsolePage,
+});
+
 const systemRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "system",
@@ -89,6 +96,7 @@ const routeTree = rootRoute.addChildren([
   triggersRoute,
   atomsRoute,
   systemRoute,
+  logsRoute,
   databaseLegacyRoute,
   databaseRoute,
   jobDefsRoute,

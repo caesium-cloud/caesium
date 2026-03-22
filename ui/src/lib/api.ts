@@ -316,6 +316,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  getLogLevel: () => request<{ level: string }>("/logs/level"),
+  setLogLevel: (body: { level: string }) =>
+    request<{ level: string }>("/logs/level", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
   applyJobDef: (yaml: string) =>
     request<ApplyJobDefResponse>("/jobdefs/apply", {
       method: "POST",

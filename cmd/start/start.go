@@ -48,6 +48,10 @@ var (
 var cancel context.CancelFunc
 
 func start(cmd *cobra.Command, args []string) error {
+	if err := log.CaptureStderr(); err != nil {
+		log.Warn("failed to capture stderr for unified logging", "error", err)
+	}
+
 	signalChan := make(chan os.Signal, 1)
 
 	go func() {

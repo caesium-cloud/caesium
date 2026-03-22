@@ -5,6 +5,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
+	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
@@ -73,6 +74,13 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 	// stats
 	{
 		g.GET("/stats", stats.Get)
+	}
+
+	// server logs
+	if env.Variables().LogConsoleEnabled {
+		g.GET("/logs/stream", logs.Stream)
+		g.GET("/logs/level", logs.GetLevel)
+		g.PUT("/logs/level", logs.SetLevel)
 	}
 
 	// database

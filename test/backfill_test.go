@@ -108,6 +108,15 @@ func (s *IntegrationTestSuite) listJobRunSummaries(jobID string) []backfillRunSu
 	return runs
 }
 
+// tryListJobRunSummaries is like listJobRunSummaries but returns an error
+// instead of calling require.  Safe for use inside Eventually/Never callbacks
+// which testify runs in a separate goroutine.
+func (s *IntegrationTestSuite) tryListJobRunSummaries(jobID string) ([]backfillRunSummary, error) {
+	var runs []backfillRunSummary
+	err := s.tryGetJSON(fmt.Sprintf("/v1/jobs/%s/runs", jobID), &runs)
+	return runs, err
+}
+
 func countBackfillRuns(runs []backfillRunSummary, backfillID string) int {
 	count := 0
 	for _, run := range runs {
@@ -338,7 +347,11 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 
 	var runsBeforeCancel int
 	s.Require().Eventually(func() bool {
-		runsBeforeCancel = countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
+		runs, err := s.tryListJobRunSummaries(job.ID)
+		if err != nil {
+			return false
+		}
+		runsBeforeCancel = countBackfillRuns(runs, b.ID)
 		return runsBeforeCancel == 1
 	}, 10*time.Second, 200*time.Millisecond, "expected exactly one in-flight run before cancellation")
 
@@ -355,7 +368,11 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 	s.Equal(runsBeforeCancel, runsAfterCancel, "cancel should not launch any additional backfill runs")
 
 	s.Require().Never(func() bool {
-		return countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID) > runsBeforeCancel
+		runs, err := s.tryListJobRunSummaries(job.ID)
+		if err != nil {
+			return false // treat transient errors as "condition not satisfied"
+		}
+		return countBackfillRuns(runs, b.ID) > runsBeforeCancel
 	}, 2*time.Second, 100*time.Millisecond, "no late backfill runs should appear after cancellation")
 }
 
