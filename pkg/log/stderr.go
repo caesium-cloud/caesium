@@ -1,0 +1,63 @@
+//go:build !windows
+
+package log
+
+import (
+	"bufio"
+	"os"
+	"regexp"
+	"strings"
+	"syscall"
+)
+
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// CaptureStderr redirects file descriptor 2 (stderr) through a pipe so that
+// output from C libraries (e.g. libdqlite/libraft) is captured and routed
+// through the structured logger instead of appearing as raw, colorized text.
+//
+// The original stderr fd is preserved via dup so that fatal/crash output from
+// the Go runtime still reaches the terminal.
+func CaptureStderr() error {
+	// Preserve the original stderr fd for crash output.
+	origFd, err := syscall.Dup(int(os.Stderr.Fd()))
+	if err != nil {
+		return err
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		syscall.Close(origFd)
+		return err
+	}
+
+	// Replace fd 2 with the write end of our pipe.
+	if err := syscall.Dup2(int(w.Fd()), int(os.Stderr.Fd())); err != nil {
+		r.Close()
+		w.Close()
+		syscall.Close(origFd)
+		return err
+	}
+	w.Close() // fd 2 is now the write end; close the extra copy
+
+	go func() {
+		scanner := bufio.NewScanner(r)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			// Strip ANSI escape codes.
+			line = ansiPattern.ReplaceAllString(line, "")
+			if line == "" {
+				continue
+			}
+			Debug("dqlite/c", "msg", line)
+		}
+		// If the pipe breaks (e.g. during shutdown), restore stderr.
+		syscall.Dup2(origFd, 2)
+		syscall.Close(origFd)
+	}()
+
+	return nil
+}

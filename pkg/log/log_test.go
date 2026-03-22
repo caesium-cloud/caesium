@@ -73,7 +73,7 @@ func capture(logFunc func(string, ...interface{}), msg string, kv ...interface{}
 
 	zap.ReplaceGlobals(zap.New(
 		zapcore.NewCore(
-			zapcore.NewJSONEncoder(config()),
+			zapcore.NewJSONEncoder(jsonConfig()),
 			zapcore.AddSync(writer),
 			logLevel,
 		),

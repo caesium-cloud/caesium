@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
-import { Activity, Database, CheckCircle2, XCircle, Clock, Server, Zap, RefreshCw, TerminalSquare } from "lucide-react";
+import { Activity, Database, CheckCircle2, XCircle, Clock, ScrollText, Server, Zap, RefreshCw, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 function StatusDot({ ok }: { ok: boolean }) {
@@ -171,19 +171,39 @@ export function SystemPage() {
           </div>
           <Badge variant="outline">Power feature</Badge>
         </CardHeader>
-        <CardContent className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div className="space-y-1">
-            <p className="font-medium">Database Console</p>
-            <p className="text-sm text-muted-foreground">
-              Inspect the embedded database with schema-aware SQL when diagnosing jobs, runs, and scheduler state.
-            </p>
-            <p className="text-xs text-muted-foreground">
-              Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_DATABASE_CONSOLE_ENABLED=true</code>.
-            </p>
+        <CardContent className="space-y-6">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="font-medium">Database Console</p>
+              <p className="text-sm text-muted-foreground">
+                Inspect the embedded database with schema-aware SQL when diagnosing jobs, runs, and scheduler state.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_DATABASE_CONSOLE_ENABLED=true</code>.
+              </p>
+            </div>
+            <Button asChild variant="outline">
+              <Link to="/system/database">Open database console</Link>
+            </Button>
           </div>
-          <Button asChild variant="outline">
-            <Link to="/system/database">Open database console</Link>
-          </Button>
+          <div className="border-t border-border" />
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="font-medium flex items-center gap-2">
+                <ScrollText className="h-4 w-4" />
+                Log Console
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Stream server logs in real time with level filtering and search for diagnosing runtime behavior.
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_LOG_CONSOLE_ENABLED=true</code>.
+              </p>
+            </div>
+            <Button asChild variant="outline">
+              <Link to="/system/logs">Open log console</Link>
+            </Button>
+          </div>
         </CardContent>
       </Card>
 

@@ -32,6 +32,7 @@ export function AppShell() {
           if (nextEvent.key === "s") navigate({ to: "/stats" });
           if (nextEvent.key === "y") navigate({ to: "/system" });
           if (nextEvent.key === "d") navigate({ to: "/jobdefs" });
+          if (nextEvent.key === "l") navigate({ to: "/system/logs" });
           window.removeEventListener("keydown", nextKeyHandler);
         };
         window.addEventListener("keydown", nextKeyHandler, { once: true });

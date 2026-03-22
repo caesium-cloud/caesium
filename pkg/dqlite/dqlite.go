@@ -58,7 +58,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 				fn = log.Error
 			}
 
-			fn("internal db", "log", fmt.Sprintf(format, a...))
+			fn("dqlite", "msg", fmt.Sprintf(format, a...), "source", "dqlite")
 		}
 
 		app, err := app.New(

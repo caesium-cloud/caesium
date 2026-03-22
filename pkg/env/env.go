@@ -36,6 +36,8 @@ func Variables() Environment {
 // by caesium.
 type Environment struct {
 	LogLevel                      string        `default:"info" split_words:"true"`
+	LogFormat                     string        `default:"json" split_words:"true"`
+	LogConsoleEnabled             bool          `default:"false" split_words:"true"`
 	Port                          int           `default:"8080"`
 	DockerHost                    string        `default:"" split_words:"true"`
 	KubernetesConfig              string        `default:"" split_words:"true"`
