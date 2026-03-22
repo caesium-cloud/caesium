@@ -252,3 +252,12 @@ func TestCaptureMarkers_TruncatesSnapshot(t *testing.T) {
 	assert.Equal(t, "abcdefghij", result.LogText)
 	assert.True(t, result.LogTruncated)
 }
+
+func TestCaptureMarkers_AllowsLargeLinesWithinSnapshotLimit(t *testing.T) {
+	line := strings.Repeat("x", 128*1024)
+	result, err := CaptureMarkers(strings.NewReader(line+"\n"), MaxLogSnapshotBytes)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, line+"\n", result.LogText)
+	assert.False(t, result.LogTruncated)
+}

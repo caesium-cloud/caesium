@@ -1057,12 +1057,17 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		}
 		resultUpdate := updateQuery.
 			Updates(map[string]interface{}{
-				"status":       string(TaskStatusPending),
-				"attempt":      attempt,
-				"runtime_id":   "",
-				"started_at":   nil,
-				"completed_at": nil,
-				"error":        "",
+				"status":            string(TaskStatusPending),
+				"attempt":           attempt,
+				"runtime_id":        "",
+				"started_at":        nil,
+				"completed_at":      nil,
+				"result":            "",
+				"output":            nil,
+				"branch_selections": nil,
+				"log_text":          "",
+				"log_truncated":     false,
+				"error":             "",
 			})
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error

@@ -367,6 +367,70 @@ func TestCompleteTaskWithNilOutput(t *testing.T) {
 	require.Nil(t, taskState.Output)
 }
 
+func TestRetryTaskClearsPreviousExecutionArtifacts(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomModel := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","hello"]`,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+
+	task := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomModel.ID,
+		Name:   "retry-me",
+	}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atomModel, 0))
+	require.NoError(t, store.StartTask(runRecord.ID, task.ID, "runtime-1"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, task.ID, "failure", map[string]string{"rows": "10"}, []string{"branch-a"}))
+	require.NoError(t, store.SaveTaskLogSnapshot(runRecord.ID, task.ID, &TaskLogSnapshot{
+		Text:      "previous attempt logs",
+		Truncated: true,
+	}))
+
+	require.NoError(t, store.RetryTask(runRecord.ID, task.ID, 2))
+
+	state, err := store.Get(runRecord.ID)
+	require.NoError(t, err)
+
+	var taskState *TaskRun
+	for _, candidate := range state.Tasks {
+		if candidate.ID == task.ID {
+			taskState = candidate
+			break
+		}
+	}
+	require.NotNil(t, taskState)
+	require.Equal(t, TaskStatusPending, taskState.Status)
+	require.Equal(t, "", taskState.RuntimeID)
+	require.Equal(t, "", taskState.Result)
+	require.Nil(t, taskState.Output)
+
+	snapshot, err := store.GetTaskLogSnapshot(runRecord.ID, task.ID)
+	require.NoError(t, err)
+	require.Nil(t, snapshot)
+
+	var model models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).First(&model).Error)
+	require.Equal(t, "", model.LogText)
+	require.False(t, model.LogTruncated)
+	require.Len(t, model.BranchSelections, 0)
+}
+
 func TestPredecessorOutputs(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

@@ -33,6 +33,8 @@ const (
 	MaxLogSnapshotBytes = 1 << 20 // 1 MiB
 )
 
+var initialScannerBuffer = make([]byte, 0, 64*1024)
+
 // ParseOutput reads container log output and extracts structured key-value
 // pairs from lines matching the ##caesium::output marker protocol.
 //
@@ -45,7 +47,7 @@ const (
 func ParseOutput(logs io.Reader) (map[string]string, error) {
 	result := make(map[string]string)
 
-	scanner := bufio.NewScanner(logs)
+	scanner := newLogScanner(logs)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -104,7 +106,7 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 	var result []string
 	seen := make(map[string]struct{})
 
-	scanner := bufio.NewScanner(logs)
+	scanner := newLogScanner(logs)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -180,7 +182,7 @@ func parseMarkers(logs io.Reader, snapshot io.Writer) (*Markers, error) {
 		reader = io.TeeReader(logs, snapshot)
 	}
 
-	scanner := bufio.NewScanner(reader)
+	scanner := newLogScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -239,23 +241,29 @@ type boundedSnapshotWriter struct {
 }
 
 func (w *boundedSnapshotWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
 	if w.limit <= 0 {
-		w.truncated = len(p) > 0
+		w.truncated = true
 		return len(p), nil
 	}
 
-	remaining := w.limit - w.buf.Len()
-	if remaining > 0 {
-		if remaining > len(p) {
-			remaining = len(p)
-		}
-		if _, err := w.buf.Write(p[:remaining]); err != nil {
-			return 0, err
-		}
+	if w.buf.Len() >= w.limit {
+		w.truncated = true
+		return len(p), nil
 	}
 
-	if len(p) > remaining {
+	spaceLeft := w.limit - w.buf.Len()
+	bytesToWrite := p
+	if len(bytesToWrite) > spaceLeft {
+		bytesToWrite = p[:spaceLeft]
 		w.truncated = true
+	}
+
+	if _, err := w.buf.Write(bytesToWrite); err != nil {
+		return 0, err
 	}
 
 	return len(p), nil
@@ -263,6 +271,12 @@ func (w *boundedSnapshotWriter) Write(p []byte) (int, error) {
 
 func (w *boundedSnapshotWriter) String() string {
 	return w.buf.String()
+}
+
+func newLogScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(initialScannerBuffer, MaxLogSnapshotBytes)
+	return scanner
 }
 
 // NormalizeStepName converts a step name to an environment-variable-safe

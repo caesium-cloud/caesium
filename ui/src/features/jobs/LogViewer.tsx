@@ -1,7 +1,7 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
-import { SearchAddon } from "xterm-addon-search";
+import { SearchAddon } from "@xterm/addon-search";
 import "xterm/css/xterm.css";
 import {
   AlertTriangle,
@@ -33,9 +33,7 @@ interface LogViewerProps {
 export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
-  const fitAddonRef = useRef<FitAddon | null>(null);
   const searchAddonRef = useRef<SearchAddon | null>(null);
-  const logBufferRef = useRef("");
   const [logState, setLogState] = useState<LogState>("loading");
   const [logSource, setLogSource] = useState<LogSource>(null);
   const [logTruncated, setLogTruncated] = useState(false);
@@ -90,7 +88,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
     fitAddon.fit();
 
     xtermRef.current = terminal;
-    fitAddonRef.current = fitAddon;
     searchAddonRef.current = searchAddon;
 
     const handleResize = () => fitAddon.fit();
@@ -99,7 +96,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
     return () => {
       window.removeEventListener("resize", handleResize);
       searchAddonRef.current = null;
-      fitAddonRef.current = null;
       xtermRef.current = null;
       terminal.dispose();
     };
@@ -113,7 +109,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
     const term = terminal;
 
     term.reset();
-    logBufferRef.current = "";
     setHasLogOutput(false);
     setTransportError(null);
     setLogSource(null);
@@ -170,7 +165,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
             sawOutput = true;
             setHasLogOutput(true);
           }
-          logBufferRef.current += chunk;
           term.write(chunk);
         }
 
@@ -180,7 +174,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
             sawOutput = true;
             setHasLogOutput(true);
           }
-          logBufferRef.current += tail;
           term.write(tail);
         }
 
@@ -239,12 +232,18 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
   };
 
   const handleCopy = async () => {
-    if (!logBufferRef.current) {
+    const terminal = xtermRef.current;
+    if (!terminal) {
+      return;
+    }
+
+    const text = extractTerminalText(terminal);
+    if (!text) {
       return;
     }
 
     try {
-      await navigator.clipboard.writeText(logBufferRef.current);
+      await navigator.clipboard.writeText(text);
       toast.success("Copied task logs");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to copy task logs");
@@ -472,4 +471,34 @@ function LogBadge({ children, className }: { children: ReactNode; className?: st
       {children}
     </span>
   );
+}
+
+function extractTerminalText(terminal: Terminal): string {
+  const lines: string[] = [];
+  const buffer = terminal.buffer.active;
+  let currentLine = "";
+
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) {
+      continue;
+    }
+
+    const text = line.translateToString(true);
+    if (line.isWrapped) {
+      currentLine += text;
+      continue;
+    }
+
+    if (currentLine) {
+      lines.push(currentLine);
+    }
+    currentLine = text;
+  }
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines.join("\n").trimEnd();
 }
