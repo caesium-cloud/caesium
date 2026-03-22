@@ -72,30 +72,31 @@ type CallbackRun struct {
 }
 
 type TaskRun struct {
-	ID                      uuid.UUID         `json:"id"`
-	JobRunID                uuid.UUID         `json:"job_run_id"`
-	TaskID                  uuid.UUID         `json:"task_id"`
-	AtomID                  uuid.UUID         `json:"atom_id"`
-	Engine                  models.AtomEngine `json:"engine"`
-	Image                   string            `json:"image"`
-	Command                 []string          `json:"command"`
-	RuntimeID               string            `json:"runtime_id,omitempty"`
-	Status                  TaskStatus        `json:"status"`
-	NodeSelector            map[string]string `json:"node_selector,omitempty"`
-	ClaimedBy               string            `json:"claimed_by,omitempty"`
-	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
-	ClaimAttempt            int               `json:"claim_attempt"`
-	Attempt                 int               `json:"attempt"`
-	MaxAttempts             int               `json:"max_attempts"`
-	Result                  string            `json:"result,omitempty"`
-	Output                  map[string]string `json:"output,omitempty"`
-	BranchSelections        []string          `json:"branch_selections,omitempty"`
-	StartedAt               *time.Time        `json:"started_at,omitempty"`
-	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
-	Error                   string            `json:"error,omitempty"`
-	OutstandingPredecessors int               `json:"outstanding_predecessors"`
-	CreatedAt               time.Time         `json:"created_at"`
-	UpdatedAt               time.Time         `json:"updated_at"`
+	ID                      uuid.UUID                 `json:"id"`
+	JobRunID                uuid.UUID                 `json:"job_run_id"`
+	TaskID                  uuid.UUID                 `json:"task_id"`
+	AtomID                  uuid.UUID                 `json:"atom_id"`
+	Engine                  models.AtomEngine         `json:"engine"`
+	Image                   string                    `json:"image"`
+	Command                 []string                  `json:"command"`
+	RuntimeID               string                    `json:"runtime_id,omitempty"`
+	Status                  TaskStatus                `json:"status"`
+	NodeSelector            map[string]string         `json:"node_selector,omitempty"`
+	ClaimedBy               string                    `json:"claimed_by,omitempty"`
+	ClaimExpiresAt          *time.Time                `json:"claim_expires_at,omitempty"`
+	ClaimAttempt            int                       `json:"claim_attempt"`
+	Attempt                 int                       `json:"attempt"`
+	MaxAttempts             int                       `json:"max_attempts"`
+	Result                  string                    `json:"result,omitempty"`
+	Output                  map[string]string         `json:"output,omitempty"`
+	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
+	BranchSelections        []string                  `json:"branch_selections,omitempty"`
+	StartedAt               *time.Time                `json:"started_at,omitempty"`
+	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
+	Error                   string                    `json:"error,omitempty"`
+	OutstandingPredecessors int                       `json:"outstanding_predecessors"`
+	CreatedAt               time.Time                 `json:"created_at"`
+	UpdatedAt               time.Time                 `json:"updated_at"`
 }
 
 type JobRun struct {
@@ -1454,6 +1455,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		var out map[string]string
 		if err := json.Unmarshal(model.Output, &out); err == nil {
 			task.Output = out
+		}
+	}
+
+	if len(model.SchemaViolations) > 0 {
+		var violations []pkgtask.SchemaViolation
+		if err := json.Unmarshal(model.SchemaViolations, &violations); err == nil {
+			task.SchemaViolations = violations
 		}
 	}
 
