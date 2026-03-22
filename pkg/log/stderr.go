@@ -28,18 +28,18 @@ func CaptureStderr() error {
 
 	r, w, err := os.Pipe()
 	if err != nil {
-		unix.Close(origFd)
+		_ = unix.Close(origFd)
 		return err
 	}
 
 	// Replace fd 2 with the write end of our pipe.
 	if err := unix.Dup2(int(w.Fd()), int(os.Stderr.Fd())); err != nil {
-		r.Close()
-		w.Close()
-		unix.Close(origFd)
+		_ = r.Close()
+		_ = w.Close()
+		_ = unix.Close(origFd)
 		return err
 	}
-	w.Close() // fd 2 is now the write end; close the extra copy
+	_ = w.Close() // fd 2 is now the write end; close the extra copy
 
 	go func() {
 		scanner := bufio.NewScanner(r)
@@ -67,8 +67,8 @@ func CaptureStderr() error {
 			}
 		}
 		// If the pipe breaks (e.g. during shutdown), restore stderr.
-		unix.Dup2(origFd, 2)
-		unix.Close(origFd)
+		_ = unix.Dup2(origFd, 2)
+		_ = unix.Close(origFd)
 	}()
 
 	return nil
