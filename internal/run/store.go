@@ -457,6 +457,11 @@ type CompleteTaskResult struct {
 	SkippedTaskIDs []uuid.UUID
 }
 
+type TaskLogSnapshot struct {
+	Text      string
+	Truncated bool
+}
+
 // CompleteTaskWithResult completes a task and returns details about branch
 // skips so the local executor can update its in-memory state.
 func (s *Store) CompleteTaskWithResult(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
@@ -470,6 +475,38 @@ func (s *Store) CompleteTaskWithResult(runID, taskID uuid.UUID, result string, o
 func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string, branchSelections []string) error {
 	_, err := s.completeTask(runID, taskID, result, claimedBy, true, output, branchSelections)
 	return err
+}
+
+func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSnapshot) error {
+	if snapshot == nil {
+		return nil
+	}
+
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Updates(map[string]interface{}{
+			"log_text":      snapshot.Text,
+			"log_truncated": snapshot.Truncated,
+		}).Error
+}
+
+func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {
+	var task models.TaskRun
+	if err := s.db.
+		Select("log_text", "log_truncated").
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		First(&task).Error; err != nil {
+		return nil, err
+	}
+
+	if task.LogText == "" && !task.LogTruncated {
+		return nil, nil
+	}
+
+	return &TaskLogSnapshot{
+		Text:      task.LogText,
+		Truncated: task.LogTruncated,
+	}, nil
 }
 
 func (s *Store) successorEdgesTx(tx *gorm.DB, task models.Task) ([]models.TaskEdge, error) {

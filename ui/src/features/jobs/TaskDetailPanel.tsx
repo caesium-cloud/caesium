@@ -1,7 +1,4 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import "xterm/css/xterm.css";
 import {
   X,
   Info,
@@ -14,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { JobTask, TaskRun } from "@/lib/api";
+import { LogViewer } from "./LogViewer";
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -207,7 +205,7 @@ export function TaskDetailPanel({
             </div>
           </ScrollArea>
         ) : (
-          <EmbeddedLogViewer
+          <LogViewer
             jobId={jobId}
             runId={runId}
             taskId={taskId}
@@ -216,114 +214,6 @@ export function TaskDetailPanel({
           />
         )}
       </div>
-    </div>
-  );
-}
-
-/* ── Embedded log viewer (no chrome, fills parent) ── */
-
-function EmbeddedLogViewer({
-  jobId,
-  runId,
-  taskId,
-  error,
-  status,
-}: {
-  jobId: string;
-  runId: string;
-  taskId: string;
-  error?: string | null;
-  status?: string;
-}) {
-  const terminalRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!terminalRef.current) return;
-
-    const term = new Terminal({
-      cursorBlink: false,
-      cursorStyle: "bar",
-      disableStdin: true,
-      convertEol: true,
-      fontSize: 12,
-      fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, "Courier New", monospace',
-      theme: {
-        background: "#0f172a",
-      },
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(terminalRef.current);
-    fitAddon.fit();
-
-    const abortController = new AbortController();
-
-    async function streamLogs() {
-      try {
-        const response = await fetch(
-          `/v1/jobs/${jobId}/runs/${runId}/logs?${new URLSearchParams({ task_id: taskId })}`,
-          { signal: abortController.signal },
-        );
-        if (!response.ok) {
-          term.writeln(`\x1b[31mError: ${await response.text()}\x1b[0m`);
-          return;
-        }
-        const reader = response.body?.getReader();
-        if (!reader) return;
-        const decoder = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          term.write(decoder.decode(value));
-        }
-      } catch (err: unknown) {
-        if (err instanceof Error && err.name !== "AbortError") {
-          term.writeln(`\x1b[31mConnection error: ${err.message}\x1b[0m`);
-        }
-      }
-    }
-
-    streamLogs();
-
-    const handleResize = () => fitAddon.fit();
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      abortController.abort();
-      term.dispose();
-      window.removeEventListener("resize", handleResize);
-    };
-  }, [jobId, runId, taskId]);
-
-  return (
-    <div className="flex h-full flex-col">
-      {error && status === "skipped" ? (
-        <div className="px-4 py-2.5 bg-slate-500/10 border-b border-slate-500/20 flex gap-3 items-start">
-          <SkipForward className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              Skipped
-            </span>
-            <span className="text-[10px] text-slate-400/80 font-mono leading-relaxed">
-              {error}
-            </span>
-          </div>
-        </div>
-      ) : error ? (
-        <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 flex gap-3 items-start">
-          <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">
-              Error
-            </span>
-            <span className="text-[10px] text-red-400 font-mono leading-relaxed">
-              {error}
-            </span>
-          </div>
-        </div>
-      ) : null}
-      <div ref={terminalRef} className="flex-1 overflow-hidden bg-[#0f172a] p-2" />
     </div>
   );
 }

@@ -256,9 +256,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// over the log stream (no full buffering).
 	var taskOutput map[string]string
 	var branchSelections []string
+	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
-		markers, parseErr := pkgtask.ParseMarkers(logs)
+		markers, parseErr := pkgtask.CaptureMarkers(logs, pkgtask.MaxLogSnapshotBytes)
 		if closeErr := logs.Close(); closeErr != nil {
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
@@ -269,11 +270,20 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 			if len(markers.Branches) > 0 {
 				branchSelections = markers.Branches
 			}
+			if markers.LogText != "" || markers.LogTruncated {
+				logSnapshot = &run.TaskLogSnapshot{
+					Text:      markers.LogText,
+					Truncated: markers.LogTruncated,
+				}
+			}
 		}
 	}
 
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
 		return err
+	}
+	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.TaskID, logSnapshot); err != nil {
+		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {
 		return fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())

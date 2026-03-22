@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
@@ -19,6 +20,12 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
+)
+
+const (
+	logHeaderState     = "X-Caesium-Log-State"
+	logHeaderSource    = "X-Caesium-Log-Source"
+	logHeaderTruncated = "X-Caesium-Log-Truncated"
 )
 
 func Logs(c *echo.Context) error {
@@ -56,7 +63,9 @@ func Logs(c *echo.Context) error {
 		}
 	}
 
-	runEntry, err := runsvc.New(ctx).Get(runID)
+	runService := runsvc.New(ctx)
+
+	runEntry, err := runService.Get(runID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return echo.ErrNotFound
@@ -80,8 +89,16 @@ func Logs(c *echo.Context) error {
 		return echo.ErrNotFound
 	}
 
+	snapshot, err := runService.GetTaskLogSnapshot(runID, taskID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
 	if taskEntry.RuntimeID == "" {
-		return echo.NewHTTPError(http.StatusConflict, "task has not started")
+		if snapshot != nil {
+			return writeLogSnapshot(c, snapshot)
+		}
+		return writeLogState(c, logStateForTask(taskEntry))
 	}
 
 	engine, err := engineFor(ctx, taskEntry.Engine)
@@ -91,11 +108,13 @@ func Logs(c *echo.Context) error {
 
 	reader, err := engine.Logs(&atom.EngineLogsRequest{ID: taskEntry.RuntimeID, Since: since})
 	if err != nil {
-		status := http.StatusInternalServerError
-		if runEntry.CompletedAt != nil {
-			status = http.StatusGone
+		if snapshot != nil {
+			return writeLogSnapshot(c, snapshot)
 		}
-		return echo.NewHTTPError(status, "log stream unavailable").Wrap(err)
+		if taskEntry.CompletedAt != nil || runEntry.CompletedAt != nil {
+			return writeLogState(c, "unavailable")
+		}
+		return echo.NewHTTPError(http.StatusBadGateway, "live log stream unavailable").Wrap(err)
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
@@ -105,6 +124,7 @@ func Logs(c *echo.Context) error {
 
 	res := c.Response()
 	res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
+	res.Header().Set(logHeaderSource, "live")
 	res.WriteHeader(http.StatusOK)
 
 	flusher, _ := res.(http.Flusher)
@@ -142,6 +162,37 @@ func Logs(c *echo.Context) error {
 			}
 		}
 	}
+}
+
+func writeLogSnapshot(c *echo.Context, snapshot *runstorage.TaskLogSnapshot) error {
+	res := c.Response()
+	res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
+	res.Header().Set(logHeaderSource, "persisted")
+	if snapshot != nil && snapshot.Truncated {
+		res.Header().Set(logHeaderTruncated, "true")
+	}
+	res.WriteHeader(http.StatusOK)
+	if snapshot == nil || snapshot.Text == "" {
+		return nil
+	}
+	_, err := io.Copy(res, strings.NewReader(snapshot.Text))
+	return err
+}
+
+func writeLogState(c *echo.Context, state string) error {
+	c.Response().Header().Set(logHeaderState, state)
+	c.Response().WriteHeader(http.StatusNoContent)
+	return nil
+}
+
+func logStateForTask(task *runstorage.TaskRun) string {
+	if task == nil {
+		return "unavailable"
+	}
+	if task.CompletedAt != nil || task.Status == runstorage.TaskStatusSucceeded || task.Status == runstorage.TaskStatusFailed || task.Status == runstorage.TaskStatusSkipped {
+		return "empty"
+	}
+	return "pending"
 }
 
 func engineFor(ctx context.Context, engine models.AtomEngine) (atom.Engine, error) {

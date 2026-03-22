@@ -147,7 +147,7 @@ The server exposes a REST API on port `8080` and a GraphQL endpoint at `/gql`.
 | `PUT /v1/jobs/:id/pause` | Pause a job |
 | `PUT /v1/jobs/:id/unpause` | Unpause a job |
 | `GET /v1/jobs/:id/dag` | Retrieve the task dependency graph |
-| `GET /v1/jobs/:id/runs/:run_id/logs` | Stream task logs (SSE) |
+| `GET /v1/jobs/:id/runs/:run_id/logs` | Stream task logs (plain text stream) |
 | `GET /v1/triggers` | List triggers |
 | `GET /v1/atoms` | List registered execution atoms |
 | `GET /v1/events` | Subscribe to lifecycle events (SSE) |

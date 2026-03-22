@@ -232,3 +232,23 @@ func TestParseBranches_DockerMultiplexedPrefix(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"my-step"}, result)
 }
+
+func TestCaptureMarkers_IncludesRawLogSnapshot(t *testing.T) {
+	logs := strings.NewReader("2026-03-21T10:00:00Z starting\n##caesium::output {\"rows\": 42}\n")
+	result, err := CaptureMarkers(logs, MaxLogSnapshotBytes)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, map[string]string{"rows": "42"}, result.Output)
+	assert.Contains(t, result.LogText, "starting")
+	assert.Contains(t, result.LogText, "##caesium::output")
+	assert.False(t, result.LogTruncated)
+}
+
+func TestCaptureMarkers_TruncatesSnapshot(t *testing.T) {
+	logs := strings.NewReader("abcdefghijklmnopqrstuvwxyz")
+	result, err := CaptureMarkers(logs, 10)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "abcdefghij", result.LogText)
+	assert.True(t, result.LogTruncated)
+}
