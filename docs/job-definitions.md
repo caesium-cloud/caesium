@@ -170,6 +170,7 @@ steps:
   - Explicit edge wiring (`explicit-links.job.yaml`).
   - Fan-out/fan-in DAG (`fanout-join.job.yaml`).
   - HTTP-triggered debugging workflow (`http-ops-debug.job.yaml`).
+  - HTTP-triggered log streaming showcase with ANSI color and sustained output (`log-streaming.job.yaml`).
   - Multi-document run history samples with success and failure cases (`run-history.job.yaml`).
   - Callback failure handling (`callback-failure.job.yaml`).
 
