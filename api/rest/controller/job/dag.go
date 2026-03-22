@@ -2,6 +2,7 @@ package job
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"slices"
@@ -21,15 +22,18 @@ type DAGResponse struct {
 }
 
 type DAGNode struct {
-	ID         uuid.UUID   `json:"id"`
-	AtomID     uuid.UUID   `json:"atom_id"`
-	Type       string      `json:"type,omitempty"`
-	Successors []uuid.UUID `json:"successors"`
+	ID           uuid.UUID       `json:"id"`
+	AtomID       uuid.UUID       `json:"atom_id"`
+	Type         string          `json:"type,omitempty"`
+	Successors   []uuid.UUID     `json:"successors"`
+	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
+	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
 }
 
 type DAGEdge struct {
-	From uuid.UUID `json:"from"`
-	To   uuid.UUID `json:"to"`
+	From            uuid.UUID `json:"from"`
+	To              uuid.UUID `json:"to"`
+	ContractDefined bool      `json:"contract_defined,omitempty"`
 }
 
 func DAG(c *echo.Context) error {
@@ -78,6 +82,28 @@ func DAG(c *echo.Context) error {
 		addEdge(edge.FromTaskID, edge.ToTaskID)
 	}
 
+	// contractEdges: set of (from,to) edges where the consumer has inputSchema referencing the producer.
+	type edgeKey struct{ from, to uuid.UUID }
+	contractEdges := make(map[edgeKey]struct{})
+	for _, t := range tasks {
+		if len(t.InputSchema) == 0 {
+			continue
+		}
+		var inputSchema map[string]any
+		if err := json.Unmarshal(t.InputSchema, &inputSchema); err != nil {
+			continue
+		}
+		// Find predecessor tasks by name and mark their edges as contract-bearing.
+		for producerName := range inputSchema {
+			for _, candidate := range tasks {
+				if candidate.Name == producerName {
+					contractEdges[edgeKey{from: candidate.ID, to: t.ID}] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+
 	nodes := make([]DAGNode, 0, len(tasks))
 	edges := make([]DAGEdge, 0, len(tasks))
 
@@ -96,9 +122,11 @@ func DAG(c *echo.Context) error {
 		}
 
 		for _, to := range successors {
+			_, hasContract := contractEdges[edgeKey{from: t.ID, to: to}]
 			edges = append(edges, DAGEdge{
-				From: t.ID,
-				To:   to,
+				From:            t.ID,
+				To:              to,
+				ContractDefined: hasContract,
 			})
 		}
 
@@ -107,12 +135,19 @@ func DAG(c *echo.Context) error {
 			nodeType = "" // omit default type to keep response compact
 		}
 
-		nodes = append(nodes, DAGNode{
+		node := DAGNode{
 			ID:         t.ID,
 			AtomID:     t.AtomID,
 			Type:       nodeType,
 			Successors: successors,
-		})
+		}
+		if len(t.OutputSchema) > 0 {
+			node.OutputSchema = json.RawMessage(t.OutputSchema)
+		}
+		if len(t.InputSchema) > 0 {
+			node.InputSchema = json.RawMessage(t.InputSchema)
+		}
+		nodes = append(nodes, node)
 	}
 
 	resp := &DAGResponse{

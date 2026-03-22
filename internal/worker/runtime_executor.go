@@ -279,6 +279,14 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		}
 	}
 
+	// Runtime schema validation: if the task declares an outputSchema and the job has
+	// schemaValidation enabled, validate the actual output against the schema.
+	if taskOutput != nil {
+		if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
+			return err
+		}
+	}
+
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
 		return err
 	}
@@ -289,6 +297,51 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
 	}
 
+	return nil
+}
+
+// runSchemaValidation validates the task's output against its declared outputSchema.
+// It is a no-op when the task has no schema or the job has schemaValidation disabled.
+// On violations, it persists them and either logs (warn) or returns an error (fail).
+func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
+	// Fetch task outputSchema and the job's schemaValidation setting in one query.
+	var result struct {
+		OutputSchema     []byte
+		SchemaValidation string
+	}
+	err := e.store.DB().
+		Table("tasks").
+		Select("tasks.output_schema AS output_schema, jobs.schema_validation AS schema_validation").
+		Joins("JOIN jobs ON jobs.id = tasks.job_id").
+		Where("tasks.id = ?", taskRun.TaskID).
+		Take(&result).Error
+	if err != nil || len(result.OutputSchema) == 0 || result.SchemaValidation == "" {
+		return nil
+	}
+
+	var schemaRaw map[string]any
+	if err := json.Unmarshal(result.OutputSchema, &schemaRaw); err != nil {
+		log.Warn("failed to unmarshal task output schema", "task_id", taskRun.TaskID, "error", err)
+		return nil
+	}
+
+	violations, err := pkgtask.ValidateOutput(output, schemaRaw)
+	if err != nil {
+		log.Warn("schema validation error", "task_id", taskRun.TaskID, "error", err)
+		return nil
+	}
+	if len(violations) == 0 {
+		return nil
+	}
+
+	log.Warn("task output schema violations", "task_id", taskRun.TaskID, "violations", len(violations))
+	if saveErr := e.store.SaveSchemaViolations(taskRun.JobRunID, taskRun.TaskID, violations); saveErr != nil {
+		log.Warn("failed to persist schema violations", "task_id", taskRun.TaskID, "error", saveErr)
+	}
+
+	if result.SchemaValidation == "fail" {
+		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskRun.TaskID, len(violations))
+	}
 	return nil
 }
 

@@ -75,6 +75,7 @@ export interface TaskRun {
   max_attempts?: number;
   result?: string;
   output?: Record<string, string>;
+  schema_violations?: Array<{ key: string; message: string }>;
   error?: string;
   outstanding_predecessors?: number;
   started_at?: string;
@@ -112,6 +113,8 @@ export interface JobTask {
   retry_delay: number;
   retry_backoff: boolean;
   trigger_rule: string;
+  output_schema?: Record<string, unknown>;
+  input_schema?: Record<string, Record<string, unknown>>;
   created_at: string;
   updated_at: string;
 }
@@ -122,11 +125,14 @@ export interface DAGNode {
   type?: string;
   next_id?: string;
   successors?: string[];
+  output_schema?: Record<string, unknown>;
+  input_schema?: Record<string, Record<string, unknown>>;
 }
 
 export interface DAGEdge {
   from: string;
   to: string;
+  contract_defined?: boolean;
 }
 
 export interface JobDAGResponse {

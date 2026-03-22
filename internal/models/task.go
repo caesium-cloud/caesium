@@ -20,8 +20,13 @@ type Task struct {
 	RetryDelay   time.Duration     `gorm:"not null;default:0" json:"retry_delay"`
 	RetryBackoff bool              `gorm:"not null;default:false" json:"retry_backoff"`
 	TriggerRule  string            `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
-	CreatedAt    time.Time         `gorm:"not null"`
-	UpdatedAt    time.Time         `gorm:"not null"`
+	// OutputSchema is a JSON Schema describing this task's expected output keys.
+	OutputSchema datatypes.JSON `gorm:"type:json" json:"output_schema,omitempty"`
+	// InputSchema maps predecessor task names to JSON Schema fragments describing
+	// required keys from each predecessor's output.
+	InputSchema datatypes.JSON `gorm:"type:json" json:"input_schema,omitempty"`
+	CreatedAt   time.Time      `gorm:"not null"`
+	UpdatedAt   time.Time      `gorm:"not null"`
 }
 
 type Tasks []*Task

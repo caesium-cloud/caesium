@@ -44,6 +44,12 @@ type Definition struct {
 	Steps      []Step     `yaml:"steps" json:"steps"`
 }
 
+const (
+	SchemaValidationDisabled = ""
+	SchemaValidationWarn     = "warn"
+	SchemaValidationFail     = "fail"
+)
+
 // Metadata contains descriptive data for the job.
 type Metadata struct {
 	Alias            string            `yaml:"alias" json:"alias"`
@@ -52,6 +58,9 @@ type Metadata struct {
 	MaxParallelTasks int               `yaml:"maxParallelTasks,omitempty" json:"maxParallelTasks,omitempty"`
 	TaskTimeout      time.Duration     `yaml:"taskTimeout,omitempty" json:"taskTimeout,omitempty"`
 	RunTimeout       time.Duration     `yaml:"runTimeout,omitempty" json:"runTimeout,omitempty"`
+	// SchemaValidation controls runtime output schema validation.
+	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
+	SchemaValidation string `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
 }
 
 // Trigger defines how the job is triggered.
@@ -69,36 +78,43 @@ type Callback struct {
 
 // Step defines an execution step.
 type Step struct {
-	Name           string            `yaml:"name" json:"name"`
-	Type           string            `yaml:"type,omitempty" json:"type,omitempty"`
-	Engine         string            `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Image          string            `yaml:"image" json:"image"`
-	Command        []string          `yaml:"command,omitempty" json:"command,omitempty"`
-	NodeSelector   map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
-	Next           []string          `yaml:"next,omitempty" json:"next,omitempty"`
-	DependsOn      []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
-	Retries        int               `yaml:"retries,omitempty" json:"retries,omitempty"`
-	RetryDelay     time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
-	RetryBackoff   bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
-	TriggerRule    string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	Name         string            `yaml:"name" json:"name"`
+	Type         string            `yaml:"type,omitempty" json:"type,omitempty"`
+	Engine       string            `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Image        string            `yaml:"image" json:"image"`
+	Command      []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	NodeSelector map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
+	Next         []string          `yaml:"next,omitempty" json:"next,omitempty"`
+	DependsOn    []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Retries      int               `yaml:"retries,omitempty" json:"retries,omitempty"`
+	RetryDelay   time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
+	RetryBackoff bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	TriggerRule  string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	// OutputSchema is a JSON Schema describing this step's expected output keys.
+	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
+	// InputSchema maps predecessor step names to JSON Schema fragments describing
+	// which keys this step requires from each predecessor's output.
+	InputSchema    map[string]map[string]any `yaml:"inputSchema,omitempty" json:"inputSchema,omitempty"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
 // UnmarshalYAML sets defaults while deserialising a step.
 func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	type rawStep struct {
-		Name           string            `yaml:"name"`
-		Type           string            `yaml:"type"`
-		Engine         string            `yaml:"engine"`
-		Image          string            `yaml:"image"`
-		Command        []string          `yaml:"command"`
-		NodeSelector   map[string]string `yaml:"nodeSelector"`
-		Next           interface{}       `yaml:"next"`
-		DependsOn      interface{}       `yaml:"dependsOn"`
-		Retries        int               `yaml:"retries"`
-		RetryDelay     time.Duration     `yaml:"retryDelay"`
-		RetryBackoff   bool              `yaml:"retryBackoff"`
-		TriggerRule    string            `yaml:"triggerRule"`
+		Name           string                    `yaml:"name"`
+		Type           string                    `yaml:"type"`
+		Engine         string                    `yaml:"engine"`
+		Image          string                    `yaml:"image"`
+		Command        []string                  `yaml:"command"`
+		NodeSelector   map[string]string         `yaml:"nodeSelector"`
+		Next           interface{}               `yaml:"next"`
+		DependsOn      interface{}               `yaml:"dependsOn"`
+		Retries        int                       `yaml:"retries"`
+		RetryDelay     time.Duration             `yaml:"retryDelay"`
+		RetryBackoff   bool                      `yaml:"retryBackoff"`
+		TriggerRule    string                    `yaml:"triggerRule"`
+		OutputSchema   map[string]any            `yaml:"outputSchema"`
+		InputSchema    map[string]map[string]any `yaml:"inputSchema"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -135,6 +151,8 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
+	s.OutputSchema = rs.OutputSchema
+	s.InputSchema = rs.InputSchema
 	s.Spec = rs.Spec
 
 	return nil
@@ -162,6 +180,13 @@ func (d *Definition) Validate() error {
 	}
 	if strings.TrimSpace(d.Metadata.Alias) == "" {
 		return fmt.Errorf("metadata.alias is required")
+	}
+
+	switch d.Metadata.SchemaValidation {
+	case SchemaValidationDisabled, SchemaValidationWarn, SchemaValidationFail:
+	default:
+		return fmt.Errorf("metadata.schemaValidation %q must be one of [\"\",\"%s\",\"%s\"]",
+			d.Metadata.SchemaValidation, SchemaValidationWarn, SchemaValidationFail)
 	}
 
 	if err := validateTrigger(&d.Trigger); err != nil {
@@ -209,6 +234,19 @@ func validateSteps(steps []Step) error {
 		return err
 	}
 	if err := detectCycles(adj, names); err != nil {
+		return err
+	}
+	// Build predecessors map (reverse of adj) for schema validation.
+	predecessors := make(map[string]map[string]struct{}, len(names))
+	for from, targets := range adj {
+		for to := range targets {
+			if predecessors[to] == nil {
+				predecessors[to] = make(map[string]struct{})
+			}
+			predecessors[to][from] = struct{}{}
+		}
+	}
+	if err := validateSchemas(steps, names, predecessors); err != nil {
 		return err
 	}
 	return nil

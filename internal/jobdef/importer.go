@@ -83,6 +83,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			MaxParallelTasks: def.Metadata.MaxParallelTasks,
 			TaskTimeout:      def.Metadata.TaskTimeout,
 			RunTimeout:       def.Metadata.RunTimeout,
+			SchemaValidation: def.Metadata.SchemaValidation,
 		}
 
 		if opts != nil && opts.Provenance != nil {
@@ -208,6 +209,22 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			RetryDelay:   step.RetryDelay,
 			RetryBackoff: step.RetryBackoff,
 			TriggerRule:  triggerRule,
+		}
+
+		if step.OutputSchema != nil {
+			b, err := json.Marshal(step.OutputSchema)
+			if err != nil {
+				return nil, fmt.Errorf("step %s: outputSchema: %w", step.Name, err)
+			}
+			task.OutputSchema = datatypes.JSON(b)
+		}
+
+		if step.InputSchema != nil {
+			b, err := json.Marshal(step.InputSchema)
+			if err != nil {
+				return nil, fmt.Errorf("step %s: inputSchema: %w", step.Name, err)
+			}
+			task.InputSchema = datatypes.JSON(b)
 		}
 
 		if err := tx.Create(task).Error; err != nil {

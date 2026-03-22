@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 
 	lintpkg "github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 )
 
@@ -49,6 +51,13 @@ var lintCmd = &cobra.Command{
 		if !lintCheckSecrets {
 			if err := writeCmdOut(cmd, "Validated %d job definition(s)\n", len(defs)); err != nil {
 				return err
+			}
+			for _, def := range defs {
+				if summary := contractSummary(def.Steps); summary != "" {
+					if err := writeCmdOut(cmd, "  %s: %s\n", def.Metadata.Alias, summary); err != nil {
+						return err
+					}
+				}
 			}
 			return nil
 		}
@@ -139,4 +148,57 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// contractSummary returns a human-readable description of data contracts in a step list,
+// or "" if there are none.
+func contractSummary(steps []jobdef.Step) string {
+	type contract struct {
+		producer string
+		consumer string
+		keys     []string
+	}
+	var contracts []contract
+
+	for _, step := range steps {
+		if step.InputSchema == nil {
+			continue
+		}
+		for producerName, schema := range step.InputSchema {
+			var keys []string
+			if req, ok := schema["required"].([]any); ok {
+				for _, k := range req {
+					if s, ok := k.(string); ok {
+						keys = append(keys, s)
+					}
+				}
+			}
+			sort.Strings(keys)
+			contracts = append(contracts, contract{
+				producer: producerName,
+				consumer: step.Name,
+				keys:     keys,
+			})
+		}
+	}
+
+	if len(contracts) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(contracts))
+	for _, c := range contracts {
+		if len(c.keys) > 0 {
+			parts = append(parts, fmt.Sprintf("%s \u2192 %s: %s", c.producer, c.consumer, strings.Join(c.keys, ", ")))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s \u2192 %s", c.producer, c.consumer))
+		}
+	}
+
+	n := len(contracts)
+	noun := "data contract"
+	if n != 1 {
+		noun = "data contracts"
+	}
+	return fmt.Sprintf("%d %s (%s)", n, noun, strings.Join(parts, "; "))
 }

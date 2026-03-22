@@ -15,7 +15,9 @@ import (
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -488,6 +490,20 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSn
 			"log_text":      snapshot.Text,
 			"log_truncated": snapshot.Truncated,
 		}).Error
+}
+
+// SaveSchemaViolations persists schema validation violations for a task run.
+func (s *Store) SaveSchemaViolations(runID, taskID uuid.UUID, violations []pkgtask.SchemaViolation) error {
+	if len(violations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(violations)
+	if err != nil {
+		return err
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("schema_violations", datatypes.JSON(b)).Error
 }
 
 func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {
