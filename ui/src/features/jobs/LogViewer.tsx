@@ -1,11 +1,9 @@
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
 import "xterm/css/xterm.css";
 import {
   AlertTriangle,
-  ChevronDown,
-  ChevronUp,
   Copy,
   Search,
   SkipForward,
@@ -13,6 +11,7 @@ import {
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { buildLogFilterResult } from "./logFiltering";
 
 const logHeaderState = "X-Caesium-Log-State";
 const logHeaderSource = "X-Caesium-Log-Source";
@@ -30,37 +29,18 @@ interface LogViewerProps {
   sizeVersion?: number;
 }
 
-interface SearchMatch {
-  row: number;
-  column: number;
-  length: number;
-}
-
-interface SearchPosition {
-  current: number;
-  total: number;
-}
-
-interface SearchableLine {
-  text: string;
-  rows: Array<{ row: number; text: string }>;
-}
-
 export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: LogViewerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchTermRef = useRef("");
-  const searchRefreshFrameRef = useRef<number | null>(null);
+  const [rawLogText, setRawLogText] = useState("");
   const [logState, setLogState] = useState<LogState>("loading");
   const [logSource, setLogSource] = useState<LogSource>(null);
   const [logTruncated, setLogTruncated] = useState(false);
   const [transportError, setTransportError] = useState<string | null>(null);
-  const [hasLogOutput, setHasLogOutput] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
-  const [searchPosition, setSearchPosition] = useState<SearchPosition | null>(null);
-  const [searchRevision, setSearchRevision] = useState(0);
 
   useEffect(() => {
     searchTermRef.current = searchTerm;
@@ -117,9 +97,6 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
 
     return () => {
       window.removeEventListener("resize", handleResize);
-      if (searchRefreshFrameRef.current !== null) {
-        cancelAnimationFrame(searchRefreshFrameRef.current);
-      }
       fitAddonRef.current = null;
       xtermRef.current = null;
       terminal.dispose();
@@ -151,26 +128,8 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     const term = terminal;
 
     term.reset();
-    setHasLogOutput(false);
-    setTransportError(null);
-    setLogSource(null);
-    setLogTruncated(false);
-    setLogState("loading");
-    setSearchPosition(null);
-    term.clearSelection();
 
     const abortController = new AbortController();
-
-    const scheduleSearchRefresh = () => {
-      if (!searchTermRef.current || searchRefreshFrameRef.current !== null) {
-        return;
-      }
-
-      searchRefreshFrameRef.current = requestAnimationFrame(() => {
-        searchRefreshFrameRef.current = null;
-        setSearchRevision((current) => current + 1);
-      });
-    };
 
     async function streamLogs() {
       try {
@@ -216,23 +175,28 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
             continue;
           }
 
+          setRawLogText((current) => current + chunk);
           if (!sawOutput) {
             sawOutput = true;
-            setHasLogOutput(true);
           }
-          term.write(chunk, scheduleSearchRefresh);
+
+          if (!searchTermRef.current) {
+            term.write(chunk);
+          }
         }
 
         const tail = decoder.decode();
         if (tail) {
+          setRawLogText((current) => current + tail);
           if (!sawOutput) {
             sawOutput = true;
-            setHasLogOutput(true);
           }
-          term.write(tail, scheduleSearchRefresh);
+
+          if (!searchTermRef.current) {
+            term.write(tail);
+          }
         }
 
-        setHasLogOutput(sawOutput);
         setLogState(sawOutput ? "complete" : "empty");
       } catch (err: unknown) {
         if (err instanceof Error && err.name === "AbortError") {
@@ -250,81 +214,40 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     };
   }, [jobId, runId, taskId]);
 
+  const filterResult = useMemo(
+    () => buildLogFilterResult(rawLogText, searchTerm, caseSensitive),
+    [caseSensitive, rawLogText, searchTerm],
+  );
+  const searchSummary =
+    searchTerm.length > 0
+      ? {
+          totalLines: filterResult.totalLines,
+          visibleLines: filterResult.visibleLines,
+        }
+      : null;
+
   useEffect(() => {
     const terminal = xtermRef.current;
     if (!terminal) {
       return;
     }
 
-    if (!searchTerm) {
-      setSearchPosition(null);
-      terminal.clearSelection();
-      return;
-    }
-
     try {
-      const matches = findSearchMatches(terminal, searchTerm, caseSensitive);
-
-      if (matches.length === 0) {
-        setSearchPosition({ current: 0, total: 0 });
-        terminal.clearSelection();
-        return;
+      terminal.reset();
+      if (filterResult.renderedLog) {
+        terminal.write(filterResult.renderedLog, () => {
+          fitAddonRef.current?.fit();
+        });
+      } else {
+        fitAddonRef.current?.fit();
       }
-
-      setSearchPosition({ current: 1, total: matches.length });
-      focusSearchMatch(terminal, matches[0]);
-    } catch (err) {
-      setSearchPosition({ current: 0, total: 0 });
-      terminal.clearSelection();
-      toast.error(err instanceof Error ? err.message : "Failed to search task logs");
-    }
-  }, [caseSensitive, searchRevision, searchTerm]);
-
-  const moveSearch = (direction: 1 | -1) => {
-    const terminal = xtermRef.current;
-    if (!terminal || !searchTerm) {
-      return;
-    }
-
-    try {
-      const matches = findSearchMatches(terminal, searchTerm, caseSensitive);
-
-      if (matches.length === 0) {
-        setSearchPosition({ current: 0, total: 0 });
-        terminal.clearSelection();
-        toast.info(`No matches for "${searchTerm}"`);
-        return;
-      }
-
-      const currentIndex = searchPosition && searchPosition.current > 0 ? searchPosition.current - 1 : -1;
-      const nextIndex =
-        direction === 1
-          ? (currentIndex + 1 + matches.length) % matches.length
-          : (currentIndex - 1 + matches.length) % matches.length;
-      const nextMatch = matches[nextIndex];
-
-      setSearchPosition({ current: nextIndex + 1, total: matches.length });
-      focusSearchMatch(terminal, nextMatch);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to search task logs");
     }
-  };
-
-  const handleFindNext = () => {
-    moveSearch(1);
-  };
-
-  const handleFindPrevious = () => {
-    moveSearch(-1);
-  };
+  }, [filterResult.renderedLog]);
 
   const handleCopy = async () => {
-    const terminal = xtermRef.current;
-    if (!terminal) {
-      return;
-    }
-
-    const text = extractTerminalText(terminal);
+    const text = filterResult.renderedText.trimEnd();
     if (!text) {
       return;
     }
@@ -338,6 +261,15 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
   };
 
   const emptyState = getEmptyState(logState, status, logSource);
+  const hasRawLogOutput = rawLogText.length > 0;
+  const hasVisibleOutput = searchTerm ? (searchSummary?.visibleLines ?? 0) > 0 : hasRawLogOutput;
+  const filteredEmptyState =
+    searchTerm && hasRawLogOutput
+      ? {
+          title: "No matching log lines",
+          body: "Try a broader filter or disable case-sensitive matching.",
+        }
+      : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-slate-950">
@@ -369,45 +301,9 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
           <input
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter") {
-                return;
-              }
-
-              event.preventDefault();
-              if (event.shiftKey) {
-                handleFindPrevious();
-                return;
-              }
-
-              handleFindNext();
-            }}
-            placeholder="Search logs"
+            placeholder="Filter visible rows"
             className="w-full bg-transparent text-xs text-slate-100 outline-none placeholder:text-slate-500"
           />
-        </div>
-
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-slate-300 hover:bg-slate-800 hover:text-slate-50"
-            onClick={handleFindPrevious}
-            disabled={!searchTerm || !hasLogOutput}
-          >
-            <ChevronUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 text-slate-300 hover:bg-slate-800 hover:text-slate-50"
-            onClick={handleFindNext}
-            disabled={!searchTerm || !hasLogOutput}
-          >
-            <ChevronDown className="h-3.5 w-3.5" />
-          </Button>
         </div>
 
         <button
@@ -428,15 +324,15 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
           variant="ghost"
           className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-300 hover:bg-slate-800 hover:text-slate-50"
           onClick={handleCopy}
-          disabled={!hasLogOutput}
+          disabled={!hasVisibleOutput}
         >
           <Copy className="h-3.5 w-3.5" />
           Copy
         </Button>
 
-        {searchTerm ? (
+        {searchTerm && searchSummary ? (
           <div className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300">
-            {searchPosition ? `${searchPosition.current}/${searchPosition.total}` : "0/0"}
+            {`${searchSummary.visibleLines}/${searchSummary.totalLines} lines`}
           </div>
         ) : null}
 
@@ -457,11 +353,11 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       <div className="relative flex-1 overflow-hidden">
         <div ref={terminalRef} className="h-full w-full overflow-hidden bg-slate-950 px-3 py-2" />
 
-        {!hasLogOutput && emptyState ? (
+        {!hasVisibleOutput && (filteredEmptyState || emptyState) ? (
           <div className="absolute inset-0 flex items-center justify-center bg-slate-950/96 px-6 text-center">
             <div className="max-w-sm space-y-2">
-              <div className="text-sm font-semibold text-slate-100">{emptyState.title}</div>
-              <div className="text-xs leading-relaxed text-slate-400">{emptyState.body}</div>
+              <div className="text-sm font-semibold text-slate-100">{(filteredEmptyState || emptyState)?.title}</div>
+              <div className="text-xs leading-relaxed text-slate-400">{(filteredEmptyState || emptyState)?.body}</div>
             </div>
           </div>
         ) : null}
@@ -562,107 +458,4 @@ function LogBadge({ children, className }: { children: ReactNode; className?: st
       {children}
     </span>
   );
-}
-
-function extractTerminalText(terminal: Terminal): string {
-  return buildSearchLines(terminal)
-    .map((line) => line.text)
-    .join("\n")
-    .trimEnd();
-}
-
-function findSearchMatches(terminal: Terminal, searchTerm: string, caseSensitive: boolean): SearchMatch[] {
-  const normalizedTerm = normalizeSearchText(searchTerm, caseSensitive);
-  if (!normalizedTerm) {
-    return [];
-  }
-
-  const matches: SearchMatch[] = [];
-  const searchableLines = buildSearchLines(terminal);
-
-  for (const line of searchableLines) {
-    const haystack = normalizeSearchText(line.text, caseSensitive);
-    let offset = haystack.indexOf(normalizedTerm);
-
-    while (offset !== -1) {
-      matches.push(offsetToMatch(line, offset, searchTerm.length));
-      offset = haystack.indexOf(normalizedTerm, offset + Math.max(searchTerm.length, 1));
-    }
-  }
-
-  return matches;
-}
-
-function focusSearchMatch(terminal: Terminal, match: SearchMatch) {
-  terminal.clearSelection();
-  terminal.scrollToLine(Math.max(match.row - 2, 0));
-  terminal.select(match.column, match.row, match.length);
-}
-
-function buildSearchLines(terminal: Terminal) {
-  const lines: SearchableLine[] = [];
-  const buffer = terminal.buffer.active;
-  let currentLine = "";
-  let currentRows: Array<{ row: number; text: string }> = [];
-
-  for (let index = 0; index < buffer.length; index += 1) {
-    const line = buffer.getLine(index);
-    if (!line) {
-      continue;
-    }
-
-    const text = line.translateToString(true);
-    currentRows.push({ row: index, text });
-    if (line.isWrapped) {
-      currentLine += text;
-      continue;
-    }
-
-    lines.push({
-      text: currentLine + text,
-      rows: currentRows,
-    });
-    currentLine = "";
-    currentRows = [];
-  }
-
-  if (currentRows.length > 0) {
-    lines.push({
-      text: currentLine,
-      rows: currentRows,
-    });
-  }
-
-  return lines;
-}
-
-function normalizeSearchText(value: string, caseSensitive: boolean) {
-  return caseSensitive ? value : value.toLocaleLowerCase();
-}
-
-function offsetToMatch(
-  line: SearchableLine,
-  offset: number,
-  length: number,
-): SearchMatch {
-  let remaining = offset;
-
-  for (const row of line.rows) {
-    if (remaining < row.text.length) {
-      return {
-        row: row.row,
-        column: remaining,
-        length,
-      };
-    }
-
-    remaining -= row.text.length;
-  }
-
-  const lastRow = line.rows[line.rows.length - 1];
-  return {
-    row: lastRow.row,
-    column: Math.max(lastRow.text.length - 1, 0),
-    length,
-  };
 }

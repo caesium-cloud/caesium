@@ -263,6 +263,7 @@ export function TaskDetailPanel({
           </ScrollArea>
         ) : (
           <LogViewer
+            key={`${jobId}:${runId}:${taskId}`}
             jobId={jobId}
             runId={runId}
             taskId={taskId}
