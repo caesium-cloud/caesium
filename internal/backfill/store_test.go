@@ -63,10 +63,9 @@ func newBackfillTestStore(t *testing.T) (*Store, *gorm.DB, uuid.UUID) {
 	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		sqlDB, sqlErr := db.DB()
-		if sqlErr == nil {
-			_ = sqlDB.Close()
-		}
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
 	})
 
 	require.NoError(t, db.AutoMigrate(models.All...))

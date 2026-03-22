@@ -336,11 +336,11 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 	b := s.createBackfill(job.ID, start, end, 1, "none")
 	s.Require().Equal("running", b.Status)
 
-	// Wait briefly to allow the backfill goroutine to spin up.
-	time.Sleep(2 * time.Second)
-
-	runsBeforeCancel := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
-	s.Require().Equal(1, runsBeforeCancel, "expected exactly one in-flight run before cancellation")
+	var runsBeforeCancel int
+	s.Require().Eventually(func() bool {
+		runsBeforeCancel = countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
+		return runsBeforeCancel == 1
+	}, 10*time.Second, 200*time.Millisecond, "expected exactly one in-flight run before cancellation")
 
 	cancelResp := s.cancelBackfillRequest(job.ID, b.ID)
 	defer cancelResp.Body.Close()
@@ -354,9 +354,9 @@ func (s *IntegrationTestSuite) TestBackfillCancel() {
 	runsAfterCancel := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
 	s.Equal(runsBeforeCancel, runsAfterCancel, "cancel should not launch any additional backfill runs")
 
-	time.Sleep(2 * time.Second)
-	runsAfterDrain := countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID)
-	s.Equal(runsBeforeCancel, runsAfterDrain, "no late backfill runs should appear after cancellation")
+	s.Require().Never(func() bool {
+		return countBackfillRuns(s.listJobRunSummaries(job.ID), b.ID) > runsBeforeCancel
+	}, 2*time.Second, 100*time.Millisecond, "no late backfill runs should appear after cancellation")
 }
 
 // TestBackfillValidationEndBeforeStart verifies that end ≤ start returns 400.
