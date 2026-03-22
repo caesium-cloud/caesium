@@ -2,6 +2,7 @@ package task
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,14 @@ const (
 	// task to prevent unbounded memory/DB usage.  Tasks that need to pass
 	// larger payloads should use shared storage and pass the reference.
 	MaxOutputBytes = 65536 // 64 KB
+
+	// MaxLogSnapshotBytes caps the amount of raw task log text that Caesium
+	// persists for completed tasks. This gives the UI a durable snapshot to
+	// search and review after the runtime itself has been cleaned up.
+	MaxLogSnapshotBytes = 1 << 20 // 1 MiB
 )
+
+var initialScannerBuffer = make([]byte, 0, 64*1024)
 
 // ParseOutput reads container log output and extracts structured key-value
 // pairs from lines matching the ##caesium::output marker protocol.
@@ -39,7 +47,7 @@ const (
 func ParseOutput(logs io.Reader) (map[string]string, error) {
 	result := make(map[string]string)
 
-	scanner := bufio.NewScanner(logs)
+	scanner := newLogScanner(logs)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -98,7 +106,7 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 	var result []string
 	seen := make(map[string]struct{})
 
-	scanner := bufio.NewScanner(logs)
+	scanner := newLogScanner(logs)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -130,8 +138,10 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 // extracting both structured output key-value pairs and branch selection markers
 // without buffering the entire log stream in memory.
 type Markers struct {
-	Output   map[string]string
-	Branches []string
+	Output       map[string]string
+	Branches     []string
+	LogText      string
+	LogTruncated bool
 }
 
 // ParseMarkers reads container log output in a single pass and extracts both
@@ -139,11 +149,40 @@ type Markers struct {
 // markers.  This is more memory-efficient than calling ParseOutput and
 // ParseBranches separately, as it avoids buffering the entire log stream.
 func ParseMarkers(logs io.Reader) (*Markers, error) {
+	return parseMarkers(logs, nil)
+}
+
+// CaptureMarkers reads container log output in a single pass, extracting
+// structured markers while also capturing a bounded raw log snapshot suitable
+// for UI display after the runtime has been cleaned up.
+func CaptureMarkers(logs io.Reader, maxSnapshotBytes int) (*Markers, error) {
+	if maxSnapshotBytes <= 0 {
+		return parseMarkers(logs, nil)
+	}
+
+	snapshot := &boundedSnapshotWriter{limit: maxSnapshotBytes}
+	result, err := parseMarkers(logs, snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if result != nil {
+		result.LogText = snapshot.String()
+		result.LogTruncated = snapshot.truncated
+	}
+	return result, nil
+}
+
+func parseMarkers(logs io.Reader, snapshot io.Writer) (*Markers, error) {
 	output := make(map[string]string)
 	var branches []string
 	branchSeen := make(map[string]struct{})
 
-	scanner := bufio.NewScanner(logs)
+	reader := logs
+	if snapshot != nil {
+		reader = io.TeeReader(logs, snapshot)
+	}
+
+	scanner := newLogScanner(reader)
 	for scanner.Scan() {
 		line := scanner.Text()
 
@@ -193,6 +232,51 @@ func ParseMarkers(logs io.Reader) (*Markers, error) {
 
 	result.Branches = branches
 	return result, nil
+}
+
+type boundedSnapshotWriter struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (w *boundedSnapshotWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	if w.limit <= 0 {
+		w.truncated = true
+		return len(p), nil
+	}
+
+	if w.buf.Len() >= w.limit {
+		w.truncated = true
+		return len(p), nil
+	}
+
+	spaceLeft := w.limit - w.buf.Len()
+	bytesToWrite := p
+	if len(bytesToWrite) > spaceLeft {
+		bytesToWrite = p[:spaceLeft]
+		w.truncated = true
+	}
+
+	if _, err := w.buf.Write(bytesToWrite); err != nil {
+		return 0, err
+	}
+
+	return len(p), nil
+}
+
+func (w *boundedSnapshotWriter) String() string {
+	return w.buf.String()
+}
+
+func newLogScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(initialScannerBuffer, MaxLogSnapshotBytes)
+	return scanner
 }
 
 // NormalizeStepName converts a step name to an environment-variable-safe

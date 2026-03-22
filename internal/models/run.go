@@ -46,6 +46,8 @@ type TaskRun struct {
 	Result                  string            `json:"result,omitempty"`
 	Output                  datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections        datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
+	LogText                 string            `gorm:"type:text" json:"-"`
+	LogTruncated            bool              `gorm:"not null;default:false" json:"-"`
 	Error                   string            `json:"error,omitempty"`
 	RuntimeID               string            `json:"runtime_id,omitempty"`
 	OutstandingPredecessors int               `gorm:"not null" json:"outstanding_predecessors"`

@@ -16,6 +16,7 @@ type Service interface {
 	SetBus(event.Bus)
 	Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*runstorage.JobRun, error)
 	Get(uuid.UUID) (*runstorage.JobRun, error)
+	GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.TaskLogSnapshot, error)
 	List(uuid.UUID) ([]*runstorage.JobRun, error)
 	Latest(uuid.UUID) (*runstorage.JobRun, error)
 }
@@ -60,6 +61,10 @@ func (r *runService) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[
 
 func (r *runService) Get(runID uuid.UUID) (*runstorage.JobRun, error) {
 	return r.store.Get(runID)
+}
+
+func (r *runService) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*runstorage.TaskLogSnapshot, error) {
+	return r.store.GetTaskLogSnapshot(runID, taskID)
 }
 
 func (r *runService) List(jobID uuid.UUID) ([]*runstorage.JobRun, error) {

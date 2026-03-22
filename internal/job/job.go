@@ -541,8 +541,8 @@ func (j *job) Run(ctx context.Context) error {
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
 	// It returns the atom result string, any parsed task outputs, any branch
-	// selections (for branch-type tasks), and any error.
-	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, error) {
+	// selections (for branch-type tasks), a persisted log snapshot, and any error.
+	executeAtom := func(taskCtx context.Context, taskID uuid.UUID, attempt int, runner *atomRunner, extraEnv map[string]string) (string, map[string]string, []string, *run.TaskLogSnapshot, error) {
 		atomName := fmt.Sprintf("%s-%s", taskID, runID)
 		if attempt > 1 {
 			atomName = fmt.Sprintf("%s-attempt%d", atomName, attempt)
@@ -572,11 +572,11 @@ func (j *job) Run(ctx context.Context) error {
 			Spec:    spec,
 		})
 		if err != nil {
-			return "", nil, nil, err
+			return "", nil, nil, nil, err
 		}
 
 		if err := store.StartTask(runID, taskID, a.ID()); err != nil {
-			return "", nil, nil, err
+			return "", nil, nil, nil, err
 		}
 
 		waitResult := make(chan struct {
@@ -598,18 +598,18 @@ func (j *job) Run(ctx context.Context) error {
 					ID:    a.ID(),
 					Force: true,
 				}); stopErr != nil {
-					return "", nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
+					return "", nil, nil, nil, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskID, taskTimeout, a.ID(), stopErr)
 				}
 				// Distinguish run-level timeout from task-level timeout.
 				if ctx.Err() != nil {
-					return "", nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
+					return "", nil, nil, nil, fmt.Errorf("task %s cancelled: %w", taskID, ctx.Err())
 				}
-				return "", nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
+				return "", nil, nil, nil, fmt.Errorf("task %s timed out after %s", taskID, taskTimeout)
 			}
-			return "", nil, nil, taskCtx.Err()
+			return "", nil, nil, nil, taskCtx.Err()
 		case result := <-waitResult:
 			if result.err != nil {
-				return "", nil, nil, result.err
+				return "", nil, nil, nil, result.err
 			}
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
@@ -618,9 +618,10 @@ func (j *job) Run(ctx context.Context) error {
 			// pass over the log stream (no full buffering).
 			var taskOutput map[string]string
 			var branchNames []string
+			var logSnapshot *run.TaskLogSnapshot
 			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 			if logErr == nil {
-				markers, parseErr := pkgtask.ParseMarkers(logStream)
+				markers, parseErr := pkgtask.CaptureMarkers(logStream, pkgtask.MaxLogSnapshotBytes)
 				if closeErr := logStream.Close(); closeErr != nil {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}
@@ -629,6 +630,12 @@ func (j *job) Run(ctx context.Context) error {
 				} else if markers != nil {
 					taskOutput = markers.Output
 					branchNames = markers.Branches
+					if markers.LogText != "" || markers.LogTruncated {
+						logSnapshot = &run.TaskLogSnapshot{
+							Text:      markers.LogText,
+							Truncated: markers.LogTruncated,
+						}
+					}
 				}
 			}
 
@@ -636,7 +643,7 @@ func (j *job) Run(ctx context.Context) error {
 				ID:    a.ID(),
 				Force: true,
 			})
-			return string(a.Result()), taskOutput, branchNames, stopErr
+			return string(a.Result()), taskOutput, branchNames, logSnapshot, stopErr
 		}
 	}
 
@@ -676,13 +683,16 @@ func (j *job) Run(ctx context.Context) error {
 				taskCtx, cancel = context.WithTimeout(ctx, taskTimeout)
 			}
 
-			result, output, branchNames, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
+			result, output, branchNames, logSnapshot, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
 			cancel()
 
 			if execErr == nil {
 				completeResult, completeErr := store.CompleteTaskWithResult(runID, taskID, result, output, branchNames)
 				if completeErr != nil {
 					return nil, completeErr
+				}
+				if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+					log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 				}
 				if len(output) > 0 {
 					taskOutputs[taskID] = output

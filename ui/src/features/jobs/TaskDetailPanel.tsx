@@ -1,7 +1,4 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
-import { Terminal } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import "xterm/css/xterm.css";
 import {
   X,
   Info,
@@ -14,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import type { JobTask, TaskRun } from "@/lib/api";
+import { LogViewer } from "./LogViewer";
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -27,6 +25,11 @@ interface TaskDetailPanelProps {
 
 type TabId = "details" | "logs";
 
+const taskPanelDefaultWidth = 520;
+const taskPanelMinWidth = 420;
+const taskPanelMaxWidth = 960;
+const taskPanelWidthStorageKey = "caesium.task-detail-panel.width";
+
 export function TaskDetailPanel({
   taskId,
   task,
@@ -38,6 +41,8 @@ export function TaskDetailPanel({
 }: TaskDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("logs");
   const [isVisible, setIsVisible] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(() => getInitialPanelWidth());
+  const [isResizing, setIsResizing] = useState(false);
   // Tracks the pending close animation timer so stale timers can be cancelled.
   // Without this, quickly switching from task A → B could have A's timer fire
   // and call onClose after B's panel has already opened.
@@ -75,19 +80,69 @@ export function TaskDetailPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [handleClose]);
 
+  useEffect(() => {
+    const handleWindowResize = () => {
+      setPanelWidth((current) => clampPanelWidth(current, window.innerWidth));
+    };
+
+    window.addEventListener("resize", handleWindowResize);
+    return () => window.removeEventListener("resize", handleWindowResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizing) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      setPanelWidth(clampPanelWidth(window.innerWidth - event.clientX, window.innerWidth));
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [isResizing]);
+
+  useEffect(() => {
+    persistPanelWidth(panelWidth);
+  }, [panelWidth]);
+
   const resolvedType = taskType || "task";
   const status = runTask?.status ?? "pending";
 
   return (
     <div
+      data-testid="task-detail-panel"
       className={cn(
-        "absolute inset-y-0 right-0 z-20 flex w-[520px] max-w-[85%] flex-col",
+        "absolute inset-y-0 right-0 z-20 flex flex-col",
         "border-l border-border/60 bg-card/95 backdrop-blur-xl",
         "shadow-[-8px_0_32px_rgba(0,0,0,0.25)]",
         "transition-transform duration-200 ease-out",
         isVisible ? "translate-x-0" : "translate-x-full",
+        isResizing ? "select-none" : "",
       )}
+      style={{ width: `${panelWidth}px`, maxWidth: "90vw" }}
     >
+      <div
+        aria-label="Resize task panel"
+        data-testid="task-detail-panel-resize-handle"
+        className="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          setIsResizing(true);
+        }}
+      >
+        <div className="mx-auto h-full w-px bg-border/40 transition-colors hover:bg-primary/60" />
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -207,123 +262,17 @@ export function TaskDetailPanel({
             </div>
           </ScrollArea>
         ) : (
-          <EmbeddedLogViewer
+          <LogViewer
+            key={`${jobId}:${runId}:${taskId}`}
             jobId={jobId}
             runId={runId}
             taskId={taskId}
             error={runTask?.error}
             status={status}
+            sizeVersion={panelWidth}
           />
         )}
       </div>
-    </div>
-  );
-}
-
-/* ── Embedded log viewer (no chrome, fills parent) ── */
-
-function EmbeddedLogViewer({
-  jobId,
-  runId,
-  taskId,
-  error,
-  status,
-}: {
-  jobId: string;
-  runId: string;
-  taskId: string;
-  error?: string | null;
-  status?: string;
-}) {
-  const terminalRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!terminalRef.current) return;
-
-    const term = new Terminal({
-      cursorBlink: false,
-      cursorStyle: "bar",
-      disableStdin: true,
-      convertEol: true,
-      fontSize: 12,
-      fontFamily: 'JetBrains Mono, Menlo, Monaco, Consolas, "Courier New", monospace',
-      theme: {
-        background: "#0f172a",
-      },
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(terminalRef.current);
-    fitAddon.fit();
-
-    const abortController = new AbortController();
-
-    async function streamLogs() {
-      try {
-        const response = await fetch(
-          `/v1/jobs/${jobId}/runs/${runId}/logs?${new URLSearchParams({ task_id: taskId })}`,
-          { signal: abortController.signal },
-        );
-        if (!response.ok) {
-          term.writeln(`\x1b[31mError: ${await response.text()}\x1b[0m`);
-          return;
-        }
-        const reader = response.body?.getReader();
-        if (!reader) return;
-        const decoder = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          term.write(decoder.decode(value));
-        }
-      } catch (err: unknown) {
-        if (err instanceof Error && err.name !== "AbortError") {
-          term.writeln(`\x1b[31mConnection error: ${err.message}\x1b[0m`);
-        }
-      }
-    }
-
-    streamLogs();
-
-    const handleResize = () => fitAddon.fit();
-    window.addEventListener("resize", handleResize);
-
-    return () => {
-      abortController.abort();
-      term.dispose();
-      window.removeEventListener("resize", handleResize);
-    };
-  }, [jobId, runId, taskId]);
-
-  return (
-    <div className="flex h-full flex-col">
-      {error && status === "skipped" ? (
-        <div className="px-4 py-2.5 bg-slate-500/10 border-b border-slate-500/20 flex gap-3 items-start">
-          <SkipForward className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-              Skipped
-            </span>
-            <span className="text-[10px] text-slate-400/80 font-mono leading-relaxed">
-              {error}
-            </span>
-          </div>
-        </div>
-      ) : error ? (
-        <div className="px-4 py-2.5 bg-red-500/10 border-b border-red-500/20 flex gap-3 items-start">
-          <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">
-              Error
-            </span>
-            <span className="text-[10px] text-red-400 font-mono leading-relaxed">
-              {error}
-            </span>
-          </div>
-        </div>
-      ) : null}
-      <div ref={terminalRef} className="flex-1 overflow-hidden bg-[#0f172a] p-2" />
     </div>
   );
 }
@@ -409,4 +358,28 @@ function MetadataCell({
 function formatAttempts(runTask?: TaskRun): string {
   if (!runTask?.attempt && !runTask?.max_attempts) return "1 / 1";
   return `${runTask.attempt ?? 1} / ${runTask.max_attempts ?? 1}`;
+}
+
+function getInitialPanelWidth() {
+  const storedWidth =
+    typeof window === "undefined"
+      ? null
+      : window.localStorage.getItem(taskPanelWidthStorageKey);
+  const parsedWidth = storedWidth ? Number.parseInt(storedWidth, 10) : taskPanelDefaultWidth;
+  const safeWidth = Number.isFinite(parsedWidth) ? parsedWidth : taskPanelDefaultWidth;
+  return clampPanelWidth(safeWidth, typeof window === "undefined" ? undefined : window.innerWidth);
+}
+
+function clampPanelWidth(width: number, viewportWidth = 1280) {
+  const maxWidth = Math.min(taskPanelMaxWidth, Math.floor(viewportWidth * 0.9));
+  const minWidth = Math.min(taskPanelMinWidth, maxWidth);
+  return Math.min(maxWidth, Math.max(minWidth, Math.round(width)));
+}
+
+function persistPanelWidth(width: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(taskPanelWidthStorageKey, String(width));
 }
