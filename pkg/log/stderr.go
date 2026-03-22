@@ -7,7 +7,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -20,22 +21,22 @@ var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 // the Go runtime still reaches the terminal.
 func CaptureStderr() error {
 	// Preserve the original stderr fd for crash output.
-	origFd, err := syscall.Dup(int(os.Stderr.Fd()))
+	origFd, err := unix.Dup(int(os.Stderr.Fd()))
 	if err != nil {
 		return err
 	}
 
 	r, w, err := os.Pipe()
 	if err != nil {
-		syscall.Close(origFd)
+		unix.Close(origFd)
 		return err
 	}
 
 	// Replace fd 2 with the write end of our pipe.
-	if err := syscall.Dup2(int(w.Fd()), int(os.Stderr.Fd())); err != nil {
+	if err := unix.Dup2(int(w.Fd()), int(os.Stderr.Fd())); err != nil {
 		r.Close()
 		w.Close()
-		syscall.Close(origFd)
+		unix.Close(origFd)
 		return err
 	}
 	w.Close() // fd 2 is now the write end; close the extra copy
@@ -66,8 +67,8 @@ func CaptureStderr() error {
 			}
 		}
 		// If the pipe breaks (e.g. during shutdown), restore stderr.
-		syscall.Dup2(origFd, 2)
-		syscall.Close(origFd)
+		unix.Dup2(origFd, 2)
+		unix.Close(origFd)
 	}()
 
 	return nil
