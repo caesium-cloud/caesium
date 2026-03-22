@@ -1,7 +1,6 @@
 import { type ReactNode, useEffect, useRef, useState } from "react";
 import { Terminal } from "xterm";
 import { FitAddon } from "xterm-addon-fit";
-import { SearchAddon } from "@xterm/addon-search";
 import "xterm/css/xterm.css";
 import {
   AlertTriangle,
@@ -28,12 +27,31 @@ interface LogViewerProps {
   taskId: string;
   error?: string | null;
   status?: string;
+  sizeVersion?: number;
 }
 
-export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProps) {
+interface SearchMatch {
+  row: number;
+  column: number;
+  length: number;
+}
+
+interface SearchPosition {
+  current: number;
+  total: number;
+}
+
+interface SearchableLine {
+  text: string;
+  rows: Array<{ row: number; text: string }>;
+}
+
+export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: LogViewerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
-  const searchAddonRef = useRef<SearchAddon | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchTermRef = useRef("");
+  const searchRefreshFrameRef = useRef<number | null>(null);
   const [logState, setLogState] = useState<LogState>("loading");
   const [logSource, setLogSource] = useState<LogSource>(null);
   const [logTruncated, setLogTruncated] = useState(false);
@@ -41,6 +59,12 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
   const [hasLogOutput, setHasLogOutput] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
+  const [searchPosition, setSearchPosition] = useState<SearchPosition | null>(null);
+  const [searchRevision, setSearchRevision] = useState(0);
+
+  useEffect(() => {
+    searchTermRef.current = searchTerm;
+  }, [searchTerm]);
 
   useEffect(() => {
     if (!terminalRef.current) {
@@ -81,25 +105,43 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
     });
 
     const fitAddon = new FitAddon();
-    const searchAddon = new SearchAddon({ highlightLimit: 2000 });
     terminal.loadAddon(fitAddon);
-    terminal.loadAddon(searchAddon);
     terminal.open(terminalRef.current);
     fitAddon.fit();
 
     xtermRef.current = terminal;
-    searchAddonRef.current = searchAddon;
+    fitAddonRef.current = fitAddon;
 
     const handleResize = () => fitAddon.fit();
     window.addEventListener("resize", handleResize);
 
     return () => {
       window.removeEventListener("resize", handleResize);
-      searchAddonRef.current = null;
+      if (searchRefreshFrameRef.current !== null) {
+        cancelAnimationFrame(searchRefreshFrameRef.current);
+      }
+      fitAddonRef.current = null;
       xtermRef.current = null;
       terminal.dispose();
     };
   }, []);
+
+  useEffect(() => {
+    if (sizeVersion === undefined) {
+      return;
+    }
+
+    const fitAddon = fitAddonRef.current;
+    if (!fitAddon) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      fitAddon.fit();
+    });
+
+    return () => cancelAnimationFrame(frame);
+  }, [sizeVersion]);
 
   useEffect(() => {
     const terminal = xtermRef.current;
@@ -114,8 +156,21 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
     setLogSource(null);
     setLogTruncated(false);
     setLogState("loading");
+    setSearchPosition(null);
+    term.clearSelection();
 
     const abortController = new AbortController();
+
+    const scheduleSearchRefresh = () => {
+      if (!searchTermRef.current || searchRefreshFrameRef.current !== null) {
+        return;
+      }
+
+      searchRefreshFrameRef.current = requestAnimationFrame(() => {
+        searchRefreshFrameRef.current = null;
+        setSearchRevision((current) => current + 1);
+      });
+    };
 
     async function streamLogs() {
       try {
@@ -165,7 +220,7 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
             sawOutput = true;
             setHasLogOutput(true);
           }
-          term.write(chunk);
+          term.write(chunk, scheduleSearchRefresh);
         }
 
         const tail = decoder.decode();
@@ -174,7 +229,7 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
             sawOutput = true;
             setHasLogOutput(true);
           }
-          term.write(tail);
+          term.write(tail, scheduleSearchRefresh);
         }
 
         setHasLogOutput(sawOutput);
@@ -196,39 +251,71 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
   }, [jobId, runId, taskId]);
 
   useEffect(() => {
-    const searchAddon = searchAddonRef.current;
-    if (!searchAddon) {
+    const terminal = xtermRef.current;
+    if (!terminal) {
       return;
     }
 
     if (!searchTerm) {
-      searchAddon.clearDecorations();
+      setSearchPosition(null);
+      terminal.clearSelection();
       return;
     }
 
-    searchAddon.findNext(searchTerm, searchOptions(caseSensitive, true));
-  }, [caseSensitive, searchTerm]);
+    try {
+      const matches = findSearchMatches(terminal, searchTerm, caseSensitive);
 
-  const handleFindNext = () => {
-    const searchAddon = searchAddonRef.current;
-    if (!searchAddon || !searchTerm) {
+      if (matches.length === 0) {
+        setSearchPosition({ current: 0, total: 0 });
+        terminal.clearSelection();
+        return;
+      }
+
+      setSearchPosition({ current: 1, total: matches.length });
+      focusSearchMatch(terminal, matches[0]);
+    } catch (err) {
+      setSearchPosition({ current: 0, total: 0 });
+      terminal.clearSelection();
+      toast.error(err instanceof Error ? err.message : "Failed to search task logs");
+    }
+  }, [caseSensitive, searchRevision, searchTerm]);
+
+  const moveSearch = (direction: 1 | -1) => {
+    const terminal = xtermRef.current;
+    if (!terminal || !searchTerm) {
       return;
     }
 
-    if (!searchAddon.findNext(searchTerm, searchOptions(caseSensitive, false))) {
-      toast.info(`No matches for "${searchTerm}"`);
+    try {
+      const matches = findSearchMatches(terminal, searchTerm, caseSensitive);
+
+      if (matches.length === 0) {
+        setSearchPosition({ current: 0, total: 0 });
+        terminal.clearSelection();
+        toast.info(`No matches for "${searchTerm}"`);
+        return;
+      }
+
+      const currentIndex = searchPosition && searchPosition.current > 0 ? searchPosition.current - 1 : -1;
+      const nextIndex =
+        direction === 1
+          ? (currentIndex + 1 + matches.length) % matches.length
+          : (currentIndex - 1 + matches.length) % matches.length;
+      const nextMatch = matches[nextIndex];
+
+      setSearchPosition({ current: nextIndex + 1, total: matches.length });
+      focusSearchMatch(terminal, nextMatch);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to search task logs");
     }
   };
 
-  const handleFindPrevious = () => {
-    const searchAddon = searchAddonRef.current;
-    if (!searchAddon || !searchTerm) {
-      return;
-    }
+  const handleFindNext = () => {
+    moveSearch(1);
+  };
 
-    if (!searchAddon.findPrevious(searchTerm, searchOptions(caseSensitive, false))) {
-      toast.info(`No matches for "${searchTerm}"`);
-    }
+  const handleFindPrevious = () => {
+    moveSearch(-1);
   };
 
   const handleCopy = async () => {
@@ -282,6 +369,19 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
           <input
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter") {
+                return;
+              }
+
+              event.preventDefault();
+              if (event.shiftKey) {
+                handleFindPrevious();
+                return;
+              }
+
+              handleFindNext();
+            }}
             placeholder="Search logs"
             className="w-full bg-transparent text-xs text-slate-100 outline-none placeholder:text-slate-500"
           />
@@ -334,6 +434,12 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
           Copy
         </Button>
 
+        {searchTerm ? (
+          <div className="rounded-md border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-slate-300">
+            {searchPosition ? `${searchPosition.current}/${searchPosition.total}` : "0/0"}
+          </div>
+        ) : null}
+
         <div className="ml-auto flex flex-wrap items-center gap-2 text-[10px] font-semibold uppercase tracking-wide">
           <LogBadge>{renderStateLabel(logState)}</LogBadge>
           {logSource === "live" ? <LogBadge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-200">Live</LogBadge> : null}
@@ -362,21 +468,6 @@ export function LogViewer({ jobId, runId, taskId, error, status }: LogViewerProp
       </div>
     </div>
   );
-}
-
-function searchOptions(caseSensitive: boolean, incremental: boolean) {
-  return {
-    caseSensitive,
-    incremental,
-    decorations: {
-      matchBackground: "#1e293b",
-      matchBorder: "#475569",
-      matchOverviewRuler: "#334155",
-      activeMatchBackground: "#0f766e",
-      activeMatchBorder: "#14b8a6",
-      activeMatchColorOverviewRuler: "#14b8a6",
-    },
-  };
 }
 
 function parseNoContentState(state: string | null): LogState {
@@ -474,9 +565,45 @@ function LogBadge({ children, className }: { children: ReactNode; className?: st
 }
 
 function extractTerminalText(terminal: Terminal): string {
-  const lines: string[] = [];
+  return buildSearchLines(terminal)
+    .map((line) => line.text)
+    .join("\n")
+    .trimEnd();
+}
+
+function findSearchMatches(terminal: Terminal, searchTerm: string, caseSensitive: boolean): SearchMatch[] {
+  const normalizedTerm = normalizeSearchText(searchTerm, caseSensitive);
+  if (!normalizedTerm) {
+    return [];
+  }
+
+  const matches: SearchMatch[] = [];
+  const searchableLines = buildSearchLines(terminal);
+
+  for (const line of searchableLines) {
+    const haystack = normalizeSearchText(line.text, caseSensitive);
+    let offset = haystack.indexOf(normalizedTerm);
+
+    while (offset !== -1) {
+      matches.push(offsetToMatch(line, offset, searchTerm.length));
+      offset = haystack.indexOf(normalizedTerm, offset + Math.max(searchTerm.length, 1));
+    }
+  }
+
+  return matches;
+}
+
+function focusSearchMatch(terminal: Terminal, match: SearchMatch) {
+  terminal.clearSelection();
+  terminal.scrollToLine(Math.max(match.row - 2, 0));
+  terminal.select(match.column, match.row, match.length);
+}
+
+function buildSearchLines(terminal: Terminal) {
+  const lines: SearchableLine[] = [];
   const buffer = terminal.buffer.active;
   let currentLine = "";
+  let currentRows: Array<{ row: number; text: string }> = [];
 
   for (let index = 0; index < buffer.length; index += 1) {
     const line = buffer.getLine(index);
@@ -485,20 +612,57 @@ function extractTerminalText(terminal: Terminal): string {
     }
 
     const text = line.translateToString(true);
+    currentRows.push({ row: index, text });
     if (line.isWrapped) {
       currentLine += text;
       continue;
     }
 
-    if (currentLine) {
-      lines.push(currentLine);
+    lines.push({
+      text: currentLine + text,
+      rows: currentRows,
+    });
+    currentLine = "";
+    currentRows = [];
+  }
+
+  if (currentRows.length > 0) {
+    lines.push({
+      text: currentLine,
+      rows: currentRows,
+    });
+  }
+
+  return lines;
+}
+
+function normalizeSearchText(value: string, caseSensitive: boolean) {
+  return caseSensitive ? value : value.toLocaleLowerCase();
+}
+
+function offsetToMatch(
+  line: SearchableLine,
+  offset: number,
+  length: number,
+): SearchMatch {
+  let remaining = offset;
+
+  for (const row of line.rows) {
+    if (remaining < row.text.length) {
+      return {
+        row: row.row,
+        column: remaining,
+        length,
+      };
     }
-    currentLine = text;
+
+    remaining -= row.text.length;
   }
 
-  if (currentLine) {
-    lines.push(currentLine);
-  }
-
-  return lines.join("\n").trimEnd();
+  const lastRow = line.rows[line.rows.length - 1];
+  return {
+    row: lastRow.row,
+    column: Math.max(lastRow.text.length - 1, 0),
+    length,
+  };
 }

@@ -25,6 +25,11 @@ interface TaskDetailPanelProps {
 
 type TabId = "details" | "logs";
 
+const taskPanelDefaultWidth = 520;
+const taskPanelMinWidth = 420;
+const taskPanelMaxWidth = 960;
+const taskPanelWidthStorageKey = "caesium.task-detail-panel.width";
+
 export function TaskDetailPanel({
   taskId,
   task,
@@ -36,6 +41,8 @@ export function TaskDetailPanel({
 }: TaskDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>("logs");
   const [isVisible, setIsVisible] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(() => getInitialPanelWidth());
+  const [isResizing, setIsResizing] = useState(false);
   // Tracks the pending close animation timer so stale timers can be cancelled.
   // Without this, quickly switching from task A → B could have A's timer fire
   // and call onClose after B's panel has already opened.
@@ -73,19 +80,69 @@ export function TaskDetailPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [handleClose]);
 
+  useEffect(() => {
+    const handleWindowResize = () => {
+      setPanelWidth((current) => clampPanelWidth(current, window.innerWidth));
+    };
+
+    window.addEventListener("resize", handleWindowResize);
+    return () => window.removeEventListener("resize", handleWindowResize);
+  }, []);
+
+  useEffect(() => {
+    if (!isResizing) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      setPanelWidth(clampPanelWidth(window.innerWidth - event.clientX, window.innerWidth));
+    };
+
+    const handlePointerUp = () => {
+      setIsResizing(false);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [isResizing]);
+
+  useEffect(() => {
+    persistPanelWidth(panelWidth);
+  }, [panelWidth]);
+
   const resolvedType = taskType || "task";
   const status = runTask?.status ?? "pending";
 
   return (
     <div
+      data-testid="task-detail-panel"
       className={cn(
-        "absolute inset-y-0 right-0 z-20 flex w-[520px] max-w-[85%] flex-col",
+        "absolute inset-y-0 right-0 z-20 flex flex-col",
         "border-l border-border/60 bg-card/95 backdrop-blur-xl",
         "shadow-[-8px_0_32px_rgba(0,0,0,0.25)]",
         "transition-transform duration-200 ease-out",
         isVisible ? "translate-x-0" : "translate-x-full",
+        isResizing ? "select-none" : "",
       )}
+      style={{ width: `${panelWidth}px`, maxWidth: "90vw" }}
     >
+      <div
+        aria-label="Resize task panel"
+        data-testid="task-detail-panel-resize-handle"
+        className="absolute inset-y-0 left-0 z-10 w-2 -translate-x-1/2 cursor-col-resize"
+        onPointerDown={(event) => {
+          event.preventDefault();
+          setIsResizing(true);
+        }}
+      >
+        <div className="mx-auto h-full w-px bg-border/40 transition-colors hover:bg-primary/60" />
+      </div>
+
       {/* Header */}
       <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
         <div className="flex items-center gap-3 min-w-0">
@@ -211,6 +268,7 @@ export function TaskDetailPanel({
             taskId={taskId}
             error={runTask?.error}
             status={status}
+            sizeVersion={panelWidth}
           />
         )}
       </div>
@@ -299,4 +357,28 @@ function MetadataCell({
 function formatAttempts(runTask?: TaskRun): string {
   if (!runTask?.attempt && !runTask?.max_attempts) return "1 / 1";
   return `${runTask.attempt ?? 1} / ${runTask.max_attempts ?? 1}`;
+}
+
+function getInitialPanelWidth() {
+  const storedWidth =
+    typeof window === "undefined"
+      ? null
+      : window.localStorage.getItem(taskPanelWidthStorageKey);
+  const parsedWidth = storedWidth ? Number.parseInt(storedWidth, 10) : taskPanelDefaultWidth;
+  const safeWidth = Number.isFinite(parsedWidth) ? parsedWidth : taskPanelDefaultWidth;
+  return clampPanelWidth(safeWidth, typeof window === "undefined" ? undefined : window.innerWidth);
+}
+
+function clampPanelWidth(width: number, viewportWidth = 1280) {
+  const maxWidth = Math.min(taskPanelMaxWidth, Math.floor(viewportWidth * 0.9));
+  const minWidth = Math.min(taskPanelMinWidth, maxWidth);
+  return Math.min(maxWidth, Math.max(minWidth, Math.round(width)));
+}
+
+function persistPanelWidth(width: number) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(taskPanelWidthStorageKey, String(width));
 }
