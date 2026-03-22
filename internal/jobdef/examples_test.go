@@ -28,6 +28,7 @@ func (s *ExamplesSuite) TestExampleManifestsConformToSchema() {
 		"explicit-links.job.yaml":   {"explicit-links"},
 		"fanout-join.job.yaml":      {"fanout-join-demo"},
 		"http-ops-debug.job.yaml":   {"http-ops-debug"},
+		"log-streaming.job.yaml":    {"log-streaming-demo"},
 		"callback-failure.job.yaml": {"callback-failure-demo"},
 		"run-history.job.yaml":      {"cron-success-fast", "cron-failure-fast"},
 	}

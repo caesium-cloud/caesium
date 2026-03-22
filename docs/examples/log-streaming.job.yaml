@@ -1,0 +1,53 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: log-streaming-demo
+  labels:
+    team: platform
+    scenario: log-streaming
+  annotations:
+    owner: platform-oncall
+    purpose: "Exercise live log streaming, ANSI color, search, and retained-log viewing in the web UI"
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/demo/log-streaming"
+    secret: "log-demo-secret"
+steps:
+  - name: emit-live-logs
+    engine: docker
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        total_batches=18
+        batch=1
+
+        echo "Starting log streaming showcase"
+        echo "This task emits colored text, plain text, and JSON over ~18 seconds"
+
+        while [ "$batch" -le "$total_batches" ]; do
+          ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          rows=$((batch * 125))
+          latency_ms=$((25 + batch * 9))
+
+          printf '\033[36m[%s] phase=stream batch=%02d status=running\033[0m\n' "$ts" "$batch"
+          printf 'batch=%02d rows=%04d latency_ms=%03d worker=demo-node\n' "$batch" "$rows" "$latency_ms"
+          printf '\033[32mmetrics rows_processed=%04d throughput_rps=%03d\033[0m\n' "$rows" "$((40 + batch * 3))"
+
+          if [ $((batch % 4)) -eq 0 ]; then
+            printf '\033[33mwarning batch=%02d upstream_latency_ms=%03d retryable=true\033[0m\n' "$batch" "$((latency_ms + 40))"
+          fi
+
+          if [ $((batch % 6)) -eq 0 ]; then
+            printf '{"timestamp":"%s","level":"info","batch":%d,"status":"streaming","rows":%d}\n' "$ts" "$batch" "$rows"
+          fi
+
+          sleep 1
+          batch=$((batch + 1))
+        done
+
+        echo '##caesium::output {"batches_emitted": "18", "log_profile": "streaming-demo"}'
+        printf '\033[35mstream complete: retained logs should remain available after cleanup\033[0m\n'
