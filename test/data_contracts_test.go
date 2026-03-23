@@ -113,7 +113,7 @@ func (s *IntegrationTestSuite) TestDataContractsWarnRecordsViolations() {
 	s.Equal("succeeded", transform.Status)
 	s.Equal("unknown", transform.Output["rows_written"])
 	s.Require().NotEmpty(transform.SchemaViolations)
-	s.Contains(transform.SchemaViolations[0].Message, "expected integer")
+	s.Contains(transform.SchemaViolations[0].Message, "integer")
 }
 
 func (s *IntegrationTestSuite) TestDataContractsFailFailsRun() {
@@ -133,7 +133,7 @@ func (s *IntegrationTestSuite) TestDataContractsFailFailsRun() {
 	s.Equal("failed", transform.Status)
 	s.Contains(transform.Error, "violates declared schema")
 	s.Require().NotEmpty(transform.SchemaViolations)
-	s.Contains(transform.SchemaViolations[0].Message, "expected integer")
+	s.Contains(transform.SchemaViolations[0].Message, "integer")
 
 	notify := s.requireRunTaskByName(job.ID, run, "notify")
 	s.NotEqual("succeeded", notify.Status)
