@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
@@ -138,9 +139,13 @@ func instanceLocationStr(parts []string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	result := ""
+
+	var b strings.Builder
 	for _, p := range parts {
-		result += "/" + p
+		b.WriteByte('/')
+		p = strings.ReplaceAll(p, "~", "~0")
+		p = strings.ReplaceAll(p, "/", "~1")
+		b.WriteString(p)
 	}
-	return result
+	return b.String()
 }

@@ -136,3 +136,11 @@ func TestValidateOutput(t *testing.T) {
 		})
 	}
 }
+
+func TestInstanceLocationStrEscapesJSONPointerTokens(t *testing.T) {
+	t.Parallel()
+
+	got := instanceLocationStr([]string{"root", "foo/bar", "tilde~key"})
+
+	require.Equal(t, "/root/foo~1bar/tilde~0key", got)
+}

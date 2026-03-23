@@ -85,6 +85,10 @@ func DAG(c *echo.Context) error {
 	// contractEdges: set of (from,to) edges where the consumer has inputSchema referencing the producer.
 	type edgeKey struct{ from, to uuid.UUID }
 	contractEdges := make(map[edgeKey]struct{})
+	taskIDByName := make(map[string]uuid.UUID, len(tasks))
+	for _, t := range tasks {
+		taskIDByName[t.Name] = t.ID
+	}
 	for _, t := range tasks {
 		if len(t.InputSchema) == 0 {
 			continue
@@ -95,11 +99,8 @@ func DAG(c *echo.Context) error {
 		}
 		// Find predecessor tasks by name and mark their edges as contract-bearing.
 		for producerName := range inputSchema {
-			for _, candidate := range tasks {
-				if candidate.Name == producerName {
-					contractEdges[edgeKey{from: candidate.ID, to: t.ID}] = struct{}{}
-					break
-				}
+			if producerID, ok := taskIDByName[producerName]; ok {
+				contractEdges[edgeKey{from: producerID, to: t.ID}] = struct{}{}
 			}
 		}
 	}

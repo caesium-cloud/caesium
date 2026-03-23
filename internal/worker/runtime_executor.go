@@ -21,6 +21,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -305,22 +306,21 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 // It is a no-op when the task has no schema or the job has schemaValidation disabled.
 // On violations, it persists them and either logs (warn) or returns an error (fail).
 func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
-	var task models.Task
-	if err := e.store.DB().
-		Select("id", "job_id", "output_schema").
-		First(&task, "id = ?", taskRun.TaskID).Error; err != nil || len(task.OutputSchema) == 0 {
-		return nil
+	var result struct {
+		OutputSchema     datatypes.JSON `gorm:"column:output_schema"`
+		SchemaValidation string         `gorm:"column:schema_validation"`
 	}
-
-	var job models.Job
 	if err := e.store.DB().
-		Select("id", "schema_validation").
-		First(&job, "id = ?", task.JobID).Error; err != nil || job.SchemaValidation == "" {
+		Table("tasks").
+		Select("tasks.output_schema, jobs.schema_validation").
+		Joins("JOIN jobs ON jobs.id = tasks.job_id").
+		Where("tasks.id = ?", taskRun.TaskID).
+		Take(&result).Error; err != nil || len(result.OutputSchema) == 0 || result.SchemaValidation == "" {
 		return nil
 	}
 
 	var schemaRaw map[string]any
-	if err := json.Unmarshal(task.OutputSchema, &schemaRaw); err != nil {
+	if err := json.Unmarshal(result.OutputSchema, &schemaRaw); err != nil {
 		log.Warn("failed to unmarshal task output schema", "task_id", taskRun.TaskID, "error", err)
 		return nil
 	}
@@ -339,7 +339,7 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		log.Warn("failed to persist schema violations", "task_id", taskRun.TaskID, "error", saveErr)
 	}
 
-	if job.SchemaValidation == jobdef.SchemaValidationFail {
+	if result.SchemaValidation == jobdef.SchemaValidationFail {
 		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskRun.TaskID, len(violations))
 	}
 	return nil
