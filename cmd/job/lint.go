@@ -186,6 +186,16 @@ func contractSummary(steps []jobdef.Step) string {
 		return ""
 	}
 
+	sort.Slice(contracts, func(i, j int) bool {
+		if contracts[i].producer != contracts[j].producer {
+			return contracts[i].producer < contracts[j].producer
+		}
+		if contracts[i].consumer != contracts[j].consumer {
+			return contracts[i].consumer < contracts[j].consumer
+		}
+		return strings.Join(contracts[i].keys, "\x00") < strings.Join(contracts[j].keys, "\x00")
+	})
+
 	parts := make([]string, 0, len(contracts))
 	for _, c := range contracts {
 		if len(c.keys) > 0 {

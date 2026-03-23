@@ -17,7 +17,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
-	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -282,10 +281,8 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 
 	// Runtime schema validation: if the task declares an outputSchema and the job has
 	// schemaValidation enabled, validate the actual output against the schema.
-	if taskOutput != nil {
-		if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
-			return err
-		}
+	if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
+		return err
 	}
 
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
@@ -301,53 +298,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	return nil
 }
 
-// runSchemaValidation validates the task's output against its declared outputSchema.
-// It is a no-op when the task has no schema or the job has schemaValidation disabled.
-// On violations, it persists them and either logs (warn) or returns an error (fail).
 func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
-	outputSchema, schemaValidation := e.loadSchemaValidationConfig(taskRun.TaskID)
-	if len(outputSchema) == 0 || schemaValidation == "" {
+	if taskRun == nil {
 		return nil
 	}
-
-	var schemaRaw map[string]any
-	if err := json.Unmarshal(outputSchema, &schemaRaw); err != nil {
-		log.Warn("failed to unmarshal task output schema", "task_id", taskRun.TaskID, "error", err)
-		return nil
-	}
-
-	violations, err := pkgtask.ValidateOutput(output, schemaRaw)
-	if err != nil {
-		log.Warn("schema validation error", "task_id", taskRun.TaskID, "error", err)
-		return nil
-	}
-	if len(violations) == 0 {
-		return nil
-	}
-
-	log.Warn("task output schema violations", "task_id", taskRun.TaskID, "violations", len(violations))
-	if saveErr := e.store.SaveSchemaViolations(taskRun.JobRunID, taskRun.TaskID, violations); saveErr != nil {
-		log.Warn("failed to persist schema violations", "task_id", taskRun.TaskID, "error", saveErr)
-	}
-
-	if schemaValidation == jobdef.SchemaValidationFail {
-		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskRun.TaskID, len(violations))
-	}
-	return nil
-}
-
-func (e *runtimeExecutor) loadSchemaValidationConfig(taskID uuid.UUID) ([]byte, string) {
-	var task models.Task
-	if err := e.store.DB().First(&task, "id = ?", taskID).Error; err != nil || len(task.OutputSchema) == 0 {
-		return nil, ""
-	}
-
-	var job models.Job
-	if err := e.store.DB().First(&job, "id = ?", task.JobID).Error; err != nil || job.SchemaValidation == "" {
-		return nil, ""
-	}
-
-	return task.OutputSchema, job.SchemaValidation
+	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
 }
 
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) error {

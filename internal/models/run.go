@@ -46,6 +46,10 @@ type TaskRun struct {
 	Result           string            `json:"result,omitempty"`
 	Output           datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
+	// OutputSchema snapshots the task's declared runtime output schema onto the task run.
+	OutputSchema datatypes.JSON `gorm:"type:json" json:"-"`
+	// SchemaValidation snapshots the job's schema validation mode onto the task run.
+	SchemaValidation string `gorm:"type:text;not null;default:''" json:"-"`
 	// SchemaViolations stores any output schema violations detected at runtime.
 	SchemaViolations        datatypes.JSON `gorm:"type:json" json:"schema_violations,omitempty"`
 	LogText                 string         `gorm:"type:text" json:"-"`

@@ -61,6 +61,17 @@ func TestRunSchemaValidationFailReturnsError(t *testing.T) {
 	require.Contains(t, violations[0].Message, "integer")
 }
 
+func TestRunSchemaValidationFailReturnsErrorForMissingRequiredOutput(t *testing.T) {
+	taskRun, db := seedSchemaValidationTaskRun(t, jobdef.SchemaValidationFail)
+
+	executor := &runtimeExecutor{store: run.NewStore(db)}
+	err := executor.runSchemaValidation(taskRun, nil)
+	require.ErrorContains(t, err, "violates declared schema")
+
+	violations := persistedSchemaViolations(t, db, taskRun.JobRunID, taskRun.TaskID)
+	require.NotEmpty(t, violations)
+}
+
 func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models.TaskRun, *gorm.DB) {
 	t.Helper()
 
@@ -132,19 +143,21 @@ func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models
 	require.NoError(t, db.Create(jobRun).Error)
 
 	taskRun := &models.TaskRun{
-		ID:          uuid.New(),
-		JobRunID:    jobRun.ID,
-		TaskID:      task.ID,
-		AtomID:      atom.ID,
-		Engine:      atom.Engine,
-		Image:       atom.Image,
-		Command:     atom.Command,
-		Status:      string(run.TaskStatusRunning),
-		Attempt:     1,
-		MaxAttempts: 1,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-		StartedAt:   &now,
+		ID:               uuid.New(),
+		JobRunID:         jobRun.ID,
+		TaskID:           task.ID,
+		AtomID:           atom.ID,
+		Engine:           atom.Engine,
+		Image:            atom.Image,
+		Command:          atom.Command,
+		Status:           string(run.TaskStatusRunning),
+		Attempt:          1,
+		MaxAttempts:      1,
+		OutputSchema:     datatypes.JSON(schemaBytes),
+		SchemaValidation: schemaValidation,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		StartedAt:        &now,
 	}
 	require.NoError(t, db.Create(taskRun).Error)
 

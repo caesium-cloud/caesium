@@ -144,3 +144,32 @@ func TestInstanceLocationStrEscapesJSONPointerTokens(t *testing.T) {
 
 	require.Equal(t, "/root/foo~1bar/tilde~0key", got)
 }
+
+func TestValidateOutputFlattensNestedValidationCauses(t *testing.T) {
+	t.Parallel()
+
+	violations, err := ValidateOutput(
+		map[string]string{"payload": `{"rows_written":"unknown"}`},
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"payload": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"rows_written": map[string]any{"type": "integer"},
+					},
+					"required": []any{"rows_written"},
+				},
+			},
+			"required": []any{"payload"},
+		},
+	)
+	require.NoError(t, err)
+	require.NotEmpty(t, violations)
+
+	keys := make([]string, 0, len(violations))
+	for _, violation := range violations {
+		keys = append(keys, violation.Key)
+	}
+	require.Contains(t, keys, "/payload/rows_written")
+}

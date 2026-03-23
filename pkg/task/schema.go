@@ -63,6 +63,20 @@ func ValidateOutput(output map[string]string, schemaRaw map[string]any) ([]Schem
 	return nil, nil
 }
 
+// ValidateOutputSchemaBytes validates a task output map against a schema encoded as JSON bytes.
+func ValidateOutputSchemaBytes(output map[string]string, schemaBytes []byte) ([]SchemaViolation, error) {
+	if len(schemaBytes) == 0 {
+		return nil, nil
+	}
+
+	var schemaRaw map[string]any
+	if err := json.Unmarshal(schemaBytes, &schemaRaw); err != nil {
+		return nil, fmt.Errorf("unmarshal schema: %w", err)
+	}
+
+	return ValidateOutput(output, schemaRaw)
+}
+
 // coerceValue attempts to convert a string value to the declared schema type.
 // Falls back to the original string if conversion fails.
 func coerceValue(s string, typeName string) any {
@@ -112,12 +126,7 @@ func collectViolations(err error) []SchemaViolation {
 	}
 	var violations []SchemaViolation
 	if ve, ok := err.(*jsonschema.ValidationError); ok {
-		for _, cause := range ve.Causes {
-			violations = append(violations, SchemaViolation{
-				Key:     instanceLocationStr(cause.InstanceLocation),
-				Message: cause.Error(),
-			})
-		}
+		appendLeafViolations(&violations, ve)
 		if len(violations) == 0 {
 			// Top-level error with no sub-causes.
 			violations = append(violations, SchemaViolation{
@@ -132,6 +141,22 @@ func collectViolations(err error) []SchemaViolation {
 		})
 	}
 	return violations
+}
+
+func appendLeafViolations(dst *[]SchemaViolation, err *jsonschema.ValidationError) {
+	if err == nil {
+		return
+	}
+	if len(err.Causes) == 0 {
+		*dst = append(*dst, SchemaViolation{
+			Key:     instanceLocationStr(err.InstanceLocation),
+			Message: err.Error(),
+		})
+		return
+	}
+	for _, cause := range err.Causes {
+		appendLeafViolations(dst, cause)
+	}
 }
 
 // instanceLocationStr converts a JSON Pointer path ([]string) to a slash-joined string.

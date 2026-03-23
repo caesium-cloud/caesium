@@ -345,6 +345,15 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		maxAttempts = 1
 	}
 
+	schemaValidation := ""
+	if len(task.OutputSchema) > 0 {
+		var job models.Job
+		if err := s.db.Select("schema_validation").First(&job, "id = ?", task.JobID).Error; err != nil {
+			return err
+		}
+		schemaValidation = job.SchemaValidation
+	}
+
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
 		JobRunID:                runID,
@@ -358,6 +367,8 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Attempt:                 1,
 		MaxAttempts:             maxAttempts,
 		OutstandingPredecessors: outstanding,
+		OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
+		SchemaValidation:        schemaValidation,
 	}
 
 	pendingEvents := make([]event.Event, 0, 1)

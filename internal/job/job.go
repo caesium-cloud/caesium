@@ -3,7 +3,6 @@ package job
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -690,13 +689,11 @@ func (j *job) Run(ctx context.Context) error {
 			cancel()
 
 			if execErr == nil {
-				if len(output) > 0 {
-					if err := j.validateTaskOutputSchema(store, runID, taskModel, output); err != nil {
-						if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
-							log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
-						}
-						execErr = err
+				if err := run.ValidateTaskOutputSchema(store, runID, taskModel.ID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
+					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
 					}
+					execErr = err
 				}
 			}
 
@@ -989,38 +986,6 @@ func (j *job) Run(ctx context.Context) error {
 
 	if runErr != nil {
 		return runErr
-	}
-
-	return nil
-}
-
-func (j *job) validateTaskOutputSchema(store *run.Store, runID uuid.UUID, taskModel *models.Task, output map[string]string) error {
-	if taskModel == nil || len(taskModel.OutputSchema) == 0 || j.schemaValidation == "" {
-		return nil
-	}
-
-	var schemaRaw map[string]any
-	if err := json.Unmarshal(taskModel.OutputSchema, &schemaRaw); err != nil {
-		log.Warn("failed to unmarshal task output schema", "task_id", taskModel.ID, "error", err)
-		return nil
-	}
-
-	violations, err := pkgtask.ValidateOutput(output, schemaRaw)
-	if err != nil {
-		log.Warn("schema validation error", "task_id", taskModel.ID, "error", err)
-		return nil
-	}
-	if len(violations) == 0 {
-		return nil
-	}
-
-	log.Warn("task output schema violations", "task_id", taskModel.ID, "violations", len(violations))
-	if saveErr := store.SaveSchemaViolations(runID, taskModel.ID, violations); saveErr != nil {
-		log.Warn("failed to persist schema violations", "task_id", taskModel.ID, "error", saveErr)
-	}
-
-	if j.schemaValidation == jobdefschema.SchemaValidationFail {
-		return fmt.Errorf("task %s output violates declared schema: %d violation(s)", taskModel.ID, len(violations))
 	}
 
 	return nil
