@@ -55,9 +55,10 @@ type job struct {
 	atomPollInterval       time.Duration
 }
 
-type jobOption func(*job)
+// JobOption configures a job before execution.
+type JobOption func(*job)
 
-func New(m *models.Job, opts ...jobOption) Job {
+func New(m *models.Job, opts ...JobOption) Job {
 	j := &job{
 		id:                     m.ID,
 		triggerID:              &m.TriggerID,
@@ -100,13 +101,14 @@ const (
 	executionModeDistributed = "distributed"
 )
 
-func WithTriggerID(id *uuid.UUID) jobOption {
+func WithTriggerID(id *uuid.UUID) JobOption {
 	return func(j *job) {
 		j.triggerID = id
 	}
 }
 
-func withRunStoreFactory(factory func() *run.Store) jobOption {
+// WithRunStoreFactory overrides the run store used for execution state.
+func WithRunStoreFactory(factory func() *run.Store) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.runStoreFactory = factory
@@ -114,7 +116,8 @@ func withRunStoreFactory(factory func() *run.Store) jobOption {
 	}
 }
 
-func withEnvVariables(variables func() env.Environment) jobOption {
+// WithEnvVariables overrides the environment configuration.
+func WithEnvVariables(variables func() env.Environment) JobOption {
 	return func(j *job) {
 		if variables != nil {
 			j.envVariables = variables
@@ -122,7 +125,8 @@ func withEnvVariables(variables func() env.Environment) jobOption {
 	}
 }
 
-func withTaskServiceFactory(factory func(context.Context) task.Task) jobOption {
+// WithTaskServiceFactory overrides the task service used to look up tasks.
+func WithTaskServiceFactory(factory func(context.Context) task.Task) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.taskServiceFactory = factory
@@ -130,7 +134,8 @@ func withTaskServiceFactory(factory func(context.Context) task.Task) jobOption {
 	}
 }
 
-func withAtomServiceFactory(factory func(context.Context) asvc.Atom) jobOption {
+// WithAtomServiceFactory overrides the atom service used to look up atoms.
+func WithAtomServiceFactory(factory func(context.Context) asvc.Atom) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.atomServiceFactory = factory
@@ -138,7 +143,8 @@ func withAtomServiceFactory(factory func(context.Context) asvc.Atom) jobOption {
 	}
 }
 
-func withTaskEdgeServiceFactory(factory func(context.Context) taskedge.TaskEdge) jobOption {
+// WithTaskEdgeServiceFactory overrides the task edge service used to look up edges.
+func WithTaskEdgeServiceFactory(factory func(context.Context) taskedge.TaskEdge) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.taskEdgeServiceFactory = factory
@@ -146,7 +152,8 @@ func withTaskEdgeServiceFactory(factory func(context.Context) taskedge.TaskEdge)
 	}
 }
 
-func withDispatchRunCallbacks(dispatch func(context.Context, uuid.UUID, uuid.UUID, error) error) jobOption {
+// WithDispatchRunCallbacks overrides the callback dispatch function.
+func WithDispatchRunCallbacks(dispatch func(context.Context, uuid.UUID, uuid.UUID, error) error) JobOption {
 	return func(j *job) {
 		if dispatch != nil {
 			j.dispatchRunCallbacks = dispatch
@@ -154,7 +161,8 @@ func withDispatchRunCallbacks(dispatch func(context.Context, uuid.UUID, uuid.UUI
 	}
 }
 
-func withDockerEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+// WithDockerEngineFactory overrides the Docker engine constructor.
+func WithDockerEngineFactory(factory func(context.Context) atom.Engine) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.newDockerEngine = factory
@@ -162,7 +170,8 @@ func withDockerEngineFactory(factory func(context.Context) atom.Engine) jobOptio
 	}
 }
 
-func withKubernetesEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+// WithKubernetesEngineFactory overrides the Kubernetes engine constructor.
+func WithKubernetesEngineFactory(factory func(context.Context) atom.Engine) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.newKubernetesEngine = factory
@@ -170,7 +179,8 @@ func withKubernetesEngineFactory(factory func(context.Context) atom.Engine) jobO
 	}
 }
 
-func withPodmanEngineFactory(factory func(context.Context) atom.Engine) jobOption {
+// WithPodmanEngineFactory overrides the Podman engine constructor.
+func WithPodmanEngineFactory(factory func(context.Context) atom.Engine) JobOption {
 	return func(j *job) {
 		if factory != nil {
 			j.newPodmanEngine = factory
@@ -178,7 +188,8 @@ func withPodmanEngineFactory(factory func(context.Context) atom.Engine) jobOptio
 	}
 }
 
-func withAtomPollInterval(interval time.Duration) jobOption {
+// WithAtomPollInterval overrides the polling interval for atom completion checks.
+func WithAtomPollInterval(interval time.Duration) JobOption {
 	return func(j *job) {
 		if interval > 0 {
 			j.atomPollInterval = interval
@@ -186,10 +197,10 @@ func withAtomPollInterval(interval time.Duration) jobOption {
 	}
 }
 
-// WithParams is an exported option that attaches run parameters to the job.
+// WithParams attaches run parameters to the job.
 // Parameters are injected into each task's environment as
 // CAESIUM_PARAM_<KEY>=<VALUE> (KEY uppercased).
-func WithParams(params map[string]string) jobOption {
+func WithParams(params map[string]string) JobOption {
 	return func(j *job) {
 		j.params = params
 	}
