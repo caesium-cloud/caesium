@@ -2,19 +2,14 @@
 package test
 
 import (
-	"bytes"
-	"errors"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 
-	"github.com/caesium-cloud/caesium/internal/daganalysis"
+	"github.com/caesium-cloud/caesium/internal/dag"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
-	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/spf13/cobra"
-	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -38,7 +33,9 @@ func init() {
 }
 
 func runTest(cmd *cobra.Command, _ []string) error {
-	defs, err := collectDefinitions(testPaths)
+	// Don't validate during collection — we validate per-definition below
+	// to report errors individually.
+	defs, err := jobdef.CollectDefinitions(testPaths, false)
 	if err != nil {
 		return err
 	}
@@ -58,7 +55,7 @@ func runTest(cmd *cobra.Command, _ []string) error {
 			continue
 		}
 
-		analysis, err := daganalysis.Analyze(def)
+		analysis, err := dag.Analyze(def)
 		if err != nil {
 			_, _ = fmt.Fprintf(w, "  FAIL  %s: DAG analysis error: %v\n", def.Metadata.Alias, err)
 			allOK = false
@@ -78,14 +75,15 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		_, _ = fmt.Fprintln(w, "Image availability:")
 		var allImages []string
 		for i := range defs {
-			allImages = append(allImages, daganalysis.UniqueImages(&defs[i])...)
+			allImages = append(allImages, dag.UniqueImages(&defs[i])...)
 		}
 		allImages = dedup(allImages)
 		results := imagecheck.Check(cmd.Context(), allImages)
 		for _, r := range results {
 			switch {
 			case r.Error != nil:
-				_, _ = fmt.Fprintf(w, "  ?     %s  (error: %v)\n", r.Image, r.Error)
+				_, _ = fmt.Fprintf(w, "  FAIL  %s  (error: %v)\n", r.Image, r.Error)
+				allOK = false
 			case r.Available:
 				_, _ = fmt.Fprintf(w, "  PASS  %s  (local)\n", r.Image)
 			default:
@@ -95,17 +93,17 @@ func runTest(cmd *cobra.Command, _ []string) error {
 	}
 
 	if !allOK {
-		return fmt.Errorf("one or more definitions failed validation")
+		return fmt.Errorf("one or more checks failed")
 	}
 	return nil
 }
 
-func printDAGSummary(w io.Writer, a *daganalysis.DAGAnalysis) {
+func printDAGSummary(w io.Writer, a *dag.Analysis) {
 	_, _ = fmt.Fprintf(w, "         Steps: %s (%d steps, max parallelism: %d)\n",
 		strings.Join(formatExecutionOrder(a.ExecutionOrder), " -> "), len(a.Steps), a.MaxParallelism)
 }
 
-func printVerbose(w io.Writer, a *daganalysis.DAGAnalysis) {
+func printVerbose(w io.Writer, a *dag.Analysis) {
 	_, _ = fmt.Fprintf(w, "         Roots: %s\n", strings.Join(a.RootSteps, ", "))
 	_, _ = fmt.Fprintf(w, "         Leaves: %s\n", strings.Join(a.LeafSteps, ", "))
 	for _, s := range a.Steps {
@@ -140,85 +138,4 @@ func dedup(items []string) []string {
 		out = append(out, item)
 	}
 	return out
-}
-
-// collectDefinitions mirrors the pattern from cmd/job/apply.go.
-func collectDefinitions(paths []string) ([]schema.Definition, error) {
-	if len(paths) == 0 {
-		paths = []string{"."}
-	}
-
-	var defs []schema.Definition
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			return nil, err
-		}
-		if info.IsDir() {
-			if err := filepath.WalkDir(p, func(path string, d os.DirEntry, walkErr error) error {
-				if walkErr != nil {
-					return walkErr
-				}
-				if d.IsDir() || !isYAML(path) {
-					return nil
-				}
-				return appendDefinitions(path, &defs)
-			}); err != nil {
-				return nil, err
-			}
-		} else {
-			if !isYAML(p) {
-				return nil, fmt.Errorf("%s is not a YAML file", p)
-			}
-			if err := appendDefinitions(p, &defs); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return defs, nil
-}
-
-func appendDefinitions(path string, defs *[]schema.Definition) error {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	dec := yaml.NewDecoder(bytes.NewReader(data))
-	for {
-		var def schema.Definition
-		if err := dec.Decode(&def); err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return fmt.Errorf("%s: %w", path, err)
-		}
-		if isBlankDefinition(&def) {
-			continue
-		}
-		// Don't validate here — we validate in runTest to report per-definition.
-		*defs = append(*defs, def)
-	}
-	return nil
-}
-
-func isYAML(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
-}
-
-func isBlankDefinition(def *schema.Definition) bool {
-	if def == nil {
-		return true
-	}
-	if strings.TrimSpace(def.Metadata.Alias) != "" {
-		return false
-	}
-	if def.APIVersion != "" || def.Kind != "" {
-		return false
-	}
-	if def.Trigger.Type != "" || len(def.Steps) > 0 || len(def.Callbacks) > 0 {
-		return false
-	}
-	return true
 }

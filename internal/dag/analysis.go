@@ -1,5 +1,5 @@
-// Package daganalysis computes topology metrics for job DAGs.
-package daganalysis
+// Package dag computes topology metrics for job DAGs.
+package dag
 
 import (
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -15,8 +15,8 @@ type StepInfo struct {
 	Depth      int // topological depth (layer index)
 }
 
-// DAGAnalysis holds the computed topology of a job definition.
-type DAGAnalysis struct {
+// Analysis holds the computed topology of a job definition.
+type Analysis struct {
 	Steps          []StepInfo
 	ExecutionOrder [][]string // layers of parallelizable steps
 	MaxParallelism int
@@ -26,7 +26,7 @@ type DAGAnalysis struct {
 
 // Analyze computes topology metrics for the given definition.
 // The definition must already be validated.
-func Analyze(def *jobdef.Definition) (*DAGAnalysis, error) {
+func Analyze(def *jobdef.Definition) (*Analysis, error) {
 	successors, err := jobdef.DeriveStepSuccessors(def.Steps)
 	if err != nil {
 		return nil, err
@@ -104,7 +104,7 @@ func Analyze(def *jobdef.Definition) (*DAGAnalysis, error) {
 		}
 	}
 
-	return &DAGAnalysis{
+	return &Analysis{
 		Steps:          steps,
 		ExecutionOrder: layers,
 		MaxParallelism: maxParallel,

@@ -1,4 +1,4 @@
-package daganalysis
+package dag
 
 import (
 	"testing"

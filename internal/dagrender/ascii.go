@@ -6,20 +6,14 @@ import (
 	"io"
 	"strings"
 
-	"github.com/caesium-cloud/caesium/internal/daganalysis"
+	"github.com/caesium-cloud/caesium/internal/dag"
 )
 
 // Render writes an ASCII DAG visualization to the writer.
-func Render(analysis *daganalysis.DAGAnalysis, w io.Writer) error {
+func Render(analysis *dag.Analysis, w io.Writer) error {
 	if len(analysis.Steps) == 0 {
 		_, err := fmt.Fprintln(w, "(empty DAG)")
 		return err
-	}
-
-	// Build lookup maps.
-	stepByName := make(map[string]*daganalysis.StepInfo, len(analysis.Steps))
-	for i := range analysis.Steps {
-		stepByName[analysis.Steps[i].Name] = &analysis.Steps[i]
 	}
 
 	layers := analysis.ExecutionOrder

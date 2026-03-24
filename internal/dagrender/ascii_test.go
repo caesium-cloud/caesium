@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/caesium-cloud/caesium/internal/daganalysis"
+	"github.com/caesium-cloud/caesium/internal/dag"
 )
 
 func TestRenderSequential(t *testing.T) {
-	a := &daganalysis.DAGAnalysis{
-		Steps: []daganalysis.StepInfo{
+	a := &dag.Analysis{
+		Steps: []dag.StepInfo{
 			{Name: "a", Depth: 0},
 			{Name: "b", Depth: 1},
 			{Name: "c", Depth: 2},
@@ -34,8 +34,8 @@ func TestRenderSequential(t *testing.T) {
 }
 
 func TestRenderParallel(t *testing.T) {
-	a := &daganalysis.DAGAnalysis{
-		Steps: []daganalysis.StepInfo{
+	a := &dag.Analysis{
+		Steps: []dag.StepInfo{
 			{Name: "start", Depth: 0},
 			{Name: "branch-a", Depth: 1},
 			{Name: "branch-b", Depth: 1},
@@ -57,7 +57,7 @@ func TestRenderParallel(t *testing.T) {
 }
 
 func TestRenderEmpty(t *testing.T) {
-	a := &daganalysis.DAGAnalysis{}
+	a := &dag.Analysis{}
 	var buf bytes.Buffer
 	if err := Render(a, &buf); err != nil {
 		t.Fatalf("Render: %v", err)

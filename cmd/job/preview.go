@@ -3,7 +3,7 @@ package job
 import (
 	"fmt"
 
-	"github.com/caesium-cloud/caesium/internal/daganalysis"
+	"github.com/caesium-cloud/caesium/internal/dag"
 	"github.com/caesium-cloud/caesium/internal/dagrender"
 	"github.com/spf13/cobra"
 )
@@ -29,7 +29,7 @@ var previewCmd = &cobra.Command{
 				return fmt.Errorf("definition %s: %w", def.Metadata.Alias, err)
 			}
 
-			analysis, err := daganalysis.Analyze(def)
+			analysis, err := dag.Analyze(def)
 			if err != nil {
 				return fmt.Errorf("definition %s: %w", def.Metadata.Alias, err)
 			}
