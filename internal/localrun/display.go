@@ -9,10 +9,10 @@ import (
 
 // TaskProgress represents the status of a single task during a local run.
 type TaskProgress struct {
-	Name      string
-	Status    string // pending, running, succeeded, failed, skipped
-	Duration  time.Duration
-	Error     string
+	Name     string
+	Status   string // pending, running, succeeded, failed, skipped
+	Duration time.Duration
+	Error    string
 }
 
 // Display renders task progress to a terminal.
@@ -39,14 +39,14 @@ func (d *Display) RenderProgress(tasks []TaskProgress) {
 		if t.Error != "" {
 			errMsg = fmt.Sprintf("  error: %s", t.Error)
 		}
-		fmt.Fprintf(d.Writer, "  %s  %-*s  %s%s%s\n", icon, maxName, t.Name, t.Status, dur, errMsg)
+		_, _ = fmt.Fprintf(d.Writer, "  %s  %-*s  %s%s%s\n", icon, maxName, t.Name, t.Status, dur, errMsg)
 	}
 }
 
 // RenderHeader prints a header line for a dev run.
 func (d *Display) RenderHeader(alias string, path string) {
-	fmt.Fprintf(d.Writer, "caesium dev %s  %s\n", alias, path)
-	fmt.Fprintln(d.Writer, strings.Repeat("-", 60))
+	_, _ = fmt.Fprintf(d.Writer, "caesium dev %s  %s\n", alias, path)
+	_, _ = fmt.Fprintln(d.Writer, strings.Repeat("-", 60))
 }
 
 func statusIcon(status string) string {

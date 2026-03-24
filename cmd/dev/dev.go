@@ -22,11 +22,11 @@ import (
 )
 
 var (
-	devPaths     []string
-	taskTimeout  time.Duration
-	runTimeout   time.Duration
-	maxParallel  int
-	runOnce      bool
+	devPaths    []string
+	taskTimeout time.Duration
+	runTimeout  time.Duration
+	maxParallel int
+	runOnce     bool
 )
 
 // Cmd is the top-level dev command.
@@ -55,7 +55,7 @@ func runDev(cmd *cobra.Command, _ []string) error {
 
 	// Initial run.
 	if err := executeRun(cmd.Context(), w, paths); err != nil {
-		fmt.Fprintf(w, "Run failed: %v\n", err)
+		_, _ = fmt.Fprintf(w, "Run failed: %v\n", err)
 		if runOnce {
 			return err
 		}
@@ -78,7 +78,7 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("watcher: %w", err)
 	}
-	defer watcher.Close()
+	defer func() { _ = watcher.Close() }()
 
 	// Watch directories containing YAML files (to catch new files too).
 	watchedDirs := make(map[string]struct{})
@@ -93,7 +93,7 @@ func runDev(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	fmt.Fprintf(w, "\nWatching %d file(s) for changes... (Ctrl-C to stop)\n", len(yamlFiles))
+	_, _ = fmt.Fprintf(w, "\nWatching %d file(s) for changes... (Ctrl-C to stop)\n", len(yamlFiles))
 
 	ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -106,7 +106,7 @@ func runDev(cmd *cobra.Command, _ []string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Fprintln(w, "\nStopping.")
+			_, _ = fmt.Fprintln(w, "\nStopping.")
 			return nil
 		case event, ok := <-watcher.Events:
 			if !ok {
@@ -123,11 +123,11 @@ func runDev(cmd *cobra.Command, _ []string) error {
 			if !ok {
 				return nil
 			}
-			fmt.Fprintf(w, "Watch error: %v\n", err)
+			_, _ = fmt.Fprintf(w, "Watch error: %v\n", err)
 		case <-debounce.C:
-			fmt.Fprintf(w, "\nFile changed, re-running...\n\n")
+			_, _ = fmt.Fprintf(w, "\nFile changed, re-running...\n\n")
 			if err := executeRun(ctx, w, paths); err != nil {
-				fmt.Fprintf(w, "Run failed: %v\n", err)
+				_, _ = fmt.Fprintf(w, "Run failed: %v\n", err)
 			}
 		}
 	}
@@ -139,7 +139,7 @@ func executeRun(ctx context.Context, w io.Writer, paths []string) error {
 		return err
 	}
 	if len(defs) == 0 {
-		fmt.Fprintln(w, "No job definitions found.")
+		_, _ = fmt.Fprintln(w, "No job definitions found.")
 		return nil
 	}
 
@@ -155,10 +155,10 @@ func executeRun(ctx context.Context, w io.Writer, paths []string) error {
 		display.RenderHeader(def.Metadata.Alias, strings.Join(paths, ", "))
 
 		if err := runner.Run(ctx, def); err != nil {
-			fmt.Fprintf(w, "  FAIL  %s: %v\n", def.Metadata.Alias, err)
+			_, _ = fmt.Fprintf(w, "  FAIL  %s: %v\n", def.Metadata.Alias, err)
 			return err
 		}
-		fmt.Fprintf(w, "  OK    %s completed successfully\n", def.Metadata.Alias)
+		_, _ = fmt.Fprintf(w, "  OK    %s completed successfully\n", def.Metadata.Alias)
 	}
 	return nil
 }

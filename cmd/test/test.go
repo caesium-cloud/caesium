@@ -18,9 +18,9 @@ import (
 )
 
 var (
-	testPaths      []string
-	checkImages    bool
-	verboseOutput  bool
+	testPaths     []string
+	checkImages   bool
+	verboseOutput bool
 )
 
 // Cmd is the top-level test command.
@@ -53,19 +53,19 @@ func runTest(cmd *cobra.Command, _ []string) error {
 	for i := range defs {
 		def := &defs[i]
 		if err := def.Validate(); err != nil {
-			fmt.Fprintf(w, "  FAIL  %s: %v\n", def.Metadata.Alias, err)
+			_, _ = fmt.Fprintf(w, "  FAIL  %s: %v\n", def.Metadata.Alias, err)
 			allOK = false
 			continue
 		}
 
 		analysis, err := daganalysis.Analyze(def)
 		if err != nil {
-			fmt.Fprintf(w, "  FAIL  %s: DAG analysis error: %v\n", def.Metadata.Alias, err)
+			_, _ = fmt.Fprintf(w, "  FAIL  %s: DAG analysis error: %v\n", def.Metadata.Alias, err)
 			allOK = false
 			continue
 		}
 
-		fmt.Fprintf(w, "  PASS  %s\n", def.Metadata.Alias)
+		_, _ = fmt.Fprintf(w, "  PASS  %s\n", def.Metadata.Alias)
 		printDAGSummary(w, analysis)
 
 		if verboseOutput {
@@ -74,8 +74,8 @@ func runTest(cmd *cobra.Command, _ []string) error {
 	}
 
 	if checkImages {
-		fmt.Fprintln(w)
-		fmt.Fprintln(w, "Image availability:")
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Image availability:")
 		var allImages []string
 		for i := range defs {
 			allImages = append(allImages, daganalysis.UniqueImages(&defs[i])...)
@@ -83,12 +83,13 @@ func runTest(cmd *cobra.Command, _ []string) error {
 		allImages = dedup(allImages)
 		results := imagecheck.Check(cmd.Context(), allImages)
 		for _, r := range results {
-			if r.Error != nil {
-				fmt.Fprintf(w, "  ?     %s  (error: %v)\n", r.Image, r.Error)
-			} else if r.Available {
-				fmt.Fprintf(w, "  PASS  %s  (local)\n", r.Image)
-			} else {
-				fmt.Fprintf(w, "  MISS  %s  (not found locally)\n", r.Image)
+			switch {
+			case r.Error != nil:
+				_, _ = fmt.Fprintf(w, "  ?     %s  (error: %v)\n", r.Image, r.Error)
+			case r.Available:
+				_, _ = fmt.Fprintf(w, "  PASS  %s  (local)\n", r.Image)
+			default:
+				_, _ = fmt.Fprintf(w, "  MISS  %s  (not found locally)\n", r.Image)
 			}
 		}
 	}
@@ -100,23 +101,19 @@ func runTest(cmd *cobra.Command, _ []string) error {
 }
 
 func printDAGSummary(w io.Writer, a *daganalysis.DAGAnalysis) {
-	names := make([]string, len(a.Steps))
-	for i, s := range a.Steps {
-		names[i] = s.Name
-	}
-	fmt.Fprintf(w, "         Steps: %s (%d steps, max parallelism: %d)\n",
+	_, _ = fmt.Fprintf(w, "         Steps: %s (%d steps, max parallelism: %d)\n",
 		strings.Join(formatExecutionOrder(a.ExecutionOrder), " -> "), len(a.Steps), a.MaxParallelism)
 }
 
 func printVerbose(w io.Writer, a *daganalysis.DAGAnalysis) {
-	fmt.Fprintf(w, "         Roots: %s\n", strings.Join(a.RootSteps, ", "))
-	fmt.Fprintf(w, "         Leaves: %s\n", strings.Join(a.LeafSteps, ", "))
+	_, _ = fmt.Fprintf(w, "         Roots: %s\n", strings.Join(a.RootSteps, ", "))
+	_, _ = fmt.Fprintf(w, "         Leaves: %s\n", strings.Join(a.LeafSteps, ", "))
 	for _, s := range a.Steps {
 		deps := "(root)"
 		if len(s.DependsOn) > 0 {
 			deps = strings.Join(s.DependsOn, ", ")
 		}
-		fmt.Fprintf(w, "         - %s [%s] depends on: %s\n", s.Name, s.Engine, deps)
+		_, _ = fmt.Fprintf(w, "         - %s [%s] depends on: %s\n", s.Name, s.Engine, deps)
 	}
 }
 

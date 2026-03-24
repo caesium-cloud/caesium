@@ -25,16 +25,17 @@ func Check(ctx context.Context, images []string) []Result {
 		}
 		return results
 	}
-	defer cli.Close()
+	defer func() { _ = cli.Close() }()
 
 	results := make([]Result, len(images))
 	for i, img := range images {
-		_, _, inspectErr := cli.ImageInspectWithRaw(ctx, img)
-		if inspectErr == nil {
+		_, _, inspectErr := cli.ImageInspectWithRaw(ctx, img) //nolint:staticcheck // ImageInspect not yet available in our client version
+		switch {
+		case inspectErr == nil:
 			results[i] = Result{Image: img, Available: true}
-		} else if isNotFound(inspectErr) {
+		case isNotFound(inspectErr):
 			results[i] = Result{Image: img, Available: false}
-		} else {
+		default:
 			results[i] = Result{Image: img, Error: inspectErr}
 		}
 	}

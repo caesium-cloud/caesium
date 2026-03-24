@@ -13,7 +13,7 @@ var previewPaths []string
 var previewCmd = &cobra.Command{
 	Use:   "preview",
 	Short: "Render DAG visualization in the terminal",
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, _ []string) error {
 		defs, err := collectDefinitions(previewPaths)
 		if err != nil {
 			return err
@@ -35,7 +35,7 @@ var previewCmd = &cobra.Command{
 			}
 
 			if len(defs) > 1 {
-				fmt.Fprintf(w, "--- %s ---\n", def.Metadata.Alias)
+				_, _ = fmt.Fprintf(w, "--- %s ---\n", def.Metadata.Alias)
 			}
 
 			if err := dagrender.Render(analysis, w); err != nil {
@@ -43,7 +43,7 @@ var previewCmd = &cobra.Command{
 			}
 
 			if len(defs) > 1 && i < len(defs)-1 {
-				fmt.Fprintln(w)
+				_, _ = fmt.Fprintln(w)
 			}
 		}
 		return nil

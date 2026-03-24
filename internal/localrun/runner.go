@@ -58,8 +58,7 @@ func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
 
 	store := run.NewStore(db)
 
-	vars := env.Variables()
-	envCopy := *vars
+	envCopy := env.Variables()
 	envCopy.ExecutionMode = "local"
 	if r.cfg.MaxParallel > 0 {
 		envCopy.MaxParallelTasks = r.cfg.MaxParallel
