@@ -15,7 +15,9 @@ import (
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -70,30 +72,31 @@ type CallbackRun struct {
 }
 
 type TaskRun struct {
-	ID                      uuid.UUID         `json:"id"`
-	JobRunID                uuid.UUID         `json:"job_run_id"`
-	TaskID                  uuid.UUID         `json:"task_id"`
-	AtomID                  uuid.UUID         `json:"atom_id"`
-	Engine                  models.AtomEngine `json:"engine"`
-	Image                   string            `json:"image"`
-	Command                 []string          `json:"command"`
-	RuntimeID               string            `json:"runtime_id,omitempty"`
-	Status                  TaskStatus        `json:"status"`
-	NodeSelector            map[string]string `json:"node_selector,omitempty"`
-	ClaimedBy               string            `json:"claimed_by,omitempty"`
-	ClaimExpiresAt          *time.Time        `json:"claim_expires_at,omitempty"`
-	ClaimAttempt            int               `json:"claim_attempt"`
-	Attempt                 int               `json:"attempt"`
-	MaxAttempts             int               `json:"max_attempts"`
-	Result                  string            `json:"result,omitempty"`
-	Output                  map[string]string `json:"output,omitempty"`
-	BranchSelections        []string          `json:"branch_selections,omitempty"`
-	StartedAt               *time.Time        `json:"started_at,omitempty"`
-	CompletedAt             *time.Time        `json:"completed_at,omitempty"`
-	Error                   string            `json:"error,omitempty"`
-	OutstandingPredecessors int               `json:"outstanding_predecessors"`
-	CreatedAt               time.Time         `json:"created_at"`
-	UpdatedAt               time.Time         `json:"updated_at"`
+	ID                      uuid.UUID                 `json:"id"`
+	JobRunID                uuid.UUID                 `json:"job_run_id"`
+	TaskID                  uuid.UUID                 `json:"task_id"`
+	AtomID                  uuid.UUID                 `json:"atom_id"`
+	Engine                  models.AtomEngine         `json:"engine"`
+	Image                   string                    `json:"image"`
+	Command                 []string                  `json:"command"`
+	RuntimeID               string                    `json:"runtime_id,omitempty"`
+	Status                  TaskStatus                `json:"status"`
+	NodeSelector            map[string]string         `json:"node_selector,omitempty"`
+	ClaimedBy               string                    `json:"claimed_by,omitempty"`
+	ClaimExpiresAt          *time.Time                `json:"claim_expires_at,omitempty"`
+	ClaimAttempt            int                       `json:"claim_attempt"`
+	Attempt                 int                       `json:"attempt"`
+	MaxAttempts             int                       `json:"max_attempts"`
+	Result                  string                    `json:"result,omitempty"`
+	Output                  map[string]string         `json:"output,omitempty"`
+	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
+	BranchSelections        []string                  `json:"branch_selections,omitempty"`
+	StartedAt               *time.Time                `json:"started_at,omitempty"`
+	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
+	Error                   string                    `json:"error,omitempty"`
+	OutstandingPredecessors int                       `json:"outstanding_predecessors"`
+	CreatedAt               time.Time                 `json:"created_at"`
+	UpdatedAt               time.Time                 `json:"updated_at"`
 }
 
 type JobRun struct {
@@ -342,6 +345,15 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		maxAttempts = 1
 	}
 
+	schemaValidation := ""
+	if len(task.OutputSchema) > 0 {
+		var job models.Job
+		if err := s.db.Select("schema_validation").First(&job, "id = ?", task.JobID).Error; err != nil {
+			return err
+		}
+		schemaValidation = job.SchemaValidation
+	}
+
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
 		JobRunID:                runID,
@@ -355,6 +367,8 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Attempt:                 1,
 		MaxAttempts:             maxAttempts,
 		OutstandingPredecessors: outstanding,
+		OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
+		SchemaValidation:        schemaValidation,
 	}
 
 	pendingEvents := make([]event.Event, 0, 1)
@@ -488,6 +502,20 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSn
 			"log_text":      snapshot.Text,
 			"log_truncated": snapshot.Truncated,
 		}).Error
+}
+
+// SaveSchemaViolations persists schema validation violations for a task run.
+func (s *Store) SaveSchemaViolations(runID, taskID uuid.UUID, violations []pkgtask.SchemaViolation) error {
+	if len(violations) == 0 {
+		return nil
+	}
+	b, err := json.Marshal(violations)
+	if err != nil {
+		return err
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("schema_violations", datatypes.JSON(b)).Error
 }
 
 func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, error) {
@@ -1438,6 +1466,13 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		var out map[string]string
 		if err := json.Unmarshal(model.Output, &out); err == nil {
 			task.Output = out
+		}
+	}
+
+	if len(model.SchemaViolations) > 0 {
+		var violations []pkgtask.SchemaViolation
+		if err := json.Unmarshal(model.SchemaViolations, &violations); err == nil {
+			task.SchemaViolations = violations
 		}
 	}
 

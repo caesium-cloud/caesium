@@ -16,11 +16,12 @@ import {
   ArrowRightFromLine,
   ArrowLeftToLine,
   SkipForward,
+  ShieldCheck,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, outputCount, receivesOutputs } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, outputCount, receivesOutputs, hasOutputSchema } = data;
   const taskLabel = typeof label === 'string' ? label : '';
 
   const getStatusIcon = () => {
@@ -198,12 +199,19 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         </div>
       </div>
 
-      {outputCount > 0 && (
-        <div className="absolute -right-1 top-1/2 -translate-x-3 -translate-y-1/2">
-          <div className="flex items-center gap-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5">
-            <span className="text-[7px] font-bold text-emerald-300">OUT</span>
-            <ArrowRightFromLine className="h-2 w-2 text-emerald-400" />
-          </div>
+      {(outputCount > 0 || hasOutputSchema) && (
+        <div className="absolute -right-1 top-1/2 -translate-x-3 -translate-y-1/2 flex flex-col items-end gap-1">
+          {outputCount > 0 && (
+            <div className="flex items-center gap-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5">
+              <span className="text-[7px] font-bold text-emerald-300">OUT</span>
+              <ArrowRightFromLine className="h-2 w-2 text-emerald-400" />
+            </div>
+          )}
+          {hasOutputSchema && (
+            <div className="flex items-center gap-0.5 rounded-full border border-blue-500/40 bg-blue-500/15 px-1.5 py-0.5" title="Output schema defined">
+              <ShieldCheck className="h-2 w-2 text-blue-400" />
+            </div>
+          )}
         </div>
       )}
       <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />

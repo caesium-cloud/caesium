@@ -23,9 +23,12 @@ type Job struct {
 	MaxParallelTasks   int               `json:"max_parallel_tasks"`
 	TaskTimeout        time.Duration     `json:"task_timeout"`
 	RunTimeout         time.Duration     `json:"run_timeout"`
-	Paused             bool              `gorm:"not null;default:false" json:"paused"`
-	CreatedAt          time.Time         `gorm:"not null" json:"created_at"`
-	UpdatedAt          time.Time         `gorm:"not null" json:"updated_at"`
+	// SchemaValidation controls runtime output schema validation for this job's tasks.
+	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
+	SchemaValidation string    `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
+	Paused           bool      `gorm:"not null;default:false" json:"paused"`
+	CreatedAt        time.Time `gorm:"not null" json:"created_at"`
+	UpdatedAt        time.Time `gorm:"not null" json:"updated_at"`
 
 	LatestRun *JobRun `gorm:"-" json:"latest_run,omitempty"`
 }

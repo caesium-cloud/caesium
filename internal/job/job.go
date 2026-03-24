@@ -45,6 +45,7 @@ type job struct {
 	taskTimeout            time.Duration
 	runTimeout             time.Duration
 	alias                  string
+	schemaValidation       string
 	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
@@ -68,6 +69,7 @@ func New(m *models.Job, opts ...jobOption) Job {
 		taskTimeout:            m.TaskTimeout,
 		runTimeout:             m.RunTimeout,
 		alias:                  m.Alias,
+		schemaValidation:       m.SchemaValidation,
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -685,6 +687,15 @@ func (j *job) Run(ctx context.Context) error {
 
 			result, output, branchNames, logSnapshot, execErr := executeAtom(taskCtx, taskID, attempt, runner, outputEnv)
 			cancel()
+
+			if execErr == nil {
+				if err := run.ValidateTaskOutputSchema(store, runID, taskModel.ID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
+					if snapshotErr := store.SaveTaskLogSnapshot(runID, taskID, logSnapshot); snapshotErr != nil {
+						log.Warn("failed to persist task log snapshot", "job_id", j.id, "task_id", taskID, "error", snapshotErr)
+					}
+					execErr = err
+				}
+			}
 
 			if execErr == nil {
 				completeResult, completeErr := store.CompleteTaskWithResult(runID, taskID, result, output, branchNames)

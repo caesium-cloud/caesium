@@ -6,8 +6,10 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func TestStorePersistsRunState(t *testing.T) {
@@ -201,6 +203,67 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 			require.Equal(t, 0, rt.OutstandingPredecessors)
 		}
 	}
+}
+
+func TestRegisterTaskPersistsSchemaValidationConfig(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	now := time.Now().UTC()
+
+	trigger := &models.Trigger{
+		ID:        uuid.New(),
+		Alias:     "schema-validation-trigger",
+		Type:      models.TriggerTypeCron,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{
+		ID:               uuid.New(),
+		Alias:            "schema-validation-job",
+		TriggerID:        trigger.ID,
+		SchemaValidation: jobdef.SchemaValidationFail,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, db.Create(job).Error)
+
+	runRecord, err := store.Start(job.ID, &trigger.ID)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine",
+		Command:   `["echo","test"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	schema := datatypes.JSON(`{"type":"object","required":["rows_written"]}`)
+	task := &models.Task{
+		ID:           uuid.New(),
+		JobID:        job.ID,
+		AtomID:       atom.ID,
+		Name:         "transform",
+		OutputSchema: schema,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, db.Create(task).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).Error)
+	require.JSONEq(t, string(schema), string(persisted.OutputSchema))
+	require.Equal(t, job.SchemaValidation, persisted.SchemaValidation)
 }
 
 func TestClaimAwareTaskLifecycleMethods(t *testing.T) {

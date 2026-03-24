@@ -279,6 +279,12 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		}
 	}
 
+	// Runtime schema validation: if the task declares an outputSchema and the job has
+	// schemaValidation enabled, validate the actual output against the schema.
+	if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
+		return err
+	}
+
 	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
 		return err
 	}
@@ -290,6 +296,13 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 
 	return nil
+}
+
+func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
+	if taskRun == nil {
+		return nil
+	}
+	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
 }
 
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) error {

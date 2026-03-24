@@ -44,6 +44,12 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
             </div>
           </div>
         ) : null}
+        {task?.output_schema ? (
+          <OutputSchemaSection schema={task.output_schema} />
+        ) : null}
+        {runTask?.schema_violations && runTask.schema_violations.length > 0 ? (
+          <SchemaViolationsSection violations={runTask.schema_violations} />
+        ) : null}
       </div>
   );
 
@@ -88,6 +94,62 @@ function MetadataRow({ label, value, mono = false, badge = false, className }: M
       ) : (
         <div className={mono ? "font-mono text-xs text-foreground" : "text-foreground"}>{value}</div>
       )}
+    </div>
+  );
+}
+
+interface OutputSchemaSectionProps {
+  schema: Record<string, unknown>;
+}
+
+function OutputSchemaSection({ schema }: OutputSchemaSectionProps) {
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  const required = schema.required as string[] | undefined;
+
+  return (
+    <div className="md:col-span-2">
+      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">Output Schema</div>
+      <div className="rounded-md border bg-muted/50 p-2">
+        {properties ? (
+          Object.entries(properties).map(([key, prop]) => {
+            const type = (prop as Record<string, unknown>).type as string | undefined;
+            const isRequired = required?.includes(key);
+            return (
+              <div key={key} className="flex gap-2 font-mono text-xs">
+                <span className="font-semibold text-muted-foreground">{key}:</span>
+                <span className="text-foreground">{type ?? "any"}</span>
+                {isRequired && (
+                  <Badge variant="outline" className="h-4 px-1 text-[10px] font-normal">required</Badge>
+                )}
+              </div>
+            );
+          })
+        ) : (
+          <span className="font-mono text-xs text-muted-foreground">schema defined</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+interface SchemaViolationsSectionProps {
+  violations: Array<{ key: string; message: string }>;
+}
+
+function SchemaViolationsSection({ violations }: SchemaViolationsSectionProps) {
+  return (
+    <div className="md:col-span-2">
+      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-600">Schema Violations</div>
+      <div className="rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+        {violations.map((v, i) => (
+          <div key={i} className="flex gap-2 font-mono text-xs">
+            {v.key && (
+              <span className="font-semibold text-amber-700 dark:text-amber-400">{v.key}:</span>
+            )}
+            <span className="text-amber-800 dark:text-amber-300">{v.message}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

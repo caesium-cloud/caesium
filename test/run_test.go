@@ -14,17 +14,25 @@ import (
 // runResponse matches the JSON returned by POST /v1/jobs/:id/run and
 // GET /v1/jobs/:id/runs/:run_id.
 type runResponse struct {
-	ID     string `json:"id"`
-	JobID  string `json:"job_id"`
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
-	Tasks  []struct {
-		ID     string            `json:"id"`
-		Status string            `json:"status"`
-		Result string            `json:"result,omitempty"`
-		Output map[string]string `json:"output,omitempty"`
-		Error  string            `json:"error,omitempty"`
-	} `json:"tasks"`
+	ID     string            `json:"id"`
+	JobID  string            `json:"job_id"`
+	Status string            `json:"status"`
+	Error  string            `json:"error,omitempty"`
+	Tasks  []runTaskResponse `json:"tasks"`
+}
+
+type runTaskResponse struct {
+	ID               string                    `json:"id"`
+	Status           string                    `json:"status"`
+	Result           string                    `json:"result,omitempty"`
+	Output           map[string]string         `json:"output,omitempty"`
+	SchemaViolations []schemaViolationResponse `json:"schema_violations,omitempty"`
+	Error            string                    `json:"error,omitempty"`
+}
+
+type schemaViolationResponse struct {
+	Key     string `json:"key"`
+	Message string `json:"message"`
 }
 
 // awaitRun polls GET /v1/jobs/:jobID/runs/:runID until the run reaches a

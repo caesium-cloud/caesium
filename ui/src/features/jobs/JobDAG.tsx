@@ -138,6 +138,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                   outputCount,
                   receivesOutputs: taskReceivesOutputs.has(n.id),
                   taskType: n.type,
+                  hasOutputSchema: !!n.output_schema,
                 },
                 position: { x: 0, y: 0 }
             }
@@ -161,7 +162,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                 target: e.to,
                 type: 'dataflow',
                 animated: sourceStatus === 'running',
-                data: { outputCount },
+                data: { outputCount, contractDefined: !!e.contract_defined },
                 markerEnd: {
                   type: MarkerType.ArrowClosed,
                   width: 20,

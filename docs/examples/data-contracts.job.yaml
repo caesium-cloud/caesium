@@ -1,0 +1,119 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: data-contracts-demo
+  labels:
+    team: platform
+    scenario: schema-validation
+  annotations:
+    owner: platform-oncall
+    purpose: "Demonstrates outputSchema/inputSchema data contracts with runtime validation"
+  # schemaValidation: warn  => tasks still succeed but violations are recorded and visible in the UI.
+  # Change to "fail" to make the load step (which emits a bad type) actually fail.
+  schemaValidation: warn
+trigger:
+  type: cron
+  configuration:
+    cron: "*/15 * * * *"
+    timezone: "UTC"
+steps:
+  # --- Step 1: extract ---
+  # Declares an outputSchema so downstream steps can declare contracts against it.
+  - name: extract
+    engine: docker
+    image: alpine:3.20
+    outputSchema:
+      type: object
+      properties:
+        row_count:  { type: integer }
+        source:     { type: string }
+        format:     { type: string }
+      required: [row_count, source, format]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Extracting data from warehouse..."
+        sleep 1
+        ROW_COUNT=$((RANDOM % 9000 + 1000))
+        echo "Extracted $ROW_COUNT rows"
+        # Emit output that matches the declared outputSchema.
+        echo '##caesium::output {"row_count": "'$ROW_COUNT'", "source": "warehouse-prod", "format": "parquet"}'
+
+  # --- Step 2: transform ---
+  # Declares an inputSchema naming exactly which keys it needs from extract, and its own outputSchema.
+  - name: transform
+    engine: docker
+    image: alpine:3.20
+    dependsOn: [extract]
+    inputSchema:
+      extract:
+        required: [row_count, source]
+        properties:
+          row_count: { type: integer }
+          source:    { type: string }
+    outputSchema:
+      type: object
+      properties:
+        processed_rows: { type: integer }
+        output_path:    { type: string }
+        transform_id:   { type: string }
+      required: [processed_rows, output_path, transform_id]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Transforming $CAESIUM_OUTPUT_EXTRACT_ROW_COUNT rows from $CAESIUM_OUTPUT_EXTRACT_SOURCE..."
+        sleep 1
+        PROCESSED=$((CAESIUM_OUTPUT_EXTRACT_ROW_COUNT * 85 / 100))
+        echo "Kept $PROCESSED rows after deduplication"
+        echo '##caesium::output {"processed_rows": "'$PROCESSED'", "output_path": "/data/transformed.parquet", "transform_id": "txn-'$(date +%s)'"}'
+
+  # --- Step 3: load ---
+  # Declares an inputSchema against transform, and its own outputSchema.
+  # NOTE: This step intentionally emits rows_written as "unknown" (a non-integer string)
+  # to demonstrate a runtime schema violation.  With schemaValidation: warn the task
+  # still succeeds, but the violation is recorded and shown in the Task Metadata panel.
+  - name: load
+    engine: docker
+    image: alpine:3.20
+    dependsOn: [transform]
+    inputSchema:
+      transform:
+        required: [processed_rows, output_path]
+        properties:
+          processed_rows: { type: integer }
+    outputSchema:
+      type: object
+      properties:
+        rows_written:  { type: integer }
+        destination:   { type: string }
+        duration_ms:   { type: integer }
+      required: [rows_written, destination, duration_ms]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Loading $CAESIUM_OUTPUT_TRANSFORM_PROCESSED_ROWS rows from $CAESIUM_OUTPUT_TRANSFORM_OUTPUT_PATH..."
+        sleep 1
+        echo "Wrote to analytics-db"
+        # rows_written is intentionally "unknown" to trigger a schema violation (integer expected).
+        # The task still succeeds because schemaValidation is set to "warn".
+        echo '##caesium::output {"rows_written": "unknown", "destination": "analytics-db", "duration_ms": "412"}'
+
+  # --- Step 4: notify ---
+  # No schemas — demonstrates backwards compatibility alongside contract-bearing steps.
+  - name: notify
+    engine: docker
+    image: alpine:3.20
+    dependsOn: [load]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Pipeline complete!"
+        echo "  Destination : $CAESIUM_OUTPUT_LOAD_DESTINATION"
+        echo "  Rows written: $CAESIUM_OUTPUT_LOAD_ROWS_WRITTEN"
+        echo "  Duration    : ${CAESIUM_OUTPUT_LOAD_DURATION_MS}ms"
+        echo "Done."
