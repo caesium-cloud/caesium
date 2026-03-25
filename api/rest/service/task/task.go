@@ -30,6 +30,16 @@ func Service(ctx context.Context) Task {
 	}
 }
 
+// ServiceWithDB creates a Task service backed by the supplied database
+// connection, bypassing the global db.Connection() singleton. This is
+// used by the local runner to avoid initialising the production database.
+func ServiceWithDB(ctx context.Context, conn *gorm.DB) Task {
+	return &taskService{
+		ctx: ctx,
+		db:  conn,
+	}
+}
+
 func (t *taskService) WithDatabase(conn *gorm.DB) Task {
 	t.db = conn
 	return t

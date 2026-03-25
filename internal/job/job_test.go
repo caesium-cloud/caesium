@@ -286,18 +286,18 @@ func withTestDeps(
 	atomSvc asvc.Atom,
 	edgeSvc taskedge.TaskEdge,
 	engine atom.Engine,
-) []jobOption {
-	return []jobOption{
-		withRunStoreFactory(func() *run.Store { return store }),
-		withEnvVariables(func() env.Environment { return vars }),
-		withTaskServiceFactory(func(context.Context) task.Task { return taskSvc }),
-		withAtomServiceFactory(func(context.Context) asvc.Atom { return atomSvc }),
-		withTaskEdgeServiceFactory(func(context.Context) taskedge.TaskEdge { return edgeSvc }),
-		withDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
-		withDockerEngineFactory(func(context.Context) atom.Engine { return engine }),
-		withKubernetesEngineFactory(func(context.Context) atom.Engine { return engine }),
-		withPodmanEngineFactory(func(context.Context) atom.Engine { return engine }),
-		withAtomPollInterval(5 * time.Millisecond),
+) []JobOption {
+	return []JobOption{
+		WithRunStoreFactory(func() *run.Store { return store }),
+		WithEnvVariables(func() env.Environment { return vars }),
+		WithTaskServiceFactory(func(context.Context) task.Task { return taskSvc }),
+		WithAtomServiceFactory(func(context.Context) asvc.Atom { return atomSvc }),
+		WithTaskEdgeServiceFactory(func(context.Context) taskedge.TaskEdge { return edgeSvc }),
+		WithDispatchRunCallbacks(func(context.Context, uuid.UUID, uuid.UUID, error) error { return nil }),
+		WithDockerEngineFactory(func(context.Context) atom.Engine { return engine }),
+		WithKubernetesEngineFactory(func(context.Context) atom.Engine { return engine }),
+		WithPodmanEngineFactory(func(context.Context) atom.Engine { return engine }),
+		WithAtomPollInterval(5 * time.Millisecond),
 	}
 }
 
