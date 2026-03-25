@@ -1,5 +1,7 @@
 # Design: Smart Incremental Execution
 
+> Status: Proposed only. This feature is not implemented in the current repo; use this file as a design draft rather than a statement of shipped behavior.
+
 ## Status
 
 Draft (proposed).

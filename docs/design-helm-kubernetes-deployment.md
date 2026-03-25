@@ -1,5 +1,7 @@
 # Design: Helm Charts for Kubernetes Deployment
 
+> Status: Mostly implemented design record. The supported install path is documented in [kubernetes-deployment.md](kubernetes-deployment.md); keep this file as historical design context plus remaining validation notes.
+
 ## Status
 
 Implemented (pending live-cluster validation)

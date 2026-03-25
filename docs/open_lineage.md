@@ -63,6 +63,7 @@ The integration is controlled entirely via environment variables. It is disabled
 | `CAESIUM_OPEN_LINEAGE_HEADERS` | string | (empty) | Comma-separated `key=value` pairs for HTTP headers (e.g. auth tokens) |
 | `CAESIUM_OPEN_LINEAGE_FILE_PATH` | string | `/var/lib/caesium/lineage.ndjson` | Output file path when transport is `file` |
 | `CAESIUM_OPEN_LINEAGE_TIMEOUT` | duration | `5s` | HTTP client timeout |
+| `CAESIUM_OPEN_LINEAGE_RETRY_ATTEMPTS` | uint | `3` | Number of HTTP transport retry attempts |
 
 ## Transport options
 

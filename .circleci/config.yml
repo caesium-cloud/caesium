@@ -156,6 +156,65 @@ jobs:
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
             just tag=$IMAGE_TAG ui-test
 
+  ui-e2e:
+    machine:
+      image: ubuntu-2404:current
+    resource_class: medium
+    working_directory: /home/circleci/project
+    steps:
+      - checkout
+      - attach_workspace:
+          at: /tmp/workspace
+      - run:
+          name: Install just, Node.js, and npm
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y just curl
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+      - run:
+          name: Load release image
+          command: gunzip -c /tmp/workspace/release-amd64.tar.gz | docker load
+      - run:
+          name: Install UI dependencies and browsers
+          command: |
+            cd ui
+            npm ci
+            npx playwright install --with-deps chromium
+      - run:
+          name: Start Caesium server
+          command: |
+            IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
+            docker rm -f caesium-server >/dev/null 2>&1 || true
+            docker run -d --name caesium-server \
+              -p 8080:8080 \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              -e DOCKER_HOST=unix:///var/run/docker.sock \
+              --user 0:0 \
+              caesiumcloud/caesium:${IMAGE_TAG} start
+            tries=0
+            until curl -sf http://127.0.0.1:8080/health >/dev/null; do
+              tries=$((tries + 1))
+              if [ "$tries" -gt 30 ]; then
+                echo "Caesium did not become ready in time"
+                docker logs caesium-server || true
+                exit 1
+              fi
+              sleep 1
+            done
+      - run:
+          name: Run Playwright E2E
+          command: |
+            if ! (cd ui && npm run test:e2e); then
+              docker logs caesium-server || true
+              docker ps -a || true
+              exit 1
+            fi
+      - run:
+          name: Stop Caesium server
+          when: always
+          command: docker rm -f caesium-server >/dev/null 2>&1 || true
+
   build-and-integration-test:
     machine:
       image: ubuntu-2404:current
@@ -407,10 +466,20 @@ workflows:
               only: /.*/
             tags:
               only: /^v.*/
+      - ui-e2e:
+          requires:
+            - ui-test
+            - build-and-integration-test
+          filters:
+            branches:
+              only: /.*/
+            tags:
+              only: /^v.*/
       - publish:
           requires:
             - lint
             - ui-test
+            - ui-e2e
             - helm-lint
             - unit-test
             - unit-test-arm64

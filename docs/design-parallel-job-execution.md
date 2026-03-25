@@ -1,5 +1,7 @@
 # Design: Parallel Job Execution
 
+> Status: Implemented with some historical branch references retained below. For day-to-day operations, prefer [parallel-execution-operations.md](parallel-execution-operations.md).
+
 ## Status
 
 Complete

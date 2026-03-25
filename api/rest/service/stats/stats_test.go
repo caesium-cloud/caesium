@@ -49,6 +49,11 @@ func (s *StatsSuite) TestEmptyDatabaseReturnsZeros() {
 	s.Equal(float64(0), resp.Jobs.SuccessRate)
 	s.Empty(resp.TopFailing)
 	s.Empty(resp.SlowestJobs)
+	s.Len(resp.SuccessRateTrend, 7)
+	for _, day := range resp.SuccessRateTrend {
+		s.Equal(int64(0), day.RunCount)
+		s.Equal(float64(0), day.SuccessRate)
+	}
 }
 
 func (s *StatsSuite) TestSuccessRateComputedCorrectly() {
@@ -169,16 +174,19 @@ func (s *StatsSuite) TestSuccessRateTrendUsesFullCalendarWindow() {
 	s.Require().NoError(err)
 	s.Require().Len(resp.SuccessRateTrend, 7)
 
-	byDate := make(map[string]float64, len(resp.SuccessRateTrend))
+	byDate := make(map[string]DailyStats, len(resp.SuccessRateTrend))
 	for _, day := range resp.SuccessRateTrend {
-		byDate[day.Date] = day.SuccessRate
+		byDate[day.Date] = day
 	}
 
 	s.Equal(today.Add(-6*24*time.Hour).Format("2006-01-02"), resp.SuccessRateTrend[0].Date)
 	s.Equal(today.Format("2006-01-02"), resp.SuccessRateTrend[6].Date)
-	s.Equal(1.0, byDate[today.Format("2006-01-02")])
-	s.Equal(0.0, byDate[twoDaysAgo.Format("2006-01-02")])
-	s.Equal(0.0, byDate[today.Add(-1*24*time.Hour).Format("2006-01-02")])
+	s.Equal(int64(1), byDate[today.Format("2006-01-02")].RunCount)
+	s.Equal(1.0, byDate[today.Format("2006-01-02")].SuccessRate)
+	s.Equal(int64(1), byDate[twoDaysAgo.Format("2006-01-02")].RunCount)
+	s.Equal(0.0, byDate[twoDaysAgo.Format("2006-01-02")].SuccessRate)
+	s.Equal(int64(0), byDate[today.Add(-1*24*time.Hour).Format("2006-01-02")].RunCount)
+	s.Equal(0.0, byDate[today.Add(-1*24*time.Hour).Format("2006-01-02")].SuccessRate)
 }
 
 func (s *StatsSuite) createJob(alias string) uuid.UUID {

@@ -164,6 +164,28 @@ ui-test: builder
         {{repo}}/{{builder_image}}:{{tag}} \
         sh -c 'npm ci && npm test && npm run build:ci'
 
+ui-e2e: build-release
+    @docker rm -f caesium-server >/dev/null 2>&1 || true
+    bash -lc 'set -euo pipefail; \
+        trap "docker rm -f caesium-server >/dev/null 2>&1 || true" EXIT; \
+        docker run --platform {{platform}} -d --name caesium-server -p 8080:8080 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            --user 0:0 {{repo}}/{{image}}:{{tag}} start >/dev/null; \
+        tries=0; \
+        until curl -sf http://127.0.0.1:8080/health >/dev/null; do \
+            tries=$$((tries + 1)); \
+            if [ "$$tries" -gt 30 ]; then \
+                echo "Caesium did not become ready in time" >&2; \
+                exit 1; \
+            fi; \
+            sleep 1; \
+        done; \
+        cd ui; \
+        npm ci; \
+        npx playwright install chromium; \
+        npm run test:e2e'
+
 helm-lint:
     helm lint ./helm/caesium
 

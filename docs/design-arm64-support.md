@@ -1,5 +1,7 @@
 # Design: Comprehensive ARM64 Support
 
+> Status: Implemented design record. Use this document as rationale and implementation history; current operator behavior is reflected in the root README, `justfile`, and CI config.
+
 ## Status
 
 Implemented

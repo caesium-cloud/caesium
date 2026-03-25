@@ -170,6 +170,7 @@ export interface StatsResponse {
 
 export interface DailyStats {
   date: string;
+  run_count: number;
   success_rate: number;
 }
 

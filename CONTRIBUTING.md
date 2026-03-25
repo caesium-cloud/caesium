@@ -31,7 +31,7 @@ Thanks for your interest in contributing. This guide covers everything you need 
 
 ```
 caesium/
-├── cmd/                  # CLI entrypoints (start, job, run)
+├── cmd/                  # CLI entrypoints (start, job, run, backfill, dev, test)
 ├── internal/             # Private application packages
 │   ├── executor/         # Trigger polling and job queuing
 │   ├── worker/           # Task claimer and concurrent worker pool
@@ -123,6 +123,7 @@ Use `develop` as the base for all PRs. `master` is the stable release branch and
 | `just rm` | Stop and remove the server container |
 | `just unit-test` | Run Go unit tests (race detector + coverage) |
 | `just ui-test` | Run React unit tests (Vitest) |
+| `just ui-e2e` | Run Playwright against the embedded UI and a real Caesium server |
 | `just lint` | Run `go fmt`, `go vet`, and `golangci-lint` |
 | `just ui-lint` | Run ESLint on the React codebase |
 | `just integration-test` | Run integration tests (requires Docker-in-Docker) |
@@ -167,6 +168,7 @@ Use `develop` as the base for all PRs. `master` is the stable release branch and
 ```bash
 just unit-test      # Go (with race detector)
 just ui-test        # React (Vitest)
+just ui-e2e         # Playwright against the embedded UI
 ```
 
 Aim for unit tests on any new logic in `internal/` or `pkg/`. Tests should not require external processes; mock or stub at the boundary.

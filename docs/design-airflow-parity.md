@@ -1,5 +1,7 @@
 # Design: Airflow Functional Parity
 
+> Status: Partially implemented design record. See [airflow-parity.md](airflow-parity.md) for the current shipped subset and use this file for the remaining workstreams only.
+
 ## Status
 
 Phase 1 complete. Seven of fifteen workstreams are implemented (WS1, WS2, WS3, WS6, WS8, WS10, WS12).

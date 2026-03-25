@@ -1,73 +1,103 @@
-# React + TypeScript + Vite
+# Caesium UI
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This package contains the embedded React operator UI that is built into the Caesium Go binary.
 
-Currently, two official plugins are available:
+## Stack
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- React 19 + TypeScript
+- Vite
+- Tailwind CSS + shadcn/ui primitives
+- TanStack Query + TanStack Router
+- React Flow for DAG rendering
+- Recharts for stats visualizations
+- xterm.js for task log rendering
+- Vitest + Testing Library for component tests
+- Playwright for browser E2E
 
-## React Compiler
+## Routes
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+The UI is served from `/` by the Go API and currently includes:
 
-## Expanding the ESLint configuration
+- `/jobs`
+- `/jobs/:jobId`
+- `/jobs/:jobId/runs/:runId`
+- `/stats`
+- `/triggers`
+- `/atoms`
+- `/jobdefs`
+- `/system`
+- `/system/logs`
+- `/system/database`
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Development
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+Install dependencies:
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd ui
+npm ci
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Run the Vite dev server:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm run dev
 ```
+
+By default Vite proxies `/v1` requests to `http://localhost:8080`, so the usual workflow is:
+
+```bash
+just run
+cd ui
+npm run dev
+```
+
+## Build and Embedding
+
+The production UI is embedded into the Go binary:
+
+- `build/Dockerfile` runs `npm ci && npm run build` inside `ui/`.
+- The generated `ui/dist/` bundle is embedded through [ui/embed.go](/Users/cryan/dev/caesium/ui/embed.go).
+- [api/ui.go](/Users/cryan/dev/caesium/api/ui.go) serves the embedded assets and falls back to `index.html` for SPA routes.
+
+For local production-style verification:
+
+```bash
+cd ui
+npm run build
+npm run preview
+```
+
+## Tests
+
+Unit and component tests:
+
+```bash
+cd ui
+npm test
+```
+
+Current frontend coverage includes:
+
+- API client and SSE client behavior
+- Stats page rendering
+- Database console utilities
+- Task detail panel resize behavior
+- Task node rendering states
+- Job DAG layout/status/edge mapping
+
+Browser E2E:
+
+```bash
+just ui-e2e
+```
+
+`just ui-e2e` starts a real Caesium server with the embedded UI, installs Chromium if needed, and runs Playwright against the operator flow.
+
+## Notes
+
+- The UI depends on real REST and SSE endpoints; it is not a standalone mock frontend.
+- Some operator tools are env-gated on the backend:
+  - `CAESIUM_LOG_CONSOLE_ENABLED`
+  - `CAESIUM_DATABASE_CONSOLE_ENABLED`
+- Bundle budget enforcement runs as part of `npm run build:ci` and `just ui-test`.

@@ -1,193 +1,79 @@
 # Caesium Web UI Implementation Plan
 
-## React + TypeScript + Vite + Tailwind + shadcn/ui + TanStack + React Flow + SSE
+> Status: Phase 1 is complete and most Phase 2 observability work is already shipped. This document now tracks only the remaining implementation gaps relative to the current repo.
 
-This document defines a **step-by-step implementation plan** for
-building the embedded Caesium Web UI.
+## Current State
 
-It is designed to be executed iteratively by autonomous coding agents.
+The embedded UI is already in production shape for the core operator workflow:
 
-------------------------------------------------------------------------
+- React + TypeScript + Vite app under `ui/`
+- Embedded into the Go binary with `go:embed`
+- TanStack Router app shell and feature routes
+- Jobs list, Job Detail, Run Detail, Stats, Triggers, Atoms, JobDefs, and System pages
+- SSE-backed live run updates
+- React Flow DAG rendering
+- xterm-based task log streaming and retained log viewing
+- Backfill, pause/unpause, trigger run, callback retry, and job definition apply surfaces
+- System log console and database console operator tools
 
-# 0. Goals [COMPLETED]
+## Completed Work
 
-Build a modern, operator-grade UI for Caesium with:
+### Phase 1 Core UI
 
--   [x] Real-time updates via **SSE (first-class, v1)**
--   [x] Interactive DAG visualization
--   [x] Run inspection with status overlays
--   [x] Live log streaming
--   [x] Operator actions (trigger run, pause/unpause, retry callbacks)
--   [x] Airflow parity surfaces for paused jobs, run parameters, and task retry/trigger metadata
--   [x] Beautiful, polished UI (Akuity-style)
+- [x] Embedded web UI with SPA fallback and Docker build integration
+- [x] Jobs list with live updates and trigger controls
+- [x] Job Detail DAG view and task metadata inspection
+- [x] Run Detail live DAG updates and log access
+- [x] Task log streaming with retained-log fallback
+- [x] Operator actions for pause/unpause, trigger, backfill, and callback retry
+- [x] Command palette, keyboard shortcuts, theme support, and general UI polish
 
-No authentication or multi-tenancy in v1.
+### Phase 2 Work Already Landed
 
-------------------------------------------------------------------------
+- [x] Recharts adoption for the stats surface
+- [x] Success-rate trend chart
+- [x] Failure-distribution chart
+- [x] Trigger and atom inspection in Job Detail
+- [x] Airflow-parity UI for paused jobs, run params, retries, trigger rules, and node selectors
+- [x] Baseline frontend test coverage for `StatsPage`, `TaskNode`, API helpers, SSE helpers, and key operator panels
 
-# 1. Repository Structure [COMPLETED]
+## Remaining Gaps
 
-Create a `ui/` directory inside the Caesium monorepo:
+### 1. Stats Surface
 
-    /ui
-      /src
-        /app
-        /components
-        /features
-        /lib
-      index.html
-      vite.config.ts
-      tailwind.config.ts
-      tsconfig.json
-      package.json
+- [x] Add daily run-volume data to the stats API (`run_count` on each daily trend entry)
+- [x] Add a Daily Run Volume chart to the Stats page
+- [ ] Decide whether the slowest-jobs table should remain as-is or be promoted to a chart in a future pass
 
-UI is embedded into the Go binary using `go:embed`.
+### 2. Component Coverage
 
-------------------------------------------------------------------------
+- [x] Add focused `JobDAG` tests covering:
+  - node type mapping
+  - status normalization
+  - selected-node state
+  - output-bearing and contract-bearing edges
+- [x] Expand `TaskNode` coverage only for behavior not already tested
+- [ ] Add equivalent focused tests for any future custom DAG edge or branch-node behavior that becomes more complex
 
-# 2. Project Scaffold [COMPLETED]
+### 3. Browser E2E
 
-- [x] Create Vite App (React + TS)
-- [x] Install Core Dependencies (TanStack, React Flow, Lucide, xterm, etc.)
-- [x] Configure Tailwind and PostCSS
-- [x] Setup shadcn/ui and base components
+- [x] Add Playwright coverage for the critical operator flow:
+  - apply a fixture job
+  - trigger a run
+  - observe live run-state updates
+  - open the Run Detail page
+  - click a task node
+  - verify live logs
+  - verify retained logs after completion
+- [x] Add a dedicated `ui-e2e` workflow in CircleCI
+- [x] Add a local developer entrypoint via `just ui-e2e`
 
-------------------------------------------------------------------------
+## Acceptance Criteria
 
-# 3. Core Architecture [COMPLETED]
+The remaining UI plan is considered closed when:
 
-## 3.1 Routing (TanStack Router)
-
-Routes implemented:
-
--   `/jobs`
--   `/jobs/:jobId`
--   `/jobs/:jobId/runs/:runId`
--   `/stats`
-
-- [x] Create `AppShell` layout with sidebar + header.
-
-------------------------------------------------------------------------
-
-# 4. API Layer [COMPLETED]
-
-- [x] Create `src/lib/api.ts`.
-- [x] Base Fetch Wrapper with error handling.
-- [x] TypeScript types matching REST models (Job, Run, Task, Atom, etc.).
-
-------------------------------------------------------------------------
-
-# 5. SSE Integration [COMPLETED]
-
-- [x] Define Event Types matching backend schema.
-- [x] Create SSE Client Manager (`src/lib/events.ts`) with reconnect and subscription logic.
-- [x] React Query Integration for granular cache invalidation.
-- [x] Persistent Global SSE connection initialized at root.
-
-------------------------------------------------------------------------
-
-# 6. Jobs List Page [COMPLETED]
-
-- [x] Fetch `/jobs`
-- [x] Display in `shadcn` Table
-- [x] Add "Trigger Run" action with toast notifications.
-- [x] Real-time status and duration updates via SSE.
-
-------------------------------------------------------------------------
-
-# 7. Job Detail Page [COMPLETED]
-
-- [x] DAG Rendering with React Flow + Dagre layout.
-- [x] Node status styling (Running, Completed, Failed).
-- [x] Tabbed view (DAG, Runs, Definition).
-- [x] Integrated real-time DAG updates.
-
-------------------------------------------------------------------------
-
-# 8. Run Detail Page [COMPLETED]
-
-- [x] Real-time status mapping from SSE events.
-- [x] Interactive DAG with log access via node click.
-- [x] Live run/task state visualization.
-
-------------------------------------------------------------------------
-
-# 9. Log Streaming [COMPLETED]
-
-- [x] Use existing REST streaming endpoint (`/v1/jobs/:id/runs/:run_id/logs`).
-- [x] Render with `xterm.js` for high-performance terminal output.
-- [x] Integrated into DAG visualization on the Run Detail page.
-
-------------------------------------------------------------------------
-
-# 10. UI Polish [COMPLETED]
-
-- [x] Toast notifications (Sonner)
-- [x] Loading states (Skeletons)
-- [x] Keyboard shortcuts (`g+j`, `g+t`, etc.)
-- [x] Command palette (`cmd+k`)
-- [x] Smooth transitions (Fade-in animations)
-- [x] Native Dark Mode (default) with persistent theme switcher.
-- [x] Advanced DAG Visualization (engine icons, YAML command lists, live errors).
-
-------------------------------------------------------------------------
-
-# 11. Embedding in Go Binary [COMPLETED]
-
-- [x] Multi-stage Docker build producing `ui/dist`.
-- [x] Go `//go:embed` integration in `ui/embed.go`.
-- [x] Echo route registration and SPA fallback in `api/ui.go`.
-
-------------------------------------------------------------------------
-
-# 12. Implementation Order Summary
-
-1.  [x] Scaffold + Tailwind + shadcn
-2.  [x] Router + AppShell
-3.  [x] API client
-4.  [x] SSE client manager
-5.  [x] Jobs list
-6.  [x] DAG view
-7.  [x] Run detail + SSE updates
-8.  [x] Log viewer
-9.  [x] Polish
-10. [x] Embed build
-
-------------------------------------------------------------------------
-
-# 13. Phase 2: Deep Observability & Testing [IN PROGRESS]
-
-While the core operator UI is complete, the following enhancements will elevate the platform to a production-ready observability suite.
-
-## 13.1 Advanced Stats Visualization
-- [ ] Replace basic tables with **Recharts** visualizations.
-- [ ] Add "Job Success Rate over Time" (Line Chart).
-- [ ] Add "Daily Run Volume" (Bar Chart).
-- [ ] Add "Failure Distribution by Job" (Pie Chart).
-
-## 13.2 Detailed Inspections [COMPLETED]
-- [x] **Job Detail Integration**: Inspect associated triggers and atoms directly within the Job Detail page.
-- [x] **Trigger Configuration**: View cron schedules, aliases, and recent firings in a dedicated tab.
-- [x] **Atom Usage**: View image, command, and engine details for all tasks in a job.
-
-## 13.3 Airflow Parity UI [COMPLETED]
-- [x] Surface paused jobs on the Jobs page and Job Detail page.
-- [x] Add pause/unpause operator actions in the web UI using the REST API.
-- [x] Show run parameters on Job Detail and Run Detail pages.
-- [x] Show task `triggerRule`, retries, retry backoff, attempt counts, and node selectors in task detail panels.
-
-## 13.4 Testing & Quality
-- [ ] **E2E Testing**: Implement Playwright tests for critical paths (Trigger Job -> Watch SSE -> View Logs).
-- [ ] **Component Testing**: Expand unit tests for complex visual components like `TaskNode` and `JobDAG`.
-
-------------------------------------------------------------------------
-
-# 14. Definition of Done [Phase 1: 100% COMPLETED]
-
-- [x] Jobs list works with real-time updates.
-- [x] DAG fully interactive and descriptive.
-- [x] Run page updates in real time (SSE).
-- [x] Logs stream live with high performance.
-- [x] Actions (Trigger/Search) reflected instantly.
-- [x] Modern, polished "Operator-Grade" UI.
-- [x] Build artifacts embedded in the Go backend.
+- stats payloads continue to include a full seven-day window with both `success_rate` and `run_count`
+- Stats page renders both trend and volume charts without breaking existing summary tables
+- DAG component tests cover node and edge mapping logic without relying on fragile DOM internals
+- Playwright runs against a real Caesium instance and verifies live plus retained task logs
+- documentation and contributor guidance describe the shipped UI rather than the original scaffold plan

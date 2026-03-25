@@ -13,7 +13,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `CAESIUM_MAX_PARALLEL_TASKS` | `1` | Max local task concurrency within a job run (`local` mode). |
+| `CAESIUM_MAX_PARALLEL_TASKS` | `runtime.NumCPU()` | Max local task concurrency within a job run (`local` mode). |
 | `CAESIUM_TASK_FAILURE_POLICY` | `halt` | Task failure behavior: `halt` or `continue`. |
 | `CAESIUM_TASK_TIMEOUT` | `0` | Per-task timeout (`0` disables timeout). |
 | `CAESIUM_EXECUTION_MODE` | `local` | `local` or `distributed` execution model. |

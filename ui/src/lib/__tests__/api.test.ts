@@ -59,6 +59,7 @@ describe('api', () => {
       jobs: { total: 10, recent_runs: 5, success_rate: 0.9, avg_duration_seconds: 5.0 },
       top_failing: [],
       slowest_jobs: [],
+      success_rate_trend: [{ date: '2026-03-24', run_count: 3, success_rate: 1 }],
     };
     mockFetch.mockResolvedValue(okResponse(statsData));
     const result = await api.getStats();
