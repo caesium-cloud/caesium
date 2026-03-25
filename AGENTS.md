@@ -1,5 +1,9 @@
 # Repository Guidelines
 
+## Project Overview
+
+Caesium is a distributed job scheduler with declarative YAML DAG pipelines supporting Docker, Podman, and Kubernetes runtimes.
+
 ## Project Structure & Module Organization
 - `cmd/` – CLI entrypoints built with Cobra; binaries assemble here.
 - `internal/` – private packages for app logic (not imported externally).
@@ -16,14 +20,30 @@
 - `just run` – start the server container locally (host network).
 - `just rm` – remove the running container.
 - `just unit-test` – run unit tests with race + coverage.
+- `just lint` – go fmt + go vet + golangci-lint.
 - `just integration-test` – run tests in `./test` with `-tags=integration`.
+- `just hydrate` – load example jobs into running server.
 - Containerized builds are required: use `just build` (or `just builder` + `just run`). Avoid invoking `go build` directly on the host so the toolchain and CGO deps stay consistent.
+- CI runs in `.circleci/`, not GitHub Actions.
+
+## Local Development Workflow
+
+```sh
+caesium job lint --path jobs/           # Validate schemas and DAG
+caesium job preview --path job.yaml     # ASCII DAG visualization
+caesium dev --once --path job.yaml      # Run locally against Docker
+caesium dev --path job.yaml             # Watch mode — re-run on save
+caesium job diff --path jobs/           # Preview changes vs server
+caesium job apply --path jobs/          # Deploy to server
+```
 
 ## Coding Style & Naming Conventions
 - Go formatting: run `go fmt ./...` (CI expects formatted code).
 - Lint/vet: run `go vet ./...` before submitting.
 - Naming: packages lower-case short names; exported types, funcs, and consts use CamelCase; tests end with `_test.go`.
 - Keep modules cohesive; prefer `internal/` for non-public code.
+- Job definition schema is in `pkg/jobdef/definition.go`.
+- Example manifests are in `docs/examples/*.job.yaml`.
 
 ## Testing Guidelines
 - Unit tests live beside code or under package directories; name files `*_test.go`.
