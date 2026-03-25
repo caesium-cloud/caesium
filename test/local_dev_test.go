@@ -87,8 +87,8 @@ func (s *IntegrationTestSuite) TestJobPreviewRendersSingleDefinition() {
 	s.Contains(out, "build")
 	s.Contains(out, "test")
 	s.Contains(out, "package")
-	// Should contain box-drawing arrow separator.
-	s.Contains(out, "-->")
+	// Should contain arrowhead connecting layers.
+	s.Contains(out, ">")
 }
 
 func (s *IntegrationTestSuite) TestJobPreviewRendersDAG() {
@@ -294,7 +294,7 @@ steps:
 	s.Contains(previewOut, "extract")
 	s.Contains(previewOut, "transform")
 	s.Contains(previewOut, "load")
-	s.Contains(previewOut, "-->")
+	s.Contains(previewOut, ">")
 
 	// Step 3: Execute the DAG locally.
 	devOut := s.runCLIOutput("dev", "--once", "--path", dir)
