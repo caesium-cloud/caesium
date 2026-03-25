@@ -12,3 +12,14 @@ caesium
 .circleci
 .gitignore
 .devcontainer
+.claude
+.git
+
+# UI build artifacts (rebuilt inside the container)
+ui/node_modules
+ui/dist
+
+# Build artifacts
+helm
+coverage.txt
+*.tar.gz

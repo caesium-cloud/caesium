@@ -13,15 +13,16 @@ jobs:
           name: Install just
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
-          name: Build builder image (amd64)
+          name: Build builder images (amd64)
           command: |
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
             just tag=$IMAGE_TAG builder
+            just tag=$IMAGE_TAG builder-full
       - run:
-          name: Save builder image (amd64)
+          name: Save builder images (amd64)
           command: |
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-amd64
-            docker save caesiumcloud/caesium-builder:$IMAGE_TAG | gzip > /tmp/builder-amd64.tar.gz
+            docker save caesiumcloud/caesium-builder:$IMAGE_TAG caesiumcloud/caesium-builder:$IMAGE_TAG-full | gzip > /tmp/builder-amd64.tar.gz
       - persist_to_workspace:
           root: /tmp
           paths:
@@ -39,15 +40,16 @@ jobs:
           name: Install just
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
-          name: Build builder image (arm64)
+          name: Build builder images (arm64)
           command: |
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
             just tag=$IMAGE_TAG builder
+            just tag=$IMAGE_TAG builder-full
       - run:
-          name: Save builder image (arm64)
+          name: Save builder images (arm64)
           command: |
             IMAGE_TAG=${CIRCLE_TAG:-$CIRCLE_SHA1}-arm64
-            docker save caesiumcloud/caesium-builder:$IMAGE_TAG | gzip > /tmp/builder-arm64.tar.gz
+            docker save caesiumcloud/caesium-builder:$IMAGE_TAG caesiumcloud/caesium-builder:$IMAGE_TAG-full | gzip > /tmp/builder-arm64.tar.gz
       - persist_to_workspace:
           root: /tmp
           paths:
@@ -66,7 +68,7 @@ jobs:
           name: Install just
           command: sudo apt-get update && sudo apt-get install -y just
       - run:
-          name: Load builder image
+          name: Load builder images
           command: gunzip -c /tmp/workspace/builder-amd64.tar.gz | docker load
       - run:
           name: Lint

@@ -21,7 +21,15 @@ validate-platform:
 builder: validate-platform
     docker build --platform {{platform}} \
         --build-arg TARGETARCH={{target_arch}} \
+        --target builder \
         -t {{repo}}/{{builder_image}}:{{tag}} \
+        -f {{dockerfile}}.build .
+
+builder-full: validate-platform
+    docker build --platform {{platform}} \
+        --build-arg TARGETARCH={{target_arch}} \
+        --target builder-full \
+        -t {{repo}}/{{builder_image}}:{{tag}}-full \
         -f {{dockerfile}}.build .
 
 build: builder
@@ -34,6 +42,7 @@ build: builder
 # Build for a specific platform (requires buildx + QEMU for cross-platform)
 build-cross target_platform:
     docker buildx build --platform {{target_platform}} \
+        --target builder \
         -t {{repo}}/{{builder_image}}:{{tag}} \
         -f {{dockerfile}}.build --load .
     docker buildx build --platform {{target_platform}} \
@@ -45,6 +54,7 @@ build-cross target_platform:
 # Build and push multi-arch images for both builder and runtime
 build-multiarch:
     docker buildx build --platform linux/amd64,linux/arm64 \
+        --target builder \
         -t {{repo}}/{{builder_image}}:{{tag}} \
         -f {{dockerfile}}.build --push .
     docker buildx build --platform linux/amd64,linux/arm64 \
@@ -81,11 +91,11 @@ push-multiarch:
         {{repo}}/{{image}}:{{tag}}-arm64
     docker manifest push {{repo}}/{{image}}:{{tag}}
 
-unit-test: builder
+unit-test: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
-        {{repo}}/{{builder_image}}:{{tag}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...'
 
 run: build
@@ -108,7 +118,7 @@ integration-test:
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{it_container}} \
         -w {{bld_dir}} \
-        {{repo}}/{{builder_image}}:{{tag}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration'; then \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
     else \
@@ -139,29 +149,29 @@ integration-up: build-test
         -e CAESIUM_LOG_LEVEL=debug \
         {{repo}}/{{image}}:{{tag}}-test start
 
-lint: builder
+lint: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
         -e GOFLAGS=-buildvcs=false \
-        {{repo}}/{{builder_image}}:{{tag}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && set -euo pipefail; \
             go fmt .; \
             go vet ./...; \
             golangci-lint run ./...'
 
-ui-lint: builder
+ui-lint: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
-        {{repo}}/{{builder_image}}:{{tag}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
         sh -c 'npm ci && npm run lint'
 
-ui-test: builder
+ui-test: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
-        {{repo}}/{{builder_image}}:{{tag}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
         sh -c 'npm ci && npm test && npm run build:ci'
 
 ui-e2e: build-release
