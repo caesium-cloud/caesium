@@ -46,7 +46,9 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   const applyResponse = await request.post("/v1/jobdefs/apply", {
     data: { definitions: [definition] },
   });
-  expect(applyResponse.ok()).toBeTruthy();
+  if (!applyResponse.ok()) {
+    throw new Error(`failed to apply fixture: ${applyResponse.status()} ${await applyResponse.text()}`);
+  }
 
   await page.goto("/jobs");
 

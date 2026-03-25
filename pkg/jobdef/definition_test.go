@@ -1,6 +1,9 @@
 package jobdef
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 var example1 = `
 $schema: https://yourorg.io/schemas/job.v1.json
@@ -209,5 +212,21 @@ steps:
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
+	var step Step
+	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.20","command":["echo","ok"]}`), &step)
+	if err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	if step.Type != StepTypeTask {
+		t.Fatalf("step type = %q, want %q", step.Type, StepTypeTask)
+	}
+
+	if step.Engine != EngineDocker {
+		t.Fatalf("step engine = %q, want %q", step.Engine, EngineDocker)
 	}
 }

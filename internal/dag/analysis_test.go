@@ -13,9 +13,9 @@ func TestAnalyzeSequential(t *testing.T) {
 		Metadata:   jobdef.Metadata{Alias: "seq"},
 		Trigger:    jobdef.Trigger{Type: "cron", Configuration: map[string]any{"cron": "* * * * *"}},
 		Steps: []jobdef.Step{
-			{Name: "a", Engine: "docker", Image: "alpine"},
-			{Name: "b", Engine: "docker", Image: "alpine"},
-			{Name: "c", Engine: "docker", Image: "alpine"},
+			{Name: "a", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine"},
+			{Name: "b", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine"},
+			{Name: "c", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine"},
 		},
 	}
 
@@ -45,10 +45,10 @@ func TestAnalyzeFanOut(t *testing.T) {
 		Metadata:   jobdef.Metadata{Alias: "fan"},
 		Trigger:    jobdef.Trigger{Type: "cron", Configuration: map[string]any{"cron": "* * * * *"}},
 		Steps: []jobdef.Step{
-			{Name: "start", Engine: "docker", Image: "alpine", Next: []string{"a", "b"}},
-			{Name: "a", Engine: "docker", Image: "alpine", DependsOn: []string{"start"}, Next: []string{"join"}},
-			{Name: "b", Engine: "docker", Image: "alpine", DependsOn: []string{"start"}, Next: []string{"join"}},
-			{Name: "join", Engine: "docker", Image: "alpine", DependsOn: []string{"a", "b"}},
+			{Name: "start", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine", Next: []string{"a", "b"}},
+			{Name: "a", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine", DependsOn: []string{"start"}, Next: []string{"join"}},
+			{Name: "b", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine", DependsOn: []string{"start"}, Next: []string{"join"}},
+			{Name: "join", Type: jobdef.StepTypeTask, Engine: "docker", Image: "alpine", DependsOn: []string{"a", "b"}},
 		},
 	}
 
