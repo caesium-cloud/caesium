@@ -2,7 +2,7 @@
 FROM golang:1.25.6-alpine3.23 AS dqlite
 RUN apk add --no-cache \
     autoconf automake libtool \
-    libuv-dev lz4-dev curl \
+    libuv-dev lz4-dev \
     make gcc g++ musl-dev linux-headers \
     sqlite-dev git
 ARG DQLITE_REF=v1.18.5
@@ -20,6 +20,7 @@ FROM golang:1.25.6-alpine3.23 AS builder
 RUN apk add --no-cache \
     ca-certificates git dumb-init \
     libuv-dev lz4-dev \
+    gpgme-dev btrfs-progs-dev lvm2-dev \
     make gcc g++ musl-dev linux-headers \
     sqlite-dev nodejs npm
 COPY --from=dqlite /usr/lib/libdqlite* /usr/lib/
@@ -37,7 +38,4 @@ RUN go mod download
 
 # -------- Stage 3: Full builder with lint & test tooling --------
 FROM builder AS builder-full
-RUN apk add --no-cache \
-    gpgme-dev btrfs-progs-dev lvm2-dev \
-    autoconf automake libtool curl
 RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
