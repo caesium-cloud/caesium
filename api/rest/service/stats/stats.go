@@ -156,7 +156,6 @@ func (s *Service) Get() (*StatsResponse, error) {
 	// Success rate trend (last 7 days)
 	var trendData []struct {
 		Day      string
-		Total    int64
 		Succ     int64
 		RunCount int64
 	}
@@ -169,7 +168,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	sevenDaysAgo := today.Add(-6 * 24 * time.Hour)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select(dayExpr+" as day, COUNT(*) as total, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
+		Select(dayExpr+" as day, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
 		Where("started_at >= ? AND status IN ?", sevenDaysAgo, []string{"succeeded", "failed"}).
 		Group("day").
 		Order("day ASC").
@@ -183,8 +182,8 @@ func (s *Service) Get() (*StatsResponse, error) {
 	trendMap := make(map[string]dailyAggregate, len(trendData))
 	for _, d := range trendData {
 		rate := 0.0
-		if d.Total > 0 {
-			rate = float64(d.Succ) / float64(d.Total)
+		if d.RunCount > 0 {
+			rate = float64(d.Succ) / float64(d.RunCount)
 		}
 		trendMap[d.Day] = dailyAggregate{
 			successRate: rate,

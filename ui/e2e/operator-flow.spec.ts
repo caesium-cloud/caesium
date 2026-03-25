@@ -7,14 +7,22 @@ import { parseAllDocuments } from "yaml";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+type FixtureDefinition = {
+  metadata?: Record<string, unknown> & { alias?: string };
+  trigger?: {
+    configuration?: Record<string, unknown> & { path?: string };
+  };
+};
+
 async function loadFixtureDefinition() {
   const fixturePath = path.resolve(__dirname, "../../docs/examples/log-streaming.job.yaml");
   const yaml = await fs.readFile(fixturePath, "utf8");
   const docs = parseAllDocuments(yaml);
-  const definition = docs[0]?.toJS() as Record<string, any> | undefined;
-  if (!definition) {
+  const raw = docs[0]?.toJS();
+  if (!raw || typeof raw !== "object") {
     throw new Error("failed to parse log-streaming fixture");
   }
+  const definition = raw as FixtureDefinition;
 
   const suffix = Date.now().toString(36);
   definition.metadata = {

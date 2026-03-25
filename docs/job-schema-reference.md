@@ -23,10 +23,19 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `alias` | string | required | Unique identifier used across APIs and web UI. |
 | `labels` | map[string]string | optional | Attach metadata for filtering. |
 | `annotations` | map[string]string | optional | Free-form metadata surfaced to clients. |
+| `maxParallelTasks` | integer | optional | Caps concurrent runnable steps for a single job run. |
+| `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |
+| `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |
+| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
 
 ## Trigger
 
 Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.
+
+### Common Trigger Fields
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `defaultParams` | map[string]string | optional | Seeds run parameters when a trigger fires. |
 
 ### Cron Trigger
 | Field | Type | Required | Notes |
@@ -51,12 +60,22 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
 | `name` | string | required | Unique within the job; used for DAG references. |
+| `type` | string | optional | Step kind. Defaults to `task`; `branch` enables conditional fan-out. |
 | `engine` | string | optional | One of `docker`, `podman`, `kubernetes`. Defaults to `docker`. |
 | `image` | string | required | Container image reference. |
 | `command` | array[string] | optional | Executed command; defaults to entrypoint. |
+| `env` | map[string]string | optional | Environment variables passed to the runtime. |
+| `workdir` | string | optional | Working directory inside the container runtime. |
+| `mounts` | array[object] | optional | Bind mounts with `source`, `target`, and optional `readOnly`. |
 | `nodeSelector` | map[string]string | optional | Node labels required for claiming this step in distributed mode. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
+| `retries` | integer | optional | Number of retry attempts after the initial failure. |
+| `retryDelay` | duration | optional | Base delay between retry attempts. |
+| `retryBackoff` | boolean | optional | Doubles `retryDelay` for each retry attempt when enabled. |
+| `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
+| `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
+| `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
 
 ## Secret References
 

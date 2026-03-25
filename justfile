@@ -177,6 +177,7 @@ ui-e2e: build-release
             tries=$$((tries + 1)); \
             if [ "$$tries" -gt 30 ]; then \
                 echo "Caesium did not become ready in time" >&2; \
+                docker logs caesium-server >&2 || true; \
                 exit 1; \
             fi; \
             sleep 1; \

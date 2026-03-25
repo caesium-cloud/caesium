@@ -47,9 +47,16 @@ func (s *ReportSuite) TestAnalyzeSummary() {
 func (s *ReportSuite) TestMarkdownGeneration() {
 	md := Markdown()
 	s.Contains(md, "# Job Definition Schema")
+	s.Contains(md, "| `maxParallelTasks` | integer")
+	s.Contains(md, "| `schemaValidation` | string")
+	s.Contains(md, "| `defaultParams`")
+	s.Contains(md, "| `type` | string")
 	s.Contains(md, "| `engine` | string")
+	s.Contains(md, "| `env` | map[string]string")
 	s.Contains(md, "| `nodeSelector` | map[string]string")
 	s.Contains(md, "| `dependsOn` | array[string]")
+	s.Contains(md, "| `retries` | integer")
+	s.Contains(md, "| `triggerRule` | string")
 }
 
 func (s *ReportSuite) TestRenderSummaryMarkdown() {

@@ -57,8 +57,8 @@ npm run dev
 The production UI is embedded into the Go binary:
 
 - `build/Dockerfile` runs `npm ci && npm run build` inside `ui/`.
-- The generated `ui/dist/` bundle is embedded through [ui/embed.go](/Users/cryan/dev/caesium/ui/embed.go).
-- [api/ui.go](/Users/cryan/dev/caesium/api/ui.go) serves the embedded assets and falls back to `index.html` for SPA routes.
+- The generated `ui/dist/` bundle is embedded through [embed.go](embed.go).
+- [api/ui.go](../api/ui.go) serves the embedded assets and falls back to `index.html` for SPA routes.
 
 For local production-style verification:
 

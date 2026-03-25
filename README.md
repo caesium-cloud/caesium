@@ -91,7 +91,10 @@ caesium dev --once --path jobs/nightly-etl.job.yaml
 ### 4. Start the server and apply definitions
 
 ```bash
+# Start the server
 just run
+
+# Apply definitions
 caesium job apply --path jobs/ --server http://localhost:8080
 ```
 
