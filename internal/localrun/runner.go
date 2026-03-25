@@ -95,23 +95,26 @@ func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
 }
 
 // dbTaskService returns a factory that produces task services backed by the given DB.
+// It uses ServiceWithDB to avoid triggering the global db.Connection() singleton.
 func dbTaskService(conn *gorm.DB) func(context.Context) task.Task {
 	return func(ctx context.Context) task.Task {
-		return task.Service(ctx).WithDatabase(conn)
+		return task.ServiceWithDB(ctx, conn)
 	}
 }
 
 // dbAtomService returns a factory that produces atom services backed by the given DB.
+// It uses ServiceWithDB to avoid triggering the global db.Connection() singleton.
 func dbAtomService(conn *gorm.DB) func(context.Context) asvc.Atom {
 	return func(ctx context.Context) asvc.Atom {
-		return asvc.Service(ctx).WithDatabase(conn)
+		return asvc.ServiceWithDB(ctx, conn)
 	}
 }
 
 // dbTaskEdgeService returns a factory that produces task-edge services backed by the given DB.
+// It uses ServiceWithDB to avoid triggering the global db.Connection() singleton.
 func dbTaskEdgeService(conn *gorm.DB) func(context.Context) taskedge.TaskEdge {
 	return func(ctx context.Context) taskedge.TaskEdge {
-		return taskedge.Service(ctx).WithDatabase(conn)
+		return taskedge.ServiceWithDB(ctx, conn)
 	}
 }
 

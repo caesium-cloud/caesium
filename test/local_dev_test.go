@@ -3,6 +3,7 @@
 package test
 
 import (
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -124,6 +125,7 @@ func (s *IntegrationTestSuite) TestJobPreviewRejectsInvalidDefinition() {
 // ---------------------------------------------------------------------------
 
 func (s *IntegrationTestSuite) TestDevOnceExecutesSingleStepJob() {
+	s.requireDocker()
 	// Create a minimal job that just echoes — fast and deterministic.
 	manifest := `
 apiVersion: v1
@@ -148,6 +150,7 @@ steps:
 }
 
 func (s *IntegrationTestSuite) TestDevOnceExecutesDAG() {
+	s.requireDocker()
 	manifest := `
 apiVersion: v1
 kind: Job
@@ -188,6 +191,7 @@ steps:
 }
 
 func (s *IntegrationTestSuite) TestDevOnceFailsOnBadImage() {
+	s.requireDocker()
 	manifest := `
 apiVersion: v1
 kind: Job
@@ -211,6 +215,7 @@ steps:
 }
 
 func (s *IntegrationTestSuite) TestDevOnceWithRunTimeout() {
+	s.requireDocker()
 	manifest := `
 apiVersion: v1
 kind: Job
@@ -233,6 +238,7 @@ steps:
 }
 
 func (s *IntegrationTestSuite) TestDevOnceSkipsNonCaesiumYAML() {
+	s.requireDocker()
 	dir := s.writeMixedYAMLDir()
 	defer os.RemoveAll(dir)
 
@@ -246,6 +252,7 @@ func (s *IntegrationTestSuite) TestDevOnceSkipsNonCaesiumYAML() {
 // ---------------------------------------------------------------------------
 
 func (s *IntegrationTestSuite) TestFullLocalDevWorkflow() {
+	s.requireDocker()
 	manifest := `
 apiVersion: v1
 kind: Job
@@ -298,6 +305,25 @@ steps:
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// requireDocker skips the test when the Docker daemon is not reachable.
+func (s *IntegrationTestSuite) requireDocker() {
+	s.T().Helper()
+	d := net.Dialer{Timeout: 2 * 1e9}
+	conn, err := d.DialContext(s.T().Context(), "unix", dockerSocket())
+	if err != nil {
+		s.T().Skipf("Docker not available (%v), skipping", err)
+	}
+	_ = conn.Close()
+}
+
+// dockerSocket returns the Docker socket path, respecting DOCKER_HOST.
+func dockerSocket() string {
+	if host := os.Getenv("DOCKER_HOST"); strings.HasPrefix(host, "unix://") {
+		return strings.TrimPrefix(host, "unix://")
+	}
+	return "/var/run/docker.sock"
+}
 
 // runCLIOutput runs the CLI and returns stdout+stderr, failing the test on
 // non-zero exit.

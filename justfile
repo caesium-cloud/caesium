@@ -104,6 +104,8 @@ integration-test:
     just integration-up
     if docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{it_container}} \
         -w {{bld_dir}} \
         {{repo}}/{{builder_image}}:{{tag}} \

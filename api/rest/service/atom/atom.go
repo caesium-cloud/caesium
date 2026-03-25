@@ -33,6 +33,16 @@ func Service(ctx context.Context) Atom {
 	}
 }
 
+// ServiceWithDB creates an Atom service backed by the supplied database
+// connection, bypassing the global db.Connection() singleton. This is
+// used by the local runner to avoid initialising the production database.
+func ServiceWithDB(ctx context.Context, conn *gorm.DB) Atom {
+	return &atomService{
+		ctx: ctx,
+		db:  conn,
+	}
+}
+
 func (a *atomService) WithDatabase(conn *gorm.DB) Atom {
 	a.db = conn
 	return a

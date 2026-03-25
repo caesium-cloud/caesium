@@ -27,6 +27,16 @@ func Service(ctx context.Context) TaskEdge {
 	}
 }
 
+// ServiceWithDB creates a TaskEdge service backed by the supplied database
+// connection, bypassing the global db.Connection() singleton. This is
+// used by the local runner to avoid initialising the production database.
+func ServiceWithDB(ctx context.Context, conn *gorm.DB) TaskEdge {
+	return &taskEdgeService{
+		ctx: ctx,
+		db:  conn,
+	}
+}
+
 func (t *taskEdgeService) WithDatabase(conn *gorm.DB) TaskEdge {
 	t.db = conn
 	return t
