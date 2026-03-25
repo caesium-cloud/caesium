@@ -35,11 +35,12 @@ Use `--verbose` to see root/leaf steps, dependency details, and engine configura
 caesium job preview --path jobs/fanout-join.job.yaml
 
 # ┌───────────┐      ┌───────────┐      ┌─────────┐      ┌─────────┐
-# │ bootstrap │ -->  │   lint    │ -->  │ package │ -->  │ publish │
-# └───────────┘      └───────────┘      └─────────┘      └─────────┘
-#                     ┌───────────┐
-#                     │ unit-test │
-#                     └───────────┘
+# │ bootstrap │───┬─>│   lint    │───┬─>│ package │─────>│ publish │
+# └───────────┘   │  └───────────┘   │  └─────────┘      └─────────┘
+#                 │                   │
+#                 │  ┌───────────┐    │
+#                 └─>│ unit-test │────┘
+#                    └───────────┘
 ```
 
 ### Run locally

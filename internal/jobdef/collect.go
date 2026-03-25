@@ -67,8 +67,15 @@ func appendDefinitions(path string, defs *[]schema.Definition, validate bool) er
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			// Skip files that fail to decode as a Definition — they are
-			// likely non-Caesium YAML (Helm charts, K8s manifests, etc.).
+			// Distinguish YAML syntax errors (which should be surfaced) from
+			// type-mismatch errors caused by non-Caesium YAML (which should
+			// be skipped). Re-decode the same document into a generic map: if
+			// that also fails, the YAML itself is malformed.
+			if isSyntaxError(data) {
+				return fmt.Errorf("%s: %w", path, err)
+			}
+			// Valid YAML that doesn't fit the Definition struct (e.g. a K8s
+			// Deployment whose metadata shape differs). Skip the file.
 			return nil
 		}
 		if isBlankDefinition(&def) {
@@ -86,6 +93,20 @@ func appendDefinitions(path string, defs *[]schema.Definition, validate bool) er
 	}
 
 	return nil
+}
+
+// isSyntaxError returns true if the raw bytes contain malformed YAML that
+// cannot be decoded into any structure. A successful decode into a generic
+// map means the YAML is syntactically valid but simply doesn't match the
+// Definition schema (e.g. a Helm chart or Kubernetes manifest).
+func isSyntaxError(data []byte) bool {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	for {
+		var raw map[string]any
+		if err := dec.Decode(&raw); err != nil {
+			return !errors.Is(err, io.EOF)
+		}
+	}
 }
 
 // isCaesiumDefinition returns true if the definition looks like a Caesium
