@@ -1,0 +1,71 @@
+---
+description: Rules for generating and editing Caesium job definition YAML files
+globs: ["**/*.job.yaml", "jobs/**/*.yaml", "docs/examples/**/*.yaml"]
+---
+
+# Caesium Job Definition Rules
+
+## Schema
+
+Every job definition must have:
+- `apiVersion: v1`
+- `kind: Job`
+- `metadata.alias` — unique, lowercase, hyphenated identifier
+- `trigger` — either `cron` or `http` type
+- `steps` — at least one step with a unique `name` and `image`
+
+## Trigger Types
+
+Cron: `trigger.configuration.cron` is a 5-field POSIX cron. Optional `timezone` (IANA, default UTC).
+
+HTTP: `trigger.configuration.path` is the route. Optional `secret`.
+
+## Steps
+
+Required: `name` (unique), `image` (container reference).
+
+Optional fields: `engine` (docker|podman|kubernetes, default docker), `command`, `env`, `workdir`, `mounts`, `next`, `dependsOn`, `retries`, `retryDelay`, `retryBackoff`, `triggerRule`, `outputSchema`, `inputSchema`.
+
+## DAG Wiring
+
+- If no step uses `next` or `dependsOn` → steps link sequentially (implicit).
+- If any step uses `next`/`dependsOn` → all edges must be explicit.
+- `next` is for fan-out (string or array of step names).
+- `dependsOn` is for fan-in/join (string or array of step names).
+- No cycles, self-references, or references to non-existent steps.
+
+## Data Contracts
+
+Emit output: `echo '##caesium::output {"key": "value"}'`
+Access upstream output: `$CAESIUM_OUTPUT_<STEP>_<KEY>` (both uppercased).
+
+Declare `outputSchema` (JSON Schema) on producing steps. Declare `inputSchema` on consuming steps mapping predecessor name → required schema. Set `metadata.schemaValidation` to `"warn"` or `"fail"`.
+
+## Trigger Rules
+
+`all_success` (default), `all_done`, `all_failed`, `one_success`, `always`
+
+## Secrets
+
+Always use `secret://` URIs: `secret://env/VAR`, `secret://k8s/<secret>/<key>`, `secret://vault/<path>?field=<key>`
+
+## Metadata Options
+
+`labels`, `annotations` (maps), `maxParallelTasks` (int), `taskTimeout`, `runTimeout` (durations like `5m`), `schemaValidation` (`""`, `"warn"`, `"fail"`).
+
+## Callbacks
+
+```yaml
+callbacks:
+  - type: notification
+    configuration:
+      webhook_url: "https://hooks.slack.com/..."
+```
+
+## Validation
+
+Run `caesium job lint --path <dir>` locally. Run `caesium dev --once --path <file>` to test against Docker. See `docs/caesium-job-llm-reference.md` for complete reference.
+
+## File Naming
+
+Use `.job.yaml` extension for Git sync glob matching.

@@ -1,0 +1,54 @@
+# Caesium — Windsurf/Codeium Rules
+
+## About
+
+Caesium is a distributed job scheduler with declarative YAML DAG pipelines (Docker/Podman/Kubernetes). See `docs/caesium-job-llm-reference.md` for the complete job definition reference.
+
+## Job Definition Generation
+
+### Required Structure
+
+```yaml
+apiVersion: v1
+kind: Job
+metadata:
+  alias: <unique-lowercase-hyphenated-name>
+trigger:
+  type: cron    # or "http"
+  configuration:
+    cron: "0 2 * * *"
+steps:
+  - name: <step-name>
+    image: <container-image>
+    command: ["sh", "-c", "echo hello"]
+```
+
+### Key Rules
+
+- `metadata.alias` must be unique, lowercase, hyphenated
+- Trigger: `cron` (5-field POSIX + optional `timezone`) or `http` (with `path` + optional `secret`)
+- Every step needs a unique `name` and an `image`; `engine` defaults to `docker`
+- DAG: no explicit edges → sequential auto-linking; any explicit edge → all edges must be explicit
+- `next` for fan-out, `dependsOn` for fan-in/join; no cycles or unknown references
+- Data output: `echo '##caesium::output {"key": "value"}'`; consumed as `$CAESIUM_OUTPUT_<STEP>_<KEY>`
+- Schemas: `outputSchema` (JSON Schema) on producers, `inputSchema` on consumers, `metadata.schemaValidation: "warn"|"fail"`
+- Secrets: `secret://env/VAR`, `secret://k8s/<secret>/<key>`, `secret://vault/<path>?field=<key>`
+- `triggerRule`: `all_success` (default), `all_done`, `all_failed`, `one_success`, `always`
+- Durations: Go format (`30s`, `5m`, `1h`)
+- File extension: `.job.yaml`
+
+### Validation
+
+```sh
+caesium job lint --path jobs/
+caesium dev --once --path job.yaml
+```
+
+## Go Development
+
+- Build: `just build` (containerized)
+- Test: `just unit-test`
+- Lint: `just lint`
+- Types: `pkg/jobdef/definition.go`
+- Examples: `docs/examples/*.job.yaml`
+- CI: `.circleci/` (CircleCI)

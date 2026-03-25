@@ -40,3 +40,17 @@
 - Configuration is via environment variables (parsed with `envconfig`); prefer explicit envs over flags in examples.
 - Do not commit secrets; use local env files or CI secrets.
 - Review Dockerfiles under `build/` for any changes affecting supply chain or runtime permissions.
+
+## Generating Caesium Job Definitions
+
+When asked to create or modify Caesium job definition YAML files, follow the full reference in `docs/caesium-job-llm-reference.md`. Summary of key rules:
+
+- Every job needs `apiVersion: v1`, `kind: Job`, a unique `metadata.alias`, a `trigger`, and at least one step
+- Trigger types: `cron` (5-field POSIX cron expression) or `http` (with route path)
+- Every step requires a unique `name` and an `image`; `engine` defaults to `docker`
+- DAG wiring: if no step uses `next`/`dependsOn`, steps auto-link sequentially; once any step uses explicit edges, all must be explicit
+- Data contracts: steps emit `echo '##caesium::output {"key": "value"}'`, downstream reads `$CAESIUM_OUTPUT_<STEP>_<KEY>`; declare `outputSchema`/`inputSchema` and set `metadata.schemaValidation` to `"warn"` or `"fail"`
+- Secrets: use `secret://` URIs (`env`, `k8s`, `vault` providers) — never hardcode credentials
+- File naming: use `.job.yaml` extension for Git sync glob matching
+- Validate locally: `caesium job lint --path <dir>`, test with `caesium dev --once --path <file>`
+- Full examples: `docs/examples/*.job.yaml`
