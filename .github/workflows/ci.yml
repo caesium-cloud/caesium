@@ -213,6 +213,9 @@ jobs:
           cd ui
           npm ci
           npx playwright install --with-deps chromium
+      - name: Pre-pull job images
+        run: |
+          docker pull alpine:3.20
       - name: Start Caesium server
         run: |
           docker rm -f caesium-server >/dev/null 2>&1 || true
