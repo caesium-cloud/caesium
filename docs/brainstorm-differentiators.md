@@ -1,5 +1,7 @@
 # Brainstorm: Killer Features Beyond Airflow Parity
 
+> Status: Idea backlog only. This file captures product exploration and is not a commitment that the listed capabilities exist in the current build.
+
 These are feature ideas that go beyond matching Airflow and position Caesium as a genuinely better product. Each section captures the idea, the user pain it addresses, and rough scope. The **smart incremental execution** idea has its own dedicated design doc (`design-incremental-execution.md`).
 
 ---

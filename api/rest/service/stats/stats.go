@@ -20,6 +20,7 @@ type StatsResponse struct {
 // DailyStats describes success rate for a specific day.
 type DailyStats struct {
 	Date        string  `json:"date"`
+	RunCount    int64   `json:"run_count"`
 	SuccessRate float64 `json:"success_rate"`
 }
 
@@ -154,9 +155,9 @@ func (s *Service) Get() (*StatsResponse, error) {
 
 	// Success rate trend (last 7 days)
 	var trendData []struct {
-		Day   string
-		Total int64
-		Succ  int64
+		Day      string
+		Succ     int64
+		RunCount int64
 	}
 	dayExpr := "strftime('%Y-%m-%d', started_at, 'utc')"
 	if s.db.Name() == "postgres" {
@@ -167,28 +168,38 @@ func (s *Service) Get() (*StatsResponse, error) {
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	sevenDaysAgo := today.Add(-6 * 24 * time.Hour)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select(dayExpr+" as day, COUNT(*) as total, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
+		Select(dayExpr+" as day, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
 		Where("started_at >= ? AND status IN ?", sevenDaysAgo, []string{"succeeded", "failed"}).
 		Group("day").
 		Order("day ASC").
 		Scan(&trendData)
 
-	trendMap := make(map[string]float64, len(trendData))
+	type dailyAggregate struct {
+		successRate float64
+		runCount    int64
+	}
+
+	trendMap := make(map[string]dailyAggregate, len(trendData))
 	for _, d := range trendData {
 		rate := 0.0
-		if d.Total > 0 {
-			rate = float64(d.Succ) / float64(d.Total)
+		if d.RunCount > 0 {
+			rate = float64(d.Succ) / float64(d.RunCount)
 		}
-		trendMap[d.Day] = rate
+		trendMap[d.Day] = dailyAggregate{
+			successRate: rate,
+			runCount:    d.RunCount,
+		}
 	}
 
 	resp.SuccessRateTrend = make([]DailyStats, 0, 7)
 	for i := 0; i < 7; i++ {
 		day := sevenDaysAgo.Add(time.Duration(i) * 24 * time.Hour)
 		dayStr := day.Format("2006-01-02")
+		aggregate := trendMap[dayStr]
 		resp.SuccessRateTrend = append(resp.SuccessRateTrend, DailyStats{
 			Date:        dayStr,
-			SuccessRate: trendMap[dayStr],
+			RunCount:    aggregate.runCount,
+			SuccessRate: aggregate.successRate,
 		})
 	}
 

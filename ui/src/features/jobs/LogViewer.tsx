@@ -362,6 +362,9 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       hasVisibleOutput={hasVisibleOutput}
     >
       <div ref={terminalRef} className="h-full w-full overflow-hidden bg-slate-950 px-3 py-2" />
+      <pre data-testid="task-log-plaintext" className="sr-only">
+        {filterResult.renderedText}
+      </pre>
       {transportError && (
         <div className="absolute inset-x-0 top-0 border-b border-red-500/20 bg-red-500/10 px-4 py-2.5 text-[11px] text-red-200">
           {transportError}

@@ -83,4 +83,34 @@ describe('TaskNode', () => {
     });
     expect(screen.getByText('myimage:v2')).toBeInTheDocument();
   });
+
+  it('renders shell commands from serialized command strings', () => {
+    renderTaskNode({
+      label: 'task-shell',
+      status: 'running',
+      atom: { image: 'alpine:latest', engine: 'docker', command: '["sh","-c","echo streamed logs"]' },
+      engine: 'docker',
+      command: '["sh","-c","echo streamed logs"]',
+    });
+
+    expect(screen.getByText('SHELL')).toBeInTheDocument();
+    expect(screen.getByText('echo streamed logs')).toBeInTheDocument();
+  });
+
+  it('shows data contract indicators when the node receives and emits outputs', () => {
+    renderTaskNode({
+      label: 'task-contract',
+      status: 'succeeded',
+      atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'contract'] },
+      engine: 'docker',
+      command: ['echo', 'contract'],
+      receivesOutputs: true,
+      outputCount: 2,
+      hasOutputSchema: true,
+    });
+
+    expect(screen.getByText('IN')).toBeInTheDocument();
+    expect(screen.getByText('OUT')).toBeInTheDocument();
+    expect(screen.getByTitle('Output schema defined')).toBeInTheDocument();
+  });
 });

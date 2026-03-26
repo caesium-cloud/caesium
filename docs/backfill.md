@@ -1,18 +1,18 @@
 # Backfills
 
-This guide covers how Caesium backfills work at runtime and how to operate them safely in single-node and multi-replica deployments.
+This guide covers how Caesium backfills work at runtime and how to operate them through the REST API, CLI, and embedded UI.
 
 ## What a Backfill Does
 
-A backfill replays a job over the cron fire times in a closed interval:
+A backfill replays a cron-triggered job over the fire times in a half-open interval:
 
 - `start` is inclusive.
 - `end` is exclusive.
 - Each logical date becomes a normal job run with `logical_date` attached as a run parameter.
 
-Backfills are only supported for jobs with a cron trigger.
+Backfills are only supported for jobs whose trigger type is `cron`.
 
-## API
+## REST API
 
 Create a backfill:
 
@@ -37,7 +37,7 @@ Supported `reprocess` values:
 - `failed`: rerun dates whose latest run did not succeed.
 - `all`: queue every logical date in the interval.
 
-List and inspect backfills:
+Inspect backfills:
 
 - `GET /v1/jobs/{id}/backfills`
 - `GET /v1/jobs/{id}/backfills/{backfill_id}`
@@ -45,6 +45,35 @@ List and inspect backfills:
 Cancel a backfill:
 
 - `PUT /v1/jobs/{id}/backfills/{backfill_id}/cancel`
+
+## CLI
+
+Create a backfill:
+
+```bash
+caesium backfill create \
+  --job-id <job-id> \
+  --start 2026-03-01T00:00:00Z \
+  --end 2026-03-10T00:00:00Z \
+  --max-concurrent 2 \
+  --reprocess failed \
+  --server http://localhost:8080
+```
+
+List backfills for a job:
+
+```bash
+caesium backfill list --job-id <job-id> --server http://localhost:8080
+```
+
+Cancel a running backfill:
+
+```bash
+caesium backfill cancel \
+  --job-id <job-id> \
+  --backfill-id <backfill-id> \
+  --server http://localhost:8080
+```
 
 ## Cancellation Semantics
 
@@ -62,17 +91,22 @@ In practice, this means you can create a backfill on one replica and cancel it f
 `max_concurrent` limits how many logical dates a backfill may run at once.
 
 - `1` is the safest default.
-- Higher values increase throughput but also increase container pressure and DB traffic.
+- Higher values increase throughput but also increase container pressure and database traffic.
 - Cancellation does not interrupt already running tasks; it only prevents additional logical dates from starting.
-
-## Operational Guidance
-
-- Use `reprocess=none` for a one-time catch-up over a window you know has no prior runs.
-- Use `reprocess=failed` when you want to retry only failures in a historical window.
-- Use `reprocess=all` only when you intentionally want to replay every date, even if prior runs succeeded.
-- In multi-replica deployments, either replica can accept the cancel request because the request is persisted in the shared database.
-- If you cancel a large backfill, expect the current in-flight runs to finish before the backfill reaches a terminal cancelled state.
 
 ## UI Behavior
 
-The Jobs view shows active backfills, their progress counters, and a cancel action while the backfill is still running.
+The embedded UI surfaces backfills from the Jobs and Job Detail flows:
+
+- Operators can start a backfill from Job Detail when the job uses a cron trigger.
+- Active backfills show progress counters and status.
+- Running backfills expose a cancel action.
+- Cancellation is reflected through the shared database, so UI actions remain safe in multi-replica deployments.
+
+## Operational Guidance
+
+- Use `reprocess=none` for one-time catch-up windows you expect to be empty.
+- Use `reprocess=failed` when replaying only historical failures.
+- Use `reprocess=all` only when you intentionally want a full replay.
+- In multi-replica deployments, any replica may accept create or cancel requests because the shared database is the source of truth.
+- Large backfills may take time to settle into a terminal cancelled state because in-flight runs are allowed to finish.

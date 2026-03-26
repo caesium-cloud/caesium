@@ -1,5 +1,7 @@
 # Job Definition Ingestion Roadmap & Checklist
 
+> Status: Largely implemented. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+
 ## Goals
 - [x] Support authoring, validation, and storage of job definitions in YAML format.
 - [x] Provide user-friendly tooling (CLI/API) for pushing and managing job definitions.

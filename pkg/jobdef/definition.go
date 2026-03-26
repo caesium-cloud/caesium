@@ -1,6 +1,7 @@
 package jobdef
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -147,6 +148,57 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.NodeSelector = rs.NodeSelector
 	s.Next = nextList
 	s.DependsOn = dependsList
+	s.Retries = rs.Retries
+	s.RetryDelay = rs.RetryDelay
+	s.RetryBackoff = rs.RetryBackoff
+	s.TriggerRule = rs.TriggerRule
+	s.OutputSchema = rs.OutputSchema
+	s.InputSchema = rs.InputSchema
+	s.Spec = rs.Spec
+
+	return nil
+}
+
+// UnmarshalJSON mirrors the YAML defaults so REST/UI JSON apply requests behave
+// the same as YAML manifests loaded from disk.
+func (s *Step) UnmarshalJSON(data []byte) error {
+	type rawStep struct {
+		Name           string                    `json:"name"`
+		Type           string                    `json:"type"`
+		Engine         string                    `json:"engine"`
+		Image          string                    `json:"image"`
+		Command        []string                  `json:"command"`
+		NodeSelector   map[string]string         `json:"nodeSelector"`
+		Next           []string                  `json:"next"`
+		DependsOn      []string                  `json:"dependsOn"`
+		Retries        int                       `json:"retries"`
+		RetryDelay     time.Duration             `json:"retryDelay"`
+		RetryBackoff   bool                      `json:"retryBackoff"`
+		TriggerRule    string                    `json:"triggerRule"`
+		OutputSchema   map[string]any            `json:"outputSchema"`
+		InputSchema    map[string]map[string]any `json:"inputSchema"`
+		container.Spec `json:",inline"`
+	}
+
+	rs := rawStep{Engine: EngineDocker}
+	if err := json.Unmarshal(data, &rs); err != nil {
+		return err
+	}
+
+	s.Name = rs.Name
+	s.Type = rs.Type
+	if s.Type == "" {
+		s.Type = StepTypeTask
+	}
+	s.Engine = rs.Engine
+	if s.Engine == "" {
+		s.Engine = EngineDocker
+	}
+	s.Image = rs.Image
+	s.Command = rs.Command
+	s.NodeSelector = rs.NodeSelector
+	s.Next = rs.Next
+	s.DependsOn = rs.DependsOn
 	s.Retries = rs.Retries
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff

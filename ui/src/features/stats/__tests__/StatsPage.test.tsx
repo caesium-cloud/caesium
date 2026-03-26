@@ -39,8 +39,8 @@ const mockStats: StatsResponse = {
     { job_id: 'job-3', alias: 'build-all', avg_duration_seconds: 120.5 },
   ],
   success_rate_trend: [
-    { date: '2026-03-08', success_rate: 0.75 },
-    { date: '2026-03-09', success_rate: 1 },
+    { date: '2026-03-08', run_count: 4, success_rate: 0.75 },
+    { date: '2026-03-09', run_count: 2, success_rate: 1 },
   ],
 };
 
@@ -89,6 +89,7 @@ describe('StatsPage', () => {
     await waitFor(() => {
       expect(screen.getByText('deploy-prod')).toBeInTheDocument();
     });
+    expect(screen.getByText('Daily Run Volume (7d)')).toBeInTheDocument();
     expect(screen.getByText('run-tests')).toBeInTheDocument();
     expect(screen.getByText('build-all')).toBeInTheDocument();
   });

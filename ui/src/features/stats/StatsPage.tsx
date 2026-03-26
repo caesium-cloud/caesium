@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DailyRunVolumeChart } from "./components/DailyRunVolumeChart";
 import { FailureDistributionChart } from "./components/FailureDistributionChart";
 import { SuccessRateTrendChart } from "./components/SuccessRateTrendChart";
 import {
@@ -67,6 +68,15 @@ export function StatsPage() {
           </CardHeader>
           <CardContent>
             <SuccessRateTrendChart data={stats?.success_rate_trend ?? []} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Daily Run Volume (7d)</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <DailyRunVolumeChart data={stats?.success_rate_trend ?? []} />
           </CardContent>
         </Card>
 
