@@ -9,6 +9,7 @@ on:
 
 env:
   IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   builder:
