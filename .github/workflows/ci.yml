@@ -1,0 +1,347 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+env:
+  IMAGE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+
+jobs:
+  builder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: Build builder images (amd64)
+        run: |
+          just tag=${{ env.IMAGE_TAG }}-amd64 builder
+          just tag=${{ env.IMAGE_TAG }}-amd64 builder-full
+      - name: Save builder images
+        run: |
+          docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64 \
+                      caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
+            | gzip > /tmp/builder-amd64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builder-amd64
+          path: /tmp/builder-amd64.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  builder-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - name: Build builder images (arm64)
+        run: |
+          just tag=${{ env.IMAGE_TAG }}-arm64 builder
+          just tag=${{ env.IMAGE_TAG }}-arm64 builder-full
+      - name: Save builder images
+        run: |
+          docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64 \
+                      caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64-full \
+            | gzip > /tmp/builder-arm64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: builder-arm64
+          path: /tmp/builder-arm64.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  lint:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Lint
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 lint
+
+  helm-lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      - name: Helm lint
+        run: helm lint ./helm/caesium
+      - name: Helm template
+        run: helm template caesium ./helm/caesium --values ./helm/caesium/ci/test-values.yaml
+
+  unit-test:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
+
+  unit-test-arm64:
+    needs: builder-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-arm64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
+      - name: Unit tests (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 unit-test
+
+  ui-test:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: UI lint
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 ui-lint
+      - name: UI unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 ui-test
+
+  build-and-integration-test:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Build release image (amd64)
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 build
+      - name: Integration tests (amd64)
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 integration-test
+      - name: Save release image
+        run: |
+          docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 \
+            | gzip > /tmp/release-amd64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-amd64
+          path: /tmp/release-amd64.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  build-and-integration-test-arm64:
+    needs: builder-arm64
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: builder-arm64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-arm64.tar.gz | docker load
+      - name: Build release image (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 build
+      - name: Integration tests (arm64)
+        run: just tag=${{ env.IMAGE_TAG }}-arm64 integration-test
+      - name: Save release image
+        run: |
+          docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64 \
+            | gzip > /tmp/release-arm64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arm64
+          path: /tmp/release-arm64.tar.gz
+          retention-days: 1
+          compression-level: 0
+
+  ui-e2e:
+    needs: [ui-test, build-and-integration-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-amd64
+          path: /tmp
+      - name: Load release image
+        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install UI dependencies and browsers
+        run: |
+          cd ui
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start Caesium server
+        run: |
+          docker rm -f caesium-server >/dev/null 2>&1 || true
+          docker run -d --name caesium-server \
+            -p 8080:8080 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            --user 0:0 \
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
+          tries=0
+          until curl -sf http://127.0.0.1:8080/health >/dev/null; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 30 ]; then
+              echo "Caesium did not become ready in time"
+              docker logs caesium-server || true
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Run Playwright E2E
+        run: |
+          if ! (cd ui && npm run test:e2e); then
+            docker logs caesium-server || true
+            docker ps -a || true
+            exit 1
+          fi
+      - name: Stop Caesium server
+        if: always()
+        run: docker rm -f caesium-server >/dev/null 2>&1 || true
+
+  helm-integration-test:
+    needs: [build-and-integration-test, helm-lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-amd64
+          path: /tmp
+      - name: Load release image
+        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+      - name: Install kind
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x ./kubectl
+          sudo mv ./kubectl /usr/local/bin/kubectl
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+      - name: Create kind cluster
+        run: kind create cluster --wait 120s
+      - name: Load Caesium image into kind
+        run: kind load docker-image caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64
+      - name: Helm install
+        run: |
+          if ! helm install caesium ./helm/caesium \
+            --values ./helm/caesium/ci/test-values.yaml \
+            --set image.tag=${{ env.IMAGE_TAG }}-amd64 \
+            --set persistence.enabled=false \
+            --wait --timeout 240s; then
+            kubectl get pods -A || true
+            kubectl get events --sort-by=.lastTimestamp -A | tail -n 200 || true
+            kubectl describe statefulset caesium || true
+            kubectl describe pods -l app.kubernetes.io/instance=caesium || true
+            kubectl logs statefulset/caesium -c caesium || true
+            kubectl logs statefulset/caesium -c peer-discovery || true
+            exit 1
+          fi
+      - name: Helm test
+        run: helm test caesium --timeout 90s
+      - name: Verify health endpoint
+        run: |
+          kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
+          PORT_FORWARD_PID=$!
+          trap 'kill $PORT_FORWARD_PID' EXIT
+
+          tries=0
+          until curl -sf http://127.0.0.1:8080/health >/dev/null; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 30 ]; then
+              echo "Port-forward did not become ready in time"
+              cat /tmp/port-forward.log || true
+              kubectl get pods -A || true
+              kubectl describe pods -l app.kubernetes.io/instance=caesium || true
+              exit 1
+            fi
+            sleep 1
+          done
+          curl -sf http://127.0.0.1:8080/health
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - lint
+      - unit-test
+      - unit-test-arm64
+      - ui-test
+      - ui-e2e
+      - build-and-integration-test
+      - build-and-integration-test-arm64
+      - helm-lint
+      - helm-integration-test
+    runs-on: ubuntu-24.04
+    environment: Docker
+    timeout-minutes: 30
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-amd64
+          path: /tmp
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-arm64
+          path: /tmp
+      - name: Load release images
+        run: |
+          gunzip -c /tmp/release-amd64.tar.gz | docker load
+          gunzip -c /tmp/release-arm64.tar.gz | docker load
+      - name: Login to Docker Hub
+        run: echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      - name: Push multi-arch manifest
+        run: |
+          IMAGE_TAG=${{ env.IMAGE_TAG }}
+          docker push caesiumcloud/caesium:${IMAGE_TAG}-amd64
+          docker push caesiumcloud/caesium:${IMAGE_TAG}-arm64
+          docker manifest create caesiumcloud/caesium:${IMAGE_TAG} \
+            caesiumcloud/caesium:${IMAGE_TAG}-amd64 \
+            caesiumcloud/caesium:${IMAGE_TAG}-arm64
+          docker manifest push caesiumcloud/caesium:${IMAGE_TAG}

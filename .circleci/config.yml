@@ -1,3 +1,5 @@
+# DEPRECATED: This pipeline is being replaced by GitHub Actions (.github/workflows/ci.yml).
+# This file will be removed once the GitHub Actions pipeline is verified on master and a tag release.
 version: 2.1
 
 jobs:
