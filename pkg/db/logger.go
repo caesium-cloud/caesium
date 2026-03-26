@@ -54,35 +54,23 @@ func (l *zapLogger) Trace(_ context.Context, begin time.Time, fc func() (sql str
 	elapsed := time.Since(begin)
 	sql, rows := fc()
 
+	fields := []interface{}{
+		"source", "gorm",
+		"duration", elapsed.String(),
+		"rows", rows,
+		"sql", sql,
+	}
+
 	switch {
-	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
-		log.Error("database error",
-			"source", "gorm",
-			"duration", elapsed.String(),
-			"rows", rows,
-			"sql", sql,
-			"error", err,
-		)
-	case err != nil && errors.Is(err, gorm.ErrRecordNotFound):
-		log.Debug("record not found",
-			"source", "gorm",
-			"duration", elapsed.String(),
-			"rows", rows,
-			"sql", sql,
-		)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		log.Debug("record not found", fields...)
+	case err != nil:
+		log.Error("database error", append(fields, "error", err)...)
 	case elapsed > slowQueryThreshold:
-		log.Warn("slow query",
-			"source", "gorm",
-			"duration", elapsed.String(),
-			"rows", rows,
-			"sql", sql,
-		)
+		log.Warn("slow query", fields...)
 	default:
-		log.Debug("query",
-			"source", "gorm",
-			"duration", elapsed.String(),
-			"rows", rows,
-			"sql", sql,
-		)
+		if l.level >= gormlogger.Info {
+			log.Debug("query", fields...)
+		}
 	}
 }
