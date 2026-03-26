@@ -32,7 +32,7 @@ type dockerEngine struct {
 // NewEngine creates a new instance of docker.Engine
 // for interacting with docker.Atoms.
 func NewEngine(ctx context.Context) Engine {
-	cli, err := client.NewClientWithOpts()
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		panic(err)
 	}

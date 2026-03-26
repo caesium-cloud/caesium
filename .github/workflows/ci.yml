@@ -142,6 +142,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
+      - uses: docker/setup-docker-action@v4
       - uses: actions/download-artifact@v4
         with:
           name: builder-amd64
@@ -170,6 +171,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: extractions/setup-just@v2
+      - uses: docker/setup-docker-action@v4
       - uses: actions/download-artifact@v4
         with:
           name: builder-arm64
