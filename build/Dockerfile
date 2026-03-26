@@ -2,14 +2,19 @@ ARG BUILDER_TAG
 FROM caesiumcloud/caesium-builder:${BUILDER_TAG} AS builder
 
 WORKDIR /bld/caesium
+
+# 1. Install npm deps (only re-runs when package files change)
+COPY ui/package.json ui/package-lock.json ./ui/
+RUN --mount=type=cache,target=/root/.npm \
+    cd ui && npm ci
+
+# 2. Copy UI source and build (only re-runs when ui/ source changes)
+COPY ui/ ./ui/
+RUN cd ui && npm run build
+
+# 3. Copy all source and build Go binary
+#    ui/node_modules and ui/dist are in .dockerignore so COPY won't clobber them.
 COPY . .
-
-# Build embedded web UI first so Go can embed ui/dist.
-WORKDIR /bld/caesium/ui
-RUN npm ci && npm run build
-
-# Build binary with minimal size and prep runtime deps
-WORKDIR /bld/caesium
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags="-s -w" -o /dist/bin/caesium ./

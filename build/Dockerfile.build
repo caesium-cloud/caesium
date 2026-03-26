@@ -1,22 +1,30 @@
-FROM golang:1.25.6-alpine3.23
-
-# Update & install OS dependencies
-WORKDIR /bld
+# -------- Stage 1: Compile dqlite (pinned, rarely changes) --------
+FROM golang:1.25.6-alpine3.23 AS dqlite
 RUN apk add --no-cache \
-    ca-certificates git dumb-init \
     autoconf automake libtool \
-    libuv-dev lz4-dev curl \
+    libuv-dev lz4-dev \
     make gcc g++ musl-dev linux-headers \
-    gpgme-dev btrfs-progs-dev lvm2-dev \
-    sqlite-dev nodejs npm
-RUN curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
-
-# Compile & install (raft is now bundled in dqlite >= v1.18.1)
-WORKDIR /bld
+    sqlite-dev git
 ARG DQLITE_REF=v1.18.5
+WORKDIR /bld
 RUN git clone --depth 1 --branch ${DQLITE_REF} https://github.com/canonical/dqlite
 WORKDIR /bld/dqlite
-RUN autoreconf -i && CFLAGS="-Wno-error=maybe-musttail-local-addr" CXXFLAGS="-Wno-error=maybe-musttail-local-addr" ./configure --disable-backtrace --prefix=/usr && make -j$(nproc) install
+RUN autoreconf -i && \
+    CFLAGS="-Wno-error=maybe-musttail-local-addr" \
+    CXXFLAGS="-Wno-error=maybe-musttail-local-addr" \
+    ./configure --disable-backtrace --prefix=/usr && \
+    make -j$(nproc) install
+
+# -------- Stage 2: Lean builder for compiling the release binary --------
+FROM golang:1.25.6-alpine3.23 AS builder
+RUN apk add --no-cache \
+    ca-certificates git dumb-init \
+    libuv-dev lz4-dev \
+    gpgme-dev btrfs-progs-dev lvm2-dev \
+    make gcc g++ musl-dev linux-headers \
+    sqlite-dev nodejs npm
+COPY --from=dqlite /usr/lib/libdqlite* /usr/lib/
+COPY --from=dqlite /usr/include/dqlite.h /usr/include/
 
 # Go build environment & dependencies
 WORKDIR /bld/caesium
@@ -27,3 +35,12 @@ ENV CGO_ENABLED=1 \
     GOARCH=${TARGETARCH}
 COPY go.mod go.sum ./
 RUN go mod download
+
+# -------- Stage 3: Full builder with lint & test tooling --------
+FROM builder AS builder-full
+# Pre-populate the npm cache so ui-lint / ui-test don't need network access
+# at runtime. node_modules is discarded; only /root/.npm (tarballs) is kept.
+COPY ui/package.json ui/package-lock.json ./ui/
+RUN npm ci --prefix ./ui && rm -rf ./ui/node_modules
+RUN apk add --no-cache curl && \
+    curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0

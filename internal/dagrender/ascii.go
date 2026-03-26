@@ -86,10 +86,10 @@ func Render(analysis *dag.Analysis, w io.Writer) error {
 
 	// Draw connectors between adjacent layers.
 	for i := 0; i < len(layers)-1; i++ {
-		startX := layerX[i] + boxW(i)   // first char after source box
-		endX := layerX[i+1]             // first char of target box
-		midX := (startX + endX) / 2     // vertical junction column
-		arrowX := endX - 1              // arrowhead '>' position
+		startX := layerX[i] + boxW(i) // first char after source box
+		endX := layerX[i+1]           // first char of target box
+		midX := (startX + endX) / 2   // vertical junction column
+		arrowX := endX - 1            // arrowhead '>' position
 
 		// Collect unique (sourceRow, targetRow) edges.
 		type edge struct{ from, to int }
