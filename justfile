@@ -165,14 +165,14 @@ ui-lint: builder-full
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
         {{repo}}/{{builder_image}}:{{tag}}-full \
-        sh -c 'npm ci && npm run lint'
+        sh -c 'npm ci --prefer-offline && npm run lint'
 
 ui-test: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
         {{repo}}/{{builder_image}}:{{tag}}-full \
-        sh -c 'npm ci && npm test && npm run build:ci'
+        sh -c 'npm ci --prefer-offline && npm test && npm run build:ci'
 
 ui-e2e: build-release
     @docker rm -f caesium-server >/dev/null 2>&1 || true

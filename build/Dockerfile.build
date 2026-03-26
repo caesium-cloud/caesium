@@ -38,5 +38,9 @@ RUN go mod download
 
 # -------- Stage 3: Full builder with lint & test tooling --------
 FROM builder AS builder-full
+# Pre-populate the npm cache so ui-lint / ui-test don't need network access
+# at runtime. node_modules is discarded; only /root/.npm (tarballs) is kept.
+COPY ui/package.json ui/package-lock.json ./ui/
+RUN npm ci --prefix ./ui && rm -rf ./ui/node_modules
 RUN apk add --no-cache curl && \
     curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.4.0
