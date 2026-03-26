@@ -145,6 +145,7 @@ integration-up: build-test
         --privileged \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e DOCKER_API_VERSION=1.48 \
         --user 0:0 \
         -e CAESIUM_LOG_LEVEL=debug \
         {{repo}}/{{image}}:{{tag}}-test start
