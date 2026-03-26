@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
       - name: Build builder images (amd64)
         run: |
           just tag=${{ env.IMAGE_TAG }}-amd64 builder
@@ -27,7 +27,7 @@ jobs:
           docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64 \
                       caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
             | gzip > /tmp/builder-amd64.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: builder-amd64
           path: /tmp/builder-amd64.tar.gz
@@ -38,8 +38,8 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
       - name: Build builder images (arm64)
         run: |
           just tag=${{ env.IMAGE_TAG }}-arm64 builder
@@ -49,7 +49,7 @@ jobs:
           docker save caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64 \
                       caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-arm64-full \
             | gzip > /tmp/builder-arm64.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: builder-arm64
           path: /tmp/builder-arm64.tar.gz
@@ -61,9 +61,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: actions/download-artifact@v8
         with:
           name: builder-amd64
           path: /tmp
@@ -76,8 +76,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@v6
+      - uses: azure/setup-helm@v5
         with:
           version: v3.17.0
       - name: Helm lint
@@ -90,9 +90,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: actions/download-artifact@v8
         with:
           name: builder-amd64
           path: /tmp
@@ -106,9 +106,9 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: actions/download-artifact@v8
         with:
           name: builder-arm64
           path: /tmp
@@ -122,9 +122,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: actions/download-artifact@v8
         with:
           name: builder-amd64
           path: /tmp
@@ -140,10 +140,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: docker/setup-docker-action@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: docker/setup-docker-action@v5
+      - uses: actions/download-artifact@v8
         with:
           name: builder-amd64
           path: /tmp
@@ -157,7 +157,7 @@ jobs:
         run: |
           docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 \
             | gzip > /tmp/release-amd64.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-amd64
           path: /tmp/release-amd64.tar.gz
@@ -169,10 +169,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: extractions/setup-just@v2
-      - uses: docker/setup-docker-action@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: extractions/setup-just@v3
+      - uses: docker/setup-docker-action@v5
+      - uses: actions/download-artifact@v8
         with:
           name: builder-arm64
           path: /tmp
@@ -186,7 +186,7 @@ jobs:
         run: |
           docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64 \
             | gzip > /tmp/release-arm64.tar.gz
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-arm64
           path: /tmp/release-arm64.tar.gz
@@ -198,16 +198,16 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: release-amd64
           path: /tmp
       - name: Load release image
         run: gunzip -c /tmp/release-amd64.tar.gz | docker load
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
       - name: Install UI dependencies and browsers
         run: |
           cd ui
@@ -251,8 +251,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           name: release-amd64
           path: /tmp
@@ -268,7 +268,7 @@ jobs:
           curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
           chmod +x ./kubectl
           sudo mv ./kubectl /usr/local/bin/kubectl
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
         with:
           version: v3.17.0
       - name: Create kind cluster
@@ -328,11 +328,11 @@ jobs:
     environment: Docker
     timeout-minutes: 30
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-amd64
           path: /tmp
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: release-arm64
           path: /tmp
