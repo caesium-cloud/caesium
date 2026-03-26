@@ -8,8 +8,10 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	_ "github.com/jackc/pgx/v4"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 var (
@@ -18,17 +20,32 @@ var (
 	err  error
 )
 
+func gormLogLevel() gormlogger.LogLevel {
+	switch log.GetLevel() {
+	case zapcore.DebugLevel:
+		return gormlogger.Info // log all queries
+	case zapcore.InfoLevel, zapcore.WarnLevel:
+		return gormlogger.Warn // errors + slow queries
+	default:
+		return gormlogger.Error // errors only
+	}
+}
+
 func Connection() *gorm.DB {
 	once.Do(func() {
 		dbType := env.Variables().DatabaseType
 
 		log.Info("establishing db connection", "type", dbType)
 
+		cfg := &gorm.Config{
+			Logger: NewLogger().LogMode(gormLogLevel()),
+		}
+
 		switch dbType {
 		case "postgres":
 			gdb, err = gorm.Open(
 				postgres.Open(env.Variables().DatabaseDSN),
-				&gorm.Config{},
+				cfg,
 			)
 		case "internal":
 			fallthrough
@@ -37,7 +54,7 @@ func Connection() *gorm.DB {
 		default:
 			gdb, err = gorm.Open(
 				dqlite.Open(""),
-				&gorm.Config{},
+				cfg,
 			)
 		}
 
