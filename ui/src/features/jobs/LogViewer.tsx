@@ -46,10 +46,18 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
   const [transportError, setTransportError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
 
   useEffect(() => {
     searchTermRef.current = searchTerm;
   }, [searchTerm]);
+
+  // When the task hasn't started yet, retry the log fetch every 2s until it does.
+  useEffect(() => {
+    if (logState !== "pending") return;
+    const timer = setTimeout(() => setRetryKey((k) => k + 1), 2000);
+    return () => clearTimeout(timer);
+  }, [logState, retryKey]);
 
   useEffect(() => {
     if (!terminalRef.current) {
@@ -217,7 +225,7 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     return () => {
       abortController.abort();
     };
-  }, [jobId, runId, taskId]);
+  }, [jobId, runId, taskId, retryKey]);
 
   const filterResult = useMemo(
     () => buildLogFilterResult(rawLogText, searchTerm, caseSensitive),
