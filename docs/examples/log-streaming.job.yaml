@@ -22,11 +22,11 @@ steps:
       - sh
       - -c
       - |
-        total_batches=18
+        total_batches=45
         batch=1
 
         echo "Starting log streaming showcase"
-        echo "This task emits colored text, plain text, and JSON over ~18 seconds"
+        echo "This task emits colored text, plain text, and JSON over ~45 seconds"
 
         while [ "$batch" -le "$total_batches" ]; do
           ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -49,5 +49,5 @@ steps:
           batch=$((batch + 1))
         done
 
-        echo '##caesium::output {"batches_emitted": "18", "log_profile": "streaming-demo"}'
+        echo '##caesium::output {"batches_emitted": "45", "log_profile": "streaming-demo"}'
         printf '\033[35mstream complete: retained logs should remain available after cleanup\033[0m\n'
