@@ -19,18 +19,26 @@ validate-platform:
     fi
 
 builder: validate-platform
-    docker build --platform {{platform}} \
-        --build-arg TARGETARCH={{target_arch}} \
-        --target builder \
-        -t {{repo}}/{{builder_image}}:{{tag}} \
-        -f {{dockerfile}}.build .
+    @if docker image inspect {{repo}}/{{builder_image}}:{{tag}} >/dev/null 2>&1; then \
+        echo "Builder image {{repo}}/{{builder_image}}:{{tag}} already exists, skipping build."; \
+    else \
+        docker build --platform {{platform}} \
+            --build-arg TARGETARCH={{target_arch}} \
+            --target builder \
+            -t {{repo}}/{{builder_image}}:{{tag}} \
+            -f {{dockerfile}}.build .; \
+    fi
 
 builder-full: validate-platform
-    docker build --platform {{platform}} \
-        --build-arg TARGETARCH={{target_arch}} \
-        --target builder-full \
-        -t {{repo}}/{{builder_image}}:{{tag}}-full \
-        -f {{dockerfile}}.build .
+    @if docker image inspect {{repo}}/{{builder_image}}:{{tag}}-full >/dev/null 2>&1; then \
+        echo "Builder image {{repo}}/{{builder_image}}:{{tag}}-full already exists, skipping build."; \
+    else \
+        docker build --platform {{platform}} \
+            --build-arg TARGETARCH={{target_arch}} \
+            --target builder-full \
+            -t {{repo}}/{{builder_image}}:{{tag}}-full \
+            -f {{dockerfile}}.build .; \
+    fi
 
 build: builder
     docker build --platform {{platform}} \

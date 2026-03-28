@@ -12,7 +12,7 @@ Caesium is a distributed job scheduler with declarative YAML DAG pipelines suppo
 - `build/` – Dockerfiles (`Dockerfile`, `Dockerfile.build`) and build assets.
 - `test/` – integration tests (run with `-tags=integration`).
 - `docs/` – user and developer documentation.
-- Root: `go.mod`, `go.sum`, `justfile`, CI configs under `.circleci/` and `.github/`.
+- Root: `go.mod`, `go.sum`, `justfile`, CI configs under `.github/workflows/`.
 
 ## Build, Test, and Development Commands
 - `just builder` – build the builder image used for reproducible builds.
@@ -24,7 +24,7 @@ Caesium is a distributed job scheduler with declarative YAML DAG pipelines suppo
 - `just integration-test` – run tests in `./test` with `-tags=integration`.
 - `just hydrate` – load example jobs into running server.
 - Containerized builds are required: use `just build` (or `just builder` + `just run`). Avoid invoking `go build` directly on the host so the toolchain and CGO deps stay consistent.
-- CI runs in `.circleci/`, not GitHub Actions.
+- CI runs in GitHub Actions (`.github/workflows/ci.yml`). The legacy `.circleci/` config is deprecated and will be removed.
 
 ## Local Development Workflow
 

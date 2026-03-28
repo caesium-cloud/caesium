@@ -9,6 +9,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml"><img src="https://github.com/caesium-cloud/caesium/actions/workflows/ci.yml/badge.svg?branch=master" alt="CI"></a>
   <a href="https://pkg.go.dev/github.com/caesium-cloud/caesium"><img src="https://pkg.go.dev/badge/github.com/caesium-cloud/caesium.svg" alt="Go Reference"></a>
   <a href="https://goreportcard.com/report/github.com/caesium-cloud/caesium"><img src="https://goreportcard.com/badge/github.com/caesium-cloud/caesium" alt="Go Report Card"></a>
   <a href="https://codecov.io/gh/caesium-cloud/caesium"><img src="https://codecov.io/gh/caesium-cloud/caesium/branch/develop/graph/badge.svg?token=YXM50NU5GI" alt="Coverage"></a>
