@@ -1,0 +1,74 @@
+# Demonstrates the step-output caching feature.
+# When cache is enabled, Caesium hashes each step's inputs (image, command,
+# env, and upstream outputs) and skips re-execution when a matching result
+# already exists in the cache store.
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: incremental-cache-demo
+  labels:
+    team: data-eng
+    scenario: caching
+  # Job-level default: all steps cache their outputs unless overridden.
+  cache: true
+trigger:
+  type: cron
+  configuration:
+    cron: "0 */6 * * *"
+    timezone: "UTC"
+steps:
+  # Step 1 -- fetch raw data.
+  # Inherits cache: true from metadata, so repeated runs with the same
+  # inputs will return the cached output instantly.
+  - name: fetch-prices
+    engine: docker
+    image: alpine:3.20
+    command:
+      - sh
+      - -c
+      - |
+        echo "Fetching latest price data..."
+        sleep 2
+        ROWS=$((RANDOM % 500 + 100))
+        echo "Fetched $ROWS price records"
+        echo '##caesium::output {"row_count": "'$ROWS'", "source": "market-feed", "as_of": "2026-03-29T06:00:00Z"}'
+    next:
+      - compute-indicators
+
+  # Step 2 -- compute derived metrics.
+  # Uses a custom TTL so the cached result expires after 12 hours,
+  # ensuring indicators are recalculated at least twice per day.
+  - name: compute-indicators
+    engine: docker
+    image: alpine:3.20
+    cache:
+      ttl: "12h"
+    command:
+      - sh
+      - -c
+      - |
+        echo "Computing indicators for $CAESIUM_OUTPUT_FETCH_PRICES_ROW_COUNT records..."
+        sleep 3
+        SIGNALS=$((CAESIUM_OUTPUT_FETCH_PRICES_ROW_COUNT / 10))
+        echo "Generated $SIGNALS trading signals"
+        echo '##caesium::output {"signal_count": "'$SIGNALS'", "model_version": "v2.4"}'
+    dependsOn: fetch-prices
+    next: notify-team
+
+  # Step 3 -- send a Slack notification.
+  # cache: false ensures this step always runs, even when upstream
+  # outputs are unchanged (notifications should never be skipped).
+  - name: notify-team
+    engine: docker
+    image: alpine:3.20
+    cache: false
+    command:
+      - sh
+      - -c
+      - |
+        echo "Pipeline complete."
+        echo "  Signals: $CAESIUM_OUTPUT_COMPUTE_INDICATORS_SIGNAL_COUNT (model $CAESIUM_OUTPUT_COMPUTE_INDICATORS_MODEL_VERSION)"
+        echo "  Source:  $CAESIUM_OUTPUT_FETCH_PRICES_SOURCE ($CAESIUM_OUTPUT_FETCH_PRICES_ROW_COUNT rows)"
+        echo "Would POST to Slack webhook here."
+    dependsOn: compute-indicators

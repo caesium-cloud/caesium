@@ -107,6 +107,7 @@ caesium job apply --path jobs/ --server http://localhost:8080
 - Cron and HTTP triggers.
 - Distributed execution backed by dqlite, including mixed `amd64` and `arm64` clusters.
 - Embedded operator UI with live run updates, DAG inspection, backfill controls, and log streaming.
+- Smart incremental execution: cache task results and skip re-execution when inputs are unchanged.
 - OpenLineage event emission.
 - Prometheus metrics plus optional in-browser operator tools for server logs and database inspection.
 

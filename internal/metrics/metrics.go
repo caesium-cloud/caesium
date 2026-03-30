@@ -110,6 +110,29 @@ var (
 		},
 		[]string{"job_alias"},
 	)
+
+	TaskCacheHitsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_task_cache_hits_total",
+			Help: "Total number of task cache hits.",
+		},
+		[]string{"job_alias", "task_name"},
+	)
+
+	TaskCacheMissesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_task_cache_misses_total",
+			Help: "Total number of task cache misses.",
+		},
+		[]string{"job_alias", "task_name"},
+	)
+
+	TaskCacheEntries = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "caesium_task_cache_entries",
+			Help: "Current number of task cache entries.",
+		},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -128,5 +151,8 @@ func Register() {
 		TaskRetriesTotal,
 		BackfillRunsTotal,
 		BackfillsActive,
+		TaskCacheHitsTotal,
+		TaskCacheMissesTotal,
+		TaskCacheEntries,
 	)
 }

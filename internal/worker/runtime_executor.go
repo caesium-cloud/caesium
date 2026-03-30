@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
+	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -82,6 +83,58 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	var taskModel models.Task
 	hasTaskModel := e.store.DB().First(&taskModel, "id = ?", taskRun.TaskID).Error == nil
 
+	// Cache check: attempt to satisfy the task from cache before container execution.
+	cacheConfig := cache.ConfigFromEnv()
+	var cacheStore *cache.Store
+	var cacheHash string
+	if cacheConfig.Enabled && hasTaskModel {
+		cacheStore = cache.NewStore(e.store.DB())
+
+		// Look up job alias for hash computation.
+		cacheJobAlias := resolveJobAlias()
+
+		// Fetch predecessor outputs for hash input.
+		predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
+		if predErr != nil {
+			log.Warn("cache: failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
+		}
+
+		// Fetch run params from the job run record.
+		var runParams map[string]string
+		var jobRun models.JobRun
+		if err := e.store.DB().Select("params").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err == nil && len(jobRun.Params) > 0 {
+			_ = json.Unmarshal(jobRun.Params, &runParams)
+		}
+
+		hashInput := cache.HashInput{
+			JobAlias:           cacheJobAlias,
+			TaskName:           taskModel.Name,
+			Image:              taskRun.Image,
+			Command:            parseTaskCommand(taskRun.Command),
+			PredecessorOutputs: predOutputs,
+			RunParams:          runParams,
+		}
+		cacheHash = hashInput.Compute()
+
+		entry, found, getErr := cacheStore.Get(cacheHash)
+		if getErr != nil {
+			log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
+		} else if found {
+			log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
+			if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
+				if errors.Is(err, run.ErrTaskClaimMismatch) {
+					log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+					return
+				}
+				log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
+				// Fall through to normal execution on persistence failure.
+			} else {
+				metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskModel.Name).Inc()
+				return
+			}
+		}
+	}
+
 	maxAttempts := taskRun.MaxAttempts
 	if maxAttempts < 1 {
 		maxAttempts = 1
@@ -95,6 +148,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
 		execErr := e.executeTask(ctx, taskRun)
 		if execErr == nil {
+			// Store successful result in cache.
+			if cacheStore != nil && cacheHash != "" {
+				e.storeCacheEntry(cacheStore, cacheConfig, cacheHash, taskRun)
+			}
 			return
 		}
 
@@ -303,6 +360,68 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		return nil
 	}
 	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
+}
+
+// storeCacheEntry reads back the completed task run and stores the result in the cache.
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheConfig cache.Config, hash string, taskRun *models.TaskRun) {
+	// Read back the completed task run to get output and result.
+	var completed models.TaskRun
+	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
+		log.Warn("cache: failed to read completed task run for caching", "task_id", taskRun.TaskID, "error", err)
+		return
+	}
+
+	// Only cache successful results.
+	if !run.IsSuccessfulTaskResult(completed.Result) {
+		return
+	}
+
+	// Resolve the job ID from the job run.
+	var jobRun models.JobRun
+	if err := e.store.DB().Select("job_id").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
+		log.Warn("cache: failed to look up job ID for caching", "run_id", taskRun.JobRunID, "error", err)
+		return
+	}
+
+	// Resolve task name.
+	var taskModel models.Task
+	if err := e.store.DB().Select("name").First(&taskModel, "id = ?", taskRun.TaskID).Error; err != nil {
+		log.Warn("cache: failed to look up task name for caching", "task_id", taskRun.TaskID, "error", err)
+		return
+	}
+
+	// Decode output and branch selections from JSON.
+	var output map[string]string
+	if len(completed.Output) > 0 {
+		_ = json.Unmarshal(completed.Output, &output)
+	}
+	var branchSelections []string
+	if len(completed.BranchSelections) > 0 {
+		_ = json.Unmarshal(completed.BranchSelections, &branchSelections)
+	}
+
+	entry := &cache.Entry{
+		Hash:             hash,
+		JobID:            jobRun.JobID,
+		TaskName:         taskModel.Name,
+		Result:           completed.Result,
+		Output:           output,
+		BranchSelections: branchSelections,
+		RunID:            taskRun.JobRunID,
+		TaskRunID:        completed.ID,
+		CreatedAt:        time.Now().UTC(),
+	}
+
+	if cacheConfig.TTL > 0 {
+		expiresAt := entry.CreatedAt.Add(cacheConfig.TTL)
+		entry.ExpiresAt = &expiresAt
+	}
+
+	if err := cacheStore.Put(entry); err != nil {
+		log.Warn("cache: failed to store entry", "task_id", taskRun.TaskID, "hash", hash, "error", err)
+	} else {
+		log.Info("cache: stored entry for worker task", "task_id", taskRun.TaskID, "hash", hash)
+	}
 }
 
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) error {

@@ -4,7 +4,7 @@
 
 ## Status
 
-Draft (proposed).
+Implemented (Phase 1).
 
 ## Overview
 
