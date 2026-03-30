@@ -230,3 +230,71 @@ func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 		t.Fatalf("step engine = %q, want %q", step.Engine, EngineDocker)
 	}
 }
+
+func TestStepUnmarshalJSONPreservesFalseCacheOverride(t *testing.T) {
+	var step Step
+	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.20","cache":false}`), &step)
+	if err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	cache, ok := step.Cache.(bool)
+	if !ok {
+		t.Fatalf("step cache has type %T, want bool", step.Cache)
+	}
+	if cache {
+		t.Fatalf("step cache = true, want false")
+	}
+}
+
+func TestMarshalPreservesFalseCacheOverrides(t *testing.T) {
+	def := Definition{
+		APIVersion: APIVersionV1,
+		Kind:       KindJob,
+		Metadata: Metadata{
+			Alias: "cache-false-json",
+			Cache: false,
+		},
+		Trigger: Trigger{
+			Type:          TriggerCron,
+			Configuration: map[string]any{"expression": "0 0 * * *"},
+		},
+		Steps: []Step{
+			{
+				Name:  "step-a",
+				Image: "alpine",
+				Cache: false,
+			},
+		},
+	}
+
+	body, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("marshal definition: %v", err)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("unmarshal definition json: %v", err)
+	}
+
+	metadata, ok := decoded["metadata"].(map[string]any)
+	if !ok {
+		t.Fatalf("metadata missing from marshaled definition: %s", string(body))
+	}
+	if cache, ok := metadata["cache"].(bool); !ok || cache {
+		t.Fatalf("metadata.cache not preserved as false: %s", string(body))
+	}
+
+	steps, ok := decoded["steps"].([]any)
+	if !ok || len(steps) != 1 {
+		t.Fatalf("steps missing from marshaled definition: %s", string(body))
+	}
+	step, ok := steps[0].(map[string]any)
+	if !ok {
+		t.Fatalf("step missing from marshaled definition: %s", string(body))
+	}
+	if cache, ok := step["cache"].(bool); !ok || cache {
+		t.Fatalf("step.cache not preserved as false: %s", string(body))
+	}
+}

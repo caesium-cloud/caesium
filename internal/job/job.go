@@ -246,12 +246,10 @@ func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
 
-	// Initialize cache store if enabled.
+	// Initialize the cache store up front. Whether a given task uses cache is
+	// decided later from step/job config plus env defaults.
 	cacheConfig := cache.ConfigFromEnv()
-	var cacheStore *cache.Store
-	if cacheConfig.Enabled {
-		cacheStore = cache.NewStore(db.Connection())
-	}
+	cacheStore := cache.NewStore(db.Connection())
 
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)

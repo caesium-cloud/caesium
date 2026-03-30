@@ -88,7 +88,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	cacheConfig := cache.ConfigFromEnv()
 	var cacheStore *cache.Store
 	var cacheHash string
-	if cacheConfig.Enabled && hasTaskModel {
+	if hasTaskModel {
 		cacheStore = cache.NewStore(e.store.DB())
 
 		// Look up job alias for hash computation.
@@ -153,21 +153,23 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			cacheHash = hashInput.Compute()
 		}
 
-		entry, found, getErr := cacheStore.Get(cacheHash)
-		if getErr != nil {
-			log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
-		} else if found {
-			log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
-			if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
-				if errors.Is(err, run.ErrTaskClaimMismatch) {
-					log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+		if cacheStore != nil {
+			entry, found, getErr := cacheStore.Get(cacheHash)
+			if getErr != nil {
+				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
+			} else if found {
+				log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
+				if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
+					if errors.Is(err, run.ErrTaskClaimMismatch) {
+						log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
+						return
+					}
+					log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
+					// Fall through to normal execution on persistence failure.
+				} else {
+					metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskModel.Name).Inc()
 					return
 				}
-				log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
-				// Fall through to normal execution on persistence failure.
-			} else {
-				metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskModel.Name).Inc()
-				return
 			}
 		}
 	}

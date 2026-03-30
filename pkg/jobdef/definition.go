@@ -62,7 +62,7 @@ type Metadata struct {
 	// SchemaValidation controls runtime output schema validation.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
 	SchemaValidation string      `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
-	Cache            interface{} `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Cache            interface{} `yaml:"cache,omitempty" json:"cache"`
 }
 
 // Trigger defines how the job is triggered.
@@ -97,7 +97,7 @@ type Step struct {
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
 	// which keys this step requires from each predecessor's output.
 	InputSchema    map[string]map[string]any `yaml:"inputSchema,omitempty" json:"inputSchema,omitempty"`
-	Cache          interface{}               `yaml:"cache,omitempty" json:"cache,omitempty"`
+	Cache          interface{}               `yaml:"cache,omitempty" json:"cache"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -181,6 +181,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		TriggerRule    string                    `json:"triggerRule"`
 		OutputSchema   map[string]any            `json:"outputSchema"`
 		InputSchema    map[string]map[string]any `json:"inputSchema"`
+		Cache          interface{}               `json:"cache"`
 		container.Spec `json:",inline"`
 	}
 
@@ -209,6 +210,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.TriggerRule = rs.TriggerRule
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
+	s.Cache = rs.Cache
 	s.Spec = rs.Spec
 
 	return nil
