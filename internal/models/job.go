@@ -25,7 +25,8 @@ type Job struct {
 	RunTimeout         time.Duration     `json:"run_timeout"`
 	// SchemaValidation controls runtime output schema validation for this job's tasks.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
-	SchemaValidation string    `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
+	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
+	CacheConfig      datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
 	Paused           bool      `gorm:"not null;default:false" json:"paused"`
 	CreatedAt        time.Time `gorm:"not null" json:"created_at"`
 	UpdatedAt        time.Time `gorm:"not null" json:"updated_at"`

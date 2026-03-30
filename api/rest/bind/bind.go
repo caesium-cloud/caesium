@@ -6,6 +6,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
+	jobcache "github.com/caesium-cloud/caesium/api/rest/controller/job/cache"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
@@ -46,17 +47,28 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id/runs/:run_id", run.Get)
 		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
+		g.POST("/jobs/:id/runs/:run_id/retry", run.Retry)
 		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
 		g.PUT("/jobs/:id/pause", job.Pause)
 		g.PUT("/jobs/:id/unpause", job.Unpause)
 		g.DELETE("/jobs/:id", job.Delete)
 
+		// job cache management
+		g.GET("/jobs/:id/cache", jobcache.List)
+		g.DELETE("/jobs/:id/cache", jobcache.DeleteJob)
+		g.DELETE("/jobs/:id/cache/:task_name", jobcache.DeleteTask)
+
 		// backfills
 		g.POST("/jobs/:id/backfill", backfill.Post)
 		g.GET("/jobs/:id/backfills", backfill.List)
 		g.GET("/jobs/:id/backfills/:backfill_id", backfill.Get)
 		g.PUT("/jobs/:id/backfills/:backfill_id/cancel", backfill.Cancel)
+	}
+
+	// global cache management
+	{
+		g.POST("/cache/prune", jobcache.Prune)
 	}
 
 	// job definitions
