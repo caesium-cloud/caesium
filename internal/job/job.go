@@ -3,6 +3,7 @@ package job
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -48,6 +49,7 @@ type job struct {
 	runTimeout             time.Duration
 	alias                  string
 	schemaValidation       string
+	jobCacheConfig         interface{}
 	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
@@ -73,6 +75,7 @@ func New(m *models.Job, opts ...JobOption) Job {
 		runTimeout:             m.RunTimeout,
 		alias:                  m.Alias,
 		schemaValidation:       m.SchemaValidation,
+		jobCacheConfig:         unmarshalCacheConfig(m.CacheConfig),
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -224,6 +227,19 @@ func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) m
 		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
 	}
 	return env
+}
+
+// unmarshalCacheConfig decodes a JSON-encoded cache config from a DB column
+// back into the interface{} form expected by ResolveCacheConfig.
+func unmarshalCacheConfig(raw []byte) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
 }
 
 func (j *job) Run(ctx context.Context) error {
@@ -696,8 +712,14 @@ func (j *job) Run(ctx context.Context) error {
 
 		// Cache check — attempt to bypass container execution.
 		var cacheCfg jobdefschema.CacheConfig
+		var inputHash string
 		if cacheStore != nil {
-			cacheCfg = jobdefschema.ResolveCacheConfig(nil, nil, cacheConfig.Enabled, cacheConfig.TTL)
+			// Resolve cache config from step-level, job-level, then env defaults.
+			var stepCache interface{}
+			if taskModel != nil {
+				stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
+			}
+			cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL)
 		}
 		if cacheStore != nil && cacheCfg.Enabled {
 			taskName := ""
@@ -705,12 +727,9 @@ func (j *job) Run(ctx context.Context) error {
 				taskName = taskModel.Name
 			}
 
-			// Build merged env for hashing (mirrors executeAtom merge logic).
-			mergedEnv := make(map[string]string, len(runner.spec.Env)+len(paramEnv)+len(outputEnv))
+			// Build merged env for hashing, excluding volatile per-run vars.
+			mergedEnv := make(map[string]string, len(runner.spec.Env)+len(outputEnv))
 			for k, v := range runner.spec.Env {
-				mergedEnv[k] = v
-			}
-			for k, v := range paramEnv {
 				mergedEnv[k] = v
 			}
 			for k, v := range outputEnv {
@@ -738,7 +757,7 @@ func (j *job) Run(ctx context.Context) error {
 				RunParams:          snapshot.Params,
 				CacheVersion:       cacheCfg.Version,
 			}
-			inputHash := hashInput.Compute()
+			inputHash = hashInput.Compute()
 
 			entry, found, err := cacheStore.Get(inputHash)
 			switch {
@@ -808,46 +827,12 @@ func (j *job) Run(ctx context.Context) error {
 					taskOutputs[taskID] = output
 				}
 
-				// Store successful result in cache.
-				if cacheStore != nil && cacheCfg.Enabled && run.IsSuccessfulTaskResult(result) {
+				// Store successful result in cache, reusing the hash computed earlier.
+				if cacheStore != nil && cacheCfg.Enabled && inputHash != "" && run.IsSuccessfulTaskResult(result) {
 					taskName := ""
 					if taskModel != nil {
 						taskName = taskModel.Name
 					}
-
-					// Recompute hash for storage (mirrors the pre-check hash).
-					mergedEnv := make(map[string]string, len(runner.spec.Env)+len(paramEnv)+len(outputEnv))
-					for k, v := range runner.spec.Env {
-						mergedEnv[k] = v
-					}
-					for k, v := range paramEnv {
-						mergedEnv[k] = v
-					}
-					for k, v := range outputEnv {
-						mergedEnv[k] = v
-					}
-
-					var predHashes []string
-					for _, predID := range predecessors[taskID] {
-						if h, ok := taskHashes[predID]; ok {
-							predHashes = append(predHashes, h)
-						}
-					}
-
-					hashInput := cache.HashInput{
-						JobAlias:           j.alias,
-						TaskName:           taskName,
-						Image:              runner.image,
-						Command:            runner.command,
-						Env:                mergedEnv,
-						WorkDir:            runner.spec.WorkDir,
-						Mounts:             runner.spec.Mounts,
-						PredecessorHashes:  predHashes,
-						PredecessorOutputs: predOutputs,
-						RunParams:          snapshot.Params,
-						CacheVersion:       cacheCfg.Version,
-					}
-					inputHash := hashInput.Compute()
 					taskHashes[taskID] = inputHash
 
 					var expiresAt *time.Time

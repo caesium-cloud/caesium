@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -106,15 +107,51 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			_ = json.Unmarshal(jobRun.Params, &runParams)
 		}
 
-		hashInput := cache.HashInput{
-			JobAlias:           cacheJobAlias,
-			TaskName:           taskModel.Name,
-			Image:              taskRun.Image,
-			Command:            parseTaskCommand(taskRun.Command),
-			PredecessorOutputs: predOutputs,
-			RunParams:          runParams,
+		// Load atom spec for env/workdir/mounts to match local execution hash.
+		var atomSpec container.Spec
+		var atomModel models.Atom
+		if err := e.store.DB().First(&atomModel, "id = ?", taskRun.AtomID).Error; err == nil && len(atomModel.Spec) > 0 {
+			_ = json.Unmarshal(atomModel.Spec, &atomSpec)
 		}
-		cacheHash = hashInput.Compute()
+
+		// Resolve step-level and job-level cache config.
+		var stepCache, jobCache interface{}
+		if len(taskModel.CacheConfig) > 0 {
+			_ = json.Unmarshal(taskModel.CacheConfig, &stepCache)
+		}
+		var jobModel models.Job
+		if err := e.store.DB().Select("cache_config").First(&jobModel, "id = ?", taskModel.JobID).Error; err == nil && len(jobModel.CacheConfig) > 0 {
+			_ = json.Unmarshal(jobModel.CacheConfig, &jobCache)
+		}
+		cacheCfg := jobdefschema.ResolveCacheConfig(stepCache, jobCache, cacheConfig.Enabled, cacheConfig.TTL)
+		if !cacheCfg.Enabled {
+			cacheStore = nil
+		} else {
+			// Build merged env for hashing, excluding volatile per-run vars.
+			mergedEnv := make(map[string]string, len(atomSpec.Env))
+			for k, v := range atomSpec.Env {
+				mergedEnv[k] = v
+			}
+			if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
+				for k, v := range outputEnv {
+					mergedEnv[k] = v
+				}
+			}
+
+			hashInput := cache.HashInput{
+				JobAlias:           cacheJobAlias,
+				TaskName:           taskModel.Name,
+				Image:              taskRun.Image,
+				Command:            parseTaskCommand(taskRun.Command),
+				Env:                mergedEnv,
+				WorkDir:            atomSpec.WorkDir,
+				Mounts:             atomSpec.Mounts,
+				PredecessorOutputs: predOutputs,
+				RunParams:          runParams,
+				CacheVersion:       cacheCfg.Version,
+			}
+			cacheHash = hashInput.Compute()
+		}
 
 		entry, found, getErr := cacheStore.Get(cacheHash)
 		if getErr != nil {

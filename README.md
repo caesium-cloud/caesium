@@ -63,16 +63,12 @@ steps:
   - name: extract
     image: alpine:3.20
     command: ["sh", "-c", "echo extracting"]
-    next: transform
   - name: transform
     image: alpine:3.20
     command: ["sh", "-c", "echo transforming"]
-    dependsOn: extract
-    next: load
   - name: load
     image: alpine:3.20
     command: ["sh", "-c", "echo loading"]
-    dependsOn: transform
 ```
 
 ### 2. Validate and preview it
