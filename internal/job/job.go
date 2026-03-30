@@ -27,7 +27,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
-	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -246,10 +245,14 @@ func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
 
-	// Initialize the cache store up front. Whether a given task uses cache is
-	// decided later from step/job config plus env defaults.
 	cacheConfig := cache.ConfigFromEnv()
-	cacheStore := cache.NewStore(db.Connection())
+	var cacheStore *cache.Store
+	getCacheStore := func() *cache.Store {
+		if cacheStore == nil {
+			cacheStore = cache.NewStore(store.DB())
+		}
+		return cacheStore
+	}
 
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
@@ -711,15 +714,15 @@ func (j *job) Run(ctx context.Context) error {
 		// Cache check — attempt to bypass container execution.
 		var cacheCfg jobdefschema.CacheConfig
 		var inputHash string
-		if cacheStore != nil {
-			// Resolve cache config from step-level, job-level, then env defaults.
-			var stepCache interface{}
-			if taskModel != nil {
-				stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
-			}
-			cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL)
+		// Resolve cache config from step-level, job-level, then env defaults.
+		var stepCache interface{}
+		if taskModel != nil {
+			stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
 		}
-		if cacheStore != nil && cacheCfg.Enabled {
+		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL)
+
+		if cacheCfg.Enabled {
+			cacheStore := getCacheStore()
 			taskName := ""
 			if taskModel != nil {
 				taskName = taskModel.Name
@@ -826,7 +829,8 @@ func (j *job) Run(ctx context.Context) error {
 				}
 
 				// Store successful result in cache, reusing the hash computed earlier.
-				if cacheStore != nil && cacheCfg.Enabled && inputHash != "" && run.IsSuccessfulTaskResult(result) {
+				if cacheCfg.Enabled && inputHash != "" && run.IsSuccessfulTaskResult(result) {
+					cacheStore := getCacheStore()
 					taskName := ""
 					if taskModel != nil {
 						taskName = taskModel.Name
