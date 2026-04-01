@@ -264,6 +264,6 @@ describe("JobDAG", () => {
     expect(screen.getByText("Observed outputs for this run")).toBeInTheDocument();
     expect(screen.getByText("rows:")).toBeInTheDocument();
     expect(screen.getByText("10")).toBeInTheDocument();
-    expect(screen.getByText("Consumer requirements declared")).toBeInTheDocument();
+    expect(screen.getByTitle("Consumer requirements declared")).toBeInTheDocument();
   });
 });

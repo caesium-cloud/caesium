@@ -9,6 +9,7 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
+import { ShieldCheck } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import type { JobDAGResponse, Atom, JobTask, TaskRun } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
@@ -279,11 +280,16 @@ function EdgeDetails({ edge }: { edge: EdgeDetailsState }) {
                 <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
                     {edge.outputCount} {edge.outputCount === 1 ? 'output' : 'outputs'}
                 </span>
-                {edge.contractDefined ? (
-                    <span className="rounded-full border border-blue-500/35 bg-blue-500/10 px-2.5 py-1 text-xs font-semibold text-blue-700 dark:text-blue-300">
-                        Consumer requirements declared
-                    </span>
-                ) : null}
+                <span
+                    className={`inline-flex items-center rounded-full border px-2 py-1 ${
+                        edge.contractDefined
+                            ? 'border-blue-500/35 bg-blue-500/10'
+                            : 'border-slate-400/35 bg-slate-500/10'
+                    }`}
+                    title={edge.contractDefined ? 'Consumer requirements declared' : 'No consumer requirements declared'}
+                >
+                    <ShieldCheck className={`h-3 w-3 ${edge.contractDefined ? 'text-blue-400' : 'text-slate-500'}`} />
+                </span>
             </div>
 
             <SchemaSection
