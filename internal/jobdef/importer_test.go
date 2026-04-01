@@ -101,6 +101,10 @@ func (s *ImporterTestSuite) TestApplyUpdatesExistingJob() {
 	var totalTasks int64
 	s.Require().NoError(s.db.Unscoped().Model(&models.Task{}).Count(&totalTasks).Error)
 	s.Equal(int64(3), totalTasks)
+
+	var totalEdges int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.TaskEdge{}).Count(&totalEdges).Error)
+	s.Equal(int64(1), totalEdges)
 }
 
 func (s *ImporterTestSuite) TestApplyRejectsProvenanceConflictWithoutForce() {
@@ -145,6 +149,44 @@ func (s *ImporterTestSuite) TestPruneMissingSoftDeletesJobs() {
 	var totalJobs int64
 	s.Require().NoError(s.db.Unscoped().Model(&models.Job{}).Count(&totalJobs).Error)
 	s.Equal(int64(2), totalJobs)
+}
+
+func (s *ImporterTestSuite) TestApplyRestoresRetiredTasksAndCallbacks() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var originalTasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalTasks).Error)
+	s.Len(originalTasks, 3)
+
+	var originalCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalCallbacks).Error)
+	s.Len(originalCallbacks, 1)
+
+	pruned, err := s.importer.PruneMissing(ctx, nil, nil)
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	job, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var restoredTasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&restoredTasks).Error)
+	s.Len(restoredTasks, 3)
+	for idx := range restoredTasks {
+		s.Equal(originalTasks[idx].ID, restoredTasks[idx].ID)
+		s.Equal(idx, restoredTasks[idx].Position)
+	}
+
+	var restoredCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&restoredCallbacks).Error)
+	s.Len(restoredCallbacks, 1)
+	s.Equal(originalCallbacks[0].ID, restoredCallbacks[0].ID)
+	s.Equal(0, restoredCallbacks[0].Position)
 }
 
 func (s *ImporterTestSuite) TestApplyWithProvenance() {

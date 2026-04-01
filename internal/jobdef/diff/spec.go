@@ -124,7 +124,7 @@ func buildJobSpec(ctx context.Context, db *gorm.DB, job *models.Job) (JobSpec, e
 	}
 
 	var callbacks models.Callbacks
-	if err := db.WithContext(ctx).Where("job_id = ?", job.ID).Order("created_at asc").Find(&callbacks).Error; err != nil {
+	if err := db.WithContext(ctx).Where("job_id = ?", job.ID).Order("position asc").Order("created_at asc").Find(&callbacks).Error; err != nil {
 		return JobSpec{}, err
 	}
 	spec.Callbacks = make([]CallbackSpec, 0, len(callbacks))
@@ -152,6 +152,7 @@ func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, e
 	var tasks []models.Task
 	if err := db.WithContext(ctx).
 		Where("job_id = ?", jobID).
+		Order("position asc").
 		Order("created_at asc").
 		Find(&tasks).Error; err != nil {
 		return nil, err

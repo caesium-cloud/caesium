@@ -332,7 +332,7 @@ func (j *job) Run(ctx context.Context) error {
 
 	tasks, err := j.taskServiceFactory(ctx).List(&task.ListRequest{
 		JobID:   j.id.String(),
-		OrderBy: []string{"created_at"},
+		OrderBy: []string{"position", "created_at"},
 	})
 	if err != nil {
 		runErr = err

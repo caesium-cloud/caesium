@@ -89,11 +89,11 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			jobModel.TriggerID = triggerModel.ID
 		}
 
-		taskByName, retiredTaskIDs, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def.Steps, opts)
+		taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def.Steps, opts)
 		if err != nil {
 			return err
 		}
-		if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, taskByName, retiredTaskIDs, opts); err != nil {
+		if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, taskByName, opts); err != nil {
 			return err
 		}
 		if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
@@ -137,19 +137,24 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 			return err
 		}
 
+		toRetire := make([]*models.Job, 0, len(jobs))
 		for idx := range jobs {
 			jobModel := &jobs[idx]
 			if _, ok := desiredSet[jobModel.Alias]; ok {
 				continue
 			}
-			if err := i.ensureJobNotRunningTx(tx, jobModel); err != nil {
-				return err
-			}
-			if err := i.retireJobTx(tx, jobModel); err != nil {
-				return err
-			}
-			pruned++
+			toRetire = append(toRetire, jobModel)
 		}
+		if len(toRetire) == 0 {
+			return nil
+		}
+		if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
+			return err
+		}
+		if err := i.retireJobsTx(tx, toRetire); err != nil {
+			return err
+		}
+		pruned = len(toRetire)
 		return nil
 	})
 	return pruned, err
@@ -207,6 +212,44 @@ func (i *Importer) ensureJobNotRunningTx(tx *gorm.DB, jobModel *models.Job) erro
 		return fmt.Errorf("%w: %s", ErrJobRunning, jobModel.Alias)
 	}
 	return nil
+}
+
+func (i *Importer) ensureJobsNotRunningTx(tx *gorm.DB, jobs []*models.Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	jobIDs := make([]uuid.UUID, 0, len(jobs))
+	aliasByID := make(map[uuid.UUID]string, len(jobs))
+	for _, jobModel := range jobs {
+		if jobModel == nil {
+			continue
+		}
+		jobIDs = append(jobIDs, jobModel.ID)
+		aliasByID[jobModel.ID] = jobModel.Alias
+	}
+	if len(jobIDs) == 0 {
+		return nil
+	}
+
+	var running []struct {
+		JobID uuid.UUID
+	}
+	if err := tx.Model(&models.JobRun{}).
+		Select("job_id").
+		Where("job_id IN ? AND status = ?", jobIDs, "running").
+		Group("job_id").
+		Find(&running).Error; err != nil {
+		return err
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	alias := aliasByID[running[0].JobID]
+	if alias == "" {
+		alias = running[0].JobID.String()
+	}
+	return fmt.Errorf("%w: %s", ErrJobRunning, alias)
 }
 
 func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def *schema.Definition, opts *ApplyOptions) (*models.Job, *models.Trigger, error) {
@@ -333,7 +376,7 @@ func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias s
 
 func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, opts *ApplyOptions) (map[string]*models.Task, []uuid.UUID, []uuid.UUID, error) {
 	var existingTasks []models.Task
-	if err := tx.Where("job_id = ?", jobModel.ID).Order("created_at asc").Find(&existingTasks).Error; err != nil {
+	if err := tx.Unscoped().Where("job_id = ?", jobModel.ID).Order("position asc").Order("created_at asc").Find(&existingTasks).Error; err != nil {
 		return nil, nil, nil, err
 	}
 
@@ -345,7 +388,6 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []s
 
 	taskByName := make(map[string]*models.Task, len(steps))
 	seenNames := make(map[string]struct{}, len(steps))
-	sequenceBase := time.Now().UTC()
 
 	for idx := range steps {
 		step := &steps[idx]
@@ -409,7 +451,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []s
 		if err := populateTaskFromStep(taskModel, atomModel.ID, step); err != nil {
 			return nil, nil, nil, err
 		}
-		taskModel.CreatedAt = sequenceBase.Add(time.Duration(idx) * time.Microsecond)
+		taskModel.Position = idx
 
 		if taskModel.UpdatedAt.IsZero() {
 			if err := tx.Create(taskModel).Error; err != nil {
@@ -428,7 +470,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []s
 				"cache_config":  taskModel.CacheConfig,
 				"output_schema": taskModel.OutputSchema,
 				"input_schema":  taskModel.InputSchema,
-				"created_at":    taskModel.CreatedAt,
+				"position":      taskModel.Position,
 				"deleted_at":    nil,
 			}
 			if err := tx.Unscoped().Model(taskModel).Updates(taskUpdates).Error; err != nil {
@@ -459,19 +501,14 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []s
 	return taskByName, retiredTaskIDs, retiredAtomIDs, nil
 }
 
-func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, taskByName map[string]*models.Task, retiredTaskIDs []uuid.UUID, opts *ApplyOptions) error {
+func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, taskByName map[string]*models.Task, opts *ApplyOptions) error {
 	successors, err := schema.DeriveStepSuccessors(steps)
 	if err != nil {
 		return err
 	}
 
-	if err := tx.Where("job_id = ?", jobModel.ID).Delete(&models.TaskEdge{}).Error; err != nil {
+	if err := tx.Unscoped().Where("job_id = ?", jobModel.ID).Delete(&models.TaskEdge{}).Error; err != nil {
 		return err
-	}
-	if len(retiredTaskIDs) > 0 {
-		if err := tx.Where("job_id = ? AND (from_task_id IN ? OR to_task_id IN ?)", jobModel.ID, retiredTaskIDs, retiredTaskIDs).Delete(&models.TaskEdge{}).Error; err != nil {
-			return err
-		}
 	}
 
 	totalEdges := 0
@@ -517,11 +554,10 @@ func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []s
 
 func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks []schema.Callback) error {
 	var existing []models.Callback
-	if err := tx.Where("job_id = ?", jobID).Order("created_at asc").Find(&existing).Error; err != nil {
+	if err := tx.Unscoped().Where("job_id = ?", jobID).Order("position asc").Order("created_at asc").Find(&existing).Error; err != nil {
 		return err
 	}
 
-	sequenceBase := time.Now().UTC()
 	for idx := range callbacks {
 		cfg, err := jsonutil.MarshalMapString(callbacks[idx].Configuration)
 		if err != nil {
@@ -533,10 +569,11 @@ func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks 
 			callbackModel = &existing[idx]
 			callbackModel.Type = models.CallbackType(callbacks[idx].Type)
 			callbackModel.Configuration = cfg
+			callbackModel.Position = idx
 			if err := tx.Unscoped().Model(callbackModel).Updates(map[string]any{
 				"type":          callbackModel.Type,
 				"configuration": callbackModel.Configuration,
-				"created_at":    sequenceBase.Add(time.Duration(idx) * time.Microsecond),
+				"position":      callbackModel.Position,
 				"deleted_at":    nil,
 			}).Error; err != nil {
 				return err
@@ -549,7 +586,7 @@ func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks 
 			JobID:         jobID,
 			Type:          models.CallbackType(callbacks[idx].Type),
 			Configuration: cfg,
-			CreatedAt:     sequenceBase.Add(time.Duration(idx) * time.Microsecond),
+			Position:      idx,
 		}
 		if err := tx.Create(callbackModel).Error; err != nil {
 			return err
@@ -575,18 +612,42 @@ func (i *Importer) retireJobTx(tx *gorm.DB, jobModel *models.Job) error {
 	if jobModel == nil {
 		return nil
 	}
+	return i.retireJobsTx(tx, []*models.Job{jobModel})
+}
 
-	if err := tx.Where("job_id = ?", jobModel.ID).Delete(&models.TaskEdge{}).Error; err != nil {
+func (i *Importer) retireJobsTx(tx *gorm.DB, jobs []*models.Job) error {
+	if len(jobs) == 0 {
+		return nil
+	}
+
+	jobIDs := make([]uuid.UUID, 0, len(jobs))
+	triggerIDs := make([]uuid.UUID, 0, len(jobs))
+	for _, jobModel := range jobs {
+		if jobModel == nil {
+			continue
+		}
+		jobIDs = append(jobIDs, jobModel.ID)
+		if jobModel.TriggerID != uuid.Nil {
+			triggerIDs = append(triggerIDs, jobModel.TriggerID)
+		}
+	}
+	if len(jobIDs) == 0 {
+		return nil
+	}
+
+	if err := tx.Unscoped().Where("job_id IN ?", jobIDs).Delete(&models.TaskEdge{}).Error; err != nil {
 		return err
 	}
-	if err := tx.Where("job_id = ?", jobModel.ID).Delete(&models.Callback{}).Error; err != nil {
+
+	if err := tx.Where("job_id IN ?", jobIDs).Delete(&models.Callback{}).Error; err != nil {
 		return err
 	}
 
 	var tasks []models.Task
-	if err := tx.Where("job_id = ?", jobModel.ID).Find(&tasks).Error; err != nil {
+	if err := tx.Where("job_id IN ?", jobIDs).Find(&tasks).Error; err != nil {
 		return err
 	}
+
 	atomIDs := make([]uuid.UUID, 0, len(tasks))
 	for idx := range tasks {
 		if tasks[idx].AtomID != uuid.Nil {
@@ -594,18 +655,18 @@ func (i *Importer) retireJobTx(tx *gorm.DB, jobModel *models.Job) error {
 		}
 	}
 
-	if err := tx.Where("job_id = ?", jobModel.ID).Delete(&models.Task{}).Error; err != nil {
+	if err := tx.Where("job_id IN ?", jobIDs).Delete(&models.Task{}).Error; err != nil {
 		return err
 	}
 	if err := i.softDeleteAtomsTx(tx, atomIDs); err != nil {
 		return err
 	}
-	if jobModel.TriggerID != uuid.Nil {
-		if err := tx.Delete(&models.Trigger{}, jobModel.TriggerID).Error; err != nil {
+	if len(triggerIDs) > 0 {
+		if err := tx.Delete(&models.Trigger{}, triggerIDs).Error; err != nil {
 			return err
 		}
 	}
-	return tx.Delete(jobModel).Error
+	return tx.Delete(&models.Job{}, jobIDs).Error
 }
 
 func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema.Step) error {

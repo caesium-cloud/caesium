@@ -165,6 +165,7 @@ func (d *Dispatcher) RetryFailed(ctx context.Context, runID uuid.UUID) error {
 	if err := d.db.WithContext(dispatchCtx).
 		Unscoped().
 		Where("id IN ?", retryIDs).
+		Order("position asc").
 		Order("created_at asc").
 		Find(&retryCallbacks).Error; err != nil {
 		return fmt.Errorf("load retry callbacks: %w", err)
@@ -210,6 +211,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 	var callbacks []models.Callback
 	if err := d.db.WithContext(ctx).
 		Where("job_id = ?", jobID).
+		Order("position asc").
 		Order("created_at asc").
 		Find(&callbacks).Error; err != nil {
 		return Metadata{}, nil, fmt.Errorf("load callbacks: %w", err)
