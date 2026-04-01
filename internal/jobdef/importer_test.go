@@ -189,6 +189,39 @@ func (s *ImporterTestSuite) TestApplyRestoresRetiredTasksAndCallbacks() {
 	s.Equal(0, restoredCallbacks[0].Position)
 }
 
+func (s *ImporterTestSuite) TestApplyCreatesNewCallbackVersionWhenConfigurationChanges() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var originalCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalCallbacks).Error)
+	s.Len(originalCallbacks, 1)
+
+	updated := strings.Replace(testutil.SampleJob, "https://example", "https://example-v2", 1)
+	def, err = schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var activeCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&activeCallbacks).Error)
+	s.Len(activeCallbacks, 1)
+	s.NotEqual(originalCallbacks[0].ID, activeCallbacks[0].ID)
+
+	var totalCallbacks []models.Callback
+	s.Require().NoError(s.db.Unscoped().Where("job_id = ?", job.ID).Order("created_at asc").Find(&totalCallbacks).Error)
+	s.Len(totalCallbacks, 2)
+	s.Equal(originalCallbacks[0].ID, totalCallbacks[0].ID)
+	s.NotZero(totalCallbacks[0].DeletedAt.Time)
+	s.Equal(activeCallbacks[0].ID, totalCallbacks[1].ID)
+	s.Equal(0, activeCallbacks[0].Position)
+}
+
 func (s *ImporterTestSuite) TestApplyWithProvenance() {
 	def, err := schema.Parse([]byte(testutil.SampleJob))
 	s.Require().NoError(err)

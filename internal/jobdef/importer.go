@@ -558,23 +558,38 @@ func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks 
 		return err
 	}
 
+	pools := make(map[string][]*models.Callback, len(existing))
+	for idx := range existing {
+		cb := &existing[idx]
+		key := callbackSignature(cb.Type, cb.Configuration)
+		pools[key] = append(pools[key], cb)
+	}
+
+	claimed := make(map[uuid.UUID]struct{}, len(existing))
 	for idx := range callbacks {
 		cfg, err := jsonutil.MarshalMapString(callbacks[idx].Configuration)
 		if err != nil {
 			return err
 		}
 
+		cbType := models.CallbackType(callbacks[idx].Type)
+		key := callbackSignature(cbType, cfg)
+
 		var callbackModel *models.Callback
-		if idx < len(existing) {
-			callbackModel = &existing[idx]
-			callbackModel.Type = models.CallbackType(callbacks[idx].Type)
-			callbackModel.Configuration = cfg
+		for _, candidate := range pools[key] {
+			if _, ok := claimed[candidate.ID]; ok {
+				continue
+			}
+			callbackModel = candidate
+			break
+		}
+
+		if callbackModel != nil {
+			claimed[callbackModel.ID] = struct{}{}
 			callbackModel.Position = idx
 			if err := tx.Unscoped().Model(callbackModel).Updates(map[string]any{
-				"type":          callbackModel.Type,
-				"configuration": callbackModel.Configuration,
-				"position":      callbackModel.Position,
-				"deleted_at":    nil,
+				"position":   callbackModel.Position,
+				"deleted_at": nil,
 			}).Error; err != nil {
 				return err
 			}
@@ -584,7 +599,7 @@ func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks 
 		callbackModel = &models.Callback{
 			ID:            uuid.New(),
 			JobID:         jobID,
-			Type:          models.CallbackType(callbacks[idx].Type),
+			Type:          cbType,
 			Configuration: cfg,
 			Position:      idx,
 		}
@@ -593,12 +608,19 @@ func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks 
 		}
 	}
 
-	for idx := len(callbacks); idx < len(existing); idx++ {
+	for idx := range existing {
+		if _, ok := claimed[existing[idx].ID]; ok {
+			continue
+		}
 		if err := tx.Delete(&existing[idx]).Error; err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func callbackSignature(cbType models.CallbackType, cfg string) string {
+	return string(cbType) + "\x00" + cfg
 }
 
 func (i *Importer) softDeleteAtomsTx(tx *gorm.DB, atomIDs []uuid.UUID) error {
