@@ -9,6 +9,7 @@ interface Props {
 
 const STATUS_COLORS: Record<string, string> = {
   succeeded: "#22c55e",
+  cached: "#14b8a6",
   failed: "#ef4444",
   running: "#00b4d8",
   skipped: "#a3a3a3",
@@ -28,7 +29,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
   const [now] = useState<number>(Date.now);
 
   // Only show tasks that have started
-  const startedTasks = tasks.filter(t => t.started_at);
+  const startedTasks = tasks.filter(t => t.started_at || t.status === "cached");
   if (startedTasks.length === 0) {
     return (
       <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
@@ -39,7 +40,8 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
 
   // Compute relative start/end offsets in ms
   const taskTimes = startedTasks.map(t => {
-    const start = new Date(t.started_at!).getTime() - runStart;
+    const startAt = t.started_at ?? t.created_at;
+    const start = new Date(startAt).getTime() - runStart;
     const end = t.completed_at
       ? new Date(t.completed_at).getTime() - runStart
       : now - runStart;

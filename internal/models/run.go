@@ -8,22 +8,25 @@ import (
 )
 
 type JobRun struct {
-	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
-	Job          Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	BackfillID   *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
-	Backfill     *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
-	TriggerID    uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
-	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
-	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`
-	Status       string         `gorm:"type:text;index;not null" json:"status"`
-	Error        string         `json:"error,omitempty"`
-	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-	StartedAt    time.Time      `gorm:"not null" json:"started_at"`
-	CompletedAt  *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt    time.Time      `gorm:"not null" json:"created_at"`
-	UpdatedAt    time.Time      `gorm:"not null" json:"updated_at"`
-	Tasks        []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	ID            uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID         uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
+	Job           Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	BackfillID    *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
+	Backfill      *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
+	TriggerID     uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType   string         `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias  string         `gorm:"type:text" json:"trigger_alias"`
+	Status        string         `gorm:"type:text;index;not null" json:"status"`
+	Error         string         `json:"error,omitempty"`
+	Params        datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
+	StartedAt     time.Time      `gorm:"not null" json:"started_at"`
+	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt     time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt     time.Time      `gorm:"not null" json:"updated_at"`
+	Tasks         []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	CacheHits     int            `gorm:"-" json:"cache_hits"`
+	ExecutedTasks int            `gorm:"-" json:"executed_tasks"`
+	TotalTasks    int            `gorm:"-" json:"total_tasks"`
 }
 
 type TaskRun struct {
@@ -46,6 +49,10 @@ type TaskRun struct {
 	Result           string            `json:"result,omitempty"`
 	Output           datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
+	CacheHit         bool              `gorm:"not null;default:false" json:"cache_hit"`
+	CacheOriginRunID *uuid.UUID        `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt   *time.Time        `json:"cache_created_at,omitempty"`
+	CacheExpiresAt   *time.Time        `gorm:"index" json:"cache_expires_at,omitempty"`
 	// OutputSchema snapshots the task's declared runtime output schema onto the task run.
 	OutputSchema datatypes.JSON `gorm:"type:json" json:"-"`
 	// SchemaValidation snapshots the job's schema validation mode onto the task run.

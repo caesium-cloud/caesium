@@ -25,6 +25,8 @@ func List(c *echo.Context) error {
 		Hash      string  `json:"hash"`
 		TaskName  string  `json:"task_name"`
 		Result    string  `json:"result"`
+		RunID     string  `json:"run_id"`
+		TaskRunID string  `json:"task_run_id"`
 		CreatedAt string  `json:"created_at"`
 		ExpiresAt *string `json:"expires_at,omitempty"`
 	}
@@ -35,6 +37,8 @@ func List(c *echo.Context) error {
 			Hash:      e.Hash,
 			TaskName:  e.TaskName,
 			Result:    e.Result,
+			RunID:     e.RunID.String(),
+			TaskRunID: e.TaskRunID.String(),
 			CreatedAt: e.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 		}
 		if e.ExpiresAt != nil {

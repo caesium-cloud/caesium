@@ -1,17 +1,22 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
+import { Link } from "@tanstack/react-router";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   X,
   Info,
   ScrollText,
   AlertTriangle,
   SkipForward,
+  Archive,
 } from "lucide-react";
+import { toast } from "sonner";
 import { cn, formatDurationNs, formatKeyValueMap } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import type { JobTask, TaskRun } from "@/lib/api";
+import { api, type JobTask, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
+import { isTaskCached } from "./cache-utils";
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -39,6 +44,7 @@ export function TaskDetailPanel({
   runId,
   onClose,
 }: TaskDetailPanelProps) {
+  const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<TabId>("logs");
   const [isVisible, setIsVisible] = useState(false);
   const [panelWidth, setPanelWidth] = useState(() => getInitialPanelWidth());
@@ -117,6 +123,23 @@ export function TaskDetailPanel({
 
   const resolvedType = taskType || "task";
   const status = runTask?.status ?? "pending";
+  const cached = isTaskCached(runTask);
+
+  const invalidateCacheMutation = useMutation({
+    mutationFn: () => {
+      if (!task?.name) {
+        throw new Error("Task name unavailable");
+      }
+      return api.deleteTaskCache(jobId, task.name);
+    },
+    onSuccess: () => {
+      toast.success(`Cleared cache for ${task?.name ?? taskId}`);
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "cache"] });
+    },
+    onError: (err: Error) => {
+      toast.error(`Failed to clear task cache: ${err.message}`);
+    },
+  });
 
   return (
     <div
@@ -152,7 +175,7 @@ export function TaskDetailPanel({
               {taskId}
             </h3>
             <div className="flex items-center gap-2 mt-0.5">
-              <Badge variant="outline" className="text-[10px] px-1.5 py-0">
+              <Badge variant={cached ? "cached" : "outline"} className="text-[10px] px-1.5 py-0">
                 {status}
               </Badge>
               {resolvedType !== "task" && (
@@ -221,6 +244,41 @@ export function TaskDetailPanel({
                 </div>
               ) : null}
 
+              {cached ? (
+                <div className="rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2.5 flex gap-3 items-start">
+                  <Archive className="w-4 h-4 text-teal-500 shrink-0 mt-0.5" />
+                  <div className="flex flex-1 flex-col gap-1 min-w-0">
+                    <span className="text-[10px] font-bold text-teal-700 dark:text-teal-300 uppercase tracking-wider">
+                      Reused successful output
+                    </span>
+                    <span className="text-xs text-teal-700 dark:text-teal-300">
+                      This task completed from cache, so no new container had to run for this step.
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-teal-700 dark:text-teal-300">
+                      {runTask?.cache_origin_run_id ? (
+                        <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: runTask.cache_origin_run_id }} className="font-mono hover:underline">
+                          Source run {runTask.cache_origin_run_id.slice(0, 8)}
+                        </Link>
+                      ) : null}
+                      {runTask?.cache_created_at ? (
+                        <span>cached {new Date(runTask.cache_created_at).toLocaleString()}</span>
+                      ) : null}
+                      {runTask?.cache_expires_at ? (
+                        <span>expires {new Date(runTask.cache_expires_at).toLocaleString()}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => invalidateCacheMutation.mutate()}
+                    disabled={invalidateCacheMutation.isPending || !task?.name}
+                  >
+                    Invalidate
+                  </Button>
+                </div>
+              ) : null}
+
               {/* Metadata grid */}
               <div className="grid grid-cols-2 gap-3">
                 <MetadataCell label="Task ID" value={task?.id ?? runTask?.task_id ?? taskId} mono />
@@ -283,6 +341,8 @@ function StatusDot({ status }: { status: string }) {
   const color =
     status === "succeeded" || status === "completed"
       ? "bg-emerald-400 shadow-emerald-400/50"
+      : status === "cached"
+        ? "bg-teal-400 shadow-teal-400/50"
       : status === "failed"
         ? "bg-red-400 shadow-red-400/50"
         : status === "running"

@@ -2,6 +2,7 @@ import type { JobTask, TaskRun } from "@/lib/api";
 import { formatDurationNs, formatKeyValueMap } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { isTaskCached } from "./cache-utils";
 
 interface TaskMetadataPanelProps {
   task?: JobTask;
@@ -16,11 +17,13 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
   }
 
   const resolvedType = taskType || 'task';
+  const cached = isTaskCached(runTask);
 
   const content = (
     <div className="grid gap-3 text-sm md:grid-cols-2">
         <MetadataRow label="Task ID" value={task?.id ?? runTask?.task_id ?? "Unknown"} mono />
-        <MetadataRow label="Status" value={runTask?.status ?? "pending"} badge />
+        <MetadataRow label="Status" value={runTask?.status ?? "pending"} badge badgeVariant={cached ? "cached" : "outline"} />
+        {cached ? <MetadataRow label="Cache" value="Served from cache" badge badgeVariant="cached" className="md:col-span-2" /> : null}
         {resolvedType !== 'task' && <MetadataRow label="Type" value={resolvedType} badge />}
         <MetadataRow label="Trigger Rule" value={task?.trigger_rule ?? "all_success"} mono />
         <MetadataRow label="Attempts" value={formatAttempts(runTask)} mono />
@@ -30,6 +33,9 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
         <MetadataRow label="Claimed By" value={runTask?.claimed_by || "Unclaimed"} mono />
         <MetadataRow label="Node Selector" value={formatKeyValueMap((task?.node_selector || runTask?.node_selector) as Record<string, unknown>)} />
         <MetadataRow label="Outstanding Predecessors" value={String(runTask?.outstanding_predecessors ?? 0)} mono />
+        {runTask?.cache_origin_run_id ? <MetadataRow label="Source Run" value={runTask.cache_origin_run_id} mono /> : null}
+        {runTask?.cache_created_at ? <MetadataRow label="Cached At" value={new Date(runTask.cache_created_at).toLocaleString()} /> : null}
+        {runTask?.cache_expires_at ? <MetadataRow label="Cache Expires" value={new Date(runTask.cache_expires_at).toLocaleString()} /> : null}
         {runTask?.error ? <MetadataRow label="Error" value={runTask.error} className="md:col-span-2" /> : null}
         {runTask?.output && Object.keys(runTask.output).length > 0 ? (
           <div className="md:col-span-2">
@@ -80,15 +86,16 @@ interface MetadataRowProps {
   value: string;
   mono?: boolean;
   badge?: boolean;
+  badgeVariant?: "cached" | "outline";
   className?: string;
 }
 
-function MetadataRow({ label, value, mono = false, badge = false, className }: MetadataRowProps) {
+function MetadataRow({ label, value, mono = false, badge = false, badgeVariant = "outline", className }: MetadataRowProps) {
   return (
     <div className={className}>
       <div className="mb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
       {badge ? (
-        <Badge variant="outline" className="font-medium">
+        <Badge variant={badgeVariant} className="font-medium">
           {value}
         </Badge>
       ) : (

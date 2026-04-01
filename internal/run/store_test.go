@@ -576,6 +576,82 @@ func TestPredecessorOutputs_NoPredecessors(t *testing.T) {
 	require.Nil(t, outputs)
 }
 
+func TestPredecessorHashes(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomA := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","a"]`,
+	}
+	atomB := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","b"]`,
+	}
+	require.NoError(t, db.Create(atomA).Error)
+	require.NoError(t, db.Create(atomB).Error)
+
+	taskA := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomA.ID,
+		Name:   "step-a",
+	}
+	taskB := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomB.ID,
+		Name:   "step-b",
+	}
+	require.NoError(t, db.Create(taskA).Error)
+	require.NoError(t, db.Create(taskB).Error)
+
+	edge := &models.TaskEdge{
+		ID:         uuid.New(),
+		JobID:      jobID,
+		FromTaskID: taskA.ID,
+		ToTaskID:   taskB.ID,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	require.NoError(t, db.Create(edge).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskA, atomA, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
+	require.NoError(t, store.StartTask(runRecord.ID, taskA.ID, "runtime-a"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", map[string]string{
+		"row_count": "42",
+	}, nil))
+
+	var completed models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskA.ID).First(&completed).Error)
+	require.NoError(t, db.Create(&models.TaskCache{
+		Hash:      "pred-hash-1",
+		JobID:     jobID,
+		TaskName:  "step-a",
+		Result:    "ok",
+		RunID:     runRecord.ID,
+		TaskRunID: completed.ID,
+		CreatedAt: time.Now().UTC(),
+	}).Error)
+
+	hashes, err := store.PredecessorHashes(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"pred-hash-1"}, hashes)
+}
+
 func TestCompleteTaskWithBranchSkipLeavesOneSuccessJoinRunnable(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

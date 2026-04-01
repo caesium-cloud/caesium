@@ -1,4 +1,4 @@
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState, type ReactNode } from 'react';
 import ReactFlow, {
   Controls,
   Background,
@@ -9,7 +9,9 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import dagre from 'dagre';
-import type { JobDAGResponse, Atom, TaskRun } from '@/lib/api';
+import { ShieldCheck } from 'lucide-react';
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import type { JobDAGResponse, Atom, JobTask, TaskRun } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
 import { BranchNode } from './components/BranchNode';
 import { DataFlowEdge } from './components/DataFlowEdge';
@@ -76,6 +78,7 @@ interface TaskRunMetadata {
 interface JobDAGProps {
   dag: JobDAGResponse;
   atoms: Record<string, Atom>;
+  taskDefinitions?: Record<string, JobTask>;
   taskStatus?: Record<string, string>;
   taskMetadata?: Record<string, TaskRunMetadata>;
   taskRunData?: Record<string, TaskRun>;
@@ -83,7 +86,20 @@ interface JobDAGProps {
   selectedTaskId?: string | null;
 }
 
-export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
+interface EdgeDetailsState {
+  sourceId: string;
+  sourceName: string;
+  targetId: string;
+  targetName: string;
+  outputCount: number;
+  contractDefined: boolean;
+  output?: Record<string, string>;
+  outputSchema?: Record<string, unknown>;
+  contractSchema?: Record<string, unknown>;
+}
+
+export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
+    const [selectedEdge, setSelectedEdge] = useState<EdgeDetailsState | null>(null);
     const resolvedTaskStatus = useMemo(() => {
         const statusByTask: Record<string, string> = {};
 
@@ -100,27 +116,12 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
         return statusByTask;
     }, [taskMetadata, taskStatus]);
 
-    // Build a set of task IDs that receive outputs from predecessors.
-    const taskReceivesOutputs = useMemo(() => {
-        const receivers = new Set<string>();
-        if (!dag.edges) return receivers;
-        for (const e of dag.edges) {
-            const sourceRun = taskRunData?.[e.from];
-            if (sourceRun?.output && Object.keys(sourceRun.output).length > 0) {
-                receivers.add(e.to);
-            }
-        }
-        return receivers;
-    }, [dag.edges, taskRunData]);
-
     const initialNodes: Node[] = useMemo(() => {
         if (!dag.nodes) return [];
         return dag.nodes.map(n => {
             const atom = atoms[n.atom_id];
             const meta = taskMetadata?.[n.id];
             const status = resolvedTaskStatus[n.id] || 'pending';
-            const runTask = taskRunData?.[n.id];
-            const outputCount = runTask?.output ? Object.keys(runTask.output).length : 0;
 
             const nodeType = n.type === 'branch' ? 'branch' : 'task';
 
@@ -135,26 +136,34 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                   startedAt: meta?.started_at,
                   completedAt: meta?.completed_at,
                   error: meta?.error,
-                  outputCount,
-                  receivesOutputs: taskReceivesOutputs.has(n.id),
                   taskType: n.type,
-                  hasOutputSchema: !!n.output_schema,
                 },
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, atoms, resolvedTaskStatus, taskMetadata, taskRunData, selectedTaskId, taskReceivesOutputs]);
+    }, [dag, atoms, resolvedTaskStatus, taskMetadata, selectedTaskId]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
+        const dagNodesById = new Map(dag.nodes.map((node) => [node.id, node]));
+
         return dag.edges.map((e) => {
             const sourceStatus = resolvedTaskStatus[e.from] || 'pending';
             const targetStatus = resolvedTaskStatus[e.to] || 'pending';
             const sourceRun = taskRunData?.[e.from];
+            const sourceTask = taskDefinitions?.[e.from];
+            const targetTask = taskDefinitions?.[e.to];
+            const sourceNode = dagNodesById.get(e.from);
             const outputCount = sourceRun?.output ? Object.keys(sourceRun.output).length : 0;
             const hasOutputs = outputCount > 0;
             const isBranchSkipped = targetStatus === 'skipped' && sourceStatus === 'succeeded';
-            const stroke = isBranchSkipped ? '#64748b' : hasOutputs && sourceStatus === 'succeeded' ? '#10b981' : edgeColor(sourceStatus);
+            const stroke = isBranchSkipped ? '#64748b' : edgeColor(sourceStatus);
+            const sourceName = sourceTask?.name || e.from;
+            const targetName = targetTask?.name || e.to;
+            const contractSchema = sourceTask?.name && targetTask?.input_schema
+              ? targetTask.input_schema[sourceTask.name]
+              : undefined;
+            const outputSchema = sourceTask?.output_schema || sourceNode?.output_schema;
 
             return {
                 id: `e${e.from}-${e.to}`,
@@ -162,7 +171,21 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                 target: e.to,
                 type: 'dataflow',
                 animated: sourceStatus === 'running',
-                data: { outputCount, contractDefined: !!e.contract_defined },
+                data: {
+                  outputCount,
+                  contractDefined: !!e.contract_defined,
+                  onOpenDetails: () => setSelectedEdge({
+                    sourceId: e.from,
+                    sourceName,
+                    targetId: e.to,
+                    targetName,
+                    outputCount,
+                    contractDefined: !!e.contract_defined,
+                    output: sourceRun?.output,
+                    outputSchema,
+                    contractSchema,
+                  }),
+                },
                 markerEnd: {
                   type: MarkerType.ArrowClosed,
                   width: 20,
@@ -177,7 +200,7 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
                 }
             };
         });
-    }, [dag, resolvedTaskStatus, taskRunData]);
+    }, [dag, resolvedTaskStatus, taskDefinitions, taskRunData]);
 
     const { nodes: layoutedNodes, edges: layoutedEdges } = useMemo(
         () => getLayoutedElements(initialNodes, initialEdges),
@@ -189,22 +212,38 @@ export function JobDAG({ dag, atoms, taskStatus, taskMetadata, taskRunData, onNo
     }, [onNodeClick]);
 
   return (
-    <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
-      <ReactFlow
-        nodes={layoutedNodes}
-        edges={layoutedEdges}
-        nodeTypes={nodeTypes}
-        edgeTypes={edgeTypes}
-        onNodeClick={handleNodeClick}
-        fitView
-        fitViewOptions={{ padding: 0.2 }}
-        minZoom={0.1}
-        maxZoom={1.5}
-      >
-        <Background gap={20} />
-        <Controls />
-      </ReactFlow>
-    </div>
+    <>
+      <div className="relative h-full min-h-[500px] w-full overflow-hidden rounded-lg bg-dag-bg">
+        <ReactFlow
+          nodes={layoutedNodes}
+          edges={layoutedEdges}
+          nodeTypes={nodeTypes}
+          edgeTypes={edgeTypes}
+          onNodeClick={handleNodeClick}
+          fitView
+          fitViewOptions={{ padding: 0.2 }}
+          minZoom={0.1}
+          maxZoom={1.5}
+        >
+          <Background gap={20} />
+          <Controls />
+        </ReactFlow>
+      </div>
+
+      <Dialog open={selectedEdge !== null} onOpenChange={(open) => !open && setSelectedEdge(null)}>
+        <DialogContent className="max-w-2xl">
+            <DialogHeader>
+            <DialogTitle>
+              {selectedEdge ? `${selectedEdge.sourceName} → ${selectedEdge.targetName}` : 'Edge details'}
+            </DialogTitle>
+            <DialogDescription>
+              Inspect observed run outputs, the producer's published schema, and any downstream requirements declared for this connection.
+            </DialogDescription>
+          </DialogHeader>
+          {selectedEdge ? <EdgeDetails edge={selectedEdge} /> : null}
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 
@@ -223,6 +262,8 @@ function edgeColor(status: string) {
             return '#00b4d8';
         case 'succeeded':
             return '#10b981';
+        case 'cached':
+            return '#14b8a6';
         case 'failed':
             return '#f97316';
         case 'skipped':
@@ -230,4 +271,138 @@ function edgeColor(status: string) {
         default:
             return '#64748b';
     }
+}
+
+function EdgeDetails({ edge }: { edge: EdgeDetailsState }) {
+    return (
+        <div className="space-y-5">
+            <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                    {edge.outputCount} {edge.outputCount === 1 ? 'output' : 'outputs'}
+                </span>
+                <span
+                    className={`inline-flex items-center rounded-full border px-2 py-1 ${
+                        edge.contractDefined
+                            ? 'border-blue-500/35 bg-blue-500/10'
+                            : 'border-slate-400/35 bg-slate-500/10'
+                    }`}
+                    title={edge.contractDefined ? 'Consumer requirements declared' : 'No consumer requirements declared'}
+                >
+                    <ShieldCheck className={`h-3 w-3 ${edge.contractDefined ? 'text-blue-400' : 'text-slate-500'}`} />
+                </span>
+            </div>
+
+            <SchemaSection
+                title="Observed outputs for this run"
+                description="Values emitted by the upstream task on the selected run overlay."
+            >
+                {edge.output && Object.keys(edge.output).length > 0 ? (
+                    <div className="rounded-md border bg-muted/40 p-3">
+                        {Object.entries(edge.output).map(([key, value]) => (
+                            <div key={key} className="flex gap-2 font-mono text-xs">
+                                <span className="font-semibold text-muted-foreground">{key}:</span>
+                                <span className="break-all text-foreground">{value}</span>
+                            </div>
+                        ))}
+                    </div>
+                ) : (
+                    <EmptyState message="No run-time outputs are available for this edge on the current overlay." />
+                )}
+            </SchemaSection>
+
+            <div className="grid gap-4 md:grid-cols-2">
+                <SchemaSection
+                    title="Published output schema"
+                    description="The schema the upstream task declares for the data it emits."
+                >
+                    <SchemaPreview schema={edge.outputSchema} emptyMessage="This producer does not declare an output schema." />
+                </SchemaSection>
+                <SchemaSection
+                    title="Consumer requirements"
+                    description="The fields and types the downstream task explicitly requires from this producer."
+                >
+                    <SchemaPreview schema={edge.contractSchema} emptyMessage="This consumer uses the producer output without declaring specific required fields." />
+                </SchemaSection>
+            </div>
+        </div>
+    );
+}
+
+function SchemaSection({
+    title,
+    description,
+    children,
+}: {
+    title: string;
+    description: string;
+    children: ReactNode;
+}) {
+    return (
+        <div className="space-y-2">
+            <div>
+                <div className="text-sm font-semibold text-foreground">{title}</div>
+                <div className="text-xs text-muted-foreground">{description}</div>
+            </div>
+            {children}
+        </div>
+    );
+}
+
+function SchemaPreview({
+    schema,
+    emptyMessage,
+}: {
+    schema?: Record<string, unknown>;
+    emptyMessage: string;
+}) {
+    if (!schema) {
+        return <EmptyState message={emptyMessage} />;
+    }
+
+    const properties = isRecord(schema.properties) ? schema.properties : null;
+    const required = Array.isArray(schema.required)
+        ? schema.required.filter((item): item is string => typeof item === 'string')
+        : [];
+
+    if (properties && Object.keys(properties).length > 0) {
+        return (
+            <div className="rounded-md border bg-muted/40 p-3">
+                {Object.entries(properties).map(([key, value]) => {
+                    const prop = isRecord(value) ? value : undefined;
+                    const type = typeof prop?.type === 'string' ? prop.type : 'any';
+                    const isRequired = required.includes(key);
+
+                    return (
+                        <div key={key} className="flex items-center gap-2 text-xs">
+                            <span className="font-mono font-semibold text-foreground">{key}</span>
+                            <span className="font-mono text-muted-foreground">{type}</span>
+                            {isRequired ? (
+                                <span className="rounded border border-blue-500/35 bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:text-blue-300">
+                                    required
+                                </span>
+                            ) : null}
+                        </div>
+                    );
+                })}
+            </div>
+        );
+    }
+
+    return (
+        <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 text-[11px] leading-relaxed text-foreground">
+            {JSON.stringify(schema, null, 2)}
+        </pre>
+    );
+}
+
+function EmptyState({ message }: { message: string }) {
+    return (
+        <div className="rounded-md border border-dashed bg-muted/20 p-3 text-xs text-muted-foreground">
+            {message}
+        </div>
+    );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

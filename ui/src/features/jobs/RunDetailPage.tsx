@@ -11,7 +11,9 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type JobTask, type JobRun, type TaskRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
+import { getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
+import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
 export function RunDetailPage() {
@@ -92,6 +94,8 @@ export function RunDetailPage() {
                     ? "skipped"
                     : e.type === "task_retrying"
                       ? "pending"
+                      : e.type === "task_cached"
+                        ? "cached"
                       : taskUpdate?.status || "pending";
 
           if (existingIndex >= 0) {
@@ -117,7 +121,14 @@ export function RunDetailPage() {
             });
           }
 
-          return { ...old, tasks: updatedTasks };
+          const summary = getRunCacheStats({ ...old, tasks: updatedTasks });
+          return {
+            ...old,
+            tasks: updatedTasks,
+            cache_hits: summary.cacheHits,
+            executed_tasks: summary.executedTasks,
+            total_tasks: summary.totalTasks,
+          };
         }
 
         return old;
@@ -125,13 +136,13 @@ export function RunDetailPage() {
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
+    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
       events.subscribe(type, onEvent),
     );
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
+      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
         events.unsubscribe(type, onEvent),
       );
     };
@@ -219,6 +230,18 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
+      <Card>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-sm">Cache Summary</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm text-muted-foreground">
+            Cached tasks reused structured outputs from prior successful runs instead of launching a new container.
+          </p>
+          <RunCacheSummary run={run} />
+        </CardContent>
+      </Card>
+
       <div
         ref={dagContainerRef}
         className="relative overflow-hidden rounded-md border bg-card"
@@ -228,6 +251,7 @@ export function RunDetailPage() {
           <JobDAG
             dag={dag}
             atoms={atoms}
+            taskDefinitions={taskDefinitions}
             taskMetadata={taskMetadata}
             taskRunData={runTasks}
             onNodeClick={setSelectedTaskId}

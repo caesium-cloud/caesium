@@ -14,11 +14,11 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
-	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -99,6 +99,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if predErr != nil {
 			log.Warn("cache: failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
 		}
+		predHashes, predHashErr := e.store.PredecessorHashes(taskRun.JobRunID, taskRun.TaskID)
+		if predHashErr != nil {
+			log.Warn("cache: failed to query predecessor hashes", "task_id", taskRun.TaskID, "error", predHashErr)
+		}
 
 		// Fetch run params from the job run record.
 		var runParams map[string]string
@@ -146,6 +150,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				Env:                mergedEnv,
 				WorkDir:            atomSpec.WorkDir,
 				Mounts:             atomSpec.Mounts,
+				PredecessorHashes:  predHashes,
 				PredecessorOutputs: predOutputs,
 				RunParams:          runParams,
 				CacheVersion:       cacheCfg.Version,
@@ -159,7 +164,11 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
 			} else if found {
 				log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
-				if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
+				if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, run.CacheHitSource{
+					RunID:     entry.RunID,
+					CreatedAt: entry.CreatedAt,
+					ExpiresAt: entry.ExpiresAt,
+				}, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
 					if errors.Is(err, run.ErrTaskClaimMismatch) {
 						log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 						return

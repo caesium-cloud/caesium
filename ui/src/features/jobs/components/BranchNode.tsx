@@ -13,15 +13,13 @@ import {
   Settings,
   Terminal as TerminalIcon,
   AlertTriangle,
-  ArrowRightFromLine,
-  ArrowLeftToLine,
   GitBranch,
   SkipForward,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
 export const BranchNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, outputCount, receivesOutputs } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
   const taskLabel = typeof label === 'string' ? label : '';
 
   const getStatusIcon = () => {
@@ -104,14 +102,6 @@ export const BranchNode = memo(({ data }: NodeProps) => {
       )}
     >
       <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-amber-400" />
-      {receivesOutputs && (
-        <div className="absolute -left-1 top-1/2 -translate-y-1/2 translate-x-3">
-          <div className="flex items-center gap-0.5 rounded-full border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5">
-            <ArrowLeftToLine className="h-2 w-2 text-violet-400" />
-            <span className="text-[7px] font-bold text-violet-300">IN</span>
-          </div>
-        </div>
-      )}
 
       <div className="flex h-full flex-col gap-2">
         {/* Row 1: Image & Status */}
@@ -197,14 +187,6 @@ export const BranchNode = memo(({ data }: NodeProps) => {
         </div>
       </div>
 
-      {outputCount > 0 && (
-        <div className="absolute -right-1 top-1/2 -translate-x-3 -translate-y-1/2">
-          <div className="flex items-center gap-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5">
-            <span className="text-[7px] font-bold text-emerald-300">OUT</span>
-            <ArrowRightFromLine className="h-2 w-2 text-emerald-400" />
-          </div>
-        </div>
-      )}
       <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-amber-400" />
     </div>
   );

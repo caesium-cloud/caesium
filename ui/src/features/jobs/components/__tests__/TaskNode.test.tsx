@@ -49,6 +49,19 @@ describe('TaskNode', () => {
     expect(screen.getByText('Error Details')).toBeInTheDocument();
   });
 
+  it('renders task with cached status', () => {
+    renderTaskNode({
+      label: 'task-cache',
+      status: 'cached',
+      atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'cache'] },
+      engine: 'docker',
+      command: ['echo', 'cache'],
+    });
+
+    expect(screen.getByTestId('status-icon-cached')).toBeInTheDocument();
+    expect(screen.getByText('Reused Result')).toBeInTheDocument();
+  });
+
   it('renders docker engine icon', () => {
     renderTaskNode({
       label: 'task-ghi789',
@@ -97,20 +110,16 @@ describe('TaskNode', () => {
     expect(screen.getByText('echo streamed logs')).toBeInTheDocument();
   });
 
-  it('shows data contract indicators when the node receives and emits outputs', () => {
+  it('does not render redundant schema or in/out badges on the node chrome', () => {
     renderTaskNode({
       label: 'task-contract',
       status: 'succeeded',
       atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'contract'] },
       engine: 'docker',
       command: ['echo', 'contract'],
-      receivesOutputs: true,
-      outputCount: 2,
-      hasOutputSchema: true,
     });
 
-    expect(screen.getByText('IN')).toBeInTheDocument();
-    expect(screen.getByText('OUT')).toBeInTheDocument();
-    expect(screen.getByTitle('Output schema defined')).toBeInTheDocument();
+    expect(screen.queryByText('IN')).not.toBeInTheDocument();
+    expect(screen.queryByText('OUT')).not.toBeInTheDocument();
   });
 });

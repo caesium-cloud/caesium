@@ -768,7 +768,11 @@ func (j *job) Run(ctx context.Context) error {
 				metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
 				log.Info("cache hit", "task", taskName, "hash", inputHash[:12])
 
-				cacheResult, cacheErr := store.CacheHitTask(runID, taskID, entry.Result, entry.Output, entry.BranchSelections)
+				cacheResult, cacheErr := store.CacheHitTask(runID, taskID, run.CacheHitSource{
+					RunID:     entry.RunID,
+					CreatedAt: entry.CreatedAt,
+					ExpiresAt: entry.ExpiresAt,
+				}, entry.Result, entry.Output, entry.BranchSelections)
 				if cacheErr != nil {
 					log.Error("failed to apply cache hit", "task", taskName, "error", cacheErr)
 					// Fall through to normal execution.

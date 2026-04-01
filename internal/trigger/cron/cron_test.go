@@ -5,6 +5,43 @@ import (
 	"time"
 )
 
+func TestScheduledRunParamsInjectsLogicalDateAndPreservesDefaults(t *testing.T) {
+	c := &Cron{
+		defaultParams: map[string]string{
+			"region": "us-east-1",
+		},
+	}
+
+	logicalDate := time.Date(2026, 3, 31, 6, 0, 0, 0, time.UTC)
+	params := c.scheduledRunParams(logicalDate)
+
+	if params["region"] != "us-east-1" {
+		t.Fatalf("region = %q, want %q", params["region"], "us-east-1")
+	}
+	if params["logical_date"] != "2026-03-31T06:00:00Z" {
+		t.Fatalf("logical_date = %q, want %q", params["logical_date"], "2026-03-31T06:00:00Z")
+	}
+}
+
+func TestScheduledRunParamsOverridesUserLogicalDate(t *testing.T) {
+	c := &Cron{
+		defaultParams: map[string]string{
+			"logical_date": "stale-value",
+			"env":          "prod",
+		},
+	}
+
+	logicalDate := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	params := c.scheduledRunParams(logicalDate)
+
+	if params["env"] != "prod" {
+		t.Fatalf("env = %q, want %q", params["env"], "prod")
+	}
+	if params["logical_date"] != "2026-04-01T00:00:00Z" {
+		t.Fatalf("logical_date = %q, want %q", params["logical_date"], "2026-04-01T00:00:00Z")
+	}
+}
+
 func TestExtractExpressionPrefersExpression(t *testing.T) {
 	cfg := map[string]interface{}{
 		"expression": "0 0 * * *",

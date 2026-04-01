@@ -6,6 +6,7 @@ export interface Job {
   trigger_id: string;
   labels: Record<string, unknown>;
   annotations: Record<string, unknown>;
+  cache_config?: CacheConfigValue;
   max_parallel_tasks?: number;
   task_timeout?: number;
   run_timeout?: number;
@@ -30,6 +31,9 @@ export interface JobRun {
   completed_at?: string;
   created_at: string;
   updated_at: string;
+  cache_hits?: number;
+  executed_tasks?: number;
+  total_tasks?: number;
   tasks?: TaskRun[];
 }
 
@@ -76,6 +80,11 @@ export interface TaskRun {
   result?: string;
   output?: Record<string, string>;
   schema_violations?: Array<{ key: string; message: string }>;
+  branch_selections?: string[];
+  cache_hit?: boolean;
+  cache_origin_run_id?: string;
+  cache_created_at?: string;
+  cache_expires_at?: string;
   error?: string;
   outstanding_predecessors?: number;
   started_at?: string;
@@ -107,16 +116,45 @@ export interface JobTask {
   id: string;
   job_id: string;
   atom_id: string;
+  name: string;
   next_id?: string;
   node_selector: Record<string, unknown>;
   retries: number;
   retry_delay: number;
   retry_backoff: boolean;
   trigger_rule: string;
+  cache_config?: CacheConfigValue;
   output_schema?: Record<string, unknown>;
   input_schema?: Record<string, Record<string, unknown>>;
   created_at: string;
   updated_at: string;
+}
+
+export type CacheConfigValue =
+  | boolean
+  | {
+      enabled?: boolean;
+      ttl?: string;
+      version?: number;
+    }
+  | null;
+
+export interface CacheEntry {
+  hash: string;
+  task_name: string;
+  result: string;
+  run_id: string;
+  task_run_id: string;
+  created_at: string;
+  expires_at?: string;
+}
+
+export interface JobCacheResponse {
+  entries: CacheEntry[];
+}
+
+export interface CachePruneResponse {
+  pruned: number;
 }
 
 export interface DAGNode {
@@ -302,6 +340,11 @@ export const api = {
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
+  getJobCache: (jobId: string) => request<JobCacheResponse>(`/jobs/${jobId}/cache`),
+  deleteJobCache: (jobId: string) => request<void>(`/jobs/${jobId}/cache`, { method: "DELETE" }),
+  deleteTaskCache: (jobId: string, taskName: string) =>
+    request<void>(`/jobs/${jobId}/cache/${encodeURIComponent(taskName)}`, { method: "DELETE" }),
+  pruneCache: () => request<CachePruneResponse>("/cache/prune", { method: "POST" }),
   triggerJob: (jobId: string, body?: TriggerRunRequest) =>
     request<JobRun>(`/jobs/${jobId}/run`, {
       method: "POST",

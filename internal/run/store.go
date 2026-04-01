@@ -97,6 +97,10 @@ type TaskRun struct {
 	Output                  map[string]string         `json:"output,omitempty"`
 	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
 	BranchSelections        []string                  `json:"branch_selections,omitempty"`
+	CacheHit                bool                      `json:"cache_hit"`
+	CacheOriginRunID        *uuid.UUID                `json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt          *time.Time                `json:"cache_created_at,omitempty"`
+	CacheExpiresAt          *time.Time                `json:"cache_expires_at,omitempty"`
 	StartedAt               *time.Time                `json:"started_at,omitempty"`
 	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
 	Error                   string                    `json:"error,omitempty"`
@@ -106,21 +110,24 @@ type TaskRun struct {
 }
 
 type JobRun struct {
-	ID           uuid.UUID         `json:"id"`
-	JobID        uuid.UUID         `json:"job_id"`
-	BackfillID   *uuid.UUID        `json:"backfill_id,omitempty"`
-	JobAlias     string            `json:"job_alias,omitempty"`
-	TriggerType  string            `json:"trigger_type,omitempty"`
-	TriggerAlias string            `json:"trigger_alias,omitempty"`
-	Status       Status            `json:"status"`
-	Params       map[string]string `json:"params,omitempty"`
-	StartedAt    time.Time         `json:"started_at"`
-	CompletedAt  *time.Time        `json:"completed_at,omitempty"`
-	CreatedAt    time.Time         `json:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at"`
-	Error        string            `json:"error,omitempty"`
-	Tasks        []*TaskRun        `json:"tasks"`
-	Callbacks    []*CallbackRun    `json:"callbacks"`
+	ID            uuid.UUID         `json:"id"`
+	JobID         uuid.UUID         `json:"job_id"`
+	BackfillID    *uuid.UUID        `json:"backfill_id,omitempty"`
+	JobAlias      string            `json:"job_alias,omitempty"`
+	TriggerType   string            `json:"trigger_type,omitempty"`
+	TriggerAlias  string            `json:"trigger_alias,omitempty"`
+	Status        Status            `json:"status"`
+	Params        map[string]string `json:"params,omitempty"`
+	StartedAt     time.Time         `json:"started_at"`
+	CompletedAt   *time.Time        `json:"completed_at,omitempty"`
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
+	Error         string            `json:"error,omitempty"`
+	Tasks         []*TaskRun        `json:"tasks"`
+	Callbacks     []*CallbackRun    `json:"callbacks"`
+	CacheHits     int               `json:"cache_hits"`
+	ExecutedTasks int               `json:"executed_tasks"`
+	TotalTasks    int               `json:"total_tasks"`
 }
 
 type Store struct {
@@ -482,6 +489,12 @@ type TaskLogSnapshot struct {
 	Truncated bool
 }
 
+type CacheHitSource struct {
+	RunID     uuid.UUID
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+}
+
 // CompleteTaskWithResult completes a task and returns details about branch
 // skips so the local executor can update its in-memory state.
 func (s *Store) CompleteTaskWithResult(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
@@ -499,8 +512,8 @@ func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy s
 
 // CacheHitTask marks a task as completed via cache hit (local mode).
 // It mirrors the CompleteTaskWithResult flow but sets status to "cached".
-func (s *Store) CacheHitTask(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
-	skipped, err := s.cacheHitTask(runID, taskID, result, "", false, output, branchSelections)
+func (s *Store) CacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
+	skipped, err := s.cacheHitTask(runID, taskID, source, result, "", false, output, branchSelections)
 	if err != nil {
 		return nil, err
 	}
@@ -508,12 +521,12 @@ func (s *Store) CacheHitTask(runID, taskID uuid.UUID, result string, output map[
 }
 
 // CacheHitTaskClaimed marks a claimed task as completed via cache hit (distributed mode).
-func (s *Store) CacheHitTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string, branchSelections []string) error {
-	_, err := s.cacheHitTask(runID, taskID, result, claimedBy, true, output, branchSelections)
+func (s *Store) CacheHitTaskClaimed(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, output map[string]string, branchSelections []string) error {
+	_, err := s.cacheHitTask(runID, taskID, source, result, claimedBy, true, output, branchSelections)
 	return err
 }
 
-func (s *Store) cacheHitTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
+func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
 	pendingEvents := make([]event.Event, 0, 8)
 	var skippedTaskIDs []uuid.UUID
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -539,9 +552,13 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		}
 
 		updates := map[string]interface{}{
-			"status":       string(TaskStatusCached),
-			"completed_at": now,
-			"result":       result,
+			"status":              string(TaskStatusCached),
+			"completed_at":        now,
+			"result":              result,
+			"cache_hit":           true,
+			"cache_origin_run_id": source.RunID,
+			"cache_created_at":    source.CreatedAt,
+			"cache_expires_at":    source.ExpiresAt,
 		}
 		if len(output) > 0 {
 			encoded, marshalErr := json.Marshal(output)
@@ -775,9 +792,13 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 	result := tx.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
 		Updates(map[string]interface{}{
-			"status":       string(TaskStatusSkipped),
-			"completed_at": time.Now().UTC(),
-			"error":        reason,
+			"status":              string(TaskStatusSkipped),
+			"completed_at":        time.Now().UTC(),
+			"error":               reason,
+			"cache_hit":           false,
+			"cache_origin_run_id": nil,
+			"cache_created_at":    nil,
+			"cache_expires_at":    nil,
 		})
 	if result.Error != nil {
 		return false, result.Error
@@ -931,9 +952,13 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		}
 
 		updates := map[string]interface{}{
-			"status":       string(status),
-			"completed_at": now,
-			"result":       result,
+			"status":              string(status),
+			"completed_at":        now,
+			"result":              result,
+			"cache_hit":           false,
+			"cache_origin_run_id": nil,
+			"cache_created_at":    nil,
+			"cache_expires_at":    nil,
 		}
 		if len(output) > 0 {
 			encoded, marshalErr := json.Marshal(output)
@@ -1215,9 +1240,13 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		}
 		resultUpdate := updateQuery.
 			Updates(map[string]interface{}{
-				"status":       string(TaskStatusFailed),
-				"completed_at": now,
-				"error":        errMsg,
+				"status":              string(TaskStatusFailed),
+				"completed_at":        now,
+				"error":               errMsg,
+				"cache_hit":           false,
+				"cache_origin_run_id": nil,
+				"cache_created_at":    nil,
+				"cache_expires_at":    nil,
 			})
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
@@ -1261,17 +1290,21 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		}
 		resultUpdate := updateQuery.
 			Updates(map[string]interface{}{
-				"status":            string(TaskStatusPending),
-				"attempt":           attempt,
-				"runtime_id":        "",
-				"started_at":        nil,
-				"completed_at":      nil,
-				"result":            "",
-				"output":            nil,
-				"branch_selections": nil,
-				"log_text":          "",
-				"log_truncated":     false,
-				"error":             "",
+				"status":              string(TaskStatusPending),
+				"attempt":             attempt,
+				"runtime_id":          "",
+				"started_at":          nil,
+				"completed_at":        nil,
+				"result":              "",
+				"output":              nil,
+				"branch_selections":   nil,
+				"log_text":            "",
+				"log_truncated":       false,
+				"error":               "",
+				"cache_hit":           false,
+				"cache_origin_run_id": nil,
+				"cache_created_at":    nil,
+				"cache_expires_at":    nil,
 			})
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
@@ -1323,9 +1356,13 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 		if err := tx.Model(&models.TaskRun{}).
 			Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
 			Updates(map[string]interface{}{
-				"status":       string(TaskStatusSkipped),
-				"completed_at": now,
-				"error":        reason,
+				"status":              string(TaskStatusSkipped),
+				"completed_at":        now,
+				"error":               reason,
+				"cache_hit":           false,
+				"cache_origin_run_id": nil,
+				"cache_created_at":    nil,
+				"cache_expires_at":    nil,
 			}).Error; err != nil {
 			return err
 		}
@@ -1436,9 +1473,13 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
 		Updates(map[string]interface{}{
-			"status":     string(TaskStatusPending),
-			"runtime_id": "",
-			"started_at": nil,
+			"status":              string(TaskStatusPending),
+			"runtime_id":          "",
+			"started_at":          nil,
+			"cache_hit":           false,
+			"cache_origin_run_id": nil,
+			"cache_created_at":    nil,
+			"cache_expires_at":    nil,
 		}).Error
 }
 
@@ -1594,6 +1635,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 		}
 		runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
 	}
+	runValue.CacheHits, runValue.ExecutedTasks, runValue.TotalTasks = summarizeTasks(runValue.Tasks)
 
 	callbackRuns, err := s.loadCallbackRunsWithDB(conn, model.ID)
 	if err != nil {
@@ -1636,6 +1678,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		OutstandingPredecessors: model.OutstandingPredecessors,
 		CreatedAt:               model.CreatedAt,
 		UpdatedAt:               model.UpdatedAt,
+		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
 	}
 
 	if len(model.Output) > 0 {
@@ -1671,8 +1714,38 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		completed := *model.CompletedAt
 		task.CompletedAt = &completed
 	}
+	if model.CacheOriginRunID != nil {
+		originRunID := *model.CacheOriginRunID
+		task.CacheOriginRunID = &originRunID
+	}
+	if model.CacheCreatedAt != nil {
+		cacheCreatedAt := *model.CacheCreatedAt
+		task.CacheCreatedAt = &cacheCreatedAt
+	}
+	if model.CacheExpiresAt != nil {
+		cacheExpiresAt := *model.CacheExpiresAt
+		task.CacheExpiresAt = &cacheExpiresAt
+	}
 
 	return task
+}
+
+func summarizeTasks(tasks []*TaskRun) (cacheHits, executedTasks, totalTasks int) {
+	totalTasks = len(tasks)
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		if task.CacheHit || task.Status == TaskStatusCached {
+			cacheHits++
+			continue
+		}
+		switch task.Status {
+		case TaskStatusRunning, TaskStatusSucceeded, TaskStatusFailed:
+			executedTasks++
+		}
+	}
+	return cacheHits, executedTasks, totalTasks
 }
 
 func (s *Store) loadCallbackRunsWithDB(conn *gorm.DB, runID uuid.UUID) ([]*CallbackRun, error) {
@@ -1828,6 +1901,60 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
+// PredecessorHashes returns cache hashes for predecessor task runs when those
+// predecessors stored cache entries. This keeps distributed cache hashing
+// aligned with local execution, which incorporates predecessor task hashes.
+func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
+	var edges []models.TaskEdge
+	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		return nil, err
+	}
+
+	if len(edges) == 0 {
+		return nil, nil
+	}
+
+	predTaskIDs := make([]uuid.UUID, len(edges))
+	for i, edge := range edges {
+		predTaskIDs[i] = edge.FromTaskID
+	}
+
+	var taskRuns []models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+		log.Warn("failed to find predecessor task runs for hashes", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	if len(taskRuns) == 0 {
+		return nil, nil
+	}
+
+	taskRunIDs := make([]uuid.UUID, len(taskRuns))
+	for i, taskRun := range taskRuns {
+		taskRunIDs[i] = taskRun.ID
+	}
+
+	var caches []models.TaskCache
+	if err := s.db.Select("hash", "task_run_id").Where("run_id = ? AND task_run_id IN ?", runID, taskRunIDs).Find(&caches).Error; err != nil {
+		log.Warn("failed to find predecessor cache hashes", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+
+	if len(caches) == 0 {
+		return nil, nil
+	}
+
+	hashes := make([]string, 0, len(caches))
+	for _, entry := range caches {
+		if entry.Hash != "" {
+			hashes = append(hashes, entry.Hash)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	return hashes, nil
+}
+
 // RetryFromFailure resets a failed run so that previously-succeeded and cached
 // tasks are preserved and only failed/pending/skipped tasks are re-executed.
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
@@ -1877,15 +2004,19 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
 				updates := map[string]interface{}{
-					"status":           string(TaskStatusPending),
-					"completed_at":     nil,
-					"result":           "",
-					"error":            "",
-					"started_at":       nil,
-					"claimed_by":       "",
-					"claim_expires_at": nil,
-					"runtime_id":       "",
-					"attempt":          1,
+					"status":              string(TaskStatusPending),
+					"completed_at":        nil,
+					"result":              "",
+					"error":               "",
+					"started_at":          nil,
+					"claimed_by":          "",
+					"claim_expires_at":    nil,
+					"runtime_id":          "",
+					"attempt":             1,
+					"cache_hit":           false,
+					"cache_origin_run_id": nil,
+					"cache_created_at":    nil,
+					"cache_expires_at":    nil,
 				}
 				if err := tx.Model(tr).Updates(updates).Error; err != nil {
 					return err

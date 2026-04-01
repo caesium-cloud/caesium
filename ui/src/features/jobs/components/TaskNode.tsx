@@ -13,15 +13,13 @@ import {
   Settings,
   Terminal as TerminalIcon,
   AlertTriangle,
-  ArrowRightFromLine,
-  ArrowLeftToLine,
+  Archive,
   SkipForward,
-  ShieldCheck,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, outputCount, receivesOutputs, hasOutputSchema } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
   const taskLabel = typeof label === 'string' ? label : '';
 
   const getStatusIcon = () => {
@@ -31,6 +29,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         return <CheckCircle2 data-testid="status-icon-succeeded" className="w-5 h-5 text-green-400 fill-green-500/10" />;
       case 'failed':
         return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-red-400 fill-red-500/10" />;
+      case 'cached':
+        return <Archive data-testid="status-icon-cached" className="w-5 h-5 text-teal-300 fill-teal-400/10" />;
       case 'running':
         return <Activity data-testid="status-icon-running" className="w-5 h-5 text-blue-400 animate-spin" />;
       case 'skipped':
@@ -82,6 +82,8 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         return 'border-red-400/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(8_86%_58%/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_rgba(248,113,113,0.16)]';
       case 'running':
         return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_rgba(0,180,216,0.28)]';
+      case 'cached':
+        return 'border-dashed border-teal-400/55 bg-[linear-gradient(155deg,rgba(45,212,191,0.16),rgba(56,189,248,0.08)_34%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_rgba(45,212,191,0.14)]';
       case 'skipped':
         return 'border-slate-500/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
       default:
@@ -104,14 +106,6 @@ export const TaskNode = memo(({ data }: NodeProps) => {
       )}
     >
       <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
-      {receivesOutputs && (
-        <div className="absolute -left-1 top-1/2 -translate-y-1/2 translate-x-3">
-          <div className="flex items-center gap-0.5 rounded-full border border-violet-500/40 bg-violet-500/15 px-1.5 py-0.5">
-            <ArrowLeftToLine className="h-2 w-2 text-violet-400" />
-            <span className="text-[7px] font-bold text-violet-300">IN</span>
-          </div>
-        </div>
-      )}
 
       <div className="flex h-full flex-col gap-2">
         {/* Row 1: Image & Status */}
@@ -179,6 +173,16 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                 </span>
               </div>
             </div>
+          ) : status === 'cached' ? (
+            <div className="flex gap-2 items-start">
+              <Archive className="w-3.5 h-3.5 text-teal-300 shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-[8px] font-bold text-teal-200/90 uppercase tracking-wider">Reused Result</span>
+                <span className="text-[9px] text-teal-100/85 font-mono leading-relaxed line-clamp-3">
+                  Successful output restored from cache. No container started.
+                </span>
+              </div>
+            </div>
           ) : commandArray.length > 0 ? (
             <div className="flex flex-col gap-1">
               {commandArray.map((arg: string, i: number) => (
@@ -199,21 +203,6 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         </div>
       </div>
 
-      {(outputCount > 0 || hasOutputSchema) && (
-        <div className="absolute -right-1 top-1/2 -translate-x-3 -translate-y-1/2 flex flex-col items-end gap-1">
-          {outputCount > 0 && (
-            <div className="flex items-center gap-0.5 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-1.5 py-0.5">
-              <span className="text-[7px] font-bold text-emerald-300">OUT</span>
-              <ArrowRightFromLine className="h-2 w-2 text-emerald-400" />
-            </div>
-          )}
-          {hasOutputSchema && (
-            <div className="flex items-center gap-0.5 rounded-full border border-blue-500/40 bg-blue-500/15 px-1.5 py-0.5" title="Output schema defined">
-              <ShieldCheck className="h-2 w-2 text-blue-400" />
-            </div>
-          )}
-        </div>
-      )}
       <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
     </div>
   );
