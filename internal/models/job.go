@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 type Job struct {
@@ -27,9 +28,10 @@ type Job struct {
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
 	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
 	CacheConfig      datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
-	Paused           bool      `gorm:"not null;default:false" json:"paused"`
-	CreatedAt        time.Time `gorm:"not null" json:"created_at"`
-	UpdatedAt        time.Time `gorm:"not null" json:"updated_at"`
+	Paused           bool           `gorm:"not null;default:false" json:"paused"`
+	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`
+	CreatedAt        time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt        time.Time      `gorm:"not null" json:"updated_at"`
 
 	LatestRun *JobRun `gorm:"-" json:"latest_run,omitempty"`
 }

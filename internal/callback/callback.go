@@ -132,7 +132,7 @@ func (d *Dispatcher) RetryFailed(ctx context.Context, runID uuid.UUID) error {
 		return fmt.Errorf("load run: %w", err)
 	}
 
-	meta, callbacks, err := d.prepare(dispatchCtx, runState.JobID, runID, nil)
+	meta, _, err := d.prepare(dispatchCtx, runState.JobID, runID, nil)
 	if err != nil {
 		return err
 	}
@@ -153,13 +153,23 @@ func (d *Dispatcher) RetryFailed(ctx context.Context, runID uuid.UUID) error {
 		failedSet[cr.CallbackID] = struct{}{}
 	}
 
-	retryCallbacks := make([]models.Callback, 0, len(failedSet))
-	for _, cb := range callbacks {
-		if _, ok := failedSet[cb.ID]; ok {
-			retryCallbacks = append(retryCallbacks, cb)
-		}
+	retryIDs := make([]uuid.UUID, 0, len(failedSet))
+	for id := range failedSet {
+		retryIDs = append(retryIDs, id)
+	}
+	if len(retryIDs) == 0 {
+		return nil
 	}
 
+	var retryCallbacks []models.Callback
+	if err := d.db.WithContext(dispatchCtx).
+		Unscoped().
+		Where("id IN ?", retryIDs).
+		Order("position asc").
+		Order("created_at asc").
+		Find(&retryCallbacks).Error; err != nil {
+		return fmt.Errorf("load retry callbacks: %w", err)
+	}
 	if len(retryCallbacks) == 0 {
 		return nil
 	}
@@ -188,7 +198,7 @@ func ensureContext(ctx context.Context) context.Context {
 
 func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr error) (Metadata, []models.Callback, error) {
 	var job models.Job
-	if err := d.db.WithContext(ctx).First(&job, "id = ?", jobID).Error; err != nil {
+	if err := d.db.WithContext(ctx).Unscoped().First(&job, "id = ?", jobID).Error; err != nil {
 		return Metadata{}, nil, fmt.Errorf("load job: %w", err)
 	}
 
@@ -201,6 +211,7 @@ func (d *Dispatcher) prepare(ctx context.Context, jobID, runID uuid.UUID, runErr
 	var callbacks []models.Callback
 	if err := d.db.WithContext(ctx).
 		Where("job_id = ?", jobID).
+		Order("position asc").
 		Order("created_at asc").
 		Find(&callbacks).Error; err != nil {
 		return Metadata{}, nil, fmt.Errorf("load callbacks: %w", err)

@@ -727,7 +727,14 @@ func (s *Store) successorEdgesTx(tx *gorm.DB, task models.Task) ([]models.TaskEd
 	}
 
 	var next models.Task
-	err := tx.Where("job_id = ? AND created_at > ?", task.JobID, task.CreatedAt).
+	err := tx.Where(
+		"job_id = ? AND (position > ? OR (position = ? AND created_at > ?))",
+		task.JobID,
+		task.Position,
+		task.Position,
+		task.CreatedAt,
+	).
+		Order("position asc").
 		Order("created_at asc").
 		First(&next).Error
 	if err == nil {

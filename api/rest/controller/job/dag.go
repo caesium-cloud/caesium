@@ -54,7 +54,7 @@ func DAG(c *echo.Context) error {
 
 	tasks, err := task.Service(ctx).List(&task.ListRequest{
 		JobID:   id.String(),
-		OrderBy: []string{"created_at"},
+		OrderBy: []string{"position", "created_at"},
 	})
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)

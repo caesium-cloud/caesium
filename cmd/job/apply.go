@@ -21,6 +21,8 @@ import (
 var (
 	applyPaths  []string
 	applyServer string
+	applyForce  bool
+	applyPrune  bool
 )
 
 var applyCmd = &cobra.Command{
@@ -38,7 +40,7 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs); err != nil {
+		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune); err != nil {
 			return err
 		}
 
@@ -52,6 +54,8 @@ var applyCmd = &cobra.Command{
 func init() {
 	applyCmd.Flags().StringSliceVarP(&applyPaths, "path", "p", nil, "Paths to job definition files or directories (default: current directory)")
 	applyCmd.Flags().StringVar(&applyServer, "server", "http://localhost:8080", "Caesium server base URL")
+	applyCmd.Flags().BoolVar(&applyForce, "force", false, "Override provenance ownership checks when applying definitions")
+	applyCmd.Flags().BoolVar(&applyPrune, "prune", false, "Retire active jobs that are missing from the supplied path set")
 	Cmd.AddCommand(applyCmd)
 }
 
@@ -120,8 +124,12 @@ func appendDefinitions(path string, defs *[]schema.Definition) error {
 	return nil
 }
 
-func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition) error {
-	reqBody := jobdef.ApplyRequest{Definitions: defs}
+func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool) error {
+	reqBody := jobdef.ApplyRequest{
+		Definitions: defs,
+		Force:       force,
+		Prune:       prune,
+	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return err

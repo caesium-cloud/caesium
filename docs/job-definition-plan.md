@@ -1,6 +1,13 @@
 # Job Definition Ingestion Roadmap & Checklist
 
-> Status: Largely implemented. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+> Status: Largely implemented. Phase 1 reconciliation and prune work is complete, including provenance-aware updates, source-scoped pruning, restoration of retired definitions, and history-preserving soft deletes. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+
+## Recent Progress
+- Reconcile-in-place imports now preserve job identity and run history on re-apply.
+- `--force` and `--prune` are wired through CLI, REST apply, and Git sync.
+- Retired definitions can be restored in place without replacing triggers, tasks, atoms, or callbacks.
+- Import ordering now uses explicit task/callback positions instead of mutating `CreatedAt`.
+- Validation coverage includes reconcile, prune, restore, and Git sync scenarios.
 
 ## Goals
 - [x] Support authoring, validation, and storage of job definitions in YAML format.
@@ -24,8 +31,8 @@
 ### Phase 1 – Import Pipeline (Push Model)
 - [x] Implement importer translating definitions into persisted jobs, triggers, atoms, tasks, and callbacks with transactional guarantees.
 - [x] Document usage and extend schema examples in `docs/job-definitions.md`.
-- [ ] Implement safe update semantics with provenance enforcement and optional `--force` override (requires DB columns: jobs.provenance_source_id, jobs.deleted_at).
-- [ ] Implement pruning workflow (`--prune`, protect labels, soft delete/GC) leveraging provenance metadata.
+- [x] Implement safe update semantics with provenance enforcement and optional `--force` override (using provenance metadata and soft deletes for retired definitions).
+- [x] Implement pruning workflow (`--prune`, protect labels, soft delete/GC) leveraging provenance metadata.
 - [x] Add CLI commands:
   - [x] `caesium job apply` to push definitions from file/dir/stdin.
   - [x] `caesium job lint` for validation.

@@ -75,16 +75,151 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	s.Len(edges, 2)
 }
 
-func (s *ImporterTestSuite) TestDuplicateAliasFails() {
+func (s *ImporterTestSuite) TestApplyUpdatesExistingJob() {
 	def, err := schema.Parse([]byte(testutil.SampleJob))
 	s.Require().NoError(err)
 
 	ctx := context.Background()
-	_, err = s.importer.Apply(ctx, def)
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	updated := strings.Replace(testutil.SampleJob, "owner: etl", "owner: analytics", 1)
+	updated = strings.Replace(updated, "  - name: publish\n    image: busybox:1.36\n    command: [\"sh\", \"-c\", \"echo publish\"]\n", "", 1)
+	def, err = schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+
+	job2, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.Equal(job.ID, job2.ID)
+	s.Equal("analytics", job2.Annotations["owner"])
+
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+	testutil.AssertCount(s.T(), s.db, &models.Task{}, 2)
+	testutil.AssertCount(s.T(), s.db, &models.TaskEdge{}, 1)
+	testutil.AssertCount(s.T(), s.db, &models.Callback{}, 1)
+
+	var totalTasks int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.Task{}).Count(&totalTasks).Error)
+	s.Equal(int64(3), totalTasks)
+
+	var totalEdges int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.TaskEdge{}).Count(&totalEdges).Error)
+	s.Equal(int64(1), totalEdges)
+}
+
+func (s *ImporterTestSuite) TestApplyRejectsProvenanceConflictWithoutForce() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-a"},
+	})
+	s.Require().NoError(err)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-b"},
+	})
+	s.ErrorIs(err, ErrProvenanceConflict)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-b"},
+		Force:      true,
+	})
+	s.Require().NoError(err)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingSoftDeletesJobs() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	second := strings.Replace(testutil.SampleJob, "csv-to-parquet", "csv-to-parquet-2", 1)
+	def2, err := schema.Parse([]byte(second))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(context.Background(), def2)
+	s.Require().NoError(err)
+
+	pruned, err := s.importer.PruneMissing(context.Background(), []string{"csv-to-parquet"}, nil)
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+
+	var totalJobs int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.Job{}).Count(&totalJobs).Error)
+	s.Equal(int64(2), totalJobs)
+}
+
+func (s *ImporterTestSuite) TestApplyRestoresRetiredTasksAndCallbacks() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var originalTasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalTasks).Error)
+	s.Len(originalTasks, 3)
+
+	var originalCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalCallbacks).Error)
+	s.Len(originalCallbacks, 1)
+
+	pruned, err := s.importer.PruneMissing(ctx, nil, nil)
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	job, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var restoredTasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&restoredTasks).Error)
+	s.Len(restoredTasks, 3)
+	for idx := range restoredTasks {
+		s.Equal(originalTasks[idx].ID, restoredTasks[idx].ID)
+		s.Equal(idx, restoredTasks[idx].Position)
+	}
+
+	var restoredCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&restoredCallbacks).Error)
+	s.Len(restoredCallbacks, 1)
+	s.Equal(originalCallbacks[0].ID, restoredCallbacks[0].ID)
+	s.Equal(0, restoredCallbacks[0].Position)
+}
+
+func (s *ImporterTestSuite) TestApplyCreatesNewCallbackVersionWhenConfigurationChanges() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var originalCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&originalCallbacks).Error)
+	s.Len(originalCallbacks, 1)
+
+	updated := strings.Replace(testutil.SampleJob, "https://example", "https://example-v2", 1)
+	def, err = schema.Parse([]byte(updated))
 	s.Require().NoError(err)
 
 	_, err = s.importer.Apply(ctx, def)
-	s.Error(err)
+	s.Require().NoError(err)
+
+	var activeCallbacks []models.Callback
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&activeCallbacks).Error)
+	s.Len(activeCallbacks, 1)
+	s.NotEqual(originalCallbacks[0].ID, activeCallbacks[0].ID)
+
+	var totalCallbacks []models.Callback
+	s.Require().NoError(s.db.Unscoped().Where("job_id = ?", job.ID).Order("created_at asc").Find(&totalCallbacks).Error)
+	s.Len(totalCallbacks, 2)
+	s.Equal(originalCallbacks[0].ID, totalCallbacks[0].ID)
+	s.NotZero(totalCallbacks[0].DeletedAt.Time)
+	s.Equal(activeCallbacks[0].ID, totalCallbacks[1].ID)
+	s.Equal(0, activeCallbacks[0].Position)
 }
 
 func (s *ImporterTestSuite) TestApplyWithProvenance() {
