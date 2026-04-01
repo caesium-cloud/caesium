@@ -99,6 +99,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if predErr != nil {
 			log.Warn("cache: failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
 		}
+		predHashes, predHashErr := e.store.PredecessorHashes(taskRun.JobRunID, taskRun.TaskID)
+		if predHashErr != nil {
+			log.Warn("cache: failed to query predecessor hashes", "task_id", taskRun.TaskID, "error", predHashErr)
+		}
 
 		// Fetch run params from the job run record.
 		var runParams map[string]string
@@ -146,6 +150,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				Env:                mergedEnv,
 				WorkDir:            atomSpec.WorkDir,
 				Mounts:             atomSpec.Mounts,
+				PredecessorHashes:  predHashes,
 				PredecessorOutputs: predOutputs,
 				RunParams:          runParams,
 				CacheVersion:       cacheCfg.Version,

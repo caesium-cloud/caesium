@@ -1894,6 +1894,60 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
+// PredecessorHashes returns cache hashes for predecessor task runs when those
+// predecessors stored cache entries. This keeps distributed cache hashing
+// aligned with local execution, which incorporates predecessor task hashes.
+func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
+	var edges []models.TaskEdge
+	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		return nil, err
+	}
+
+	if len(edges) == 0 {
+		return nil, nil
+	}
+
+	predTaskIDs := make([]uuid.UUID, len(edges))
+	for i, edge := range edges {
+		predTaskIDs[i] = edge.FromTaskID
+	}
+
+	var taskRuns []models.TaskRun
+	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+		log.Warn("failed to find predecessor task runs for hashes", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+	if len(taskRuns) == 0 {
+		return nil, nil
+	}
+
+	taskRunIDs := make([]uuid.UUID, len(taskRuns))
+	for i, taskRun := range taskRuns {
+		taskRunIDs[i] = taskRun.ID
+	}
+
+	var caches []models.TaskCache
+	if err := s.db.Select("hash", "task_run_id").Where("run_id = ? AND task_run_id IN ?", runID, taskRunIDs).Find(&caches).Error; err != nil {
+		log.Warn("failed to find predecessor cache hashes", "run_id", runID, "task_id", taskID, "error", err)
+		return nil, nil
+	}
+
+	if len(caches) == 0 {
+		return nil, nil
+	}
+
+	hashes := make([]string, 0, len(caches))
+	for _, entry := range caches {
+		if entry.Hash != "" {
+			hashes = append(hashes, entry.Hash)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	return hashes, nil
+}
+
 // RetryFromFailure resets a failed run so that previously-succeeded and cached
 // tasks are preserved and only failed/pending/skipped tasks are re-executed.
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
