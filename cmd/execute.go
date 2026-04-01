@@ -2,6 +2,7 @@ package cmd
 
 import (
 	backfillcmd "github.com/caesium-cloud/caesium/cmd/backfill"
+	cachecmd "github.com/caesium-cloud/caesium/cmd/cache"
 	devcmd "github.com/caesium-cloud/caesium/cmd/dev"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	runcmd "github.com/caesium-cloud/caesium/cmd/run"
@@ -15,6 +16,7 @@ var cmds = []*cobra.Command{
 	job.Cmd,
 	runcmd.Cmd,
 	backfillcmd.Cmd,
+	cachecmd.Cmd,
 	testcmd.Cmd,
 	devcmd.Cmd,
 }

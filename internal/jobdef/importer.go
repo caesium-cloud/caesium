@@ -86,6 +86,14 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			SchemaValidation: def.Metadata.SchemaValidation,
 		}
 
+		if def.Metadata.Cache != nil {
+			b, err := json.Marshal(def.Metadata.Cache)
+			if err != nil {
+				return fmt.Errorf("metadata.cache: %w", err)
+			}
+			jobModel.CacheConfig = datatypes.JSON(b)
+		}
+
 		if opts != nil && opts.Provenance != nil {
 			prov := opts.Provenance
 			jobModel.ProvenanceSourceID = strings.TrimSpace(prov.SourceID)
@@ -209,6 +217,14 @@ func (i *Importer) createAtomsAndTasks(tx *gorm.DB, job *models.Job, steps []sch
 			RetryDelay:   step.RetryDelay,
 			RetryBackoff: step.RetryBackoff,
 			TriggerRule:  triggerRule,
+		}
+
+		if step.Cache != nil {
+			b, err := json.Marshal(step.Cache)
+			if err != nil {
+				return nil, fmt.Errorf("step %s: cache: %w", step.Name, err)
+			}
+			task.CacheConfig = datatypes.JSON(b)
 		}
 
 		if step.OutputSchema != nil {

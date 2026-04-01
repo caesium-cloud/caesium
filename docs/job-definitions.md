@@ -132,6 +132,83 @@ steps:
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 - Steps can set container options directly on the manifest via `env`, `workdir`, and `mounts`. Environment values are passed to every runtime, while bind mounts map host paths (`source`) into the container at `target` (set `readOnly: true` when needed). These fields are optional and default to the runtime image configuration.
 
+## Caching
+
+Caesium supports Smart Incremental Execution through step-level caching. When enabled, a completed task's output is stored and reused on subsequent runs if the task's inputs have not changed. Cache entries are keyed by a SHA-256 hash of the task's identity: image, command, environment variables, mounts, predecessor outputs, run parameters, and cache version.
+
+### Enabling Cache
+
+Cache can be enabled at the job level or overridden per step. Step-level settings take precedence over job-level defaults.
+
+| Scope | Field | Example |
+|-------|-------|---------|
+| Job default | `metadata.cache` | `true` or `{ttl: "24h"}` |
+| Step override | `steps[].cache` | `true`, `false`, or `{ttl: "12h", version: 2}` |
+| Global | env `CAESIUM_CACHE_ENABLED=true` | Enables caching for all jobs |
+
+### Configuration Options
+
+- **`true` / `false`** -- enable or disable caching.
+- **`ttl`** -- duration string controlling how long an entry remains valid (e.g. `"1h"`, `"24h"`, `"7d"`). Expired entries are ignored and the task re-executes.
+- **`version`** -- integer that forms part of the cache key. Bump this value to force re-execution without modifying the rest of the manifest.
+
+### When to Use
+
+Caching is appropriate for idempotent, side-effect-free tasks such as data transformations, report generation, or artifact builds where the same inputs always produce the same outputs. Avoid caching tasks that write to external systems, send notifications, or depend on state outside the declared inputs.
+
+### Cache Management
+
+**CLI**
+
+```sh
+caesium cache list --job-id <id>
+caesium cache invalidate --job-id <id> [--task <name>]
+caesium cache prune
+```
+
+**REST API**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/jobs/:id/cache` | List cache entries for a job |
+| `DELETE` | `/v1/jobs/:id/cache` | Invalidate all entries for a job |
+| `DELETE` | `/v1/jobs/:id/cache/:task_name` | Invalidate a single task entry |
+| `POST` | `/v1/cache/prune` | Remove expired entries across all jobs |
+
+### Example
+
+```yaml
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: daily-report
+  cache:
+    ttl: "24h"
+trigger:
+  type: cron
+  configuration:
+    cron: "0 6 * * *"
+    timezone: "UTC"
+steps:
+  - name: fetch-data
+    image: alpine:3.20
+    command: ["sh", "-c", "echo fetching data"]
+    cache: true
+  - name: transform
+    image: alpine:3.20
+    command: ["sh", "-c", "echo transforming"]
+    cache:
+      ttl: "12h"
+      version: 2
+  - name: notify
+    image: alpine:3.20
+    command: ["sh", "-c", "echo sending notification"]
+    cache: false
+```
+
+In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` overrides it with a 12-hour TTL and a pinned cache version, and `notify` is never cached because it produces a side effect.
+
 ## Git-Based Synchronisation (Phase 2)
 
 - Store job manifests under a repository path (e.g. `jobs/`).

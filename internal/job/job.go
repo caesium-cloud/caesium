@@ -3,6 +3,7 @@ package job
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/docker"
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
+	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -46,6 +48,7 @@ type job struct {
 	runTimeout             time.Duration
 	alias                  string
 	schemaValidation       string
+	jobCacheConfig         interface{}
 	params                 map[string]string
 	runStoreFactory        func() *run.Store
 	envVariables           func() env.Environment
@@ -71,6 +74,7 @@ func New(m *models.Job, opts ...JobOption) Job {
 		runTimeout:             m.RunTimeout,
 		alias:                  m.Alias,
 		schemaValidation:       m.SchemaValidation,
+		jobCacheConfig:         unmarshalCacheConfig(m.CacheConfig),
 		runStoreFactory:        run.Default,
 		envVariables:           env.Variables,
 		taskServiceFactory:     task.Service,
@@ -224,9 +228,31 @@ func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) m
 	return env
 }
 
+// unmarshalCacheConfig decodes a JSON-encoded cache config from a DB column
+// back into the interface{} form expected by ResolveCacheConfig.
+func unmarshalCacheConfig(raw []byte) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
+
+	cacheConfig := cache.ConfigFromEnv()
+	var cacheStore *cache.Store
+	getCacheStore := func() *cache.Store {
+		if cacheStore == nil {
+			cacheStore = cache.NewStore(store.DB())
+		}
+		return cacheStore
+	}
 
 	executionMode := normalizeExecutionMode(vars.ExecutionMode)
 	failurePolicy := normalizeTaskFailurePolicy(vars.TaskFailurePolicy)
@@ -451,12 +477,13 @@ func (j *job) Run(ctx context.Context) error {
 	processed := make(map[uuid.UUID]bool, len(tasks))
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
+	taskHashes := make(map[uuid.UUID]string, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
 		indegree[taskState.ID] = taskState.OutstandingPredecessors
 		switch taskState.Status {
-		case run.TaskStatusSucceeded:
+		case run.TaskStatusSucceeded, run.TaskStatusCached:
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
 			terminalTasks++
@@ -683,6 +710,87 @@ func (j *job) Run(ctx context.Context) error {
 		outputEnv := pkgtask.BuildOutputEnv(predOutputs)
 
 		taskModel := tasksByID[taskID]
+
+		// Cache check — attempt to bypass container execution.
+		var cacheCfg jobdefschema.CacheConfig
+		var inputHash string
+		// Resolve cache config from step-level, job-level, then env defaults.
+		var stepCache interface{}
+		if taskModel != nil {
+			stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
+		}
+		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL)
+
+		if cacheCfg.Enabled {
+			cacheStore := getCacheStore()
+			taskName := ""
+			if taskModel != nil {
+				taskName = taskModel.Name
+			}
+
+			// Build merged env for hashing, excluding volatile per-run vars.
+			mergedEnv := make(map[string]string, len(runner.spec.Env)+len(outputEnv))
+			for k, v := range runner.spec.Env {
+				mergedEnv[k] = v
+			}
+			for k, v := range outputEnv {
+				mergedEnv[k] = v
+			}
+
+			// Collect predecessor hashes.
+			var predHashes []string
+			for _, predID := range predecessors[taskID] {
+				if h, ok := taskHashes[predID]; ok {
+					predHashes = append(predHashes, h)
+				}
+			}
+
+			hashInput := cache.HashInput{
+				JobAlias:           j.alias,
+				TaskName:           taskName,
+				Image:              runner.image,
+				Command:            runner.command,
+				Env:                mergedEnv,
+				WorkDir:            runner.spec.WorkDir,
+				Mounts:             runner.spec.Mounts,
+				PredecessorHashes:  predHashes,
+				PredecessorOutputs: predOutputs,
+				RunParams:          snapshot.Params,
+				CacheVersion:       cacheCfg.Version,
+			}
+			inputHash = hashInput.Compute()
+
+			entry, found, err := cacheStore.Get(inputHash)
+			switch {
+			case err != nil:
+				log.Warn("cache lookup failed", "task", taskName, "error", err)
+			case found:
+				metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
+				log.Info("cache hit", "task", taskName, "hash", inputHash[:12])
+
+				cacheResult, cacheErr := store.CacheHitTask(runID, taskID, entry.Result, entry.Output, entry.BranchSelections)
+				if cacheErr != nil {
+					log.Error("failed to apply cache hit", "task", taskName, "error", cacheErr)
+					// Fall through to normal execution.
+				} else {
+					if len(entry.Output) > 0 {
+						taskOutputs[taskID] = entry.Output
+					}
+					taskHashes[taskID] = inputHash
+					var skipped []uuid.UUID
+					if cacheResult != nil && len(cacheResult.SkippedTaskIDs) > 0 {
+						skipped = cacheResult.SkippedTaskIDs
+					}
+					if !run.IsSuccessfulTaskResult(entry.Result) {
+						return skipped, fmt.Errorf("task %s failed with cached result %q", taskID, entry.Result)
+					}
+					return skipped, nil
+				}
+			default:
+				metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
+			}
+		}
+
 		maxAttempts := 1
 		if taskModel != nil && taskModel.Retries > 0 {
 			maxAttempts = taskModel.Retries + 1
@@ -719,6 +827,37 @@ func (j *job) Run(ctx context.Context) error {
 				if len(output) > 0 {
 					taskOutputs[taskID] = output
 				}
+
+				// Store successful result in cache, reusing the hash computed earlier.
+				if cacheCfg.Enabled && inputHash != "" && run.IsSuccessfulTaskResult(result) {
+					cacheStore := getCacheStore()
+					taskName := ""
+					if taskModel != nil {
+						taskName = taskModel.Name
+					}
+					taskHashes[taskID] = inputHash
+
+					var expiresAt *time.Time
+					if cacheCfg.TTL > 0 {
+						t := time.Now().Add(cacheCfg.TTL)
+						expiresAt = &t
+					}
+					if putErr := cacheStore.Put(&cache.Entry{
+						Hash:             inputHash,
+						JobID:            j.id,
+						TaskName:         taskName,
+						Result:           result,
+						Output:           output,
+						BranchSelections: branchNames,
+						RunID:            runID,
+						TaskRunID:        taskID,
+						CreatedAt:        time.Now(),
+						ExpiresAt:        expiresAt,
+					}); putErr != nil {
+						log.Warn("failed to store cache entry", "task", taskName, "error", putErr)
+					}
+				}
+
 				var skipped []uuid.UUID
 				if completeResult != nil && len(completeResult.SkippedTaskIDs) > 0 {
 					skipped = completeResult.SkippedTaskIDs

@@ -62,3 +62,17 @@ type TaskRun struct {
 	CreatedAt               time.Time      `gorm:"not null" json:"created_at"`
 	UpdatedAt               time.Time      `gorm:"not null" json:"updated_at"`
 }
+
+// TaskCache stores cached task results keyed by identity hash.
+type TaskCache struct {
+	Hash             string         `gorm:"primaryKey;type:text"`
+	JobID            uuid.UUID      `gorm:"type:uuid;not null;index:idx_task_cache_job"`
+	TaskName         string         `gorm:"type:text;not null"`
+	Result           string         `gorm:"type:text;not null"`
+	Output           datatypes.JSON `gorm:"type:json"`
+	BranchSelections datatypes.JSON `gorm:"type:json"`
+	RunID            uuid.UUID      `gorm:"type:uuid;not null"`
+	TaskRunID        uuid.UUID      `gorm:"type:uuid;not null"`
+	CreatedAt        time.Time
+	ExpiresAt        *time.Time `gorm:"index:idx_task_cache_expires"`
+}

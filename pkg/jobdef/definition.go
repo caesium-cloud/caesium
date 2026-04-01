@@ -61,7 +61,8 @@ type Metadata struct {
 	RunTimeout       time.Duration     `yaml:"runTimeout,omitempty" json:"runTimeout,omitempty"`
 	// SchemaValidation controls runtime output schema validation.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
-	SchemaValidation string `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
+	SchemaValidation string      `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
+	Cache            interface{} `yaml:"cache,omitempty" json:"cache"`
 }
 
 // Trigger defines how the job is triggered.
@@ -96,6 +97,7 @@ type Step struct {
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
 	// which keys this step requires from each predecessor's output.
 	InputSchema    map[string]map[string]any `yaml:"inputSchema,omitempty" json:"inputSchema,omitempty"`
+	Cache          interface{}               `yaml:"cache,omitempty" json:"cache"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -116,6 +118,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		TriggerRule    string                    `yaml:"triggerRule"`
 		OutputSchema   map[string]any            `yaml:"outputSchema"`
 		InputSchema    map[string]map[string]any `yaml:"inputSchema"`
+		Cache          interface{}               `yaml:"cache"`
 		container.Spec `yaml:",inline"`
 	}
 
@@ -154,6 +157,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.TriggerRule = rs.TriggerRule
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
+	s.Cache = rs.Cache
 	s.Spec = rs.Spec
 
 	return nil
@@ -177,6 +181,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		TriggerRule    string                    `json:"triggerRule"`
 		OutputSchema   map[string]any            `json:"outputSchema"`
 		InputSchema    map[string]map[string]any `json:"inputSchema"`
+		Cache          interface{}               `json:"cache"`
 		container.Spec `json:",inline"`
 	}
 
@@ -205,6 +210,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.TriggerRule = rs.TriggerRule
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
+	s.Cache = rs.Cache
 	s.Spec = rs.Spec
 
 	return nil
@@ -541,4 +547,48 @@ func detectCycles(adj map[string]map[string]struct{}, names map[string]int) erro
 		}
 	}
 	return nil
+}
+
+// CacheConfig is the resolved cache configuration for a step.
+type CacheConfig struct {
+	Enabled bool
+	TTL     time.Duration
+	Version int
+}
+
+// ResolveCacheConfig resolves the cache configuration for a step,
+// considering step-level config, job-level defaults, and environment settings.
+func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration) CacheConfig {
+	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL}
+
+	// Apply job-level defaults
+	applyCache(&cfg, metaCache)
+	// Step-level overrides job-level
+	applyCache(&cfg, stepCache)
+
+	return cfg
+}
+
+func applyCache(cfg *CacheConfig, raw interface{}) {
+	switch v := raw.(type) {
+	case bool:
+		cfg.Enabled = v
+	case map[string]any:
+		cfg.Enabled = true
+		if ttl, ok := v["ttl"]; ok {
+			if s, ok := ttl.(string); ok {
+				if d, err := time.ParseDuration(s); err == nil {
+					cfg.TTL = d
+				}
+			}
+		}
+		if ver, ok := v["version"]; ok {
+			switch n := ver.(type) {
+			case int:
+				cfg.Version = n
+			case float64:
+				cfg.Version = int(n)
+			}
+		}
+	}
 }

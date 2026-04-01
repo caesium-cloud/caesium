@@ -13,6 +13,7 @@ var All = []interface{}{
 	&Backfill{},
 	&JobRun{},
 	&TaskRun{},
+	&TaskCache{},
 	&CallbackRun{},
 	&ExecutionEvent{},
 }

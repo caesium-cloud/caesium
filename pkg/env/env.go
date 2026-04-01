@@ -72,6 +72,10 @@ type Environment struct {
 	JobdefSecretsVaultNamespace   string        `envconfig:"JOBDEF_SECRETS_VAULT_NAMESPACE"`
 	JobdefSecretsVaultCACert      string        `envconfig:"JOBDEF_SECRETS_VAULT_CA_CERT"`
 	JobdefSecretsVaultSkipVerify  bool          `envconfig:"JOBDEF_SECRETS_VAULT_SKIP_VERIFY" default:"false"`
+	CacheEnabled                  bool          `default:"false" split_words:"true"`
+	CacheTTL                      time.Duration `default:"24h" split_words:"true"`
+	CachePruneInterval            time.Duration `default:"1h" split_words:"true"`
+	CacheMaxEntries               int           `default:"10000" split_words:"true"`
 	OpenLineageEnabled            bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
 	OpenLineageTransport          string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
 	OpenLineageURL                string        `envconfig:"OPEN_LINEAGE_URL" default:""`

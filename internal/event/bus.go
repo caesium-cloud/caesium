@@ -25,6 +25,7 @@ const (
 	TypeTaskSkipped       Type = "task_skipped"
 	TypeTaskRetrying      Type = "task_retrying"
 	TypeTaskReady         Type = "task_ready"
+	TypeTaskCached        Type = "task_cached"
 	TypeTaskClaimed       Type = "task_claimed"
 	TypeTaskLeaseExpired  Type = "task_lease_expired"
 	TypeLogChunk          Type = "log_chunk"
@@ -34,6 +35,7 @@ const (
 	TypeBackfillComplete  Type = "backfill_completed"
 	TypeBackfillFailed    Type = "backfill_failed"
 	TypeBackfillCancelled Type = "backfill_cancelled"
+	TypeRunRetried        Type = "run_retried"
 )
 
 // Event represents a system event.

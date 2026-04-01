@@ -140,13 +140,13 @@ func satisfiesTriggerRule(rule string, predStatuses []run.TaskStatus) bool {
 	}
 
 	isTerminal := func(s run.TaskStatus) bool {
-		return s == run.TaskStatusSucceeded || s == run.TaskStatusFailed || s == run.TaskStatusSkipped
+		return s == run.TaskStatusSucceeded || s == run.TaskStatusCached || s == run.TaskStatusFailed || s == run.TaskStatusSkipped
 	}
 
 	switch rule {
 	case jobdefschema.TriggerRuleAllSuccess:
 		for _, s := range predStatuses {
-			if s != run.TaskStatusSucceeded {
+			if !run.IsTerminalSuccess(s) {
 				return false
 			}
 		}
@@ -170,7 +170,7 @@ func satisfiesTriggerRule(rule string, predStatuses []run.TaskStatus) bool {
 
 	case jobdefschema.TriggerRuleOneSuccess:
 		for _, s := range predStatuses {
-			if s == run.TaskStatusSucceeded {
+			if run.IsTerminalSuccess(s) {
 				return true
 			}
 		}
@@ -179,7 +179,7 @@ func satisfiesTriggerRule(rule string, predStatuses []run.TaskStatus) bool {
 	default:
 		// Unknown rule: default to all_success behaviour.
 		for _, s := range predStatuses {
-			if s != run.TaskStatusSucceeded {
+			if !run.IsTerminalSuccess(s) {
 				return false
 			}
 		}
