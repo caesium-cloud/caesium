@@ -65,4 +65,32 @@ describe('api', () => {
     const result = await api.getStats();
     expect(result).toEqual(statsData);
   });
+
+  it('getJobCache targets the cache endpoint', async () => {
+    mockFetch.mockResolvedValue(okResponse({ entries: [] }));
+    await api.getJobCache('job-42');
+    expect(mockFetch).toHaveBeenCalledWith('/v1/jobs/job-42/cache', expect.anything());
+  });
+
+  it('deleteTaskCache encodes the task name in the URL', async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 204,
+      text: () => Promise.resolve(''),
+    });
+    await api.deleteTaskCache('job-42', 'extract data');
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/v1/jobs/job-42/cache/extract%20data',
+      expect.objectContaining({ method: 'DELETE' })
+    );
+  });
+
+  it('pruneCache uses POST on the global cache prune endpoint', async () => {
+    mockFetch.mockResolvedValue(okResponse({ pruned: 3 }));
+    await api.pruneCache();
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/v1/cache/prune',
+      expect.objectContaining({ method: 'POST' })
+    );
+  });
 });

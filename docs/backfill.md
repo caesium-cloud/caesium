@@ -9,6 +9,7 @@ A backfill replays a cron-triggered job over the fire times in a half-open inter
 - `start` is inclusive.
 - `end` is exclusive.
 - Each logical date becomes a normal job run with `logical_date` attached as a run parameter.
+- Regular cron fires also carry `logical_date`, so scheduled runs and backfill runs follow the same cache-keying model.
 
 Backfills are only supported for jobs whose trigger type is `cron`.
 

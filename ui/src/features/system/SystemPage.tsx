@@ -1,5 +1,7 @@
 import { Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { toast } from "sonner";
 import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -7,6 +9,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
 import { Activity, Database, CheckCircle2, XCircle, Clock, ScrollText, Server, Zap, RefreshCw, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 
 function StatusDot({ ok }: { ok: boolean }) {
   return ok
@@ -26,6 +29,7 @@ function formatUptime(ns: number): string {
 }
 
 export function SystemPage() {
+  const [pruneDialogOpen, setPruneDialogOpen] = useState(false);
   const {
     data: health,
     isLoading,
@@ -43,6 +47,16 @@ export function SystemPage() {
   const db = health?.checks?.database;
   const activeRuns = health?.checks?.active_runs;
   const triggers = health?.checks?.triggers;
+  const pruneCacheMutation = useMutation({
+    mutationFn: api.pruneCache,
+    onSuccess: (result) => {
+      setPruneDialogOpen(false);
+      toast.success(`Pruned ${result.pruned} expired cache entries`);
+    },
+    onError: (err: Error) => {
+      toast.error(`Failed to prune cache: ${err.message}`);
+    },
+  });
 
   return (
     <div className="space-y-6">
@@ -204,8 +218,42 @@ export function SystemPage() {
               <Link to="/system/logs">Open log console</Link>
             </Button>
           </div>
+          <div className="border-t border-border" />
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="space-y-1">
+              <p className="font-medium flex items-center gap-2">
+                <Database className="h-4 w-4" />
+                Cache Maintenance
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Remove expired task cache entries across all jobs to keep the cache store tidy.
+              </p>
+            </div>
+            <Button variant="outline" onClick={() => setPruneDialogOpen(true)}>
+              Prune expired cache
+            </Button>
+          </div>
         </CardContent>
       </Card>
+
+      <Dialog open={pruneDialogOpen} onOpenChange={setPruneDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Prune expired cache entries</DialogTitle>
+            <DialogDescription>
+              This removes only expired cache records across all jobs. Active cache entries are not affected.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPruneDialogOpen(false)} disabled={pruneCacheMutation.isPending}>
+              Cancel
+            </Button>
+            <Button onClick={() => pruneCacheMutation.mutate()} disabled={pruneCacheMutation.isPending}>
+              Confirm prune
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Checks breakdown */}
       {!isLoading && health?.checks && (

@@ -25,8 +25,6 @@ vi.mock("reactflow", () => {
             data-node-type={String(node.type)}
             data-status={String(data.status ?? "")}
             data-selected={String(Boolean(data.isSelected))}
-            data-receives-outputs={String(Boolean(data.receivesOutputs))}
-            data-has-output-schema={String(Boolean(data.hasOutputSchema))}
             onClick={(event) => onNodeClick?.(event, node)}
           >
             {String(data.label ?? id)}
@@ -39,14 +37,16 @@ vi.mock("reactflow", () => {
         const data = (edge.data ?? {}) as Record<string, unknown>;
         const style = (edge.style ?? {}) as Record<string, unknown>;
         return (
-          <div
+          <button
             key={String(edge.id)}
+            type="button"
             data-testid={`edge-${source}-${target}`}
             data-output-count={String(data.outputCount ?? "")}
             data-contract-defined={String(Boolean(data.contractDefined))}
             data-animated={String(Boolean(edge.animated))}
             data-stroke={String(style.stroke ?? "")}
             data-dasharray={String(style.strokeDasharray ?? "")}
+            onClick={() => (data.onOpenDetails as (() => void) | undefined)?.()}
           />
         );
       })}
@@ -131,7 +131,6 @@ describe("JobDAG", () => {
     expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-node-type", "task");
     expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-status", "succeeded");
     expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-selected", "true");
-    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-has-output-schema", "true");
     expect(screen.getByTestId("node-branch-1")).toHaveAttribute("data-node-type", "branch");
     expect(screen.getByTestId("node-branch-1")).toHaveAttribute("data-status", "running");
   });
@@ -188,11 +187,83 @@ describe("JobDAG", () => {
       />,
     );
 
-    expect(screen.getByTestId("node-task-2")).toHaveAttribute("data-receives-outputs", "true");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-output-count", "2");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-contract-defined", "true");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "#64748b");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-dasharray", "6 3");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-animated", "false");
+  });
+
+  it("opens edge details with run outputs and contract information", () => {
+    const dag: JobDAGResponse = {
+      job_id: "job-1",
+      nodes: [
+        { id: "task-1", atom_id: "atom-1", output_schema: { type: "object", properties: { rows: { type: "integer" } } } },
+        { id: "task-2", atom_id: "atom-2" },
+      ],
+      edges: [{ from: "task-1", to: "task-2", contract_defined: true }],
+    };
+
+    const taskRunData: Record<string, TaskRun> = {
+      "task-1": {
+        id: "run-task-1",
+        job_run_id: "run-1",
+        task_id: "task-1",
+        atom_id: "atom-1",
+        engine: "docker",
+        image: "busybox:1.36",
+        command: ["echo", "one"],
+        status: "succeeded",
+        output: { rows: "10" },
+        created_at: "2026-03-24T00:00:00Z",
+        updated_at: "2026-03-24T00:00:00Z",
+      },
+    };
+
+    render(
+      <JobDAG
+        dag={dag}
+        atoms={atoms}
+        taskRunData={taskRunData}
+        taskDefinitions={{
+          "task-1": {
+            id: "task-1",
+            job_id: "job-1",
+            atom_id: "atom-1",
+            name: "extract",
+            node_selector: {},
+            retries: 0,
+            retry_delay: 0,
+            retry_backoff: false,
+            trigger_rule: "all_success",
+            output_schema: { type: "object", properties: { rows: { type: "integer" } } },
+            created_at: "",
+            updated_at: "",
+          },
+          "task-2": {
+            id: "task-2",
+            job_id: "job-1",
+            atom_id: "atom-2",
+            name: "transform",
+            node_selector: {},
+            retries: 0,
+            retry_delay: 0,
+            retry_backoff: false,
+            trigger_rule: "all_success",
+            input_schema: { extract: { type: "object", properties: { rows: { type: "integer" } }, required: ["rows"] } },
+            created_at: "",
+            updated_at: "",
+          },
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByTestId("edge-task-1-task-2"));
+
+    expect(screen.getByText("extract → transform")).toBeInTheDocument();
+    expect(screen.getByText("Observed outputs for this run")).toBeInTheDocument();
+    expect(screen.getByText("rows:")).toBeInTheDocument();
+    expect(screen.getByText("10")).toBeInTheDocument();
+    expect(screen.getByText("Consumer requirements declared")).toBeInTheDocument();
   });
 });

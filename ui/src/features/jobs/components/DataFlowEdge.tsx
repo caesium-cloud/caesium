@@ -27,6 +27,8 @@ export const DataFlowEdge = memo(({
   const outputCount = data?.outputCount ?? 0;
   const contractDefined = data?.contractDefined ?? false;
   const showLabel = outputCount > 0 || contractDefined;
+  const onOpenDetails = data?.onOpenDetails as (() => void) | undefined;
+  const outputLabel = outputCount > 0 ? `${outputCount} ${outputCount === 1 ? 'output' : 'outputs'}` : 'flow';
 
   return (
     <>
@@ -40,22 +42,27 @@ export const DataFlowEdge = memo(({
               transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
             }}
           >
-            <div className="flex items-center gap-1">
-              {outputCount > 0 && (
-                <div className="flex items-center gap-1 rounded-full border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 shadow-sm shadow-emerald-500/10 backdrop-blur-sm">
-                  <ArrowRight className="h-2.5 w-2.5 text-emerald-400" />
-                  <span className="text-[9px] font-bold tabular-nums text-emerald-300">
-                    {outputCount} {outputCount === 1 ? 'output' : 'outputs'}
-                  </span>
-                </div>
-              )}
-              {contractDefined && (
-                <div className="flex items-center gap-1 rounded-full border border-blue-500/40 bg-blue-500/15 px-2 py-0.5 shadow-sm shadow-blue-500/10 backdrop-blur-sm">
-                  <ShieldCheck className="h-2.5 w-2.5 text-blue-400" />
-                  <span className="text-[9px] font-bold text-blue-300">contract</span>
-                </div>
-              )}
-            </div>
+            <button
+              type="button"
+              className="flex items-center gap-1.5 rounded-full border border-slate-400/35 bg-slate-950/80 px-2.5 py-1 shadow-sm backdrop-blur-sm transition-colors hover:border-slate-300/45 hover:bg-slate-900/90"
+              onClick={onOpenDetails}
+              title="View edge data details"
+            >
+              <ArrowRight className="h-2.5 w-2.5 text-emerald-400" />
+              <span className="text-[9px] font-bold tabular-nums text-emerald-300">
+                {outputLabel}
+              </span>
+              <div
+                className={`rounded-full border px-1.5 py-0.5 ${
+                  contractDefined
+                    ? 'border-blue-500/35 bg-blue-500/10'
+                    : 'border-slate-500/30 bg-slate-500/10'
+                }`}
+                title={contractDefined ? 'Data contract defined' : 'No data contract defined'}
+              >
+                <ShieldCheck className={`h-2.5 w-2.5 ${contractDefined ? 'text-blue-400' : 'text-slate-500'}`} />
+              </div>
+            </button>
           </div>
         </EdgeLabelRenderer>
       )}

@@ -121,12 +121,15 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 	for _, job := range jobs {
 		if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
 			job.LatestRun = &models.JobRun{
-				ID:          latest.ID,
-				JobID:       latest.JobID,
-				Status:      string(latest.Status),
-				StartedAt:   latest.StartedAt,
-				CompletedAt: latest.CompletedAt,
-				Error:       latest.Error,
+				ID:            latest.ID,
+				JobID:         latest.JobID,
+				Status:        string(latest.Status),
+				StartedAt:     latest.StartedAt,
+				CompletedAt:   latest.CompletedAt,
+				Error:         latest.Error,
+				CacheHits:     latest.CacheHits,
+				ExecutedTasks: latest.ExecutedTasks,
+				TotalTasks:    latest.TotalTasks,
 			}
 		}
 	}
@@ -147,12 +150,15 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 	runStore := runstorage.NewStore(j.db)
 	if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
 		job.LatestRun = &models.JobRun{
-			ID:          latest.ID,
-			JobID:       latest.JobID,
-			Status:      string(latest.Status),
-			StartedAt:   latest.StartedAt,
-			CompletedAt: latest.CompletedAt,
-			Error:       latest.Error,
+			ID:            latest.ID,
+			JobID:         latest.JobID,
+			Status:        string(latest.Status),
+			StartedAt:     latest.StartedAt,
+			CompletedAt:   latest.CompletedAt,
+			Error:         latest.Error,
+			CacheHits:     latest.CacheHits,
+			ExecutedTasks: latest.ExecutedTasks,
+			TotalTasks:    latest.TotalTasks,
 		}
 	}
 

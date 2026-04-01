@@ -121,7 +121,7 @@ steps:
 - `apiVersion`/`kind` are fixed (`v1`, `Job`).
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
-- `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run.
+- `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - Steps support retry controls via `retries`, `retryDelay`, and `retryBackoff`.
@@ -135,6 +135,8 @@ steps:
 ## Caching
 
 Caesium supports Smart Incremental Execution through step-level caching. When enabled, a completed task's output is stored and reused on subsequent runs if the task's inputs have not changed. Cache entries are keyed by a SHA-256 hash of the task's identity: image, command, environment variables, mounts, predecessor outputs, run parameters, and cache version.
+
+For cron-triggered jobs, Caesium automatically injects `logical_date` into run parameters on every scheduled fire. That means a run scheduled for `2026-03-31T06:00:00Z` and the next run scheduled for `2026-04-01T06:00:00Z` do not share the same cache key unless you intentionally normalize that date yourself. In practice, scheduled runs cache within the same logical slot, while cross-day or cross-window reuse requires an explicit job design.
 
 ### Enabling Cache
 
@@ -155,6 +157,24 @@ Cache can be enabled at the job level or overridden per step. Step-level setting
 ### When to Use
 
 Caching is appropriate for idempotent, side-effect-free tasks such as data transformations, report generation, or artifact builds where the same inputs always produce the same outputs. Avoid caching tasks that write to external systems, send notifications, or depend on state outside the declared inputs.
+
+### Cache Behavior
+
+- A cache hit requires the full task identity to match, including run parameters and upstream outputs.
+- Scheduled cron runs now always include `logical_date`, so the scheduler naturally invalidates cache across distinct cron slots.
+- Manual reruns hit cache only when they use the same effective parameters as the original run.
+- Backfills also carry `logical_date`, so each replayed slot gets its own cache namespace.
+- Expired entries are ignored even if the hash still matches.
+- Bumping `cache.version` forces a miss without changing the rest of the manifest.
+
+### Best Practices
+
+- Model the business date explicitly. For scheduled work, read `CAESIUM_PARAM_LOGICAL_DATE` instead of relying on wall-clock time inside the script.
+- Cache only deterministic steps whose outputs are fully explained by declared inputs, params, env, and upstream outputs.
+- Keep side effects out of cached steps. Notifications, webhooks, external writes, and mutable API mutations should usually set `cache: false`.
+- Use `cache.version` when you change step semantics but want a clean invalidation boundary.
+- Use `ttl` to cap staleness when the same logical slot may be rerun over a longer operator window.
+- If you want reuse across multiple scheduled slots, pass a coarser-grained param yourself, such as `reporting_week`, and key your logic off that instead of the raw cron timestamp.
 
 ### Cache Management
 
@@ -207,7 +227,7 @@ steps:
     cache: false
 ```
 
-In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` overrides it with a 12-hour TTL and a pinned cache version, and `notify` is never cached because it produces a side effect.
+In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` overrides it with a 12-hour TTL and a pinned cache version, and `notify` is never cached because it produces a side effect. Because the job is cron-triggered, Caesium also injects `logical_date` into each scheduled run, so the April 1 run and April 2 run do not share cache entries by default.
 
 ## Git-Based Synchronisation (Phase 2)
 

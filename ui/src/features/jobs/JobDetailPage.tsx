@@ -17,7 +17,10 @@ import {
 } from "@/components/ui/dialog";
 import { BackfillDialog } from "./BackfillDialog";
 import { BackfillsView } from "./BackfillsView";
+import { CacheView } from "./CacheView";
+import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
+import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { useDagHeight } from "@/hooks/useDagHeight";
@@ -25,7 +28,7 @@ import { api, type Atom, type Job, type JobRun, type JobTask, type TaskRun, type
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
-type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | null;
+type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache" | null;
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
@@ -204,6 +207,8 @@ export function JobDetailPage() {
                     ? "skipped"
                     : e.type === "task_retrying"
                       ? "pending"
+                      : e.type === "task_cached"
+                        ? "cached"
                       : taskUpdate?.status || "pending";
 
           if (existingIndex >= 0) {
@@ -228,7 +233,14 @@ export function JobDetailPage() {
             });
           }
 
-          return { ...old, tasks: updatedTasks };
+          const summary = getRunCacheStats({ ...old, tasks: updatedTasks });
+          return {
+            ...old,
+            tasks: updatedTasks,
+            cache_hits: summary.cacheHits,
+            executed_tasks: summary.executedTasks,
+            total_tasks: summary.totalTasks,
+          };
         }
 
         return old;
@@ -238,12 +250,12 @@ export function JobDetailPage() {
       queryClient.invalidateQueries({ queryKey: ["job", jobId] });
     };
 
-    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
+    ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
       events.subscribe(type, onEvent),
     );
 
     return () => {
-      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying"].forEach((type) =>
+      ["run_started", "run_completed", "run_failed", "run_terminal", "task_started", "task_succeeded", "task_failed", "task_skipped", "task_retrying", "task_cached"].forEach((type) =>
         events.unsubscribe(type, onEvent),
       );
     };
@@ -295,6 +307,7 @@ export function JobDetailPage() {
               </>
             ) : null}
           </div>
+          {featuredRun ? <div className="mt-3"><RunCacheSummary run={featuredRun} /></div> : null}
         </div>
         <div className="flex items-center gap-2">
           {/* Secondary view buttons */}
@@ -318,6 +331,9 @@ export function JobDetailPage() {
             <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("backfills")}>
               <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
               Backfills
+            </Button>
+            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("cache")}>
+              Cache
             </Button>
           </div>
           <div className="h-6 w-px bg-border" />
@@ -355,7 +371,7 @@ export function JobDetailPage() {
       >
         {/* Compact overlay status bar */}
         <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5">
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
             {featuredRun ? (
               <>
                 <span>
@@ -378,11 +394,14 @@ export function JobDetailPage() {
               <span>DAG topology only — trigger a run to populate task state</span>
             )}
           </div>
-          {job.paused && (
-            <Badge variant="outline" className="border-amber-500/40 text-amber-300 text-[10px] px-1.5 py-0">
-              Paused
-            </Badge>
-          )}
+          <div className="flex items-center gap-2">
+            {featuredRun ? <RunCacheSummary run={featuredRun} compact /> : null}
+            {job.paused && (
+              <Badge variant="outline" className="border-amber-500/40 text-amber-300 text-[10px] px-1.5 py-0">
+                Paused
+              </Badge>
+            )}
+          </div>
         </div>
 
         {/* DAG canvas */}
@@ -391,6 +410,7 @@ export function JobDetailPage() {
             <JobDAG
               dag={dag}
               atoms={atoms}
+              taskDefinitions={taskDefinitions}
               taskMetadata={taskMetadata}
               taskStatus={taskStatus}
               taskRunData={featuredRunTasks}
@@ -417,7 +437,7 @@ export function JobDetailPage() {
 
       {/* Secondary views dialog */}
       <Dialog open={secondaryView !== null} onOpenChange={(open) => !open && setSecondaryView(null)}>
-        <DialogContent className="max-w-3xl max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0">
+        <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
           <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
             <DialogTitle>
               {secondaryView === "runs" && "Run History"}
@@ -425,6 +445,7 @@ export function JobDetailPage() {
               {secondaryView === "configuration" && "Configuration"}
               {secondaryView === "definition" && "Job Definition (YAML)"}
               {secondaryView === "backfills" && "Backfills"}
+              {secondaryView === "cache" && "Cache"}
             </DialogTitle>
           </DialogHeader>
           <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
@@ -442,6 +463,9 @@ export function JobDetailPage() {
             )}
             {secondaryView === "backfills" && (
               <BackfillsView jobId={jobId} />
+            )}
+            {secondaryView === "cache" && (
+              <CacheView jobId={jobId} job={job} featuredRun={featuredRun} tasks={tasks} />
             )}
           </div>
         </DialogContent>
@@ -586,6 +610,10 @@ function ConfigurationView({
               <div className="font-mono text-xs">{job.max_parallel_tasks}</div>
             </div>
           ) : null}
+          <div>
+            <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Cache Policy</div>
+            <div className="font-mono text-xs">{describeCachePolicy(job.cache_config)}</div>
+          </div>
           <div>
             <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Labels</div>
             <div className="font-mono text-xs">{formatKeyValueMap(job.labels)}</div>

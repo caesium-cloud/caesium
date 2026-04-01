@@ -1,7 +1,7 @@
 # Demonstrates the step-output caching feature.
 # When cache is enabled, Caesium hashes each step's inputs (image, command,
-# env, and upstream outputs) and skips re-execution when a matching result
-# already exists in the cache store.
+# env, run params, and upstream outputs) and skips re-execution when a
+# matching result already exists in the cache store.
 $schema: https://yourorg.io/schemas/job.v1.json
 apiVersion: v1
 kind: Job
@@ -17,10 +17,13 @@ trigger:
   configuration:
     cron: "0 */6 * * *"
     timezone: "UTC"
+# Because this is a cron-triggered job, each scheduled fire gets its own
+# injected logical_date run param. A rerun of the same logical slot can hit
+# cache, but the next scheduled slot will naturally produce a different key.
 steps:
   # Step 1 -- fetch raw data.
-  # Inherits cache: true from metadata, so repeated runs with the same
-  # inputs will return the cached output instantly.
+  # Inherits cache: true from metadata, so repeated runs of the same
+  # logical slot will return the cached output instantly.
   - name: fetch-prices
     engine: docker
     image: alpine:3.20

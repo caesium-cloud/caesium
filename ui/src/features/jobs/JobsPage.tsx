@@ -18,6 +18,7 @@ import {
 import { api, type Job, type JobRun } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { cn, shortId } from "@/lib/utils";
+import { formatCacheShare, getRunCacheStats } from "./cache-utils";
 
 export function JobsPage() {
   const navigate = useNavigate();
@@ -65,14 +66,39 @@ export function JobsPage() {
       );
     };
 
+    const onTaskCached = (e: CaesiumEvent) => {
+      if (!e.job_id || !e.run_id) {
+        queryClient.invalidateQueries({ queryKey: ["jobs"] });
+        return;
+      }
+
+      queryClient.setQueryData(["jobs"], (old: Job[] | undefined) =>
+        old?.map((job) => {
+          const latestRun = job.latest_run;
+          if (job.id !== e.job_id || !latestRun || latestRun.id !== e.run_id) {
+            return job;
+          }
+          return {
+            ...job,
+            latest_run: {
+              ...latestRun,
+              cache_hits: (latestRun.cache_hits ?? 0) + 1,
+            },
+          };
+        }),
+      );
+    };
+
     events.subscribeConnection(onConnection);
     ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((type) => events.subscribe(type, onRunEvent));
     ["job_paused", "job_unpaused"].forEach((type) => events.subscribe(type, onPauseEvent));
+    events.subscribe("task_cached", onTaskCached);
 
     return () => {
       events.unsubscribeConnection(onConnection);
       ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((type) => events.unsubscribe(type, onRunEvent));
       ["job_paused", "job_unpaused"].forEach((type) => events.unsubscribe(type, onPauseEvent));
+      events.unsubscribe("task_cached", onTaskCached);
     };
   }, [queryClient]);
 
@@ -165,13 +191,11 @@ export function JobsPage() {
                     <div className="text-[10px] font-mono text-muted-foreground">{shortId(job.id)}</div>
                   </TableCell>
                   <TableCell>
-                    <div className="flex flex-col items-start gap-1">
-                      {isRunning ? renderRunStatus(latestRun) : !isPaused ? renderRunStatus(latestRun) : null}
-                      {isPaused ? (
-                        <Badge variant="outline" className="border-amber-500/40 text-amber-300">
-                          Paused
-                        </Badge>
-                      ) : null}
+                    <div className="flex flex-col items-start gap-1.5">
+                      <div className="flex items-center gap-2 whitespace-nowrap">
+                        {isRunning ? renderRunStatus(latestRun) : !isPaused ? renderRunStatus(latestRun) : null}
+                        {latestRun ? <RunStateSummary run={latestRun} /> : null}
+                      </div>
                       {isPaused ? (
                         <span className="text-xs text-muted-foreground">
                           {isRunning ? "New runs are blocked while the current run drains." : "New runs are blocked until this job is unpaused."}
@@ -232,4 +256,21 @@ function renderRunStatus(run?: JobRun) {
           : "secondary";
 
   return <Badge variant={variant}>{run.status}</Badge>;
+}
+
+function RunStateSummary({ run }: { run: JobRun }) {
+  const stats = getRunCacheStats(run);
+  if (stats.cacheHits <= 0) {
+    return null;
+  }
+
+  return (
+    <span className="text-[11px] text-muted-foreground">
+      <span className="font-medium text-teal-700 dark:text-teal-300">{stats.cacheHits} cached</span>
+      {" · "}
+      <span>{stats.executedTasks} executed</span>
+      {" · "}
+      <span>{formatCacheShare(stats)} reused</span>
+    </span>
+  );
 }

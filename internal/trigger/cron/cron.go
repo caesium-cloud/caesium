@@ -95,7 +95,7 @@ func (c *Cron) Listen(ctx context.Context) {
 
 	select {
 	case <-time.After(time.Until(next)):
-		if err := c.Fire(ctx); err != nil {
+		if err := c.fireAt(ctx, next); err != nil {
 			log.Error("trigger fire failure", "id", c.id, "error", err)
 		}
 	case <-ctx.Done():
@@ -104,6 +104,10 @@ func (c *Cron) Listen(ctx context.Context) {
 }
 
 func (c *Cron) Fire(ctx context.Context) error {
+	return c.fireAt(ctx, time.Now())
+}
+
+func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 	log.Info(
 		"trigger firing",
 		"id", c.id,
@@ -132,7 +136,7 @@ func (c *Cron) Fire(ctx context.Context) error {
 			continue
 		}
 		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
-		params := c.defaultParams
+		params := c.scheduledRunParams(logicalDate)
 		go func() {
 			if err = job.New(j, job.WithParams(params)).Run(ctx); err != nil {
 				log.Error("job run failure", "id", j.ID, "error", err)
@@ -176,15 +180,8 @@ func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 
 		for _, d := range missed {
 			logicalDate := d.UTC().Format(time.RFC3339)
-			params := map[string]string{
-				"logical_date": logicalDate,
-				"is_catchup":   "true",
-			}
-			for k, v := range c.defaultParams {
-				if _, exists := params[k]; !exists {
-					params[k] = v
-				}
-			}
+			params := c.scheduledRunParams(d)
+			params["is_catchup"] = "true"
 
 			metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
 			capturedJob := j
@@ -197,6 +194,20 @@ func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 			}()
 		}
 	}
+}
+
+func (c *Cron) scheduledRunParams(logicalDate time.Time) map[string]string {
+	params := make(map[string]string, len(c.defaultParams)+1)
+	for k, v := range c.defaultParams {
+		params[k] = v
+	}
+
+	date := logicalDate
+	if c.location != nil {
+		date = logicalDate.In(c.location)
+	}
+	params["logical_date"] = date.UTC().Format(time.RFC3339)
+	return params
 }
 
 func (c *Cron) ID() uuid.UUID {
