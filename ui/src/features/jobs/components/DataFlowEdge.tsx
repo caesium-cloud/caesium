@@ -28,7 +28,6 @@ export const DataFlowEdge = memo(({
   const contractDefined = data?.contractDefined ?? false;
   const showLabel = outputCount > 0 || contractDefined;
   const onOpenDetails = data?.onOpenDetails as (() => void) | undefined;
-  const outputLabel = outputCount > 0 ? `${outputCount} ${outputCount === 1 ? 'output' : 'outputs'}` : 'flow';
 
   return (
     <>
@@ -48,10 +47,14 @@ export const DataFlowEdge = memo(({
               onClick={onOpenDetails}
               title="View edge data details"
             >
-              <ArrowRight className="h-2.5 w-2.5 text-emerald-400" />
-              <span className="text-[9px] font-bold tabular-nums text-emerald-300">
-                {outputLabel}
-              </span>
+              {outputCount > 0 ? (
+                <>
+                  <ArrowRight className="h-2.5 w-2.5 text-emerald-400" />
+                  <span className="text-[9px] font-bold tabular-nums text-emerald-300">
+                    {outputCount} {outputCount === 1 ? 'output' : 'outputs'}
+                  </span>
+                </>
+              ) : null}
               <div
                 className={`rounded-full border px-1.5 py-0.5 ${
                   contractDefined
