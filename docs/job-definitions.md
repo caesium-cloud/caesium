@@ -215,8 +215,10 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - The importer (`internal/jobdef/git.Source`) clones the repository, walks the directory tree, and applies manifests. Provide `Source.Globs` to filter files (e.g. `**/*.job.yaml`); when omitted, all `.yaml`/`.yml` files are considered.
 - Multi-document YAML files are supported—each document must describe a single Job.
 - Reapplying a manifest with an existing alias reconciles the existing active job in place so job identity and run history are preserved.
+- Reapplying a previously retired definition restores its existing trigger, tasks, atoms, and callbacks instead of minting replacement records, which keeps historical references stable.
 - A `Watch` helper reuses a local working clone and performs periodic `fetch/pull` cycles. Configure `WatchOptions{Interval, Once}` to control frequency, optionally providing `Source.LocalDir` when you want to persist the checkout. Provide `Source.SourceID` to tag imported jobs with provenance metadata, and configure either Basic Auth credentials or SSH credentials backed by a secret resolver for private remotes.
 - Imported jobs persist provenance information (source ID, repository URL, ref, commit, and manifest path) and Git sync uses `source_id` to prune previously imported jobs that disappear from the source set.
+- Pruning retires matching jobs with soft deletes so run history remains queryable, while DAG edge rows are hard-deleted during reconciliation to avoid unbounded edge-table growth.
 - Triggers and atoms inherit the same provenance metadata; step-level records append `#step/<name>` and the trigger appends `#trigger` to the manifest path for precise drift tracking.
 
 ## Diffing Job Definitions
@@ -225,6 +227,7 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - Use `caesium job apply --path <dir>` to persist definitions into the database.
 - Add `--force` to override provenance conflicts when the existing active job was imported from a different source.
 - Add `--prune` to retire active jobs that were previously imported from the same source but are no longer present in the manifest set.
+- `caesium job apply` preserves task and callback ordering during reconciliation using stable importer positions rather than rewriting creation timestamps.
 - Updated jobs include a unified diff showing the fields that will change.
 - Run the diff command before applying changes to confirm the preview matches the expected plan.
 

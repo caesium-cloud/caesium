@@ -1,6 +1,13 @@
 # Job Definition Ingestion Roadmap & Checklist
 
-> Status: Largely implemented. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+> Status: Largely implemented. Phase 1 reconciliation and prune work is complete, including provenance-aware updates, source-scoped pruning, restoration of retired definitions, and history-preserving soft deletes. Use [job-definitions.md](job-definitions.md) and [job-schema-reference.md](job-schema-reference.md) for current behavior; treat unchecked items here as remaining roadmap notes.
+
+## Recent Progress
+- Reconcile-in-place imports now preserve job identity and run history on re-apply.
+- `--force` and `--prune` are wired through CLI, REST apply, and Git sync.
+- Retired definitions can be restored in place without replacing triggers, tasks, atoms, or callbacks.
+- Import ordering now uses explicit task/callback positions instead of mutating `CreatedAt`.
+- Validation coverage includes reconcile, prune, restore, and Git sync scenarios.
 
 ## Goals
 - [x] Support authoring, validation, and storage of job definitions in YAML format.
