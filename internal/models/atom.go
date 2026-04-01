@@ -7,6 +7,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 type AtomEngine string
@@ -28,6 +29,7 @@ type Atom struct {
 	ProvenanceRef      string         `json:"provenance_ref"`
 	ProvenanceCommit   string         `json:"provenance_commit"`
 	ProvenancePath     string         `json:"provenance_path"`
+	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
 	CreatedAt          time.Time      `gorm:"not null" json:"created_at"`
 	UpdatedAt          time.Time      `gorm:"not null" json:"updated_at"`
 }

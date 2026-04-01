@@ -294,6 +294,32 @@ steps:
 	s.True(diff.Empty(), "unexpected diff: %+v", diff)
 }
 
+func (s *GitSyncSuite) TestSyncWithSourceIDPrunesMissingJobs() {
+	repoDir := s.initRepo(map[string]string{
+		"jobs/sample.yaml": testutil.SampleJob,
+	})
+
+	db := testutil.OpenTestDB(s.T())
+	s.T().Cleanup(func() { testutil.CloseDB(db) })
+
+	importer := jobdef.NewImporter(db)
+	source := Source{URL: repoDir, Ref: "master", Path: "jobs", SourceID: "git-sync"}
+
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	testutil.AssertCount(s.T(), db, &models.Job{}, 1)
+
+	s.commit(repoDir, map[string]string{
+		"jobs/sample.yaml": strings.Replace(testutil.SampleJob, "csv-to-parquet", "csv-to-parquet-2", 1),
+	})
+
+	s.Require().NoError(source.Sync(context.Background(), importer))
+	testutil.AssertCount(s.T(), db, &models.Job{}, 1)
+
+	var totalJobs int64
+	s.Require().NoError(db.Unscoped().Model(&models.Job{}).Count(&totalJobs).Error)
+	s.Equal(int64(2), totalJobs)
+}
+
 func (s *GitSyncSuite) TestSyncPathGlobs() {
 	repoDir := s.initRepo(map[string]string{
 		"jobs/sample.yaml":      testutil.SampleJob,

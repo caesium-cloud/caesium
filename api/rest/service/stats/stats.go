@@ -208,7 +208,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 
 func (s *Service) lookupAlias(jobID string) string {
 	var job models.Job
-	if err := s.db.WithContext(s.ctx).Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := s.db.WithContext(s.ctx).Unscoped().Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
 		return ""
 	}
 	return job.Alias

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 type TaskEdge struct {
@@ -19,8 +20,9 @@ type TaskEdge struct {
 	ProvenanceRef      string
 	ProvenanceCommit   string
 	ProvenancePath     string
-	CreatedAt          time.Time `gorm:"not null"`
-	UpdatedAt          time.Time `gorm:"not null"`
+	DeletedAt          gorm.DeletedAt `gorm:"index" json:"-"`
+	CreatedAt          time.Time      `gorm:"not null"`
+	UpdatedAt          time.Time      `gorm:"not null"`
 }
 
 type TaskEdges []*TaskEdge

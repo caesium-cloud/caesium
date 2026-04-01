@@ -244,6 +244,7 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 
 	slices.Sort(files)
 
+	desiredAliases := make([]string, 0)
 	for _, path := range files {
 		relToRepo, err := filepath.Rel(dir, path)
 		if err != nil {
@@ -258,7 +259,15 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 		}
 
 		opts := &jobdef.ApplyOptions{Provenance: prov}
-		if err := applyFile(ctx, importer, path, opts); err != nil {
+		aliases, err := applyFile(ctx, importer, path, opts)
+		if err != nil {
+			return err
+		}
+		desiredAliases = append(desiredAliases, aliases...)
+	}
+
+	if strings.TrimSpace(s.SourceID) != "" {
+		if _, err := importer.PruneMissing(ctx, desiredAliases, &jobdef.PruneOptions{SourceID: s.SourceID}); err != nil {
 			return err
 		}
 	}
@@ -614,25 +623,27 @@ func (s *Source) shouldInclude(fullPath, relative string) bool {
 	return false
 }
 
-func applyFile(ctx context.Context, importer *jobdef.Importer, path string, opts *jobdef.ApplyOptions) error {
+func applyFile(ctx context.Context, importer *jobdef.Importer, path string, opts *jobdef.ApplyOptions) ([]string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	dec := yamlNewDecoder(data)
+	aliases := make([]string, 0)
 	for {
 		def, err := dec()
 		if errors.Is(err, errEOF) {
-			return nil
+			return aliases, nil
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		if _, err := importer.ApplyWithOptions(ctx, def, opts); err != nil {
-			return err
+			return nil, err
 		}
+		aliases = append(aliases, def.Metadata.Alias)
 	}
 }
 

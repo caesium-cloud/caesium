@@ -150,6 +150,60 @@ steps:
 	s.Equal("/tmp", spec.Mounts[0].Target)
 }
 
+func (s *IntegrationTestSuite) TestJobApplyReconcilesExistingDefinition() {
+	alias := fmt.Sprintf("integration-reconcile-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  annotations:
+    owner: first
+trigger:
+  type: cron
+  configuration:
+    cron: "*/10 * * * *"
+steps:
+  - name: extract
+    image: alpine
+    command: ["sh", "-c", "echo extract"]
+  - name: load
+    image: alpine
+    command: ["sh", "-c", "echo load"]
+`, alias)
+
+	tmpDir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(tmpDir)
+
+	s.runCLI("job", "apply", "--path", tmpDir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+	firstID := job.ID
+
+	updated := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  annotations:
+    owner: second
+trigger:
+  type: cron
+  configuration:
+    cron: "*/10 * * * *"
+steps:
+  - name: extract
+    image: alpine
+    command: ["sh", "-c", "echo extract updated"]
+`, alias)
+	require.NoError(s.T(), os.WriteFile(filepath.Join(tmpDir, "job.yaml"), []byte(strings.TrimSpace(updated)), 0o644))
+
+	s.runCLI("job", "apply", "--path", tmpDir, "--server", s.caesiumURL)
+	job = s.requireJobByAlias(alias)
+	s.Equal(firstID, job.ID)
+	s.Len(s.fetchTasks(job.ID), 1)
+}
+
 func TestIntegrationTestSuite(t *testing.T) {
 	suite.Run(t, new(IntegrationTestSuite))
 }

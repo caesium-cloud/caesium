@@ -75,16 +75,76 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	s.Len(edges, 2)
 }
 
-func (s *ImporterTestSuite) TestDuplicateAliasFails() {
+func (s *ImporterTestSuite) TestApplyUpdatesExistingJob() {
 	def, err := schema.Parse([]byte(testutil.SampleJob))
 	s.Require().NoError(err)
 
 	ctx := context.Background()
-	_, err = s.importer.Apply(ctx, def)
+	job, err := s.importer.Apply(ctx, def)
 	s.Require().NoError(err)
 
-	_, err = s.importer.Apply(ctx, def)
-	s.Error(err)
+	updated := strings.Replace(testutil.SampleJob, "owner: etl", "owner: analytics", 1)
+	updated = strings.Replace(updated, "  - name: publish\n    image: busybox:1.36\n    command: [\"sh\", \"-c\", \"echo publish\"]\n", "", 1)
+	def, err = schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+
+	job2, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.Equal(job.ID, job2.ID)
+	s.Equal("analytics", job2.Annotations["owner"])
+
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+	testutil.AssertCount(s.T(), s.db, &models.Task{}, 2)
+	testutil.AssertCount(s.T(), s.db, &models.TaskEdge{}, 1)
+	testutil.AssertCount(s.T(), s.db, &models.Callback{}, 1)
+
+	var totalTasks int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.Task{}).Count(&totalTasks).Error)
+	s.Equal(int64(3), totalTasks)
+}
+
+func (s *ImporterTestSuite) TestApplyRejectsProvenanceConflictWithoutForce() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-a"},
+	})
+	s.Require().NoError(err)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-b"},
+	})
+	s.ErrorIs(err, ErrProvenanceConflict)
+
+	_, err = s.importer.ApplyWithOptions(context.Background(), def, &ApplyOptions{
+		Provenance: &Provenance{SourceID: "git-b"},
+		Force:      true,
+	})
+	s.Require().NoError(err)
+}
+
+func (s *ImporterTestSuite) TestPruneMissingSoftDeletesJobs() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	second := strings.Replace(testutil.SampleJob, "csv-to-parquet", "csv-to-parquet-2", 1)
+	def2, err := schema.Parse([]byte(second))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(context.Background(), def2)
+	s.Require().NoError(err)
+
+	pruned, err := s.importer.PruneMissing(context.Background(), []string{"csv-to-parquet"}, nil)
+	s.Require().NoError(err)
+	s.Equal(1, pruned)
+
+	testutil.AssertCount(s.T(), s.db, &models.Job{}, 1)
+
+	var totalJobs int64
+	s.Require().NoError(s.db.Unscoped().Model(&models.Job{}).Count(&totalJobs).Error)
+	s.Equal(int64(2), totalJobs)
 }
 
 func (s *ImporterTestSuite) TestApplyWithProvenance() {
