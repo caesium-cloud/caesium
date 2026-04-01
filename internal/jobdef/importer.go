@@ -630,13 +630,6 @@ func (i *Importer) softDeleteAtomsTx(tx *gorm.DB, atomIDs []uuid.UUID) error {
 	return tx.Where("id IN ?", atomIDs).Delete(&models.Atom{}).Error
 }
 
-func (i *Importer) retireJobTx(tx *gorm.DB, jobModel *models.Job) error {
-	if jobModel == nil {
-		return nil
-	}
-	return i.retireJobsTx(tx, []*models.Job{jobModel})
-}
-
 func (i *Importer) retireJobsTx(tx *gorm.DB, jobs []*models.Job) error {
 	if len(jobs) == 0 {
 		return nil
