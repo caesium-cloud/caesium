@@ -62,7 +62,7 @@ func New(ctx context.Context) *Service {
 // between completed_at and started_at. The expression is dialect-aware:
 // Postgres uses EXTRACT(EPOCH FROM ...), SQLite/DQLite uses JULIANDAY arithmetic.
 func (s *Service) durationExpr() string {
-	if s.db.Dialector.Name() == "postgres" {
+	if s.db.Name() == "postgres" {
 		return "EXTRACT(EPOCH FROM (completed_at - started_at))"
 	}
 	return "(JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400"
@@ -160,7 +160,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 		RunCount int64
 	}
 	dayExpr := "strftime('%Y-%m-%d', started_at, 'utc')"
-	if s.db.Dialector.Name() == "postgres" {
+	if s.db.Name() == "postgres" {
 		dayExpr = "TO_CHAR(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
 	}
 
