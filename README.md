@@ -131,6 +131,22 @@ just run
 
 The API and embedded UI are served from `http://localhost:8080`.
 
+### Using Podman
+
+Set the following environment variables to use Podman instead of Docker:
+
+```bash
+export CAESIUM_PODMAN=true
+export CAESIUM_SOCK=/run/podman/podman.sock   # or $XDG_RUNTIME_DIR/podman/podman.sock
+just run
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `CAESIUM_PODMAN` | `false` | Prefix image references with `localhost/` for Podman's local image store |
+| `CAESIUM_SOCK` | `/var/run/docker.sock` | Host-side container socket to mount into the container |
+| `CAESIUM_PORT` | `8080` | Host port to expose the server on |
+
 ### Load example jobs
 
 ```bash
