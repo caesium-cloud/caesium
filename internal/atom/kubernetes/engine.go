@@ -125,7 +125,7 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 					Env:             envVars,
 					WorkingDir:      req.Spec.WorkDir,
 					VolumeMounts:    volumeMounts,
-					ImagePullPolicy: v1.PullAlways,
+					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			},
 			Volumes:       volumes,
