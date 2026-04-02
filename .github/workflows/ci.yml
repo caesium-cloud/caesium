@@ -248,15 +248,21 @@ jobs:
   helm-integration-test:
     needs: [build-and-integration-test, helm-lint]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: release-amd64
           path: /tmp
-      - name: Load release image
-        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load images
+        run: |
+          gunzip -c /tmp/release-amd64.tar.gz | docker load
+          gunzip -c /tmp/builder-amd64.tar.gz | docker load
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -290,11 +296,14 @@ jobs:
           fi
       - name: Helm test
         run: helm test caesium --timeout 90s
-      - name: Verify health endpoint
+      - name: Pre-load job images into kind
+        run: |
+          docker pull alpine:3.20
+          kind load docker-image alpine:3.20
+      - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
-          PORT_FORWARD_PID=$!
-          trap 'kill $PORT_FORWARD_PID' EXIT
+          echo $! > /tmp/port-forward.pid
 
           tries=0
           until curl -sf http://127.0.0.1:8080/health >/dev/null; do
@@ -303,90 +312,23 @@ jobs:
               echo "Port-forward did not become ready in time"
               cat /tmp/port-forward.log || true
               kubectl get pods -A || true
-              kubectl describe pods -l app.kubernetes.io/instance=caesium || true
               exit 1
             fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:8080/health
-      - name: Pre-load job images into kind
+      - name: Integration tests (Kubernetes)
         run: |
-          docker pull alpine:3.20
-          kind load docker-image alpine:3.20
-      - name: Run Kubernetes engine single-step integration test
-        run: |
-          JOB_ID=$(curl -sf -X POST http://127.0.0.1:8080/v1/jobs \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "alias": "k8s-engine-single-step",
-              "trigger": {"type": "http", "configuration": {"path": "/jobs/k8s-engine-single-step"}},
-              "tasks": [{"name": "hello", "atom": {"engine": "kubernetes", "image": "alpine:3.20", "command": ["sh", "-c", "echo hello-from-kubernetes"]}}]
-            }' | jq -r '.id')
-          echo "Created job: $JOB_ID"
-
-          RUN_ID=$(curl -sf -X POST "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/run" | jq -r '.id')
-          echo "Triggered run: $RUN_ID"
-
-          for i in $(seq 1 90); do
-            STATUS=$(curl -sf "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/runs/${RUN_ID}" | jq -r '.status')
-            echo "Run status: $STATUS"
-            if [ "$STATUS" = "succeeded" ]; then
-              echo "Kubernetes single-step test passed"
-              break
-            elif [ "$STATUS" = "failed" ]; then
-              echo "Run failed!"
-              curl -sf "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/runs/${RUN_ID}" | jq .
-              kubectl get pods -A || true
-              kubectl describe pods -l cloud.caesium -A || true
-              exit 1
-            fi
-            sleep 2
-          done
-          if [ "$STATUS" != "succeeded" ]; then
-            echo "Timeout waiting for run to complete"
-            kubectl get pods -A || true
-            exit 1
-          fi
-      - name: Run Kubernetes engine DAG integration test
-        run: |
-          JOB_ID=$(curl -sf -X POST http://127.0.0.1:8080/v1/jobs \
-            -H 'Content-Type: application/json' \
-            -d '{
-              "alias": "k8s-engine-dag",
-              "trigger": {"type": "http", "configuration": {"path": "/jobs/k8s-engine-dag"}},
-              "tasks": [
-                {"name": "extract", "atom": {"engine": "kubernetes", "image": "alpine:3.20", "command": ["sh", "-c", "echo '\''##caesium::output {\"rows\": \"42\"}'\''"]}},
-                {"name": "load", "atom": {"engine": "kubernetes", "image": "alpine:3.20", "command": ["sh", "-c", "echo loaded=$CAESIUM_OUTPUT_EXTRACT_ROWS"]}, "dependsOn": ["extract"]}
-              ]
-            }' | jq -r '.id')
-          echo "Created DAG job: $JOB_ID"
-
-          RUN_ID=$(curl -sf -X POST "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/run" | jq -r '.id')
-          echo "Triggered run: $RUN_ID"
-
-          for i in $(seq 1 120); do
-            STATUS=$(curl -sf "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/runs/${RUN_ID}" | jq -r '.status')
-            echo "DAG run status: $STATUS"
-            if [ "$STATUS" = "succeeded" ]; then
-              echo "Kubernetes DAG test passed"
-              break
-            elif [ "$STATUS" = "failed" ]; then
-              echo "DAG run failed!"
-              curl -sf "http://127.0.0.1:8080/v1/jobs/${JOB_ID}/runs/${RUN_ID}" | jq .
-              kubectl get pods -A || true
-              kubectl describe pods -l cloud.caesium -A || true
-              kubectl logs statefulset/caesium -c caesium || true
-              exit 1
-            fi
-            sleep 2
-          done
-          if [ "$STATUS" != "succeeded" ]; then
-            echo "Timeout waiting for DAG run to complete"
-            kubectl get pods -A || true
-            kubectl logs statefulset/caesium -c caesium || true
-            exit 1
-          fi
-      - name: Dump Caesium logs on failure
+          docker run --rm \
+            -v $(pwd):/bld/caesium \
+            -e CAESIUM_TEST_ENGINE=kubernetes \
+            --network=host \
+            -w /bld/caesium \
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
+            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 15m'
+      - name: Stop port-forward
+        if: always()
+        run: kill $(cat /tmp/port-forward.pid) 2>/dev/null || true
+      - name: Dump logs on failure
         if: failure()
         run: |
           kubectl logs statefulset/caesium -c caesium || true
