@@ -83,12 +83,20 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// Load the task model to get retry configuration.
 	var taskModel models.Task
 	hasTaskModel := e.store.DB().First(&taskModel, "id = ?", taskRun.TaskID).Error == nil
+	taskName := taskRun.TaskID.String()
+	if hasTaskModel && taskModel.Name != "" {
+		taskName = taskModel.Name
+	}
 
 	// Cache check: attempt to satisfy the task from cache before container execution.
-	cacheConfig := cache.ConfigFromEnv()
 	var cacheStore *cache.Store
 	var cacheHash string
-	if hasTaskModel {
+	cacheCfg := jobdefschema.CacheConfig{
+		Enabled: taskRun.CacheEnabled,
+		TTL:     taskRun.CacheTTL,
+		Version: taskRun.CacheVersion,
+	}
+	if cacheCfg.Enabled {
 		cacheStore = cache.NewStore(e.store.DB())
 
 		// Look up job alias for hash computation.
@@ -118,44 +126,33 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			_ = json.Unmarshal(atomModel.Spec, &atomSpec)
 		}
 
-		// Resolve step-level and job-level cache config.
-		var stepCache, jobCache interface{}
-		if len(taskModel.CacheConfig) > 0 {
-			_ = json.Unmarshal(taskModel.CacheConfig, &stepCache)
+		// Build merged env for hashing, excluding volatile per-run vars.
+		mergedEnv := make(map[string]string, len(atomSpec.Env))
+		for k, v := range atomSpec.Env {
+			mergedEnv[k] = v
 		}
-		var jobModel models.Job
-		if err := e.store.DB().Select("cache_config").First(&jobModel, "id = ?", taskModel.JobID).Error; err == nil && len(jobModel.CacheConfig) > 0 {
-			_ = json.Unmarshal(jobModel.CacheConfig, &jobCache)
-		}
-		cacheCfg := jobdefschema.ResolveCacheConfig(stepCache, jobCache, cacheConfig.Enabled, cacheConfig.TTL)
-		if !cacheCfg.Enabled {
-			cacheStore = nil
-		} else {
-			// Build merged env for hashing, excluding volatile per-run vars.
-			mergedEnv := make(map[string]string, len(atomSpec.Env))
-			for k, v := range atomSpec.Env {
+		if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
+			for k, v := range outputEnv {
 				mergedEnv[k] = v
 			}
-			if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
-				for k, v := range outputEnv {
-					mergedEnv[k] = v
-				}
-			}
+		}
 
-			hashInput := cache.HashInput{
-				JobAlias:           cacheJobAlias,
-				TaskName:           taskModel.Name,
-				Image:              taskRun.Image,
-				Command:            parseTaskCommand(taskRun.Command),
-				Env:                mergedEnv,
-				WorkDir:            atomSpec.WorkDir,
-				Mounts:             atomSpec.Mounts,
-				PredecessorHashes:  predHashes,
-				PredecessorOutputs: predOutputs,
-				RunParams:          runParams,
-				CacheVersion:       cacheCfg.Version,
-			}
-			cacheHash = hashInput.Compute()
+		hashInput := cache.HashInput{
+			JobAlias:           cacheJobAlias,
+			TaskName:           taskName,
+			Image:              taskRun.Image,
+			Command:            parseTaskCommand(taskRun.Command),
+			Env:                mergedEnv,
+			WorkDir:            atomSpec.WorkDir,
+			Mounts:             atomSpec.Mounts,
+			PredecessorHashes:  predHashes,
+			PredecessorOutputs: predOutputs,
+			RunParams:          runParams,
+			CacheVersion:       cacheCfg.Version,
+		}
+		cacheHash = hashInput.Compute()
+		if err := e.store.SetTaskHash(taskRun.JobRunID, taskRun.TaskID, cacheHash); err != nil {
+			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
 
 		if cacheStore != nil {
@@ -176,7 +173,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 					log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
 					// Fall through to normal execution on persistence failure.
 				} else {
-					metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskModel.Name).Inc()
+					metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskName).Inc()
 					return
 				}
 			}
@@ -198,7 +195,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
-				e.storeCacheEntry(cacheStore, cacheConfig, cacheHash, taskRun)
+				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, taskRun)
 			}
 			return
 		}
@@ -411,7 +408,7 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
-func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheConfig cache.Config, hash string, taskRun *models.TaskRun) {
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash string, taskRun *models.TaskRun) {
 	// Read back the completed task run to get output and result.
 	var completed models.TaskRun
 	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
@@ -460,8 +457,8 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheConfig c
 		CreatedAt:        time.Now().UTC(),
 	}
 
-	if cacheConfig.TTL > 0 {
-		expiresAt := entry.CreatedAt.Add(cacheConfig.TTL)
+	if cacheCfg.TTL > 0 {
+		expiresAt := entry.CreatedAt.Add(cacheCfg.TTL)
 		entry.ExpiresAt = &expiresAt
 	}
 

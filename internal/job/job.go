@@ -759,6 +759,9 @@ func (j *job) Run(ctx context.Context) error {
 				CacheVersion:       cacheCfg.Version,
 			}
 			inputHash = hashInput.Compute()
+			if err := store.SetTaskHash(runID, taskID, inputHash); err != nil {
+				log.Warn("failed to persist task hash", "task", taskName, "error", err)
+			}
 
 			entry, found, err := cacheStore.Get(inputHash)
 			switch {

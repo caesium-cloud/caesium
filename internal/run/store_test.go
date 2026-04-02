@@ -1,6 +1,7 @@
 package run
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -634,22 +635,138 @@ func TestPredecessorHashes(t *testing.T) {
 	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", map[string]string{
 		"row_count": "42",
 	}, nil))
-
-	var completed models.TaskRun
-	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, taskA.ID).First(&completed).Error)
-	require.NoError(t, db.Create(&models.TaskCache{
-		Hash:      "pred-hash-1",
-		JobID:     jobID,
-		TaskName:  "step-a",
-		Result:    "ok",
-		RunID:     runRecord.ID,
-		TaskRunID: completed.ID,
-		CreatedAt: time.Now().UTC(),
-	}).Error)
+	require.NoError(t, store.SetTaskHash(runRecord.ID, taskA.ID, "pred-hash-1"))
 
 	hashes, err := store.PredecessorHashes(runRecord.ID, taskB.ID)
 	require.NoError(t, err)
 	require.Equal(t, []string{"pred-hash-1"}, hashes)
+}
+
+func TestPredecessorHashesIncludesCachedPredecessors(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomA := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","a"]`,
+	}
+	atomB := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","b"]`,
+	}
+	require.NoError(t, db.Create(atomA).Error)
+	require.NoError(t, db.Create(atomB).Error)
+
+	taskA := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomA.ID,
+		Name:   "step-a",
+	}
+	taskB := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atomB.ID,
+		Name:   "step-b",
+	}
+	require.NoError(t, db.Create(taskA).Error)
+	require.NoError(t, db.Create(taskB).Error)
+
+	edge := &models.TaskEdge{
+		ID:         uuid.New(),
+		JobID:      jobID,
+		FromTaskID: taskA.ID,
+		ToTaskID:   taskB.ID,
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
+	}
+	require.NoError(t, db.Create(edge).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskA, atomA, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
+	require.NoError(t, store.SetTaskHash(runRecord.ID, taskA.ID, "pred-hash-cached"))
+	_, err = store.CacheHitTask(runRecord.ID, taskA.ID, CacheHitSource{
+		RunID:     uuid.New(),
+		CreatedAt: time.Now().UTC(),
+	}, "ok", map[string]string{"row_count": "42"}, nil)
+	require.NoError(t, err)
+
+	hashes, err := store.PredecessorHashes(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"pred-hash-cached"}, hashes)
+}
+
+func TestRegisterTaskSnapshotsResolvedCacheConfig(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+	t.Setenv("CAESIUM_CACHE_ENABLED", "false")
+	t.Setenv("CAESIUM_CACHE_TTL", "30m")
+
+	store := NewStore(db)
+
+	jobCacheJSON, err := json.Marshal(map[string]any{"ttl": "2h"})
+	require.NoError(t, err)
+
+	trigger := &models.Trigger{
+		ID:    uuid.New(),
+		Alias: "cache-trigger",
+		Type:  models.TriggerTypeCron,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	jobID := uuid.New()
+	jobModel := &models.Job{
+		ID:          jobID,
+		Alias:       "cache-job",
+		TriggerID:   trigger.ID,
+		CacheConfig: datatypes.JSON(jobCacheJSON),
+	}
+	require.NoError(t, db.Create(jobModel).Error)
+
+	runRecord, err := store.Start(jobID, &trigger.ID)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine",
+		Command: `["echo","cache"]`,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	stepCacheJSON, err := json.Marshal(map[string]any{"version": 3})
+	require.NoError(t, err)
+
+	task := &models.Task{
+		ID:          uuid.New(),
+		JobID:       jobID,
+		AtomID:      atom.ID,
+		Name:        "cacheable",
+		CacheConfig: datatypes.JSON(stepCacheJSON),
+	}
+	require.NoError(t, db.Create(task).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+
+	var taskRun models.TaskRun
+	require.NoError(t, db.First(&taskRun, "job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).Error)
+	require.True(t, taskRun.CacheEnabled)
+	require.Equal(t, 2*time.Hour, taskRun.CacheTTL)
+	require.Equal(t, 3, taskRun.CacheVersion)
 }
 
 func TestCompleteTaskWithBranchSkipLeavesOneSuccessJoinRunnable(t *testing.T) {
