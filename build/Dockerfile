@@ -1,5 +1,5 @@
-ARG BUILDER_TAG
-FROM caesiumcloud/caesium-builder:${BUILDER_TAG} AS builder
+ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
+FROM ${BUILDER_IMAGE} AS builder
 
 WORKDIR /bld/caesium
 

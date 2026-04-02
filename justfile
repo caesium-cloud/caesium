@@ -11,6 +11,12 @@ target_arch     := if platform == "linux/arm64" { "arm64" } else if platform == 
 bld_dir         := "/bld/caesium"
 repo_dir        := `pwd`
 it_container    := "caesium-server-test"
+# Podman support: set CAESIUM_PODMAN=true to prefix images with localhost/
+podman          := env("CAESIUM_PODMAN", "false")
+image_ref       := if podman == "true" { "localhost/" + repo + "/" + image } else { repo + "/" + image }
+builder_ref     := if podman == "true" { "localhost/" + repo + "/" + builder_image } else { repo + "/" + builder_image }
+sock            := env("CAESIUM_SOCK", "/var/run/docker.sock")
+port            := env("CAESIUM_PORT", "8080")
 
 validate-platform:
     @if [ "{{platform}}" != "linux/amd64" ] && [ "{{platform}}" != "linux/arm64" ]; then \
@@ -19,24 +25,24 @@ validate-platform:
     fi
 
 builder: validate-platform
-    @if docker image inspect {{repo}}/{{builder_image}}:{{tag}} >/dev/null 2>&1; then \
-        echo "Builder image {{repo}}/{{builder_image}}:{{tag}} already exists, skipping build."; \
+    @if docker image inspect {{builder_ref}}:{{tag}} >/dev/null 2>&1; then \
+        echo "Builder image {{builder_ref}}:{{tag}} already exists, skipping build."; \
     else \
         docker build --platform {{platform}} \
             --build-arg TARGETARCH={{target_arch}} \
             --target builder \
-            -t {{repo}}/{{builder_image}}:{{tag}} \
+            -t {{builder_ref}}:{{tag}} \
             -f {{dockerfile}}.build .; \
     fi
 
 builder-full: validate-platform
-    @if docker image inspect {{repo}}/{{builder_image}}:{{tag}}-full >/dev/null 2>&1; then \
-        echo "Builder image {{repo}}/{{builder_image}}:{{tag}}-full already exists, skipping build."; \
+    @if docker image inspect {{builder_ref}}:{{tag}}-full >/dev/null 2>&1; then \
+        echo "Builder image {{builder_ref}}:{{tag}}-full already exists, skipping build."; \
     else \
         docker build --platform {{platform}} \
             --build-arg TARGETARCH={{target_arch}} \
             --target builder-full \
-            -t {{repo}}/{{builder_image}}:{{tag}}-full \
+            -t {{builder_ref}}:{{tag}}-full \
             -f {{dockerfile}}.build .; \
     fi
 
@@ -44,76 +50,76 @@ build: builder
     docker build --platform {{platform}} \
         --build-arg BUILDER_TAG={{tag}} \
         --target release \
-        -t {{repo}}/{{image}}:{{tag}} \
+        -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} .
 
 # Build for a specific platform (requires buildx + QEMU for cross-platform)
 build-cross target_platform:
     docker buildx build --platform {{target_platform}} \
         --target builder \
-        -t {{repo}}/{{builder_image}}:{{tag}} \
+        -t {{builder_ref}}:{{tag}} \
         -f {{dockerfile}}.build --load .
     docker buildx build --platform {{target_platform}} \
         --build-arg BUILDER_TAG={{tag}} \
         --target release \
-        -t {{repo}}/{{image}}:{{tag}} \
+        -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} --load .
 
 # Build and push multi-arch images for both builder and runtime
 build-multiarch:
     docker buildx build --platform linux/amd64,linux/arm64 \
         --target builder \
-        -t {{repo}}/{{builder_image}}:{{tag}} \
+        -t {{builder_ref}}:{{tag}} \
         -f {{dockerfile}}.build --push .
     docker buildx build --platform linux/amd64,linux/arm64 \
         --build-arg BUILDER_TAG={{tag}} \
         --target release \
-        -t {{repo}}/{{image}}:{{tag}} \
+        -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} --push .
 
 build-release: builder
     docker build --platform {{platform}} \
         --build-arg BUILDER_TAG={{tag}} \
         --target release \
-        -t {{repo}}/{{image}}:{{tag}} \
+        -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} .
 
 build-test: builder
     docker build --platform {{platform}} \
         --build-arg BUILDER_TAG={{tag}} \
         --target test \
-        -t {{repo}}/{{image}}:{{tag}}-test \
+        -t {{image_ref}}:{{tag}}-test \
         -f {{dockerfile}} .
 
 push:
-	docker push {{repo}}/{{image}}:{{tag}}
+	docker push {{image_ref}}:{{tag}}
 
 push-test:
-	docker push {{repo}}/{{image}}:{{tag}}-test
+	docker push {{image_ref}}:{{tag}}-test
 
 push-multiarch:
-    docker push {{repo}}/{{image}}:{{tag}}-amd64
-    docker push {{repo}}/{{image}}:{{tag}}-arm64
-    docker manifest create {{repo}}/{{image}}:{{tag}} \
-        {{repo}}/{{image}}:{{tag}}-amd64 \
-        {{repo}}/{{image}}:{{tag}}-arm64
-    docker manifest push {{repo}}/{{image}}:{{tag}}
+    docker push {{image_ref}}:{{tag}}-amd64
+    docker push {{image_ref}}:{{tag}}-arm64
+    docker manifest create {{image_ref}}:{{tag}} \
+        {{image_ref}}:{{tag}}-amd64 \
+        {{image_ref}}:{{tag}}-arm64
+    docker manifest push {{image_ref}}:{{tag}}
 
 unit-test: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
-        {{repo}}/{{builder_image}}:{{tag}}-full \
+        {{builder_ref}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test -race -coverprofile=coverage.txt -covermode=atomic -v ./...'
 
 run: build
     docker run --platform {{platform}} \
         -d --name caesium-server \
-        -p 8080:8080 \
-        -v /var/run/docker.sock:/var/run/docker.sock \
+        -p {{port}}:8080 \
+        -v {{sock}}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
-        {{repo}}/{{image}}:{{tag}} start
+        {{image_ref}}:{{tag}} start
 
 rm:
 	docker rm -f caesium-server
@@ -143,12 +149,12 @@ integration-test:
     docker rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     if docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
-        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v {{sock}}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{bld_dir}}/.tmp/caesium-cli/caesium \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{it_container}} \
         -w {{bld_dir}} \
-        {{repo}}/{{builder_image}}:{{tag}}-full \
+        {{builder_ref}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration'; then \
       docker rm -f {{it_container}} >/dev/null 2>&1 || true; \
     else \
@@ -197,7 +203,7 @@ hydrate:
         --rm \
         --network=host \
         -v {{repo_dir}}/docs/examples:/examples:ro \
-        {{repo}}/{{image}}:{{tag}} job apply --server http://127.0.0.1:8080 --path /examples
+        {{image_ref}}:{{tag}} job apply --server http://127.0.0.1:{{port}} --path /examples
 
 integration-up:
     docker build --platform {{platform}} \
@@ -209,18 +215,18 @@ integration-up:
     docker run -d --platform {{platform}} \
         --name {{it_container}} \
         --privileged \
-        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v {{sock}}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
         -e CAESIUM_LOG_LEVEL=debug \
-        {{repo}}/{{image}}:{{tag}}-test start
+        {{image_ref}}:{{tag}}-test start
 
 lint: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}} \
         -e GOFLAGS=-buildvcs=false \
-        {{repo}}/{{builder_image}}:{{tag}}-full \
+        {{builder_ref}}:{{tag}}-full \
         sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && set -euo pipefail; \
             go fmt .; \
             go vet ./...; \
@@ -230,26 +236,26 @@ ui-lint: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
-        {{repo}}/{{builder_image}}:{{tag}}-full \
+        {{builder_ref}}:{{tag}}-full \
         sh -c 'npm ci --prefer-offline && npm run lint'
 
 ui-test: builder-full
     docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
         -w {{bld_dir}}/ui \
-        {{repo}}/{{builder_image}}:{{tag}}-full \
+        {{builder_ref}}:{{tag}}-full \
         sh -c 'npm ci --prefer-offline && npm test && npm run build:ci'
 
 ui-e2e: build-release
     @docker rm -f caesium-server >/dev/null 2>&1 || true
     bash -lc 'set -euo pipefail; \
         trap "docker rm -f caesium-server >/dev/null 2>&1 || true" EXIT; \
-        docker run --platform {{platform}} -d --name caesium-server -p 8080:8080 \
-            -v /var/run/docker.sock:/var/run/docker.sock \
+        docker run --platform {{platform}} -d --name caesium-server -p {{port}}:8080 \
+            -v {{sock}}:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
-            --user 0:0 {{repo}}/{{image}}:{{tag}} start >/dev/null; \
+            --user 0:0 {{image_ref}}:{{tag}} start >/dev/null; \
         tries=0; \
-        until curl -sf http://127.0.0.1:8080/health >/dev/null; do \
+        until curl -sf http://127.0.0.1:{{port}}/health >/dev/null; do \
             tries=$$((tries + 1)); \
             if [ "$$tries" -gt 30 ]; then \
                 echo "Caesium did not become ready in time" >&2; \
