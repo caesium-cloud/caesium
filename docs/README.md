@@ -5,6 +5,7 @@ This directory mixes current-source operator documentation with design records a
 ## Current Source of Truth
 
 - [job-definitions.md](job-definitions.md): Authoring, linting, diffing, schema tooling, Git sync, and operational controls for job manifests.
+- [caesium-job-llm-reference.md](caesium-job-llm-reference.md): LLM authoring guide plus executable harness scenario format, including metrics and OpenLineage assertions.
 - [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
 - [backfill.md](backfill.md): Backfill behavior across API, CLI, and UI.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Distributed execution configuration, rollout, and troubleshooting.
@@ -21,7 +22,7 @@ This directory mixes current-source operator documentation with design records a
 
 ## Design Records and Roadmaps
 
-These files are useful context, but each should be treated according to its status banner.
+These files are useful context, but each should be treated according to its status banner. CI enforces that these docs keep an explicit `> Status:` banner near the top.
 
 - [job-definition-plan.md](job-definition-plan.md)
 - [design-airflow-parity.md](design-airflow-parity.md)

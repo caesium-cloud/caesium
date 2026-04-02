@@ -1,6 +1,6 @@
 # Design: Smart Incremental Execution
 
-> Status: Proposed only. This feature is not implemented in the current repo; use this file as a design draft rather than a statement of shipped behavior.
+> Status: Implemented design record. Phase 1 incremental execution and cache support are shipped; use this document as design rationale and follow-up planning context, not as a statement that all future extensions are complete.
 
 ## Status
 

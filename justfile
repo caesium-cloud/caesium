@@ -120,9 +120,17 @@ rm:
 
 integration-test:
     just integration-up
+    @cli_dir=$(mktemp -d); \
+    cli_ctr=$(docker create --platform {{platform}} {{repo}}/{{image}}:{{tag}}-test true); \
+    trap 'docker rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"' EXIT; \
+    docker cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
+    chmod +x "$cli_dir/caesium"; \
+    docker rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     if docker run --rm --platform {{platform}} \
         -v {{repo_dir}}:{{bld_dir}} \
+        -v "$cli_dir":/tmp/caesium-cli:ro \
         -v /var/run/docker.sock:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH=/tmp/caesium-cli/caesium \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{it_container}} \
         -w {{bld_dir}} \

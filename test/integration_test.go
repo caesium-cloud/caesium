@@ -36,17 +36,16 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	}
 	s.projectRoot = filepath.Clean(filepath.Join(cwd, ".."))
 
-	binPath := filepath.Join(s.projectRoot, "caesium-cli")
-	build := exec.CommandContext(s.T().Context(), "go", "build", "-o", binPath, ".")
-	build.Dir = s.projectRoot
-	build.Env = append(os.Environ(), "GOFLAGS=-buildvcs=false")
-	if output, err := build.CombinedOutput(); err != nil {
-		s.T().Fatalf("build caesium cli: %v\n%s", err, string(output))
+	s.cliPath = os.Getenv("CAESIUM_CLI_PATH")
+	if s.cliPath == "" {
+		s.T().Fatal("CAESIUM_CLI_PATH is not set; run integration tests via `just integration-test` or provide a CLI path extracted from the containerized build artifact")
 	}
-	s.cliPath = binPath
-	s.T().Cleanup(func() {
-		_ = os.Remove(binPath)
-	})
+	if !filepath.IsAbs(s.cliPath) {
+		s.cliPath = filepath.Join(s.projectRoot, s.cliPath)
+	}
+	if _, err := os.Stat(s.cliPath); err != nil {
+		s.T().Fatalf("stat CAESIUM_CLI_PATH %q: %v", s.cliPath, err)
+	}
 
 	host := os.Getenv("CAESIUM_HOST")
 	if host == "" {

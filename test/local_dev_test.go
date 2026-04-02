@@ -75,6 +75,163 @@ func (s *IntegrationTestSuite) TestTestCommandNoDefinitionsFound() {
 	s.Contains(out, "No job definitions found")
 }
 
+func (s *IntegrationTestSuite) TestTestCommandRunsHarnessScenario() {
+	s.requireDocker()
+
+	dir := s.writeJobManifest(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: harness-smoke
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+steps:
+  - name: produce
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::output {\"color\":\"blue\"}' && echo harness-log"]
+`)
+	defer os.RemoveAll(dir)
+
+	s.writeScenarioManifest(dir, `
+apiVersion: v1
+kind: Harness
+scenarios:
+  - name: harness-smoke
+    path: ./job.yaml
+    expect:
+      runStatus: succeeded
+      tasks:
+        - name: produce
+          status: succeeded
+          output:
+            color: blue
+          logContains:
+            - harness-log
+`)
+
+	out := s.runCLIOutput("test", "--scenario", dir, "--verbose")
+	s.Contains(out, "PASS")
+	s.Contains(out, "harness-smoke")
+	s.Contains(out, "Run: harness-smoke (succeeded)")
+	s.Contains(out, "produce: succeeded")
+}
+
+func (s *IntegrationTestSuite) TestTestCommandRunsHarnessScenarioWithObservabilityAssertions() {
+	s.requireDocker()
+
+	dir := s.writeJobManifest(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: harness-observability
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+steps:
+  - name: produce
+    image: alpine
+    command: ["sh", "-c", "echo '##caesium::output {\"color\":\"green\"}' && echo observability-log"]
+`)
+	defer os.RemoveAll(dir)
+
+	s.writeScenarioManifest(dir, `
+apiVersion: v1
+kind: Harness
+scenarios:
+  - name: harness-observability
+    path: ./job.yaml
+    expect:
+      runStatus: succeeded
+      tasks:
+        - name: produce
+          status: succeeded
+          output:
+            color: green
+          logContains:
+            - observability-log
+      metrics:
+        - name: caesium_job_runs_total
+          labels:
+            job_id: $job_id
+            status: succeeded
+          value: 1
+        - name: caesium_task_runs_total
+          labels:
+            job_id: $job_id
+            task_id: $task_id:produce
+            engine: docker
+            status: succeeded
+          value: 1
+        - name: caesium_jobs_active
+          labels:
+            job_id: $job_id
+          value: 0
+        - name: caesium_lineage_events_emitted_total
+          labels:
+            event_type: START
+            status: success
+          delta: 2
+        - name: caesium_lineage_events_emitted_total
+          labels:
+            event_type: COMPLETE
+            status: success
+          delta: 2
+      lineage:
+        totalEvents: 4
+        eventTypes:
+          START: 2
+          COMPLETE: 2
+        jobNames:
+          - harness-observability
+`)
+
+	out := s.runCLIOutput("test", "--scenario", dir)
+	s.Contains(out, "PASS")
+	s.Contains(out, "harness-observability")
+}
+
+func (s *IntegrationTestSuite) TestTestCommandRunsExpectedFailureScenario() {
+	s.requireDocker()
+
+	dir := s.writeJobManifest(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: harness-failure
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+steps:
+  - name: fail
+    image: alpine
+    command: ["sh", "-c", "echo failing-now && exit 7"]
+`)
+	defer os.RemoveAll(dir)
+
+	s.writeScenarioManifest(dir, `
+apiVersion: v1
+kind: Harness
+scenarios:
+  - name: harness-failure
+    path: ./job.yaml
+    expect:
+      runStatus: failed
+      tasks:
+        - name: fail
+          status: failed
+          logContains:
+            - failing-now
+`)
+
+	out := s.runCLIOutput("test", "--scenario", dir)
+	s.Contains(out, "PASS")
+	s.Contains(out, "harness-failure")
+}
+
 // ---------------------------------------------------------------------------
 // caesium job preview
 // ---------------------------------------------------------------------------
@@ -357,6 +514,13 @@ metadata:
 steps: []
 `
 	return s.writeJobManifest(manifest)
+}
+
+func (s *IntegrationTestSuite) writeScenarioManifest(dir string, contents string) string {
+	s.T().Helper()
+	path := filepath.Join(dir, "harness.scenario.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(strings.TrimSpace(contents)), 0o644))
+	return path
 }
 
 // writeMixedYAMLDir creates a temp directory containing a valid Caesium job

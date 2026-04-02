@@ -267,13 +267,17 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - Use the lint command in CI to gate manifest changes before pushing them to Git sync or applying them directly.
 - Reference manifests live under `docs/examples/`; conformance tests load these files to ensure the documentation stays in sync with the schema.
 - Example scenarios under `docs/examples/` include:
+  - Conditional branching examples with single-branch and multi-branch flows (`branching.job.yaml`).
   - Minimal sequential Cron pipeline (`minimal.job.yaml`).
   - Callback-enabled workflow (`callbacks.job.yaml`).
   - Explicit edge wiring (`explicit-links.job.yaml`).
   - Fan-out/fan-in DAG (`fanout-join.job.yaml`).
+  - Data contract validation across producer and consumer steps (`data-contracts.job.yaml`).
   - HTTP-triggered debugging workflow (`http-ops-debug.job.yaml`).
+  - Incremental execution and cache reuse (`incremental-cache.job.yaml`).
   - HTTP-triggered log streaming showcase with ANSI color and sustained output (`log-streaming.job.yaml`).
   - Multi-document run history samples with success and failure cases (`run-history.job.yaml`).
+  - Task output extraction and downstream environment propagation (`task-outputs.job.yaml`).
   - Callback failure handling (`callback-failure.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
