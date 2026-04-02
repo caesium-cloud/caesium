@@ -486,6 +486,9 @@ func (j *job) Run(ctx context.Context) error {
 		case run.TaskStatusSucceeded, run.TaskStatusCached:
 			processed[taskState.ID] = true
 			taskOutcomes[taskState.ID] = run.TaskStatusSucceeded
+			if len(taskState.Output) > 0 {
+				taskOutputs[taskState.ID] = taskState.Output
+			}
 			terminalTasks++
 		case run.TaskStatusSkipped:
 			processed[taskState.ID] = true
@@ -1224,6 +1227,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			running := 0
 			succeeded := 0
 			skipped := 0
+			cached := 0
 
 			for _, taskState := range snapshot.Tasks {
 				switch taskState.Status {
@@ -1235,10 +1239,12 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 					succeeded++
 				case run.TaskStatusSkipped:
 					skipped++
+				case run.TaskStatusCached:
+					cached++
 				}
 			}
 
-			terminal := failed + succeeded + skipped
+			terminal := failed + succeeded + skipped + cached
 			if terminal == taskCount {
 				if failed > 0 {
 					return fmt.Errorf("run %s completed with %d failed task(s)", runID, failed)

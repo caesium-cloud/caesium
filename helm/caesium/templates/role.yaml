@@ -1,8 +1,10 @@
 {{- if .Values.kubernetes.engine.enabled }}
+{{- $engineNS := default .Release.Namespace .Values.kubernetes.engine.namespace }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "caesium.fullname" . }}-engine
+  namespace: {{ $engineNS }}
   labels:
     {{- include "caesium.labels" . | nindent 4 }}
 rules:
