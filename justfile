@@ -119,7 +119,20 @@ rm:
 	docker rm -f caesium-server
 
 integration-test:
-    just integration-up
+    docker build --platform {{platform}} \
+        --build-arg BUILDER_TAG={{tag}} \
+        --target test \
+        -t {{repo}}/{{image}}:{{tag}}-test \
+        -f {{dockerfile}} .
+    docker rm -f {{it_container}} >/dev/null 2>&1 || true
+    docker run -d --platform {{platform}} \
+        --name {{it_container}} \
+        --privileged \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_LOG_LEVEL=debug \
+        {{repo}}/{{image}}:{{tag}}-test start
     @cli_dir={{repo_dir}}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
     mkdir -p "$cli_dir"; \
@@ -155,7 +168,12 @@ hydrate:
         -v {{repo_dir}}/docs/examples:/examples:ro \
         {{repo}}/{{image}}:{{tag}} job apply --server http://127.0.0.1:8080 --path /examples
 
-integration-up: build-test
+integration-up:
+    docker build --platform {{platform}} \
+        --build-arg BUILDER_TAG={{tag}} \
+        --target test \
+        -t {{repo}}/{{image}}:{{tag}}-test \
+        -f {{dockerfile}} .
     docker rm -f {{it_container}} >/dev/null 2>&1 || true
     docker run -d --platform {{platform}} \
         --name {{it_container}} \
