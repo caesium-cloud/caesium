@@ -80,6 +80,14 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# -- Kubernetes engine configuration (for running job steps as Kubernetes pods)
+kubernetes:
+  engine:
+    # -- Enable the Kubernetes engine; creates a Role and RoleBinding for pod management
+    enabled: false
+    # -- Namespace in which job pods are created (defaults to the release namespace)
+    namespace: ""
+
 # -- Pod-level security context
 podSecurityContext:
   fsGroup: 10001
