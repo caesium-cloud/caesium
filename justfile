@@ -48,7 +48,7 @@ builder-full: validate-platform
 
 build: builder
     docker build --platform {{platform}} \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} .
@@ -60,7 +60,7 @@ build-cross target_platform:
         -t {{builder_ref}}:{{tag}} \
         -f {{dockerfile}}.build --load .
     docker buildx build --platform {{target_platform}} \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} --load .
@@ -72,21 +72,21 @@ build-multiarch:
         -t {{builder_ref}}:{{tag}} \
         -f {{dockerfile}}.build --push .
     docker buildx build --platform linux/amd64,linux/arm64 \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} --push .
 
 build-release: builder
     docker build --platform {{platform}} \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{image_ref}}:{{tag}} \
         -f {{dockerfile}} .
 
 build-test: builder
     docker build --platform {{platform}} \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target test \
         -t {{image_ref}}:{{tag}}-test \
         -f {{dockerfile}} .

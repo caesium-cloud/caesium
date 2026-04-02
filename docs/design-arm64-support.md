@@ -144,7 +144,7 @@ build-cross target_platform:
         -t {{repo}}/{{builder_image}}:{{tag}} \
         -f {{dockerfile}}.build --load .
     docker buildx build --platform {{target_platform}} \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{repo}}/{{image}}:{{tag}} \
         -f {{dockerfile}} --load .
@@ -155,7 +155,7 @@ build-multiarch:
         -t {{repo}}/{{builder_image}}:{{tag}} \
         -f {{dockerfile}}.build --push .
     docker buildx build --platform linux/amd64,linux/arm64 \
-        --build-arg BUILDER_TAG={{tag}} \
+        --build-arg BUILDER_IMAGE={{builder_ref}}:{{tag}} \
         --target release \
         -t {{repo}}/{{image}}:{{tag}} \
         -f {{dockerfile}} --push .
