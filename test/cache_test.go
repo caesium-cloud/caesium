@@ -33,7 +33,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: deterministic
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"val\": \"42\"}'"]
 `, alias)
 
@@ -89,11 +89,11 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: producer
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"color\": \"red\", \"size\": \"large\"}'"]
     next: consumer
   - name: consumer
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo received=$CAESIUM_OUTPUT_PRODUCER_COLOR && echo '##caesium::output {\"received\": \"true\"}'"]
     dependsOn: producer
 `, alias)
@@ -141,10 +141,10 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: cached-step
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo cached"]
   - name: uncached-step
-    image: alpine
+    image: alpine:3.20
     cache: false
     command: ["sh", "-c", "echo always-run"]
 `, alias)
@@ -192,10 +192,10 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: step-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo a"]
   - name: step-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo b"]
 `, alias)
 
@@ -303,7 +303,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: step1
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo hello"]
 `, alias)
 
@@ -357,11 +357,11 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: always-works
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"step\": \"1\"}'"]
     next: might-fail
   - name: might-fail
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "exit 1"]
     dependsOn: always-works
 `, alias)
@@ -418,11 +418,11 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: step-ok
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo ok"]
     next: step-fail
   - name: step-fail
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "exit 1"]
     dependsOn: step-ok
 `, alias)
@@ -475,7 +475,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: slow
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "sleep 30"]
 `, alias)
 
@@ -523,7 +523,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: parameterized
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo param=$CAESIUM_PARAM_ENV"]
 `, alias)
 
@@ -580,15 +580,15 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::branch path-a'"]
     next: [path-a, path-b]
   - name: path-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo selected"]
     dependsOn: [decide]
   - name: path-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo not-selected"]
     dependsOn: [decide]
 `, alias)

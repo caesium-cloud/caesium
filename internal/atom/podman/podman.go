@@ -3,7 +3,7 @@ package podman
 import (
 	"context"
 	"io"
-	"os"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -151,5 +151,5 @@ func (cli *podmanClient) ImagePull(image string, opts *images.PullOptions) (io.R
 		return nil, err
 	}
 
-	return os.Stderr, nil
+	return io.NopCloser(strings.NewReader("")), nil
 }

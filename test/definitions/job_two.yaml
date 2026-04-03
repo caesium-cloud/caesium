@@ -11,13 +11,13 @@ callbacks:
       url: "https://example"
 steps:
   - name: build
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo build"]
     next: test
   - name: test
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo test"]
     next: package
   - name: package
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo package"]

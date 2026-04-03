@@ -299,9 +299,7 @@ jobs:
       - name: Pre-load job images into kind
         run: |
           docker pull alpine:3.20
-          docker pull alpine
           kind load docker-image alpine:3.20
-          kind load docker-image alpine
       - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
@@ -360,9 +358,7 @@ jobs:
           systemctl --user enable --now podman.socket
           podman info
       - name: Pre-pull job images via Podman
-        run: |
-          podman pull alpine:3.20
-          podman pull alpine
+        run: podman pull alpine:3.20
       - name: Start Caesium with Podman engine
         run: |
           PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"

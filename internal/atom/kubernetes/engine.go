@@ -119,7 +119,10 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{
 				{
-					Name:            req.Name,
+					// Each Caesium pod runs exactly one container, so a fixed
+					// name is sufficient. The pod name already carries the
+					// full task/run identity for kubectl and log correlation.
+					Name:            "atom",
 					Image:           req.Image,
 					Command:         req.Command,
 					Env:             envVars,

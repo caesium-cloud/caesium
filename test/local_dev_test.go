@@ -295,7 +295,7 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: hello
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "hello-from-dev"]
 `
 	dir := s.writeJobManifest(manifest)
@@ -319,21 +319,21 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: step-a
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "a"]
     next:
       - step-b
       - step-c
   - name: step-b
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "b"]
     dependsOn: step-a
   - name: step-c
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "c"]
     dependsOn: step-a
   - name: step-d
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "d"]
     dependsOn:
       - step-b
@@ -384,7 +384,7 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: sleeper
-    image: alpine
+    image: alpine:3.20
     command: ["sleep", "300"]
 `
 	dir := s.writeJobManifest(manifest)
@@ -421,16 +421,16 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: extract
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "extracting"]
     next: transform
   - name: transform
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "transforming"]
     dependsOn: extract
     next: load
   - name: load
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "loading"]
     dependsOn: transform
 `
@@ -540,7 +540,7 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: greet
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "hello"]
 `
 	helmChart := `apiVersion: v2

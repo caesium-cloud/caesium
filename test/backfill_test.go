@@ -153,7 +153,7 @@ trigger:
     expression: %q
 steps:
   - name: run
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", %q]
 `, alias, cronExpr, taskCmd)
 }
@@ -416,7 +416,7 @@ trigger:
     path: /webhook/%s
 steps:
   - name: run
-    image: alpine
+    image: alpine:3.20
     command: ["echo", "hi"]
 `, alias, alias)
 

@@ -150,7 +150,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: multi-emit
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"key\": \"first\"}' && echo '##caesium::output {\"key\": \"second\", \"extra\": \"val\"}'"]
 `, time.Now().UnixNano())
 
@@ -190,16 +190,16 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: extract
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"row_count\": \"100\", \"source\": \"db\"}'"]
     next: transform
   - name: transform
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo env_row_count=$CAESIUM_OUTPUT_EXTRACT_ROW_COUNT env_source=$CAESIUM_OUTPUT_EXTRACT_SOURCE && echo '##caesium::output {\"transformed\": \"true\"}'"]
     dependsOn: extract
     next: load
   - name: load
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo upstream_transformed=$CAESIUM_OUTPUT_TRANSFORM_TRANSFORMED upstream_rows=$CAESIUM_OUTPUT_EXTRACT_ROW_COUNT"]
     dependsOn: transform
 `, alias)
@@ -264,15 +264,15 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::branch path-a'"]
     next: [path-a, path-b]
   - name: path-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo 'selected'"]
     dependsOn: [decide]
   - name: path-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo 'not selected'"]
     dependsOn: [decide]
 `, alias)
@@ -312,19 +312,19 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::branch path-a' && echo '##caesium::branch path-c'"]
     next: [path-a, path-b, path-c]
   - name: path-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo a"]
     dependsOn: [decide]
   - name: path-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo b"]
     dependsOn: [decide]
   - name: path-c
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo c"]
     dependsOn: [decide]
 `, alias)
@@ -365,15 +365,15 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo 'no branch markers here'"]
     next: [path-a, path-b]
   - name: path-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo a"]
     dependsOn: [decide]
   - name: path-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo b"]
     dependsOn: [decide]
 `, alias)
@@ -413,21 +413,21 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::branch fast-path'"]
     next: [fast-path, slow-path]
   - name: fast-path
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo fast && echo '##caesium::output {\"route\": \"fast\"}'"]
     dependsOn: [decide]
     next: [join]
   - name: slow-path
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo slow"]
     dependsOn: [decide]
     next: [join]
   - name: join
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo joined via $CAESIUM_OUTPUT_FAST_PATH_ROUTE"]
     dependsOn: [fast-path, slow-path]
     triggerRule: one_success
@@ -469,15 +469,15 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"reason\": \"data-stale\"}' && echo '##caesium::branch refresh'"]
     next: [refresh, skip]
   - name: refresh
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo refreshing because $CAESIUM_OUTPUT_DECIDE_REASON"]
     dependsOn: [decide]
   - name: skip
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo skipping"]
     dependsOn: [decide]
 `, alias)
@@ -525,20 +525,20 @@ trigger:
 steps:
   - name: decide
     type: branch
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::branch path-a'"]
     next: [path-a, path-b]
   - name: path-a
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo a"]
     dependsOn: [decide]
   - name: path-b
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo b"]
     dependsOn: [decide]
     next: [path-b-child]
   - name: path-b-child
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo bc"]
     dependsOn: [path-b]
 `, alias)
@@ -608,7 +608,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: slow-task
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "sleep 120"]
 `
 }
@@ -625,11 +625,11 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: producer
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo '##caesium::output {\"color\": \"blue\", \"count\": \"42\"}' && echo done"]
     next: consumer
   - name: consumer
-    image: alpine
+    image: alpine:3.20
     command: ["sh", "-c", "echo received_color=$CAESIUM_OUTPUT_PRODUCER_COLOR received_count=$CAESIUM_OUTPUT_PRODUCER_COUNT"]
     dependsOn: producer
 `

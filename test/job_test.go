@@ -154,8 +154,8 @@ func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.
 			Configuration: config,
 		},
 		Tasks: []job.TaskRequest{
-			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngine(s.engineType)), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-1"}}},
-			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngine(s.engineType)), Image: "alpine", Command: []string{"/bin/sh", "-c", "echo", alias + "-2"}}},
+			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngine(s.engineType)), Image: "alpine:3.20", Command: []string{"/bin/sh", "-c", "echo", alias + "-1"}}},
+			{Atom: &atom.CreateRequest{Engine: string(models.AtomEngine(s.engineType)), Image: "alpine:3.20", Command: []string{"/bin/sh", "-c", "echo", alias + "-2"}}},
 		},
 	}
 
