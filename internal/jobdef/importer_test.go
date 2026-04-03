@@ -312,15 +312,28 @@ steps:
 	s.Len(tasks, 4)
 
 	imageByTask := make(map[uuid.UUID]string, len(tasks))
+	nameByTask := make(map[uuid.UUID]string, len(tasks))
 	for _, task := range tasks {
 		var atom models.Atom
 		s.Require().NoError(s.db.First(&atom, "id = ?", task.AtomID).Error)
 		imageByTask[task.ID] = atom.Image
+		nameByTask[task.ID] = task.Name
 	}
 
 	var edges []models.TaskEdge
-	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&edges).Error)
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("created_at asc").Find(&edges).Error)
 	s.Len(edges, 4)
+
+	orderedPairs := make([]string, 0, len(edges))
+	for _, edge := range edges {
+		orderedPairs = append(orderedPairs, nameByTask[edge.FromTaskID]+"->"+nameByTask[edge.ToTaskID])
+	}
+	s.Equal([]string{
+		"start->branch-a",
+		"start->branch-b",
+		"branch-a->join",
+		"branch-b->join",
+	}, orderedPairs)
 
 	adj := make(map[string][]string)
 	for _, edge := range edges {

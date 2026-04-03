@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"sort"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -191,6 +193,24 @@ func (s *Store) DB() *gorm.DB {
 	return s.db
 }
 
+func decodeCacheConfig(raw []byte) interface{} {
+	if len(raw) == 0 {
+		return nil
+	}
+
+	var decoded interface{}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return nil
+	}
+	return decoded
+}
+
+func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("hash", hash).Error
+}
+
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
@@ -358,14 +378,31 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		maxAttempts = 1
 	}
 
-	schemaValidation := ""
-	if len(task.OutputSchema) > 0 {
-		var job models.Job
-		if err := s.db.Select("schema_validation").First(&job, "id = ?", task.JobID).Error; err != nil {
+	var job models.Job
+	jobFound := true
+	if err := s.db.Select("schema_validation", "cache_config").First(&job, "id = ?", task.JobID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
+		jobFound = false
+	}
+
+	schemaValidation := ""
+	if jobFound && len(task.OutputSchema) > 0 {
 		schemaValidation = job.SchemaValidation
 	}
+
+	envCache := cache.ConfigFromEnv()
+	jobCacheConfig := interface{}(nil)
+	if jobFound {
+		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
+	}
+	resolvedCache := jobdefschema.ResolveCacheConfig(
+		decodeCacheConfig(task.CacheConfig),
+		jobCacheConfig,
+		envCache.Enabled,
+		envCache.TTL,
+	)
 
 	record := &models.TaskRun{
 		ID:                      uuid.New(),
@@ -380,6 +417,9 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		Attempt:                 1,
 		MaxAttempts:             maxAttempts,
 		OutstandingPredecessors: outstanding,
+		CacheEnabled:            resolvedCache.Enabled,
+		CacheTTL:                resolvedCache.TTL,
+		CacheVersion:            resolvedCache.Version,
 		OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
 		SchemaValidation:        schemaValidation,
 	}
@@ -1901,9 +1941,9 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
-// PredecessorHashes returns cache hashes for predecessor task runs when those
-// predecessors stored cache entries. This keeps distributed cache hashing
-// aligned with local execution, which incorporates predecessor task hashes.
+// PredecessorHashes returns the execution hashes recorded on predecessor task
+// runs that completed successfully in the current run. This keeps distributed
+// cache hashing aligned with local execution, including transitive cache hits.
 func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 	var edges []models.TaskEdge
 	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
@@ -1920,7 +1960,14 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 	}
 
 	var taskRuns []models.TaskRun
-	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+	if err := s.db.
+		Select("hash").
+		Where("job_run_id = ? AND task_id IN ? AND status IN ? AND hash <> ''",
+			runID,
+			predTaskIDs,
+			[]string{string(TaskStatusSucceeded), string(TaskStatusCached)},
+		).
+		Find(&taskRuns).Error; err != nil {
 		log.Warn("failed to find predecessor task runs for hashes", "run_id", runID, "task_id", taskID, "error", err)
 		return nil, nil
 	}
@@ -1928,30 +1975,16 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 		return nil, nil
 	}
 
-	taskRunIDs := make([]uuid.UUID, len(taskRuns))
-	for i, taskRun := range taskRuns {
-		taskRunIDs[i] = taskRun.ID
-	}
-
-	var caches []models.TaskCache
-	if err := s.db.Select("hash", "task_run_id").Where("run_id = ? AND task_run_id IN ?", runID, taskRunIDs).Find(&caches).Error; err != nil {
-		log.Warn("failed to find predecessor cache hashes", "run_id", runID, "task_id", taskID, "error", err)
-		return nil, nil
-	}
-
-	if len(caches) == 0 {
-		return nil, nil
-	}
-
-	hashes := make([]string, 0, len(caches))
-	for _, entry := range caches {
-		if entry.Hash != "" {
-			hashes = append(hashes, entry.Hash)
+	hashes := make([]string, 0, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		if taskRun.Hash != "" {
+			hashes = append(hashes, taskRun.Hash)
 		}
 	}
 	if len(hashes) == 0 {
 		return nil, nil
 	}
+	sort.Strings(hashes)
 	return hashes, nil
 }
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -518,8 +519,25 @@ func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []s
 	edges := make([]*models.TaskEdge, 0, totalEdges)
 	sequenceBase := time.Now().UTC()
 	edgeIdx := 0
+	stepOrder := make(map[string]int, len(steps))
+	for idx, step := range steps {
+		stepOrder[step.Name] = idx
+	}
+	fromNames := make([]string, 0, len(successors))
+	for fromName := range successors {
+		fromNames = append(fromNames, fromName)
+	}
+	sort.Slice(fromNames, func(i, j int) bool {
+		left := stepOrder[fromNames[i]]
+		right := stepOrder[fromNames[j]]
+		if left != right {
+			return left < right
+		}
+		return fromNames[i] < fromNames[j]
+	})
 
-	for fromName, succs := range successors {
+	for _, fromName := range fromNames {
+		succs := successors[fromName]
 		fromTask := taskByName[fromName]
 		if fromTask == nil {
 			return fmt.Errorf("step %s missing task mapping", fromName)

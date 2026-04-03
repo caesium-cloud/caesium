@@ -33,6 +33,10 @@ func (s *Subscriber) SetTransportName(name string) {
 }
 
 func (s *Subscriber) Start(ctx context.Context) error {
+	return s.StartWithReady(ctx, nil)
+}
+
+func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) error {
 	filter := event.Filter{
 		Types: []event.Type{
 			event.TypeRunStarted,
@@ -48,6 +52,9 @@ func (s *Subscriber) Start(ctx context.Context) error {
 	ch, err := s.bus.Subscribe(ctx, filter)
 	if err != nil {
 		return err
+	}
+	if ready != nil {
+		close(ready)
 	}
 
 	for {

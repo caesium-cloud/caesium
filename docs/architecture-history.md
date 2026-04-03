@@ -1,5 +1,7 @@
 # Architecture History
 
+> Status: Historical context only. This file is useful for early design rationale, but it is not the current source of truth for shipped behavior.
+
 This document consolidates early design notes that informed Caesium's direction. Treat it as historical context, not the current source of truth.
 
 For current behavior, use:

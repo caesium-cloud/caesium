@@ -46,10 +46,14 @@ type TaskRun struct {
 	Attempt          int               `gorm:"not null;default:1" json:"attempt"`
 	MaxAttempts      int               `gorm:"not null;default:1" json:"max_attempts"`
 	NodeSelector     datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
+	Hash             string            `gorm:"type:text;index" json:"-"`
 	Result           string            `json:"result,omitempty"`
 	Output           datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
 	CacheHit         bool              `gorm:"not null;default:false" json:"cache_hit"`
+	CacheEnabled     bool              `gorm:"not null;default:false" json:"-"`
+	CacheTTL         time.Duration     `gorm:"not null;default:0" json:"-"`
+	CacheVersion     int               `gorm:"not null;default:0" json:"-"`
 	CacheOriginRunID *uuid.UUID        `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
 	CacheCreatedAt   *time.Time        `json:"cache_created_at,omitempty"`
 	CacheExpiresAt   *time.Time        `gorm:"index" json:"cache_expires_at,omitempty"`

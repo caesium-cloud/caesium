@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/dag"
+	"github.com/caesium-cloud/caesium/internal/harness"
 	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 
 var (
 	testPaths     []string
+	scenarioPaths []string
 	checkImages   bool
 	verboseOutput bool
 )
@@ -22,17 +24,22 @@ var (
 var Cmd = &cobra.Command{
 	Use:   "test",
 	Short: "Dry-run validation of job definitions",
-	Long:  "Validates YAML schemas, analyses the DAG topology, and optionally checks local Docker image availability.",
+	Long:  "Validates YAML schemas, analyses the DAG topology, optionally checks local Docker image availability, and can execute harness scenarios.",
 	RunE:  runTest,
 }
 
 func init() {
 	Cmd.Flags().StringSliceVarP(&testPaths, "path", "p", nil, "Paths to job definition files or directories (default: current directory)")
+	Cmd.Flags().StringSliceVar(&scenarioPaths, "scenario", nil, "Paths to harness scenario files or directories")
 	Cmd.Flags().BoolVar(&checkImages, "check-images", false, "Check local Docker image availability")
 	Cmd.Flags().BoolVarP(&verboseOutput, "verbose", "v", false, "Show detailed DAG analysis")
 }
 
 func runTest(cmd *cobra.Command, _ []string) error {
+	if len(scenarioPaths) > 0 {
+		return runScenarios(cmd)
+	}
+
 	// Don't validate during collection — we validate per-definition below
 	// to report errors individually.
 	defs, err := jobdef.CollectDefinitions(testPaths, false)
@@ -89,6 +96,51 @@ func runTest(cmd *cobra.Command, _ []string) error {
 			default:
 				_, _ = fmt.Fprintf(w, "  MISS  %s  (not found locally)\n", r.Image)
 			}
+		}
+	}
+
+	if !allOK {
+		return fmt.Errorf("one or more checks failed")
+	}
+	return nil
+}
+
+func runScenarios(cmd *cobra.Command) error {
+	scenarios, err := harness.CollectScenarios(scenarioPaths)
+	if err != nil {
+		return err
+	}
+	if len(scenarios) == 0 {
+		_, err := fmt.Fprintln(cmd.OutOrStdout(), "No harness scenarios found.")
+		return err
+	}
+
+	w := cmd.OutOrStdout()
+	allOK := true
+
+	for _, scenario := range scenarios {
+		result, err := harness.Execute(cmd.Context(), scenario)
+		if err != nil {
+			_, _ = fmt.Fprintf(w, "  FAIL  %s: %v\n", scenario.Scenario.Name, err)
+			allOK = false
+			continue
+		}
+
+		if result.Passed() {
+			_, _ = fmt.Fprintf(w, "  PASS  %s\n", scenario.Scenario.Name)
+			if verboseOutput {
+				_, _ = fmt.Fprintf(w, "         Run: %s (%s)\n", result.Run.Alias, result.Run.Status)
+				for _, task := range result.Run.Tasks {
+					_, _ = fmt.Fprintf(w, "         - %s: %s\n", task.Name, task.Status)
+				}
+			}
+			continue
+		}
+
+		allOK = false
+		_, _ = fmt.Fprintf(w, "  FAIL  %s\n", scenario.Scenario.Name)
+		for _, failure := range result.Failures {
+			_, _ = fmt.Fprintf(w, "         - %s\n", failure)
 		}
 	}
 

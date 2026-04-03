@@ -203,6 +203,76 @@ caesium dev --path job.yaml             # Watch mode — re-run on file save
 caesium job diff --path jobs/           # Preview creates/updates/deletes vs server
 caesium job apply --path jobs/          # Deploy definitions to running server
 caesium test --path jobs/               # Full validation suite
+caesium test --scenario harness/        # Execute harness scenarios against the local runtime
+```
+
+---
+
+## Harness Scenarios
+
+Use harness scenarios when you want executable assertions instead of schema-only validation. Scenario files should use a `.scenario.yaml` suffix and the `Harness` kind.
+
+```yaml
+apiVersion: v1
+kind: Harness
+scenarios:
+  - name: nightly-etl-smoke
+    path: ./nightly-etl.job.yaml
+    expect:
+      runStatus: succeeded
+      tasks:
+        - name: extract
+          status: succeeded
+          logContains:
+            - extracting
+        - name: load
+          status: succeeded
+```
+
+Supported assertions:
+
+- `expect.runStatus`: expected final run status (`succeeded`, `failed`, etc.)
+- `expect.errorContains`: substring match against the run error
+- `expect.tasks[].status`: expected task status
+- `expect.tasks[].output`: expected output key/value subset
+- `expect.tasks[].logContains`: required log substrings
+- `expect.tasks[].schemaViolationCount`: exact number of runtime schema violations
+- `expect.tasks[].cacheHit`: expected cache-hit boolean
+- `expect.tasks[].errorContains`: substring match against the task error
+- `expect.metrics[]`: Prometheus assertions with exact `value` or `delta`
+- `expect.metrics[].labels`: metric labels, including `$job_id`, `$job_alias`, and `$task_id:<task-name>` placeholders
+- `expect.lineage.totalEvents`: exact emitted OpenLineage event count
+- `expect.lineage.eventTypes`: exact OpenLineage event-type counts (`START`, `COMPLETE`, `FAIL`, `ABORT`)
+- `expect.lineage.jobNames`: required OpenLineage job names present in the emitted stream
+
+Example with observability assertions:
+
+```yaml
+apiVersion: v1
+kind: Harness
+scenarios:
+  - name: nightly-etl-observability
+    path: ./nightly-etl.job.yaml
+    expect:
+      runStatus: succeeded
+      metrics:
+        - name: caesium_job_runs_total
+          labels:
+            job_id: $job_id
+            status: succeeded
+          value: 1
+        - name: caesium_lineage_events_emitted_total
+          labels:
+            event_type: COMPLETE
+            status: success
+          delta: 4
+      lineage:
+        totalEvents: 8
+        eventTypes:
+          START: 4
+          COMPLETE: 4
+        jobNames:
+          - nightly-etl
 ```
 
 ---

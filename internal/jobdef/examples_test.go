@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"testing"
 
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -22,39 +23,50 @@ func TestExamplesSuite(t *testing.T) {
 }
 
 func (s *ExamplesSuite) TestExampleManifestsConformToSchema() {
-	testCases := map[string][]string{
-		"minimal.job.yaml":          {"nightly-etl"},
-		"callbacks.job.yaml":        {"csv-to-parquet"},
-		"explicit-links.job.yaml":   {"explicit-links"},
-		"fanout-join.job.yaml":      {"fanout-join-demo"},
-		"http-ops-debug.job.yaml":   {"http-ops-debug"},
-		"log-streaming.job.yaml":    {"log-streaming-demo"},
-		"callback-failure.job.yaml": {"callback-failure-demo"},
-		"run-history.job.yaml":      {"cron-success-fast", "cron-failure-fast"},
-	}
-
 	root := filepath.Join("..", "..", "docs", "examples")
+	entries, err := os.ReadDir(root)
+	s.Require().NoError(err)
 
-	for file, aliases := range testCases {
+	var files []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if filepath.Ext(entry.Name()) != ".yaml" && filepath.Ext(entry.Name()) != ".yml" {
+			continue
+		}
+		files = append(files, entry.Name())
+	}
+	sort.Strings(files)
+	s.Require().NotEmpty(files, "expected at least one example manifest")
+
+	seenAliases := make(map[string]string)
+	for _, file := range files {
 		path := filepath.Join(root, file)
 		data, err := os.ReadFile(path)
 		s.Require().NoErrorf(err, "read example %s", file)
 
 		dec := yaml.NewDecoder(bytes.NewReader(data))
-		idx := 0
+		docCount := 0
 		for {
 			var def schema.Definition
 			err := dec.Decode(&def)
 			if errors.Is(err, io.EOF) {
 				break
 			}
-			s.Require().NoErrorf(err, "decode %s doc %d", file, idx)
-			s.Require().Less(idx, len(aliases), "unexpected extra document in %s", file)
-			s.Require().NoErrorf(def.Validate(), "validate %s doc %d", file, idx)
+			s.Require().NoErrorf(err, "decode %s doc %d", file, docCount)
+			if def.APIVersion == "" && def.Kind == "" && def.Metadata.Alias == "" && len(def.Steps) == 0 {
+				continue
+			}
+			s.Require().NoErrorf(def.Validate(), "validate %s doc %d", file, docCount)
+			s.NotEmptyf(def.Metadata.Alias, "alias required in %s doc %d", file, docCount)
 
-			s.Equalf(aliases[idx], def.Metadata.Alias, "alias mismatch in %s doc %d", file, idx)
-			idx++
+			if previous, ok := seenAliases[def.Metadata.Alias]; ok {
+				s.Failf("duplicate example alias", "alias %q is used in both %s and %s", def.Metadata.Alias, previous, file)
+			}
+			seenAliases[def.Metadata.Alias] = file
+			docCount++
 		}
-		s.Equalf(len(aliases), idx, "expected %d docs in %s", len(aliases), file)
+		s.Greaterf(docCount, 0, "expected at least one definition in %s", file)
 	}
 }

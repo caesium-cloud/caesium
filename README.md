@@ -31,6 +31,14 @@ caesium test --path jobs/ --verbose
 
 Use `--check-images` to verify local image availability.
 
+### Run executable harness scenarios
+
+```bash
+caesium test --scenario ./harness
+```
+
+Harness scenario files use the `Harness` kind and let you assert run status, task status, output fragments, schema-violation counts, cache hits, log content, Prometheus metric values, and emitted OpenLineage events against a real local execution.
+
 ### Visualize a DAG
 
 ```bash
@@ -75,6 +83,7 @@ steps:
 
 ```bash
 caesium test --path jobs/ --verbose
+caesium test --scenario ./harness
 caesium job preview --path jobs/nightly-etl.job.yaml
 caesium job lint --path jobs/
 ```

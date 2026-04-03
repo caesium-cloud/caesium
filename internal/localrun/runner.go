@@ -15,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -25,12 +26,36 @@ type Config struct {
 	TaskTimeout time.Duration
 	RunTimeout  time.Duration
 	Env         map[string]string // extra env vars injected into every task
+	OnPrepared  func(store *run.Store, db *gorm.DB, jobModel *models.Job) error
 }
 
 // Runner executes a job definition against an ephemeral in-memory database
 // and the local container runtime.
 type Runner struct {
 	cfg Config
+}
+
+// RunResult captures the persisted outcome of a local run for harness assertions.
+type RunResult struct {
+	RunID  uuid.UUID
+	JobID  uuid.UUID
+	Alias  string
+	Status string
+	Error  string
+	Tasks  []TaskResult
+}
+
+// TaskResult captures the persisted outcome of one task execution.
+type TaskResult struct {
+	TaskID           uuid.UUID
+	Name             string
+	Status           string
+	Output           map[string]string
+	SchemaViolations []pkgtask.SchemaViolation
+	LogText          string
+	LogTruncated     bool
+	CacheHit         bool
+	Error            string
 }
 
 // New creates a Runner with the given configuration.
@@ -40,23 +65,34 @@ func New(cfg Config) *Runner {
 
 // Run parses, imports, and executes the definition.
 func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
+	_, err := r.RunWithResult(ctx, def)
+	return err
+}
+
+// RunWithResult parses, imports, executes, and returns the persisted run result.
+func (r *Runner) RunWithResult(ctx context.Context, def *schema.Definition) (*RunResult, error) {
 	if err := def.Validate(); err != nil {
-		return fmt.Errorf("validation: %w", err)
+		return nil, fmt.Errorf("validation: %w", err)
 	}
 
 	db, cleanup, err := OpenEphemeralDB()
 	if err != nil {
-		return fmt.Errorf("ephemeral database: %w", err)
+		return nil, fmt.Errorf("ephemeral database: %w", err)
 	}
 	defer cleanup()
 
 	importer := jobdef.NewImporter(db)
 	jobModel, err := importer.Apply(ctx, def)
 	if err != nil {
-		return fmt.Errorf("import: %w", err)
+		return nil, fmt.Errorf("import: %w", err)
 	}
 
 	store := run.NewStore(db)
+	if r.cfg.OnPrepared != nil {
+		if err := r.cfg.OnPrepared(store, db, jobModel); err != nil {
+			return nil, fmt.Errorf("prepare run: %w", err)
+		}
+	}
 
 	envCopy := env.Variables()
 	envCopy.ExecutionMode = "local"
@@ -91,7 +127,17 @@ func (r *Runner) Run(ctx context.Context, def *schema.Definition) error {
 	}
 
 	j := job.New(jobModel, opts...)
-	return j.Run(ctx)
+	runErr := j.Run(ctx)
+
+	result, resultErr := collectRunResult(store, db, jobModel)
+	if resultErr != nil {
+		if runErr != nil {
+			return nil, fmt.Errorf("%w (result collection failed: %v)", runErr, resultErr)
+		}
+		return nil, resultErr
+	}
+
+	return result, runErr
 }
 
 // dbTaskService returns a factory that produces task services backed by the given DB.
@@ -150,4 +196,64 @@ func OpenEphemeralDB() (*gorm.DB, func(), error) {
 		}
 	}
 	return db, cleanup, nil
+}
+
+func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*RunResult, error) {
+	runRecord, err := store.Latest(jobModel.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load latest run: %w", err)
+	}
+
+	var taskModels []models.Task
+	if err := db.Where("job_id = ?", jobModel.ID).Order("position asc").Find(&taskModels).Error; err != nil {
+		return nil, fmt.Errorf("load task models: %w", err)
+	}
+
+	taskByID := make(map[uuid.UUID]*run.TaskRun, len(runRecord.Tasks))
+	for _, task := range runRecord.Tasks {
+		taskByID[task.TaskID] = task
+	}
+
+	result := &RunResult{
+		RunID:  runRecord.ID,
+		JobID:  jobModel.ID,
+		Alias:  jobModel.Alias,
+		Status: string(runRecord.Status),
+		Error:  runRecord.Error,
+		Tasks:  make([]TaskResult, 0, len(taskModels)),
+	}
+
+	for _, taskModel := range taskModels {
+		taskRun, ok := taskByID[taskModel.ID]
+		if !ok {
+			result.Tasks = append(result.Tasks, TaskResult{
+				Name:   taskModel.Name,
+				Status: string(run.TaskStatusPending),
+			})
+			continue
+		}
+
+		taskResult := TaskResult{
+			TaskID:           taskModel.ID,
+			Name:             taskModel.Name,
+			Status:           string(taskRun.Status),
+			Output:           taskRun.Output,
+			SchemaViolations: taskRun.SchemaViolations,
+			CacheHit:         taskRun.CacheHit,
+			Error:            taskRun.Error,
+		}
+
+		snapshot, err := store.GetTaskLogSnapshot(runRecord.ID, taskModel.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load task log snapshot for %s: %w", taskModel.Name, err)
+		}
+		if snapshot != nil {
+			taskResult.LogText = snapshot.Text
+			taskResult.LogTruncated = snapshot.Truncated
+		}
+
+		result.Tasks = append(result.Tasks, taskResult)
+	}
+
+	return result, nil
 }

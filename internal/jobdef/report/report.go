@@ -78,7 +78,8 @@ func Markdown() string {
 	b.WriteString("| `maxParallelTasks` | integer | optional | Caps concurrent runnable steps for a single job run. |\n")
 	b.WriteString("| `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |\n")
 	b.WriteString("| `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |\n")
-	b.WriteString("| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |\n\n")
+	b.WriteString("| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |\n")
+	b.WriteString("| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true` or `{ttl: \"24h\"}`. |\n\n")
 
 	b.WriteString("## Trigger\n\n")
 	b.WriteString("Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.\n\n")
@@ -120,7 +121,14 @@ func Markdown() string {
 	b.WriteString("| `retryBackoff` | boolean | optional | Doubles `retryDelay` for each retry attempt when enabled. |\n")
 	b.WriteString("| `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |\n")
 	b.WriteString("| `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |\n")
-	b.WriteString("| `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |\n\n")
+	b.WriteString("| `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |\n")
+	b.WriteString("| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: \"12h\"}`, or `{ttl: \"12h\", version: 2}`. |\n\n")
+
+	b.WriteString("### Cache\n\n")
+	b.WriteString("| Field | Type | Required | Notes |\n")
+	b.WriteString("|-------|------|----------|-------|\n")
+	b.WriteString("| `ttl` | duration string | optional | Cache entry lifetime (e.g. \"24h\", \"7d\"). Defaults to CAESIUM_CACHE_TTL. |\n")
+	b.WriteString("| `version` | integer | optional | Bump to invalidate existing cache entries without changing task definition. |\n\n")
 
 	b.WriteString("## Secret References\n\n")
 	b.WriteString("Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.\n")
