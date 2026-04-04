@@ -1,8 +1,30 @@
 # Brainstorm: Killer Features Beyond Airflow Parity
 
-> Status: Idea backlog only. This file captures product exploration and is not a commitment that the listed capabilities exist in the current build.
+> Status: Idea backlog. Many of these ideas have graduated to the [roadmap](roadmap.md) with dedicated design documents. This file is preserved as the original brainstorm context.
 
 These are feature ideas that go beyond matching Airflow and position Caesium as a genuinely better product. Each section captures the idea, the user pain it addresses, and rough scope. The **smart incremental execution** idea has its own dedicated design doc (`design-incremental-execution.md`).
+
+### Graduated to Roadmap
+
+The following ideas now have dedicated design docs and appear on the [roadmap](roadmap.md):
+
+| Idea | Design Doc | Roadmap Phase |
+|------|-----------|---------------|
+| Data Contracts / Schema Validation (§2) | — (shipped) | Completed |
+| Local Development Experience (§4) | — (shipped) | Completed |
+| Live DAG Debugging / Run Diff (§1) | [roadmap §3.4](roadmap.md) | Phase 3 |
+| Cost Tracking & Resource Awareness (§3) | [roadmap §2.4](roadmap.md) | Phase 2 |
+| Self-Serve Triggers (§5) | [roadmap §3.3](roadmap.md) | Phase 3 |
+| Intelligent Scheduling & SLA Management (§6) | [design-sla-management.md](design-sla-management.md) | Phase 2 |
+| GitOps PR Previews (§7) | [roadmap §2.1](roadmap.md) | Phase 2 |
+| Composable Task Templates (§8) | [design-task-templates.md](design-task-templates.md) | Phase 2 |
+| Multi-Tenancy (§9) | [roadmap §3.1](roadmap.md) | Phase 3 |
+
+Additional features not in this original brainstorm but now on the roadmap:
+
+- [Event-driven triggers & webhook ingestion](design-event-triggers.md) — Phase 1
+- [Concurrency strategies & priority queues](design-concurrency-priority.md) — Phase 1
+- [Approval gates](roadmap.md) — Phase 3
 
 ---
 
@@ -228,10 +250,12 @@ steps:
 
 ## Priority Recommendations
 
-| Priority | Feature | Rationale |
-|----------|---------|-----------|
-| **1** | Smart incremental execution | Immediately tangible, saves real time/money, unique in the space. See `design-incremental-execution.md`. |
-| **2** | Local dev experience (#4) | Biggest pain point for Airflow users, low effort given existing multi-runtime support |
-| **3** | Data contracts (#2) | Builds directly on WS8 work, addresses a gap in every scheduler |
-| **4** | Live DAG debugging (#1) | Leverages existing UI investment, high wow factor |
-| **5** | Self-serve triggers (#5) | Opens Caesium to non-engineer users, expands the addressable market |
+> Updated: See [roadmap.md](roadmap.md) for the current prioritized feature plan.
+
+| Priority | Feature | Status |
+|----------|---------|--------|
+| **1** | Smart incremental execution | **Shipped.** See `design-incremental-execution.md`. |
+| **2** | Local dev experience (#4) | **Shipped.** `caesium dev` and `caesium test` are implemented. |
+| **3** | Data contracts (#2) | **Shipped.** Output/input schema validation is implemented. |
+| **4** | Live DAG debugging (#1) | Planned — see [roadmap §3.4](roadmap.md) |
+| **5** | Self-serve triggers (#5) | Planned — see [roadmap §3.3](roadmap.md) |
