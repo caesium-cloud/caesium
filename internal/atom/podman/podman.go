@@ -68,12 +68,14 @@ func (cli *podmanClient) ContainerStart(id string) error {
 	return containers.Start(cli.ctx, id, nil)
 }
 
-func (cli *podmanClient) ContainerWait(id string, ctx context.Context) error {
-	waitCtx := cli.ctx
-	if ctx != nil {
-		waitCtx = ctx
-	}
-	_, err := containers.Wait(waitCtx, id, nil)
+func (cli *podmanClient) ContainerWait(id string, _ context.Context) error {
+	// Always use cli.ctx (the Podman connection context) rather than the
+	// caller-supplied context. cli.ctx was derived from the task context via
+	// bindings.NewConnection, so it already carries the Podman HTTP client AND
+	// is cancelled when the task context is cancelled/times out. Replacing it
+	// with the raw task context loses the embedded client and causes every
+	// containers.Wait call to return "Client not set in context".
+	_, err := containers.Wait(cli.ctx, id, nil)
 	return err
 }
 
