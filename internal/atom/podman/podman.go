@@ -97,17 +97,11 @@ func (cli *podmanClient) ContainerRemove(id string, force *bool, removeVolumes *
 
 func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (io.ReadCloser, error) {
 	pr, pw := io.Pipe()
-	// Channels must be non-nil: a nil channel in a select case is permanently
-	// disabled, so the goroutine below would block forever and nothing would
-	// ever write to pw, causing CaptureMarkers to hang. Unbuffered is fine
-	// since containers.Logs writes asynchronously via its own goroutines.
 	stdoutCh := make(chan string)
 	stderrCh := make(chan string)
 
-	if err := containers.Logs(cli.ctx, id, &opts, stdoutCh, stderrCh); err != nil {
-		return nil, err
-	}
-
+	// Goroutine 1: drain log lines from both channels into the pipe.
+	// Runs until both channels are closed (signalled by goroutine 2).
 	go func() {
 		defer func() { _ = pw.Close() }()
 		for stdoutCh != nil || stderrCh != nil {
@@ -131,6 +125,18 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 					return
 				}
 			}
+		}
+	}()
+
+	// Goroutine 2: containers.Logs is synchronous — it blocks in a read loop
+	// until the log stream reaches EOF, sending lines directly to the channels.
+	// It must run in a goroutine so ContainerLogs can return immediately.
+	// Closing the channels on exit signals goroutine 1 to finish and close pw.
+	go func() {
+		defer close(stdoutCh)
+		defer close(stderrCh)
+		if err := containers.Logs(cli.ctx, id, &opts, stdoutCh, stderrCh); err != nil {
+			pw.CloseWithError(err)
 		}
 	}()
 
