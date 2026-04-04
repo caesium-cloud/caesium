@@ -88,6 +88,13 @@ func TestPinnedContainerImageVersionsAreConsistent(t *testing.T) {
 				return nil
 			}
 
+			// Skip this file itself — it defines the canonical tag map and the
+			// imageRef regex, both of which contain bare image names that would
+			// otherwise trigger false-positive violations.
+			if rel, _ := filepath.Rel(root, path); filepath.ToSlash(rel) == "internal/guardrails/guardrails_test.go" {
+				return nil
+			}
+
 			ext := strings.ToLower(filepath.Ext(path))
 			switch ext {
 			case ".go", ".yaml", ".yml", ".md", ".tsx", ".ts", ".dockerfile":

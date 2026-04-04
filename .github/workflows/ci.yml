@@ -316,11 +316,19 @@ jobs:
             fi
             sleep 1
           done
+      - name: Extract caesium CLI
+        run: |
+          mkdir -p .tmp/caesium-cli
+          ctr=$(docker create caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64)
+          docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
+          docker rm -f "$ctr"
+          chmod +x .tmp/caesium-cli/caesium
       - name: Integration tests (Kubernetes)
         run: |
           docker run --rm \
             -v $(pwd):/bld/caesium \
             -e CAESIUM_TEST_ENGINE=kubernetes \
+            -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=host \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
@@ -369,11 +377,19 @@ jobs:
             -e CAESIUM_LOG_LEVEL=debug \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
+      - name: Extract caesium CLI
+        run: |
+          mkdir -p .tmp/caesium-cli
+          ctr=$(docker create caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64)
+          docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
+          docker rm -f "$ctr"
+          chmod +x .tmp/caesium-cli/caesium
       - name: Integration tests (Podman)
         run: |
           docker run --rm \
             -v $(pwd):/bld/caesium \
             -e CAESIUM_TEST_ENGINE=podman \
+            -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
             --network=host \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
