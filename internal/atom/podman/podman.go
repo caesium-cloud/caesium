@@ -102,8 +102,10 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 
 	// Goroutine 1: drain log lines from both channels into the pipe.
 	// Runs until both channels are closed (signalled by goroutine 2).
+	// On write error, keeps draining to avoid blocking goroutine 2.
 	go func() {
 		defer func() { _ = pw.Close() }()
+		var writeErr bool
 		for stdoutCh != nil || stderrCh != nil {
 			select {
 			case line, ok := <-stdoutCh:
@@ -111,18 +113,22 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 					stdoutCh = nil
 					continue
 				}
-				if _, err := pw.Write([]byte(line + "\n")); err != nil {
-					pw.CloseWithError(err)
-					return
+				if !writeErr {
+					if _, err := pw.Write([]byte(line + "\n")); err != nil {
+						pw.CloseWithError(err)
+						writeErr = true
+					}
 				}
 			case line, ok := <-stderrCh:
 				if !ok {
 					stderrCh = nil
 					continue
 				}
-				if _, err := pw.Write([]byte(line + "\n")); err != nil {
-					pw.CloseWithError(err)
-					return
+				if !writeErr {
+					if _, err := pw.Write([]byte(line + "\n")); err != nil {
+						pw.CloseWithError(err)
+						writeErr = true
+					}
 				}
 			}
 		}
