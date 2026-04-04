@@ -109,7 +109,7 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 	}
 
 	go func() {
-		defer pw.Close()
+		defer func() { _ = pw.Close() }()
 		for stdoutCh != nil || stderrCh != nil {
 			select {
 			case line, ok := <-stdoutCh:
