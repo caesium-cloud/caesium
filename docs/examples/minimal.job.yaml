@@ -10,11 +10,11 @@ trigger:
     timezone: "UTC"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo extracting data"]
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo transforming data"]
   - name: load
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo loading data"]

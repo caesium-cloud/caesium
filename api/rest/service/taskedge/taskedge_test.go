@@ -65,7 +65,7 @@ func (s *TaskEdgeSuite) createAtom() uuid.UUID {
 	s.Require().NoError(s.db.Create(&models.Atom{
 		ID:      id,
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine:latest",
+		Image:   "alpine:3.23",
 		Command: `["echo","hello"]`,
 	}).Error)
 	return id

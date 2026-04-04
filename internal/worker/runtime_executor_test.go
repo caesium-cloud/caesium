@@ -103,7 +103,7 @@ func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models
 	atom := &models.Atom{
 		ID:        uuid.New(),
 		Engine:    models.AtomEngineDocker,
-		Image:     "alpine",
+		Image:     "alpine:3.23",
 		Command:   `["echo","test"]`,
 		CreatedAt: now,
 		UpdatedAt: now,

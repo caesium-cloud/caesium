@@ -114,6 +114,16 @@ spec:
             - name: CAESIUM_DATABASE_DSN
               value: {{ .Values.config.databaseDSN | quote }}
             {{- end }}
+            {{- if .Values.kubernetes.engine.enabled }}
+            - name: CAESIUM_KUBERNETES_NAMESPACE
+              {{- if .Values.kubernetes.engine.namespace }}
+              value: {{ .Values.kubernetes.engine.namespace | quote }}
+              {{- else }}
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+              {{- end }}
+            {{- end }}
             {{- with .Values.config.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

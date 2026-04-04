@@ -18,6 +18,7 @@ import (
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
@@ -42,7 +43,11 @@ var getKubernetesCore = func(k8sCfg string) corev1.CoreV1Interface {
 
 	config, err := clientcmd.BuildConfigFromFlags("", k8sCfg)
 	if err != nil {
-		panic(err)
+		// Fall back to in-cluster config when running inside a Kubernetes pod.
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			panic(err)
+		}
 	}
 
 	cli, err := kubernetes.NewForConfig(config)
@@ -114,13 +119,16 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		Spec: v1.PodSpec{
 			Containers: []v1.Container{
 				{
-					Name:            req.Name,
+					// Each Caesium pod runs exactly one container, so a fixed
+					// name is sufficient. The pod name already carries the
+					// full task/run identity for kubectl and log correlation.
+					Name:            "atom",
 					Image:           req.Image,
 					Command:         req.Command,
 					Env:             envVars,
 					WorkingDir:      req.Spec.WorkDir,
 					VolumeMounts:    volumeMounts,
-					ImagePullPolicy: v1.PullAlways,
+					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			},
 			Volumes:       volumes,

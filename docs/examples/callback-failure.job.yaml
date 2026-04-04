@@ -18,8 +18,8 @@ callbacks:
       user_agent: "caesium-hydrate-demo"
 steps:
   - name: prepare
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo preparing callback payload"]
   - name: complete
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo callback will run after this step"]

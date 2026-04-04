@@ -62,7 +62,7 @@ func (s *AtomSuite) TestListEmpty() {
 }
 
 func (s *AtomSuite) TestListWithEngineFilter() {
-	s.createAtom("docker", "alpine:latest", []string{"echo", "hello"})
+	s.createAtom("docker", "alpine:3.23", []string{"echo", "hello"})
 	s.createAtom("kubernetes", "nginx:latest", []string{"nginx"})
 
 	atoms, err := s.svc().List(&ListRequest{Engine: "docker"})
@@ -73,7 +73,7 @@ func (s *AtomSuite) TestListWithEngineFilter() {
 
 func (s *AtomSuite) TestListWithPagination() {
 	for i := 0; i < 5; i++ {
-		s.createAtom("docker", "alpine:latest", []string{"echo"})
+		s.createAtom("docker", "alpine:3.23", []string{"echo"})
 	}
 
 	atoms, err := s.svc().List(&ListRequest{Limit: 2, Offset: 1})
@@ -84,13 +84,13 @@ func (s *AtomSuite) TestListWithPagination() {
 // --- Get ---
 
 func (s *AtomSuite) TestGetFound() {
-	created := s.createAtom("docker", "alpine:latest", []string{"echo", "hi"})
+	created := s.createAtom("docker", "alpine:3.23", []string{"echo", "hi"})
 
 	atom, err := s.svc().Get(created.ID)
 	s.Require().NoError(err)
 	s.Equal(created.ID, atom.ID)
 	s.Equal(models.AtomEngine("docker"), atom.Engine)
-	s.Equal("alpine:latest", atom.Image)
+	s.Equal("alpine:3.23", atom.Image)
 }
 
 func (s *AtomSuite) TestGetNotFound() {
@@ -103,19 +103,19 @@ func (s *AtomSuite) TestGetNotFound() {
 func (s *AtomSuite) TestCreateBasic() {
 	atom, err := s.svc().Create(&CreateRequest{
 		Engine:  "docker",
-		Image:   "alpine:latest",
+		Image:   "alpine:3.23",
 		Command: []string{"echo", "hello"},
 	})
 	s.Require().NoError(err)
 	s.NotEqual(uuid.Nil, atom.ID)
 	s.Equal(models.AtomEngine("docker"), atom.Engine)
-	s.Equal("alpine:latest", atom.Image)
+	s.Equal("alpine:3.23", atom.Image)
 }
 
 func (s *AtomSuite) TestCreateWithSpec() {
 	atom, err := s.svc().Create(&CreateRequest{
 		Engine:  "docker",
-		Image:   "alpine:latest",
+		Image:   "alpine:3.23",
 		Command: []string{"echo"},
 		Spec: container.Spec{
 			Env:     map[string]string{"FOO": "bar"},
@@ -136,7 +136,7 @@ func (s *AtomSuite) TestCreateWithSpec() {
 // --- Delete ---
 
 func (s *AtomSuite) TestDelete() {
-	atom := s.createAtom("docker", "alpine:latest", []string{"echo"})
+	atom := s.createAtom("docker", "alpine:3.23", []string{"echo"})
 
 	err := s.svc().Delete(atom.ID)
 	s.Require().NoError(err)

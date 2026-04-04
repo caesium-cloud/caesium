@@ -21,7 +21,7 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: step-one
-    image: alpine
+    image: alpine:3.23
     command: ["echo", "hello"]
 `)
 	defs, err := CollectDefinitions([]string{dir}, false)
@@ -49,7 +49,7 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: greet
-    image: alpine
+    image: alpine:3.23
     command: ["echo", "hi"]
 `)
 	defs, err := CollectDefinitions([]string{dir}, false)
@@ -66,7 +66,7 @@ metadata:
   alias: broken-job
 steps:
   - name: bad
-    image: alpine
+    image: alpine:3.23
     command: [unclosed bracket
 `)
 	_, err := CollectDefinitions([]string{dir}, false)

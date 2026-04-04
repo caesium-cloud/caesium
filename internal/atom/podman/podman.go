@@ -3,11 +3,10 @@ package podman
 import (
 	"context"
 	"io"
-	"os"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
@@ -68,12 +67,14 @@ func (cli *podmanClient) ContainerStart(id string) error {
 	return containers.Start(cli.ctx, id, nil)
 }
 
-func (cli *podmanClient) ContainerWait(id string, ctx context.Context) error {
-	waitCtx := cli.ctx
-	if ctx != nil {
-		waitCtx = ctx
-	}
-	_, err := containers.Wait(waitCtx, id, nil)
+func (cli *podmanClient) ContainerWait(id string, _ context.Context) error {
+	// Always use cli.ctx (the Podman connection context) rather than the
+	// caller-supplied context. cli.ctx was derived from the task context via
+	// bindings.NewConnection, so it already carries the Podman HTTP client AND
+	// is cancelled when the task context is cancelled/times out. Replacing it
+	// with the raw task context loses the embedded client and causes every
+	// containers.Wait call to return "Client not set in context".
+	_, err := containers.Wait(cli.ctx, id, nil)
 	return err
 }
 
@@ -95,51 +96,53 @@ func (cli *podmanClient) ContainerRemove(id string, force *bool, removeVolumes *
 }
 
 func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (io.ReadCloser, error) {
-	var (
-		pr, pw = io.Pipe()
-		stdout chan (string)
-		stderr chan (string)
-	)
+	pr, pw := io.Pipe()
+	stdoutCh := make(chan string)
+	stderrCh := make(chan string)
 
-	err := containers.Logs(
-		cli.ctx,
-		id,
-		&containers.LogOptions{},
-		stdout,
-		stderr,
-	)
-
-	if err != nil {
-		return nil, err
-	}
-
+	// Goroutine 1: drain log lines from both channels into the pipe.
+	// Runs until both channels are closed (signalled by goroutine 2).
+	// On write error, keeps draining to avoid blocking goroutine 2.
 	go func() {
-		for {
+		defer func() { _ = pw.Close() }()
+		var writeErr bool
+		for stdoutCh != nil || stderrCh != nil {
 			select {
-			case line, ok := <-stdout:
-				if _, err := pw.Write([]byte(line)); err != nil {
-					pw.CloseWithError(err)
-					return
-				}
+			case line, ok := <-stdoutCh:
 				if !ok {
-					stdout = nil
+					stdoutCh = nil
+					continue
 				}
-			case line, ok := <-stderr:
-				if _, err := pw.Write([]byte(line)); err != nil {
-					pw.CloseWithError(err)
-					return
+				if !writeErr {
+					if _, err := pw.Write([]byte(line + "\n")); err != nil {
+						pw.CloseWithError(err)
+						writeErr = true
+					}
 				}
+			case line, ok := <-stderrCh:
 				if !ok {
-					stderr = nil
+					stderrCh = nil
+					continue
+				}
+				if !writeErr {
+					if _, err := pw.Write([]byte(line + "\n")); err != nil {
+						pw.CloseWithError(err)
+						writeErr = true
+					}
 				}
 			}
+		}
+	}()
 
-			if stdout == nil && stderr == nil {
-				if err := pw.Close(); err != nil {
-					log.Error("close podman pipe", "error", err)
-				}
-				return
-			}
+	// Goroutine 2: containers.Logs is synchronous — it blocks in a read loop
+	// until the log stream reaches EOF, sending lines directly to the channels.
+	// It must run in a goroutine so ContainerLogs can return immediately.
+	// Closing the channels on exit signals goroutine 1 to finish and close pw.
+	go func() {
+		defer close(stdoutCh)
+		defer close(stderrCh)
+		if err := containers.Logs(cli.ctx, id, &opts, stdoutCh, stderrCh); err != nil {
+			pw.CloseWithError(err)
 		}
 	}()
 
@@ -151,5 +154,5 @@ func (cli *podmanClient) ImagePull(image string, opts *images.PullOptions) (io.R
 		return nil, err
 	}
 
-	return os.Stderr, nil
+	return io.NopCloser(strings.NewReader("")), nil
 }

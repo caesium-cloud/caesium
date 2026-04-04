@@ -29,13 +29,13 @@ func TestStorePersistsRunState(t *testing.T) {
 	atomA := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	atomB := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","b"]`,
 	}
 	require.NoError(t, db.Create(atomA).Error)
@@ -126,19 +126,19 @@ func TestCompleteTaskSkipsFallbackWhenJobHasEdges(t *testing.T) {
 	atomA := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	atomB := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","b"]`,
 	}
 	atomC := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","c"]`,
 	}
 	require.NoError(t, db.Create(atomA).Error)
@@ -240,7 +240,7 @@ func TestRegisterTaskPersistsSchemaValidationConfig(t *testing.T) {
 	atom := &models.Atom{
 		ID:        uuid.New(),
 		Engine:    models.AtomEngineDocker,
-		Image:     "alpine",
+		Image:     "alpine:3.23",
 		Command:   `["echo","test"]`,
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -282,7 +282,7 @@ func TestClaimAwareTaskLifecycleMethods(t *testing.T) {
 	atom := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	require.NoError(t, db.Create(atom).Error)
@@ -347,7 +347,7 @@ func TestCompleteTaskWithOutput(t *testing.T) {
 	atomModel := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","hello"]`,
 	}
 	require.NoError(t, db.Create(atomModel).Error)
@@ -401,7 +401,7 @@ func TestCompleteTaskWithNilOutput(t *testing.T) {
 	atomModel := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","hello"]`,
 	}
 	require.NoError(t, db.Create(atomModel).Error)
@@ -446,7 +446,7 @@ func TestRetryTaskClearsPreviousExecutionArtifacts(t *testing.T) {
 	atomModel := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","hello"]`,
 	}
 	require.NoError(t, db.Create(atomModel).Error)
@@ -510,13 +510,13 @@ func TestPredecessorOutputs(t *testing.T) {
 	atomA := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	atomB := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","b"]`,
 	}
 	require.NoError(t, db.Create(atomA).Error)
@@ -592,13 +592,13 @@ func TestPredecessorHashes(t *testing.T) {
 	atomA := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	atomB := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","b"]`,
 	}
 	require.NoError(t, db.Create(atomA).Error)
@@ -657,13 +657,13 @@ func TestPredecessorHashesIncludesCachedPredecessors(t *testing.T) {
 	atomA := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","a"]`,
 	}
 	atomB := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","b"]`,
 	}
 	require.NoError(t, db.Create(atomA).Error)
@@ -743,7 +743,7 @@ func TestRegisterTaskSnapshotsResolvedCacheConfig(t *testing.T) {
 	atom := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","cache"]`,
 	}
 	require.NoError(t, db.Create(atom).Error)
@@ -784,7 +784,7 @@ func TestCompleteTaskWithBranchSkipLeavesOneSuccessJoinRunnable(t *testing.T) {
 	atom := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","ok"]`,
 	}
 	require.NoError(t, db.Create(atom).Error)
@@ -858,7 +858,7 @@ func TestCompleteTaskWithBranchSkipSkipsAllSuccessJoin(t *testing.T) {
 	atom := &models.Atom{
 		ID:      uuid.New(),
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine",
+		Image:   "alpine:3.23",
 		Command: `["echo","ok"]`,
 	}
 	require.NoError(t, db.Create(atom).Error)

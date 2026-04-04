@@ -161,6 +161,37 @@ integration-test:
 integration-down:
     docker rm -f {{it_container}}
 
+# Run integration tests against a Caesium server using the Podman engine.
+# Requires Podman to be installed and the Podman socket to be active
+# (run: systemctl --user enable --now podman.socket).
+integration-test-podman: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
+    docker rm -f caesium-server-podman >/dev/null 2>&1 || true
+    docker run -d --name caesium-server-podman \
+        --platform {{platform}} \
+        -p 8080:8080 \
+        -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
+        -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
+        -e CAESIUM_LOG_LEVEL=debug \
+        --user 0:0 \
+        {{repo}}/{{image}}:{{tag}} start
+    if docker run --rm --platform {{platform}} \
+        -v {{repo_dir}}:{{bld_dir}} \
+        -e CAESIUM_TEST_ENGINE=podman \
+        --network=host \
+        -w {{bld_dir}} \
+        {{repo}}/{{builder_image}}:{{tag}}-full \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'; then
+      docker rm -f caesium-server-podman >/dev/null 2>&1 || true
+    else
+      echo "integration tests (podman) failed; caesium server logs:"
+      docker logs caesium-server-podman || true
+      docker rm -f caesium-server-podman >/dev/null 2>&1 || true
+      exit 1
+    fi
+
 hydrate:
     docker run --platform {{platform}} \
         --rm \

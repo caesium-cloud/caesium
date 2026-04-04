@@ -42,7 +42,7 @@ func TestResumeWithoutEdges(t *testing.T) {
 	atomA := &models.Atom{
 		ID:        uuid.New(),
 		Engine:    models.AtomEngineDocker,
-		Image:     "alpine:3.20",
+		Image:     "alpine:3.23",
 		Command:   "[\"true\"]",
 		Spec:      datatypes.JSON([]byte(`{"env":{}}`)),
 		CreatedAt: now,
@@ -53,7 +53,7 @@ func TestResumeWithoutEdges(t *testing.T) {
 	atomB := &models.Atom{
 		ID:        uuid.New(),
 		Engine:    models.AtomEngineDocker,
-		Image:     "alpine:3.20",
+		Image:     "alpine:3.23",
 		Command:   "[\"true\"]",
 		Spec:      datatypes.JSON([]byte(`{"env":{}}`)),
 		CreatedAt: now,

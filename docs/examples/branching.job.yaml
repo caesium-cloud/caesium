@@ -13,27 +13,27 @@ steps:
   - name: decide-path
     type: branch
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo '##caesium::branch fast-path'"]
     next: [fast-path, slow-path]
 
   - name: fast-path
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo 'Taking the fast path' && echo '##caesium::output {\"route\": \"fast\"}'"]
     dependsOn: [decide-path]
     next: [finalize]
 
   - name: slow-path
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo 'Taking the slow path' && echo '##caesium::output {\"route\": \"slow\"}'"]
     dependsOn: [decide-path]
     next: [finalize]
 
   - name: finalize
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo Done via $CAESIUM_OUTPUT_FAST_PATH_ROUTE$CAESIUM_OUTPUT_SLOW_PATH_ROUTE"]
     dependsOn: [fast-path, slow-path]
     triggerRule: one_success
@@ -53,24 +53,24 @@ steps:
   - name: check-conditions
     type: branch
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo '##caesium::branch validate' && echo '##caesium::branch notify'"]
     next: [validate, transform, notify]
 
   - name: validate
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo 'Validating data'"]
     dependsOn: [check-conditions]
 
   - name: transform
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo 'Transforming data'"]
     dependsOn: [check-conditions]
 
   - name: notify
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo 'Sending notification'"]
     dependsOn: [check-conditions]

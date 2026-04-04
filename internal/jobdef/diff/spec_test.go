@@ -20,7 +20,7 @@ trigger:
     cron: "* * * * *"
 steps:
 - name: step
-  image: alpine
+  image: alpine:3.23
 `
 
 	dir := t.TempDir()
@@ -47,7 +47,7 @@ trigger:
     cron: "* * * * *"
 steps:
 - name: step
-  image: alpine
+  image: alpine:3.23
 `
 	dir := t.TempDir()
 	p1 := filepath.Join(dir, "one.yaml")

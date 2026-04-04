@@ -27,6 +27,7 @@ type IntegrationTestSuite struct {
 	caesiumURL  string
 	cliPath     string
 	projectRoot string
+	engineType  string // "docker", "podman", or "kubernetes"
 }
 
 func (s *IntegrationTestSuite) SetupSuite() {
@@ -45,6 +46,11 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	}
 	if _, err := os.Stat(s.cliPath); err != nil {
 		s.T().Fatalf("stat CAESIUM_CLI_PATH %q: %v", s.cliPath, err)
+	}
+
+	s.engineType = os.Getenv("CAESIUM_TEST_ENGINE")
+	if s.engineType == "" {
+		s.engineType = "docker"
 	}
 
 	host := os.Getenv("CAESIUM_HOST")
@@ -117,7 +123,7 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: env-check
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo $INTEGRATION_ENV > /tmp/out"]
     workdir: /tmp
     env:
@@ -164,10 +170,10 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: extract
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo extract"]
   - name: load
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo load"]
 `, alias)
 
@@ -192,7 +198,7 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: extract
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo extract updated"]
 `, alias)
 	require.NoError(s.T(), os.WriteFile(filepath.Join(tmpDir, "job.yaml"), []byte(strings.TrimSpace(updated)), 0o644))
@@ -212,8 +218,29 @@ func (s *IntegrationTestSuite) writeJobManifest(contents string) string {
 	require.NoError(s.T(), err)
 
 	path := filepath.Join(dir, "job.yaml")
-	require.NoError(s.T(), os.WriteFile(path, []byte(strings.TrimSpace(contents)), 0o644))
+	require.NoError(s.T(), os.WriteFile(path, []byte(strings.TrimSpace(s.injectEngine(contents))), 0o644))
 	return dir
+}
+
+// injectEngine adds an engine directive to each step in a YAML manifest when
+// the configured engine is not "docker" (docker is the default engine).
+// It detects step-level image fields by looking for indented "image:" lines
+// and inserts an "engine: <type>" line at the same indentation immediately after.
+func (s *IntegrationTestSuite) injectEngine(manifest string) string {
+	if s.engineType == "" || s.engineType == "docker" {
+		return manifest
+	}
+	lines := strings.Split(manifest, "\n")
+	out := make([]string, 0, len(lines)+8)
+	for _, line := range lines {
+		out = append(out, line)
+		stripped := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(stripped, "image:") && len(line) > len(stripped) {
+			indent := line[:len(line)-len(stripped)]
+			out = append(out, indent+"engine: "+s.engineType)
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func (s *IntegrationTestSuite) runCLI(args ...string) {

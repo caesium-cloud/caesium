@@ -26,7 +26,7 @@ steps:
   # logical slot will return the cached output instantly.
   - name: fetch-prices
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
@@ -44,7 +44,7 @@ steps:
   # ensuring indicators are recalculated at least twice per day.
   - name: compute-indicators
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     cache:
       ttl: "12h"
     command:
@@ -64,7 +64,7 @@ steps:
   # outputs are unchanged (notifications should never be skipped).
   - name: notify-team
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     cache: false
     command:
       - sh

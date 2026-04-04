@@ -8,21 +8,21 @@ trigger:
     expression: "*/5 * * * *"
 steps:
   - name: start
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo start"]
     next:
       - fanout-a
       - fanout-b
   - name: fanout-a
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo fanout-a"]
     dependsOn: start
   - name: fanout-b
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo fanout-b"]
     dependsOn: start
   - name: join
-    image: alpine
+    image: alpine:3.23
     command: ["sh", "-c", "echo join"]
     dependsOn:
       - fanout-a

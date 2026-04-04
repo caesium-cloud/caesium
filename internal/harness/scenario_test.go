@@ -23,7 +23,7 @@ trigger:
     cron: "*/5 * * * *"
 steps:
   - name: hello
-    image: alpine
+    image: alpine:3.23
     command: ["echo", "hello"]
 `), 0o644))
 

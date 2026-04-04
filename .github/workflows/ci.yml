@@ -214,7 +214,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Pre-pull job images
         run: |
-          docker pull alpine:3.20
+          docker pull alpine:3.23
       - name: Start Caesium server
         run: |
           docker rm -f caesium-server >/dev/null 2>&1 || true
@@ -248,15 +248,21 @@ jobs:
   helm-integration-test:
     needs: [build-and-integration-test, helm-lint]
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
           name: release-amd64
           path: /tmp
-      - name: Load release image
-        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load images
+        run: |
+          gunzip -c /tmp/release-amd64.tar.gz | docker load
+          gunzip -c /tmp/builder-amd64.tar.gz | docker load
       - name: Install kind
         run: |
           curl -Lo ./kind https://kind.sigs.k8s.io/dl/latest/kind-linux-amd64
@@ -277,9 +283,8 @@ jobs:
       - name: Helm install
         run: |
           if ! helm install caesium ./helm/caesium \
-            --values ./helm/caesium/ci/test-values.yaml \
+            --values ./helm/caesium/ci/test-values-k8s.yaml \
             --set image.tag=${{ env.IMAGE_TAG }}-amd64 \
-            --set persistence.enabled=false \
             --wait --timeout 240s; then
             kubectl get pods -A || true
             kubectl get events --sort-by=.lastTimestamp -A | tail -n 200 || true
@@ -291,11 +296,14 @@ jobs:
           fi
       - name: Helm test
         run: helm test caesium --timeout 90s
-      - name: Verify health endpoint
+      - name: Pre-load job images into kind
+        run: |
+          docker pull alpine:3.23
+          kind load docker-image alpine:3.23
+      - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
-          PORT_FORWARD_PID=$!
-          trap 'kill $PORT_FORWARD_PID' EXIT
+          echo $! > /tmp/port-forward.pid
 
           tries=0
           until curl -sf http://127.0.0.1:8080/health >/dev/null; do
@@ -304,12 +312,94 @@ jobs:
               echo "Port-forward did not become ready in time"
               cat /tmp/port-forward.log || true
               kubectl get pods -A || true
-              kubectl describe pods -l app.kubernetes.io/instance=caesium || true
               exit 1
             fi
             sleep 1
           done
-          curl -sf http://127.0.0.1:8080/health
+      - name: Extract caesium CLI
+        run: |
+          mkdir -p .tmp/caesium-cli
+          ctr=$(docker create caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64)
+          docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
+          docker rm -f "$ctr"
+          chmod +x .tmp/caesium-cli/caesium
+      - name: Integration tests (Kubernetes)
+        run: |
+          docker run --rm \
+            -v $(pwd):/bld/caesium \
+            -e CAESIUM_TEST_ENGINE=kubernetes \
+            -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
+            --network=host \
+            -w /bld/caesium \
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
+            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 15m'
+      - name: Stop port-forward
+        if: always()
+        run: kill $(cat /tmp/port-forward.pid) 2>/dev/null || true
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          kubectl logs statefulset/caesium -c caesium || true
+          kubectl get pods -A || true
+          kubectl describe pods -l cloud.caesium -A || true
+
+  podman-integration-test:
+    needs: [build-and-integration-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-amd64
+          path: /tmp
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load images
+        run: |
+          gunzip -c /tmp/release-amd64.tar.gz | docker load
+          gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Enable Podman socket
+        run: |
+          systemctl --user enable --now podman.socket
+          podman info
+      - name: Pre-pull job images via Podman
+        run: podman pull alpine:3.23
+      - name: Start Caesium with Podman engine
+        run: |
+          PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"
+          docker run -d --name caesium-server-podman \
+            -p 8080:8080 \
+            -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
+            -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
+            -e CAESIUM_LOG_LEVEL=debug \
+            --user 0:0 \
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
+      - name: Extract caesium CLI
+        run: |
+          mkdir -p .tmp/caesium-cli
+          ctr=$(docker create caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64)
+          docker cp "$ctr":/bin/caesium .tmp/caesium-cli/caesium
+          docker rm -f "$ctr"
+          chmod +x .tmp/caesium-cli/caesium
+      - name: Integration tests (Podman)
+        run: |
+          docker run --rm \
+            -v $(pwd):/bld/caesium \
+            -e CAESIUM_TEST_ENGINE=podman \
+            -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
+            --network=host \
+            -w /bld/caesium \
+            caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
+            sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'
+      - name: Dump Caesium logs on failure
+        if: failure()
+        run: docker logs caesium-server-podman || true
+      - name: Cleanup
+        if: always()
+        run: docker rm -f caesium-server-podman || true
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -323,6 +413,7 @@ jobs:
       - build-and-integration-test-arm64
       - helm-lint
       - helm-integration-test
+      - podman-integration-test
     runs-on: ubuntu-24.04
     environment: Docker
     timeout-minutes: 30

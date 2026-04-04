@@ -30,7 +30,7 @@ The Go application code itself is architecture-agnostic, but the **build infrast
 |---|---|---|
 | Go application code | Ready | No build tags, no assembly, no arch-specific logic |
 | Container engines (Docker/K8s/Podman) | Ready | Pure Go client libraries, no arch assumptions |
-| `alpine:3.22` base image | Ready | Published for amd64, arm64, arm/v7, etc. |
+| `alpine:3.23` base image | Ready | Published for amd64, arm64, arm/v7, etc. |
 | `golang:1.25.6-alpine3.23` builder base | Ready | Multi-arch |
 | Alpine packages (`libuv-dev`, `sqlite-dev`, etc.) | Ready | Available for all Alpine-supported architectures |
 | `docker:29.2.0-alpine3.23` (test image) | Ready | Multi-arch |
@@ -127,7 +127,7 @@ Key changes:
 **File:** `build/Dockerfile`
 
 The release and test stages are already multi-arch compatible:
-- `alpine:3.22` and `docker:29.2.0-alpine3.23` are multi-arch.
+- `alpine:3.23` and `docker:29.2.0-alpine3.23` are multi-arch.
 - The `ldd` library collection (lines 12-14) runs in the build context so it collects the correct arch's libraries.
 - No changes needed here.
 

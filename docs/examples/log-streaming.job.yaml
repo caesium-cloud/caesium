@@ -17,7 +17,7 @@ trigger:
 steps:
   - name: emit-live-logs
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c

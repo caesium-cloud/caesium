@@ -74,7 +74,7 @@ describe("TaskDetailPanel", () => {
           task_id: "task-cache",
           atom_id: "atom-1",
           engine: "docker",
-          image: "alpine:latest",
+          image: "alpine:3.23",
           command: ["echo", "cache"],
           status: "cached",
           cache_hit: true,

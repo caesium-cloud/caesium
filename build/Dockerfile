@@ -25,7 +25,7 @@ RUN ldd /dist/bin/caesium | tr -s '[:blank:]' '\n' | grep '^/' | \
     xargs -I % sh -c 'mkdir -p $(dirname ./%); cp % ./%;'
 
 # -------- Release image (no DinD) --------
-FROM alpine:3.22 AS release
+FROM alpine:3.23 AS release
 RUN apk add --no-cache ca-certificates libuv lz4-libs sqlite-libs tzdata && \
     adduser -D -H -u 10001 caesium && \
     mkdir -p /var/lib/caesium/dqlite && \

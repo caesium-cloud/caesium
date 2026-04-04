@@ -337,7 +337,7 @@ func fakeModelAtom(id uuid.UUID) *models.Atom {
 	return &models.Atom{
 		ID:      id,
 		Engine:  models.AtomEngineDocker,
-		Image:   "alpine:3.20",
+		Image:   "alpine:3.23",
 		Command: `["echo","ok"]`,
 	}
 }

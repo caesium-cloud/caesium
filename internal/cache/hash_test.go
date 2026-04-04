@@ -12,7 +12,7 @@ func baseInput() HashInput {
 	return HashInput{
 		JobAlias: "my-job",
 		TaskName: "my-task",
-		Image:    "alpine:3.18",
+		Image:    "alpine:3.23",
 		Command:  []string{"echo", "hello"},
 		Env:      map[string]string{"FOO": "bar", "BAZ": "qux"},
 		WorkDir:  "/app",

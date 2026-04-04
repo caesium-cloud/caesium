@@ -30,13 +30,13 @@ callbacks:
       url: "https://example"
 steps:
   - name: list
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo list"]
   - name: convert
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo convert"]
   - name: publish
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo publish"]
 `
 
