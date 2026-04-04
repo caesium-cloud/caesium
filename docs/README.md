@@ -24,9 +24,14 @@ This directory mixes current-source operator documentation with design records a
 
 These files are useful context, but each should be treated according to its status banner. CI enforces that these docs keep an explicit `> Status:` banner near the top.
 
+- [roadmap.md](roadmap.md): Strategic vision and feature priorities.
 - [job-definition-plan.md](job-definition-plan.md)
 - [design-airflow-parity.md](design-airflow-parity.md)
 - [design-arm64-support.md](design-arm64-support.md)
+- [design-event-triggers.md](design-event-triggers.md)
+- [design-concurrency-priority.md](design-concurrency-priority.md)
+- [design-sla-management.md](design-sla-management.md)
+- [design-task-templates.md](design-task-templates.md)
 - [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md)
 - [design-incremental-execution.md](design-incremental-execution.md)
 - [design-parallel-job-execution.md](design-parallel-job-execution.md)
