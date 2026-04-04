@@ -107,7 +107,7 @@ func (s *StoreMetricsSuite) TestCompleteTaskRecordsMetrics() {
 	taskID := uuid.New()
 	atomID := uuid.New()
 	task := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID}
-	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox"}
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
 	s.Require().NoError(s.db.Create(task).Error)
 	s.Require().NoError(s.db.Create(atom).Error)
 	s.Require().NoError(s.store.RegisterTask(run.ID, task, atom, 0))
@@ -137,7 +137,7 @@ func (s *StoreMetricsSuite) TestFailTaskRecordsMetrics() {
 	taskID := uuid.New()
 	atomID := uuid.New()
 	task := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID}
-	atom := &models.Atom{ID: atomID, Engine: models.AtomEnginePodman, Image: "alpine"}
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEnginePodman, Image: "alpine:3.23"}
 	s.Require().NoError(s.db.Create(task).Error)
 	s.Require().NoError(s.db.Create(atom).Error)
 	s.Require().NoError(s.store.RegisterTask(run.ID, task, atom, 0))

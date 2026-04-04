@@ -1,6 +1,7 @@
 package guardrails_test
 
 import (
+	"bufio"
 	"go/parser"
 	"go/token"
 	"os"
@@ -12,6 +13,159 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/report"
 )
+
+// pinnedImages defines the single canonical tag for each base image used in
+// the repo. The test below scans every source file and asserts that all
+// occurrences of an image name use exactly this tag. Add a new entry here
+// whenever a new pinned image is introduced; remove the old entry and add the
+// new tag here when upgrading.
+//
+// Intentionally excluded from enforcement:
+//   - caesiumcloud/* product images — tagged dynamically at build time
+//   - Images that appear only in .devcontainer/ (developer convenience only)
+//   - Placeholder/fixture images used in unit tests (e.g. "example", "etl:latest")
+//   - The deliberate bad-image used for error-handling tests
+var pinnedImages = map[string]string{
+	"alpine":          "alpine:3.23",
+	"busybox":         "busybox:1.36.1",
+	"curlimages/curl": "curlimages/curl:8.12.1",
+}
+
+// scanDirs is the set of subtrees checked for image version consistency.
+// .devcontainer and vendor are excluded intentionally.
+var scanDirs = []string{
+	"api", "build", "cmd", "docs", "helm",
+	"internal", "pkg", "test", "ui",
+	".github",
+}
+
+// exemptPatterns matches lines that should not be checked:
+//   - The deliberate bad image in the error-handling test
+//   - Dynamic image tags built at CI time
+//   - Lines that reference alpine only as part of a compound image tag (e.g. golang:1.25-alpine3.23, docker:29-alpine3.23)
+var exemptPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`this-image-definitely-does-not-exist`),
+	regexp.MustCompile(`caesiumcloud/`),
+	regexp.MustCompile(`golang:`),      // golang:X.Y-alpineZ
+	regexp.MustCompile(`docker:`),      // docker:X.Y.Z-alpineZ
+	regexp.MustCompile(`mcr\.microsoft`),
+	regexp.MustCompile(`BUILDER_TAG`),
+	regexp.MustCompile(`VARIANT`),
+}
+
+func TestPinnedContainerImageVersionsAreConsistent(t *testing.T) {
+	root := repoRoot(t)
+
+	// imageRef matches any occurrence of a pinned image name followed by an
+	// optional tag, e.g. `alpine`, `alpine:3.23`, `busybox:1.36.1`.
+	imageRef := regexp.MustCompile(`(alpine|busybox|curlimages/curl)(?::[\w.\-]+)?`)
+
+	type violation struct {
+		file    string
+		line    int
+		content string
+		want    string
+		got     string
+	}
+	var violations []violation
+
+	for _, subdir := range scanDirs {
+		base := filepath.Join(root, subdir)
+		if _, err := os.Stat(base); os.IsNotExist(err) {
+			continue
+		}
+
+		err := filepath.WalkDir(base, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				name := d.Name()
+				// skip hidden dirs, vendor, node_modules, dist
+				if strings.HasPrefix(name, ".") || name == "vendor" || name == "node_modules" || name == "dist" {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+
+			ext := strings.ToLower(filepath.Ext(path))
+			switch ext {
+			case ".go", ".yaml", ".yml", ".md", ".tsx", ".ts", ".dockerfile":
+				// check these
+			default:
+				if !strings.HasSuffix(strings.ToLower(filepath.Base(path)), "dockerfile") {
+					return nil
+				}
+			}
+
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			scanner := bufio.NewScanner(f)
+			lineNum := 0
+			for scanner.Scan() {
+				lineNum++
+				line := scanner.Text()
+
+				// skip exempt lines
+				exempt := false
+				for _, pat := range exemptPatterns {
+					if pat.MatchString(line) {
+						exempt = true
+						break
+					}
+				}
+				if exempt {
+					continue
+				}
+
+				matches := imageRef.FindAllString(line, -1)
+				for _, match := range matches {
+					// Identify which canonical image this is
+					for imageName, canonical := range pinnedImages {
+						// match must start with this image name
+						if match != imageName && !strings.HasPrefix(match, imageName+":") {
+							continue
+						}
+						if match != canonical {
+							relPath, _ := filepath.Rel(root, path)
+							violations = append(violations, violation{
+								file:    relPath,
+								line:    lineNum,
+								content: strings.TrimSpace(line),
+								want:    canonical,
+								got:     match,
+							})
+						}
+					}
+				}
+			}
+			return scanner.Err()
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", subdir, err)
+		}
+	}
+
+	if len(violations) > 0 {
+		sort.Slice(violations, func(i, j int) bool {
+			if violations[i].file != violations[j].file {
+				return violations[i].file < violations[j].file
+			}
+			return violations[i].line < violations[j].line
+		})
+
+		t.Log("container image version inconsistencies found")
+		t.Log("(to fix: update the image reference, or bump the canonical version in pinnedImages in internal/guardrails/guardrails_test.go)")
+		for _, v := range violations {
+			t.Errorf("%s:%d  want=%-22s  got=%-22s  %s",
+				filepath.ToSlash(v.file), v.line, v.want, v.got, v.content)
+		}
+	}
+}
 
 const (
 	modulePrefix = "github.com/caesium-cloud/caesium"

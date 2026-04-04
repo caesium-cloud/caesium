@@ -28,13 +28,13 @@ trigger:
     cadence: "nightly"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo extracting data"]
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo transforming data"]
   - name: load
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo loading data"]
 ```
 
@@ -60,15 +60,15 @@ callbacks:
 steps:
   - name: list
     engine: docker
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo listing s3://demo/csv/*.csv > /out/files.json"]
   - name: convert
     engine: docker
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo converting /in/files.json > /out/manifest.json"]
   - name: publish
     engine: docker
-    image: busybox:1.36
+    image: busybox:1.36.1
     command: ["sh", "-c", "echo publishing /out/manifest.json to s3://demo/parquet/"]
 ```
 
@@ -88,14 +88,14 @@ trigger:
 steps:
   - name: start
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo run"]
     next:
       - branch-a
       - branch-b
   - name: branch-a
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo task a"]
     dependsOn: start
     retries: 2
@@ -103,12 +103,12 @@ steps:
     retryBackoff: true
   - name: branch-b
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo task b"]
     dependsOn: start
   - name: join
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo join"]
     triggerRule: one_success
     dependsOn:
@@ -212,17 +212,17 @@ trigger:
     timezone: "UTC"
 steps:
   - name: fetch-data
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo fetching data"]
     cache: true
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo transforming"]
     cache:
       ttl: "12h"
       version: 2
   - name: notify
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo sending notification"]
     cache: false
 ```

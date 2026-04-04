@@ -13,13 +13,13 @@ trigger:
     timezone: "UTC"
 steps:
   - name: collect
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo collecting fixtures"]
   - name: verify
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo verifying fixtures"]
   - name: publish
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo publish complete"]
 ---
 $schema: https://yourorg.io/schemas/job.v1.json
@@ -37,8 +37,8 @@ trigger:
     timezone: "UTC"
 steps:
   - name: start
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo start failing pipeline"]
   - name: fail
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo intentional failure for web UI status surfaces; exit 1"]

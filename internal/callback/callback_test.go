@@ -39,7 +39,7 @@ func TestDispatchNotificationSuccess(t *testing.T) {
 	atom := &models.Atom{
 		ID:     uuid.New(),
 		Engine: models.AtomEngineDocker,
-		Image:  "alpine:3",
+		Image:  "alpine:3.23",
 	}
 	cmd, err := jsonutil.MarshalSliceString([]string{"echo", "hello"})
 	require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestRetryFailedCallbacks(t *testing.T) {
 	atom := &models.Atom{
 		ID:     uuid.New(),
 		Engine: models.AtomEngineDocker,
-		Image:  "alpine:3",
+		Image:  "alpine:3.23",
 	}
 	cmd, err := jsonutil.MarshalSliceString([]string{"echo", "hello"})
 	require.NoError(t, err)

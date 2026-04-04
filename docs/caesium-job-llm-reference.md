@@ -25,7 +25,7 @@ trigger:
 steps:
   - name: step-one
     engine: docker               # "docker" (default), "podman", or "kubernetes"
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo hello"]
 ```
 
@@ -157,7 +157,7 @@ Keys are uppercased: `row_count` → `ROW_COUNT`, step name `extract` → `EXTRA
 ```yaml
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     outputSchema:
       type: object
       properties:
@@ -167,7 +167,7 @@ steps:
     command: ["sh", "-c", "echo '##caesium::output {\"row_count\": 5000, \"source\": \"warehouse\"}'"]
 
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [extract]
     inputSchema:
       extract:
@@ -297,19 +297,19 @@ steps:
 ```yaml
 steps:
   - name: setup
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo setup"]
     next: [branch-a, branch-b]
   - name: branch-a
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo a"]
     dependsOn: setup
   - name: branch-b
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo b"]
     dependsOn: setup
   - name: join
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo join"]
     dependsOn: [branch-a, branch-b]
     triggerRule: all_success
@@ -344,7 +344,7 @@ trigger:
     cron: "0 * * * *"
 steps:
   - name: produce
-    image: alpine:3.20
+    image: alpine:3.23
     outputSchema:
       type: object
       properties:
@@ -353,7 +353,7 @@ steps:
       required: [count, status]
     command: ["sh", "-c", "echo '##caesium::output {\"count\": 42, \"status\": \"ok\"}'"]
   - name: consume
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [produce]
     inputSchema:
       produce:

@@ -67,19 +67,19 @@ trigger:
   configuration: { cron: "*/5 * * * *", timezone: "UTC" }
 steps:
   - name: start
-    image: alpine:3
+    image: alpine:3.23
     command: ["echo", "start"]
     next:
       - fanout-a
       - fanout-b
   - name: fanout-a
-    image: alpine:3
+    image: alpine:3.23
     command: ["echo", "a"]
   - name: fanout-b
-    image: alpine:3
+    image: alpine:3.23
     command: ["echo", "b"]
   - name: join
-    image: alpine:3
+    image: alpine:3.23
     command: ["echo", "done"]
     dependsOn: ["fanout-a", "fanout-b"]
 `
@@ -217,7 +217,7 @@ steps:
 
 func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 	var step Step
-	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.20","command":["echo","ok"]}`), &step)
+	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.23","command":["echo","ok"]}`), &step)
 	if err != nil {
 		t.Fatalf("json unmarshal failed: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 
 func TestStepUnmarshalJSONPreservesFalseCacheOverride(t *testing.T) {
 	var step Step
-	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.20","cache":false}`), &step)
+	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.23","cache":false}`), &step)
 	if err != nil {
 		t.Fatalf("json unmarshal failed: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestMarshalPreservesFalseCacheOverrides(t *testing.T) {
 		Steps: []Step{
 			{
 				Name:  "step-a",
-				Image: "alpine",
+				Image: "alpine:3.23",
 				Cache: false,
 			},
 		},

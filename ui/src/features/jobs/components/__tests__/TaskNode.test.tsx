@@ -29,7 +29,7 @@ describe('TaskNode', () => {
     renderTaskNode({
       label: 'task-abc123',
       status: 'succeeded',
-      atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'hello'] },
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'hello'] },
       engine: 'docker',
       command: ['echo', 'hello'],
     });
@@ -53,7 +53,7 @@ describe('TaskNode', () => {
     renderTaskNode({
       label: 'task-cache',
       status: 'cached',
-      atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'cache'] },
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'cache'] },
       engine: 'docker',
       command: ['echo', 'cache'],
     });
@@ -66,7 +66,7 @@ describe('TaskNode', () => {
     renderTaskNode({
       label: 'task-ghi789',
       status: 'pending',
-      atom: { image: 'alpine:latest', engine: 'docker', command: [] },
+      atom: { image: 'alpine:3.23', engine: 'docker', command: [] },
       engine: 'docker',
       command: [],
     });
@@ -101,7 +101,7 @@ describe('TaskNode', () => {
     renderTaskNode({
       label: 'task-shell',
       status: 'running',
-      atom: { image: 'alpine:latest', engine: 'docker', command: '["sh","-c","echo streamed logs"]' },
+      atom: { image: 'alpine:3.23', engine: 'docker', command: '["sh","-c","echo streamed logs"]' },
       engine: 'docker',
       command: '["sh","-c","echo streamed logs"]',
     });
@@ -114,7 +114,7 @@ describe('TaskNode', () => {
     renderTaskNode({
       label: 'task-contract',
       status: 'succeeded',
-      atom: { image: 'alpine:latest', engine: 'docker', command: ['echo', 'contract'] },
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'contract'] },
       engine: 'docker',
       command: ['echo', 'contract'],
     });

@@ -270,7 +270,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     outputSchema:
       type: object
       properties:
@@ -280,7 +280,7 @@ steps:
     command: ["sh", "-c", "echo '##caesium::output {\"row_count\": \"42\", \"source\": \"warehouse\"}'"]
     next: transform
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [extract]
     inputSchema:
       extract:
@@ -295,7 +295,7 @@ steps:
     command: ["sh", "-c", "echo '##caesium::output {\"rows_written\": \"%s\"}'"]
     next: notify
   - name: notify
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [transform]
     command: ["sh", "-c", "echo rows=$CAESIUM_OUTPUT_TRANSFORM_ROWS_WRITTEN"]
 `, alias, schemaValidation, rowsWritten)
@@ -313,7 +313,7 @@ trigger:
     expression: "0 0 31 2 *"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     outputSchema:
       type: object
       properties:
@@ -322,7 +322,7 @@ steps:
     command: ["sh", "-c", "echo '##caesium::output {\"row_count\": \"42\"}'"]
     next: transform
   - name: transform
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [extract]
     inputSchema:
       extract:

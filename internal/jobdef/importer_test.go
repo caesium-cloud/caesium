@@ -84,7 +84,7 @@ func (s *ImporterTestSuite) TestApplyUpdatesExistingJob() {
 	s.Require().NoError(err)
 
 	updated := strings.Replace(testutil.SampleJob, "owner: etl", "owner: analytics", 1)
-	updated = strings.Replace(updated, "  - name: publish\n    image: busybox:1.36\n    command: [\"sh\", \"-c\", \"echo publish\"]\n", "", 1)
+	updated = strings.Replace(updated, "  - name: publish\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo publish\"]\n", "", 1)
 	def, err = schema.Parse([]byte(updated))
 	s.Require().NoError(err)
 

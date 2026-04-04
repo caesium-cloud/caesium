@@ -313,7 +313,7 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 		TaskID:                  uuid.New(),
 		AtomID:                  uuid.New(),
 		Engine:                  models.AtomEngineDocker,
-		Image:                   "alpine:3.20",
+		Image:                   "alpine:3.23",
 		Command:                 `["echo","ok"]`,
 		Status:                  in.status,
 		ClaimedBy:               in.claimedBy,

@@ -22,7 +22,7 @@ steps:
   # Declares an outputSchema so downstream steps can declare contracts against it.
   - name: extract
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     outputSchema:
       type: object
       properties:
@@ -45,7 +45,7 @@ steps:
   # Declares an inputSchema naming exactly which keys it needs from extract, and its own outputSchema.
   - name: transform
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [extract]
     inputSchema:
       extract:
@@ -77,7 +77,7 @@ steps:
   # still succeeds, but the violation is recorded and shown in the Task Metadata panel.
   - name: load
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [transform]
     inputSchema:
       transform:
@@ -106,7 +106,7 @@ steps:
   # No schemas — demonstrates backwards compatibility alongside contract-bearing steps.
   - name: notify
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     dependsOn: [load]
     command:
       - sh

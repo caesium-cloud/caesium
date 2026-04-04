@@ -131,7 +131,7 @@ func (s *WorkerStatusSuite) seedTaskRun(in taskRunSeed) {
 		TaskID:                  uuid.New(),
 		AtomID:                  uuid.New(),
 		Engine:                  models.AtomEngineDocker,
-		Image:                   "alpine:3.20",
+		Image:                   "alpine:3.23",
 		Command:                 `["echo","ok"]`,
 		Status:                  in.status,
 		ClaimedBy:               in.claimedBy,

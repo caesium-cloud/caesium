@@ -10,8 +10,8 @@ trigger:
     expression: "*/10 * * * *"
 steps:
   - name: fetch
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo fetch"]
   - name: process
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo process"]

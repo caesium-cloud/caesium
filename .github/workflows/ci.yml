@@ -214,7 +214,7 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Pre-pull job images
         run: |
-          docker pull alpine:3.20
+          docker pull alpine:3.23
       - name: Start Caesium server
         run: |
           docker rm -f caesium-server >/dev/null 2>&1 || true
@@ -298,8 +298,8 @@ jobs:
         run: helm test caesium --timeout 90s
       - name: Pre-load job images into kind
         run: |
-          docker pull alpine:3.20
-          kind load docker-image alpine:3.20
+          docker pull alpine:3.23
+          kind load docker-image alpine:3.23
       - name: Start port-forward to Caesium
         run: |
           kubectl port-forward service/caesium 8080:8080 >/tmp/port-forward.log 2>&1 &
@@ -358,7 +358,7 @@ jobs:
           systemctl --user enable --now podman.socket
           podman info
       - name: Pre-pull job images via Podman
-        run: podman pull alpine:3.20
+        run: podman pull alpine:3.23
       - name: Start Caesium with Podman engine
         run: |
           PODMAN_SOCK="/run/user/$(id -u)/podman/podman.sock"

@@ -123,7 +123,7 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: env-check
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo $INTEGRATION_ENV > /tmp/out"]
     workdir: /tmp
     env:
@@ -170,10 +170,10 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo extract"]
   - name: load
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo load"]
 `, alias)
 
@@ -198,7 +198,7 @@ trigger:
     cron: "*/10 * * * *"
 steps:
   - name: extract
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo extract updated"]
 `, alias)
 	require.NoError(s.T(), os.WriteFile(filepath.Join(tmpDir, "job.yaml"), []byte(strings.TrimSpace(updated)), 0o644))

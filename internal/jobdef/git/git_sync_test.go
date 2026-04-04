@@ -232,21 +232,21 @@ trigger:
     cron: "0 * * * *"
 steps:
   - name: start
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo start"]
     next:
       - branch-a
       - branch-b
   - name: branch-a
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo branch-a"]
     dependsOn: start
   - name: branch-b
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo branch-b"]
     dependsOn: start
   - name: join
-    image: alpine:3.20
+    image: alpine:3.23
     command: ["sh", "-c", "echo join"]
     dependsOn:
       - branch-a

@@ -17,7 +17,7 @@ trigger:
 steps:
   - name: extract
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
@@ -33,7 +33,7 @@ steps:
 
   - name: transform-a
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
@@ -48,7 +48,7 @@ steps:
 
   - name: transform-b
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
@@ -63,7 +63,7 @@ steps:
 
   - name: load
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
@@ -82,7 +82,7 @@ steps:
 
   - name: notify
     engine: docker
-    image: alpine:3.20
+    image: alpine:3.23
     command:
       - sh
       - -c
