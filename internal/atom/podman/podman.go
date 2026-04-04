@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
-	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
@@ -100,9 +99,10 @@ func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (i
 	pr, pw := io.Pipe()
 	// Channels must be non-nil: a nil channel in a select case is permanently
 	// disabled, so the goroutine below would block forever and nothing would
-	// ever write to pw, causing CaptureMarkers to hang.
-	stdoutCh := make(chan string, 32)
-	stderrCh := make(chan string, 32)
+	// ever write to pw, causing CaptureMarkers to hang. Unbuffered is fine
+	// since containers.Logs writes asynchronously via its own goroutines.
+	stdoutCh := make(chan string)
+	stderrCh := make(chan string)
 
 	if err := containers.Logs(cli.ctx, id, &opts, stdoutCh, stderrCh); err != nil {
 		return nil, err
