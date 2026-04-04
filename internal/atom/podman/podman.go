@@ -97,50 +97,39 @@ func (cli *podmanClient) ContainerRemove(id string, force *bool, removeVolumes *
 }
 
 func (cli *podmanClient) ContainerLogs(id string, opts containers.LogOptions) (io.ReadCloser, error) {
-	var (
-		pr, pw = io.Pipe()
-		stdout chan (string)
-		stderr chan (string)
-	)
+	pr, pw := io.Pipe()
+	// Channels must be non-nil: a nil channel in a select case is permanently
+	// disabled, so the goroutine below would block forever and nothing would
+	// ever write to pw, causing CaptureMarkers to hang.
+	stdoutCh := make(chan string, 32)
+	stderrCh := make(chan string, 32)
 
-	err := containers.Logs(
-		cli.ctx,
-		id,
-		&containers.LogOptions{},
-		stdout,
-		stderr,
-	)
-
-	if err != nil {
+	if err := containers.Logs(cli.ctx, id, &opts, stdoutCh, stderrCh); err != nil {
 		return nil, err
 	}
 
 	go func() {
-		for {
+		defer pw.Close()
+		for stdoutCh != nil || stderrCh != nil {
 			select {
-			case line, ok := <-stdout:
-				if _, err := pw.Write([]byte(line)); err != nil {
+			case line, ok := <-stdoutCh:
+				if !ok {
+					stdoutCh = nil
+					continue
+				}
+				if _, err := pw.Write([]byte(line + "\n")); err != nil {
 					pw.CloseWithError(err)
 					return
 				}
+			case line, ok := <-stderrCh:
 				if !ok {
-					stdout = nil
+					stderrCh = nil
+					continue
 				}
-			case line, ok := <-stderr:
-				if _, err := pw.Write([]byte(line)); err != nil {
+				if _, err := pw.Write([]byte(line + "\n")); err != nil {
 					pw.CloseWithError(err)
 					return
 				}
-				if !ok {
-					stderr = nil
-				}
-			}
-
-			if stdout == nil && stderr == nil {
-				if err := pw.Close(); err != nil {
-					log.Error("close podman pipe", "error", err)
-				}
-				return
 			}
 		}
 	}()
