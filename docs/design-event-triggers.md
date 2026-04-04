@@ -89,13 +89,19 @@ func (w *WebhookController) Receive(c echo.Context) error {
     }
 
     // 3. For each matching trigger: validate signature, extract params, fire
+    // Process all triggers independently — an auth failure on one does not
+    // block others bound to the same path (path collisions are intentional).
+    var accepted int
     for _, trig := range triggers {
         cfg := trig.ParsedHTTPConfig()
 
-        // Validate signature if secret is configured
+        // Validate signature if secret is configured.
+        // Resolve secret:// URIs to their actual values before comparison.
         if cfg.Secret != "" {
-            if !validateSignature(c.Request(), body, cfg.Secret, cfg.SignatureScheme) {
-                return c.JSON(401, map[string]string{"error": "invalid signature"})
+            resolvedSecret := resolveSecret(cfg.Secret)
+            if !validateSignature(c.Request(), body, resolvedSecret, cfg.SignatureScheme, cfg.SignatureHeader) {
+                log.Warn("webhook signature validation failed", "trigger_id", trig.ID, "path", path)
+                continue // skip this trigger, keep processing others
             }
         }
 
@@ -104,6 +110,11 @@ func (w *WebhookController) Receive(c echo.Context) error {
 
         // Queue the trigger with extracted params
         executor.QueueWithParams(ctx, trig, params)
+        accepted++
+    }
+
+    if accepted == 0 {
+        return c.JSON(401, map[string]string{"error": "invalid signature"})
     }
 
     return c.JSON(202, map[string]string{"status": "accepted"})
@@ -156,7 +167,7 @@ Support common webhook signing schemes:
 Implementation: `internal/trigger/http/auth.go`
 
 ```go
-func validateSignature(req *http.Request, body []byte, secret, scheme, header string) bool {
+func validateSignature(req *http.Request, body []byte, secret, scheme string, header string) bool {
     switch scheme {
     case "hmac-sha256", "":
         return validateHMAC(req.Header.Get(header), body, secret, sha256.New)

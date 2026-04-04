@@ -86,7 +86,7 @@ func (p *Predictor) Predict(jobID uuid.UUID) (*Prediction, error) {
     // 1. Load last N completed run durations
     var durations []float64
     rows, err := p.db.Raw(`
-        SELECT EXTRACT(EPOCH FROM (completed_at - started_at))
+        SELECT (unixepoch(completed_at) - unixepoch(started_at))
         FROM job_runs
         WHERE job_id = ? AND status = 'succeeded'
         ORDER BY completed_at DESC
@@ -178,27 +178,36 @@ func (c *Checker) checkAll(ctx context.Context) {
 }
 ```
 
-**Deadline computation**: The deadline is resolved relative to the run's trigger date:
+**Deadline computation**: The deadline is resolved relative to the run's logical schedule date, not its actual start time. Using `startedAt` for rollover detection is wrong — a run that starts after the deadline due to queueing delays would have its deadline silently pushed to the next day, suppressing an already-breached SLA by up to 24 hours.
 
-- For cron jobs: the deadline applies to the same day as the `logical_date`
-- For HTTP/event-triggered jobs: the deadline applies to the day the run was started
-- If the deadline time is before the typical start time (e.g., deadline 02:00 for a job that starts at 22:00), it rolls to the next day
+- For cron jobs: anchor to `logical_date` (the scheduled slot, not when the run actually started)
+- For HTTP/event-triggered jobs: anchor to `startedAt` (no logical date available); if the deadline has already passed by start time, treat the run as immediately breached rather than rolling forward
 
 ```go
-func (c *Checker) computeDeadline(sla *SLAConfig, startedAt time.Time) time.Time {
-    loc, _ := time.LoadLocation(sla.Timezone)
-    startDay := startedAt.In(loc)
+func (c *Checker) computeDeadline(sla *SLAConfig, run *RunWithSLA) time.Time {
+    loc, err := time.LoadLocation(sla.Timezone)
+    if err != nil {
+        log.Error("invalid timezone in SLA config", "job", run.Job.Alias, "error", err)
+        loc = time.UTC
+    }
+
+    // Anchor to logical_date for cron jobs; fall back to startedAt for
+    // event/HTTP-triggered runs that have no stable schedule anchor.
+    anchor := run.LogicalDate
+    if anchor.IsZero() {
+        anchor = run.StartedAt
+    }
+    anchorDay := anchor.In(loc)
 
     deadline := time.Date(
-        startDay.Year(), startDay.Month(), startDay.Day(),
+        anchorDay.Year(), anchorDay.Month(), anchorDay.Day(),
         sla.DeadlineHour, sla.DeadlineMinute, 0, 0, loc,
     )
 
-    // If deadline is before start time, it means "by this time tomorrow"
-    if deadline.Before(startedAt) {
-        deadline = deadline.Add(24 * time.Hour)
-    }
-
+    // For HTTP/event runs only: if the deadline already passed before the
+    // run started, do NOT roll forward — the run is already breached.
+    // For cron runs: logical_date is always in the past relative to startedAt,
+    // so never roll forward (the logical date anchors the day correctly).
     return deadline
 }
 ```

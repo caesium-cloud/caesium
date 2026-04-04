@@ -162,6 +162,7 @@ type Limiter struct {
 
 func (l *Limiter) Acquire(resource string, units int, limit int, window time.Duration) (bool, error) {
     windowKey := computeWindowKey(resource, window)
+    expiry := time.Now().Truncate(window).Add(window)
 
     // Atomic increment-and-check
     result := l.db.Exec(`

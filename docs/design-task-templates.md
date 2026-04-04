@@ -292,7 +292,7 @@ caesium job lint --path jobs/ --show-resolved
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Template injection (malicious parameter values) | Arbitrary YAML generation | Go `text/template` auto-escapes. Rendered output is re-validated as a step definition. No shell execution in templates. |
+| Template injection (malicious parameter values) | Malformed or unexpected YAML | Go `text/template` does **not** auto-escape (only `html/template` does). Parameter values containing quotes, newlines, or YAML-significant characters can produce malformed output. Mitigations: (1) re-validate the fully rendered step as a legal step definition before use; (2) restrict allowed characters in parameter values via the parameter type system; (3) prefer structured YAML field injection over free-form string interpolation where possible. |
 | Version conflicts (same name, different sources) | Wrong template used | Priority order is explicit: local > git > built-in. Warn on shadowing during lint. |
 | Template drift (git source changes between lint and apply) | Unexpected behavior | Pin templates by version. Version is part of the cache key. `caesium job apply` re-resolves and warns if resolved output differs from lint. |
 | Complexity creep in template language | Hard-to-debug templates | Deliberately limited expression set. No loops, no complex logic. Templates should be thin wrappers, not programs. |
