@@ -1,3 +1,4 @@
+# Accept a full builder image reference so local Podman images can be addressed via localhost/.
 ARG BUILDER_IMAGE=caesiumcloud/caesium-builder:latest
 FROM ${BUILDER_IMAGE} AS builder
 
