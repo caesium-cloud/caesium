@@ -136,7 +136,7 @@ rm:
     {{ container_cli }} rm -f caesium-server
 
 integration-test:
-    just integration-up
+    just tag={{ tag }} integration-up
     @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
     rm -rf "$cli_dir"; \
     mkdir -p "$cli_dir"; \
