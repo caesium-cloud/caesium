@@ -1,21 +1,16 @@
 # Design: Event-Driven Triggers
 
-> Status: Proposed. This document covers the full trigger overhaul — completing the HTTP trigger implementation and adding event-driven routing.
+> Status: Partially shipped. Work Stream 1 (HTTP webhook triggers) is implemented. Work Streams 2 and 3 in this document remain proposed.
 
 ## Problem Statement
 
-Caesium's trigger system has two types: cron (fully implemented) and HTTP (partially implemented). The HTTP trigger exists as a model and fires jobs when `PUT /v1/triggers/:id` is called, but it lacks the capabilities needed for real-world use:
-
-- **No webhook receiver endpoint.** External systems cannot POST to Caesium. The only way to fire an HTTP trigger is the internal `PUT /v1/triggers/:id` API, which requires knowing the trigger's UUID.
-- **No payload handling.** The HTTP trigger ignores the request body entirely. Webhook payloads from external systems (GitHub, Slack, CI/CD, S3 notifications) cannot be extracted into job parameters.
-- **No request authentication.** The `secret` configuration field exists in the schema and examples but is never validated. Anyone who can reach the API can fire any trigger.
-- **No routing.** The `path` configuration field is documented but not implemented. All jobs associated with a trigger fire unconditionally — there is no content-based filtering.
+Caesium's trigger system has two types: cron (fully implemented) and HTTP (implemented for webhook delivery). HTTP triggers now support dedicated webhook routes, authentication, payload param extraction, and manual/API fire with params. The remaining gap in this design area is event-based routing and trigger chaining.
 - **No trigger chaining.** One job's completion cannot trigger another job. The internal event bus handles lifecycle events but has no mechanism to route them to triggers.
 - **No event persistence.** External events are fire-and-forget. There is no event log, no replay, and no deduplication.
 
 This design addresses all of the above in three work streams:
 
-1. **WS1**: Complete the HTTP webhook trigger (path routing, payload extraction, authentication)
+1. **WS1**: Complete the HTTP webhook trigger (path routing, payload extraction, authentication) — shipped
 2. **WS2**: Add event-based triggers with content filtering
 3. **WS3**: Add trigger chaining via internal lifecycle events
 
