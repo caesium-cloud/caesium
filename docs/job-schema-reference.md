@@ -47,8 +47,11 @@ Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map
 ### HTTP Trigger
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `path` | string | required | Route served under `/v1/jobs/:id`. |
-| `secret` | string | optional | Shared secret validated by web UI/API clients. |
+| `path` | string | required | Webhook route suffix. Caesium serves it at `POST /v1/hooks/<path>` and normalizes legacy `/hooks/<path>` forms. |
+| `secret` | string | optional | Shared secret used to validate incoming webhook requests. |
+| `signatureScheme` | string | optional | One of `hmac-sha256`, `hmac-sha1`, `bearer`, `basic`. Defaults to `hmac-sha256` when `secret` is set. |
+| `signatureHeader` | string | optional | Header containing the signature or token. Default varies by scheme. |
+| `paramMapping` | map[string]string | optional | Extracts JSON request-body fields into run params using simple JSONPath expressions such as `$.ref`. |
 
 ## Callbacks
 

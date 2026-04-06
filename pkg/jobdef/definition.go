@@ -271,6 +271,87 @@ func validateTrigger(t *Trigger) error {
 	if t.Configuration == nil {
 		t.Configuration = map[string]any{}
 	}
+	if t.Type == TriggerHTTP {
+		if err := validateHTTPTriggerConfiguration(t.Configuration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateTriggerSpec(t *Trigger) error {
+	return validateTrigger(t)
+}
+
+func validateHTTPTriggerConfiguration(cfg map[string]any) error {
+	rawPath, ok := cfg["path"]
+	if !ok {
+		return fmt.Errorf("trigger.configuration.path is required for http triggers")
+	}
+	path, ok := rawPath.(string)
+	if !ok {
+		return fmt.Errorf("trigger.configuration.path must be a string")
+	}
+	if normalizeHTTPTriggerPath(path) == "" {
+		return fmt.Errorf("trigger.configuration.path must not be empty")
+	}
+
+	if rawScheme, ok := cfg["signatureScheme"]; ok && rawScheme != nil {
+		scheme, ok := rawScheme.(string)
+		if !ok {
+			return fmt.Errorf("trigger.configuration.signatureScheme must be a string")
+		}
+		switch strings.TrimSpace(scheme) {
+		case "", "hmac-sha256", "hmac-sha1", "bearer", "basic":
+		default:
+			return fmt.Errorf("trigger.configuration.signatureScheme %q must be one of [hmac-sha256,hmac-sha1,bearer,basic]", scheme)
+		}
+	}
+
+	if rawMapping, ok := cfg["paramMapping"]; ok && rawMapping != nil {
+		mapping, ok := rawMapping.(map[string]any)
+		if !ok {
+			return fmt.Errorf("trigger.configuration.paramMapping must be a map of string keys and values")
+		}
+		for key, rawExpr := range mapping {
+			expr, ok := rawExpr.(string)
+			if !ok {
+				return fmt.Errorf("trigger.configuration.paramMapping[%q] must be a string", key)
+			}
+			if err := validateSimpleJSONPath(expr); err != nil {
+				return fmt.Errorf("trigger.configuration.paramMapping[%q]: %w", key, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func normalizeHTTPTriggerPath(path string) string {
+	normalized := strings.TrimSpace(path)
+	normalized = strings.TrimPrefix(normalized, "/")
+	normalized = strings.TrimPrefix(normalized, "v1/")
+	normalized = strings.TrimPrefix(normalized, "hooks/")
+	return strings.Trim(normalized, "/")
+}
+
+func validateSimpleJSONPath(expr string) error {
+	expr = strings.TrimSpace(expr)
+	if expr == "" {
+		return fmt.Errorf("must not be empty")
+	}
+	if expr == "$" {
+		return nil
+	}
+	if !strings.HasPrefix(expr, "$.") {
+		return fmt.Errorf("must start with '$.' or be '$'")
+	}
+	parts := strings.Split(expr[2:], ".")
+	for _, part := range parts {
+		if strings.TrimSpace(part) == "" {
+			return fmt.Errorf("contains an empty path segment")
+		}
+	}
 	return nil
 }
 

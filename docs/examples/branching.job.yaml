@@ -9,6 +9,8 @@ metadata:
     purpose: demonstrates conditional branching based on runtime decisions
 trigger:
   type: http
+  configuration:
+    path: "/hooks/branching-demo"
 steps:
   - name: decide-path
     type: branch
@@ -49,6 +51,8 @@ metadata:
     purpose: demonstrates multi-branch selection where two of three paths are taken
 trigger:
   type: http
+  configuration:
+    path: "/hooks/branching-multi-path"
 steps:
   - name: check-conditions
     type: branch

@@ -80,5 +80,23 @@ func Migrate() (err error) {
 			return
 		}
 	}
+
+	var triggers []models.Trigger
+	if err = Connection().Where("type = ?", models.TriggerTypeHTTP).Find(&triggers).Error; err != nil {
+		return
+	}
+	for idx := range triggers {
+		trigger := &triggers[idx]
+		if err = trigger.ApplyDerivedFields(); err != nil {
+			return
+		}
+		if err = Connection().
+			Model(&models.Trigger{}).
+			Where("id = ?", trigger.ID).
+			Update("normalized_path", trigger.NormalizedPath).
+			Error; err != nil {
+			return
+		}
+	}
 	return
 }

@@ -18,6 +18,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/run"
+	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -144,6 +145,7 @@ func start(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		log.Fatal("secret resolver configuration failure", "error", err)
 	}
+	triggerhttp.SetSecretResolver(resolver)
 
 	watches, err := runtime.BuildGitWatches(vars, resolver)
 	if err != nil {

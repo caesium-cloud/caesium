@@ -179,6 +179,44 @@ steps:
   - name: build
     image: example
 `,
+		"http trigger missing path": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration: {}
+steps:
+  - name: build
+    image: example
+`,
+		"http trigger invalid signature scheme": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration:
+    path: /hooks/test
+    signatureScheme: oauth2
+steps:
+  - name: build
+    image: example
+`,
+		"http trigger invalid param mapping": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration:
+    path: /hooks/test
+    paramMapping:
+      branch: ref
+steps:
+  - name: build
+    image: example
+`,
 		"unknown dependsOn": `apiVersion: v1
 kind: Job
 metadata:

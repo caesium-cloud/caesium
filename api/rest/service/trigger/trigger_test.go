@@ -43,11 +43,30 @@ func (s *TriggerSuite) svc() *triggerService {
 
 func (s *TriggerSuite) createTrigger(triggerType, alias string) *models.Trigger {
 	svc := s.svc()
+	config := map[string]interface{}{
+		"schedule": "* * * * *",
+	}
+	if triggerType == string(models.TriggerTypeHTTP) {
+		config = map[string]interface{}{
+			"path": "/hooks/" + alias,
+		}
+	}
+	trigger, err := svc.Create(&CreateRequest{
+		Alias:         alias,
+		Type:          triggerType,
+		Configuration: config,
+	})
+	s.Require().NoError(err)
+	return trigger
+}
+
+func (s *TriggerSuite) createHTTPTrigger(alias, path string) *models.Trigger {
+	svc := s.svc()
 	trigger, err := svc.Create(&CreateRequest{
 		Alias: alias,
-		Type:  triggerType,
+		Type:  string(models.TriggerTypeHTTP),
 		Configuration: map[string]interface{}{
-			"schedule": "* * * * *",
+			"path": path,
 		},
 	})
 	s.Require().NoError(err)
@@ -80,6 +99,27 @@ func (s *TriggerSuite) TestListWithPagination() {
 	triggers, err := s.svc().List(&ListRequest{Limit: 2, Offset: 1})
 	s.Require().NoError(err)
 	s.Len(triggers, 2)
+}
+
+func (s *TriggerSuite) TestListByPath() {
+	matched := s.createHTTPTrigger("webhook-matched", "/hooks/run")
+	s.createHTTPTrigger("webhook-other", "deploy/other")
+	s.createTrigger(string(models.TriggerTypeCron), "cron-trigger")
+
+	triggers, err := s.svc().ListByPath("run")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
+
+	triggers, err = s.svc().ListByPath("/hooks/run")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
+
+	triggers, err = s.svc().ListByPath("/v1/hooks/run")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
 }
 
 // --- Get ---
@@ -121,12 +161,30 @@ func (s *TriggerSuite) TestCreateHTTP() {
 		Alias: "webhook",
 		Type:  string(models.TriggerTypeHTTP),
 		Configuration: map[string]interface{}{
-			"method": "POST",
+			"path": "/hooks/webhook",
 		},
 	})
 	s.Require().NoError(err)
 	s.NotEqual(uuid.Nil, trigger.ID)
 	s.Equal(models.TriggerTypeHTTP, trigger.Type)
+	s.Equal("webhook", trigger.NormalizedPath)
+}
+
+func (s *TriggerSuite) TestUpdateHTTPConfigurationRefreshesNormalizedPath() {
+	created := s.createHTTPTrigger("webhook", "/hooks/original")
+
+	updated, err := s.svc().Update(created.ID, &UpdateRequest{
+		Configuration: map[string]interface{}{
+			"path": "/v1/hooks/updated/path",
+		},
+	})
+	s.Require().NoError(err)
+	s.Equal("updated/path", updated.NormalizedPath)
+
+	byPath, err := s.svc().ListByPath("/hooks/updated/path")
+	s.Require().NoError(err)
+	s.Len(byPath, 1)
+	s.Equal(created.ID, byPath[0].ID)
 }
 
 // --- Update (Delete used as proxy) ---

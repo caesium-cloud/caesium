@@ -2,47 +2,97 @@ package trigger
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	codes "net/http"
 
-	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
-	"github.com/caesium-cloud/caesium/internal/executor"
+	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/caesium-cloud/caesium/internal/trigger/http"
+	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
+)
+
+var (
+	triggerServiceFactory = triggersvc.Service
+	fireHTTPTrigger       = fireTrigger
 )
 
 func Put(c *echo.Context) error {
-	var (
-		ctx = context.Background()
-		id  = uuid.MustParse(c.Param("id"))
-		svc = trigger.Service(ctx)
-	)
+	ctx := c.Request().Context()
 
-	t, err := svc.Get(id)
+	id, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
+	}
+
+	params, err := parseOptionalParams(c.Request().Body)
+	if err != nil {
+		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
+	}
+
+	trig, err := triggerServiceFactory(ctx).Get(id)
 	switch {
-	case err != nil:
+	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
-	case t == nil:
+	case err != nil, trig == nil:
 		return echo.ErrNotFound
-	case t.Type != models.TriggerTypeHTTP:
+	case trig.Type != models.TriggerTypeHTTP:
 		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(
 			fmt.Errorf(
 				"trigger: '%v' is type: '%v', not '%v'",
-				t.ID,
-				t.Type,
+				trig.ID,
+				trig.Type,
 				models.TriggerTypeHTTP,
 			),
 		)
-	default:
-		h, err := http.New(t)
-		if err != nil {
-			return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
-		}
-
-		executor.Queue(ctx, h)
-
-		return c.JSON(codes.StatusAccepted, nil)
 	}
+
+	if err := fireHTTPTrigger(ctx, trig, params); err != nil {
+		return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
+	return c.JSON(codes.StatusAccepted, nil)
+}
+
+func parseOptionalParams(body io.Reader) (map[string]string, error) {
+	if body == nil {
+		return nil, nil
+	}
+
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 {
+		return nil, nil
+	}
+
+	var req struct {
+		Params map[string]string `json:"params,omitempty"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return nil, err
+	}
+	if req.Params != nil {
+		return req.Params, nil
+	}
+
+	var direct map[string]string
+	if err := json.Unmarshal(data, &direct); err == nil {
+		return direct, nil
+	}
+
+	return nil, fmt.Errorf("invalid json body")
+}
+
+func fireTrigger(ctx context.Context, trig *models.Trigger, params map[string]string) error {
+	httpTrigger, err := triggerhttp.New(trig)
+	if err != nil {
+		return err
+	}
+	return httpTrigger.FireWithParams(ctx, params)
 }

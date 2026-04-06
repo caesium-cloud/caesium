@@ -292,6 +292,12 @@ func (s *IntegrationTestSuite) fetchAtomSpec(atomID string) container.Spec {
 	return atomResp.Spec
 }
 
+func (s *IntegrationTestSuite) fetchRuns(jobID string) []runResponse {
+	var runs []runResponse
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs", jobID), &runs)
+	return runs
+}
+
 func (s *IntegrationTestSuite) getJSON(path string, target any) {
 	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+path, nil)
 	require.NoError(s.T(), err)

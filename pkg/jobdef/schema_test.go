@@ -15,7 +15,8 @@ metadata:
   alias: test-job
 trigger:
   type: http
-  configuration: {}
+  configuration:
+    path: /hooks/test-job
 steps:
 `
 

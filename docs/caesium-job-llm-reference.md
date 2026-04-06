@@ -74,8 +74,13 @@ trigger:
 trigger:
   type: http
   configuration:
-    path: "/hooks/my-job"        # Required. Route path.
-    secret: "webhook-secret"     # Optional. Shared secret for validation.
+    path: "my-job"               # Required. Served at POST /v1/hooks/my-job.
+    secret: "secret://env/WEBHOOK_SECRET" # Optional. Shared secret for validation.
+    signatureScheme: hmac-sha256 # Optional. hmac-sha256, hmac-sha1, bearer, basic.
+    signatureHeader: X-Hub-Signature-256  # Optional. Header containing the signature.
+    paramMapping:                # Optional. JSON body -> run params.
+      branch: "$.ref"
+      commit: "$.after"
 ```
 
 ### Steps

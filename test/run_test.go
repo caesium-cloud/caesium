@@ -18,6 +18,7 @@ type runResponse struct {
 	JobID  string            `json:"job_id"`
 	Status string            `json:"status"`
 	Error  string            `json:"error,omitempty"`
+	Params map[string]string `json:"params,omitempty"`
 	Tasks  []runTaskResponse `json:"tasks"`
 }
 
