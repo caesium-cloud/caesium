@@ -140,6 +140,22 @@ func TestExtractParamsSupportsRootJSONPath(t *testing.T) {
 	}, params)
 }
 
+func TestExtractParamsFormatsFloatsWithoutTrailingZeros(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(`{"ratio":1.25,"whole":2.0}`)
+
+	params := extractParams(body, map[string]string{
+		"ratio": "$.ratio",
+		"whole": "$.whole",
+	})
+
+	require.Equal(t, map[string]string{
+		"ratio": "1.25",
+		"whole": "2",
+	}, params)
+}
+
 func TestExtractWebhookParams(t *testing.T) {
 	t.Parallel()
 

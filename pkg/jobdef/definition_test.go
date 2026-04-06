@@ -3,6 +3,8 @@ package jobdef
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 var example1 = `
@@ -250,6 +252,20 @@ steps:
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+func TestValidateSimpleJSONPath(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"$", "$.ref", "$.sender.login", "$.items.0.name"}
+	for _, expr := range valid {
+		require.NoError(t, validateSimpleJSONPath(expr), expr)
+	}
+
+	invalid := []string{"", "ref", "$.", "$.sender..login", "$.sender. login"}
+	for _, expr := range invalid {
+		require.Error(t, validateSimpleJSONPath(expr), expr)
 	}
 }
 

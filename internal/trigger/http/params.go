@@ -55,11 +55,12 @@ func parseJSONPath(path string) []string {
 	if path == "" {
 		return nil
 	}
-	if strings.HasPrefix(path, "$.") {
+	switch {
+	case strings.HasPrefix(path, "$."):
 		path = path[2:]
-	} else if path == "$" {
+	case path == "$":
 		return []string{}
-	} else if strings.HasPrefix(path, "$") {
+	case strings.HasPrefix(path, "$"):
 		path = strings.TrimPrefix(path, "$")
 		path = strings.TrimPrefix(path, ".")
 	}
@@ -105,9 +106,9 @@ func stringifyJSONValue(value any) (string, bool) {
 	case bool:
 		return strconv.FormatBool(v), true
 	case float64:
-		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), "."), true
+		return strconv.FormatFloat(v, 'f', -1, 64), true
 	case float32:
-		return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%f", v), "0"), "."), true
+		return strconv.FormatFloat(float64(v), 'f', -1, 32), true
 	case int:
 		return strconv.Itoa(v), true
 	case int64:

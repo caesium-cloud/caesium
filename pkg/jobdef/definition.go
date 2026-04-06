@@ -3,6 +3,7 @@ package jobdef
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -33,6 +34,8 @@ const (
 	StepTypeTask   = "task"
 	StepTypeBranch = "branch"
 )
+
+var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\.[^.\s]+)*$`)
 
 // Definition models the root job document.
 type Definition struct {
@@ -340,17 +343,8 @@ func validateSimpleJSONPath(expr string) error {
 	if expr == "" {
 		return fmt.Errorf("must not be empty")
 	}
-	if expr == "$" {
-		return nil
-	}
-	if !strings.HasPrefix(expr, "$.") {
-		return fmt.Errorf("must start with '$.' or be '$'")
-	}
-	parts := strings.Split(expr[2:], ".")
-	for _, part := range parts {
-		if strings.TrimSpace(part) == "" {
-			return fmt.Errorf("contains an empty path segment")
-		}
+	if !simpleJSONPathPattern.MatchString(expr) {
+		return fmt.Errorf("must be '$' or a dot-separated path starting with '$.'")
 	}
 	return nil
 }

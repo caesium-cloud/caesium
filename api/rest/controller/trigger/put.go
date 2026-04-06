@@ -71,22 +71,28 @@ func parseOptionalParams(body io.Reader) (map[string]string, error) {
 		return nil, nil
 	}
 
-	var req struct {
-		Params map[string]string `json:"params,omitempty"`
-	}
-	if err := json.Unmarshal(data, &req); err != nil {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, err
 	}
-	if req.Params != nil {
-		return req.Params, nil
+	if rawParams, ok := payload["params"]; ok {
+		var params map[string]string
+		if err := json.Unmarshal(rawParams, &params); err != nil {
+			return nil, fmt.Errorf("invalid json body")
+		}
+		return params, nil
 	}
 
-	var direct map[string]string
-	if err := json.Unmarshal(data, &direct); err == nil {
-		return direct, nil
+	params := make(map[string]string, len(payload))
+	for key, rawValue := range payload {
+		var value string
+		if err := json.Unmarshal(rawValue, &value); err != nil {
+			return nil, fmt.Errorf("invalid json body")
+		}
+		params[key] = value
 	}
 
-	return nil, fmt.Errorf("invalid json body")
+	return params, nil
 }
 
 func fireTrigger(ctx context.Context, trig *models.Trigger, params map[string]string) error {
