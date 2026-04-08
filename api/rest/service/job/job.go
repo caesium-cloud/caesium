@@ -85,6 +85,7 @@ type ListRequest struct {
 	Offset    uint64
 	OrderBy   []string
 	TriggerID string
+	Aliases   []string
 }
 
 func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
@@ -99,6 +100,9 @@ func (j *jobService) List(req *ListRequest) (models.Jobs, error) {
 		}
 
 		q = q.Where("trigger_id = ?", req.TriggerID)
+	}
+	if len(req.Aliases) > 0 {
+		q = q.Where("alias IN ?", req.Aliases)
 	}
 
 	for _, orderBy := range req.OrderBy {

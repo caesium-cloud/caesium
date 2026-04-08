@@ -16,4 +16,6 @@ var All = []interface{}{
 	&TaskCache{},
 	&CallbackRun{},
 	&ExecutionEvent{},
+	&APIKey{},
+	&AuditLog{},
 }

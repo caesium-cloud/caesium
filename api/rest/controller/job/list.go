@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/labstack/echo/v5"
@@ -16,6 +17,9 @@ func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
+	if aliases := middleware.GetAllowedJobAliases(c); len(aliases) > 0 {
+		req.Aliases = aliases
 	}
 
 	jobs, err := job.Service(c.Request().Context()).List(req)

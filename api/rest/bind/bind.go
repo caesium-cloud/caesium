@@ -1,7 +1,9 @@
 package bind
 
 import (
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
+	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
@@ -14,16 +16,32 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo/v5"
 )
 
-func All(g *echo.Group, bus internal_event.Bus) {
-	Public(g, bus)
+var webhookHandler = webhook.Receive
+
+// All binds all routes to the given group, optionally with auth middleware.
+func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) {
+	bindWebhooks(g)
+
+	protected := g.Group("")
+	if env.Variables().AuthMode == "api-key" {
+		protected.Use(authmw.Auth(authSvc, auditor, limiter))
+		if authSvc != nil {
+			authctrl.Dependencies.Service = authSvc
+			authctrl.Dependencies.Auditor = auditor
+			bindAuth(protected)
+		}
+	}
+
+	Protected(protected, bus)
 }
 
-func Public(g *echo.Group, bus internal_event.Bus) {
+func Protected(g *echo.Group, bus internal_event.Bus) {
 	// events
 	{
 		ctrl := event.New(bus)
@@ -86,11 +104,6 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/triggers/:id/fire", trigger.Fire)
 	}
 
-	// webhooks
-	{
-		g.POST("/hooks/*", webhook.Receive)
-	}
-
 	// stats
 	{
 		g.GET("/stats", stats.Get)
@@ -113,4 +126,16 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 	{
 		g.GET("/nodes/:address/workers", node.Workers)
 	}
+}
+
+func bindWebhooks(g *echo.Group) {
+	g.POST("/hooks/*", webhookHandler)
+}
+
+func bindAuth(g *echo.Group) {
+	g.GET("/auth/keys", authctrl.ListKeys)
+	g.POST("/auth/keys", authctrl.CreateKey)
+	g.POST("/auth/keys/:id/revoke", authctrl.RevokeKey)
+	g.POST("/auth/keys/:id/rotate", authctrl.RotateKey)
+	g.GET("/auth/audit", authctrl.QueryAudit)
 }

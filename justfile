@@ -28,6 +28,7 @@ publish_image_ref := repo + "/" + image
 publish_builder_ref := repo + "/" + builder_image
 sock := env("CAESIUM_SOCK", default_sock)
 port := env("CAESIUM_PORT", "8080")
+auth_mode := env("CAESIUM_AUTH_MODE", "none")
 
 validate-platform:
     @if [ "{{ platform }}" != "linux/amd64" ] && [ "{{ platform }}" != "linux/arm64" ]; then \
@@ -129,6 +130,8 @@ run: build
         -p {{ port }}:8080 \
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e CAESIUM_AUTH_MODE={{ auth_mode }} \
+        -e CAESIUM_AUTH_REQUIRE_TLS=false \
         --user 0:0 \
         {{ local_image_ref }}:{{ tag }} start
 

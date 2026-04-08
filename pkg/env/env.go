@@ -88,4 +88,13 @@ type Environment struct {
 	WebhookMaxBodySize            ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
 	WebhookRateLimitPerMinute     int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
 	WebhookRateLimitBurst         int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
+
+	// Authentication & Authorization
+	AuthMode                string `envconfig:"AUTH_MODE" default:"none"` // none, api-key
+	AuthRequireTLS          bool   `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
+	TLSCert                 string `envconfig:"TLS_CERT" default:""`
+	TLSKey                  string `envconfig:"TLS_KEY" default:""`
+	TrustedProxies          string `envconfig:"TRUSTED_PROXIES" default:""`
+	AuthRateLimitPerMinute  int    `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
+	AuthRateLimitBurstAlert int    `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
 }
