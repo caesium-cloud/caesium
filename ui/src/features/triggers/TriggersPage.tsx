@@ -14,7 +14,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Zap, Clock, Globe, ChevronDown, ChevronRight, Play, Plus, Pencil } from "lucide-react";
+import { Zap, Clock, Globe, ChevronDown, ChevronRight, Plus, Pencil } from "lucide-react";
 import { useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 
@@ -196,12 +196,6 @@ export function TriggersPage() {
     refetchInterval: 30000,
   });
 
-  const fireMutation = useMutation({
-    mutationFn: (id: string) => api.fireTrigger(id),
-    onSuccess: () => toast.success("Trigger fired"),
-    onError: (err) => toast.error(errorMessage(err)),
-  });
-
   const createMutation = useMutation({
     mutationFn: (body: TriggerCreateRequest) => api.createTrigger(body),
     onSuccess: () => {
@@ -375,27 +369,15 @@ export function TriggersPage() {
                       <RelativeTime date={trigger.updated_at} />
                     </span>
                     {isHttp && (
-                      <>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => openEditDialog(trigger)}
-                          disabled={editorPending}
-                        >
-                          <Pencil className="h-3.5 w-3.5 mr-1.5" />
-                          Edit
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => fireMutation.mutate(trigger.id)}
-                          disabled={fireMutation.isPending}
-                          title="Fire this HTTP trigger"
-                        >
-                          <Play className="h-3.5 w-3.5 mr-1.5" />
-                          Fire
-                        </Button>
-                      </>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => openEditDialog(trigger)}
+                        disabled={editorPending}
+                      >
+                        <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                        Edit
+                      </Button>
                     )}
                   </div>
                 </div>
@@ -439,7 +421,8 @@ export function TriggersPage() {
                     {isHttp && (
                       <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-muted-foreground">
                         <Zap className="h-3 w-3 inline mr-1.5 text-yellow-500" />
-                        Manual fire hits this trigger directly and can bypass webhook auth checks. External systems should post to the webhook route above.
+                        Manual fire is now an operator-only API action via <code className="mx-1 rounded bg-muted px-1 py-0.5">POST /v1/triggers/:id/fire</code>.
+                        External systems should post to the webhook route above.
                       </div>
                     )}
                   </div>

@@ -2,6 +2,7 @@ package trigger
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -93,7 +94,7 @@ func (s *TriggerSuite) TestListByType() {
 
 func (s *TriggerSuite) TestListWithPagination() {
 	for i := 0; i < 5; i++ {
-		s.createTrigger(string(models.TriggerTypeCron), "trigger")
+		s.createTrigger(string(models.TriggerTypeCron), "trigger-"+uuid.NewString())
 	}
 
 	triggers, err := s.svc().List(&ListRequest{Limit: 2, Offset: 1})
@@ -117,6 +118,20 @@ func (s *TriggerSuite) TestListByPath() {
 	s.Equal(matched.ID, triggers[0].ID)
 
 	triggers, err = s.svc().ListByPath("/v1/hooks/run")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
+}
+
+func (s *TriggerSuite) TestListByPathPreservesRealLeadingSegments() {
+	matched := s.createHTTPTrigger("webhook-versioned", "/hooks/v1/build")
+
+	triggers, err := s.svc().ListByPath("v1/build")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
+
+	triggers, err = s.svc().ListByPath("/v1/hooks/v1/build")
 	s.Require().NoError(err)
 	s.Len(triggers, 1)
 	s.Equal(matched.ID, triggers[0].ID)
@@ -168,6 +183,20 @@ func (s *TriggerSuite) TestCreateHTTP() {
 	s.NotEqual(uuid.Nil, trigger.ID)
 	s.Equal(models.TriggerTypeHTTP, trigger.Type)
 	s.Equal("webhook", trigger.NormalizedPath)
+}
+
+func (s *TriggerSuite) TestCreateRejectsDuplicateAlias() {
+	s.createHTTPTrigger("duplicate-alias", "/hooks/first")
+
+	_, err := s.svc().Create(&CreateRequest{
+		Alias: "duplicate-alias",
+		Type:  string(models.TriggerTypeHTTP),
+		Configuration: map[string]interface{}{
+			"path": "/hooks/second",
+		},
+	})
+	s.Require().Error(err)
+	s.True(errors.Is(err, ErrTriggerAliasConflict))
 }
 
 func (s *TriggerSuite) TestUpdateHTTPConfigurationRefreshesNormalizedPath() {

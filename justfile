@@ -179,6 +179,7 @@ integration-test-podman: build
         -p 8080:8080 \
         -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
         -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
@@ -212,6 +213,7 @@ integration-up: build-test
         -v {{ sock }}:/var/run/docker.sock \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
         {{ local_image_ref }}:{{ tag }}-test start
 
@@ -247,6 +249,7 @@ ui-e2e: build-release
         {{ container_cli }} run --platform {{ platform }} -d --name caesium-server -p {{ port }}:8080 \
             -v {{ sock }}:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
             --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null; \
         tries=0; \
         until curl -sf http://127.0.0.1:{{ port }}/health >/dev/null; do \

@@ -2,6 +2,9 @@ package trigger
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -9,6 +12,11 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+)
+
+var (
+	ErrInvalidTriggerRequest = errors.New("invalid trigger request")
+	ErrTriggerAliasConflict  = errors.New("trigger alias conflict")
 )
 
 type Trigger interface {
@@ -110,11 +118,14 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 
 	cfg, err := req.ConfigurationString()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
 	}
 
 	triggerType := models.TriggerType(req.Type)
 	if err := validateTriggerRequest(triggerType, req.Configuration); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
+	}
+	if err := ensureAliasAvailable(q, strings.TrimSpace(req.Alias), uuid.Nil); err != nil {
 		return nil, err
 	}
 
@@ -143,15 +154,18 @@ func (t *triggerService) Update(id uuid.UUID, req *UpdateRequest) (*models.Trigg
 	}
 
 	if req.Alias != nil {
+		if err := ensureAliasAvailable(t.db.WithContext(t.ctx), strings.TrimSpace(*req.Alias), id); err != nil {
+			return nil, err
+		}
 		trigger.Alias = *req.Alias
 	}
 	if req.Configuration != nil {
 		if err := validateTriggerRequest(trigger.Type, req.Configuration); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
 		}
 		cfg, err := jsonutil.MarshalMapString(req.Configuration)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
 		}
 		trigger.Configuration = cfg
 	}
@@ -188,4 +202,26 @@ func validateTriggerRequest(triggerType models.TriggerType, configuration map[st
 		Type:          string(triggerType),
 		Configuration: cfg,
 	})
+}
+
+func ensureAliasAvailable(q *gorm.DB, alias string, excludeID uuid.UUID) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+
+	var existing models.Trigger
+	query := q.Where("alias = ?", alias)
+	if excludeID != uuid.Nil {
+		query = query.Where("id <> ?", excludeID)
+	}
+	err := query.First(&existing).Error
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: alias %q already exists", ErrTriggerAliasConflict, alias)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil
+	default:
+		return err
+	}
 }

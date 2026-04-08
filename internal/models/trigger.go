@@ -48,10 +48,20 @@ func (t *Trigger) ApplyDerivedFields() error {
 }
 
 func NormalizedTriggerPath(path string) string {
-	path = strings.Trim(strings.TrimSpace(path), "/")
-	path = strings.TrimPrefix(path, "v1/")
-	path = strings.TrimPrefix(path, "hooks/")
-	return strings.Trim(path, "/")
+	trimmed := strings.Trim(strings.TrimSpace(path), "/")
+	if trimmed == "" {
+		return ""
+	}
+
+	parts := strings.Split(trimmed, "/")
+	switch {
+	case len(parts) >= 2 && parts[0] == "v1" && parts[1] == "hooks":
+		parts = parts[2:]
+	case parts[0] == "hooks":
+		parts = parts[1:]
+	}
+
+	return strings.Trim(strings.Join(parts, "/"), "/")
 }
 
 func NormalizedTriggerPathForConfiguration(triggerType TriggerType, configuration string) (string, error) {

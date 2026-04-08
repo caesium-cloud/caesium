@@ -2,15 +2,18 @@ package trigger
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	codes "net/http"
+	"strings"
 
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -21,8 +24,12 @@ var (
 	fireHTTPTrigger       = fireTrigger
 )
 
-func Put(c *echo.Context) error {
+func Fire(c *echo.Context) error {
 	ctx := c.Request().Context()
+
+	if err := requireManualTriggerAPIKey(c); err != nil {
+		return err
+	}
 
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -38,7 +45,9 @@ func Put(c *echo.Context) error {
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
 		return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
-	case err != nil, trig == nil:
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return echo.ErrNotFound
+	case trig == nil:
 		return echo.ErrNotFound
 	case trig.Type != models.TriggerTypeHTTP:
 		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(
@@ -75,23 +84,15 @@ func parseOptionalParams(body io.Reader) (map[string]string, error) {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, err
 	}
-	if rawParams, ok := payload["params"]; ok {
-		var params map[string]string
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return nil, fmt.Errorf("invalid json body")
-		}
-		return params, nil
+	rawParams, ok := payload["params"]
+	if !ok {
+		return nil, fmt.Errorf("invalid json body: missing params object")
 	}
 
-	params := make(map[string]string, len(payload))
-	for key, rawValue := range payload {
-		var value string
-		if err := json.Unmarshal(rawValue, &value); err != nil {
-			return nil, fmt.Errorf("invalid json body")
-		}
-		params[key] = value
+	var params map[string]string
+	if err := json.Unmarshal(rawParams, &params); err != nil {
+		return nil, fmt.Errorf("invalid json body: %w", err)
 	}
-
 	return params, nil
 }
 
@@ -101,4 +102,24 @@ func fireTrigger(ctx context.Context, trig *models.Trigger, params map[string]st
 		return err
 	}
 	return httpTrigger.FireWithParams(ctx, params)
+}
+
+func requireManualTriggerAPIKey(c *echo.Context) error {
+	expected := strings.TrimSpace(env.Variables().ManualTriggerAPIKey)
+	if expected == "" {
+		return echo.NewHTTPError(codes.StatusServiceUnavailable, "manual trigger fire is disabled")
+	}
+
+	provided := strings.TrimSpace(c.Request().Header.Get("X-Caesium-API-Key"))
+	if provided == "" {
+		auth := strings.TrimSpace(c.Request().Header.Get("Authorization"))
+		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			provided = strings.TrimSpace(auth[7:])
+		}
+	}
+
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+		return echo.NewHTTPError(codes.StatusUnauthorized, "invalid api key")
+	}
+	return nil
 }

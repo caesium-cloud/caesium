@@ -4,7 +4,7 @@
 
 ## Problem Statement
 
-Caesium's trigger system has two types: cron (fully implemented) and HTTP (implemented for webhook delivery). HTTP triggers now support dedicated webhook routes, authentication, payload param extraction, and manual/API fire with params. The remaining gap in this design area is event-based routing and trigger chaining.
+Caesium's trigger system has two types: cron (fully implemented) and HTTP (implemented for webhook delivery). HTTP triggers now support dedicated webhook routes, authentication, payload param extraction, payload limits, per-IP rate limiting, and operator-authenticated manual/API fire. The remaining gap in this design area is event-based routing and trigger chaining.
 - **No trigger chaining.** One job's completion cannot trigger another job. The internal event bus handles lifecycle events but has no mechanism to route them to triggers.
 - **No event persistence.** External events are fire-and-forget. There is no event log, no replay, and no deduplication.
 
@@ -31,7 +31,7 @@ type Trigger interface {
 
 ### Executor
 
-The executor (`internal/executor/executor.go`) maintains a `sync.Map` of active triggers. A background loop runs every 60 seconds and queues all cron triggers. HTTP triggers are only queued when `PUT /v1/triggers/:id` is called from the REST controller.
+The executor (`internal/executor/executor.go`) maintains a `sync.Map` of active triggers. A background loop runs every 60 seconds and queues all cron triggers. HTTP triggers are only queued when `POST /v1/triggers/:id/fire` is called from the REST controller or when a matching webhook request reaches `POST /v1/hooks/*`.
 
 ### HTTP Trigger (current)
 
@@ -571,15 +571,10 @@ Add to the linter (`internal/jobdef/lint/`):
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/hooks/*` | Webhook receiver (WS1) |
+| `POST` | `/v1/triggers/:id/fire` | Operator-authenticated manual fire with optional params |
 | `POST` | `/v1/events` | Event ingestion (WS2) |
 | `GET` | `/v1/events/ingested` | List ingested events (observability) |
 | `GET` | `/v1/triggers/:id/events` | List events that matched this trigger |
-
-### Updated Endpoints
-
-| Method | Path | Change |
-|--------|------|--------|
-| `PUT` | `/v1/triggers/:id` | Accept optional JSON body as run params |
 
 ### CLI Changes
 
@@ -610,6 +605,9 @@ No mandatory infrastructure dependencies. The feature runs entirely within the e
 | `CAESIUM_EVENT_RETENTION` | `7d` | How long to keep ingested events |
 | `CAESIUM_MAX_TRIGGER_DEPTH` | `10` | Maximum trigger chain depth before rejection |
 | `CAESIUM_WEBHOOK_MAX_BODY_SIZE` | `1MB` | Maximum accepted webhook payload size |
+| `CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE` | `120` | Per-IP webhook request budget |
+| `CAESIUM_WEBHOOK_RATE_LIMIT_BURST` | `20` | Per-IP webhook burst allowance |
+| `CAESIUM_MANUAL_TRIGGER_API_KEY` | unset | Required API key for `POST /v1/triggers/:id/fire` |
 
 ---
 
@@ -677,7 +675,7 @@ New Prometheus metrics:
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| Webhook flood (DoS via high-frequency POSTs) | Resource exhaustion | `CAESIUM_WEBHOOK_MAX_BODY_SIZE` limit. Per-path rate limiting (Phase 1.3 concurrency work). Log but drop payloads exceeding thresholds. |
+| Webhook flood (DoS via high-frequency POSTs) | Resource exhaustion | `CAESIUM_WEBHOOK_MAX_BODY_SIZE` body cap plus per-IP rate limiting via `CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE`/`CAESIUM_WEBHOOK_RATE_LIMIT_BURST`. |
 | Infinite trigger chains | Runaway execution | Runtime depth guard (`_trigger_depth`). Static cycle detection at lint time. |
 | JSONPath injection (malicious payloads) | Unexpected parameter values | JSONPath extraction always produces strings. Run parameters are environment variables — they don't execute. Validate extracted values against parameter schemas when available. |
 | Event bus backpressure | Dropped internal events for chaining | Current bus drops events when channel is full (non-blocking). For chaining, this could mean missed triggers. Mitigation: increase channel buffer for the router subscriber, log dropped events as warnings, surface in metrics. |

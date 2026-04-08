@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
 )
@@ -34,6 +35,17 @@ func Receive(c *echo.Context) error {
 
 func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, runner Runner) error {
 	path := normalizeHookPath(c.Param("*"))
+	if !webhookRateLimiters.Allow(c.RealIP()) {
+		return echo.NewHTTPError(http.StatusTooManyRequests, "rate limit exceeded")
+	}
+
+	body, err := readWebhookBody(c.Request().Body)
+	switch {
+	case errors.Is(err, errRequestTooLarge):
+		return echo.NewHTTPError(http.StatusRequestEntityTooLarge, "request body too large")
+	case err != nil:
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
 
 	triggers, err := trigSvc.ListByPath(path)
 	if err != nil {
@@ -41,11 +53,6 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 	if len(triggers) == 0 {
 		return echo.NewHTTPError(http.StatusNotFound, "no trigger registered for path")
-	}
-
-	body, err := io.ReadAll(c.Request().Body)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 	}
 
 	var accepted int
@@ -124,6 +131,25 @@ func DefaultRunner(ctx context.Context, j *models.Job, params map[string]string)
 
 func normalizeHookPath(path string) string {
 	return models.NormalizedTriggerPath(strings.TrimSpace(path))
+}
+
+var errRequestTooLarge = errors.New("request body too large")
+
+func readWebhookBody(body io.Reader) ([]byte, error) {
+	maxBytes := env.Variables().WebhookMaxBodySize.Int64()
+	if maxBytes <= 0 {
+		return io.ReadAll(body)
+	}
+
+	limited := io.LimitReader(body, maxBytes+1)
+	data, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errRequestTooLarge
+	}
+	return data, nil
 }
 
 func cloneStringMap(in map[string]string) map[string]string {

@@ -26,7 +26,7 @@ These features address the most common reasons a team would choose an alternativ
 
 ### 1.1 Full-Featured HTTP Triggers & Webhook Ingestion
 
-**Status**: Shipped. HTTP triggers now support `POST /v1/hooks/*`, configured webhook paths, optional request authentication (`hmac-sha256`, `hmac-sha1`, `bearer`, `basic`), payload parameter extraction via `paramMapping`, default parameter merging, and manual/API fire with optional params. The web UI also exposes HTTP trigger configuration and editing.
+**Status**: Shipped. HTTP triggers now support `POST /v1/hooks/*`, configured webhook paths, optional request authentication (`hmac-sha256`, `hmac-sha1`, `bearer`, `basic`), payload parameter extraction via `paramMapping`, default parameter merging, and operator-authenticated manual/API fire via `POST /v1/triggers/:id/fire`. The web UI also exposes HTTP trigger configuration and editing.
 
 **Delivered state**: HTTP triggers are now a first-class webhook ingestion layer. External systems (CI/CD, GitHub, Slack, S3 notifications, custom apps) can POST to a dedicated webhook endpoint, and Caesium routes the payload to the correct job with parameter extraction and signature validation.
 

@@ -31,13 +31,10 @@ func (s *IntegrationTestSuite) TestHTTPJob() {
 	job := s.createJobWithTrigger("test_http_job", nil, models.TriggerTypeHTTP)
 	assert.NotNil(s.T(), job)
 
-	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v", s.caesiumURL, job.TriggerID))
+	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v/fire", s.caesiumURL, job.TriggerID))
 	assert.Nil(s.T(), err)
 
-	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodPut, u.String(), nil)
-	assert.Nil(s.T(), err)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.doManualTriggerRequest(http.MethodPost, u.String(), nil)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
 	if resp.Body != nil {

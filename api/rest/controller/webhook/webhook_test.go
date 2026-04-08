@@ -10,6 +10,7 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
@@ -34,6 +35,8 @@ func (s stubJobLister) List(*jsvc.ListRequest) (models.Jobs, error) {
 }
 
 func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
+	require.NoError(t, env.Process())
+
 	triggerID := uuid.New()
 	jobID := uuid.New()
 
@@ -94,6 +97,8 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 }
 
 func TestReceiveWithServicesRejectsInvalidSignature(t *testing.T) {
+	require.NoError(t, env.Process())
+
 	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
 	req.Header.Set("Authorization", "Bearer wrong-secret")
 	rec := httptest.NewRecorder()
@@ -128,4 +133,75 @@ func TestReceiveWithServicesRejectsInvalidSignature(t *testing.T) {
 	httpErr, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusUnauthorized, httpErr.Code)
+}
+
+func TestReceiveWithServicesRejectsOversizedBody(t *testing.T) {
+	t.Setenv("CAESIUM_WEBHOOK_MAX_BODY_SIZE", "8B")
+	require.NoError(t, env.Process())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{},
+		stubJobLister{},
+		func(context.Context, *models.Job, map[string]string) error { return nil },
+	)
+	require.Error(t, err)
+	httpErr, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusRequestEntityTooLarge, httpErr.Code)
+}
+
+func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
+	t.Setenv("CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE", "1")
+	t.Setenv("CAESIUM_WEBHOOK_RATE_LIMIT_BURST", "1")
+	require.NoError(t, env.Process())
+	webhookRateLimiters = &ipRateLimiters{
+		clients:  map[string]*clientLimiter{},
+		staleAge: 15 * time.Minute,
+	}
+
+	newContext := func() *echo.Context {
+		req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+		req.Header.Set("Authorization", "Bearer top-secret")
+		req.RemoteAddr = "203.0.113.8:1234"
+		rec := httptest.NewRecorder()
+		e := echo.New()
+		c := e.NewContext(req, rec)
+		c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
+		return c
+	}
+
+	triggers := stubTriggerLister{
+		triggers: models.Triggers{
+			&models.Trigger{
+				ID:   uuid.New(),
+				Type: models.TriggerTypeHTTP,
+				Configuration: `{
+					"path":"github/push",
+					"secret":"top-secret",
+					"signatureScheme":"bearer"
+				}`,
+			},
+		},
+	}
+	jobs := stubJobLister{jobs: models.Jobs{&models.Job{ID: uuid.New(), Alias: "deploy"}}}
+	runner := func(context.Context, *models.Job, map[string]string) error { return nil }
+
+	first := newContext()
+	err := ReceiveWithServices(first, triggers, jobs, runner)
+	require.NoError(t, err)
+
+	second := newContext()
+	err = ReceiveWithServices(second, triggers, jobs, runner)
+	require.Error(t, err)
+	httpErr, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusTooManyRequests, httpErr.Code)
 }

@@ -83,7 +83,7 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/triggers", trigger.Post)
 		g.GET("/triggers/:id", trigger.Get)
 		g.PATCH("/triggers/:id", trigger.Patch)
-		g.PUT("/triggers/:id", trigger.Put)
+		g.POST("/triggers/:id/fire", trigger.Fire)
 	}
 
 	// webhooks

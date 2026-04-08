@@ -15,7 +15,7 @@ func Post(c *echo.Context) error {
 
 	trigger, err := triggerServiceFactory(c.Request().Context()).Create(req)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+		return triggerServiceError(err)
 	}
 
 	return c.JSON(http.StatusCreated, trigger)

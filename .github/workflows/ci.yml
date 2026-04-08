@@ -222,6 +222,7 @@ jobs:
             -p 8080:8080 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
           tries=0

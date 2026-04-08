@@ -50,6 +50,7 @@ type Environment struct {
 	DatabaseType                  string        `default:"internal" split_words:"true"`
 	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
 	DatabaseConsoleEnabled        bool          `default:"false" split_words:"true"`
+	ManualTriggerAPIKey           string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
 	MaxParallelTasks              int           `split_words:"true"`
 	TaskFailurePolicy             string        `default:"halt" split_words:"true"`
 	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
@@ -84,4 +85,7 @@ type Environment struct {
 	OpenLineageFilePath           string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
 	OpenLineageTimeout            time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
 	OpenLineageRetryAttempts      uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
+	WebhookMaxBodySize            ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
+	WebhookRateLimitPerMinute     int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
+	WebhookRateLimitBurst         int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
 }

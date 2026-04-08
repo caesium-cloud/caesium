@@ -376,8 +376,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
   fireTrigger: (id: string, body?: TriggerRunRequest) =>
-    request<void>(`/triggers/${id}`, {
-      method: "PUT",
+    request<void>(`/triggers/${id}/fire`, {
+      method: "POST",
       body: body ? JSON.stringify(body) : undefined,
     }),
   getAtoms: () => request<Atom[]>("/atoms"),
