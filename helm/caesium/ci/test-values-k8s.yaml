@@ -5,6 +5,9 @@ image:
 
 config:
   logLevel: debug
+  extraEnv:
+    - name: CAESIUM_MANUAL_TRIGGER_API_KEY
+      value: integration-test-key
 
 kubernetes:
   engine:

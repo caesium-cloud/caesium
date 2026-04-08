@@ -375,6 +375,7 @@ jobs:
             -p 8080:8080 \
             -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
             -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
+            -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
             -e CAESIUM_LOG_LEVEL=debug \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
