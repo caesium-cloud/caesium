@@ -3,14 +3,11 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"sort"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
-	"gorm.io/gorm"
 )
 
 // DecodeScope normalizes the persisted scope payload into a structured model.
@@ -108,11 +105,4 @@ func (s *Service) JobAliasByBackfillID(ctx context.Context, id uuid.UUID) (strin
 		return "", err
 	}
 	return s.JobAliasByID(ctx, backfill.JobID)
-}
-
-func formatLookupError(kind string, err error) error {
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
-	return fmt.Errorf("lookup %s scope target: %w", kind, err)
 }
