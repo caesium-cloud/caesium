@@ -24,7 +24,7 @@ func TestRegisterGraphQLSkippedWhenAuthEnabled(t *testing.T) {
 }
 
 func hasRoute(e *echo.Echo, method, path string) bool {
-	for _, route := range e.Routes() {
+	for _, route := range e.Router().Routes() {
 		if route.Method == method && route.Path == path {
 			return true
 		}

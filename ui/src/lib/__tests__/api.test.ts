@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { api, ApiError } from '@/lib/api';
+import { clearApiKey, getApiKey, setApiKey } from '@/lib/auth';
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -16,6 +17,7 @@ function okResponse(body: unknown) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  clearApiKey();
 });
 
 describe('api', () => {
@@ -92,5 +94,33 @@ describe('api', () => {
       '/v1/cache/prune',
       expect.objectContaining({ method: 'POST' })
     );
+  });
+
+  it('adds the bearer token header when an api key is present', async () => {
+    setApiKey('csk_live_secret');
+    mockFetch.mockResolvedValue(okResponse([]));
+
+    await api.getJobs();
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/v1/jobs',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer csk_live_secret',
+        }),
+      })
+    );
+  });
+
+  it('clears the in-memory api key on 401 responses', async () => {
+    setApiKey('csk_live_secret');
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: () => Promise.resolve('Authentication required'),
+    });
+
+    await expect(api.getJobs()).rejects.toMatchObject({ status: 401 });
+    expect(getApiKey()).toBeNull();
   });
 });

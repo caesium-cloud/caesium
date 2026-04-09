@@ -16,6 +16,7 @@ import (
 
 func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 	t.Setenv("CAESIUM_AUTH_MODE", "api-key")
+	t.Setenv("CAESIUM_DATABASE_PATH", t.TempDir())
 	require.NoError(t, env.Process())
 
 	db := testutil.OpenTestDB(t)

@@ -89,3 +89,18 @@ func TestSetPausedNotFoundReturnsError(t *testing.T) {
 	_, err := svc.SetPaused(uuid.New(), true)
 	require.Error(t, err)
 }
+
+func TestListFiltersByAliases(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	_, err := svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "alpha"})
+	require.NoError(t, err)
+	_, err = svc.Create(&CreateRequest{TriggerID: uuid.New(), Alias: "beta"})
+	require.NoError(t, err)
+
+	jobs, err := svc.List(&ListRequest{Aliases: []string{"beta"}})
+	require.NoError(t, err)
+	require.Len(t, jobs, 1)
+	require.Equal(t, "beta", jobs[0].Alias)
+}
