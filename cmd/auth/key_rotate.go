@@ -23,6 +23,7 @@ var keyRotateCmd = &cobra.Command{
 	Example: `  caesium auth key rotate --id <key-id> --grace-period 24h`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(rotateServer, "/")
+		apiKey := resolveAPIKey(cmd, rotateAPIKey)
 		url := fmt.Sprintf("%s/v1/auth/keys/%s/rotate", server, rotateID)
 
 		body := map[string]interface{}{}
@@ -39,8 +40,8 @@ var keyRotateCmd = &cobra.Command{
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if rotateAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+rotateAPIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -80,7 +81,7 @@ func init() {
 	keyRotateCmd.Flags().StringVar(&rotateID, "id", "", "API key ID to rotate (required)")
 	keyRotateCmd.Flags().StringVar(&rotateGracePeriod, "grace-period", "24h", "Grace period before the old key expires")
 	keyRotateCmd.Flags().StringVar(&rotateServer, "server", "http://localhost:8080", "Caesium server base URL")
-	keyRotateCmd.Flags().StringVar(&rotateAPIKey, "api-key", "", "Admin API key for authentication")
+	keyRotateCmd.Flags().StringVar(&rotateAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 	_ = keyRotateCmd.MarkFlagRequired("id")
 
 	keyCmd.AddCommand(keyRotateCmd)

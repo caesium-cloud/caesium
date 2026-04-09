@@ -24,7 +24,7 @@ func RegisterUI(e *echo.Echo) {
 		path := c.Request().URL.Path
 
 		// If it's a request for an API or health, don't handle it here
-		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/gql") || path == "/health" || path == "/metrics" {
+		if strings.HasPrefix(path, "/v1") || strings.HasPrefix(path, "/gql") || path == "/health" || path == "/metrics" || path == "/auth/status" {
 			return echo.ErrNotFound
 		}
 

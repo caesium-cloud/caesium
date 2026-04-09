@@ -20,13 +20,14 @@ var keyListCmd = &cobra.Command{
 	Short: "List all API keys",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(listServer, "/")
+		apiKey := resolveAPIKey(cmd, listAPIKey)
 
 		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, server+"/v1/auth/keys", nil)
 		if err != nil {
 			return err
 		}
-		if listAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+listAPIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -53,7 +54,7 @@ var keyListCmd = &cobra.Command{
 
 func init() {
 	keyListCmd.Flags().StringVar(&listServer, "server", "http://localhost:8080", "Caesium server base URL")
-	keyListCmd.Flags().StringVar(&listAPIKey, "api-key", "", "Admin API key for authentication")
+	keyListCmd.Flags().StringVar(&listAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 
 	keyCmd.AddCommand(keyListCmd)
 }

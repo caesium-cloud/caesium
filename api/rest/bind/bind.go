@@ -32,9 +32,7 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 	if env.Variables().AuthMode == "api-key" {
 		protected.Use(authmw.Auth(authSvc, auditor, limiter))
 		if authSvc != nil {
-			authctrl.Dependencies.Service = authSvc
-			authctrl.Dependencies.Auditor = auditor
-			bindAuth(protected)
+			bindAuth(protected, authctrl.New(authSvc, auditor))
 		}
 	}
 
@@ -132,10 +130,10 @@ func bindWebhooks(g *echo.Group) {
 	g.POST("/hooks/*", webhookHandler)
 }
 
-func bindAuth(g *echo.Group) {
-	g.GET("/auth/keys", authctrl.ListKeys)
-	g.POST("/auth/keys", authctrl.CreateKey)
-	g.POST("/auth/keys/:id/revoke", authctrl.RevokeKey)
-	g.POST("/auth/keys/:id/rotate", authctrl.RotateKey)
-	g.GET("/auth/audit", authctrl.QueryAudit)
+func bindAuth(g *echo.Group, controller *authctrl.Controller) {
+	g.GET("/auth/keys", controller.ListKeys)
+	g.POST("/auth/keys", controller.CreateKey)
+	g.POST("/auth/keys/:id/revoke", controller.RevokeKey)
+	g.POST("/auth/keys/:id/rotate", controller.RotateKey)
+	g.GET("/auth/audit", controller.QueryAudit)
 }

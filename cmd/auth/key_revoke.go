@@ -22,14 +22,15 @@ var keyRevokeCmd = &cobra.Command{
 	Example: `  caesium auth key revoke --id <key-id>`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(revokeServer, "/")
+		apiKey := resolveAPIKey(cmd, revokeAPIKey)
 		url := fmt.Sprintf("%s/v1/auth/keys/%s/revoke", server, revokeID)
 
 		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodPost, url, nil)
 		if err != nil {
 			return err
 		}
-		if revokeAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+revokeAPIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -57,7 +58,7 @@ var keyRevokeCmd = &cobra.Command{
 func init() {
 	keyRevokeCmd.Flags().StringVar(&revokeID, "id", "", "API key ID to revoke (required)")
 	keyRevokeCmd.Flags().StringVar(&revokeServer, "server", "http://localhost:8080", "Caesium server base URL")
-	keyRevokeCmd.Flags().StringVar(&revokeAPIKey, "api-key", "", "Admin API key for authentication")
+	keyRevokeCmd.Flags().StringVar(&revokeAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 	_ = keyRevokeCmd.MarkFlagRequired("id")
 
 	keyCmd.AddCommand(keyRevokeCmd)

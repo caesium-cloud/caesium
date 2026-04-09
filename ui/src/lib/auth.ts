@@ -11,6 +11,19 @@ type AuthChangeListener = () => void;
 let apiKey: string | null = null;
 const listeners: Set<AuthChangeListener> = new Set();
 
+function cloneHeaders(headers?: HeadersInit): Record<string, string> {
+  if (!headers) {
+    return {};
+  }
+  if (headers instanceof Headers) {
+    return Object.fromEntries(headers.entries());
+  }
+  if (Array.isArray(headers)) {
+    return Object.fromEntries(headers);
+  }
+  return { ...headers };
+}
+
 /** Store the API key in memory (never persisted to disk). */
 export function setApiKey(key: string): void {
   apiKey = key;
@@ -23,14 +36,21 @@ export function clearApiKey(): void {
   listeners.forEach((fn) => fn());
 }
 
-/** Get the current API key, or null if not authenticated. */
-export function getApiKey(): string | null {
-  return apiKey;
-}
-
 /** Returns true if an API key is currently set. */
 export function isAuthenticated(): boolean {
   return apiKey !== null;
+}
+
+/**
+ * Injects the in-memory API key into a request headers object without exposing
+ * the raw key to other modules.
+ */
+export function withAuthHeaders(headers?: HeadersInit): Record<string, string> {
+  const nextHeaders = cloneHeaders(headers);
+  if (apiKey) {
+    nextHeaders.Authorization = `Bearer ${apiKey}`;
+  }
+  return nextHeaders;
 }
 
 /** Subscribe to auth state changes. Returns an unsubscribe function. */

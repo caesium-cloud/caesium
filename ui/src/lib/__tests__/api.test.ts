@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { api, ApiError } from '@/lib/api';
-import { clearApiKey, getApiKey, setApiKey } from '@/lib/auth';
+import { clearApiKey, isAuthenticated, setApiKey } from '@/lib/auth';
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -121,6 +121,6 @@ describe('api', () => {
     });
 
     await expect(api.getJobs()).rejects.toMatchObject({ status: 401 });
-    expect(getApiKey()).toBeNull();
+    expect(isAuthenticated()).toBe(false);
   });
 });

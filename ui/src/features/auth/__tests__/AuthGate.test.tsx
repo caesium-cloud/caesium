@@ -12,8 +12,11 @@ describe("AuthGate", () => {
     clearApiKey();
   });
 
-  it("renders the login page when the auth probe returns 401", async () => {
-    mockFetch.mockResolvedValue({ status: 401 });
+  it("renders the login page when the auth status endpoint says auth is enabled", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ enabled: true }),
+    });
 
     render(
       <AuthGate>
@@ -24,11 +27,14 @@ describe("AuthGate", () => {
     await waitFor(() => {
       expect(screen.getByText("Enter your API key to continue")).toBeInTheDocument();
     });
-    expect(mockFetch).toHaveBeenCalledWith("/v1/jobs?limit=1");
+    expect(mockFetch).toHaveBeenCalledWith("/auth/status");
   });
 
   it("renders children when auth is not required", async () => {
-    mockFetch.mockResolvedValue({ status: 200 });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ enabled: false }),
+    });
 
     render(
       <AuthGate>
@@ -41,8 +47,11 @@ describe("AuthGate", () => {
     });
   });
 
-  it("reacts to auth state changes after a 401 probe", async () => {
-    mockFetch.mockResolvedValue({ status: 401 });
+  it("reacts to auth state changes after an enabled auth probe", async () => {
+    mockFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ enabled: true }),
+    });
 
     render(
       <AuthGate>

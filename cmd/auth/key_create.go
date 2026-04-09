@@ -26,6 +26,7 @@ var keyCreateCmd = &cobra.Command{
   caesium auth key create --role runner --description "ETL runner" --scope-jobs etl-daily,etl-hourly`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(createServer, "/")
+		apiKey := resolveAPIKey(cmd, createAPIKey)
 
 		body := map[string]interface{}{
 			"role":        createRole,
@@ -50,8 +51,8 @@ var keyCreateCmd = &cobra.Command{
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		if createAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+createAPIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -92,7 +93,7 @@ func init() {
 	keyCreateCmd.Flags().StringVar(&createDescription, "description", "", "Human-readable description for the key")
 	keyCreateCmd.Flags().StringVar(&createExpiresIn, "expires", "", "Expiration duration (e.g. 90d, 24h)")
 	keyCreateCmd.Flags().StringVar(&createServer, "server", "http://localhost:8080", "Caesium server base URL")
-	keyCreateCmd.Flags().StringVar(&createAPIKey, "api-key", "", "Admin API key for authentication")
+	keyCreateCmd.Flags().StringVar(&createAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 	keyCreateCmd.Flags().StringSliceVar(&createScopeJobs, "scope-jobs", nil, "Restrict key to specific job aliases (comma-separated)")
 	_ = keyCreateCmd.MarkFlagRequired("role")
 

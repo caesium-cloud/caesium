@@ -6,8 +6,8 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-func ListKeys(c *echo.Context) error {
-	keys, err := Dependencies.Service.ListKeys()
+func (ctrl *Controller) ListKeys(c *echo.Context) error {
+	keys, err := ctrl.service.ListKeys()
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to list api keys").Wrap(err)
 	}

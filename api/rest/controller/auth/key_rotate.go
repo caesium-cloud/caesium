@@ -14,7 +14,7 @@ type rotateKeyRequest struct {
 	GracePeriod string `json:"grace_period"` // e.g. "24h"
 }
 
-func RotateKey(c *echo.Context) error {
+func (ctrl *Controller) RotateKey(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid key id").Wrap(err)
@@ -40,7 +40,7 @@ func RotateKey(c *echo.Context) error {
 		actor = caller.KeyPrefix
 	}
 
-	resp, err := Dependencies.Service.RotateKey(id, gracePeriod, actor)
+	resp, err := ctrl.service.RotateKey(id, gracePeriod, actor)
 	if err != nil {
 		if err == iauth.ErrKeyNotFound {
 			return echo.NewHTTPError(http.StatusNotFound, "api key not found")
@@ -51,7 +51,7 @@ func RotateKey(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to rotate api key").Wrap(err)
 	}
 
-	logAuditFailure(Dependencies.Auditor.Log(iauth.AuditEntry{
+	logAuditFailure(ctrl.auditor.Log(iauth.AuditEntry{
 		Actor:        actor,
 		Action:       iauth.ActionKeyRotate,
 		ResourceType: "api_key",

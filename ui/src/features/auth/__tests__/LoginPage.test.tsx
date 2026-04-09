@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginPage } from "../LoginPage";
-import { clearApiKey, getApiKey } from "@/lib/auth";
+import { clearApiKey, isAuthenticated } from "@/lib/auth";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
@@ -35,7 +35,7 @@ describe("LoginPage", () => {
     fireEvent.click(screen.getByText("Sign In"));
 
     expect(await screen.findByText("Invalid or expired API key")).toBeInTheDocument();
-    expect(getApiKey()).toBeNull();
+    expect(isAuthenticated()).toBe(false);
   });
 
   it("stores the api key and calls onLogin on success", async () => {
@@ -56,6 +56,6 @@ describe("LoginPage", () => {
     expect(mockFetch).toHaveBeenCalledWith("/v1/jobs?limit=1", {
       headers: { Authorization: "Bearer csk_live_good" },
     });
-    expect(getApiKey()).toBe("csk_live_good");
+    expect(isAuthenticated()).toBe(true);
   });
 });

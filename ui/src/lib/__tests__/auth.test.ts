@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearApiKey, getApiKey, isAuthenticated, onAuthChange, setApiKey } from "@/lib/auth";
+import { clearApiKey, isAuthenticated, onAuthChange, setApiKey, withAuthHeaders } from "@/lib/auth";
 
 describe("auth", () => {
   beforeEach(() => {
@@ -11,12 +11,14 @@ describe("auth", () => {
     expect(isAuthenticated()).toBe(false);
 
     setApiKey("csk_live_secret");
-    expect(getApiKey()).toBe("csk_live_secret");
     expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      Authorization: "Bearer csk_live_secret",
+    });
 
     clearApiKey();
-    expect(getApiKey()).toBeNull();
     expect(isAuthenticated()).toBe(false);
+    expect(withAuthHeaders()).not.toHaveProperty("Authorization");
   });
 
   it("notifies listeners on auth changes", () => {

@@ -1,6 +1,14 @@
 package auth
 
-import "github.com/spf13/cobra"
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"github.com/spf13/cobra"
+)
+
+const apiKeyEnvVar = "CAESIUM_API_KEY"
 
 // Cmd is the parent command for authentication operations.
 var Cmd = &cobra.Command{
@@ -16,4 +24,16 @@ var keyCmd = &cobra.Command{
 
 func init() {
 	Cmd.AddCommand(keyCmd)
+}
+
+func resolveAPIKey(cmd *cobra.Command, flagValue string) string {
+	if strings.TrimSpace(flagValue) != "" {
+		cmd.PrintErrln(fmt.Sprintf("warning: --api-key is visible in process listings; prefer %s", apiKeyEnvVar))
+		return strings.TrimSpace(flagValue)
+	}
+	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
+}
+
+func apiKeyFlagUsage(role string) string {
+	return fmt.Sprintf("%s API key for authentication (prefer %s; --api-key is visible in process listings)", role, apiKeyEnvVar)
 }

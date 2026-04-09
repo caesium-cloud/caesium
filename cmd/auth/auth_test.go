@@ -144,3 +144,49 @@ func TestAuditCommandBuildsQueryString(t *testing.T) {
 	require.Contains(t, query, "limit=10")
 	require.Contains(t, out.String(), "[]")
 }
+
+func TestKeyListCommandFallsBackToEnvironmentAPIKey(t *testing.T) {
+	var authHeader string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authHeader = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer server.Close()
+
+	t.Setenv(apiKeyEnvVar, "env-admin-token")
+	listServer = server.URL
+	listAPIKey = ""
+
+	var out bytes.Buffer
+	keyListCmd.SetOut(&out)
+	keyListCmd.SetErr(&out)
+	keyListCmd.SetContext(context.Background())
+
+	err := keyListCmd.RunE(keyListCmd, nil)
+	require.NoError(t, err)
+	require.Equal(t, "Bearer env-admin-token", authHeader)
+	require.NotContains(t, out.String(), "warning:")
+}
+
+func TestKeyCreateCommandWarnsWhenAPIKeyFlagIsUsed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"key":"csk_live_secret","api_key":{"id":"abc","role":"operator"}}`))
+	}))
+	defer server.Close()
+
+	createRole = "operator"
+	createDescription = "warn"
+	createExpiresIn = ""
+	createServer = server.URL
+	createAPIKey = "flag-admin-token"
+	createScopeJobs = nil
+
+	var out bytes.Buffer
+	keyCreateCmd.SetOut(&out)
+	keyCreateCmd.SetErr(&out)
+	keyCreateCmd.SetContext(context.Background())
+
+	err := keyCreateCmd.RunE(keyCreateCmd, nil)
+	require.NoError(t, err)
+	require.Contains(t, out.String(), "warning: --api-key is visible in process listings")
+}

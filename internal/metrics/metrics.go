@@ -1,8 +1,12 @@
 package metrics
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+var registerOnce sync.Once
 
 var (
 	JobRunsTotal = prometheus.NewCounterVec(
@@ -171,26 +175,28 @@ var (
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
 func Register() {
-	prometheus.MustRegister(
-		JobRunsTotal,
-		JobRunDurationSeconds,
-		TaskRunsTotal,
-		TaskRunDurationSeconds,
-		JobsActive,
-		CallbackRunsTotal,
-		TriggerFiresTotal,
-		WorkerClaimsTotal,
-		WorkerClaimContentionTotal,
-		WorkerLeaseExpirationsTotal,
-		TaskRetriesTotal,
-		BackfillRunsTotal,
-		BackfillsActive,
-		TaskCacheHitsTotal,
-		TaskCacheMissesTotal,
-		TaskCacheEntries,
-		AuthRequestsTotal,
-		AuthFailuresTotal,
-		AuthKeyAgeSeconds,
-		AuditLogEntriesTotal,
-	)
+	registerOnce.Do(func() {
+		prometheus.MustRegister(
+			JobRunsTotal,
+			JobRunDurationSeconds,
+			TaskRunsTotal,
+			TaskRunDurationSeconds,
+			JobsActive,
+			CallbackRunsTotal,
+			TriggerFiresTotal,
+			WorkerClaimsTotal,
+			WorkerClaimContentionTotal,
+			WorkerLeaseExpirationsTotal,
+			TaskRetriesTotal,
+			BackfillRunsTotal,
+			BackfillsActive,
+			TaskCacheHitsTotal,
+			TaskCacheMissesTotal,
+			TaskCacheEntries,
+			AuthRequestsTotal,
+			AuthFailuresTotal,
+			AuthKeyAgeSeconds,
+			AuditLogEntriesTotal,
+		)
+	})
 }

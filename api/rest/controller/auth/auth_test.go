@@ -17,25 +17,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupControllerDeps(t *testing.T) (*iauth.Service, *iauth.AuditLogger) {
+func setupControllerDeps(t *testing.T) (*Controller, *iauth.Service, *iauth.AuditLogger) {
 	t.Helper()
 
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	originalService := Dependencies.Service
-	originalAuditor := Dependencies.Auditor
-	t.Cleanup(func() {
-		Dependencies.Service = originalService
-		Dependencies.Auditor = originalAuditor
-	})
-
 	svc := iauth.NewService(db)
 	auditor := iauth.NewAuditLogger(db)
-	Dependencies.Service = svc
-	Dependencies.Auditor = auditor
-
-	return svc, auditor
+	return New(svc, auditor), svc, auditor
 }
 
 func newAuthContext(t *testing.T, method, target string, body string) (*echo.Context, *httptest.ResponseRecorder) {
@@ -61,7 +51,7 @@ func readJSONBody[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestCreateKeyCreatesScopedKeyAndAuditEntry(t *testing.T) {
-	svc, auditor := setupControllerDeps(t)
+	ctrl, svc, auditor := setupControllerDeps(t)
 	c, rec := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{
 		"description":"CI key",
 		"role":"operator",
@@ -69,9 +59,9 @@ func TestCreateKeyCreatesScopedKeyAndAuditEntry(t *testing.T) {
 		"expires_in":"2d"
 	}`)
 
-	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin"})
+	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin", Role: models.RoleAdmin})
 
-	err := CreateKey(c)
+	err := ctrl.CreateKey(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -97,10 +87,10 @@ func TestCreateKeyCreatesScopedKeyAndAuditEntry(t *testing.T) {
 }
 
 func TestCreateKeyRejectsInvalidRole(t *testing.T) {
-	setupControllerDeps(t)
+	ctrl, _, _ := setupControllerDeps(t)
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{"role":"bogus"}`)
 
-	err := CreateKey(c)
+	err := ctrl.CreateKey(c)
 	require.Error(t, err)
 
 	he, ok := err.(*echo.HTTPError)
@@ -109,12 +99,12 @@ func TestCreateKeyRejectsInvalidRole(t *testing.T) {
 }
 
 func TestListKeysReturnsPersistedKeys(t *testing.T) {
-	svc, _ := setupControllerDeps(t)
+	ctrl, svc, _ := setupControllerDeps(t)
 	_, err := svc.CreateKey(&iauth.CreateKeyRequest{Role: models.RoleViewer, CreatedBy: "test"})
 	require.NoError(t, err)
 
 	c, rec := newAuthContext(t, http.MethodGet, "/v1/auth/keys", "")
-	err = ListKeys(c)
+	err = ctrl.ListKeys(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -125,7 +115,7 @@ func TestListKeysReturnsPersistedKeys(t *testing.T) {
 }
 
 func TestRevokeKeyRevokesAndAudits(t *testing.T) {
-	svc, auditor := setupControllerDeps(t)
+	ctrl, svc, auditor := setupControllerDeps(t)
 	resp, err := svc.CreateKey(&iauth.CreateKeyRequest{Role: models.RoleRunner, CreatedBy: "seed"})
 	require.NoError(t, err)
 
@@ -133,7 +123,7 @@ func TestRevokeKeyRevokesAndAudits(t *testing.T) {
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: resp.Key.ID.String()}})
 	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin"})
 
-	err = RevokeKey(c)
+	err = ctrl.RevokeKey(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -147,7 +137,7 @@ func TestRevokeKeyRevokesAndAudits(t *testing.T) {
 }
 
 func TestRotateKeyReturnsNewKeyAndAuditEntry(t *testing.T) {
-	svc, auditor := setupControllerDeps(t)
+	ctrl, svc, auditor := setupControllerDeps(t)
 	original, err := svc.CreateKey(&iauth.CreateKeyRequest{Role: models.RoleRunner, CreatedBy: "seed"})
 	require.NoError(t, err)
 
@@ -155,7 +145,7 @@ func TestRotateKeyReturnsNewKeyAndAuditEntry(t *testing.T) {
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: original.Key.ID.String()}})
 	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_admin"})
 
-	err = RotateKey(c)
+	err = ctrl.RotateKey(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusCreated, rec.Code)
 
@@ -174,7 +164,7 @@ func TestRotateKeyReturnsNewKeyAndAuditEntry(t *testing.T) {
 }
 
 func TestQueryAuditSupportsDurationAndActorFilters(t *testing.T) {
-	_, auditor := setupControllerDeps(t)
+	ctrl, _, auditor := setupControllerDeps(t)
 
 	require.NoError(t, auditor.Log(iauth.AuditEntry{
 		Actor:    "alpha",
@@ -190,7 +180,7 @@ func TestQueryAuditSupportsDurationAndActorFilters(t *testing.T) {
 	}))
 
 	c, rec := newAuthContext(t, http.MethodGet, "/v1/auth/audit?since=24h&actor=beta&limit=10", "")
-	err := QueryAudit(c)
+	err := ctrl.QueryAudit(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -202,10 +192,10 @@ func TestQueryAuditSupportsDurationAndActorFilters(t *testing.T) {
 }
 
 func TestQueryAuditRejectsInvalidSince(t *testing.T) {
-	setupControllerDeps(t)
+	ctrl, _, _ := setupControllerDeps(t)
 	c, _ := newAuthContext(t, http.MethodGet, "/v1/auth/audit?since=not-a-duration-or-time", "")
 
-	err := QueryAudit(c)
+	err := ctrl.QueryAudit(c)
 	require.Error(t, err)
 
 	he, ok := err.(*echo.HTTPError)
@@ -220,11 +210,11 @@ func TestParseDurationSupportsDays(t *testing.T) {
 }
 
 func TestRevokeKeyRejectsInvalidUUID(t *testing.T) {
-	setupControllerDeps(t)
+	ctrl, _, _ := setupControllerDeps(t)
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys/not-a-uuid/revoke", "")
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: "not-a-uuid"}})
 
-	err := RevokeKey(c)
+	err := ctrl.RevokeKey(c)
 	require.Error(t, err)
 
 	he, ok := err.(*echo.HTTPError)
@@ -233,7 +223,7 @@ func TestRevokeKeyRejectsInvalidUUID(t *testing.T) {
 }
 
 func TestRotateKeyRejectsRevokedKey(t *testing.T) {
-	svc, _ := setupControllerDeps(t)
+	ctrl, svc, _ := setupControllerDeps(t)
 	resp, err := svc.CreateKey(&iauth.CreateKeyRequest{Role: models.RoleRunner, CreatedBy: "seed"})
 	require.NoError(t, err)
 	require.NoError(t, svc.RevokeKey(resp.Key.ID))
@@ -241,7 +231,7 @@ func TestRotateKeyRejectsRevokedKey(t *testing.T) {
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys/"+resp.Key.ID.String()+"/rotate", `{}`)
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: resp.Key.ID.String()}})
 
-	err = RotateKey(c)
+	err = ctrl.RotateKey(c)
 	require.Error(t, err)
 
 	he, ok := err.(*echo.HTTPError)
@@ -250,7 +240,7 @@ func TestRotateKeyRejectsRevokedKey(t *testing.T) {
 }
 
 func TestQueryAuditAcceptsRFC3339Since(t *testing.T) {
-	_, auditor := setupControllerDeps(t)
+	ctrl, _, auditor := setupControllerDeps(t)
 	require.NoError(t, auditor.Log(iauth.AuditEntry{
 		Actor:    "alpha",
 		Action:   iauth.ActionKeyCreate,
@@ -260,7 +250,7 @@ func TestQueryAuditAcceptsRFC3339Since(t *testing.T) {
 
 	since := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 	c, rec := newAuthContext(t, http.MethodGet, "/v1/auth/audit?since="+since, "")
-	err := QueryAudit(c)
+	err := ctrl.QueryAudit(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, rec.Code)
 
@@ -269,27 +259,46 @@ func TestQueryAuditAcceptsRFC3339Since(t *testing.T) {
 	require.Len(t, entries, 1)
 }
 
-func TestCreateKeyUsesUnknownActorWhenMiddlewareIdentityMissing(t *testing.T) {
-	_, auditor := setupControllerDeps(t)
-	c, rec := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{"role":"viewer"}`)
+func TestCreateKeyRequiresAuthenticatedCaller(t *testing.T) {
+	ctrl, _, auditor := setupControllerDeps(t)
+	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{"role":"viewer"}`)
 
-	err := CreateKey(c)
-	require.NoError(t, err)
-	require.Equal(t, http.StatusCreated, rec.Code)
+	err := ctrl.CreateKey(c)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
 
 	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionKeyCreate})
 	require.NoError(t, err)
-	require.Len(t, entries, 1)
-	require.Equal(t, "unknown", entries[0].Actor)
+	require.Len(t, entries, 0)
+}
+
+func TestCreateKeyRejectsHigherPrivilegeRoleThanCaller(t *testing.T) {
+	ctrl, _, auditor := setupControllerDeps(t)
+	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys", `{"role":"admin"}`)
+	c.Set(authmw.ContextKeyAuth, &models.APIKey{KeyPrefix: "csk_live_operator", Role: models.RoleOperator})
+
+	err := ctrl.CreateKey(c)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+
+	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionKeyCreate})
+	require.NoError(t, err)
+	require.Len(t, entries, 0)
 }
 
 func TestRotateKeyRejectsInvalidGracePeriod(t *testing.T) {
-	setupControllerDeps(t)
+	ctrl, _, _ := setupControllerDeps(t)
 	id := uuid.New().String()
 	c, _ := newAuthContext(t, http.MethodPost, "/v1/auth/keys/"+id+"/rotate", `{"grace_period":"nope"}`)
 	c.SetPathValues(echo.PathValues{{Name: "id", Value: id}})
 
-	err := RotateKey(c)
+	err := ctrl.RotateKey(c)
 	require.Error(t, err)
 
 	he, ok := err.(*echo.HTTPError)

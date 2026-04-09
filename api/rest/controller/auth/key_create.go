@@ -23,7 +23,7 @@ type createKeyResponse struct {
 	APIKey *models.APIKey `json:"api_key"`
 }
 
-func CreateKey(c *echo.Context) error {
+func (ctrl *Controller) CreateKey(c *echo.Context) error {
 	var req createKeyRequest
 	if err := c.Bind(&req); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
@@ -44,24 +44,28 @@ func CreateKey(c *echo.Context) error {
 	}
 
 	caller := middleware.GetAuthKey(c)
-	createdBy := "unknown"
-	if caller != nil {
-		createdBy = caller.KeyPrefix
+	if caller == nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "authentication required")
 	}
 
-	resp, err := Dependencies.Service.CreateKey(&auth.CreateKeyRequest{
+	requestedRole := models.Role(req.Role)
+	if models.RoleLevel(requestedRole) > models.RoleLevel(caller.Role) {
+		return echo.NewHTTPError(http.StatusForbidden, "cannot create api key with higher privilege than caller")
+	}
+
+	resp, err := ctrl.service.CreateKey(&auth.CreateKeyRequest{
 		Description: req.Description,
-		Role:        models.Role(req.Role),
+		Role:        requestedRole,
 		Scope:       req.Scope,
-		CreatedBy:   createdBy,
+		CreatedBy:   caller.KeyPrefix,
 		ExpiresAt:   expiresAt,
 	})
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to create api key").Wrap(err)
 	}
 
-	logAuditFailure(Dependencies.Auditor.Log(auth.AuditEntry{
-		Actor:        createdBy,
+	logAuditFailure(ctrl.auditor.Log(auth.AuditEntry{
+		Actor:        caller.KeyPrefix,
 		Action:       auth.ActionKeyCreate,
 		ResourceType: "api_key",
 		ResourceID:   resp.Key.ID.String(),

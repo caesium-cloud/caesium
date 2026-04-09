@@ -32,6 +32,7 @@ var endpointPolicy = map[string]models.Role{
 	// Public — no auth required (handled by skip list, not here)
 
 	// Viewer
+	"GET /metrics":                   models.RoleViewer,
 	"GET /v1/jobs":                   models.RoleViewer,
 	"GET /v1/jobs/:id":               models.RoleViewer,
 	"GET /v1/jobs/:id/tasks":         models.RoleViewer,

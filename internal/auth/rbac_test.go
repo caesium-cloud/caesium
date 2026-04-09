@@ -51,7 +51,11 @@ func TestCheckScopeMalformedDenies(t *testing.T) {
 }
 
 func TestRequiredRoleKnownEndpoints(t *testing.T) {
-	role, ok := RequiredRole("GET", "/v1/jobs")
+	role, ok := RequiredRole("GET", "/metrics")
+	require.True(t, ok)
+	require.Equal(t, models.RoleViewer, role)
+
+	role, ok = RequiredRole("GET", "/v1/jobs")
 	require.True(t, ok)
 	require.Equal(t, models.RoleViewer, role)
 

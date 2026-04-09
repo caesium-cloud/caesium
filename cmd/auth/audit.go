@@ -26,6 +26,7 @@ var auditCmd = &cobra.Command{
 	Example: `  caesium auth audit --since 24h --actor csk_live_a1b2`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		server := strings.TrimSuffix(auditServer, "/")
+		apiKey := resolveAPIKey(cmd, auditAPIKey)
 
 		params := url.Values{}
 		if auditSince != "" {
@@ -47,8 +48,8 @@ var auditCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		if auditAPIKey != "" {
-			req.Header.Set("Authorization", "Bearer "+auditAPIKey)
+		if apiKey != "" {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		resp, err := http.DefaultClient.Do(req)
@@ -79,7 +80,7 @@ func init() {
 	auditCmd.Flags().StringVar(&auditAction, "action", "", "Filter by action (e.g. job.create, api_key.revoke)")
 	auditCmd.Flags().IntVar(&auditLimit, "limit", 100, "Maximum number of entries to return")
 	auditCmd.Flags().StringVar(&auditServer, "server", "http://localhost:8080", "Caesium server base URL")
-	auditCmd.Flags().StringVar(&auditAPIKey, "api-key", "", "Admin API key for authentication")
+	auditCmd.Flags().StringVar(&auditAPIKey, "api-key", "", apiKeyFlagUsage("Admin"))
 
 	Cmd.AddCommand(auditCmd)
 }

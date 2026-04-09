@@ -7,10 +7,9 @@ interface AuthGateProps {
 }
 
 /**
- * AuthGate checks whether authentication is required by probing a lightweight
- * viewer-level REST endpoint.
- * If the server returns 401, it shows the login page. If auth is not enabled
- * (server returns 2xx without credentials), it passes through directly.
+ * AuthGate checks whether authentication is required using the explicit
+ * `/auth/status` endpoint rather than inferring auth state from a protected
+ * resource side-channel.
  */
 export function AuthGate({ children }: AuthGateProps) {
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
@@ -25,9 +24,15 @@ export function AuthGate({ children }: AuthGateProps) {
 
     async function probe() {
       try {
-        const resp = await fetch("/v1/jobs?limit=1");
+        const resp = await fetch("/auth/status");
+        if (!resp.ok) {
+          if (!cancelled) setAuthRequired(false);
+          return;
+        }
+
+        const body = (await resp.json()) as { enabled?: boolean };
         if (!cancelled) {
-          setAuthRequired(resp.status === 401);
+          setAuthRequired(Boolean(body.enabled));
         }
       } catch {
         // Network error — assume auth not required, let real errors surface later.

@@ -5,12 +5,12 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/caesium-cloud/caesium/internal/auth"
+	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/labstack/echo/v5"
 )
 
-func QueryAudit(c *echo.Context) error {
-	req := &auth.AuditQueryRequest{
+func (ctrl *Controller) QueryAudit(c *echo.Context) error {
+	req := &iauth.AuditQueryRequest{
 		Actor:  c.QueryParam("actor"),
 		Action: c.QueryParam("action"),
 	}
@@ -54,7 +54,7 @@ func QueryAudit(c *echo.Context) error {
 		req.Offset = offset
 	}
 
-	entries, err := Dependencies.Auditor.Query(req)
+	entries, err := ctrl.auditor.Query(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "failed to query audit log").Wrap(err)
 	}

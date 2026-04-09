@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/gql"
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -25,11 +27,11 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 
 	// health
 	e.GET("/health", Health)
+	e.GET("/auth/status", authStatus(vars))
 
 	// metrics
-	metrics.Register()
 	e.Use(echoprometheus.NewMiddleware("caesium"))
-	e.GET("/metrics", echoprometheus.NewHandler())
+	registerMetrics(e, vars, authSvc, auditor, limiter)
 
 	// REST
 	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter)
@@ -43,6 +45,26 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 		Address: fmt.Sprintf(":%v", vars.Port),
 	}
 	return sc.Start(ctx, e)
+}
+
+func authStatus(vars env.Environment) echo.HandlerFunc {
+	return func(c *echo.Context) error {
+		return c.JSON(http.StatusOK, map[string]bool{
+			"enabled": vars.AuthMode == "api-key",
+		})
+	}
+}
+
+func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) {
+	metrics.Register()
+
+	handler := echoprometheus.NewHandler()
+	if vars.AuthMode == "api-key" && authSvc != nil {
+		e.GET("/metrics", handler, authmw.Auth(authSvc, auditor, limiter))
+		return
+	}
+
+	e.GET("/metrics", handler)
 }
 
 func registerGraphQL(e *echo.Echo, vars env.Environment) {

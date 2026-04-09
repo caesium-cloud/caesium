@@ -1,15 +1,22 @@
 package auth
 
 import (
-	"github.com/caesium-cloud/caesium/internal/auth"
+	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
-// Dependencies holds the shared dependencies for auth controllers.
-// Set during route binding.
-var Dependencies struct {
-	Service *auth.Service
-	Auditor *auth.AuditLogger
+// Controller owns the dependencies required by the auth REST handlers.
+type Controller struct {
+	service *iauth.Service
+	auditor *iauth.AuditLogger
+}
+
+// New constructs an auth controller with explicit dependencies.
+func New(service *iauth.Service, auditor *iauth.AuditLogger) *Controller {
+	return &Controller{
+		service: service,
+		auditor: auditor,
+	}
 }
 
 func logAuditFailure(err error) {

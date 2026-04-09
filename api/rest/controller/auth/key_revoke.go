@@ -9,13 +9,13 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-func RevokeKey(c *echo.Context) error {
+func (ctrl *Controller) RevokeKey(c *echo.Context) error {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "invalid key id").Wrap(err)
 	}
 
-	if err := Dependencies.Service.RevokeKey(id); err != nil {
+	if err := ctrl.service.RevokeKey(id); err != nil {
 		if err == iauth.ErrKeyNotFound {
 			return echo.NewHTTPError(http.StatusNotFound, "api key not found")
 		}
@@ -28,7 +28,7 @@ func RevokeKey(c *echo.Context) error {
 		actor = caller.KeyPrefix
 	}
 
-	logAuditFailure(Dependencies.Auditor.Log(iauth.AuditEntry{
+	logAuditFailure(ctrl.auditor.Log(iauth.AuditEntry{
 		Actor:        actor,
 		Action:       iauth.ActionKeyRevoke,
 		ResourceType: "api_key",

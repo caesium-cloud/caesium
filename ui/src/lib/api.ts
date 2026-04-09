@@ -1,5 +1,5 @@
 import { parseAllDocuments } from "yaml";
-import { getApiKey, clearApiKey } from "./auth";
+import { clearApiKey, withAuthHeaders } from "./auth";
 
 export interface Job {
   id: string;
@@ -309,15 +309,10 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 }
 
 async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = {
+  const headers = withAuthHeaders({
     "Content-Type": "application/json",
     ...(options?.headers as Record<string, string>),
-  };
-
-  const key = getApiKey();
-  if (key) {
-    headers["Authorization"] = `Bearer ${key}`;
-  }
+  });
 
   const response = await fetch(url, {
     ...options,
