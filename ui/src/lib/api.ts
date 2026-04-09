@@ -236,6 +236,17 @@ export interface TriggerRunRequest {
   params?: Record<string, string>;
 }
 
+export interface TriggerCreateRequest {
+  alias: string;
+  type: string;
+  configuration: Record<string, unknown>;
+}
+
+export interface TriggerUpdateRequest {
+  alias?: string;
+  configuration?: Record<string, unknown>;
+}
+
 export interface DatabaseSchemaColumn {
   name: string;
   data_type: string;
@@ -354,7 +365,21 @@ export const api = {
   unpauseJob: (jobId: string) => request<Job>(`/jobs/${jobId}/unpause`, { method: "PUT" }),
   getTriggers: () => request<Trigger[]>("/triggers"),
   getTrigger: (id: string) => request<Trigger>(`/triggers/${id}`),
-  fireTrigger: (id: string) => request<void>(`/triggers/${id}`, { method: "PUT" }),
+  createTrigger: (body: TriggerCreateRequest) =>
+    request<Trigger>("/triggers", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateTrigger: (id: string, body: TriggerUpdateRequest) =>
+    request<Trigger>(`/triggers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  fireTrigger: (id: string, body?: TriggerRunRequest) =>
+    request<void>(`/triggers/${id}/fire`, {
+      method: "POST",
+      body: body ? JSON.stringify(body) : undefined,
+    }),
   getAtoms: () => request<Atom[]>("/atoms"),
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),

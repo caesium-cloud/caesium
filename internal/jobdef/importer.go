@@ -349,6 +349,9 @@ func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias s
 	triggerModel.Alias = alias
 	triggerModel.Type = models.TriggerType(trig.Type)
 	triggerModel.Configuration = cfg
+	if err := triggerModel.ApplyDerivedFields(); err != nil {
+		return nil, err
+	}
 	applyTriggerProvenance(triggerModel, opts)
 
 	if triggerModel.CreatedAt.IsZero() {
@@ -361,6 +364,7 @@ func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias s
 	updates := map[string]any{
 		"alias":                triggerModel.Alias,
 		"type":                 triggerModel.Type,
+		"normalized_path":      triggerModel.NormalizedPath,
 		"configuration":        triggerModel.Configuration,
 		"provenance_source_id": triggerModel.ProvenanceSourceID,
 		"provenance_repo":      triggerModel.ProvenanceRepo,

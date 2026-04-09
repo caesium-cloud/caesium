@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
@@ -30,18 +31,72 @@ func (s *IntegrationTestSuite) TestHTTPJob() {
 	job := s.createJobWithTrigger("test_http_job", nil, models.TriggerTypeHTTP)
 	assert.NotNil(s.T(), job)
 
-	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v", s.caesiumURL, job.TriggerID))
+	u, err := url.Parse(fmt.Sprintf("%v/v1/triggers/%v/fire", s.caesiumURL, job.TriggerID))
 	assert.Nil(s.T(), err)
 
-	req, err := http.NewRequestWithContext(s.T().Context(), http.MethodPut, u.String(), nil)
-	assert.Nil(s.T(), err)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.doManualTriggerRequest(http.MethodPost, u.String(), nil)
 	assert.Nil(s.T(), err)
 	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
 	if resp.Body != nil {
 		_ = resp.Body.Close()
 	}
+}
+
+func (s *IntegrationTestSuite) TestHTTPWebhookTriggerRoutesToJob() {
+	job := s.createJobWithTrigger("test_http_webhook_job", nil, models.TriggerTypeHTTP)
+	assert.NotNil(s.T(), job)
+
+	resp, err := s.doRequest(http.MethodPost, fmt.Sprintf("%v/v1/hooks/jobs/%s", s.caesiumURL, job.Alias), nil)
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
+
+	s.Require().Eventually(func() bool {
+		runs := s.fetchRuns(job.ID.String())
+		return len(runs) > 0
+	}, 30*time.Second, 500*time.Millisecond)
+}
+
+func (s *IntegrationTestSuite) TestHTTPWebhookTriggerAuthAndParams() {
+	alias := "test_http_webhook_auth_job"
+	job := s.createJobWithTriggerConfig(alias, nil, models.TriggerTypeHTTP, map[string]any{
+		"path":            fmt.Sprintf("/jobs/%s/secure", alias),
+		"secret":          "shared-token",
+		"signatureScheme": "bearer",
+		"defaultParams": map[string]string{
+			"environment": "staging",
+		},
+		"paramMapping": map[string]string{
+			"branch": "$.ref",
+			"actor":  "$.sender.login",
+		},
+	})
+	assert.NotNil(s.T(), job)
+
+	req, err := http.NewRequestWithContext(
+		s.T().Context(),
+		http.MethodPost,
+		fmt.Sprintf("%v/v1/hooks/jobs/%s/secure", s.caesiumURL, alias),
+		strings.NewReader(`{"ref":"refs/heads/main","sender":{"login":"octocat"}}`),
+	)
+	assert.Nil(s.T(), err)
+	req.Header.Set("Authorization", "Bearer shared-token")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	assert.Nil(s.T(), err)
+	defer resp.Body.Close()
+	assert.Equal(s.T(), http.StatusAccepted, resp.StatusCode)
+
+	s.Require().Eventually(func() bool {
+		runs := s.fetchRuns(job.ID.String())
+		if len(runs) == 0 {
+			return false
+		}
+		return runs[0].Params["environment"] == "staging" &&
+			runs[0].Params["branch"] == "refs/heads/main" &&
+			runs[0].Params["actor"] == "octocat"
+	}, 30*time.Second, 500*time.Millisecond)
 }
 
 func (s *IntegrationTestSuite) TestJobMetadataAndTasks() {
@@ -136,14 +191,26 @@ func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataReq
 }
 
 func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.MetadataRequest, trigType models.TriggerType) *models.Job {
-	config := map[string]any{}
+	return s.createJobWithTriggerConfig(alias, metadata, trigType, nil)
+}
+
+func (s *IntegrationTestSuite) createJobWithTriggerConfig(alias string, metadata *job.MetadataRequest, trigType models.TriggerType, config map[string]any) *models.Job {
+	if config == nil {
+		config = map[string]any{}
+	}
 	switch trigType {
 	case models.TriggerTypeCron:
-		config["expression"] = "* * * * *"
+		if _, ok := config["expression"]; !ok {
+			config["expression"] = "* * * * *"
+		}
 	case models.TriggerTypeHTTP:
-		config["path"] = fmt.Sprintf("/jobs/%s", alias)
+		if _, ok := config["path"]; !ok {
+			config["path"] = fmt.Sprintf("/jobs/%s", alias)
+		}
 	default:
-		config["expression"] = "* * * * *"
+		if _, ok := config["expression"]; !ok {
+			config["expression"] = "* * * * *"
+		}
 	}
 
 	req := job.PostRequest{

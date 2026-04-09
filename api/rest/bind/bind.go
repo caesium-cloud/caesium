@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
+	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/labstack/echo/v5"
@@ -79,8 +80,15 @@ func Public(g *echo.Group, bus internal_event.Bus) {
 	// triggers
 	{
 		g.GET("/triggers", trigger.List)
+		g.POST("/triggers", trigger.Post)
 		g.GET("/triggers/:id", trigger.Get)
-		g.PUT("/triggers/:id", trigger.Put)
+		g.PATCH("/triggers/:id", trigger.Patch)
+		g.POST("/triggers/:id/fire", trigger.Fire)
+	}
+
+	// webhooks
+	{
+		g.POST("/hooks/*", webhook.Receive)
 	}
 
 	// stats

@@ -3,6 +3,8 @@ package jobdef
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 var example1 = `
@@ -179,6 +181,44 @@ steps:
   - name: build
     image: example
 `,
+		"http trigger missing path": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration: {}
+steps:
+  - name: build
+    image: example
+`,
+		"http trigger invalid signature scheme": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration:
+    path: /hooks/test
+    signatureScheme: oauth2
+steps:
+  - name: build
+    image: example
+`,
+		"http trigger invalid param mapping": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: http
+  configuration:
+    path: /hooks/test
+    paramMapping:
+      branch: ref
+steps:
+  - name: build
+    image: example
+`,
 		"unknown dependsOn": `apiVersion: v1
 kind: Job
 metadata:
@@ -212,6 +252,20 @@ steps:
 		if _, err := Parse([]byte(src)); err == nil {
 			t.Fatalf("%s: expected error", name)
 		}
+	}
+}
+
+func TestValidateSimpleJSONPath(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{"$", "$.ref", "$.sender.login", "$.items.0.name"}
+	for _, expr := range valid {
+		require.NoError(t, validateSimpleJSONPath(expr), expr)
+	}
+
+	invalid := []string{"", "ref", "$.", "$.sender..login", "$.sender. login"}
+	for _, expr := range invalid {
+		require.Error(t, validateSimpleJSONPath(expr), expr)
 	}
 }
 

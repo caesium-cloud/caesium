@@ -24,10 +24,11 @@ import (
 
 type IntegrationTestSuite struct {
 	suite.Suite
-	caesiumURL  string
-	cliPath     string
-	projectRoot string
-	engineType  string // "docker", "podman", or "kubernetes"
+	caesiumURL          string
+	cliPath             string
+	projectRoot         string
+	engineType          string // "docker", "podman", or "kubernetes"
+	manualTriggerAPIKey string
 }
 
 func (s *IntegrationTestSuite) SetupSuite() {
@@ -58,6 +59,10 @@ func (s *IntegrationTestSuite) SetupSuite() {
 		host = "127.0.0.1"
 	}
 	s.caesiumURL = fmt.Sprintf("http://%v:8080", host)
+	s.manualTriggerAPIKey = os.Getenv("CAESIUM_MANUAL_TRIGGER_API_KEY")
+	if s.manualTriggerAPIKey == "" {
+		s.manualTriggerAPIKey = "integration-test-key"
+	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(2 * time.Minute)
@@ -292,6 +297,12 @@ func (s *IntegrationTestSuite) fetchAtomSpec(atomID string) container.Spec {
 	return atomResp.Spec
 }
 
+func (s *IntegrationTestSuite) fetchRuns(jobID string) []runResponse {
+	var runs []runResponse
+	s.getJSON(fmt.Sprintf("/v1/jobs/%s/runs", jobID), &runs)
+	return runs
+}
+
 func (s *IntegrationTestSuite) getJSON(path string, target any) {
 	resp, err := s.doRequest(http.MethodGet, s.caesiumURL+path, nil)
 	require.NoError(s.T(), err)
@@ -332,5 +343,14 @@ func (s *IntegrationTestSuite) doRequest(method, target string, body io.Reader) 
 	}
 
 	//nolint:bodyclose // Response body ownership is transferred to the caller.
+	return http.DefaultClient.Do(req)
+}
+
+func (s *IntegrationTestSuite) doManualTriggerRequest(method, target string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(s.T().Context(), method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Caesium-API-Key", s.manualTriggerAPIKey)
 	return http.DefaultClient.Do(req)
 }

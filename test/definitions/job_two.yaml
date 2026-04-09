@@ -4,7 +4,8 @@ metadata:
     alias: integration-job-two
 trigger:
     type: http
-    configuration: {}
+    configuration:
+      path: /hooks/integration-job-two
 callbacks:
   - type: notification
     configuration:

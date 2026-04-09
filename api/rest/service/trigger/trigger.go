@@ -2,19 +2,30 @@ package trigger
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
+var (
+	ErrInvalidTriggerRequest = errors.New("invalid trigger request")
+	ErrTriggerAliasConflict  = errors.New("trigger alias conflict")
+)
+
 type Trigger interface {
 	WithDatabase(*gorm.DB) Trigger
 	List(*ListRequest) (models.Triggers, error)
+	ListByPath(string) (models.Triggers, error)
 	Get(uuid.UUID) (*models.Trigger, error)
 	Create(*CreateRequest) (*models.Trigger, error)
+	Update(uuid.UUID, *UpdateRequest) (*models.Trigger, error)
 	Delete(uuid.UUID) error
 }
 
@@ -67,6 +78,19 @@ func (t *triggerService) List(req *ListRequest) (models.Triggers, error) {
 	return triggers, q.Find(&triggers).Error
 }
 
+func (t *triggerService) ListByPath(path string) (models.Triggers, error) {
+	normalizedPath := models.NormalizedTriggerPath(path)
+	if normalizedPath == "" {
+		return models.Triggers{}, nil
+	}
+
+	var triggers models.Triggers
+	err := t.db.WithContext(t.ctx).
+		Where("type = ? AND normalized_path = ?", models.TriggerTypeHTTP, normalizedPath).
+		Find(&triggers).Error
+	return triggers, err
+}
+
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 	var (
 		trigger = &models.Trigger{ID: id}
@@ -94,17 +118,71 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 
 	cfg, err := req.ConfigurationString()
 	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
+	}
+
+	triggerType := models.TriggerType(req.Type)
+	if err := validateTriggerRequest(triggerType, req.Configuration); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
+	}
+	if err := ensureAliasAvailable(q, strings.TrimSpace(req.Alias), uuid.Nil); err != nil {
 		return nil, err
 	}
 
 	trigger := &models.Trigger{
 		ID:            id,
 		Alias:         req.Alias,
-		Type:          models.TriggerType(req.Type),
+		Type:          triggerType,
 		Configuration: cfg,
+	}
+	if err := trigger.ApplyDerivedFields(); err != nil {
+		return nil, err
 	}
 
 	return trigger, q.Create(trigger).Error
+}
+
+type UpdateRequest struct {
+	Alias         *string                `json:"alias,omitempty"`
+	Configuration map[string]interface{} `json:"configuration,omitempty"`
+}
+
+func (t *triggerService) Update(id uuid.UUID, req *UpdateRequest) (*models.Trigger, error) {
+	var trigger models.Trigger
+	if err := t.db.WithContext(t.ctx).First(&trigger, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+
+	if req.Alias != nil {
+		if err := ensureAliasAvailable(t.db.WithContext(t.ctx), strings.TrimSpace(*req.Alias), id); err != nil {
+			return nil, err
+		}
+		trigger.Alias = *req.Alias
+	}
+	if req.Configuration != nil {
+		if err := validateTriggerRequest(trigger.Type, req.Configuration); err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
+		}
+		cfg, err := jsonutil.MarshalMapString(req.Configuration)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrInvalidTriggerRequest, err)
+		}
+		trigger.Configuration = cfg
+	}
+	if err := trigger.ApplyDerivedFields(); err != nil {
+		return nil, err
+	}
+
+	updates := map[string]any{
+		"alias":           trigger.Alias,
+		"configuration":   trigger.Configuration,
+		"normalized_path": trigger.NormalizedPath,
+	}
+	if err := t.db.WithContext(t.ctx).Model(&trigger).Updates(updates).Error; err != nil {
+		return nil, err
+	}
+
+	return &trigger, nil
 }
 
 func (t *triggerService) Delete(id uuid.UUID) error {
@@ -113,4 +191,37 @@ func (t *triggerService) Delete(id uuid.UUID) error {
 	)
 
 	return q.Delete(&models.Trigger{}, id).Error
+}
+
+func validateTriggerRequest(triggerType models.TriggerType, configuration map[string]interface{}) error {
+	cfg := configuration
+	if cfg == nil {
+		cfg = map[string]interface{}{}
+	}
+	return jobdefschema.ValidateTriggerSpec(&jobdefschema.Trigger{
+		Type:          string(triggerType),
+		Configuration: cfg,
+	})
+}
+
+func ensureAliasAvailable(q *gorm.DB, alias string, excludeID uuid.UUID) error {
+	alias = strings.TrimSpace(alias)
+	if alias == "" {
+		return nil
+	}
+
+	var existing models.Trigger
+	query := q.Where("alias = ?", alias)
+	if excludeID != uuid.Nil {
+		query = query.Where("id <> ?", excludeID)
+	}
+	err := query.First(&existing).Error
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: alias %q already exists", ErrTriggerAliasConflict, alias)
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		return nil
+	default:
+		return err
+	}
 }

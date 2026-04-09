@@ -176,7 +176,8 @@ metadata:
   alias: string     # required
 trigger:
   type: cron|http
-  configuration: {} # type-specific
+  configuration:    # type-specific
+    path: my-job    # required for http
 steps:
   - name: string    # required
     image: string   # required

@@ -95,8 +95,11 @@ func Markdown() string {
 	b.WriteString("### HTTP Trigger\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
-	b.WriteString("| `path` | string | required | Route served under `/v1/jobs/:id`. |\n")
-	b.WriteString("| `secret` | string | optional | Shared secret validated by web UI/API clients. |\n\n")
+	b.WriteString("| `path` | string | required | Webhook route suffix. Caesium serves it at `POST /v1/hooks/<path>` and normalizes legacy `/hooks/<path>` forms. |\n")
+	b.WriteString("| `secret` | string | optional | Shared secret used to validate incoming webhook requests. |\n")
+	b.WriteString("| `signatureScheme` | string | optional | One of `hmac-sha256`, `hmac-sha1`, `bearer`, `basic`. Defaults to `hmac-sha256` when `secret` is set. |\n")
+	b.WriteString("| `signatureHeader` | string | optional | Header containing the signature or token. Default varies by scheme. |\n")
+	b.WriteString("| `paramMapping` | map[string]string | optional | Extracts JSON request-body fields into run params using simple JSONPath expressions such as `$.ref`. |\n\n")
 
 	b.WriteString("## Callbacks\n\n")
 	b.WriteString("Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.\n\n")

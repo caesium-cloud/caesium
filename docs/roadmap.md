@@ -26,9 +26,9 @@ These features address the most common reasons a team would choose an alternativ
 
 ### 1.1 Full-Featured HTTP Triggers & Webhook Ingestion
 
-**Current state**: HTTP triggers exist but are minimal — `PUT /v1/triggers/:id` fires all associated jobs. The `path` and `secret` configuration fields are documented in examples but not implemented. There is no webhook receiver endpoint, no payload extraction, no request authentication, and no per-job filtering.
+**Status**: Shipped. HTTP triggers now support `POST /v1/hooks/*`, configured webhook paths, optional request authentication (`hmac-sha256`, `hmac-sha1`, `bearer`, `basic`), payload parameter extraction via `paramMapping`, default parameter merging, and operator-authenticated manual/API fire via `POST /v1/triggers/:id/fire`. The web UI also exposes HTTP trigger configuration and editing.
 
-**Target state**: HTTP triggers become a first-class webhook ingestion layer. External systems (CI/CD, GitHub, Slack, S3 notifications, custom apps) can POST to a dedicated webhook endpoint, and Caesium routes the payload to the correct job with parameter extraction and signature validation.
+**Delivered state**: HTTP triggers are now a first-class webhook ingestion layer. External systems (CI/CD, GitHub, Slack, S3 notifications, custom apps) can POST to a dedicated webhook endpoint, and Caesium routes the payload to the correct job with parameter extraction and signature validation.
 
 **Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
 
@@ -186,7 +186,6 @@ steps:
 
 | Priority | Feature | Rationale |
 |----------|---------|-----------|
-| **P0** | 1.1 HTTP triggers & webhooks | The current HTTP trigger is non-functional for real use. This is a bug, not a feature request. |
 | **P0** | 1.2 Event-driven routing | Completes the trigger story. Without events, Caesium can only do time-based and manual scheduling. |
 | **P1** | 1.3 Concurrency strategies | Table-stakes for shared clusters. Blocks multi-team adoption. |
 | **P1** | 1.4 Priority queues | Small scope, high impact for distributed deployments. |
@@ -214,6 +213,7 @@ Features that were previously on the roadmap and are now shipped:
 | OpenLineage integration | [`open_lineage.md`](open_lineage.md) | Shipped |
 | Git-based job synchronization | — | Shipped |
 | Harness testing framework | — | Shipped |
+| Full-featured HTTP triggers & webhook ingestion | [`design-event-triggers.md`](design-event-triggers.md) WS1 | Shipped |
 | Task retries with exponential backoff | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](ui_implementation_plan.md) | Shipped |

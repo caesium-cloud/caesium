@@ -122,6 +122,8 @@ steps:
 - `metadata.alias` must be unique per Caesium installation.
 - `engine` defaults to `docker` if omitted.
 - `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
+- HTTP triggers require `configuration.path`. Caesium serves the webhook at `POST /v1/hooks/<path>`. Existing manifests may spell the path as `/hooks/<path>` or `/v1/hooks/<path>`; Caesium normalizes those forms to the same route.
+- HTTP triggers may optionally define `secret`, `signatureScheme`, `signatureHeader`, and `paramMapping` to validate incoming webhook requests and extract JSON payload fields into run parameters.
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - Steps support retry controls via `retries`, `retryDelay`, and `retryBackoff`.
