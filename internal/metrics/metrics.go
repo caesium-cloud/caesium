@@ -1,8 +1,12 @@
 package metrics
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
 )
+
+var registerOnce sync.Once
 
 var (
 	JobRunsTotal = prometheus.NewCounterVec(
@@ -133,26 +137,66 @@ var (
 			Help: "Current number of task cache entries.",
 		},
 	)
+
+	// Auth metrics
+
+	AuthRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_auth_requests_total",
+			Help: "Total authenticated API requests by outcome, role, method, and path.",
+		},
+		[]string{"outcome", "role", "method", "path"},
+	)
+
+	AuthFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_auth_failures_total",
+			Help: "Total authentication failures by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	AuthKeyAgeSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "caesium_auth_key_age_seconds",
+			Help:    "Age of API keys at request time in seconds.",
+			Buckets: []float64{3600, 86400, 604800, 2592000, 7776000, 15552000, 31536000},
+		},
+	)
+
+	AuditLogEntriesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_audit_log_entries_total",
+			Help: "Total audit log entries by action and outcome.",
+		},
+		[]string{"action", "outcome"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
 func Register() {
-	prometheus.MustRegister(
-		JobRunsTotal,
-		JobRunDurationSeconds,
-		TaskRunsTotal,
-		TaskRunDurationSeconds,
-		JobsActive,
-		CallbackRunsTotal,
-		TriggerFiresTotal,
-		WorkerClaimsTotal,
-		WorkerClaimContentionTotal,
-		WorkerLeaseExpirationsTotal,
-		TaskRetriesTotal,
-		BackfillRunsTotal,
-		BackfillsActive,
-		TaskCacheHitsTotal,
-		TaskCacheMissesTotal,
-		TaskCacheEntries,
-	)
+	registerOnce.Do(func() {
+		prometheus.MustRegister(
+			JobRunsTotal,
+			JobRunDurationSeconds,
+			TaskRunsTotal,
+			TaskRunDurationSeconds,
+			JobsActive,
+			CallbackRunsTotal,
+			TriggerFiresTotal,
+			WorkerClaimsTotal,
+			WorkerClaimContentionTotal,
+			WorkerLeaseExpirationsTotal,
+			TaskRetriesTotal,
+			BackfillRunsTotal,
+			BackfillsActive,
+			TaskCacheHitsTotal,
+			TaskCacheMissesTotal,
+			TaskCacheEntries,
+			AuthRequestsTotal,
+			AuthFailuresTotal,
+			AuthKeyAgeSeconds,
+			AuditLogEntriesTotal,
+		)
+	})
 }

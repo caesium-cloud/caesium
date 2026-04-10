@@ -17,7 +17,7 @@
   <a href="https://hub.docker.com/r/caesiumcloud/caesium/"><img src="https://img.shields.io/docker/pulls/caesiumcloud/caesium?style=plastic" alt="Docker Pulls"></a>
 </p>
 
-Caesium lets you define jobs as declarative YAML DAGs, run them on Docker, Podman, or Kubernetes, and operate them through a REST API, GraphQL endpoint, Prometheus metrics, and an embedded React UI.
+Caesium lets you define jobs as declarative YAML DAGs, run them on Docker, Podman, or Kubernetes, and operate them through a REST API, Prometheus metrics, an embedded React UI, and an optional GraphQL endpoint when API-key auth is disabled.
 
 ## Local Developer Experience
 
@@ -226,13 +226,14 @@ The embedded UI exposes a few optional power-user surfaces:
 
 ## API Reference
 
-The server exposes REST on port `8080` plus GraphQL at `GET /gql`.
+The server exposes REST on port `8080`. GraphQL is available at `GET /gql` only when `CAESIUM_AUTH_MODE=none`; when API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources.
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Health check |
-| `GET /metrics` | Prometheus metrics |
-| `GET /gql` | GraphQL endpoint |
+| `GET /auth/status` | Report whether API-key auth is enabled for the UI |
+| `GET /metrics` | Prometheus metrics (viewer auth required when `CAESIUM_AUTH_MODE=api-key`) |
+| `GET /gql` | GraphQL endpoint when `CAESIUM_AUTH_MODE=none` |
 | `GET /v1/jobs` | List jobs |
 | `GET /v1/jobs/:id` | Get one job |
 | `GET /v1/jobs/:id/tasks` | List persisted task definitions for a job |
@@ -255,6 +256,8 @@ The server exposes REST on port `8080` plus GraphQL at `GET /gql`.
 | `GET /v1/nodes/:address/workers` | Inspect worker state for one node |
 
 The log and database console endpoints are intentionally gated by environment variables because they are operator-facing debugging features rather than default public APIs.
+
+For the auth management CLI, prefer supplying credentials through `CAESIUM_API_KEY`; the `--api-key` flag remains available but is visible in process listings.
 
 ## Documentation
 

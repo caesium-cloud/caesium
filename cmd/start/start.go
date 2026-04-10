@@ -2,15 +2,18 @@ package start
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"runtime/pprof"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/caesium-cloud/caesium/api"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
@@ -90,6 +93,10 @@ func start(cmd *cobra.Command, args []string) error {
 	runsvc.New(ctx).SetBus(bus)
 
 	vars := env.Variables()
+
+	// --- Authentication & Authorization ---
+	authSvc, auditor, limiter := initAuth(ctx, vars)
+
 	log.Info(
 		"execution configuration",
 		"max_parallel_tasks",
@@ -166,7 +173,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx, bus)
+		errs <- api.Start(ctx, bus, authSvc, auditor, limiter)
 	}()
 
 	go func() {
@@ -215,6 +222,67 @@ func start(cmd *cobra.Command, args []string) error {
 	defer shutdown()
 
 	return <-errs
+}
+
+// initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
+// Returns nil services when auth is disabled so callers can pass them through safely.
+func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter) {
+	conn := db.Connection()
+	authSvc := auth.NewService(conn)
+	auditor := auth.NewAuditLogger(conn)
+	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
+
+	switch vars.AuthMode {
+	case "none", "":
+		log.Warn("authentication is disabled — all endpoints are publicly accessible")
+		return authSvc, auditor, limiter
+
+	case "api-key":
+		log.Info("authentication enabled", "mode", vars.AuthMode)
+
+		// TLS requirement check.
+		if vars.AuthRequireTLS {
+			hasTLS := vars.TLSCert != "" && vars.TLSKey != ""
+			hasProxy := vars.TrustedProxies != ""
+			if !hasTLS && !hasProxy {
+				log.Fatal(
+					"TLS is required when authentication is enabled. " +
+						"Set CAESIUM_TLS_CERT/CAESIUM_TLS_KEY or CAESIUM_TRUSTED_PROXIES, " +
+						"or set CAESIUM_AUTH_REQUIRE_TLS=false to disable this check",
+				)
+			}
+		}
+
+		// Bootstrap: generate initial admin key if none exist.
+		plaintext, err := authSvc.Bootstrap()
+		if err != nil {
+			log.Fatal("auth bootstrap failure", "error", err)
+		}
+		if plaintext != "" {
+			// Print to stdout only — not to structured logs.
+			fmt.Println("==========================================================")
+			fmt.Println("  BOOTSTRAP ADMIN API KEY (shown once, save it now):")
+			fmt.Printf("  %s\n", plaintext)
+			fmt.Println("==========================================================")
+		} else {
+			// Verify at least one admin key exists.
+			exists, err := authSvc.AdminKeyExists()
+			if err != nil {
+				log.Fatal("failed to verify admin key existence", "error", err)
+			}
+			if !exists {
+				log.Fatal("no admin API key found — cannot start with authentication enabled")
+			}
+		}
+
+		authSvc.StartLastUsedFlusher(ctx)
+		limiter.StartCleanup(ctx.Done())
+		return authSvc, auditor, limiter
+
+	default:
+		log.Fatal("unknown CAESIUM_AUTH_MODE value", "mode", vars.AuthMode)
+		return nil, nil, nil // unreachable
+	}
 }
 
 func shutdown() {

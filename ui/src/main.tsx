@@ -6,6 +6,7 @@ import './index.css'
 import { router } from './router'
 import { Toaster } from '@/components/ui/sonner'
 import { ThemeProvider } from './components/theme-provider'
+import { AuthGate } from './features/auth/AuthGate'
 
 const queryClient = new QueryClient()
 
@@ -13,7 +14,9 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider defaultTheme="dark" storageKey="caesium-ui-theme">
-        <RouterProvider router={router} />
+        <AuthGate>
+          <RouterProvider router={router} />
+        </AuthGate>
         <Toaster />
       </ThemeProvider>
     </QueryClientProvider>

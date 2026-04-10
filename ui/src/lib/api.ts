@@ -1,4 +1,5 @@
 import { parseAllDocuments } from "yaml";
+import { clearApiKey, withAuthHeaders } from "./auth";
 
 export interface Job {
   id: string;
@@ -308,13 +309,20 @@ async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
 }
 
 async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
+  const headers = withAuthHeaders({
+    "Content-Type": "application/json",
+    ...(options?.headers as Record<string, string>),
+  });
+
   const response = await fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      ...options?.headers,
-    },
+    headers,
   });
+
+  if (response.status === 401) {
+    clearApiKey();
+    throw new ApiError(401, "Authentication required");
+  }
 
   if (!response.ok) {
     throw new ApiError(response.status, await response.text());
