@@ -2,12 +2,14 @@ package auth_test
 
 import (
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,12 +32,31 @@ func TestCreateKeyAndValidate(t *testing.T) {
 	require.Equal(t, "test", resp.Key.CreatedBy)
 	require.Nil(t, resp.Key.RevokedAt)
 	require.Nil(t, resp.Key.ExpiresAt)
+	require.True(t, strings.HasPrefix(resp.Key.KeyHash, auth.KeyHashSchemeSHA256+":"))
 
 	// Validate the key succeeds.
 	key, err := svc.ValidateKey(resp.Plaintext)
 	require.NoError(t, err)
 	require.Equal(t, resp.Key.ID, key.ID)
 	require.Equal(t, models.RoleOperator, key.Role)
+}
+
+func TestCreateKeyAndValidateWithHashSecret(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
+
+	resp, err := svc.CreateKey(&auth.CreateKeyRequest{
+		Description: "test key",
+		Role:        models.RoleOperator,
+		CreatedBy:   "test",
+	})
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(resp.Key.KeyHash, auth.KeyHashSchemeHMACSHA256+":"))
+
+	key, err := svc.ValidateKey(resp.Plaintext)
+	require.NoError(t, err)
+	require.Equal(t, resp.Key.ID, key.ID)
 }
 
 func TestValidateKeyNotFound(t *testing.T) {
@@ -65,6 +86,33 @@ func TestValidateKeyRevoked(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrKeyRevoked)
 }
 
+func TestValidateKeyAcceptsLegacyRawHashWithHashSecret(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+
+	plaintext, prefix, err := auth.GenerateKey()
+	require.NoError(t, err)
+
+	candidates, err := auth.HashLookupCandidates(plaintext, "server-side-secret")
+	require.NoError(t, err)
+
+	key := &models.APIKey{
+		ID:          uuid.New(),
+		KeyPrefix:   prefix,
+		KeyHash:     candidates[len(candidates)-1], // bare SHA-256 for legacy rows
+		Description: "legacy key",
+		Role:        models.RoleViewer,
+		CreatedBy:   "test",
+		CreatedAt:   time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(key).Error)
+
+	svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
+	got, err := svc.ValidateKey(plaintext)
+	require.NoError(t, err)
+	require.Equal(t, key.ID, got.ID)
+}
+
 func TestValidateKeyExpired(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	defer testutil.CloseDB(db)
@@ -80,6 +128,54 @@ func TestValidateKeyExpired(t *testing.T) {
 
 	_, err = svc.ValidateKey(resp.Plaintext)
 	require.ErrorIs(t, err, auth.ErrKeyExpired)
+}
+
+func TestValidateKeyAppliesLatencyToFailurePaths(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+
+	var sleeps []time.Duration
+	svc := auth.NewService(
+		db,
+		auth.WithValidationFailureMinLatency(50*time.Millisecond),
+		auth.WithSleep(func(d time.Duration) {
+			sleeps = append(sleeps, d)
+		}),
+	)
+
+	_, err := svc.ValidateKey("csk_live_missing")
+	require.ErrorIs(t, err, auth.ErrKeyNotFound)
+	require.Len(t, sleeps, 1)
+	require.Greater(t, sleeps[0], time.Duration(0))
+
+	sleeps = nil
+	resp, err := svc.CreateKey(&auth.CreateKeyRequest{Role: models.RoleViewer, CreatedBy: "test"})
+	require.NoError(t, err)
+	require.NoError(t, svc.RevokeKey(resp.Key.ID))
+	_, err = svc.ValidateKey(resp.Plaintext)
+	require.ErrorIs(t, err, auth.ErrKeyRevoked)
+	require.Len(t, sleeps, 1)
+	require.Greater(t, sleeps[0], time.Duration(0))
+
+	sleeps = nil
+	past := time.Now().UTC().Add(-time.Hour)
+	expired, err := svc.CreateKey(&auth.CreateKeyRequest{
+		Role:      models.RoleViewer,
+		CreatedBy: "test",
+		ExpiresAt: &past,
+	})
+	require.NoError(t, err)
+	_, err = svc.ValidateKey(expired.Plaintext)
+	require.ErrorIs(t, err, auth.ErrKeyExpired)
+	require.Len(t, sleeps, 1)
+	require.Greater(t, sleeps[0], time.Duration(0))
+
+	sleeps = nil
+	valid, err := svc.CreateKey(&auth.CreateKeyRequest{Role: models.RoleViewer, CreatedBy: "test"})
+	require.NoError(t, err)
+	_, err = svc.ValidateKey(valid.Plaintext)
+	require.NoError(t, err)
+	require.Empty(t, sleeps)
 }
 
 func TestCreateKeyWithScope(t *testing.T) {
@@ -261,6 +357,79 @@ func TestBootstrapNoopWhenAdminExists(t *testing.T) {
 	second, err := svc.Bootstrap()
 	require.NoError(t, err)
 	require.Empty(t, second)
+}
+
+func TestBootstrapReusesReservedSlotWhenBootstrapKeyIsRevoked(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
+
+	first, err := svc.Bootstrap()
+	require.NoError(t, err)
+	require.NotEmpty(t, first)
+
+	key, err := svc.ValidateKey(first)
+	require.NoError(t, err)
+	require.NoError(t, svc.RevokeKey(key.ID))
+
+	second, err := svc.Bootstrap()
+	require.NoError(t, err)
+	require.NotEmpty(t, second)
+	require.NotEqual(t, first, second)
+
+	testutil.AssertCount(t, db, &models.APIKey{}, 1)
+
+	refreshed, err := svc.ValidateKey(second)
+	require.NoError(t, err)
+	require.Equal(t, key.ID, refreshed.ID)
+	require.Equal(t, models.RoleAdmin, refreshed.Role)
+}
+
+func TestBootstrapConcurrentCreatesSingleAdminKey(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(8)
+	sqlDB.SetMaxIdleConns(8)
+
+	const workers = 8
+	results := make(chan string, workers)
+	errs := make(chan error, workers)
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
+			plaintext, err := svc.Bootstrap()
+			errs <- err
+			results <- plaintext
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	var nonEmpty int
+	for plaintext := range results {
+		if plaintext != "" {
+			nonEmpty++
+		}
+	}
+
+	require.Equal(t, 1, nonEmpty)
+	testutil.AssertCount(t, db, &models.APIKey{}, 1)
+
+	exists, err := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret")).AdminKeyExists()
+	require.NoError(t, err)
+	require.True(t, exists)
 }
 
 func TestAdminKeyExists(t *testing.T) {

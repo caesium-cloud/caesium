@@ -91,6 +91,7 @@ type Environment struct {
 
 	// Authentication & Authorization
 	AuthMode                string `envconfig:"AUTH_MODE" default:"none"` // none, api-key
+	AuthKeyHashSecret       string `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
 	AuthRequireTLS          bool   `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
 	TLSCert                 string `envconfig:"TLS_CERT" default:""`
 	TLSKey                  string `envconfig:"TLS_KEY" default:""`

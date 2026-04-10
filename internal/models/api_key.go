@@ -45,19 +45,20 @@ func ValidRole(r string) bool {
 }
 
 // APIKey represents an API key stored in the database.
-// The plaintext key is never persisted — only the SHA-256 hash.
+// The plaintext key is never persisted — only a versioned stored hash.
 type APIKey struct {
-	ID          uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-	KeyPrefix   string         `gorm:"type:text;size:12;not null;index" json:"key_prefix"`
-	KeyHash     string         `gorm:"type:text;not null;uniqueIndex" json:"-"`
-	Description string         `gorm:"type:text" json:"description,omitempty"`
-	Role        Role           `gorm:"type:text;not null" json:"role"`
-	Scope       datatypes.JSON `gorm:"type:json" json:"scope,omitempty"`
-	CreatedBy   string         `gorm:"type:text" json:"created_by,omitempty"`
-	CreatedAt   time.Time      `gorm:"not null" json:"created_at"`
-	ExpiresAt   *time.Time     `json:"expires_at,omitempty"`
-	LastUsedAt  *time.Time     `json:"last_used_at,omitempty"`
-	RevokedAt   *time.Time     `json:"revoked_at,omitempty"`
+	ID            uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	KeyPrefix     string         `gorm:"type:text;size:12;not null;index" json:"key_prefix"`
+	KeyHash       string         `gorm:"type:text;not null;uniqueIndex" json:"-"`
+	BootstrapSlot *string        `gorm:"type:text;uniqueIndex" json:"-"`
+	Description   string         `gorm:"type:text" json:"description,omitempty"`
+	Role          Role           `gorm:"type:text;not null" json:"role"`
+	Scope         datatypes.JSON `gorm:"type:json" json:"scope,omitempty"`
+	CreatedBy     string         `gorm:"type:text" json:"created_by,omitempty"`
+	CreatedAt     time.Time      `gorm:"not null" json:"created_at"`
+	ExpiresAt     *time.Time     `json:"expires_at,omitempty"`
+	LastUsedAt    *time.Time     `json:"last_used_at,omitempty"`
+	RevokedAt     *time.Time     `json:"revoked_at,omitempty"`
 }
 
 // IsRevoked returns true when the key has been revoked.

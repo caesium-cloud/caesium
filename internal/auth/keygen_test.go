@@ -8,7 +8,7 @@ import (
 )
 
 func TestGenerateKey(t *testing.T) {
-	plaintext, prefix, hash, err := GenerateKey()
+	plaintext, prefix, err := GenerateKey()
 	require.NoError(t, err)
 
 	// Key starts with the live prefix.
@@ -18,9 +18,6 @@ func TestGenerateKey(t *testing.T) {
 	require.Equal(t, plaintext[:displayPrefixLen], prefix)
 	require.Len(t, prefix, displayPrefixLen)
 
-	// Hash matches.
-	require.Equal(t, HashKey(plaintext), hash)
-
 	// Key has sufficient length (prefix + 32+ encoded chars).
 	require.Greater(t, len(plaintext), 30)
 }
@@ -28,21 +25,35 @@ func TestGenerateKey(t *testing.T) {
 func TestGenerateKeyUniqueness(t *testing.T) {
 	seen := make(map[string]bool)
 	for i := 0; i < 100; i++ {
-		plaintext, _, _, err := GenerateKey()
+		plaintext, _, err := GenerateKey()
 		require.NoError(t, err)
 		require.False(t, seen[plaintext], "duplicate key generated")
 		seen[plaintext] = true
 	}
 }
 
-func TestHashKeyDeterministic(t *testing.T) {
+func TestHashKeyDeterministicWithoutSecret(t *testing.T) {
 	key := "csk_live_testkey123"
-	h1 := HashKey(key)
-	h2 := HashKey(key)
+	h1, err := HashKey(key, "")
+	require.NoError(t, err)
+	h2, err := HashKey(key, "")
+	require.NoError(t, err)
 	require.Equal(t, h1, h2)
-	require.Len(t, h1, 64) // SHA-256 hex = 64 chars
+	require.Equal(t, "sha256:80e63ac72c6d9aaadb750de82a4b0f7e606133db9a0264559eaecb7789465029", h1)
 }
 
-func TestHashKeyDifferentInputs(t *testing.T) {
-	require.NotEqual(t, HashKey("key1"), HashKey("key2"))
+func TestHashKeyUsesHMACWhenSecretConfigured(t *testing.T) {
+	h, err := HashKey("csk_live_testkey123", "super-secret")
+	require.NoError(t, err)
+	require.Equal(t, "hmac-sha256:99620ba47041b7576ac9c72874fc81913345ce1f3aa2cbeec28c5aa65d79e20c", h)
+}
+
+func TestHashLookupCandidatesIncludeLegacyForms(t *testing.T) {
+	candidates, err := HashLookupCandidates("csk_live_testkey123", "super-secret")
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"hmac-sha256:99620ba47041b7576ac9c72874fc81913345ce1f3aa2cbeec28c5aa65d79e20c",
+		"sha256:80e63ac72c6d9aaadb750de82a4b0f7e606133db9a0264559eaecb7789465029",
+		"80e63ac72c6d9aaadb750de82a4b0f7e606133db9a0264559eaecb7789465029",
+	}, candidates)
 }

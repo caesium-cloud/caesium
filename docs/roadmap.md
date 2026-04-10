@@ -58,25 +58,13 @@ These features address the most common reasons a team would choose an alternativ
 
 ### 1.5 API Key Auth Hardening Follow-up
 
-**Status**: Baseline API-key auth, RBAC, audit logging, UI login, scoped keys, and webhook/auth domain separation are shipped. The remaining work here is security hardening on top of that base.
+**Status**: Shipped. The API-key layer now adds timing normalization for auth failures, keyed hash storage for newly issued keys, legacy-hash compatibility during rollout, and conflict-safe bootstrap semantics for concurrent startup.
 
-**Current state**: Caesium now protects the REST API and `/metrics` with API keys when `CAESIUM_AUTH_MODE=api-key`, disables GraphQL in that mode, and keeps webhook signature validation on its own auth path. There are still a few deferred hardening gaps in the implementation:
+**Delivered state**:
 
-1. `ValidateKey` has distinguishable failure paths (`not found`, `expired`, `revoked`) that should be normalized to reduce timing side channels.
-2. API keys are currently stored as a plain SHA-256 hash of the full bearer token; the follow-up should move to HMAC-SHA256 with a server-side secret or an equivalent keyed/salted design.
-3. Bootstrap admin-key creation is still a read-then-create flow and should become atomic to avoid duplicate bootstrap keys when multiple instances start concurrently.
-
-**Target state**: The API-key implementation is hardened for production multi-instance deployments:
-
-1. Authentication failures have a consistent timing envelope across missing, expired, revoked, and malformed keys.
-2. Stored key material is resistant to offline cracking after a database compromise without also compromising server-side secret material.
-3. Bootstrap admin-key creation is atomic and safe under concurrent startup.
-
-**Implementation plan**:
-1. Normalize validation-failure timing in `internal/auth/service.go` with a fixed minimum latency or equivalent dummy-work strategy.
-2. Replace bare `HashKey` with a keyed hash scheme and add the required server-side configuration plus migration notes.
-3. Make bootstrap admin-key creation transactional or conflict-driven so only one bootstrap key can be created under concurrent startup.
-4. Add focused tests for timing-path consistency, keyed-hash configuration behavior, and concurrent bootstrap semantics.
+1. Authentication failures (`not found`, `expired`, `revoked`) now share a minimum timing envelope in `ValidateKey`, reducing low-signal timing differences between failure modes.
+2. Newly created and rotated API keys are stored as versioned HMAC-SHA256 hashes when `CAESIUM_AUTH_KEY_HASH_SECRET` is configured. Legacy SHA-256 rows still validate so existing deployments can upgrade and rotate keys in place.
+3. Bootstrap admin-key creation now uses a reserved database slot plus retry-on-lock behavior so concurrent startup does not emit duplicate bootstrap keys, while still allowing a revoked or expired bootstrap key to be refreshed when no active admin key remains.
 
 ---
 
