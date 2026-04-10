@@ -24,7 +24,11 @@ var (
 )
 
 const (
-	defaultValidationFailureMinLatency = 25 * time.Millisecond
+	// defaultValidationFailureMinLatency pads all auth-failure responses to a
+	// uniform floor, preventing timing-based key enumeration. 100ms is the
+	// minimum recommended by common practice; operators can tune via
+	// WithValidationFailureMinLatency.
+	defaultValidationFailureMinLatency = 100 * time.Millisecond
 	bootstrapAdminSlot                 = "bootstrap-admin"
 	bootstrapRetryAttempts             = 5
 	bootstrapRetryDelay                = 10 * time.Millisecond
@@ -47,7 +51,7 @@ type Service struct {
 // ServiceOption customizes auth service behavior.
 type ServiceOption func(*Service)
 
-// WithKeyHashSecret configures the server-side secret used for keyed API-key hashes.
+// WithKeyHashSecret configures the server-side secret used for HMAC-SHA256 key hashes.
 func WithKeyHashSecret(secret string) ServiceOption {
 	return func(s *Service) {
 		s.keyHashSecret = secret
@@ -147,13 +151,13 @@ func (s *Service) ValidateKey(plaintext string) (_ *models.APIKey, retErr error)
 		s.applyFailureLatency(startedAt, retErr)
 	}()
 
-	hashes, err := HashLookupCandidates(plaintext, s.keyHashSecret)
+	hash, err := HashKey(plaintext, s.keyHashSecret)
 	if err != nil {
 		return nil, fmt.Errorf("hash api key: %w", err)
 	}
 
 	var key models.APIKey
-	if err := s.db.Where("key_hash IN ?", hashes).Order("created_at DESC").First(&key).Error; err != nil {
+	if err := s.db.Where("key_hash = ?", hash).First(&key).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, ErrKeyNotFound
 		}
@@ -235,8 +239,7 @@ func (s *Service) ListKeys() ([]models.APIKey, error) {
 
 // RevokeKey sets revoked_at on the specified key.
 func (s *Service) RevokeKey(id uuid.UUID) error {
-	now := time.Now().UTC()
-	result := s.db.Model(&models.APIKey{}).Where("id = ? AND revoked_at IS NULL", id).Update("revoked_at", now)
+	result := s.db.Model(&models.APIKey{}).Where("id = ? AND revoked_at IS NULL", id).Update("revoked_at", s.nowUTC())
 	if result.Error != nil {
 		return fmt.Errorf("revoke api key: %w", result.Error)
 	}
@@ -291,18 +294,17 @@ func (s *Service) RotateKey(id uuid.UUID, gracePeriod time.Duration, actor strin
 // AdminKeyExists returns true if at least one non-revoked, non-expired admin key exists.
 func (s *Service) AdminKeyExists() (bool, error) {
 	var exists bool
-	_, err := s.withBootstrapRetry(func() (int64, error) {
+	err := s.withReadRetry(func() error {
 		var count int64
-		now := s.nowUTC()
 		err := s.db.Model(&models.APIKey{}).
 			Where(
 				"role = ? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > ?)",
 				models.RoleAdmin,
-				now,
+				s.nowUTC(),
 			).
 			Count(&count).Error
 		exists = count > 0
-		return 1, err
+		return err
 	})
 	if err != nil {
 		return false, fmt.Errorf("check admin keys: %w", err)
@@ -360,7 +362,10 @@ func (s *Service) Bootstrap() (string, error) {
 		return "", nil
 	}
 
-	rowsAffected, err = s.tryRefreshBootstrapKey(prefix, hash, now)
+	// The bootstrap slot exists but the key is revoked/expired — refresh it with a
+	// new UUID so the old audit entries remain unambiguous.
+	newID := uuid.New()
+	rowsAffected, err = s.tryRefreshBootstrapKey(newID, prefix, hash, now)
 	if err != nil {
 		return "", fmt.Errorf("bootstrap admin key: %w", err)
 	}
@@ -411,7 +416,7 @@ func (s *Service) tryCreateBootstrapKey(key *models.APIKey) (int64, error) {
 	})
 }
 
-func (s *Service) tryRefreshBootstrapKey(prefix, hash string, now time.Time) (int64, error) {
+func (s *Service) tryRefreshBootstrapKey(newID uuid.UUID, prefix, hash string, now time.Time) (int64, error) {
 	return s.withBootstrapRetry(func() (int64, error) {
 		result := s.db.Model(&models.APIKey{}).
 			Where(
@@ -420,6 +425,7 @@ func (s *Service) tryRefreshBootstrapKey(prefix, hash string, now time.Time) (in
 				now,
 			).
 			Updates(map[string]any{
+				"id":           newID,
 				"key_prefix":   prefix,
 				"key_hash":     hash,
 				"description":  "Bootstrap admin key",
@@ -435,6 +441,10 @@ func (s *Service) tryRefreshBootstrapKey(prefix, hash string, now time.Time) (in
 	})
 }
 
+// withBootstrapRetry retries write operations that fail due to transient DB lock errors.
+// SQLite-specific lock messages ("database is locked", "database table is locked",
+// "database is busy") are the only recognised retry triggers — other engines are not
+// currently supported for the bootstrap path.
 func (s *Service) withBootstrapRetry(fn func() (int64, error)) (int64, error) {
 	var lastErr error
 	for attempt := 0; attempt < bootstrapRetryAttempts; attempt++ {
@@ -451,6 +461,25 @@ func (s *Service) withBootstrapRetry(fn func() (int64, error)) (int64, error) {
 		}
 	}
 	return 0, lastErr
+}
+
+// withReadRetry retries read-only operations that fail due to transient DB lock errors.
+func (s *Service) withReadRetry(fn func() error) error {
+	var lastErr error
+	for attempt := 0; attempt < bootstrapRetryAttempts; attempt++ {
+		err := fn()
+		if err == nil {
+			return nil
+		}
+		if !isBootstrapLockError(err) {
+			return err
+		}
+		lastErr = err
+		if attempt < bootstrapRetryAttempts-1 {
+			s.sleep(bootstrapRetryDelay)
+		}
+	}
+	return lastErr
 }
 
 func isBootstrapLockError(err error) bool {

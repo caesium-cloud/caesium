@@ -246,6 +246,12 @@ func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.A
 					"Use a long random secret so newly created keys are stored with a keyed hash",
 			)
 		}
+		if len(strings.TrimSpace(vars.AuthKeyHashSecret)) < 32 {
+			log.Fatal(
+				"CAESIUM_AUTH_KEY_HASH_SECRET must be at least 32 characters — " +
+					"use a cryptographically random value (e.g. openssl rand -hex 32)",
+			)
+		}
 
 		// TLS requirement check.
 		if vars.AuthRequireTLS {

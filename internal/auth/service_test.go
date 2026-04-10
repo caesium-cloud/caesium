@@ -9,7 +9,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -86,32 +85,6 @@ func TestValidateKeyRevoked(t *testing.T) {
 	require.ErrorIs(t, err, auth.ErrKeyRevoked)
 }
 
-func TestValidateKeyAcceptsLegacyRawHashWithHashSecret(t *testing.T) {
-	db := testutil.OpenTestDB(t)
-	defer testutil.CloseDB(db)
-
-	plaintext, prefix, err := auth.GenerateKey()
-	require.NoError(t, err)
-
-	candidates, err := auth.HashLookupCandidates(plaintext, "server-side-secret")
-	require.NoError(t, err)
-
-	key := &models.APIKey{
-		ID:          uuid.New(),
-		KeyPrefix:   prefix,
-		KeyHash:     candidates[len(candidates)-1], // bare SHA-256 for legacy rows
-		Description: "legacy key",
-		Role:        models.RoleViewer,
-		CreatedBy:   "test",
-		CreatedAt:   time.Now().UTC(),
-	}
-	require.NoError(t, db.Create(key).Error)
-
-	svc := auth.NewService(db, auth.WithKeyHashSecret("server-side-secret"))
-	got, err := svc.ValidateKey(plaintext)
-	require.NoError(t, err)
-	require.Equal(t, key.ID, got.ID)
-}
 
 func TestValidateKeyExpired(t *testing.T) {
 	db := testutil.OpenTestDB(t)
@@ -381,7 +354,7 @@ func TestBootstrapReusesReservedSlotWhenBootstrapKeyIsRevoked(t *testing.T) {
 
 	refreshed, err := svc.ValidateKey(second)
 	require.NoError(t, err)
-	require.Equal(t, key.ID, refreshed.ID)
+	require.NotEqual(t, key.ID, refreshed.ID) // new UUID issued on refresh to keep audit entries unambiguous
 	require.Equal(t, models.RoleAdmin, refreshed.Role)
 }
 
