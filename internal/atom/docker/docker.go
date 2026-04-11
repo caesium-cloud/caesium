@@ -8,6 +8,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -41,5 +42,6 @@ type dockerBackend interface {
 	ContainerStop(context.Context, string, container.StopOptions) error
 	ContainerRemove(context.Context, string, container.RemoveOptions) error
 	ContainerLogs(context.Context, string, container.LogsOptions) (io.ReadCloser, error)
+	ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error)
 	ImagePull(context.Context, string, image.PullOptions) (io.ReadCloser, error)
 }

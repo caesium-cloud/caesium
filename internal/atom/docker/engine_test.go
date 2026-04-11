@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/container"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/errdefs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 )
@@ -106,6 +107,9 @@ func (s *DockerTestSuite) TestCreate() {
 	}
 
 	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", testImage).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", testImage).
 		Return()
 	s.engine.backend.(*mockDockerBackend).
@@ -145,6 +149,9 @@ func (s *DockerTestSuite) TestCreateAppliesSpec() {
 	}
 
 	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", req.Image).
 		Return()
 
@@ -178,6 +185,34 @@ func (s *DockerTestSuite) TestCreateAppliesSpec() {
 	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
 }
 
+func (s *DockerTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(nil)
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerCreate", mock.AnythingOfType("*container.Config"), mock.Anything, testContainerName).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockDockerBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	assert.Equal(s.T(), testAtomID, c.ID())
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
 func (s *DockerTestSuite) TestCreatePullError() {
 	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,
@@ -187,6 +222,43 @@ func (s *DockerTestSuite) TestCreatePullError() {
 
 	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", "").
+		Return(fmt.Errorf("invalid image"))
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreateInspectError() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(fmt.Errorf("inspect failed"))
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockDockerBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockDockerBackend).AssertExpectations(s.T())
+}
+
+func (s *DockerTestSuite) TestCreatePullErrorWhenImageMissing() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
+	s.engine.backend.(*mockDockerBackend).
+		On("ImagePull", req.Image).
 		Return(fmt.Errorf("invalid image"))
 
 	c, err := s.engine.Create(req)
@@ -202,6 +274,9 @@ func (s *DockerTestSuite) TestCreateError() {
 		Command: []string{"test"},
 	}
 
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
 	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", req.Image).
 		Return()
@@ -221,6 +296,9 @@ func (s *DockerTestSuite) TestCreateStartError() {
 		Command: []string{"test"},
 	}
 
+	s.engine.backend.(*mockDockerBackend).
+		On("ImageInspect", req.Image).
+		Return(errdefs.NotFound(io.EOF))
 	s.engine.backend.(*mockDockerBackend).
 		On("ImagePull", req.Image).
 		Return()

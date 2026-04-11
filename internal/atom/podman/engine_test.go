@@ -104,6 +104,9 @@ func (s *PodmanTestSuite) TestCreate() {
 	}
 
 	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", testImage).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
 		On("ImagePull", testImage).
 		Return()
 	s.engine.backend.(*mockPodmanBackend).
@@ -140,6 +143,9 @@ func (s *PodmanTestSuite) TestCreateAppliesSpec() {
 	}
 
 	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
 		On("ImagePull", req.Image).
 		Return()
 
@@ -167,6 +173,34 @@ func (s *PodmanTestSuite) TestCreateAppliesSpec() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+func (s *PodmanTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(true, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", mock.AnythingOfType("*specgen.SpecGenerator")).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
+	assert.Equal(s.T(), testAtomID, c.ID())
+	s.engine.backend.(*mockPodmanBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestCreateError() {
 	req := &atom.EngineCreateRequest{
 		Name:    "fail",
@@ -174,6 +208,9 @@ func (s *PodmanTestSuite) TestCreateError() {
 		Command: []string{"test"},
 	}
 
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
 	s.engine.backend.(*mockPodmanBackend).
 		On("ImagePull", req.Image).
 		Return()
@@ -204,12 +241,53 @@ func (s *PodmanTestSuite) TestCreatePullError() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+func (s *PodmanTestSuite) TestCreateExistsError() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, fmt.Errorf("exists failed"))
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockPodmanBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
+func (s *PodmanTestSuite) TestCreatePullErrorWhenImageMissing() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImagePull", req.Image).
+		Return(fmt.Errorf("invalid image"))
+
+	c, err := s.engine.Create(req)
+	assert.NotNil(s.T(), err)
+	assert.Nil(s.T(), c)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestCreateStartError() {
 	req := &atom.EngineCreateRequest{
 		Image:   testImage,
 		Command: []string{"test"},
 	}
 
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
 	s.engine.backend.(*mockPodmanBackend).
 		On("ImagePull", req.Image).
 		Return()

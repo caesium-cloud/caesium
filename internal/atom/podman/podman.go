@@ -44,6 +44,7 @@ type podmanBackend interface {
 	ContainerStop(string, *time.Duration) error
 	ContainerRemove(string, *bool, *bool) error
 	ContainerLogs(string, containers.LogOptions) (io.ReadCloser, error)
+	ImageExists(string) (bool, error)
 	ImagePull(string, *images.PullOptions) (io.ReadCloser, error)
 }
 
@@ -155,4 +156,8 @@ func (cli *podmanClient) ImagePull(image string, opts *images.PullOptions) (io.R
 	}
 
 	return io.NopCloser(strings.NewReader("")), nil
+}
+
+func (cli *podmanClient) ImageExists(image string) (bool, error) {
+	return images.Exists(cli.ctx, image, nil)
 }

@@ -77,23 +77,9 @@ func (e *podmanEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 }
 
 func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	log.Info("pulling podman image", "image", req.Image)
-
-	r, err := e.backend.ImagePull(req.Image, &images.PullOptions{})
-	if err != nil {
+	if err := e.ensureImagePresent(req.Image); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := r.Close(); err != nil {
-			log.Error("close podman pull reader", "error", err)
-		}
-	}()
-
-	if _, err = io.ReadAll(r); err != nil {
-		return nil, err
-	}
-
-	log.Info("podman image pulled", "image", req.Image)
 
 	spec := &specgen.SpecGenerator{
 		ContainerBasicConfig: specgen.ContainerBasicConfig{
@@ -129,6 +115,38 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	}
 
 	return e.Get(&atom.EngineGetRequest{ID: created.ID})
+}
+
+func (e *podmanEngine) ensureImagePresent(imageRef string) error {
+	if imageRef != "" {
+		exists, err := e.backend.ImageExists(imageRef)
+		if err != nil {
+			return err
+		}
+		if exists {
+			log.Info("podman image already present", "image", imageRef)
+			return nil
+		}
+	}
+
+	log.Info("pulling podman image", "image", imageRef)
+
+	r, err := e.backend.ImagePull(imageRef, &images.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Error("close podman pull reader", "error", err)
+		}
+	}()
+
+	if _, err = io.ReadAll(r); err != nil {
+		return err
+	}
+
+	log.Info("podman image pulled", "image", imageRef)
+	return nil
 }
 
 func (e *podmanEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {

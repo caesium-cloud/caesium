@@ -107,10 +107,19 @@ func (m *mockPodmanBackend) ContainerLogs(id string, opts containers.LogOptions)
 	return io.NopCloser(bytes.NewReader([]byte("logs"))), nil
 }
 
+func (m *mockPodmanBackend) ImageExists(image string) (bool, error) {
+	args := m.Called(image)
+	return args.Bool(0), args.Error(1)
+}
+
 func (m *mockPodmanBackend) ImagePull(image string, opts *images.PullOptions) (io.ReadCloser, error) {
 	args := m.Called(image)
-	if image == "" {
-		return nil, args.Error(0)
+	var err error
+	if len(args) > 0 {
+		err = args.Error(0)
+	}
+	if err != nil || image == "" {
+		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }
