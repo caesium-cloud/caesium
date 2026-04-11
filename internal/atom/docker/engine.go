@@ -14,8 +14,8 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/client"
-	"github.com/docker/docker/errdefs"
 	"github.com/docker/docker/pkg/stdcopy"
 )
 
@@ -141,7 +141,7 @@ func (e *dockerEngine) ensureImagePresent(imageRef string) error {
 		if _, err := e.backend.ImageInspect(e.ctx, imageRef); err == nil {
 			log.Info("docker image already present", "image", imageRef)
 			return nil
-		} else if !errdefs.IsNotFound(err) {
+		} else if !cerrdefs.IsNotFound(err) {
 			return err
 		}
 	}
