@@ -259,6 +259,8 @@ The log and database console endpoints are intentionally gated by environment va
 
 For the auth management CLI, prefer supplying credentials through `CAESIUM_API_KEY`; the `--api-key` flag remains available but is visible in process listings.
 
+When `CAESIUM_AUTH_MODE=api-key`, you must also set `CAESIUM_AUTH_KEY_HASH_SECRET` to a long random server-side secret. New and rotated API keys are stored as HMAC-SHA256 hashes derived from that secret. Existing legacy SHA-256 key hashes continue to validate after upgrade so you can roll the change out safely, but you should rotate those keys so the database no longer contains legacy unkeyed hashes.
+
 ## Documentation
 
 | Guide | Description |

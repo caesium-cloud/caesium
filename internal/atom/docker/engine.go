@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -94,23 +95,9 @@ func (e *dockerEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error) {
 // no concept of a creating a Atom without it also starting,
 // so we encapsulate both functions inside docker.Atom.Create.
 func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	log.Info("pulling docker image", "image", req.Image)
-
-	r, err := e.backend.ImagePull(e.ctx, req.Image, image.PullOptions{})
-	if err != nil {
+	if err := e.ensureImagePresent(req.Image); err != nil {
 		return nil, err
 	}
-	defer func() {
-		if err := r.Close(); err != nil {
-			log.Error("close docker pull reader", "error", err)
-		}
-	}()
-
-	if _, err = io.ReadAll(r); err != nil {
-		return nil, err
-	}
-
-	log.Info("docker image pulled", "image", req.Image)
 
 	cfg := &dockercontainer.Config{
 		Image: req.Image,
@@ -147,6 +134,36 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	}
 
 	return e.Get(&atom.EngineGetRequest{ID: created.ID})
+}
+
+func (e *dockerEngine) ensureImagePresent(imageRef string) error {
+	if imageRef != "" {
+		if _, err := e.backend.ImageInspect(e.ctx, imageRef); err == nil {
+			log.Info("docker image already present", "image", imageRef)
+			return nil
+		} else if !cerrdefs.IsNotFound(err) {
+			return err
+		}
+	}
+
+	log.Info("pulling docker image", "image", imageRef)
+
+	r, err := e.backend.ImagePull(e.ctx, imageRef, image.PullOptions{})
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := r.Close(); err != nil {
+			log.Error("close docker pull reader", "error", err)
+		}
+	}()
+
+	if _, err = io.ReadAll(r); err != nil {
+		return err
+	}
+
+	log.Info("docker image pulled", "image", imageRef)
+	return nil
 }
 
 func (e *dockerEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {

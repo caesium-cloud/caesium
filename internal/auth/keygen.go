@@ -2,8 +2,6 @@ package auth
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"math/big"
 )
@@ -22,25 +20,18 @@ const (
 // base62 alphabet for URL-safe, scannable key encoding.
 const base62Chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
-// GenerateKey produces a new API key and its SHA-256 hash.
-// Returns (plaintext_key, key_prefix, key_hash, error).
+// GenerateKey produces a new API key and its display prefix.
+// Returns (plaintext_key, key_prefix, error).
 // The plaintext key must be shown exactly once at creation time.
-func GenerateKey() (plaintext, prefix, hash string, err error) {
+func GenerateKey() (plaintext, prefix string, err error) {
 	random, err := base62Encode(randomBytes)
 	if err != nil {
-		return "", "", "", fmt.Errorf("generate key: %w", err)
+		return "", "", fmt.Errorf("generate key: %w", err)
 	}
 
 	plaintext = KeyPrefixLive + random
 	prefix = plaintext[:displayPrefixLen]
-	hash = HashKey(plaintext)
-	return plaintext, prefix, hash, nil
-}
-
-// HashKey returns the hex-encoded SHA-256 hash of a plaintext API key.
-func HashKey(plaintext string) string {
-	h := sha256.Sum256([]byte(plaintext))
-	return hex.EncodeToString(h[:])
+	return plaintext, prefix, nil
 }
 
 // base62Encode generates n random bytes and encodes them in base62.

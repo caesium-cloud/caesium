@@ -10,6 +10,7 @@ import (
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	networktypes "github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/client"
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/suite"
@@ -116,10 +117,19 @@ func (m *mockDockerBackend) ContainerLogs(ctx context.Context, containerID strin
 	return args.Get(0).(io.ReadCloser), args.Error(1)
 }
 
+func (m *mockDockerBackend) ImageInspect(ctx context.Context, imageRef string, opts ...client.ImageInspectOption) (image.InspectResponse, error) {
+	args := m.Called(imageRef)
+	return image.InspectResponse{}, args.Error(0)
+}
+
 func (m *mockDockerBackend) ImagePull(ctx context.Context, imageRef string, options image.PullOptions) (io.ReadCloser, error) {
 	args := m.Called(imageRef)
-	if imageRef == "" {
-		return nil, args.Error(0)
+	var err error
+	if len(args) > 0 {
+		err = args.Error(0)
+	}
+	if err != nil || imageRef == "" {
+		return nil, err
 	}
 	return io.NopCloser(bytes.NewReader([]byte("pull"))), nil
 }

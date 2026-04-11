@@ -105,7 +105,7 @@ func (s *IntegrationTestSuite) TestDataContractsWarnRecordsViolations() {
 
 	job := s.requireJobByAlias(alias)
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status)
 
@@ -125,7 +125,7 @@ func (s *IntegrationTestSuite) TestDataContractsFailFailsRun() {
 
 	job := s.requireJobByAlias(alias)
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("failed", run.Status)
 

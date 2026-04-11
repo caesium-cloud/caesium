@@ -47,7 +47,7 @@ steps:
 
 	// First run: should execute normally.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status, "first run should succeed")
 
 	taskStatuses1 := s.taskStatusesByName(job.ID, run1)
@@ -55,7 +55,7 @@ steps:
 
 	// Second run: same inputs, should be a cache hit.
 	run2ID := s.triggerRun(job.ID)
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status, "second run should succeed")
 
 	taskStatuses2 := s.taskStatusesByName(job.ID, run2)
@@ -108,13 +108,13 @@ steps:
 
 	// First run: both tasks execute.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status)
 
 	// Second run: producer should be cached, consumer may re-execute
 	// (depends on whether predecessor hash changed). Key thing: run succeeds.
 	run2ID := s.triggerRun(job.ID)
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status, "second run with cached producer should succeed")
 
 	taskStatuses2 := s.taskStatusesByName(job.ID, run2)
@@ -159,12 +159,12 @@ steps:
 
 	// First run.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status)
 
 	// Second run.
 	run2ID := s.triggerRun(job.ID)
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status)
 
 	taskStatuses := s.taskStatusesByName(job.ID, run2)
@@ -209,7 +209,7 @@ steps:
 
 	// Execute to populate cache.
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 	s.Equal("succeeded", run.Status)
 
 	// List cache entries.
@@ -317,7 +317,7 @@ steps:
 
 	// First run to populate cache.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status)
 
 	// Invalidate cache.
@@ -331,7 +331,7 @@ steps:
 
 	// Second run should re-execute (not cached).
 	run2ID := s.triggerRun(job.ID)
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status)
 
 	taskStatuses := s.taskStatusesByName(job.ID, run2)
@@ -376,7 +376,7 @@ steps:
 
 	// First run: second task fails.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("failed", run1.Status, "run should fail because second task exits 1")
 
 	taskStatuses1 := s.taskStatusesByName(job.ID, run1)
@@ -395,7 +395,7 @@ steps:
 
 	// Wait for retry to complete (it will fail again since the step still exits 1,
 	// but the endpoint should work).
-	retryRun := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	retryRun := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.NotNil(retryRun, "retry run should reach terminal state")
 }
 
@@ -436,7 +436,7 @@ steps:
 
 	// Run and wait for failure.
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 	s.Equal("failed", run.Status)
 
 	// Retry.
@@ -451,7 +451,7 @@ steps:
 	s.Equal(http.StatusAccepted, resp.StatusCode, "retry should return 202: %s", string(body))
 
 	// Wait for retry completion.
-	retryRun := s.awaitRun(job.ID, runID, 60*time.Second)
+	retryRun := s.awaitRun(job.ID, runID, runTimeout)
 	s.Equal("failed", retryRun.Status, "retry should fail again since step still exits 1")
 
 	// The first task should still show as succeeded (preserved from original run).
@@ -537,12 +537,12 @@ steps:
 
 	// Run 1 with params {"env": "staging"}.
 	run1ID := s.triggerRunWithParams(job.ID, map[string]string{"env": "staging"})
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status)
 
 	// Run 2 with different params {"env": "production"} - should NOT be cached.
 	run2ID := s.triggerRunWithParams(job.ID, map[string]string{"env": "production"})
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status)
 
 	taskStatuses := s.taskStatusesByName(job.ID, run2)
@@ -551,7 +551,7 @@ steps:
 
 	// Run 3 with same params as run 1 - should be cached.
 	run3ID := s.triggerRunWithParams(job.ID, map[string]string{"env": "staging"})
-	run3 := s.awaitRun(job.ID, run3ID, 60*time.Second)
+	run3 := s.awaitRun(job.ID, run3ID, runTimeout)
 	s.Equal("succeeded", run3.Status)
 
 	taskStatuses3 := s.taskStatusesByName(job.ID, run3)
@@ -603,7 +603,7 @@ steps:
 
 	// First run.
 	run1ID := s.triggerRun(job.ID)
-	run1 := s.awaitRun(job.ID, run1ID, 60*time.Second)
+	run1 := s.awaitRun(job.ID, run1ID, runTimeout)
 	s.Equal("succeeded", run1.Status)
 
 	taskStatuses1 := s.taskStatusesByName(job.ID, run1)
@@ -613,7 +613,7 @@ steps:
 
 	// Second run: decide should be cached, branch selections should be preserved.
 	run2ID := s.triggerRun(job.ID)
-	run2 := s.awaitRun(job.ID, run2ID, 60*time.Second)
+	run2 := s.awaitRun(job.ID, run2ID, runTimeout)
 	s.Equal("succeeded", run2.Status, "second run with cached branch should succeed")
 
 	taskStatuses2 := s.taskStatusesByName(job.ID, run2)

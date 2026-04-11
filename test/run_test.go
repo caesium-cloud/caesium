@@ -92,7 +92,7 @@ func (s *IntegrationTestSuite) TestRunTimeout() {
 	runID := s.triggerRun(job.ID)
 
 	// The run timeout is 15 s; allow generous headroom for container startup.
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("failed", run.Status, "run should fail due to timeout")
 	s.Contains(run.Error, "timed out", "run error should mention timeout")
@@ -122,7 +122,7 @@ func (s *IntegrationTestSuite) TestTaskOutputPassing() {
 
 	runID := s.triggerRun(job.ID)
 
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status, "run should succeed")
 
@@ -165,7 +165,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status)
 
@@ -214,7 +214,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status, "three-step DAG should succeed")
 
@@ -287,7 +287,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status, "run with branch should succeed")
 
@@ -339,7 +339,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status)
 
@@ -388,7 +388,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status, "run should succeed even with all branches skipped")
 
@@ -443,7 +443,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status, "run with branch+join should succeed")
 
@@ -492,7 +492,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status)
 
@@ -553,7 +553,7 @@ steps:
 	s.Require().NotNil(job)
 
 	runID := s.triggerRun(job.ID)
-	run := s.awaitRun(job.ID, runID, 60*time.Second)
+	run := s.awaitRun(job.ID, runID, runTimeout)
 
 	s.Equal("succeeded", run.Status)
 

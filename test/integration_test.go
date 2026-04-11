@@ -22,6 +22,11 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+// runTimeout is the default deadline passed to awaitRun. 120 s gives Podman
+// and other slower runtimes enough headroom for container startup on
+// resource-constrained CI runners without making test failures slow to surface.
+const runTimeout = 120 * time.Second
+
 type IntegrationTestSuite struct {
 	suite.Suite
 	caesiumURL          string

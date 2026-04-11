@@ -228,7 +228,7 @@ func start(cmd *cobra.Command, args []string) error {
 // Returns nil services when auth is disabled so callers can pass them through safely.
 func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter) {
 	conn := db.Connection()
-	authSvc := auth.NewService(conn)
+	authSvc := auth.NewService(conn, auth.WithKeyHashSecret(vars.AuthKeyHashSecret))
 	auditor := auth.NewAuditLogger(conn)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
 
@@ -239,6 +239,19 @@ func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.A
 
 	case "api-key":
 		log.Info("authentication enabled", "mode", vars.AuthMode)
+
+		if strings.TrimSpace(vars.AuthKeyHashSecret) == "" {
+			log.Fatal(
+				"CAESIUM_AUTH_KEY_HASH_SECRET must be set when API-key authentication is enabled. " +
+					"Use a long random secret so newly created keys are stored with a keyed hash",
+			)
+		}
+		if len(strings.TrimSpace(vars.AuthKeyHashSecret)) < 32 {
+			log.Fatal(
+				"CAESIUM_AUTH_KEY_HASH_SECRET must be at least 32 characters — " +
+					"use a cryptographically random value (e.g. openssl rand -hex 32)",
+			)
+		}
 
 		// TLS requirement check.
 		if vars.AuthRequireTLS {
