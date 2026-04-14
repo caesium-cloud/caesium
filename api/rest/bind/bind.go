@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
+	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
@@ -118,6 +119,24 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	if env.Variables().DatabaseConsoleEnabled {
 		g.GET("/database/schema", database.Schema)
 		g.POST("/database/query", database.Query)
+	}
+
+	// notification channels
+	{
+		g.GET("/notifications/channels", notifctrl.ListChannels)
+		g.GET("/notifications/channels/:id", notifctrl.GetChannel)
+		g.POST("/notifications/channels", notifctrl.CreateChannel)
+		g.PATCH("/notifications/channels/:id", notifctrl.UpdateChannel)
+		g.DELETE("/notifications/channels/:id", notifctrl.DeleteChannel)
+	}
+
+	// notification policies
+	{
+		g.GET("/notifications/policies", notifctrl.ListPolicies)
+		g.GET("/notifications/policies/:id", notifctrl.GetPolicy)
+		g.POST("/notifications/policies", notifctrl.CreatePolicy)
+		g.PATCH("/notifications/policies/:id", notifctrl.UpdatePolicy)
+		g.DELETE("/notifications/policies/:id", notifctrl.DeletePolicy)
 	}
 
 	// nodes

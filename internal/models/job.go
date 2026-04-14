@@ -24,6 +24,7 @@ type Job struct {
 	MaxParallelTasks   int               `json:"max_parallel_tasks"`
 	TaskTimeout        time.Duration     `json:"task_timeout"`
 	RunTimeout         time.Duration     `json:"run_timeout"`
+	SLA                datatypes.JSON    `gorm:"type:json" json:"sla,omitempty"`
 	// SchemaValidation controls runtime output schema validation for this job's tasks.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
 	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`

@@ -18,4 +18,6 @@ var All = []interface{}{
 	&ExecutionEvent{},
 	&APIKey{},
 	&AuditLog{},
+	&NotificationChannel{},
+	&NotificationPolicy{},
 }

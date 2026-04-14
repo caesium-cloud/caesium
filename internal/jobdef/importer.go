@@ -274,6 +274,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 			MaxParallelTasks: def.Metadata.MaxParallelTasks,
 			TaskTimeout:      def.Metadata.TaskTimeout,
 			RunTimeout:       def.Metadata.RunTimeout,
+			SLA:              marshalSLA(def.Metadata.SLA),
 			SchemaValidation: def.Metadata.SchemaValidation,
 			CacheConfig:      cacheConfig,
 		}
@@ -291,6 +292,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	existing.MaxParallelTasks = def.Metadata.MaxParallelTasks
 	existing.TaskTimeout = def.Metadata.TaskTimeout
 	existing.RunTimeout = def.Metadata.RunTimeout
+	existing.SLA = marshalSLA(def.Metadata.SLA)
 	existing.SchemaValidation = def.Metadata.SchemaValidation
 	existing.CacheConfig = cacheConfig
 	applyJobProvenance(existing, opts)
@@ -303,6 +305,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 		"max_parallel_tasks":   existing.MaxParallelTasks,
 		"task_timeout":         existing.TaskTimeout,
 		"run_timeout":          existing.RunTimeout,
+		"sla":                  existing.SLA,
 		"schema_validation":    existing.SchemaValidation,
 		"cache_config":         existing.CacheConfig,
 		"provenance_source_id": existing.ProvenanceSourceID,
@@ -841,4 +844,17 @@ func cloneAnyMap(in map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// marshalSLA converts an SLAConfig pointer to JSON for storage.
+// Returns nil when no SLA is configured so the column stays NULL.
+func marshalSLA(sla *schema.SLAConfig) datatypes.JSON {
+	if sla == nil || !sla.HasSLA() {
+		return nil
+	}
+	data, err := json.Marshal(sla)
+	if err != nil {
+		return nil
+	}
+	return data
 }
