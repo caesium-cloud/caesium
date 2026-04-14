@@ -251,3 +251,27 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
 - [Design: UI Refresh](design-ui-refresh.md) — P2 console v2
 - [UI Refresh Execution Plan](ui-refresh-execution-plan.md) — P2 phased implementation
+
+Three pieces of feeback on this PR:
+```go
+// internal/trigger/http/http.go
+if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader) {
+    return nil, ErrInvalidSignature
+}
+if err := h.validateTimestamp(req); err != nil {
+```
+[P1] This replay check is bypassable as written. ExtractWebhookParams verifies the HMAC over the request body, then separately checks whether timestampHeader is fresh. Because validateSignature never authenticates that header, a captured valid body+signature pair can be replayed with a rewritten current timestamp and still pass. To get real replay protection, the timestamp needs to be part of the signed payload or the server needs to store and reject previously seen deliveries.
+
+
+```go
+// api/rest/controller/webhook/webhook.go
+func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure, auditor *auth.AuditLogger) {
+    for _, f := range failures {
+        metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
+```
+[P2] This counter still overcounts on shared paths. recordWebhookAuthFailures increments WebhookAuthFailuresTotal once per rejected trigger, but the metric is labeled only by {path, reason}. If one bad request hits a path with multiple registered triggers, the same series is incremented multiple times even though only one request failed. Either record once per request or include trigger identity in the series if per-trigger accounting is intentional.
+
+One additional review finding could not be posted inline because GitHub only allows inline comments on files that are part of the PR diff.
+[P2] ui/src/features/triggers/TriggersPage.tsx does not round-trip the new replay-protection fields. If a trigger is created through YAML or the API with timestampHeader or maxTimestampAge, then later edited in the UI, save will silently drop those fields and disable the protection. The editor needs to expose them or preserve unknown config keys when rebuilding configuration.
+
+Let's solve the first one first. 

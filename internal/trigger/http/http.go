@@ -107,7 +107,11 @@ func (h *HTTP) ExtractWebhookParams(ctx context.Context, req *stdhttp.Request, b
 	if err != nil {
 		return nil, err
 	}
-	if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader) {
+	var signedTimestamp string
+	if h.config.TimestampHeader != "" {
+		signedTimestamp = req.Header.Get(h.config.TimestampHeader)
+	}
+	if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader, signedTimestamp) {
 		return nil, ErrInvalidSignature
 	}
 	if err := h.validateTimestamp(req); err != nil {
