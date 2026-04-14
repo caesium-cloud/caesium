@@ -20,6 +20,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/lineage"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/run"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/internal/worker"
@@ -145,6 +147,31 @@ func start(cmd *cobra.Command, args []string) error {
 				}
 			}()
 		}
+	}
+
+	// --- Notification Subscriber & Watcher ---
+	{
+		notification.RegisterMetrics()
+		conn := db.Connection()
+		notifSub := notification.NewSubscriber(bus, conn)
+		notifSub.RegisterSender(models.ChannelTypeWebhook, notification.NewWebhookSender())
+		notifSub.RegisterSender(models.ChannelTypeSlack, notification.NewSlackSender())
+		notifSub.RegisterSender(models.ChannelTypeEmail, notification.NewEmailSender())
+		notifSub.RegisterSender(models.ChannelTypePagerDuty, notification.NewPagerDutySender())
+		go func() {
+			log.Info("launching notification subscriber")
+			if err := notifSub.Start(ctx); err != nil && ctx.Err() == nil {
+				log.Error("notification subscriber exited", "error", err)
+			}
+		}()
+
+		watcher := notification.NewWatcher(conn, bus, event.NewStore(conn), vars.NotificationWatcherInterval)
+		go func() {
+			log.Info("launching notification watcher (timeout/SLA)")
+			if err := watcher.Start(ctx); err != nil && ctx.Err() == nil {
+				log.Error("notification watcher exited", "error", err)
+			}
+		}()
 	}
 
 	importer := jobdef.NewImporter(db.Connection())

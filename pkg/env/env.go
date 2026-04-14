@@ -89,6 +89,9 @@ type Environment struct {
 	WebhookRateLimitPerMinute     int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
 	WebhookRateLimitBurst         int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
 
+	// Notification Watcher
+	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
+
 	// Authentication & Authorization
 	AuthMode                string `envconfig:"AUTH_MODE" default:"none"` // none, api-key
 	AuthKeyHashSecret       string `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
