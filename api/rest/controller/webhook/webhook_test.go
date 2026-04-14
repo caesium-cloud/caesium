@@ -266,13 +266,15 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "replayed_request")
 
 	body := `{"ref":"main"}`
+	ts := fmt.Sprintf("%d", 1713000000)
 	mac := hmac.New(sha256.New, []byte("top-secret"))
+	_, _ = mac.Write([]byte(ts + "."))
 	_, _ = mac.Write([]byte(body))
 	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
 	req.Header.Set("X-Hub-Signature-256", sig)
-	req.Header.Set("X-Webhook-Timestamp", fmt.Sprintf("%d", 1713000000))
+	req.Header.Set("X-Webhook-Timestamp", ts)
 	rec := httptest.NewRecorder()
 
 	e := echo.New()

@@ -69,7 +69,7 @@ func TestValidateSignature(t *testing.T) {
 
 	t.Run("no auth when secret empty", func(t *testing.T) {
 		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
-		require.True(t, validateSignature(req, body, "", "", ""))
+		require.True(t, validateSignature(req, body, "", "", "", ""))
 	})
 
 	t.Run("hmac sha256", func(t *testing.T) {
@@ -77,7 +77,27 @@ func TestValidateSignature(t *testing.T) {
 		mac := hmac.New(sha256.New, []byte("secret"))
 		_, _ = mac.Write(body)
 		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
-		require.True(t, validateSignature(req, body, "secret", "", ""))
+		require.True(t, validateSignature(req, body, "secret", "", "", ""))
+	})
+
+	t.Run("hmac sha256 with timestamp", func(t *testing.T) {
+		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		mac := hmac.New(sha256.New, []byte("secret"))
+		_, _ = mac.Write([]byte("1713000000."))
+		_, _ = mac.Write(body)
+		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		require.True(t, validateSignature(req, body, "secret", "", "", "1713000000"))
+	})
+
+	t.Run("hmac sha256 rejects rewritten timestamp", func(t *testing.T) {
+		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
+		// Signature was computed with timestamp "1713000000"
+		mac := hmac.New(sha256.New, []byte("secret"))
+		_, _ = mac.Write([]byte("1713000000."))
+		_, _ = mac.Write(body)
+		req.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		// But attacker presents a different timestamp
+		require.False(t, validateSignature(req, body, "secret", "", "", "1713000999"))
 	})
 
 	t.Run("hmac sha1", func(t *testing.T) {
@@ -85,19 +105,19 @@ func TestValidateSignature(t *testing.T) {
 		mac := hmac.New(sha1.New, []byte("secret"))
 		_, _ = mac.Write(body)
 		req.Header.Set("X-Hub-Signature", "sha1="+hex.EncodeToString(mac.Sum(nil)))
-		require.True(t, validateSignature(req, body, "secret", "hmac-sha1", ""))
+		require.True(t, validateSignature(req, body, "secret", "hmac-sha1", "", ""))
 	})
 
 	t.Run("bearer", func(t *testing.T) {
 		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer secret-token")
-		require.True(t, validateSignature(req, body, "secret-token", "bearer", ""))
+		require.True(t, validateSignature(req, body, "secret-token", "bearer", "", ""))
 	})
 
 	t.Run("basic", func(t *testing.T) {
 		req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(body))
 		req.SetBasicAuth("svc", "password")
-		require.True(t, validateSignature(req, body, "svc:password", "basic", ""))
+		require.True(t, validateSignature(req, body, "svc:password", "basic", "", ""))
 	})
 }
 
@@ -366,7 +386,7 @@ func TestValidateSignatureRejectsInvalidBearer(t *testing.T) {
 
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", bytes.NewReader(nil))
 	req.Header.Set("Authorization", "Bearer wrong")
-	require.False(t, validateSignature(req, nil, "secret", "bearer", ""))
+	require.False(t, validateSignature(req, nil, "secret", "bearer", "", ""))
 }
 
 func TestParseTimestampUnixEpoch(t *testing.T) {
@@ -516,6 +536,7 @@ func TestExtractWebhookParamsReplayProtection(t *testing.T) {
 
 	body := []byte(`{"ref":"refs/heads/main"}`)
 	mac := hmac.New(sha256.New, []byte("shared-secret"))
+	_, _ = mac.Write([]byte("1713000000."))
 	_, _ = mac.Write(body)
 
 	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(body))

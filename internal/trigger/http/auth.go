@@ -18,7 +18,7 @@ const (
 	signatureSchemeBasic      = "basic"
 )
 
-func validateSignature(req *stdhttp.Request, body []byte, secret, scheme, header string) bool {
+func validateSignature(req *stdhttp.Request, body []byte, secret, scheme, header, signedTimestamp string) bool {
 	scheme = strings.ToLower(strings.TrimSpace(scheme))
 	secret = strings.TrimSpace(secret)
 
@@ -37,9 +37,9 @@ func validateSignature(req *stdhttp.Request, body []byte, secret, scheme, header
 
 	switch scheme {
 	case signatureSchemeHMACSHA256:
-		return validateHMAC(req.Header.Get(header), body, secret, sha256.New, "sha256")
+		return validateHMAC(req.Header.Get(header), body, secret, sha256.New, "sha256", signedTimestamp)
 	case signatureSchemeHMACSHA1:
-		return validateHMAC(req.Header.Get(header), body, secret, sha1.New, "sha1")
+		return validateHMAC(req.Header.Get(header), body, secret, sha1.New, "sha1", signedTimestamp)
 	case signatureSchemeBearer:
 		return validateBearer(req.Header.Get(header), secret)
 	case signatureSchemeBasic:
@@ -60,13 +60,16 @@ func defaultSignatureHeader(scheme string) string {
 	}
 }
 
-func validateHMAC(signature string, body []byte, secret string, hash func() hash.Hash, prefix string) bool {
+func validateHMAC(signature string, body []byte, secret string, hash func() hash.Hash, prefix, timestamp string) bool {
 	signature = strings.TrimSpace(signature)
 	if signature == "" {
 		return false
 	}
 
 	mac := hmac.New(hash, []byte(secret))
+	if timestamp != "" {
+		_, _ = mac.Write([]byte(timestamp + "."))
+	}
 	_, _ = mac.Write(body)
 	expected := hex.EncodeToString(mac.Sum(nil))
 
