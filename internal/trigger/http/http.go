@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	stdhttp "net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -23,7 +25,10 @@ type HTTP struct {
 	config Config
 }
 
-var ErrInvalidSignature = errors.New("invalid signature")
+var (
+	ErrInvalidSignature = errors.New("invalid signature")
+	ErrReplayedRequest  = errors.New("replayed request")
+)
 
 func New(t *models.Trigger) (*HTTP, error) {
 	if t.Type != models.TriggerTypeHTTP {
@@ -105,8 +110,56 @@ func (h *HTTP) ExtractWebhookParams(ctx context.Context, req *stdhttp.Request, b
 	if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader) {
 		return nil, ErrInvalidSignature
 	}
+	if err := h.validateTimestamp(req); err != nil {
+		return nil, err
+	}
 	return extractParams(body, h.config.ParamMapping), nil
 }
+
+// validateTimestamp checks the timestamp header for replay protection.
+// Only enforced when a timestampHeader is configured and the scheme is HMAC-based.
+func (h *HTTP) validateTimestamp(req *stdhttp.Request) error {
+	header := h.config.TimestampHeader
+	if header == "" {
+		return nil
+	}
+
+	scheme := h.config.SignatureScheme
+	if scheme == "" {
+		scheme = signatureSchemeHMACSHA256
+	}
+	if scheme != signatureSchemeHMACSHA256 && scheme != signatureSchemeHMACSHA1 {
+		return nil
+	}
+
+	tsValue := req.Header.Get(header)
+	if tsValue == "" {
+		return ErrReplayedRequest
+	}
+
+	ts, err := parseTimestamp(tsValue)
+	if err != nil {
+		return ErrReplayedRequest
+	}
+
+	age := nowFunc().Sub(ts)
+	if age < 0 {
+		age = -age
+	}
+	if age > h.config.maxTimestampAgeDuration() {
+		return ErrReplayedRequest
+	}
+	return nil
+}
+
+var nowFunc = time.Now
+
+// SetNowFunc overrides the clock function used for replay protection.
+// Intended for testing.
+func SetNowFunc(fn func() time.Time) { nowFunc = fn }
+
+// ExportNowFunc returns the current clock function for test save/restore.
+func ExportNowFunc() func() time.Time { return nowFunc }
 
 func (h *HTTP) ID() uuid.UUID {
 	return h.id
@@ -153,6 +206,15 @@ func parseConfig(raw string) (Config, error) {
 		return Config{}, fmt.Errorf("parse trigger configuration: %w", err)
 	}
 	return cfg.withDefaults(), nil
+}
+
+// parseTimestamp parses a timestamp value as either Unix epoch seconds or RFC3339.
+func parseTimestamp(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if epoch, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.Unix(epoch, 0), nil
+	}
+	return time.Parse(time.RFC3339, value)
 }
 
 func resolveSecret(ctx context.Context, value string) (string, error) {
