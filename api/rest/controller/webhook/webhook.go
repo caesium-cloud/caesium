@@ -185,8 +185,12 @@ func cloneStringMap(in map[string]string) map[string]string {
 // failures. Only called when no trigger on the path accepted the request, so
 // failures are not inflated by multi-trigger paths where one trigger succeeds.
 func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure, auditor *auth.AuditLogger) {
+	recordedReasons := make(map[string]struct{})
 	for _, f := range failures {
-		metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
+		if _, seen := recordedReasons[f.reason]; !seen {
+			metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
+			recordedReasons[f.reason] = struct{}{}
+		}
 
 		if auditor != nil {
 			if err := auditor.Log(auth.AuditEntry{
