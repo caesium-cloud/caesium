@@ -22,11 +22,9 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-var webhookHandler = webhook.Receive
-
 // All binds all routes to the given group, optionally with auth middleware.
 func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) {
-	bindWebhooks(g)
+	bindWebhooks(g, auditor)
 
 	protected := g.Group("")
 	if env.Variables().AuthMode == "api-key" {
@@ -126,8 +124,10 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	}
 }
 
-func bindWebhooks(g *echo.Group) {
-	g.POST("/hooks/*", webhookHandler)
+var webhookHandlerFactory = webhook.ReceiveWith
+
+func bindWebhooks(g *echo.Group, auditor *auth.AuditLogger) {
+	g.POST("/hooks/*", webhookHandlerFactory(auditor))
 }
 
 func bindAuth(g *echo.Group, controller *authctrl.Controller) {

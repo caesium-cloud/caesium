@@ -177,7 +177,7 @@ var (
 			Name: "caesium_webhook_auth_failures_total",
 			Help: "Total webhook authentication failures by trigger path and reason.",
 		},
-		[]string{"trigger", "reason"},
+		[]string{"path", "reason"},
 	)
 )
 

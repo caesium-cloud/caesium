@@ -87,6 +87,7 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 				&models.Job{ID: jobID, Alias: "deploy"},
 			},
 		},
+		nil,
 		runner,
 	)
 	require.NoError(t, err)
@@ -134,6 +135,7 @@ func TestReceiveWithServicesRejectsInvalidSignature(t *testing.T) {
 				&models.Job{ID: uuid.New(), Alias: "deploy"},
 			},
 		},
+		nil,
 		func(context.Context, *models.Job, map[string]string) error { return nil },
 	)
 	require.Error(t, err)
@@ -157,6 +159,7 @@ func TestReceiveWithServicesRejectsOversizedBody(t *testing.T) {
 		c,
 		stubTriggerLister{},
 		stubJobLister{},
+		nil,
 		func(context.Context, *models.Job, map[string]string) error { return nil },
 	)
 	require.Error(t, err)
@@ -202,11 +205,11 @@ func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
 	runner := func(context.Context, *models.Job, map[string]string) error { return nil }
 
 	first := newContext()
-	err := ReceiveWithServices(first, triggers, jobs, runner)
+	err := ReceiveWithServices(first, triggers, jobs, nil, runner)
 	require.NoError(t, err)
 
 	second := newContext()
-	err = ReceiveWithServices(second, triggers, jobs, runner)
+	err = ReceiveWithServices(second, triggers, jobs, nil, runner)
 	require.Error(t, err)
 	httpErr, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
@@ -243,6 +246,7 @@ func TestReceiveWithServicesRecordsMetricOnInvalidSignature(t *testing.T) {
 			},
 		},
 		stubJobLister{},
+		nil,
 		func(context.Context, *models.Job, map[string]string) error { return nil },
 	)
 	require.Error(t, err)
@@ -292,10 +296,60 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 			},
 		},
 		stubJobLister{},
+		nil,
 		func(context.Context, *models.Job, map[string]string) error { return nil },
 	)
 	require.Error(t, err)
 
 	after := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "replayed_request")
 	require.Greater(t, after, before)
+}
+
+func TestReceiveWithServicesNoMetricWhenOneTriggerAccepts(t *testing.T) {
+	require.NoError(t, env.Process())
+	metrics.Register()
+
+	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/multi/path", strings.NewReader(`{"ref":"main"}`))
+	req.Header.Set("Authorization", "Bearer correct-secret")
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "multi/path"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"multi/path",
+						"secret":"wrong-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"multi/path",
+						"secret":"correct-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+			},
+		},
+		stubJobLister{jobs: models.Jobs{&models.Job{ID: uuid.New(), Alias: "deploy"}}},
+		nil,
+		func(context.Context, *models.Job, map[string]string) error { return nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	after := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
+	require.Equal(t, before, after, "should not record failure when at least one trigger accepts")
 }

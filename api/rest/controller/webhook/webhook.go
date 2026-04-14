@@ -30,19 +30,21 @@ type TriggerLister interface {
 	ListByPath(string) (models.Triggers, error)
 }
 
-var auditor *auth.AuditLogger
-
-// SetAuditLogger sets the audit logger used for webhook auth failure logging.
-func SetAuditLogger(a *auth.AuditLogger) {
-	auditor = a
+// triggerFailure captures a per-trigger auth failure during the matching loop.
+type triggerFailure struct {
+	triggerID string
+	reason    string
 }
 
-func Receive(c *echo.Context) error {
-	ctx := c.Request().Context()
-	return ReceiveWithServices(c, triggersvc.Service(ctx), jsvc.Service(ctx), DefaultRunner)
+// ReceiveWith returns a handler that uses the given auditor for failure logging.
+func ReceiveWith(auditor *auth.AuditLogger) func(*echo.Context) error {
+	return func(c *echo.Context) error {
+		ctx := c.Request().Context()
+		return ReceiveWithServices(c, triggersvc.Service(ctx), jsvc.Service(ctx), auditor, DefaultRunner)
+	}
 }
 
-func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, runner Runner) error {
+func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, auditor *auth.AuditLogger, runner Runner) error {
 	path := normalizeHookPath(c.Param("*"))
 	if !webhookRateLimiters.Allow(c.RealIP()) {
 		return echo.NewHTTPError(http.StatusTooManyRequests, "rate limit exceeded")
@@ -65,6 +67,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 
 	var accepted int
+	var failures []triggerFailure
 	for _, trig := range triggers {
 		httpTrigger, err := triggerhttp.New(trig)
 		if err != nil {
@@ -74,10 +77,10 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		params, err := httpTrigger.ExtractWebhookParams(c.Request().Context(), c.Request(), body)
 		switch {
 		case errors.Is(err, triggerhttp.ErrInvalidSignature):
-			recordWebhookAuthFailure(path, "invalid_signature", c.RealIP(), trig.ID.String())
+			failures = append(failures, triggerFailure{triggerID: trig.ID.String(), reason: "invalid_signature"})
 			continue
 		case errors.Is(err, triggerhttp.ErrReplayedRequest):
-			recordWebhookAuthFailure(path, "replayed_request", c.RealIP(), trig.ID.String())
+			failures = append(failures, triggerFailure{triggerID: trig.ID.String(), reason: "replayed_request"})
 			continue
 		case err != nil:
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
@@ -90,6 +93,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 
 	if accepted == 0 {
+		recordWebhookAuthFailures(path, c.RealIP(), failures, auditor)
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid signature")
 	}
 
@@ -177,23 +181,28 @@ func cloneStringMap(in map[string]string) map[string]string {
 	return out
 }
 
-func recordWebhookAuthFailure(path, reason, sourceIP, triggerID string) {
-	metrics.WebhookAuthFailuresTotal.WithLabelValues(path, reason).Inc()
+// recordWebhookAuthFailures records metrics and audit entries for webhook auth
+// failures. Only called when no trigger on the path accepted the request, so
+// failures are not inflated by multi-trigger paths where one trigger succeeds.
+func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure, auditor *auth.AuditLogger) {
+	for _, f := range failures {
+		metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
 
-	if auditor != nil {
-		if err := auditor.Log(auth.AuditEntry{
-			Actor:        "webhook",
-			Action:       auth.ActionWebhookDenied,
-			ResourceType: "trigger",
-			ResourceID:   triggerID,
-			SourceIP:     sourceIP,
-			Outcome:      auth.OutcomeDenied,
-			Metadata: map[string]interface{}{
-				"path":   path,
-				"reason": reason,
-			},
-		}); err != nil {
-			log.Warn("failed to write webhook audit log", "error", err)
+		if auditor != nil {
+			if err := auditor.Log(auth.AuditEntry{
+				Actor:        "webhook",
+				Action:       auth.ActionWebhookDenied,
+				ResourceType: "trigger",
+				ResourceID:   f.triggerID,
+				SourceIP:     sourceIP,
+				Outcome:      auth.OutcomeDenied,
+				Metadata: map[string]interface{}{
+					"path":   path,
+					"reason": f.reason,
+				},
+			}); err != nil {
+				log.Warn("failed to write webhook audit log", "error", err)
+			}
 		}
 	}
 }
