@@ -2,6 +2,10 @@ package webhook
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,7 +13,10 @@ import (
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -204,4 +211,91 @@ func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
 	httpErr, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusTooManyRequests, httpErr.Code)
+}
+
+func TestReceiveWithServicesRecordsMetricOnInvalidSignature(t *testing.T) {
+	require.NoError(t, env.Process())
+	metrics.Register()
+
+	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "invalid_signature")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"main"}`))
+	req.Header.Set("Authorization", "Bearer wrong-secret")
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"github/push",
+						"secret":"top-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+			},
+		},
+		stubJobLister{},
+		func(context.Context, *models.Job, map[string]string) error { return nil },
+	)
+	require.Error(t, err)
+
+	after := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "invalid_signature")
+	require.Greater(t, after, before)
+}
+
+func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
+	require.NoError(t, env.Process())
+	metrics.Register()
+
+	oldNow := triggerhttp.ExportNowFunc()
+	t.Cleanup(func() { triggerhttp.SetNowFunc(oldNow) })
+	triggerhttp.SetNowFunc(func() time.Time { return time.Unix(1713000600, 0) })
+
+	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "replayed_request")
+
+	body := `{"ref":"main"}`
+	mac := hmac.New(sha256.New, []byte("top-secret"))
+	_, _ = mac.Write([]byte(body))
+	sig := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(body))
+	req.Header.Set("X-Hub-Signature-256", sig)
+	req.Header.Set("X-Webhook-Timestamp", fmt.Sprintf("%d", 1713000000))
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"github/push",
+						"secret":"top-secret",
+						"signatureScheme":"hmac-sha256",
+						"timestampHeader":"X-Webhook-Timestamp"
+					}`,
+				},
+			},
+		},
+		stubJobLister{},
+		func(context.Context, *models.Job, map[string]string) error { return nil },
+	)
+	require.Error(t, err)
+
+	after := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "replayed_request")
+	require.Greater(t, after, before)
 }

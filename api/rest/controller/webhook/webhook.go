@@ -10,7 +10,9 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -26,6 +28,13 @@ type JobLister interface {
 
 type TriggerLister interface {
 	ListByPath(string) (models.Triggers, error)
+}
+
+var auditor *auth.AuditLogger
+
+// SetAuditLogger sets the audit logger used for webhook auth failure logging.
+func SetAuditLogger(a *auth.AuditLogger) {
+	auditor = a
 }
 
 func Receive(c *echo.Context) error {
@@ -65,6 +74,10 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		params, err := httpTrigger.ExtractWebhookParams(c.Request().Context(), c.Request(), body)
 		switch {
 		case errors.Is(err, triggerhttp.ErrInvalidSignature):
+			recordWebhookAuthFailure(path, "invalid_signature", c.RealIP(), trig.ID.String())
+			continue
+		case errors.Is(err, triggerhttp.ErrReplayedRequest):
+			recordWebhookAuthFailure(path, "replayed_request", c.RealIP(), trig.ID.String())
 			continue
 		case err != nil:
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
@@ -162,4 +175,25 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func recordWebhookAuthFailure(path, reason, sourceIP, triggerID string) {
+	metrics.WebhookAuthFailuresTotal.WithLabelValues(path, reason).Inc()
+
+	if auditor != nil {
+		if err := auditor.Log(auth.AuditEntry{
+			Actor:        "webhook",
+			Action:       auth.ActionWebhookDenied,
+			ResourceType: "trigger",
+			ResourceID:   triggerID,
+			SourceIP:     sourceIP,
+			Outcome:      auth.OutcomeDenied,
+			Metadata: map[string]interface{}{
+				"path":   path,
+				"reason": reason,
+			},
+		}); err != nil {
+			log.Warn("failed to write webhook audit log", "error", err)
+		}
+	}
 }

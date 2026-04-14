@@ -171,6 +171,14 @@ var (
 		},
 		[]string{"action", "outcome"},
 	)
+
+	WebhookAuthFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_webhook_auth_failures_total",
+			Help: "Total webhook authentication failures by trigger path and reason.",
+		},
+		[]string{"trigger", "reason"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -197,6 +205,7 @@ func Register() {
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,
 			AuditLogEntriesTotal,
+			WebhookAuthFailuresTotal,
 		)
 	})
 }
