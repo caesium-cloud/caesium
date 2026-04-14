@@ -31,6 +31,8 @@ type HTTPTriggerFormState = {
   signatureHeader: string;
   paramMappingText: string;
   defaultParamsText: string;
+  /** Config keys not managed by the form, preserved on round-trip. */
+  extraConfig: Record<string, unknown>;
 };
 
 function normalizeWebhookPath(path: unknown) {
@@ -64,8 +66,19 @@ function stringifyStringMap(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+const managedConfigKeys = new Set([
+  "path", "secret", "signatureScheme", "signatureHeader",
+  "paramMapping", "defaultParams",
+]);
+
 function formStateFromTrigger(trigger?: Trigger | null): HTTPTriggerFormState {
   const config = trigger ? parseTriggerConfiguration(trigger) : {};
+  const extraConfig: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(config)) {
+    if (!managedConfigKeys.has(key)) {
+      extraConfig[key] = value;
+    }
+  }
   return {
     alias: trigger?.alias ?? "",
     path: typeof config.path === "string" ? webhookRoute(config.path) : "",
@@ -74,6 +87,7 @@ function formStateFromTrigger(trigger?: Trigger | null): HTTPTriggerFormState {
     signatureHeader: typeof config.signatureHeader === "string" ? config.signatureHeader : "",
     paramMappingText: stringifyStringMap(config.paramMapping),
     defaultParamsText: stringifyStringMap(config.defaultParams),
+    extraConfig,
   };
 }
 
@@ -108,6 +122,7 @@ function buildHTTPTriggerPayload(state: HTTPTriggerFormState): Pick<TriggerCreat
   if (!normalizedPath) throw new Error("Webhook path is required");
 
   const configuration: Record<string, unknown> = {
+    ...state.extraConfig,
     path: `/hooks/${normalizedPath}`,
   };
 

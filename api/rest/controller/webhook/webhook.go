@@ -10,7 +10,9 @@ import (
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -28,12 +30,21 @@ type TriggerLister interface {
 	ListByPath(string) (models.Triggers, error)
 }
 
-func Receive(c *echo.Context) error {
-	ctx := c.Request().Context()
-	return ReceiveWithServices(c, triggersvc.Service(ctx), jsvc.Service(ctx), DefaultRunner)
+// triggerFailure captures a per-trigger auth failure during the matching loop.
+type triggerFailure struct {
+	triggerID string
+	reason    string
 }
 
-func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, runner Runner) error {
+// ReceiveWith returns a handler that uses the given auditor for failure logging.
+func ReceiveWith(auditor *auth.AuditLogger) func(*echo.Context) error {
+	return func(c *echo.Context) error {
+		ctx := c.Request().Context()
+		return ReceiveWithServices(c, triggersvc.Service(ctx), jsvc.Service(ctx), auditor, DefaultRunner)
+	}
+}
+
+func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, auditor *auth.AuditLogger, runner Runner) error {
 	path := normalizeHookPath(c.Param("*"))
 	if !webhookRateLimiters.Allow(c.RealIP()) {
 		return echo.NewHTTPError(http.StatusTooManyRequests, "rate limit exceeded")
@@ -56,6 +67,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 
 	var accepted int
+	var failures []triggerFailure
 	for _, trig := range triggers {
 		httpTrigger, err := triggerhttp.New(trig)
 		if err != nil {
@@ -65,6 +77,10 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		params, err := httpTrigger.ExtractWebhookParams(c.Request().Context(), c.Request(), body)
 		switch {
 		case errors.Is(err, triggerhttp.ErrInvalidSignature):
+			failures = append(failures, triggerFailure{triggerID: trig.ID.String(), reason: "invalid_signature"})
+			continue
+		case errors.Is(err, triggerhttp.ErrReplayedRequest):
+			failures = append(failures, triggerFailure{triggerID: trig.ID.String(), reason: "replayed_request"})
 			continue
 		case err != nil:
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
@@ -77,6 +93,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	}
 
 	if accepted == 0 {
+		recordWebhookAuthFailures(path, c.RealIP(), failures, auditor)
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid signature")
 	}
 
@@ -162,4 +179,34 @@ func cloneStringMap(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// recordWebhookAuthFailures records metrics and audit entries for webhook auth
+// failures. Only called when no trigger on the path accepted the request, so
+// failures are not inflated by multi-trigger paths where one trigger succeeds.
+func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure, auditor *auth.AuditLogger) {
+	recordedReasons := make(map[string]struct{})
+	for _, f := range failures {
+		if _, seen := recordedReasons[f.reason]; !seen {
+			metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
+			recordedReasons[f.reason] = struct{}{}
+		}
+
+		if auditor != nil {
+			if err := auditor.Log(auth.AuditEntry{
+				Actor:        "webhook",
+				Action:       auth.ActionWebhookDenied,
+				ResourceType: "trigger",
+				ResourceID:   f.triggerID,
+				SourceIP:     sourceIP,
+				Outcome:      auth.OutcomeDenied,
+				Metadata: map[string]interface{}{
+					"path":   path,
+					"reason": f.reason,
+				},
+			}); err != nil {
+				log.Warn("failed to write webhook audit log", "error", err)
+			}
+		}
+	}
 }

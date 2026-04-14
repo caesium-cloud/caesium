@@ -26,15 +26,17 @@ func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 	auditor := auth.NewAuditLogger(db)
 	limiter := auth.NewRateLimiter(10, time.Minute)
 
-	originalWebhookHandler := webhookHandler
+	originalFactory := webhookHandlerFactory
 	t.Cleanup(func() {
-		webhookHandler = originalWebhookHandler
+		webhookHandlerFactory = originalFactory
 	})
 
 	webhookCalls := 0
-	webhookHandler = func(c *echo.Context) error {
-		webhookCalls++
-		return c.String(http.StatusAccepted, "webhook")
+	webhookHandlerFactory = func(_ *auth.AuditLogger) func(*echo.Context) error {
+		return func(c *echo.Context) error {
+			webhookCalls++
+			return c.String(http.StatusAccepted, "webhook")
+		}
 	}
 
 	e := echo.New()
