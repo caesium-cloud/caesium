@@ -1,9 +1,7 @@
 package notification
 
 import (
-	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
@@ -11,28 +9,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 )
-
-// --- Test helpers ---
-
-type recordingSender struct {
-	mu       sync.Mutex
-	payloads []Payload
-}
-
-func (r *recordingSender) Send(_ context.Context, p Payload) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.payloads = append(r.payloads, p)
-	return nil
-}
-
-func (r *recordingSender) Payloads() []Payload {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	out := make([]Payload, len(r.payloads))
-	copy(out, r.payloads)
-	return out
-}
 
 // --- Tests ---
 
@@ -400,6 +376,75 @@ func TestResolveCompletedBy(t *testing.T) {
 			// Should be on the same date as refTime.
 			if got.Year() != 2026 || got.Month() != 4 || got.Day() != 13 {
 				t.Errorf("wrong date: got %s", got.Format("2006-01-02"))
+			}
+		})
+	}
+}
+
+// --- SLA window validation tests ---
+
+func TestRunMetSLA(t *testing.T) {
+	jobA := uuid.New()
+	jobB := uuid.New()
+	jobC := uuid.New()
+	jobMissing := uuid.New()
+
+	// SLA deadline is 09:00 on 2026-04-13. Window is [09:00 Apr 12, 09:00 Apr 13].
+	deadline := time.Date(2026, 4, 13, 9, 0, 0, 0, time.UTC)
+	windowStart := deadline.Add(-24 * time.Hour)
+
+	latestByJob := map[uuid.UUID]time.Time{
+		// jobA: completed at 08:30 — within window, before deadline.
+		jobA: time.Date(2026, 4, 13, 8, 30, 0, 0, time.UTC),
+		// jobB: completed at 09:15 — AFTER the deadline. Should NOT count.
+		jobB: time.Date(2026, 4, 13, 9, 15, 0, 0, time.UTC),
+		// jobC: completed at 08:00 on Apr 12 — BEFORE the window start. Should NOT count.
+		jobC: time.Date(2026, 4, 12, 8, 0, 0, 0, time.UTC),
+	}
+
+	tests := []struct {
+		name string
+		job  uuid.UUID
+		want bool
+	}{
+		{"completed within window", jobA, true},
+		{"completed after deadline", jobB, false},
+		{"completed before window start", jobC, false},
+		{"no run at all", jobMissing, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := runMetSLA(latestByJob, tt.job, windowStart, deadline)
+			if got != tt.want {
+				t.Errorf("runMetSLA() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunMetSLA_BoundaryConditions(t *testing.T) {
+	jobID := uuid.New()
+	deadline := time.Date(2026, 4, 13, 9, 0, 0, 0, time.UTC)
+	windowStart := deadline.Add(-24 * time.Hour)
+
+	tests := []struct {
+		name     string
+		complAt  time.Time
+		want     bool
+	}{
+		{"exactly at deadline", deadline, true},
+		{"exactly at window start", windowStart, true},
+		{"one nanosecond after deadline", deadline.Add(1), false},
+		{"one nanosecond before window start", windowStart.Add(-1), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := map[uuid.UUID]time.Time{jobID: tt.complAt}
+			got := runMetSLA(m, jobID, windowStart, deadline)
+			if got != tt.want {
+				t.Errorf("runMetSLA() = %v, want %v (completed_at=%s)", got, tt.want, tt.complAt)
 			}
 		})
 	}

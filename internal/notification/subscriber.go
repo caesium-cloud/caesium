@@ -8,6 +8,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -92,14 +93,22 @@ func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
 		return
 	}
 
+	// Batch-load all referenced channels in a single query.
+	channels, err := s.loadChannels(ctx, policies)
+	if err != nil {
+		log.Error("notification: failed to load channels",
+			"error", err,
+		)
+		return
+	}
+
 	payload := buildPayload(evt)
 
 	for _, policy := range policies {
-		var channel models.NotificationChannel
-		if err := s.db.WithContext(ctx).First(&channel, "id = ?", policy.ChannelID).Error; err != nil {
-			log.Error("notification: failed to load channel",
+		channel, ok := channels[policy.ChannelID]
+		if !ok {
+			log.Error("notification: channel not found",
 				"channel_id", policy.ChannelID,
-				"error", err,
 			)
 			continue
 		}
@@ -137,18 +146,50 @@ func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
 	}
 }
 
-// matchPolicies finds all enabled policies whose event_types contain the
-// given event type and whose filters match the event.
-func (s *Subscriber) matchPolicies(ctx context.Context, evt event.Event) ([]models.NotificationPolicy, error) {
-	var all []models.NotificationPolicy
+// loadChannels fetches all unique channels referenced by the given policies
+// in a single query, returning them indexed by ID.
+func (s *Subscriber) loadChannels(ctx context.Context, policies []models.NotificationPolicy) (map[uuid.UUID]models.NotificationChannel, error) {
+	ids := make([]uuid.UUID, 0, len(policies))
+	seen := make(map[uuid.UUID]struct{}, len(policies))
+	for _, p := range policies {
+		if _, dup := seen[p.ChannelID]; !dup {
+			ids = append(ids, p.ChannelID)
+			seen[p.ChannelID] = struct{}{}
+		}
+	}
+
+	var channels []models.NotificationChannel
 	if err := s.db.WithContext(ctx).
-		Where("enabled = ?", true).
-		Find(&all).Error; err != nil {
+		Where("id IN ?", ids).
+		Find(&channels).Error; err != nil {
+		return nil, err
+	}
+
+	m := make(map[uuid.UUID]models.NotificationChannel, len(channels))
+	for _, ch := range channels {
+		m[ch.ID] = ch
+	}
+	return m, nil
+}
+
+// matchPolicies finds enabled policies whose event_types contain the given
+// event type and whose filters match the event. Uses a SQL-level filter on
+// event type to reduce the rows loaded from the database.
+func (s *Subscriber) matchPolicies(ctx context.Context, evt event.Event) ([]models.NotificationPolicy, error) {
+	var candidates []models.NotificationPolicy
+	// Filter at the SQL level: only load policies whose event_types JSON
+	// contains the event type string. This is a substring match on the
+	// JSON column — not exact, but it eliminates the vast majority of
+	// non-matching rows. The in-memory policyMatchesEvent check below
+	// is the authoritative filter.
+	if err := s.db.WithContext(ctx).
+		Where("enabled = ? AND event_types LIKE ?", true, "%"+string(evt.Type)+"%").
+		Find(&candidates).Error; err != nil {
 		return nil, err
 	}
 
 	var matched []models.NotificationPolicy
-	for _, p := range all {
+	for _, p := range candidates {
 		if !policyMatchesEvent(p, evt) {
 			continue
 		}
