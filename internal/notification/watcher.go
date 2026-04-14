@@ -143,6 +143,20 @@ func (w *Watcher) scanCompletedBySLA(ctx context.Context, now time.Time) {
 		return
 	}
 
+	// First pass: resolve deadlines, collect jobs that need a DB check,
+	// and build a single batch query for all of them.
+	type candidate struct {
+		job         models.Job
+		deadline    time.Time
+		windowStart time.Time
+		alertKey    string
+	}
+	var candidates []candidate
+	var jobIDs []uuid.UUID
+	// earliestWindow tracks the oldest window start across all candidates
+	// so we can bound the batch query.
+	var earliestWindow time.Time
+
 	for _, job := range jobs {
 		sla := parseSLA(job.SLA)
 		if sla == nil || sla.CompletedBy == "" {
@@ -159,42 +173,65 @@ func (w *Watcher) scanCompletedBySLA(ctx context.Context, now time.Time) {
 			continue
 		}
 
-		// Only check if we're past the deadline.
 		if !now.After(deadline) {
 			continue
 		}
 
-		// Dedup: one alert per job per calendar day (UTC).
 		alertKey := fmt.Sprintf("%s|%s", job.ID, deadline.Format("2006-01-02"))
 		if _, alerted := w.alertedJobs[alertKey]; alerted {
 			continue
 		}
 
-		// Check if any run completed successfully after the previous day's
-		// deadline. This window covers the 24h period ending at today's deadline.
 		windowStart := deadline.Add(-24 * time.Hour)
-		var count int64
-		if err := w.db.WithContext(ctx).
-			Model(&models.JobRun{}).
-			Where("job_id = ? AND status = ? AND completed_at >= ? AND completed_at <= ?",
-				job.ID, "succeeded", windowStart, deadline).
-			Count(&count).Error; err != nil {
-			log.Error("notification watcher: failed to check completed runs",
-				"job_alias", job.Alias,
-				"error", err,
-			)
+		if earliestWindow.IsZero() || windowStart.Before(earliestWindow) {
+			earliestWindow = windowStart
+		}
+
+		candidates = append(candidates, candidate{
+			job:         job,
+			deadline:    deadline,
+			windowStart: windowStart,
+			alertKey:    alertKey,
+		})
+		jobIDs = append(jobIDs, job.ID)
+	}
+
+	if len(candidates) == 0 {
+		return
+	}
+
+	// Single batch query: for each candidate job, find the latest
+	// successful run completion time since the earliest window.
+	type jobLatest struct {
+		JobID       uuid.UUID  `gorm:"column:job_id"`
+		LatestCompl time.Time  `gorm:"column:latest_compl"`
+	}
+	var rows []jobLatest
+	if err := w.db.WithContext(ctx).
+		Model(&models.JobRun{}).
+		Select("job_id, MAX(completed_at) AS latest_compl").
+		Where("job_id IN ? AND status = ? AND completed_at >= ?",
+			jobIDs, "succeeded", earliestWindow).
+		Group("job_id").
+		Find(&rows).Error; err != nil {
+		log.Error("notification watcher: failed to batch-check completed runs", "error", err)
+		return
+	}
+	latestByJob := make(map[uuid.UUID]time.Time, len(rows))
+	for _, row := range rows {
+		latestByJob[row.JobID] = row.LatestCompl
+	}
+
+	// Second pass: verify each job's latest completion falls within
+	// its specific [windowStart, deadline] range.
+	for _, c := range candidates {
+		if runMetSLA(latestByJob, c.job.ID, c.windowStart, c.deadline) {
+			w.alertedJobs[c.alertKey] = struct{}{}
 			continue
 		}
 
-		if count > 0 {
-			// Job met its SLA — no alert needed.
-			w.alertedJobs[alertKey] = struct{}{}
-			continue
-		}
-
-		// Emit SLA miss: no successful run completed within the window.
-		w.emitCompletedBySLAEvent(ctx, job, deadline, now)
-		w.alertedJobs[alertKey] = struct{}{}
+		w.emitCompletedBySLAEvent(ctx, c.job, c.deadline, now)
+		w.alertedJobs[c.alertKey] = struct{}{}
 	}
 
 	// Prune old alert keys (keep only today and yesterday).
@@ -313,6 +350,17 @@ func buildRunEventPayload(r models.JobRun, errorMsg string) json.RawMessage {
 		return nil
 	}
 	return data
+}
+
+// runMetSLA checks whether a job's latest successful run completed within
+// its SLA window [windowStart, deadline]. Returns false if no run exists
+// for the job or the run completed outside the window.
+func runMetSLA(latestByJob map[uuid.UUID]time.Time, jobID uuid.UUID, windowStart, deadline time.Time) bool {
+	latest, ok := latestByJob[jobID]
+	if !ok {
+		return false
+	}
+	return !latest.Before(windowStart) && !latest.After(deadline)
 }
 
 // parseSLA deserializes the job's SLA JSON column.

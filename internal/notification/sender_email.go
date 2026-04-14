@@ -91,14 +91,25 @@ func formatEmailBody(p Payload) string {
 
 func buildMIMEMessage(from string, to []string, subject, body string) []byte {
 	var msg strings.Builder
-	msg.WriteString(fmt.Sprintf("From: %s\r\n", from))
-	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(to, ", ")))
-	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", subject))
+	msg.WriteString(fmt.Sprintf("From: %s\r\n", sanitizeHeader(from)))
+	sanitizedTo := make([]string, len(to))
+	for i, addr := range to {
+		sanitizedTo[i] = sanitizeHeader(addr)
+	}
+	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(sanitizedTo, ", ")))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", sanitizeHeader(subject)))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
 	msg.WriteString("\r\n")
 	msg.WriteString(body)
 	return []byte(msg.String())
+}
+
+// sanitizeHeader strips CR and LF characters from a header value to
+// prevent SMTP header injection.
+func sanitizeHeader(s string) string {
+	r := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
+	return r.Replace(s)
 }
 
 func sendMail(ctx context.Context, cfg emailConfig, msg []byte) error {

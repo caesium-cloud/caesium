@@ -163,6 +163,47 @@ func TestBuildMIMEMessage(t *testing.T) {
 	}
 }
 
+func TestSanitizeHeader(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"normal subject", "normal subject"},
+		{"has\r\ninjection", "has injection"},
+		{"has\rCR", "has CR"},
+		{"has\nLF", "has LF"},
+		{"multi\r\nBcc: evil@evil.com\r\nlines", "multi Bcc: evil@evil.com lines"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeHeader(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeHeader(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildMIMEMessage_HeaderInjection(t *testing.T) {
+	// A malicious subject with CRLF should not inject extra headers.
+	msg := buildMIMEMessage(
+		"from@example.com",
+		[]string{"to@example.com"},
+		"Subject\r\nBcc: evil@evil.com",
+		"body",
+	)
+	s := string(msg)
+	// The CRLF should be collapsed into the subject line, not appear as
+	// a separate "Bcc:" header line.
+	if containsStr(s, "\r\nBcc:") {
+		t.Error("header injection: Bcc header injected as separate line")
+	}
+	// The sanitized subject should appear on a single line.
+	if !containsStr(s, "Subject: Subject Bcc: evil@evil.com\r\n") {
+		t.Error("CRLF should be replaced with space in subject")
+	}
+}
+
 func containsStr(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || findSubstr(s, substr))
 }
