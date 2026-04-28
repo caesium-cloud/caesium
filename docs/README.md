@@ -16,7 +16,10 @@ This directory mixes current-source operator documentation with design records a
 
 ## UI and Operator Surface
 
-- [ui_implementation_plan.md](ui_implementation_plan.md): Current status of the embedded UI, remaining implementation gaps, and testing roadmap.
+- [ui_implementation_plan.md](ui_implementation_plan.md): Original v1 UI plan — closed for the visual layer, kept as the historical record of shipped feature scope.
+- [design-ui-refresh.md](design-ui-refresh.md): Console v2 design intent — palette, typography, status semantics, primitive inventory, page intent.
+- [ui-refresh-execution-plan.md](ui-refresh-execution-plan.md): Phased PR-train execution plan for the refresh, with file paths, API gaps, and acceptance criteria per step.
+- [design/ui-refresh/](design/ui-refresh/): Reference prototype source (JSX, CSS, mock fixtures, standalone HTML preview).
 - [backfill.md](backfill.md): Jobs view backfill behavior and cancellation semantics.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Worker inspection and DAG attribution surfaces.
 
@@ -32,6 +35,7 @@ These files are useful context, but each should be treated according to its stat
 - [design-concurrency-priority.md](design-concurrency-priority.md)
 - [design-sla-management.md](design-sla-management.md)
 - [design-task-templates.md](design-task-templates.md)
+- [design-ui-refresh.md](design-ui-refresh.md)
 - [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md)
 - [design-incremental-execution.md](design-incremental-execution.md)
 - [design-parallel-job-execution.md](design-parallel-job-execution.md)

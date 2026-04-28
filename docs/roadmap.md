@@ -101,7 +101,17 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 **Design doc**: [`design-sla-management.md`](design-sla-management.md)
 
-### 2.4 Cost Tracking & Resource Awareness
+### 2.4 UI Refresh (Caesium Console v2)
+
+**Current state**: The embedded UI (under `ui/`) is functionally complete — Jobs, Job Detail, Run Detail, Stats, Triggers, Atoms, JobDefs, and System pages all ship — but visually generic. Each page reinvents status colors, badges, and density choices, and the brand identity (atom motif, cyan + gold) is barely visible. The v1 plan ([`ui_implementation_plan.md`](ui_implementation_plan.md)) closed out the feature scope; this entry tracks the visual + primitive layer.
+
+**Target state**: A coherent design system shipped as four phased PR trains. Phase 0 lands tokens, status semantics, primitives (`AtomLogo`, `StatusBadge`, `Sparkline`, `EmptyState`, `UTCClock`, `UsageBar`), and the AppShell; existing pages take on the refreshed look automatically. Phase 1 rebuilds the high-traffic surfaces (Jobs list, Job Detail with live DAG overlay, Run Detail with Gantt + virtualized logs). Phase 2 polishes Stats and Triggers. Phase 3 ships the net-new server work for System (`/v1/system/health|nodes|features|cache/prune`) and JobDefs (`/v1/jobdefs/lint|diff|history`) behind a feature flag.
+
+**Design doc**: [`design-ui-refresh.md`](design-ui-refresh.md)
+**Execution plan**: [`ui-refresh-execution-plan.md`](ui-refresh-execution-plan.md)
+**Reference prototype**: [`design/ui-refresh/`](design/ui-refresh/)
+
+### 2.5 Cost Tracking & Resource Awareness
 
 **Current state**: Prometheus metrics track run counts and durations. No resource consumption data (CPU, memory) and no cost attribution.
 
@@ -202,7 +212,8 @@ steps:
 | **P1** | 2.1 PR preview runs | Leverages existing CLI capabilities. Uniquely strong differentiator. |
 | **P2** | 2.2 Task templates | Creates ecosystem and reduces boilerplate. Medium scope. |
 | **P2** | 2.3 SLA management | Genuinely unique. No orchestrator does this well. |
-| **P2** | 2.4 Cost tracking | FinOps for pipelines. Large scope but high value. |
+| **P2** | 2.4 UI refresh | Visual identity + primitive consolidation. Phased so foundations land first and propagate automatically. |
+| **P2** | 2.5 Cost tracking | FinOps for pipelines. Large scope but high value. |
 | **P3** | 3.1 Multi-tenancy | Required for larger orgs. Large scope, touches every layer. |
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
@@ -238,3 +249,5 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
 - [Design: Task Templates](design-task-templates.md) — P2 reusable steps
 - [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
+- [Design: UI Refresh](design-ui-refresh.md) — P2 console v2
+- [UI Refresh Execution Plan](ui-refresh-execution-plan.md) — P2 phased implementation

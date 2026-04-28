@@ -1,6 +1,6 @@
 # Caesium Web UI Implementation Plan
 
-> Status: Phase 1 is complete and most Phase 2 observability work is already shipped. This document now tracks only the remaining implementation gaps relative to the current repo.
+> Status: Closed for the visual layer. The visual / primitive / page-shape work has moved to [`design-ui-refresh.md`](design-ui-refresh.md) and [`ui-refresh-execution-plan.md`](ui-refresh-execution-plan.md). This document remains authoritative for the original v1 feature scope (what shipped, what tests cover) — keep it as the historical record of the v1 plan and don't add new visual work here.
 
 ## Current State
 
