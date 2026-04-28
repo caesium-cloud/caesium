@@ -26,19 +26,24 @@ function classify(status: string | undefined): ClusterHealthState {
 }
 
 /**
- * Polls `/v1/system/health` (via `api.getHealth`) every 15s.
+ * Polls `/health` every 15s and classifies the cluster state.
  *
- * Returns `{ state: 'unknown' }` until a response lands or if the endpoint
- * fails — callers gate the cluster footer on `state !== 'unknown'`.
+ * Uses `api.getHealthStatus` (non-throwing variant) so HTTP 503 responses
+ * from the server — which signal degraded or incident health — still deliver
+ * a parseable JSON body. `api.getHealth` throws on any non-2xx, making those
+ * states invisible and silently falling back to `unknown`.
  *
- * The plan's stub fallback is here intentionally: when the new
- * `/v1/system/health` shape lands (Phase 3.1), we'll widen the typing without
- * breaking the consumer surface.
+ * `data.uptime` is a Go `time.Duration` (nanoseconds); divide by 1e9 to get
+ * seconds, matching the conversion in `SystemPage.tsx`.
+ *
+ * Returns `{ state: 'unknown' }` only on genuine network failure or when no
+ * response has arrived yet. Callers gate the cluster footer on
+ * `state !== 'unknown'`.
  */
 export function useClusterHealth(): ClusterHealth {
   const { data, isError } = useQuery({
     queryKey: ["cluster-health"],
-    queryFn: api.getHealth,
+    queryFn: api.getHealthStatus,
     refetchInterval: REFETCH_MS,
     staleTime: REFETCH_MS / 2,
     retry: 1,
@@ -50,7 +55,7 @@ export function useClusterHealth(): ClusterHealth {
 
   return {
     state: classify(data.status),
-    uptimeSeconds: typeof data.uptime === "number" ? data.uptime : null,
+    uptimeSeconds: typeof data.uptime === "number" ? data.uptime / 1e9 : null,
     raw: data,
   };
 }

@@ -237,8 +237,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .atom-orbit, .atom-nucleus,
-  .pulse-cyan, .pulse-gold {
+  /* AtomLogo JS-driven animation classes */
+  .atom-orbit,
+  .atom-nucleus,
+  /* Tailwind utility classes generated from tailwind.config.js keyframes */
+  .animate-orbit-spin,
+  .animate-nucleus-pulse,
+  .animate-cyan-pulse,
+  .animate-gold-pulse {
     animation: none !important;
   }
 }

@@ -56,7 +56,7 @@ export function Sparkline({
     );
   }
 
-  const max = Math.max(...runs.map((r) => r.duration ?? 0), 60);
+  const max = runs.reduce((acc, r) => Math.max(acc, r.duration ?? 0), 60);
   const count = runs.length;
   const gap = 2;
   const barWidth = Math.max(1, (width - (count - 1) * gap) / count);
