@@ -21,34 +21,68 @@
 
     --card: 0 0% 100%;
     --card-foreground: 235 24% 12%;
- 
+
     --popover: 0 0% 100%;
     --popover-foreground: 235 24% 12%;
- 
+
     --primary: 191 100% 42%;
     --primary-foreground: 240 33% 4%;
- 
+
     --secondary: 205 50% 94%;
     --secondary-foreground: 235 24% 12%;
- 
+
     --muted: 205 38% 93%;
     --muted-foreground: 228 14% 41%;
- 
+
     --accent: 38 92% 50%;
     --accent-foreground: 240 33% 4%;
- 
+
     --destructive: 0 84.2% 60.2%;
     --destructive-foreground: 210 40% 98%;
 
     --border: 205 30% 87%;
     --input: 205 30% 87%;
     --ring: 191 100% 42%;
- 
+
     --radius: 0.5rem;
 
     --caesium-cyan: 191 100% 42%;
     --caesium-gold: 38 92% 50%;
     --caesium-void: 240 33% 4%;
+
+    /* Brand surfaces (light values; dark values override below) */
+    --void: 210 30% 98%;
+    --midnight: 0 0% 100%;
+    --obsidian: 210 25% 96%;
+    --graphite: 210 20% 91%;
+    --silt: 210 18% 84%;
+
+    /* Brand accent extensions */
+    --cyan: 191 100% 35%;
+    --cyan-glow: 191 100% 42%;
+    --cyan-dim: 191 80% 35%;
+    --gold: 38 92% 50%;
+    --gold-dim: 38 80% 42%;
+
+    /* Text levels */
+    --text-1: 235 30% 12%;
+    --text-2: 228 14% 38%;
+    --text-3: 220 10% 50%;
+    --text-4: 220 12% 70%;
+
+    /* Status semantic tokens */
+    --success: 152 65% 38%;
+    --warning: 38 92% 50%;
+    --danger: 0 78% 52%;
+    --running: 191 100% 42%;
+    --cached: 178 60% 42%;
+
+    /* Chart palette — maps shadcn chart-* names onto brand tones */
+    --chart-1: 191 100% 42%;
+    --chart-2: 38 92% 50%;
+    --chart-3: 152 65% 38%;
+    --chart-4: 0 78% 52%;
+    --chart-5: 178 60% 42%;
 
     /* Sidebar */
     --sidebar: 215 30% 97%;
@@ -79,7 +113,7 @@
     --popover: 240 24% 7%;
     --popover-foreground: 210 40% 96%;
 
-    --primary: 191 100% 42%;
+    --primary: 191 100% 47%;
     --primary-foreground: 240 33% 4%;
 
     --secondary: 236 19% 15%;
@@ -88,15 +122,49 @@
     --muted: 236 18% 18%;
     --muted-foreground: 220 12% 68%;
 
-    --accent: 38 92% 50%;
+    --accent: 38 92% 56%;
     --accent-foreground: 240 33% 4%;
 
-    --destructive: 0 62.8% 30.6%;
+    --destructive: 0 78% 62%;
     --destructive-foreground: 210 40% 98%;
 
     --border: 236 18% 16%;
     --input: 236 18% 16%;
-    --ring: 191 100% 42%;
+    --ring: 191 100% 47%;
+
+    /* Brand surfaces */
+    --void: 240 33% 4%;
+    --midnight: 240 25% 7%;
+    --obsidian: 240 18% 11%;
+    --graphite: 240 14% 17%;
+    --silt: 240 10% 22%;
+
+    /* Brand accent extensions */
+    --cyan: 191 100% 47%;
+    --cyan-glow: 191 100% 60%;
+    --cyan-dim: 191 80% 35%;
+    --gold: 38 92% 56%;
+    --gold-dim: 38 80% 42%;
+
+    /* Text levels */
+    --text-1: 210 40% 96%;
+    --text-2: 220 14% 72%;
+    --text-3: 220 12% 50%;
+    --text-4: 220 14% 32%;
+
+    /* Status semantic tokens */
+    --success: 152 65% 45%;
+    --warning: 38 92% 56%;
+    --danger: 0 78% 62%;
+    --running: 191 100% 50%;
+    --cached: 178 60% 50%;
+
+    /* Chart palette */
+    --chart-1: 191 100% 60%;
+    --chart-2: 38 92% 56%;
+    --chart-3: 152 65% 45%;
+    --chart-4: 0 78% 62%;
+    --chart-5: 178 60% 50%;
 
     /* Sidebar */
     --sidebar: 240 33% 4%;
@@ -147,6 +215,31 @@
 @layer utilities {
   .fill-caesium-gold {
     fill: hsl(var(--caesium-gold));
+  }
+}
+
+/* ── Brand motion ── */
+@keyframes orbit-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+@keyframes nucleus-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.18); opacity: 0.85; }
+}
+@keyframes cyan-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--cyan) / 0.55), 0 0 14px 0 hsl(var(--cyan) / 0.5); }
+  70% { box-shadow: 0 0 0 9px hsl(var(--cyan) / 0), 0 0 14px 0 hsl(var(--cyan) / 0.5); }
+}
+@keyframes gold-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 hsl(var(--gold) / 0.55), 0 0 12px 0 hsl(var(--gold) / 0.4); }
+  70% { box-shadow: 0 0 0 8px hsl(var(--gold) / 0), 0 0 12px 0 hsl(var(--gold) / 0.4); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atom-orbit, .atom-nucleus,
+  .pulse-cyan, .pulse-gold {
+    animation: none !important;
   }
 }
 
