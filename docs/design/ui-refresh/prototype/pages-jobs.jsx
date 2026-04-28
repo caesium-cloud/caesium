@@ -230,7 +230,7 @@ function JobDetailPage({ jobId, onBack, onOpenRun, dagStyle }) {
       cols[n.lane].push(n);
     });
     return cols;
-  }, []);
+  }, [dag.nodes]);
 
   const colW = 220, nodeW = 188, nodeH = 76, gapY = 18, padX = 40, padY = 40;
   const nodePos = uM(() => {
@@ -244,7 +244,7 @@ function JobDetailPage({ jobId, onBack, onOpenRun, dagStyle }) {
       });
     });
     return pos;
-  }, [lanes]);
+  }, [lanes, padX, colW, padY, nodeH, gapY]);
   const totalW = padX * 2 + Object.keys(lanes).length * colW;
   const totalH = padY * 2 + Math.max(...Object.values(lanes).map(l => l.length)) * (nodeH + gapY);
 

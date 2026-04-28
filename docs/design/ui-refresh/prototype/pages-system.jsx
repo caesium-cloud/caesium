@@ -1,6 +1,6 @@
 /* === Caesium Refresh — Pages: System, JobDefs === */
 
-const { useState: usSj, useEffect: usEj, useMemo: usMj, useMemo } = React;
+const { useState: usSj, useMemo } = React;
 const { Btn: B3, StatusBadge: SB3, I: I3, AtomLogo: AL3, EmptyState: ES3, timeAgo: ta3, fmtDuration: fd3 } = window.UI;
 
 /* ================================================================== */
@@ -9,7 +9,7 @@ const { Btn: B3, StatusBadge: SB3, I: I3, AtomLogo: AL3, EmptyState: ES3, timeAg
 function SystemPage() {
   const [refreshTick, setRefreshTick] = usSj(0);
   const [pruneOpen, setPruneOpen] = usSj(false);
-  const lastUpdated = usMj(() => new Date(), [refreshTick]);
+  const lastUpdated = useMemo(() => new Date(), [refreshTick]);
   const sys = window.MOCK.SYSTEM;
 
   return (

@@ -21,7 +21,7 @@ Phase 0 changes propagate automatically into every page. Land them first; the re
 Add the brand surface, brand accent, and text level tokens called out in [`design-ui-refresh.md`](design-ui-refresh.md) §"Palette" to both `:root` (light) and `.dark`.
 
 **Files to touch:**
-- `ui/src/index.css` — add `--cyan-glow`, `--cyan-dim`, `--gold-dim`, `--midnight`, `--obsidian`, `--graphite`, `--silt`, `--text-1..4`, `--success`, `--warning`, `--danger`, `--running`. Light theme overrides for the same keys.
+- `ui/src/index.css` — add `--cyan-glow`, `--cyan-dim`, `--gold-dim`, `--midnight`, `--obsidian`, `--graphite`, `--silt`, `--text-1..4`, `--success`, `--warning`, `--danger`, `--running`, `--cached`. Light theme overrides for the same keys.
 - `ui/tailwind.config.js` — extend `theme.extend.colors` so utility classes (`bg-midnight`, `text-text-2`, etc.) compose with the new tokens. Map shadcn names (`accent`, `chart-1..5`) onto the brand palette so existing components inherit without per-component overrides.
 
 **Acceptance:**

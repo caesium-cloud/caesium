@@ -65,7 +65,7 @@ The refresh extends the existing token set in `ui/src/index.css` rather than rep
 | `--warning`   | `38 92% 56%`    | `paused`, soft warning      |
 | `--danger`    | `0 78% 62%`     | `failed`                    |
 | `--running`   | `191 100% 50%`  | `running` (cyan pulse)      |
-| (no token)    | `178 60% 50%`   | `cached` (teal accent)      |
+| `--cached`    | `178 60% 50%`   | `cached` (teal accent)      |
 | `--text-3/4`  | (above)         | `queued`, `skipped`         |
 
 The full palette is in [`design/ui-refresh/prototype/styles.css`](design/ui-refresh/prototype/styles.css).
