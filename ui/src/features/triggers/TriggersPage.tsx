@@ -4,7 +4,6 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
-import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Dialog,
   DialogContent,
@@ -148,13 +147,13 @@ function errorMessage(error: unknown) {
   return "Request failed";
 }
 
-function NextFire({ expression }: { expression: string }) {
+function NextFire({ expression, timezone }: { expression: string; timezone?: string }) {
   const [nextDate, setNextDate] = useState<Date | null>(null);
 
   useEffect(() => {
     const compute = () => {
       try {
-        const interval = cronParser.parse(expression);
+        const interval = cronParser.parse(expression, timezone ? { tz: timezone } : undefined);
         setNextDate(interval.next().toDate());
       } catch {
         setNextDate(null);
@@ -164,7 +163,7 @@ function NextFire({ expression }: { expression: string }) {
     compute();
     const timer = setInterval(compute, 60000);
     return () => clearInterval(timer);
-  }, [expression]);
+  }, [expression, timezone]);
 
   if (!nextDate) return <span className="text-[10px] text-text-4 font-mono">Invalid cron</span>;
 
@@ -414,7 +413,7 @@ export function TriggersPage() {
                           <div className="flex flex-col">
                             <code className="text-xs text-text-2 font-mono">{expr}</code>
                             <div className="mt-1">
-                              <NextFire expression={expr} />
+                              <NextFire expression={expr} timezone={config.timezone as string | undefined} />
                             </div>
                           </div>
                         ) : (
@@ -425,7 +424,7 @@ export function TriggersPage() {
                       </div>
 
                       <div className="hidden md:flex justify-end">
-                        <StatusBadge status="running" label="active" />
+                        
                       </div>
                     </div>
                   </div>
@@ -463,13 +462,9 @@ export function TriggersPage() {
                 {isExpanded && (
                   <div className="border-t border-graphite/20 bg-black/20 px-5 py-4 space-y-4">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                      <div>
+                      <div className="col-span-2 md:col-span-1">
                         <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Full ID</p>
                         <p className="font-mono text-xs text-text-2 break-all">{trigger.id}</p>
-                      </div>
-                      <div>
-                        <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Status</p>
-                        <StatusBadge status="running" label="active" />
                       </div>
                       <div>
                         <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Created</p>
@@ -491,7 +486,7 @@ export function TriggersPage() {
                           <div className="flex flex-col mt-1">
                             <code className="text-xs text-text-2 font-mono bg-midnight/40 px-2 py-1 rounded inline-block w-max">{expr}</code>
                             <div className="mt-2">
-                              <NextFire expression={expr} />
+                              <NextFire expression={expr} timezone={config.timezone as string | undefined} />
                             </div>
                           </div>
                         ) : null}

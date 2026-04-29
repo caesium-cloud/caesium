@@ -240,13 +240,9 @@ export interface HealthResponse {
 
 export interface Node {
   address: string;
-  role: string;
   arch: string;
-  cpu: number;
-  mem: number;
   workers_busy: number;
   workers_total: number;
-  uptime: string;
 }
 
 export interface SystemFeatures {
@@ -275,19 +271,19 @@ export interface LintResponse {
 }
 
 export interface DiffJobSpec {
-  Alias: string;
-  Labels?: Record<string, string>;
-  Annotations?: Record<string, string>;
-  Trigger?: {
-    Type: string;
-    Configuration: Record<string, unknown>;
+  alias: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  trigger?: {
+    type: string;
+    configuration: Record<string, unknown>;
   };
-  Steps?: unknown[];
+  steps?: unknown[];
 }
 
 export interface DiffUpdate {
-  Alias: string;
-  Diff: string;
+  alias: string;
+  diff: string;
 }
 
 export interface DiffResponse {

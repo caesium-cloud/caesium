@@ -2,7 +2,6 @@ package system
 
 import (
 	"context"
-	"math/rand"
 	"runtime"
 	"strings"
 
@@ -14,13 +13,9 @@ import (
 
 type Node struct {
 	Address      string `json:"address"`
-	Role         string `json:"role"`
 	Arch         string `json:"arch"`
-	CPU          int    `json:"cpu"`
-	Mem          int    `json:"mem"`
 	WorkersBusy  int    `json:"workers_busy"`
 	WorkersTotal int    `json:"workers_total"`
-	Uptime       string `json:"uptime"`
 }
 
 type Features struct {
@@ -44,43 +39,25 @@ func (s *Service) Nodes() ([]Node, error) {
 		addrs = []string{env.Variables().NodeAddress}
 	}
 
-	// Make sure we have at least one node
 	if len(addrs) == 0 {
 		addrs = []string{"127.0.0.1:8080"}
 	}
 
 	nodes := make([]Node, 0, len(addrs))
-	for i, addr := range addrs {
+	for _, addr := range addrs {
 		addr = strings.TrimSpace(addr)
 		if addr == "" {
 			continue
 		}
-		role := "voter"
-		if i == 0 {
-			role = "leader"
-		}
 
-		// Simple pseudo-random values to make UI look alive
-		// In a real system, these would be fetched from metrics or dqlite cluster.
-		cpu := rand.Intn(40) + 10
-		if role == "leader" {
-			cpu += 20 // Make leader a bit busier
-		}
-		mem := rand.Intn(30) + 30
-
-		// Find active workers on this node
 		var busy int64
 		s.db.WithContext(s.ctx).Model(&models.TaskRun{}).Where("status = ? AND claimed_by = ?", "running", addr).Count(&busy)
 
 		nodes = append(nodes, Node{
 			Address:      addr,
-			Role:         role,
 			Arch:         runtime.GOARCH,
-			CPU:          cpu,
-			Mem:          mem,
 			WorkersBusy:  int(busy),
 			WorkersTotal: env.Variables().WorkerPoolSize,
-			Uptime:       "12d", // Mocked uptime
 		})
 	}
 	return nodes, nil

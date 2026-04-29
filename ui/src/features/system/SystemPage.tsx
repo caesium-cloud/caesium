@@ -9,7 +9,6 @@ import { Activity, Database, CheckCircle2, XCircle, Clock, ScrollText, Server, Z
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useClusterHealth } from "./useClusterHealth";
-import { UsageBar } from "@/components/ui/usage-bar";
 import { AtomLogo } from "@/components/brand/atom-logo";
 import { PROMETHEUS_METRICS } from "./metrics";
 import type { Node } from "@/lib/api";
@@ -25,16 +24,6 @@ function StatusDot({ ok }: { ok: boolean }) {
       }`} 
     />
   );
-}
-
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${Math.floor(seconds % 60)}s`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ${minutes % 60}m`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ${hours % 24}h`;
 }
 
 export function SystemPage() {
@@ -149,8 +138,8 @@ export function SystemPage() {
             </div>
             <span className="font-mono text-[11px] text-text-3">{nodes.length} total</span>
           </div>
-          <div className="grid grid-cols-[minmax(0,1.5fr)_80px_70px_100px_100px_90px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
-            <span>Address</span><span>Role</span><span>Arch</span><span>CPU</span><span>Mem</span><span>Workers</span>
+          <div className="grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
+            <span>Address</span><span>Arch</span><span>Workers</span>
           </div>
           <div>
             {isLoadingNodes ? (
@@ -162,24 +151,14 @@ export function SystemPage() {
               <div className="p-8 text-center text-sm text-text-4">No nodes detected</div>
             ) : (
               nodes.map((n, i) => (
-                <div key={n.address} className={`grid grid-cols-[minmax(0,1.5fr)_80px_70px_100px_100px_90px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}>
+                <div key={n.address} className={`grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}>
                   <div className="flex items-center gap-2.5 min-w-0 pr-2">
                     <StatusDot ok={true} />
                     <div className="min-w-0">
                       <div className="font-mono text-xs text-text-1 truncate">{n.address}</div>
-                      <div className="font-mono text-[10px] text-text-4 truncate mt-0.5">uptime {n.uptime}</div>
                     </div>
                   </div>
-                  <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-bold tracking-widest uppercase w-fit ${
-                    n.role === "leader" 
-                      ? "bg-gold/15 text-gold border border-gold/30" 
-                      : "bg-cyan/10 text-cyan-glow border border-cyan/25"
-                  }`}>
-                    {n.role}
-                  </span>
                   <span className="font-mono text-[11px] text-text-2 truncate">{n.arch}</span>
-                  <div className="pr-4"><UsageBar value={n.cpu} /></div>
-                  <div className="pr-4"><UsageBar value={n.mem} /></div>
                   <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy}/{n.workers_total}</span>
                 </div>
               ))
@@ -357,7 +336,8 @@ function ClusterTopology({ nodes }: { nodes: Node[] }) {
         const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
         const x = cx + Math.cos(angle) * R;
         const y = cy + Math.sin(angle) * R;
-        const isLeader = n.role === "leader";
+        // In reality we don't know the leader right now, so we just treat them all equal
+        const isLeader = i === 0;
         return (
           <g key={n.address}>
             <circle cx={x} cy={y} r="14" fill={isLeader ? "var(--gold)" : "var(--cyan)"} opacity="0.18" />

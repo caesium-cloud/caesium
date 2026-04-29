@@ -14,8 +14,8 @@ type Diff struct {
 
 // Update captures the differences for an existing job.
 type Update struct {
-	Alias string
-	Diff  string
+	Alias string `json:"alias"`
+	Diff  string `json:"diff"`
 }
 
 // Empty reports whether the diff contains no changes.

@@ -388,7 +388,7 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
             {added.map((a, i) => (
               <div key={`a-${i}`} className="flex gap-3 py-1.5">
                 <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
-                <span className="text-cyan-glow flex-shrink-0">{a.Alias}</span>
+                <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
                 <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
               </div>
             ))}
@@ -396,7 +396,7 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
             {removed.map((r, i) => (
               <div key={`r-${i}`} className="flex gap-3 py-1.5">
                 <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
-                <span className="text-cyan-glow flex-shrink-0">{r.Alias}</span>
+                <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
                 <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
               </div>
             ))}
@@ -405,11 +405,11 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
               <div key={`m-${i}`} className="flex flex-col py-2 border-b border-graphite/30 last:border-0">
                 <div className="flex gap-3 mb-1">
                   <span className="text-gold font-bold w-4 flex-shrink-0 text-center">~</span>
-                  <span className="text-cyan-glow">{m.Alias}</span>
+                  <span className="text-cyan-glow">{m.alias}</span>
                 </div>
                 <div className="pl-7 pr-2">
                   <pre className="text-[11px] font-mono text-text-3 overflow-x-auto bg-obsidian/30 p-2 rounded border border-graphite/20">
-                    {m.Diff}
+                    {m.diff}
                   </pre>
                 </div>
               </div>
