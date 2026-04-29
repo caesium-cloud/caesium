@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "@tanstack/react-router";
+import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ChevronDown, ChevronRight, RotateCcw, Square, History } from "lucide-react";
 import { toast } from "sonner";
@@ -21,6 +21,7 @@ import { TaskDetailPanel } from "./TaskDetailPanel";
 
 export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
+  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
@@ -186,7 +187,7 @@ export function RunDetailPage() {
       toast.success("Job triggered");
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
       if (newRun?.id) {
-        window.location.href = `/jobs/${jobId}/runs/${newRun.id}`;
+        navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId, runId: newRun.id } });
       }
     },
     onError: (err: Error) => toast.error(`Failed to trigger: ${err.message}`),

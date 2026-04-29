@@ -11,13 +11,22 @@ interface RunLogViewerProps {
   isRunning: boolean;
   taskStatus?: string;
   taskError?: string | null;
-  /** Called with the atom/task label for context highlight */
-  onHighlightChange?: (taskId: string | null) => void;
 }
 
 type LogLine = { id: number; text: string };
 
+// Mirrors the server header values from the existing LogViewer component.
+type LogState = "loading" | "streaming" | "complete" | "pending" | "unavailable" | "error" | "empty";
+
 const SCROLL_KEY_PREFIX = "caesium-run-log-scroll:";
+
+function parseNoContentState(header: string | null): LogState {
+  switch (header) {
+    case "pending": return "pending";
+    case "unavailable": return "unavailable";
+    default: return "empty";
+  }
+}
 
 export function RunLogViewer({
   jobId,
@@ -28,14 +37,17 @@ export function RunLogViewer({
   taskError,
 }: RunLogViewerProps) {
   const [lines, setLines] = useState<LogLine[]>([]);
-  const [status, setStatus] = useState<"loading" | "streaming" | "complete" | "error" | "empty">("loading");
+  const [status, setStatus] = useState<LogState>("loading");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [atBottom, setAtBottom] = useState(true);
 
   const parentRef = useRef<HTMLDivElement>(null);
   const lineIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
-  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Tracks whether scroll was saved before the last fetch reset so we can
+  // restore it unconditionally on mount/remount without checking atBottom state
+  // (which is always reset to true at fetch start).
+  const savedScrollRef = useRef<number | null>(null);
 
   const rowVirtualizer = useVirtualizer({
     count: lines.length,
@@ -44,51 +56,54 @@ export function RunLogViewer({
     overscan: 40,
   });
 
-  // Scroll position persistence
   const scrollKey = `${SCROLL_KEY_PREFIX}${runId}:${taskId}`;
-
-  const restoreScroll = useCallback(() => {
-    const saved = sessionStorage.getItem(scrollKey);
-    if (saved && parentRef.current && !atBottom) {
-      parentRef.current.scrollTop = Number(saved);
-    }
-  }, [atBottom, scrollKey]);
 
   const saveScroll = useCallback(() => {
     if (parentRef.current) {
-      sessionStorage.setItem(scrollKey, String(parentRef.current.scrollTop));
+      const pos = parentRef.current.scrollTop;
+      sessionStorage.setItem(scrollKey, String(pos));
+      savedScrollRef.current = pos;
     }
   }, [scrollKey]);
 
-  // Detect at-bottom
+  // Scroll position is restored unconditionally — atBottom is reset to true at
+  // fetch start, so guarding on it would always prevent restoration (Codex P2).
+  const restoreScroll = useCallback(() => {
+    const saved = sessionStorage.getItem(scrollKey);
+    if (saved && parentRef.current) {
+      parentRef.current.scrollTop = Number(saved);
+      setAtBottom(false);
+    }
+  }, [scrollKey]);
+
   const handleScroll = useCallback(() => {
     const el = parentRef.current;
     if (!el) return;
-    const threshold = 40;
-    const isNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
+    const isNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
     setAtBottom(isNearBottom);
-    if (!isNearBottom) {
-      saveScroll();
-    }
-  }, [saveScroll]);
+    if (!isNearBottom) saveScroll();
+    else sessionStorage.removeItem(scrollKey);
+  }, [saveScroll, scrollKey]);
 
-  // Scroll to bottom
   const scrollToBottom = useCallback(() => {
     const el = parentRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     setAtBottom(true);
     sessionStorage.removeItem(scrollKey);
+    savedScrollRef.current = null;
   }, [scrollKey]);
 
-  // Auto-scroll when at-bottom and new lines arrive
+  // Auto-scroll when tailing
   useEffect(() => {
     if (atBottom && parentRef.current) {
       parentRef.current.scrollTop = parentRef.current.scrollHeight;
     }
   }, [lines.length, atBottom]);
 
-  // Fetch + stream logs
+  // Fetch + stream logs. Re-runs when taskStatus changes so a pending task
+  // automatically starts streaming once it transitions to running (Gemini HIGH,
+  // Codex P1). Previously the dep array only had [jobId, runId, taskId, isRunning].
   useEffect(() => {
     setLines([]);
     setStatus("loading");
@@ -107,8 +122,11 @@ export function RunLogViewer({
           { signal: abort.signal, headers },
         );
 
+        // Parse the state header on 204 — the server uses this to communicate
+        // pending/unavailable rather than truly empty (Codex P1).
         if (response.status === 204) {
-          setStatus("empty");
+          const stateHeader = response.headers.get("X-Caesium-Log-State");
+          setStatus(parseNoContentState(stateHeader));
           return;
         }
 
@@ -136,14 +154,15 @@ export function RunLogViewer({
           buffer += chunk;
           sawOutput = true;
 
-          // Flush complete lines from buffer
           const newlineIdx = buffer.lastIndexOf("\n");
           if (newlineIdx === -1) continue;
 
           const toFlush = buffer.slice(0, newlineIdx + 1);
           buffer = buffer.slice(newlineIdx + 1);
 
-          const newLines: LogLine[] = toFlush.split("\n").filter(Boolean).map((text) => ({
+          // Use .slice(0, -1) instead of .filter(Boolean) so intentionally empty
+          // lines are preserved (Gemini MED, Codex P2).
+          const newLines: LogLine[] = toFlush.split("\n").slice(0, -1).map((text) => ({
             id: ++lineIdRef.current,
             text,
           }));
@@ -152,8 +171,8 @@ export function RunLogViewer({
           }
         }
 
-        // Flush remaining buffer
-        if (buffer.trim()) {
+        // Flush any trailing content that didn't end with a newline
+        if (buffer) {
           setLines((prev) => [...prev, { id: ++lineIdRef.current, text: buffer }]);
         }
 
@@ -167,27 +186,13 @@ export function RunLogViewer({
 
     fetchLogs();
 
-    return () => {
-      abort.abort();
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-    };
-  }, [jobId, runId, taskId, isRunning]);
+    return () => { abort.abort(); };
+  }, [jobId, runId, taskId, isRunning, taskStatus]);
 
-  // Retry when pending (task hasn't started yet)
+  // Restore saved scroll after lines have rendered (Codex P2 fix: no atBottom guard)
   useEffect(() => {
-    if (status !== "empty" || taskStatus !== "pending") return;
-    retryTimerRef.current = setTimeout(() => {
-      // Re-trigger by bumping a key would require hoisting; instead just re-fetch
-      // by resetting state (parent effect re-runs if taskStatus changes)
-    }, 2000);
-    return () => {
-      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
-    };
-  }, [status, taskStatus]);
-
-  useEffect(() => {
-    restoreScroll();
-  }, [restoreScroll]);
+    if (lines.length > 0) restoreScroll();
+  }, [lines.length, restoreScroll]);
 
   const virtualItems = rowVirtualizer.getVirtualItems();
 
@@ -210,6 +215,8 @@ export function RunLogViewer({
         {lines.length === 0 && (
           <div className="flex items-center justify-center h-full text-[#64748b] text-[12px]">
             {status === "loading" && "Loading logs…"}
+            {status === "pending" && "Logs will appear when the task starts."}
+            {status === "unavailable" && "No retained logs available for this task."}
             {status === "empty" && "No output captured for this task."}
             {status === "error" && (errorMsg ?? "Failed to load logs.")}
             {status === "streaming" && "Waiting for output…"}
@@ -217,9 +224,7 @@ export function RunLogViewer({
         )}
 
         {lines.length > 0 && (
-          <div
-            style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}
-          >
+          <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, position: "relative" }}>
             {virtualItems.map((vItem) => {
               const line = lines[vItem.index];
               return (
@@ -249,7 +254,7 @@ export function RunLogViewer({
         )}
       </div>
 
-      {/* "Jump to live" pill — shown when scrolled up during a running task */}
+      {/* "Jump to live" pill */}
       {!atBottom && isRunning && (
         <button
           type="button"
@@ -268,15 +273,17 @@ export function RunLogViewer({
   );
 }
 
-type LogStatus = "loading" | "streaming" | "complete" | "error" | "empty";
+type LogStatus = LogState;
 
 function StatusPill({ status }: { status: LogStatus }) {
   const map: Record<LogStatus, { label: string; cls: string }> = {
-    loading: { label: "Loading", cls: "bg-white/10 text-[#94a3b8]" },
-    streaming: { label: "Live", cls: "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" },
-    complete: { label: "Complete", cls: "bg-blue-500/10 border-blue-500/30 text-blue-300" },
-    error: { label: "Error", cls: "bg-red-500/10 border-red-500/30 text-red-300" },
-    empty: { label: "Empty", cls: "bg-white/5 text-[#64748b]" },
+    loading:     { label: "Loading",     cls: "bg-white/10 text-[#94a3b8]" },
+    streaming:   { label: "Live",        cls: "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" },
+    complete:    { label: "Complete",    cls: "bg-blue-500/10 border-blue-500/30 text-blue-300" },
+    pending:     { label: "Pending",     cls: "bg-amber-500/10 border-amber-500/30 text-amber-300" },
+    unavailable: { label: "Unavailable", cls: "bg-white/5 border-white/10 text-[#64748b]" },
+    error:       { label: "Error",       cls: "bg-red-500/10 border-red-500/30 text-red-300" },
+    empty:       { label: "Empty",       cls: "bg-white/5 text-[#64748b]" },
   };
   const { label, cls } = map[status];
   return (
