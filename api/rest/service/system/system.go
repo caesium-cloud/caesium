@@ -19,9 +19,9 @@ type Node struct {
 }
 
 type Features struct {
-	DatabaseConsoleEnabled bool `json:"database_console_enabled"`
-	LogConsoleEnabled      bool `json:"log_console_enabled"`
-	UIRefreshV2System      bool `json:"ui_refresh_v2_system"`
+	DatabaseConsoleEnabled bool   `json:"database_console_enabled"`
+	LogConsoleEnabled      bool   `json:"log_console_enabled"`
+	ExternalURL            string `json:"external_url,omitempty"`
 }
 
 type Service struct {
@@ -37,10 +37,6 @@ func (s *Service) Nodes() ([]Node, error) {
 	addrs := env.Variables().DatabaseNodes
 	if len(addrs) == 0 && env.Variables().NodeAddress != "" {
 		addrs = []string{env.Variables().NodeAddress}
-	}
-
-	if len(addrs) == 0 {
-		addrs = []string{"127.0.0.1:8080"}
 	}
 
 	nodes := make([]Node, 0, len(addrs))
@@ -68,6 +64,6 @@ func (s *Service) Features() (*Features, error) {
 	return &Features{
 		DatabaseConsoleEnabled: v.DatabaseConsoleEnabled,
 		LogConsoleEnabled:      v.LogConsoleEnabled,
-		UIRefreshV2System:      true, // This enables the V2 System UI in the frontend
+		ExternalURL:            v.APIExternalURL,
 	}, nil
 }

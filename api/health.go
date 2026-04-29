@@ -109,10 +109,7 @@ func checkTriggers() *CheckResult {
 func checkNodes() *CheckResult {
 	conn := db.Connection()
 	var count int64
-	// Simplified node count based on active workers for now
+	// Informational node count based on active workers for now
 	conn.Model(&models.TaskRun{}).Where("status = ?", "running").Select("COUNT(DISTINCT claimed_by)").Scan(&count)
-	if count == 0 {
-		count = 1 // Assume at least 1 node if running
-	}
 	return &CheckResult{Count: count}
 }

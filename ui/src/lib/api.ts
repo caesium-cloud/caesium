@@ -248,7 +248,7 @@ export interface Node {
 export interface SystemFeatures {
   database_console_enabled: boolean;
   log_console_enabled: boolean;
-  ui_refresh_v2_system: boolean;
+  external_url?: string;
 }
 
 export interface LintRequest {

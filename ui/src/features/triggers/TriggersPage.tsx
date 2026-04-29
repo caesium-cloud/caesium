@@ -174,9 +174,11 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
   );
 }
 
-function CopyWebhookUrl({ path }: { path: string }) {
+function CopyWebhookUrl({ path, externalUrl }: { path: string; externalUrl?: string }) {
   const [copied, setCopied] = useState(false);
-  const fullUrl = `${window.location.origin}${path}`;
+  const baseUrl = externalUrl || window.location.origin;
+  const fullUrl = `${baseUrl}${path}`;
+  const isFallback = !externalUrl;
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -188,9 +190,14 @@ function CopyWebhookUrl({ path }: { path: string }) {
 
   return (
     <div 
-      className="flex items-center gap-2 bg-midnight/40 border border-graphite/30 rounded-md px-2 py-1 max-w-sm"
+      className="flex items-center gap-2 bg-midnight/40 border border-graphite/30 rounded-md px-2 py-1 max-w-sm relative group"
       onClick={(e) => e.stopPropagation()}
     >
+      {isFallback && (
+        <div className="absolute -top-8 left-0 hidden group-hover:block bg-obsidian border border-graphite/50 text-text-2 text-[10px] px-2 py-1 rounded shadow-lg whitespace-nowrap z-50">
+          CAESIUM_API_EXTERNAL_URL is unset. Falling back to browser origin.
+        </div>
+      )}
       <code className="text-[10px] text-text-3 font-mono truncate flex-1">{fullUrl}</code>
       <Button 
         variant="ghost" 
@@ -218,6 +225,11 @@ export function TriggersPage() {
     queryKey: ["triggers"],
     queryFn: api.getTriggers,
     refetchInterval: 30000,
+  });
+
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
   });
 
   const createMutation = useMutation({
@@ -408,7 +420,7 @@ export function TriggersPage() {
                       
                       <div className="hidden md:flex items-center">
                         {isHttp && webhookPath ? (
-                          <CopyWebhookUrl path={webhookPath} />
+                          <CopyWebhookUrl path={webhookPath} externalUrl={features?.external_url} />
                         ) : trigger.type === "cron" ? (
                           <div className="flex flex-col">
                             <code className="text-xs text-text-2 font-mono">{expr}</code>
@@ -480,7 +492,7 @@ export function TriggersPage() {
                       <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Action</p>
                       {isHttp && webhookPath ? (
                           <div className="mt-1 max-w-[300px]">
-                            <CopyWebhookUrl path={webhookPath} />
+                            <CopyWebhookUrl path={webhookPath} externalUrl={features?.external_url} />
                           </div>
                         ) : trigger.type === "cron" ? (
                           <div className="flex flex-col mt-1">

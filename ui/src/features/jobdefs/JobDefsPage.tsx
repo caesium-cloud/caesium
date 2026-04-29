@@ -78,26 +78,51 @@ export function JobDefsPage() {
   const [tab, setTab] = useState("editor");
   const [lintResult, setLintResult] = useState<LintResponse>({ errors: [], warnings: [], summary: { steps: "" } });
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
+  const [isLinting, setIsLinting] = useState(false);
   
+  const handleYamlChange = (val: string) => {
+    setYaml(val);
+    setIsLinting(true);
+  };
+
   // Debounced API calls
   useEffect(() => {
+    const ac = new AbortController();
+
     const timer = setTimeout(async () => {
       try {
         const lr = await api.lintJobDef(yaml);
+        if (ac.signal.aborted) return;
         setLintResult(lr);
         
         // Only get diff if lint passes
         if (lr.errors && lr.errors.length === 0) {
           const dr = await api.diffJobDef(yaml);
+          if (ac.signal.aborted) return;
           setDiffResult(dr);
         } else {
           setDiffResult(null);
         }
-      } catch {
-        // Ignore API errors silently in the background
+      } catch (err) {
+        if (ac.signal.aborted) return;
+        // Surface YAML parse errors or network failures
+        setLintResult({
+          errors: [{ message: err instanceof Error ? err.message : "Request failed", line: 1 }],
+          warnings: [],
+          summary: { steps: "" },
+        });
+        setDiffResult(null);
+      } finally {
+        if (!ac.signal.aborted) {
+          setIsLinting(false);
+        }
       }
     }, 300);
-    return () => clearTimeout(timer);
+
+    return () => {
+      clearTimeout(timer);
+      ac.abort();
+    };
   }, [yaml]);
 
   const applyMutation = useMutation({
@@ -160,7 +185,7 @@ export function JobDefsPage() {
             size="sm" 
             className="bg-cyan-glow text-midnight hover:bg-cyan-dim disabled:opacity-50"
             onClick={() => applyMutation.mutate()}
-            disabled={hasErrors || applyMutation.isPending || !yaml.trim()}
+            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting}
           >
             <Play className="h-3.5 w-3.5 mr-1.5" />
             {applyMutation.isPending ? "Applying..." : "Apply definition"}
@@ -233,7 +258,7 @@ export function JobDefsPage() {
                     value={yaml}
                     height="420px"
                     extensions={[yamlLang(), customTheme, customLinter]}
-                    onChange={(val) => setYaml(val)}
+                    onChange={handleYamlChange}
                     basicSetup={{
                       lineNumbers: true,
                       foldGutter: true,
