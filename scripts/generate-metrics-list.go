@@ -56,11 +56,12 @@ func main() {
 			}
 
 			mType := "unknown"
-			if strings.Contains(selExpr.Sel.Name, "Counter") {
+			switch {
+			case strings.Contains(selExpr.Sel.Name, "Counter"):
 				mType = "counter"
-			} else if strings.Contains(selExpr.Sel.Name, "Histogram") {
+			case strings.Contains(selExpr.Sel.Name, "Histogram"):
 				mType = "histogram"
-			} else if strings.Contains(selExpr.Sel.Name, "Gauge") {
+			case strings.Contains(selExpr.Sel.Name, "Gauge"):
 				mType = "gauge"
 			}
 
@@ -87,9 +88,10 @@ func main() {
 				if !ok {
 					continue
 				}
-				if key.Name == "Name" {
+				switch key.Name {
+				case "Name":
 					name = strings.Trim(valLit.Value, "\"")
-				} else if key.Name == "Help" {
+				case "Help":
 					help = strings.Trim(valLit.Value, "\"")
 				}
 			}
