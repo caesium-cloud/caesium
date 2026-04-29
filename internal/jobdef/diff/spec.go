@@ -24,28 +24,28 @@ import (
 
 // JobSpec captures the fields that participate in diffing.
 type JobSpec struct {
-	Alias       string
-	Labels      map[string]string
-	Annotations map[string]string
-	Trigger     TriggerSpec
-	Callbacks   []CallbackSpec
-	Steps       []StepSpec
+	Alias       string            `json:"alias"`
+	Labels      map[string]string `json:"labels"`
+	Annotations map[string]string `json:"annotations"`
+	Trigger     TriggerSpec       `json:"trigger"`
+	Callbacks   []CallbackSpec    `json:"callbacks"`
+	Steps       []StepSpec        `json:"steps"`
 }
 
 type TriggerSpec struct {
-	Type          string
-	Configuration map[string]any
+	Type          string         `json:"type"`
+	Configuration map[string]any `json:"configuration"`
 }
 
 type CallbackSpec struct {
-	Type          string
-	Configuration map[string]any
+	Type          string         `json:"type"`
+	Configuration map[string]any `json:"configuration"`
 }
 
 type StepSpec struct {
-	Engine  string
-	Image   string
-	Command []string
+	Engine  string   `json:"engine"`
+	Image   string   `json:"image"`
+	Command []string `json:"command"`
 }
 
 // FromDefinition normalises a job definition into a JobSpec.

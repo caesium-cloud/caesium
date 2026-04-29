@@ -1,222 +1,458 @@
-import { useMutation } from "@tanstack/react-query";
-import { api } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
+import { useState, useEffect } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { FileCode2, Play, CheckCircle2, XCircle, RotateCcw } from "lucide-react";
-import { useState } from "react";
+import { api, type DiffResponse, type LintResponse } from "@/lib/api";
+import { FileCode2, Play, CheckCircle2, XCircle, Upload, GitBranch, FileWarning, Info } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import CodeMirror from "@uiw/react-codemirror";
+import { yaml as yamlLang } from "@codemirror/lang-yaml";
+import { linter, type Diagnostic } from "@codemirror/lint";
+import { EditorView } from "@codemirror/view";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card } from "@/components/ui/card";
 
-const EXAMPLE_YAML = `# Example Caesium job definition
-apiVersion: v1
+const EXAMPLE_YAML = `apiVersion: v1
 kind: Job
 metadata:
-  alias: my-pipeline
+  alias: nightly-etl-warehouse
+  labels:
+    team: data-platform
+    tier: critical
 trigger:
   type: cron
   configuration:
-    cron: "0 * * * *"
+    cron: "0 2 * * *"
     timezone: "UTC"
 steps:
-  - name: fetch
-    image: python:3.11-slim
-    command: ["python", "/app/fetch.py"]
-  - name: transform
-    image: python:3.11-slim
-    command: ["python", "/app/transform.py"]
-  - name: load
-    image: python:3.11-slim
-    command: ["python", "/app/load.py"]
+  - name: extract.users
+    image: ghcr.io/cs/postgres-extractor:1.4
+    command: ["python", "/app/extract.py", "--table=users"]
+  - name: extract.orders
+    image: ghcr.io/cs/postgres-extractor:1.4
+    command: ["python", "/app/extract.py", "--table=orders"]
+  - name: transform.users
+    image: ghcr.io/cs/dbt:1.7
+    dependsOn: [extract.users]
+    command: ["dbt", "run", "--select", "users"]
+  - name: transform.orders
+    image: ghcr.io/cs/dbt:1.7
+    dependsOn: [extract.orders]
+    command: ["dbt", "run", "--select", "orders"]
+  - name: load.warehouse
+    image: snowflake/snowsql
+    dependsOn: [transform.users, transform.orders]
+    command: ["snowsql", "-f", "/sql/load.sql"]
 `;
 
+// Simple custom theme for the editor to match our brand
+const customTheme = EditorView.theme({
+  "&": {
+    backgroundColor: "transparent !important",
+    color: "hsl(var(--text-1))",
+    fontSize: "12.5px",
+    fontFamily: "var(--font-mono)",
+  },
+  ".cm-content": {
+    caretColor: "hsl(var(--cyan-glow))",
+  },
+  "&.cm-focused .cm-cursor": {
+    borderLeftColor: "hsl(var(--cyan-glow))",
+  },
+  ".cm-gutters": {
+    backgroundColor: "hsl(var(--obsidian) / 0.5)",
+    color: "hsl(var(--text-4))",
+    borderRight: "1px solid hsl(var(--graphite))",
+  },
+  ".cm-activeLineGutter": {
+    backgroundColor: "transparent",
+    color: "hsl(var(--cyan-glow))",
+  },
+  ".cm-activeLine": {
+    backgroundColor: "hsl(var(--cyan) / 0.05)",
+  },
+}, { dark: true });
+
 export function JobDefsPage() {
-  const [yaml, setYaml] = useState("");
-  const [result, setResult] = useState<{ ok: boolean; message: string; detail?: string } | null>(null);
+  const queryClient = useQueryClient();
+  const [yaml, setYaml] = useState(EXAMPLE_YAML);
+  const [tab, setTab] = useState("editor");
+  const [lintResult, setLintResult] = useState<LintResponse>({ errors: [], warnings: [], summary: { steps: "" } });
+  const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
+  const [isLinting, setIsLinting] = useState(false);
+  
+  const handleYamlChange = (val: string) => {
+    setYaml(val);
+    setIsLinting(true);
+  };
+
+  // Debounced API calls
+  useEffect(() => {
+    const ac = new AbortController();
+
+    const timer = setTimeout(async () => {
+      try {
+        const lr = await api.lintJobDef(yaml);
+        if (ac.signal.aborted) return;
+        setLintResult(lr);
+        
+        // Only get diff if lint passes
+        if (lr.errors && lr.errors.length === 0) {
+          const dr = await api.diffJobDef(yaml);
+          if (ac.signal.aborted) return;
+          setDiffResult(dr);
+        } else {
+          setDiffResult(null);
+        }
+      } catch (err) {
+        if (ac.signal.aborted) return;
+        // Surface YAML parse errors or network failures
+        setLintResult({
+          errors: [{ message: err instanceof Error ? err.message : "Request failed", line: 1 }],
+          warnings: [],
+          summary: { steps: "" },
+        });
+        setDiffResult(null);
+      } finally {
+        if (!ac.signal.aborted) {
+          setIsLinting(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      clearTimeout(timer);
+      ac.abort();
+    };
+  }, [yaml]);
 
   const applyMutation = useMutation({
     mutationFn: () => api.applyJobDef(yaml),
     onSuccess: (data) => {
-      setResult({ ok: true, message: "Job definition applied successfully", detail: JSON.stringify(data, null, 2) });
-      toast.success("Job definition applied");
+      toast.success(`Applied successfully (${data.applied} jobs)`);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      queryClient.invalidateQueries({ queryKey: ["atoms"] });
+      queryClient.invalidateQueries({ queryKey: ["triggers"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      // re-trigger diff to clear changes
+      api.diffJobDef(yaml).then(dr => setDiffResult(dr)).catch(() => {});
     },
     onError: (err) => {
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setResult({ ok: false, message: "Failed to apply job definition", detail: msg });
-      toast.error("Failed to apply job definition");
+      toast.error(err instanceof Error ? err.message : "Failed to apply job definition");
     },
   });
 
+  const customLinter = linter((view) => {
+    const diagnostics: Diagnostic[] = [];
+    if (lintResult.errors) {
+      lintResult.errors.forEach(err => {
+        const lineNo = err.line && err.line <= view.state.doc.lines ? err.line : 1;
+        const line = view.state.doc.line(lineNo);
+        diagnostics.push({
+          from: line.from,
+          to: line.to,
+          severity: "error",
+          message: err.message,
+        });
+      });
+    }
+    return diagnostics;
+  });
+
   const lineCount = yaml.split("\n").length;
+  const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
+  const hasErrors = lintResult.errors && lintResult.errors.length > 0;
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 pb-12">
+      <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Job Definitions</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Apply YAML manifests to create or update jobs, atoms, and triggers</p>
+          <div className="text-[10px] font-bold uppercase tracking-widest text-gold/85 mb-1">Declarative Manifests</div>
+          <h1 className="text-2xl font-bold tracking-tight m-0 leading-tight">Job Definitions</h1>
+          <p className="text-sm text-text-3 mt-1 flex items-center gap-1.5">
+            Lint, diff, and apply YAML manifests <span className="text-text-4">·</span> <code className="font-mono text-cyan-glow text-xs bg-cyan-glow/10 px-1 py-0.5 rounded">caesium job apply</code>
+          </p>
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
+            <Upload className="h-3.5 w-3.5 mr-1.5" />
+            Upload
+          </Button>
+          <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
+            <GitBranch className="h-3.5 w-3.5 mr-1.5" />
+            Git sync
+          </Button>
+          <Button 
+            size="sm" 
+            className="bg-cyan-glow text-midnight hover:bg-cyan-dim disabled:opacity-50"
+            onClick={() => applyMutation.mutate()}
+            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting}
+          >
+            <Play className="h-3.5 w-3.5 mr-1.5" />
+            {applyMutation.isPending ? "Applying..." : "Apply definition"}
+          </Button>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        {/* Editor */}
-        <div className="xl:col-span-2 space-y-3">
-          <Card>
-            <CardHeader className="pb-2 flex flex-row items-center justify-between">
-              <CardTitle className="text-sm font-medium flex items-center gap-2">
-                <FileCode2 className="h-4 w-4" />
-                YAML Editor
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-muted-foreground">{lineCount} lines</span>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => { setYaml(EXAMPLE_YAML); setResult(null); }}
-                  className="text-xs h-7"
-                >
-                  Load example
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => { setYaml(""); setResult(null); }}
-                  className="text-xs h-7"
-                  disabled={!yaml}
-                >
-                  <RotateCcw className="h-3 w-3 mr-1" />
-                  Clear
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <div className="relative">
-                {/* Line numbers */}
-                <div className="absolute left-0 top-0 bottom-0 w-10 flex flex-col bg-muted/50 border-r text-[10px] font-mono text-muted-foreground overflow-hidden pointer-events-none select-none pt-3 pl-2">
-                  {yaml.split("\n").map((_, i) => (
-                    <div key={i} className="leading-6">{i + 1}</div>
-                  ))}
-                  {yaml.length === 0 && <div className="leading-6">1</div>}
-                </div>
-                <textarea
-                  value={yaml}
-                  onChange={e => { setYaml(e.target.value); setResult(null); }}
-                  spellCheck={false}
-                  placeholder={`# Paste your job definition YAML here\n# or click "Load example" to get started`}
-                  className="w-full min-h-[480px] pl-12 pr-4 pt-3 pb-3 font-mono text-sm bg-code-bg text-code-fg rounded-b-lg focus:outline-none focus:ring-2 focus:ring-ring resize-y placeholder:text-muted-foreground/40 leading-6"
-                  style={{ tabSize: 2 }}
-                  onKeyDown={e => {
-                    // Tab inserts 2 spaces
-                    if (e.key === "Tab") {
-                      e.preventDefault();
-                      const start = e.currentTarget.selectionStart;
-                      const end = e.currentTarget.selectionEnd;
-                      const newVal = yaml.substring(0, start) + "  " + yaml.substring(end);
-                      setYaml(newVal);
-                      setTimeout(() => {
-                        e.currentTarget.selectionStart = start + 2;
-                        e.currentTarget.selectionEnd = start + 2;
-                      }, 0);
-                    }
-                  }}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          <div className="flex items-center gap-3">
-            <Button
-              onClick={() => applyMutation.mutate()}
-              disabled={!yaml.trim() || applyMutation.isPending}
-              className="gap-2"
+      <div className="bg-obsidian border border-graphite/50 rounded-lg p-[3px] w-fit">
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList className="bg-transparent h-auto p-0 space-x-1">
+            <TabsTrigger 
+              value="editor" 
+              className="data-[state=active]:bg-cyan/15 data-[state=active]:text-cyan-glow data-[state=active]:border-cyan/30 border border-transparent px-3.5 py-1.5 text-xs font-medium text-text-2 transition-all"
             >
-              <Play className="h-4 w-4" />
-              {applyMutation.isPending ? "Applying..." : "Apply Definition"}
-            </Button>
-            {result && (
-              <Badge variant={result.ok ? "success" : "destructive"} className="gap-1.5">
-                {result.ok
-                  ? <CheckCircle2 className="h-3 w-3" />
-                  : <XCircle className="h-3 w-3" />}
-                {result.message}
-              </Badge>
-            )}
-          </div>
+              Editor
+              {hasErrors && (
+                <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-danger/20 text-danger">
+                  {lintResult.errors.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger 
+              value="diff" 
+              className="data-[state=active]:bg-cyan/15 data-[state=active]:text-cyan-glow data-[state=active]:border-cyan/30 border border-transparent px-3.5 py-1.5 text-xs font-medium text-text-2 transition-all"
+            >
+              Diff vs server
+              {diffCount > 0 && !hasErrors && (
+                <span className="ml-2 font-mono text-[10px] px-1.5 py-0.5 rounded-full bg-gold/20 text-gold">
+                  {diffCount}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger 
+              value="history" 
+              disabled
+              title="Coming in v1.1"
+              className="disabled:opacity-50 border border-transparent px-3.5 py-1.5 text-xs font-medium text-text-2 transition-all cursor-not-allowed"
+            >
+              History
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
 
-          {/* Result detail */}
-          {result?.detail && (
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm font-medium">
-                  {result.ok ? "Response" : "Error Detail"}
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <pre className={`text-xs rounded p-3 overflow-auto max-h-48 font-mono ${
-                  result.ok ? "bg-muted text-foreground" : "bg-destructive/10 text-destructive"
-                }`}>
-                  {result.detail}
-                </pre>
-              </CardContent>
-            </Card>
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_320px] gap-4 items-start">
+        <div className="flex flex-col gap-4">
+          {tab === "editor" ? (
+            <>
+              <Card className="bg-midnight/30 border-graphite/50 overflow-hidden shadow-lg">
+                <div className="flex justify-between items-center px-4 py-2.5 border-b border-graphite/50 bg-obsidian/50">
+                  <div className="flex items-center gap-2">
+                    <FileCode2 className="h-3.5 w-3.5 text-text-3" />
+                    <span className="font-mono text-xs text-text-2">job.yaml</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono text-[10px] text-text-4">
+                      {lineCount} lines <span className="mx-1">·</span> {(yaml.length / 1024).toFixed(1)} KB
+                    </span>
+                    <button 
+                      onClick={() => setYaml(EXAMPLE_YAML)} 
+                      className="text-[11px] text-text-3 hover:text-text-1 transition-colors"
+                    >
+                      Reset example
+                    </button>
+                  </div>
+                </div>
+                
+                <div className="min-h-[420px] bg-void">
+                  <CodeMirror
+                    value={yaml}
+                    height="420px"
+                    extensions={[yamlLang(), customTheme, customLinter]}
+                    onChange={handleYamlChange}
+                    basicSetup={{
+                      lineNumbers: true,
+                      foldGutter: true,
+                      dropCursor: true,
+                      allowMultipleSelections: true,
+                      indentOnInput: true,
+                      bracketMatching: true,
+                      closeBrackets: true,
+                      autocompletion: true,
+                      highlightActiveLine: true,
+                      highlightSelectionMatches: true,
+                    }}
+                  />
+                </div>
+              </Card>
+
+              {/* Lint feedback */}
+              <Card className="bg-midnight/30 border-graphite/50 overflow-hidden">
+                <div className="px-4 py-2.5 border-b border-graphite/50 flex justify-between items-center bg-obsidian/30">
+                  <div className="text-xs font-medium flex items-center gap-2">
+                    {hasErrors ? (
+                      <>
+                        <XCircle className="h-3.5 w-3.5 text-danger" />
+                        <span className="text-danger">{lintResult.errors.length} validation {lintResult.errors.length === 1 ? "error" : "errors"}</span>
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="h-3.5 w-3.5 text-success" />
+                        <span className="text-success">Schema valid</span>
+                        <span className="text-text-4 mx-1">·</span>
+                        <span className="text-text-3">{lintResult.summary?.steps || "No steps"}</span>
+                      </>
+                    )}
+                  </div>
+                  <span className="font-mono text-[10px] text-text-4">live lint</span>
+                </div>
+                
+                {hasErrors && (
+                  <div className="p-3 flex flex-col gap-2">
+                    {lintResult.errors.map((e, i) => (
+                      <div key={i} className="flex items-start gap-2.5 text-xs">
+                        <FileWarning className="h-3.5 w-3.5 text-danger mt-0.5 flex-shrink-0" />
+                        <span className="text-danger/90">{e.message}</span>
+                        {e.line != null && (
+                          <span className="font-mono text-[10px] text-text-4 ml-auto whitespace-nowrap mt-0.5">line {e.line}</span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {!hasErrors && lintResult.summary?.steps && (
+                  <div className="p-3">
+                    <div className="flex items-start gap-2.5 text-xs">
+                      <Info className="h-3.5 w-3.5 text-success mt-0.5 flex-shrink-0" />
+                      <span className="text-text-2">{lintResult.summary.steps}</span>
+                    </div>
+                  </div>
+                )}
+              </Card>
+            </>
+          ) : (
+            <DiffView diff={diffResult} />
           )}
         </div>
 
-        {/* Reference panel */}
-        <div className="space-y-4">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Schema Reference</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4 text-xs">
-              <div>
-                <p className="font-semibold text-foreground mb-1.5">Required top-level fields</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`apiVersion: v1
+        {/* Right rail */}
+        <div className="flex flex-col gap-3 sticky top-4">
+          <Card className="bg-midnight/30 border-graphite/50 p-4 shadow-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-text-3 mb-3">Schema reference</div>
+            <RefBlock title="Top-level fields" code={`apiVersion: v1
 kind: Job
 metadata:
   alias: string     # required
 trigger:
   type: cron|http
-  configuration:    # type-specific
-    path: my-job    # required for http
-steps:
-  - name: string    # required
-    image: string   # required
-    command: [...]  # optional
-    engine: docker  # default`}</pre>
-              </div>
-              <div>
-                <p className="font-semibold text-foreground mb-1.5">Step DAG edges</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`# Explicit successors
-next: [step-b, step-c]
-# Or prerequisites
-dependsOn: [step-a]
-# Without edges: steps run
-# sequentially top-to-bottom`}</pre>
-              </div>
-              <div>
-                <p className="font-semibold text-foreground mb-1.5">Callbacks (optional)</p>
-                <pre className="bg-muted rounded p-2 text-muted-foreground overflow-x-auto">{`callbacks:
+steps: [...]`} />
+            <RefBlock title="DAG edges" code={`# Prerequisites (recommended)
+dependsOn: [extract.users]
+
+# Or explicit successors
+next: [transform.users]`} />
+            <RefBlock title="Callbacks" code={`callbacks:
   - type: notification
     configuration:
-      webhook_url: "https://..."
-      channel: "#alerts"`}</pre>
-              </div>
-            </CardContent>
+      webhook_url: "https://…"
+      channel: "#alerts"`} />
           </Card>
-
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-sm font-medium">Notes</CardTitle>
-            </CardHeader>
-            <CardContent className="text-xs text-muted-foreground space-y-2">
-              <p>• Applying a definition is <strong className="text-foreground">idempotent</strong> — re-applying the same definition updates existing resources.</p>
-              <p>• Jobs, atoms, and triggers can be defined in the same manifest or separate files.</p>
-              <p>• Trigger aliases are referenced by jobs in the <code className="bg-muted px-1 rounded">trigger</code> field.</p>
-              <p>• Task order is defined by the <code className="bg-muted px-1 rounded">next</code> field to form a DAG.</p>
-            </CardContent>
+          
+          <Card className="bg-midnight/30 border-graphite/50 p-4 shadow-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-text-3 mb-3">Tips</div>
+            <ul className="m-0 p-0 list-none flex flex-col gap-2.5 text-xs text-text-2 leading-relaxed">
+              <li className="flex gap-2">
+                <span className="text-cyan-glow mt-0.5">·</span> 
+                <span>Apply is <strong>idempotent</strong> — re-applying updates existing resources.</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-cyan-glow mt-0.5">·</span> 
+                <span>Multiple resources can share one manifest.</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-cyan-glow mt-0.5">·</span> 
+                <span>Use <code className="font-mono bg-obsidian px-1 py-0.5 rounded text-[11px] text-cyan-glow border border-graphite/50">caesium job lint</code> in CI.</span>
+              </li>
+              <li className="flex gap-2">
+                <span className="text-cyan-glow mt-0.5">·</span> 
+                <span>Without edges, steps run sequentially.</span>
+              </li>
+            </ul>
           </Card>
         </div>
       </div>
+    </div>
+  );
+}
+
+function DiffView({ diff }: { diff: DiffResponse | null }) {
+  if (!diff) {
+    return (
+      <Card className="bg-midnight/30 border-graphite/50 p-8 text-center text-text-3 text-sm">
+        No differences to display. Schema must be valid to generate a diff.
+      </Card>
+    );
+  }
+
+  const added = diff.added || [];
+  const modified = diff.modified || [];
+  const removed = diff.removed || [];
+  const total = added.length + modified.length + removed.length;
+
+  return (
+    <Card className="bg-midnight/30 border-graphite/50 overflow-hidden shadow-lg">
+      <div className="px-4 py-3 border-b border-graphite/50 bg-obsidian/30 flex justify-between items-start sm:items-center flex-col sm:flex-row gap-2">
+        <div>
+          <div className="text-[13px] font-medium text-text-1">Diff vs server state</div>
+          <div className="text-[11px] text-text-3 mt-0.5">{total} {total === 1 ? "change" : "changes"} pending apply</div>
+        </div>
+        <div className="flex gap-3 text-[11px] font-medium bg-obsidian/60 px-3 py-1.5 rounded-full border border-graphite/40">
+          <span className="text-success flex items-center gap-1"><span className="text-[14px] leading-none">+</span> {added.length} added</span>
+          <span className="text-gold flex items-center gap-1"><span className="text-[14px] leading-none">~</span> {modified.length} modified</span>
+          <span className="text-danger flex items-center gap-1"><span className="text-[14px] leading-none">-</span> {removed.length} removed</span>
+        </div>
+      </div>
+      
+      <div className="p-0">
+        {total === 0 ? (
+          <div className="p-8 text-center text-text-3 text-sm">
+            Local definitions exactly match the server state.
+          </div>
+        ) : (
+          <div className="font-mono text-xs leading-relaxed overflow-x-auto bg-void p-4">
+            {added.map((a, i) => (
+              <div key={`a-${i}`} className="flex gap-3 py-1.5">
+                <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
+                <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
+                <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
+              </div>
+            ))}
+            
+            {removed.map((r, i) => (
+              <div key={`r-${i}`} className="flex gap-3 py-1.5">
+                <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
+                <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
+                <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
+              </div>
+            ))}
+            
+            {modified.map((m, i) => (
+              <div key={`m-${i}`} className="flex flex-col py-2 border-b border-graphite/30 last:border-0">
+                <div className="flex gap-3 mb-1">
+                  <span className="text-gold font-bold w-4 flex-shrink-0 text-center">~</span>
+                  <span className="text-cyan-glow">{m.alias}</span>
+                </div>
+                <div className="pl-7 pr-2">
+                  <pre className="text-[11px] font-mono text-text-3 overflow-x-auto bg-obsidian/30 p-2 rounded border border-graphite/20">
+                    {m.diff}
+                  </pre>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+}
+
+function RefBlock({ title, code }: { title: string; code: string }) {
+  return (
+    <div className="mb-4 last:mb-0">
+      <div className="text-[11px] font-medium text-text-1 mb-1.5">{title}</div>
+      <pre className="font-mono m-0 p-2.5 rounded bg-void border border-graphite/60 text-[10.5px] leading-relaxed text-text-2 whitespace-pre-wrap overflow-hidden">
+        {code}
+      </pre>
     </div>
   );
 }

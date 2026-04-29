@@ -1,27 +1,35 @@
 import { Link } from "@tanstack/react-router";
 import { useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Card } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RelativeTime } from "@/components/relative-time";
 import { Activity, Database, CheckCircle2, XCircle, Clock, ScrollText, Server, Zap, RefreshCw, TerminalSquare } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { useClusterHealth } from "./useClusterHealth";
+import { AtomLogo } from "@/components/brand/atom-logo";
+import { PROMETHEUS_METRICS } from "./metrics";
+import type { Node } from "@/lib/api";
+import React from "react";
 
 function StatusDot({ ok }: { ok: boolean }) {
-  return ok
-    ? <span className="inline-block h-2 w-2 rounded-full bg-green-500" />
-    : <span className="inline-block h-2 w-2 rounded-full bg-destructive animate-pulse" />;
+  return (
+    <span 
+      className={`inline-block h-2 w-2 rounded-full shadow-[0_0_6px] flex-shrink-0 ${
+        ok 
+          ? "bg-success shadow-success/60" 
+          : "bg-danger shadow-danger/60 animate-pulse"
+      }`} 
+    />
+  );
 }
 
-function formatUptime(ns: number): string {
-  const seconds = Math.floor(ns / 1e9);
-  if (seconds < 60) return `${seconds}s`;
+function formatUptime(seconds: number): string {
+  if (seconds < 60) return `${Math.floor(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+  if (minutes < 60) return `${minutes}m ${Math.floor(seconds % 60)}s`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ${minutes % 60}m`;
   const days = Math.floor(hours / 24);
@@ -29,313 +37,369 @@ function formatUptime(ns: number): string {
 }
 
 export function SystemPage() {
+  const queryClient = useQueryClient();
   const [pruneDialogOpen, setPruneDialogOpen] = useState(false);
-  const {
-    data: health,
-    isLoading,
-    error,
-    refetch,
-    dataUpdatedAt,
-  } = useQuery({
-    queryKey: ["health"],
-    queryFn: api.getHealth,
+  const health = useClusterHealth();
+  const rawHealth = health.raw;
+  
+  const { data: nodes = [], isLoading: isLoadingNodes } = useQuery({
+    queryKey: ["system-nodes"],
+    queryFn: api.getSystemNodes,
     refetchInterval: 15000,
-    retry: false,
   });
 
-  const isHealthy = health?.status === "healthy";
-  const db = health?.checks?.database;
-  const activeRuns = health?.checks?.active_runs;
-  const triggers = health?.checks?.triggers;
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+  });
+
   const pruneCacheMutation = useMutation({
     mutationFn: api.pruneCache,
     onSuccess: (result) => {
       setPruneDialogOpen(false);
       toast.success(`Pruned ${result.pruned} expired cache entries`);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     },
     onError: (err: Error) => {
       toast.error(`Failed to prune cache: ${err.message}`);
     },
   });
 
+  const db = rawHealth?.checks?.database;
+  const activeRuns = rawHealth?.checks?.active_runs;
+  const triggers = rawHealth?.checks?.triggers;
+  const nodesCheck = rawHealth?.checks?.nodes;
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="space-y-6 pb-12">
+      <div className="flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">System</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">Cluster health and observability</p>
+          <div className="text-[10px] font-bold uppercase tracking-widest text-gold/85 mb-1">Cluster · Health</div>
+          <h1 className="text-2xl font-bold tracking-tight m-0 leading-tight">System</h1>
+          <p className="text-sm text-text-3 mt-1">Fleet observability, operator tools, and Prometheus reference</p>
         </div>
         <div className="flex items-center gap-3">
-          {dataUpdatedAt > 0 && (
-            <span className="text-xs text-muted-foreground">
-              Updated <RelativeTime date={new Date(dataUpdatedAt).toISOString()} />
-            </span>
-          )}
-          <Button variant="outline" size="sm" onClick={() => refetch()}>
+          <Button variant="outline" size="sm" onClick={() => queryClient.invalidateQueries()} className="bg-transparent border-graphite/50 text-text-2 hover:bg-graphite/20 hover:text-text-1">
             <RefreshCw className="h-3.5 w-3.5 mr-1.5" />
             Refresh
           </Button>
         </div>
       </div>
 
-      {/* Health status banner */}
-      {!isLoading && (
-        <div className={`rounded-lg border px-4 py-3 flex items-center gap-3 ${
-          error
-            ? "border-destructive bg-destructive/10"
-            : isHealthy
-              ? "border-green-500/30 bg-green-500/5"
-              : "border-yellow-500/30 bg-yellow-500/5"
-        }`}>
-          {error
-            ? <XCircle className="h-5 w-5 text-destructive shrink-0" />
-            : isHealthy
-              ? <CheckCircle2 className="h-5 w-5 text-green-500 shrink-0" />
-              : <Activity className="h-5 w-5 text-yellow-500 shrink-0" />
+      {/* Health banner */}
+      <div className={`rounded-lg border px-4 py-3 flex items-center gap-3 ${
+        health.state === "incident" || health.state === "unknown"
+          ? "border-danger/35 bg-gradient-to-r from-danger/10 to-danger/0"
+          : health.state === "operational"
+            ? "border-success/35 bg-gradient-to-r from-success/10 to-success/0"
+            : "border-gold/35 bg-gradient-to-r from-gold/10 to-gold/0"
+      }`}>
+        <div className="relative w-8 h-8 flex items-center justify-center flex-shrink-0">
+          <span className={`absolute inset-0 rounded-full animate-pulse opacity-20 ${
+            health.state === "incident" || health.state === "unknown" ? "bg-danger" : health.state === "operational" ? "bg-success" : "bg-gold"
+          }`} />
+          {health.state === "incident" || health.state === "unknown"
+            ? <XCircle className="h-4 w-4 text-danger relative" />
+            : health.state === "operational"
+              ? <CheckCircle2 className="h-4 w-4 text-success relative" />
+              : <Activity className="h-4 w-4 text-gold relative" />
           }
-          <div>
-            <p className="font-medium text-sm">
-              {error
-                ? "Health check failed — API unreachable"
-                : isHealthy
-                  ? "All systems operational"
-                  : "System degraded"}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="font-medium text-sm text-text-1 truncate">
+            {health.state === "incident" || health.state === "unknown"
+              ? "Health check failed — API unreachable"
+              : health.state === "operational"
+                ? "All systems operational"
+                : "System degraded"}
+          </p>
+          {health.uptimeSeconds != null && (
+            <p className="text-[11px] font-mono text-text-3 mt-0.5 truncate">
+              Uptime <span className="text-text-2">{formatUptime(health.uptimeSeconds)}</span>
             </p>
-            {health?.uptime != null && (
-              <p className="text-xs text-muted-foreground">
-                Uptime: {formatUptime(health.uptime)}
-              </p>
+          )}
+        </div>
+        <span className={`inline-flex items-center px-2.5 py-1 rounded text-[11px] font-bold tracking-widest uppercase flex-shrink-0 ${
+          health.state === "incident" || health.state === "unknown"
+            ? "bg-danger/15 text-danger"
+            : health.state === "operational"
+              ? "bg-success/15 text-success"
+              : "bg-gold/15 text-gold"
+        }`}>
+          {health.state}
+        </span>
+      </div>
+
+      {/* KPI strips */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <SysKpi icon={Database} label="Database" value={<span className="capitalize text-success">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} dot={db?.status === "healthy"} />
+        <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{activeRuns?.count ?? 0}</span>} sub="Currently executing" />
+        <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{triggers?.count ?? 0}</span>} sub="Registered" />
+        <SysKpi icon={Server} label="Nodes" value={<span className="font-mono">{nodesCheck?.count ?? nodes.length}</span>} sub="Active workers" dot={nodes.length > 0} />
+      </div>
+
+      <div className="grid lg:grid-cols-[2fr_1fr] gap-4 items-start">
+        {/* Nodes Table */}
+        <Card className="bg-midnight/30 border-graphite/50 overflow-hidden rounded-lg">
+          <div className="px-4 py-3 border-b border-graphite/50 flex justify-between items-center bg-obsidian/30">
+            <div>
+              <div className="text-[13px] font-medium text-text-1">Cluster nodes</div>
+              <div className="text-[11px] text-text-3 mt-0.5">dqlite quorum · dynamic allocation</div>
+            </div>
+            <span className="font-mono text-[11px] text-text-3">{nodes.length} total</span>
+          </div>
+          <div className="grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-2 bg-obsidian/50 border-b border-graphite/50 text-[10px] font-semibold tracking-[0.16em] uppercase text-text-3">
+            <span>Address</span><span>Arch</span><span>Workers</span>
+          </div>
+          <div>
+            {isLoadingNodes ? (
+              <div className="p-4 space-y-3">
+                <Skeleton className="h-6 w-full bg-graphite/10" />
+                <Skeleton className="h-6 w-full bg-graphite/10" />
+              </div>
+            ) : nodes.length === 0 ? (
+              <div className="p-8 text-center text-sm text-text-4">No nodes detected</div>
+            ) : (
+              nodes.map((n, i) => (
+                <div key={n.address} className={`grid grid-cols-[minmax(0,1.5fr)_70px_90px] px-4 py-3 items-center ${i !== nodes.length - 1 ? "border-b border-graphite/30" : ""}`}>
+                  <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                    <StatusDot ok={true} />
+                    <div className="min-w-0">
+                      <div className="font-mono text-xs text-text-1 truncate">{n.address}</div>
+                    </div>
+                  </div>
+                  <span className="font-mono text-[11px] text-text-2 truncate">{n.arch}</span>
+                  <span className="font-mono text-xs text-text-2 truncate">{n.workers_busy}/{n.workers_total}</span>
+                </div>
+              ))
             )}
           </div>
-        </div>
-      )}
-
-      {/* KPI cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Database</CardTitle>
-            <Database className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-7 w-24" /> : (
-              <div className="flex items-center gap-2">
-                <StatusDot ok={db?.status === "healthy"} />
-                <span className="text-lg font-semibold capitalize">{db?.status ?? "unknown"}</span>
-              </div>
-            )}
-            {db?.latency_ms != null && (
-              <p className="text-xs text-muted-foreground mt-1">{db.latency_ms} ms latency</p>
-            )}
-          </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Active Runs</CardTitle>
-            <Activity className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-7 w-16" /> : (
-              <span className="text-2xl font-bold">{activeRuns?.count ?? 0}</span>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">Currently executing</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Triggers</CardTitle>
-            <Zap className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-7 w-16" /> : (
-              <span className="text-2xl font-bold">{triggers?.count ?? 0}</span>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">Registered</p>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Status</CardTitle>
-            <Server className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            {isLoading ? <Skeleton className="h-7 w-20" /> : (
-              <Badge variant={error ? "destructive" : isHealthy ? "success" : "secondary"}>
-                {error ? "unreachable" : health?.status ?? "unknown"}
-              </Badge>
-            )}
-            <p className="text-xs text-muted-foreground mt-1">API health</p>
-          </CardContent>
+        {/* Cluster Topology */}
+        <Card className="bg-midnight/30 border-graphite/50 p-4">
+          <div className="text-[13px] font-medium text-text-1 mb-1">Topology</div>
+          <div className="text-[11px] text-text-3 mb-4">Quorum view</div>
+          <ClusterTopology nodes={nodes} />
         </Card>
       </div>
 
-      <Card className="border-primary/20 bg-primary/5">
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
+      {/* Operator Tools */}
+      <Card className="relative overflow-hidden border-cyan/25 bg-gradient-to-br from-midnight to-cyan/5 p-5">
+        <div className="absolute -top-10 -right-10 w-[200px] h-[200px] opacity-5 pointer-events-none">
+          <AtomLogo size={200} animated={false} />
+        </div>
+        <div className="flex justify-between items-start mb-4 relative z-10">
           <div>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <TerminalSquare className="h-4 w-4" />
-              Operator Tools
-            </CardTitle>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Read-only debugging surfaces for operators and power users.
-            </p>
-          </div>
-          <Badge variant="outline">Power feature</Badge>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <p className="font-medium">Database Console</p>
-              <p className="text-sm text-muted-foreground">
-                Inspect the embedded database with schema-aware SQL when diagnosing jobs, runs, and scheduler state.
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_DATABASE_CONSOLE_ENABLED=true</code>.
-              </p>
+            <div className="flex items-center gap-2">
+              <TerminalSquare className="h-4 w-4 text-cyan-glow" />
+              <span className="text-sm font-medium text-text-1">Operator tools</span>
             </div>
-            <Button asChild variant="outline">
-              <Link to="/system/database">Open database console</Link>
-            </Button>
+            <div className="text-[11px] text-text-3 mt-1">Read-only debugging surfaces — gated by environment variables</div>
           </div>
-          <div className="border-t border-border" />
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <p className="font-medium flex items-center gap-2">
-                <ScrollText className="h-4 w-4" />
-                Log Console
-              </p>
-              <p className="text-sm text-muted-foreground">
-                Stream server logs in real time with level filtering and search for diagnosing runtime behavior.
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Requires <code className="rounded bg-background px-1 py-0.5">CAESIUM_LOG_CONSOLE_ENABLED=true</code>.
-              </p>
-            </div>
-            <Button asChild variant="outline">
-              <Link to="/system/logs">Open log console</Link>
-            </Button>
-          </div>
-          <div className="border-t border-border" />
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="space-y-1">
-              <p className="font-medium flex items-center gap-2">
-                <Database className="h-4 w-4" />
-                Cache Maintenance
-              </p>
-              <p className="text-sm text-muted-foreground">
-                Remove expired task cache entries across all jobs to keep the cache store tidy.
-              </p>
-            </div>
-            <Button variant="outline" onClick={() => setPruneDialogOpen(true)}>
-              Prune expired cache
-            </Button>
-          </div>
-        </CardContent>
+          <span className="text-[10px] font-bold tracking-widest uppercase px-2 py-1 rounded border border-gold/40 text-gold bg-gold/5">Power feature</span>
+        </div>
+        <div className="grid sm:grid-cols-3 gap-3 relative z-10">
+          <ToolCard 
+            icon={Database} 
+            title="Database console" 
+            desc="Schema-aware SQL with read-only safeguards." 
+            env="CAESIUM_DATABASE_CONSOLE_ENABLED" 
+            enabled={features?.database_console_enabled}
+            to="/system/database"
+          />
+          <ToolCard 
+            icon={ScrollText} 
+            title="Log console" 
+            desc="Stream server logs in real time with level filtering." 
+            env="CAESIUM_LOG_CONSOLE_ENABLED" 
+            enabled={features?.log_console_enabled}
+            to="/system/logs"
+          />
+          <ToolCard 
+            icon={RefreshCw} 
+            title="Cache maintenance" 
+            desc="Prune expired task cache entries across all jobs." 
+            onClick={() => setPruneDialogOpen(true)}
+            enabled={true} // Always available
+          />
+        </div>
       </Card>
 
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Health Checks */}
+        <Card className="bg-midnight/30 border-graphite/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-graphite/50">
+            <div className="text-[13px] font-medium text-text-1">Health checks</div>
+            <div className="text-[11px] text-text-3 mt-0.5">Polled every 15s · {health.state === "operational" ? "all green" : "review degraded items"}</div>
+          </div>
+          <div className="flex flex-col">
+            {[
+              { key: "Database", result: db, detail: db?.latency_ms != null ? `${db.latency_ms} ms latency` : undefined },
+              { key: "Active Runs", result: activeRuns, detail: activeRuns?.count != null ? `${activeRuns.count} running` : undefined, alwaysOk: true },
+              { key: "Triggers", result: triggers, detail: triggers?.count != null ? `${triggers.count} registered` : undefined, alwaysOk: true },
+              { key: "Nodes", result: nodesCheck, detail: nodesCheck?.count != null ? `${nodesCheck.count} tracking` : undefined, alwaysOk: true },
+            ].map((c, i, arr) => (
+              <div key={c.key} className={`flex justify-between items-center px-4 py-3 ${i !== arr.length - 1 ? "border-b border-graphite/30" : ""}`}>
+                <div className="flex items-center gap-2.5">
+                  <StatusDot ok={c.alwaysOk ? true : c.result?.status === "healthy"} />
+                  <span className="text-[13px] text-text-1">{c.key}</span>
+                </div>
+                <span className="font-mono text-[11px] text-text-3">{c.detail || "--"}</span>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        {/* Prometheus Metrics */}
+        <Card className="bg-midnight/30 border-graphite/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-graphite/50 flex justify-between items-center">
+            <div>
+              <div className="text-[13px] font-medium text-text-1 flex items-center gap-2">
+                <Clock className="h-3.5 w-3.5 text-text-3" />
+                Prometheus metrics
+              </div>
+              <div className="text-[11px] text-text-3 mt-1">
+                Exposed at <code className="font-mono bg-obsidian px-1.5 py-0.5 rounded text-cyan-glow">/metrics</code>
+              </div>
+            </div>
+            <Button variant="ghost" size="sm" asChild className="h-7 text-xs text-text-3 hover:text-text-1 border border-graphite/50">
+              <a href="/metrics" target="_blank" rel="noreferrer">Open</a>
+            </Button>
+          </div>
+          <div className="p-4 flex flex-wrap gap-1.5 max-h-[250px] overflow-y-auto custom-scrollbar">
+            {PROMETHEUS_METRICS.map((m) => (
+              <code key={m.name} className="font-mono text-[10.5px] px-2 py-1 rounded bg-obsidian border border-graphite/50 text-text-2 hover:border-cyan/50 hover:text-cyan-glow transition-colors cursor-default" title={m.help}>
+                {m.name}
+              </code>
+            ))}
+          </div>
+        </Card>
+      </div>
+
       <Dialog open={pruneDialogOpen} onOpenChange={setPruneDialogOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-[425px] bg-midnight border-graphite/50 text-text-1">
           <DialogHeader>
-            <DialogTitle>Prune expired cache entries</DialogTitle>
-            <DialogDescription>
-              This removes only expired cache records across all jobs. Active cache entries are not affected.
+            <DialogTitle className="text-lg">Prune expired cache entries</DialogTitle>
+            <DialogDescription className="text-text-3 mt-1.5">
+              This removes only expired records across all jobs. Active cache entries are not affected and will continue to serve hits.
             </DialogDescription>
           </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPruneDialogOpen(false)} disabled={pruneCacheMutation.isPending}>
+          <DialogFooter className="mt-4 gap-2 sm:gap-0">
+            <Button variant="outline" onClick={() => setPruneDialogOpen(false)} disabled={pruneCacheMutation.isPending} className="bg-transparent border-graphite/50 text-text-2 hover:text-text-1 hover:bg-graphite/20">
               Cancel
             </Button>
-            <Button onClick={() => pruneCacheMutation.mutate()} disabled={pruneCacheMutation.isPending}>
-              Confirm prune
+            <Button onClick={() => pruneCacheMutation.mutate()} disabled={pruneCacheMutation.isPending} className="bg-cyan-glow text-midnight hover:bg-cyan-dim">
+              {pruneCacheMutation.isPending ? "Pruning..." : "Confirm prune"}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+    </div>
+  );
+}
 
-      {/* Checks breakdown */}
-      {!isLoading && health?.checks && (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Health Checks</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {[
-              {
-                key: "Database",
-                result: db,
-                detail: db?.latency_ms != null ? `${db.latency_ms} ms latency` : undefined,
-              },
-              {
-                key: "Active Runs",
-                result: activeRuns,
-                detail: activeRuns?.count != null ? `${activeRuns.count} running` : undefined,
-                alwaysOk: true,
-              },
-              {
-                key: "Triggers",
-                result: triggers,
-                detail: triggers?.count != null ? `${triggers.count} registered` : undefined,
-                alwaysOk: true,
-              },
-            ].map(({ key, result, detail, alwaysOk }) => (
-              <div key={key} className="flex items-center justify-between py-2 border-b last:border-0">
-                <div className="flex items-center gap-3">
-                  <StatusDot ok={alwaysOk ? true : result?.status === "healthy"} />
-                  <span className="text-sm font-medium">{key}</span>
-                </div>
-                <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                  {detail && <span className="font-mono text-xs">{detail}</span>}
-                  {!alwaysOk && result?.status && (
-                    <Badge variant={result.status === "healthy" ? "success" : "destructive"} className="text-[10px]">
-                      {result.status}
-                    </Badge>
-                  )}
-                </div>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
+function SysKpi({ icon: Icon, label, value, sub, dot }: { icon: React.ComponentType<{ className?: string }>; label: string; value: React.ReactNode; sub: string; dot?: boolean }) {
+  return (
+    <Card className="bg-midnight/30 border-graphite/50 p-3.5 hover:bg-midnight/50 transition-colors">
+      <div className="flex justify-between items-center mb-2">
+        <span className="text-[10px] font-bold tracking-widest uppercase text-text-3">{label}</span>
+        <Icon className="h-3.5 w-3.5 text-text-4" />
+      </div>
+      <div className="flex items-center gap-2">
+        {dot && <StatusDot ok={true} />}
+        <div className="text-[22px] font-medium text-text-1 tracking-tight leading-none">{value}</div>
+      </div>
+      <div className="font-mono text-[10px] text-text-4 mt-2 truncate">{sub}</div>
+    </Card>
+  );
+}
+
+function ClusterTopology({ nodes }: { nodes: Node[] }) {
+  const cx = 110, cy = 110, R = 70;
+  return (
+    <svg viewBox="0 0 220 220" className="w-full h-[220px]">
+      <defs>
+        <radialGradient id="topo-glow" cx="0.5" cy="0.5" r="0.5">
+          <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0" />
+        </radialGradient>
+      </defs>
+      {/* connections */}
+      {nodes.map((_n1, i) => nodes.slice(i + 1).map((_n2, j) => {
+        const a1 = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+        const a2 = ((i + j + 1) / nodes.length) * Math.PI * 2 - Math.PI / 2;
+        return (
+          <line key={`${i}-${j}`}
+            x1={cx + Math.cos(a1) * R} y1={cy + Math.sin(a1) * R}
+            x2={cx + Math.cos(a2) * R} y2={cy + Math.sin(a2) * R}
+            stroke="var(--cyan)" strokeOpacity="0.3" strokeWidth="1" strokeDasharray="2 3"
+          />
+        );
+      }))}
+      {/* center label */}
+      <circle cx={cx} cy={cy} r="40" fill="url(#topo-glow)" />
+      <text x={cx} y={cy - 2} textAnchor="middle" fontSize="9" fill="var(--text-3)" style={{ letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>quorum</text>
+      <text x={cx} y={cy + 12} textAnchor="middle" fontSize="14" fill="var(--text-1)" fontWeight="500" className="font-mono">{nodes.length}/{nodes.length}</text>
+      {/* nodes */}
+      {nodes.map((n, i) => {
+        const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+        const x = cx + Math.cos(angle) * R;
+        const y = cy + Math.sin(angle) * R;
+        // In reality we don't know the leader right now, so we just treat them all equal
+        const isLeader = i === 0;
+        return (
+          <g key={n.address}>
+            <circle cx={x} cy={y} r="14" fill={isLeader ? "var(--gold)" : "var(--cyan)"} opacity="0.18" />
+            <circle cx={x} cy={y} r="8" fill={isLeader ? "var(--gold)" : "var(--cyan)"} stroke="var(--midnight)" strokeWidth="2" />
+            <text x={x} y={y + Math.sin(angle) * 24 + (Math.sin(angle) > 0 ? 8 : -2)} textAnchor="middle" fontSize="9" fill="var(--text-2)" className="font-mono">{n.address.split(":")[0]}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function ToolCard({ icon: Icon, title, desc, env, enabled, onClick, to }: { icon: React.ComponentType<{ className?: string }>; title: string; desc: string; env?: string; enabled?: boolean; onClick?: () => void; to?: string }) {
+  const content = (
+    <div className={`
+      p-3.5 rounded-lg border transition-all duration-160 flex flex-col gap-2 h-full
+      ${to || onClick ? "cursor-pointer bg-obsidian/60 border-graphite/50 hover:bg-obsidian hover:border-cyan/40 group" : "bg-obsidian/40 border-graphite/30"}
+    `}>
+      <div className="flex justify-between items-center">
+        <Icon className="w-4 h-4 text-cyan-glow" />
+        {enabled != null && (
+          <span className={`
+            text-[9px] font-bold tracking-[0.12em] uppercase px-1.5 py-0.5 rounded-[3px]
+            ${enabled ? "bg-success/15 text-success" : "bg-graphite text-text-3"}
+          `}>
+            {enabled ? "Enabled" : "Disabled"}
+          </span>
+        )}
+      </div>
+      <div className="flex-1">
+        <div className="text-[13px] font-medium text-text-1 group-hover:text-cyan-glow transition-colors">{title}</div>
+        <div className="text-[11px] text-text-3 mt-1 leading-relaxed">{desc}</div>
+      </div>
+      {env && (
+        <code className="font-mono text-[10px] text-text-4 bg-void px-1.5 py-0.5 rounded-[3px] mt-auto truncate w-full text-center" title={env}>
+          {env}
+        </code>
       )}
+    </div>
+  );
 
-      {/* Prometheus metrics reference */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <Clock className="h-4 w-4" />
-            Prometheus Metrics
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <p className="text-sm text-muted-foreground mb-3">
-            Detailed metrics are exposed in Prometheus format at <code className="bg-muted px-1 rounded">/metrics</code>.
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {[
-              "caesium_job_runs_total",
-              "caesium_job_run_duration_seconds",
-              "caesium_task_runs_total",
-              "caesium_task_run_duration_seconds",
-              "caesium_jobs_active",
-              "caesium_worker_claims_total",
-              "caesium_trigger_fires_total",
-            ].map(m => (
-              <code key={m} className="text-xs bg-muted px-2 py-1 rounded font-mono">{m}</code>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
+  if (to) {
+    return (
+      <Link to={to} className="block outline-none focus-visible:ring-2 focus-visible:ring-cyan-glow rounded-lg">
+        {content}
+      </Link>
+    );
+  }
 
-      {error && (
-        <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm">
-          <p className="font-medium text-destructive">Unable to reach health endpoint</p>
-          <p className="text-xs mt-1 text-muted-foreground">
-            Ensure the Caesium API is running and the <code className="bg-muted px-1 rounded">/health</code> endpoint is accessible.
-          </p>
-        </div>
-      )}
+  return (
+    <div onClick={onClick} role="button" tabIndex={0} className="block outline-none focus-visible:ring-2 focus-visible:ring-cyan-glow rounded-lg">
+      {content}
     </div>
   );
 }

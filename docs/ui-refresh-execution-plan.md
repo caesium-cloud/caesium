@@ -1,6 +1,6 @@
 # UI Refresh — Execution Plan
 
-> Status: Active — Phase 0 shipped (2026-04-28, branch `claude/eager-rubin-E3djS`). Phase 1 shipped (2026-04-28, branch `claude/wizardly-sutherland-c39d8e`). Phase 2 is next. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
+> Status: Active — Phase 0 shipped (2026-04-28, branch `claude/eager-rubin-E3djS`). Phase 1 shipped (2026-04-28, branch `claude/wizardly-sutherland-c39d8e`). Phase 2 shipped (2026-04-28). Phase 3 shipped (2026-04-28). Phase 4 is next. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
 
 ## How to use this plan
 
@@ -146,7 +146,7 @@ These are the pages operators stare at. Land Phase 0 first; skip ahead and you'l
 
 ---
 
-## Phase 2 · Lower-traffic paths
+## Phase 2 · Lower-traffic paths ✅ Shipped 2026-04-28
 
 Land Phase 1 first; these pages are quieter and benefit from the primitives stabilizing.
 
@@ -183,7 +183,7 @@ Land Phase 1 first; these pages are quieter and benefit from the primitives stab
 
 ---
 
-## Phase 3 · Net-new server work
+## Phase 3 · Net-new server work ✅ Shipped 2026-04-28
 
 System and JobDefs need backend extensions. Ship behind `CAESIUM_UI_REFRESH_V2_SYSTEM` (server-side feature flag exposed via `/v1/system/features`) until the new endpoints stabilize.
 
