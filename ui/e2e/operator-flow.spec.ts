@@ -69,7 +69,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await expect(page.getByTestId("task-detail-panel").getByText("Live", { exact: true })).toBeVisible();
   await expect(page.getByTestId("task-log-plaintext")).toContainText("Starting log streaming showcase");
 
-  await expect(page.getByText("succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  await expect(page.locator('[data-status="succeeded"]').first()).toBeVisible({ timeout: 90_000 });
 
   await page.reload();
   node = page.locator(".react-flow__node").first();
