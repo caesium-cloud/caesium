@@ -1,6 +1,6 @@
 # Caesium Web UI Implementation Plan
 
-> Status: Closed for the visual layer. The visual / primitive / page-shape work has moved to [`design-ui-refresh.md`](design-ui-refresh.md) and [`ui-refresh-execution-plan.md`](ui-refresh-execution-plan.md). This document remains authoritative for the original v1 feature scope (what shipped, what tests cover) — keep it as the historical record of the v1 plan and don't add new visual work here.
+> Status: Closed. This document is the historical record of the v1 feature scope and the 2026-04 UI refresh. No new work tracked here.
 
 ## Current State
 
@@ -27,6 +27,16 @@ The embedded UI is already in production shape for the core operator workflow:
 - [x] Task log streaming with retained-log fallback
 - [x] Operator actions for pause/unpause, trigger, backfill, and callback retry
 - [x] Command palette, keyboard shortcuts, theme support, and general UI polish
+
+### UI Refresh (2026-04) — Shipped
+
+Full visual-layer redesign shipped across PRs [#146](https://github.com/caesium-cloud/caesium/pull/146), [#147](https://github.com/caesium-cloud/caesium/pull/147), and [#148](https://github.com/caesium-cloud/caesium/pull/148).
+
+- [x] Design tokens, status semantics, `<AtomLogo>`, and UI primitives (Phase 0)
+- [x] App shell visual upgrade: animated sidebar, breadcrumb header, UTC clock (Phase 0)
+- [x] Jobs list, Job Detail + DAG, Run Detail + log viewer (Phase 1)
+- [x] Stats page, Triggers page (Phase 2)
+- [x] System page with cluster topology, JobDefs editor with CodeMirror lint/diff (Phase 3)
 
 ### Phase 2 Work Already Landed
 
