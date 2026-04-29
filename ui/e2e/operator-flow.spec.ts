@@ -52,7 +52,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
 
   await page.goto("/jobs");
 
-  const row = page.locator("tr", { hasText: alias }).first();
+  const row = page.locator('[data-testid="job-row"]', { hasText: alias }).first();
   await expect(row).toBeVisible();
 
   await row.locator('button[title="Trigger run"]').click();

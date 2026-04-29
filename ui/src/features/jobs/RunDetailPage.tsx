@@ -230,7 +230,7 @@ export function RunDetailPage() {
           </div>
           <div className="flex items-center gap-2.5">
             <h1 className="text-xl font-semibold text-text-1 font-mono tracking-tight">
-              {shortId(runId)}
+              Run {shortId(runId)}
             </h1>
             <StatusBadge status={run.status} size="sm" />
           </div>

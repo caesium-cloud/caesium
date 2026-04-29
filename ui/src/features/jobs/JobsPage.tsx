@@ -131,6 +131,7 @@ function JobsPageInner() {
           return (
             <div
               key={job.id}
+              data-testid="job-row"
               className={cn(
                 "group grid items-center px-4 py-0 border-b border-border/40 last:border-0 transition-colors",
                 "hover:bg-obsidian/60",
