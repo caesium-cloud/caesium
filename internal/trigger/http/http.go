@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	stdhttp "net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/job"
@@ -21,11 +23,45 @@ type HTTP struct {
 	trigger.Trigger
 	id     uuid.UUID
 	config Config
+	now    func() time.Time
+
+	secretResolver secret.Resolver
+	listJobs       func(context.Context, string) (models.Jobs, error)
+	runJob         func(context.Context, *models.Job, map[string]string) error
 }
 
-var ErrInvalidSignature = errors.New("invalid signature")
+var (
+	ErrInvalidSignature = errors.New("invalid signature")
+	ErrReplayedRequest  = errors.New("replayed request")
+)
 
-func New(t *models.Trigger) (*HTTP, error) {
+type Option func(*HTTP)
+
+func WithNow(fn func() time.Time) Option {
+	return func(h *HTTP) {
+		h.now = fn
+	}
+}
+
+func WithSecretResolver(resolver secret.Resolver) Option {
+	return func(h *HTTP) {
+		h.secretResolver = resolver
+	}
+}
+
+func WithListJobs(fn func(context.Context, string) (models.Jobs, error)) Option {
+	return func(h *HTTP) {
+		h.listJobs = fn
+	}
+}
+
+func WithRunJob(fn func(context.Context, *models.Job, map[string]string) error) Option {
+	return func(h *HTTP) {
+		h.runJob = fn
+	}
+}
+
+func New(t *models.Trigger, opts ...Option) (*HTTP, error) {
 	if t.Type != models.TriggerTypeHTTP {
 		return nil, fmt.Errorf("trigger is %v not %v", t.Type, models.TriggerTypeHTTP)
 	}
@@ -35,7 +71,20 @@ func New(t *models.Trigger) (*HTTP, error) {
 		return nil, err
 	}
 
-	return &HTTP{id: t.ID, config: cfg}, nil
+	h := &HTTP{
+		id:     t.ID,
+		config: cfg,
+		now:    time.Now,
+		secretResolver: defaultSecretResolver,
+		listJobs:       defaultListJobs,
+		runJob:         defaultRunJob,
+	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+
+	return h, nil
 }
 
 func (h *HTTP) Listen(ctx context.Context) {
@@ -59,7 +108,7 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) err
 		"id", h.id,
 		"type", models.TriggerTypeHTTP)
 
-	jobs, err := listJobs(ctx, h.id.String())
+	jobs, err := h.listJobs(ctx, h.id.String())
 	if err != nil {
 		return err
 	}
@@ -80,7 +129,7 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) err
 		}
 		runtimeParams := cloneParams(mergedParams)
 		go func(jobModel *models.Job, params map[string]string) {
-			if err := runJob(context.WithoutCancel(ctx), jobModel, params); err != nil {
+			if err := h.runJob(context.WithoutCancel(ctx), jobModel, params); err != nil {
 				log.Error("job run failure", "id", jobModel.ID, "error", err)
 			}
 		}(jobModel, runtimeParams)
@@ -98,14 +147,57 @@ func (h *HTTP) MergeParams(params map[string]string) map[string]string {
 }
 
 func (h *HTTP) ExtractWebhookParams(ctx context.Context, req *stdhttp.Request, body []byte) (map[string]string, error) {
-	resolvedSecret, err := resolveSecret(ctx, h.config.Secret)
+	resolvedSecret, err := h.resolveSecret(ctx, h.config.Secret)
 	if err != nil {
 		return nil, err
 	}
-	if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader) {
+	var signedTimestamp string
+	if h.config.TimestampHeader != "" {
+		signedTimestamp = req.Header.Get(h.config.TimestampHeader)
+	}
+	if !validateSignature(req, body, resolvedSecret, h.config.SignatureScheme, h.config.SignatureHeader, signedTimestamp) {
 		return nil, ErrInvalidSignature
 	}
+	if err := h.validateTimestamp(req); err != nil {
+		return nil, err
+	}
 	return extractParams(body, h.config.ParamMapping), nil
+}
+
+// validateTimestamp checks the timestamp header for replay protection.
+// Only enforced when a timestampHeader is configured and the scheme is HMAC-based.
+func (h *HTTP) validateTimestamp(req *stdhttp.Request) error {
+	header := h.config.TimestampHeader
+	if header == "" {
+		return nil
+	}
+
+	scheme := h.config.SignatureScheme
+	if scheme == "" {
+		scheme = signatureSchemeHMACSHA256
+	}
+	if scheme != signatureSchemeHMACSHA256 && scheme != signatureSchemeHMACSHA1 {
+		return nil
+	}
+
+	tsValue := req.Header.Get(header)
+	if tsValue == "" {
+		return ErrReplayedRequest
+	}
+
+	ts, err := parseTimestamp(tsValue)
+	if err != nil {
+		return ErrReplayedRequest
+	}
+
+	age := h.now().Sub(ts)
+	if age < 0 {
+		age = -age
+	}
+	if age > h.config.maxTimestampAgeDuration() {
+		return ErrReplayedRequest
+	}
+	return nil
 }
 
 func (h *HTTP) ID() uuid.UUID {
@@ -113,14 +205,14 @@ func (h *HTTP) ID() uuid.UUID {
 }
 
 var (
-	secretResolver secret.Resolver
+	defaultSecretResolver secret.Resolver
 
-	listJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
+	defaultListJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		req := &jsvc.ListRequest{TriggerID: triggerID}
 		return jsvc.Service(ctx).List(req)
 	}
 
-	runJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	defaultRunJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
 		if j == nil {
 			return fmt.Errorf("job is nil")
 		}
@@ -129,7 +221,7 @@ var (
 )
 
 func SetSecretResolver(resolver secret.Resolver) {
-	secretResolver = resolver
+	defaultSecretResolver = resolver
 }
 
 func cloneParams(params map[string]string) map[string]string {
@@ -155,13 +247,22 @@ func parseConfig(raw string) (Config, error) {
 	return cfg.withDefaults(), nil
 }
 
-func resolveSecret(ctx context.Context, value string) (string, error) {
+// parseTimestamp parses a timestamp value as either Unix epoch seconds or RFC3339.
+func parseTimestamp(value string) (time.Time, error) {
+	value = strings.TrimSpace(value)
+	if epoch, err := strconv.ParseInt(value, 10, 64); err == nil {
+		return time.Unix(epoch, 0), nil
+	}
+	return time.Parse(time.RFC3339, value)
+}
+
+func (h *HTTP) resolveSecret(ctx context.Context, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || !strings.HasPrefix(value, "secret://") {
 		return value, nil
 	}
-	if secretResolver == nil {
+	if h.secretResolver == nil {
 		return "", fmt.Errorf("secret resolver is not configured")
 	}
-	return secretResolver.Resolve(ctx, value)
+	return h.secretResolver.Resolve(ctx, value)
 }

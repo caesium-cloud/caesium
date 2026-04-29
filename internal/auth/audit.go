@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -36,6 +37,7 @@ const (
 	ActionCacheDelete  = "cache.delete"
 	ActionLogLevel     = "log.set_level"
 	ActionDBQuery      = "database.query"
+	ActionWebhookDenied = "webhook.denied"
 )
 
 // AuditLogger writes structured audit log entries to the database.
@@ -85,6 +87,7 @@ func (a *AuditLogger) Log(entry AuditEntry) error {
 	if err := a.db.Create(record).Error; err != nil {
 		return fmt.Errorf("write audit log: %w", err)
 	}
+	metrics.AuditLogEntriesTotal.WithLabelValues(entry.Action, entry.Outcome).Inc()
 	return nil
 }
 

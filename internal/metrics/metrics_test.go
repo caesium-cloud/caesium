@@ -32,6 +32,7 @@ func (s *MetricsSuite) SetupTest() {
 		WorkerClaimContentionTotal,
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
+		WebhookAuthFailuresTotal,
 	)
 }
 
@@ -139,6 +140,18 @@ func (s *MetricsSuite) TestWorkerLeaseExpirationsTotalAdds() {
 
 	val := metrictestutil.CounterValue(s.T(), WorkerLeaseExpirationsTotal, "node-a")
 	s.GreaterOrEqual(val, float64(3))
+}
+
+func (s *MetricsSuite) TestWebhookAuthFailuresTotalIncrements() {
+	WebhookAuthFailuresTotal.WithLabelValues("github/push", "invalid_signature").Inc()
+	WebhookAuthFailuresTotal.WithLabelValues("github/push", "replayed_request").Inc()
+	WebhookAuthFailuresTotal.WithLabelValues("github/push", "replayed_request").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), WebhookAuthFailuresTotal, "github/push", "invalid_signature")
+	s.GreaterOrEqual(val, float64(1))
+
+	val = metrictestutil.CounterValue(s.T(), WebhookAuthFailuresTotal, "github/push", "replayed_request")
+	s.GreaterOrEqual(val, float64(2))
 }
 
 func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) float64 {
