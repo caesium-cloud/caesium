@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"net"
 	"net/smtp"
 	"strings"
@@ -97,7 +98,7 @@ func buildMIMEMessage(from string, to []string, subject, body string) []byte {
 		sanitizedTo[i] = sanitizeHeader(addr)
 	}
 	msg.WriteString(fmt.Sprintf("To: %s\r\n", strings.Join(sanitizedTo, ", ")))
-	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", sanitizeHeader(subject)))
+	msg.WriteString(fmt.Sprintf("Subject: %s\r\n", mime.QEncoding.Encode("utf-8", subject)))
 	msg.WriteString("MIME-Version: 1.0\r\n")
 	msg.WriteString("Content-Type: text/plain; charset=\"utf-8\"\r\n")
 	msg.WriteString("\r\n")
@@ -108,7 +109,7 @@ func buildMIMEMessage(from string, to []string, subject, body string) []byte {
 // sanitizeHeader strips CR and LF characters from a header value to
 // prevent SMTP header injection.
 func sanitizeHeader(s string) string {
-	r := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ")
+	r := strings.NewReplacer("\r", "", "\n", "")
 	return r.Replace(s)
 }
 

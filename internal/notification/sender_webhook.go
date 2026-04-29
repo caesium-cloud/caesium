@@ -88,8 +88,15 @@ func (s *WebhookSender) Send(ctx context.Context, ch models.NotificationChannel,
 
 	log.Warn("webhook: non-2xx response",
 		"channel", ch.Name,
-		"url", cfg.URL,
-		"status", resp.StatusCode,
+		"host",    redactURL(cfg.URL),
+		"status",  resp.StatusCode,
 	)
 	return fmt.Errorf("webhook: server responded %d", resp.StatusCode)
+}
+
+func redactURL(u string) string {
+	if u == "" {
+		return ""
+	}
+	return "[redacted]"
 }

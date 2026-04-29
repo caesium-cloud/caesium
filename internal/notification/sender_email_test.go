@@ -3,6 +3,7 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,10 +170,10 @@ func TestSanitizeHeader(t *testing.T) {
 		want  string
 	}{
 		{"normal subject", "normal subject"},
-		{"has\r\ninjection", "has injection"},
-		{"has\rCR", "has CR"},
-		{"has\nLF", "has LF"},
-		{"multi\r\nBcc: evil@evil.com\r\nlines", "multi Bcc: evil@evil.com lines"},
+		{"has\r\ninjection", "hasinjection"},
+		{"has\rCR", "hasCR"},
+		{"has\nLF", "hasLF"},
+		{"multi\r\nBcc: evil@evil.com\r\nlines", "multiBcc: evil@evil.comlines"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
@@ -193,14 +194,14 @@ func TestBuildMIMEMessage_HeaderInjection(t *testing.T) {
 		"body",
 	)
 	s := string(msg)
-	// The CRLF should be collapsed into the subject line, not appear as
+	// The CRLF should be encoded by mime.QEncoding, not appear as
 	// a separate "Bcc:" header line.
-	if containsStr(s, "\r\nBcc:") {
+	if strings.Contains(s, "\r\nBcc:") {
 		t.Error("header injection: Bcc header injected as separate line")
 	}
-	// The sanitized subject should appear on a single line.
-	if !containsStr(s, "Subject: Subject Bcc: evil@evil.com\r\n") {
-		t.Error("CRLF should be replaced with space in subject")
+	// The subject should be mime-encoded.
+	if !strings.Contains(s, "Subject: =?utf-8?q?Subject=0D=0ABcc:_evil@evil.com?=") {
+		t.Errorf("Subject should be mime-encoded, got:\n%s", s)
 	}
 }
 

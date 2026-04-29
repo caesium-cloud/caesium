@@ -262,6 +262,25 @@ func policyFilterMatches(p models.NotificationPolicy, evt event.Event) bool {
 		}
 	}
 
+	if len(filter.Labels) > 0 {
+		// If the payload is missing or unparseable, fail closed: the
+		// filter requires labels but we can't verify them.
+		if len(evt.Payload) == 0 {
+			return false
+		}
+		var partial struct {
+			JobLabels map[string]string `json:"job_labels"`
+		}
+		if err := json.Unmarshal(evt.Payload, &partial); err != nil {
+			return false
+		}
+		for k, v := range filter.Labels {
+			if actual, ok := partial.JobLabels[k]; !ok || actual != v {
+				return false
+			}
+		}
+	}
+
 	return true
 }
 
@@ -278,11 +297,13 @@ func buildPayload(evt event.Event) Payload {
 	// Extract common fields from the event payload.
 	if evt.Payload != nil {
 		var partial struct {
-			JobAlias string `json:"job_alias"`
-			Error    string `json:"error"`
+			JobAlias  string            `json:"job_alias"`
+			JobLabels map[string]string `json:"job_labels"`
+			Error     string            `json:"error"`
 		}
 		if err := json.Unmarshal(evt.Payload, &partial); err == nil {
 			p.JobAlias = partial.JobAlias
+			p.JobLabels = partial.JobLabels
 			p.Error = partial.Error
 		}
 	}

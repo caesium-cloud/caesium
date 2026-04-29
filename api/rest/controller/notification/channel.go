@@ -102,6 +102,7 @@ var sensitiveKeys = map[string]struct{}{
 	"password":    {},
 	"routing_key": {},
 	"webhook_url": {},
+	"url":         {},
 	"token":       {},
 	"secret":      {},
 	"api_key":     {},

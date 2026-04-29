@@ -291,10 +291,11 @@ func (w *Watcher) emitSLAEvent(ctx context.Context, jobID uuid.UUID, r *models.J
 func (w *Watcher) emitCompletedBySLAEvent(ctx context.Context, job models.Job, deadline, now time.Time) {
 	msg := fmt.Sprintf("SLA missed: job %q did not complete by %s UTC", job.Alias, deadline.Format("15:04"))
 	data, _ := json.Marshal(map[string]interface{}{
-		"job_id":    job.ID,
-		"job_alias": job.Alias,
-		"error":     msg,
-		"sla":       map[string]string{"completedBy": deadline.Format("15:04")},
+		"job_id":     job.ID,
+		"job_alias":  job.Alias,
+		"job_labels": job.Labels,
+		"error":      msg,
+		"sla":        map[string]string{"completedBy": deadline.Format("15:04")},
 	})
 
 	evt := event.Event{
@@ -331,6 +332,7 @@ func buildRunEventPayload(r models.JobRun, errorMsg string) json.RawMessage {
 		"id":           r.ID,
 		"job_id":       r.JobID,
 		"job_alias":    r.Job.Alias,
+		"job_labels":   r.Job.Labels,
 		"status":       r.Status,
 		"started_at":   r.StartedAt,
 		"trigger_type": r.TriggerType,

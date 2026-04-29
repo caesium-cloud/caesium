@@ -83,6 +83,8 @@ type TaskRun struct {
 	ID                      uuid.UUID                 `json:"id"`
 	JobRunID                uuid.UUID                 `json:"job_run_id"`
 	TaskID                  uuid.UUID                 `json:"task_id"`
+	JobAlias                string                    `json:"job_alias,omitempty"`
+	JobLabels               map[string]string         `json:"job_labels,omitempty"`
 	AtomID                  uuid.UUID                 `json:"atom_id"`
 	Engine                  models.AtomEngine         `json:"engine"`
 	Image                   string                    `json:"image"`
@@ -114,8 +116,9 @@ type TaskRun struct {
 type JobRun struct {
 	ID            uuid.UUID         `json:"id"`
 	JobID         uuid.UUID         `json:"job_id"`
-	BackfillID    *uuid.UUID        `json:"backfill_id,omitempty"`
 	JobAlias      string            `json:"job_alias,omitempty"`
+	JobLabels     map[string]string `json:"job_labels,omitempty"`
+	BackfillID    *uuid.UUID        `json:"backfill_id,omitempty"`
 	TriggerType   string            `json:"trigger_type,omitempty"`
 	TriggerAlias  string            `json:"trigger_alias,omitempty"`
 	Status        Status            `json:"status"`
@@ -1608,13 +1611,14 @@ func (s *Store) loadRunWithDB(conn *gorm.DB, runID uuid.UUID) (*JobRun, error) {
 	var result struct {
 		models.JobRun
 		JobAlias     string
+		JobLabels    datatypes.JSONMap
 		TriggerType  string
 		TriggerAlias string
 	}
 
 	// Use a JOIN to fetch job and trigger information for human readability
 	err := conn.Table("job_runs").
-		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
+		Select("job_runs.*, jobs.alias as job_alias, jobs.labels as job_labels, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("left join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
 		Where("job_runs.id = ?", runID).
@@ -1630,8 +1634,15 @@ func (s *Store) loadRunWithDB(conn *gorm.DB, runID uuid.UUID) (*JobRun, error) {
 	}
 
 	runValue.JobAlias = result.JobAlias
+	runValue.JobLabels = jsonmap.ToStringMap(result.JobLabels)
 	runValue.TriggerType = result.TriggerType
 	runValue.TriggerAlias = result.TriggerAlias
+
+	// Propagate job metadata to task runs for downstream event payloads.
+	for i := range runValue.Tasks {
+		runValue.Tasks[i].JobAlias = runValue.JobAlias
+		runValue.Tasks[i].JobLabels = runValue.JobLabels
+	}
 
 	return runValue, nil
 }
@@ -1826,12 +1837,14 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 	}
 
 	var jobRun models.JobRun
-	if err := db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+	if err := db.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
 		log.Error("failed to fetch job run for event", "error", err, "run_id", runID)
 		return nil, err
 	}
 
 	taskPayload := convertRunTaskModel(&taskRun)
+	taskPayload.JobAlias = jobRun.Job.Alias
+	taskPayload.JobLabels = jobRun.Job.Labels
 	// Use task-run row ID for event payloads so downstream consumers can identify
 	// each task execution uniquely across retries/runs.
 	taskPayload.ID = taskRun.ID

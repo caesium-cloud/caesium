@@ -22,6 +22,7 @@ type Payload struct {
 	EventType  event.Type        `json:"event_type"`
 	JobID      uuid.UUID         `json:"job_id"`
 	JobAlias   string            `json:"job_alias,omitempty"`
+	JobLabels  map[string]string `json:"job_labels,omitempty"`
 	RunID      uuid.UUID         `json:"run_id"`
 	TaskID     uuid.UUID         `json:"task_id,omitempty"`
 	Error      string            `json:"error,omitempty"`

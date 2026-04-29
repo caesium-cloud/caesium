@@ -90,9 +90,9 @@ func TestRedactChannel_SensitiveKeys(t *testing.T) {
 		}
 	}
 
-	// url should NOT be redacted (not in sensitiveKeys).
-	if ch.Config["url"] != "https://example.com/hook" {
-		t.Errorf("url should not be redacted, got %q", ch.Config["url"])
+	// url should be redacted.
+	if ch.Config["url"] == "https://example.com/hook" {
+		t.Error("url should be redacted")
 	}
 
 	// password should be redacted.

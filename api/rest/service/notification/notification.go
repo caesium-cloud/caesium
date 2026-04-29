@@ -196,7 +196,7 @@ func (s *service) UpdateChannel(id uuid.UUID, req *UpdateChannelRequest) (*model
 }
 
 func (s *service) DeleteChannel(id uuid.UUID) error {
-	return s.db.WithContext(s.ctx).Delete(&models.NotificationChannel{}, "id = ?", id).Error
+	return s.db.WithContext(s.ctx).Unscoped().Delete(&models.NotificationChannel{}, "id = ?", id).Error
 }
 
 // --- Policy CRUD ---
