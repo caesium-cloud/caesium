@@ -1844,7 +1844,7 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 
 	taskPayload := convertRunTaskModel(&taskRun)
 	taskPayload.JobAlias = jobRun.Job.Alias
-	taskPayload.JobLabels = jobRun.Job.Labels
+	taskPayload.JobLabels = jsonmap.ToStringMap(jobRun.Job.Labels)
 	// Use task-run row ID for event payloads so downstream consumers can identify
 	// each task execution uniquely across retries/runs.
 	taskPayload.ID = taskRun.ID
