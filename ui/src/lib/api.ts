@@ -393,6 +393,25 @@ export const api = {
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
   getHealth: () => requestURL<HealthResponse>("/health"),
+  /**
+   * Like `getHealth` but reads the response body on any non-401 status code.
+   * The server returns HTTP 503 for degraded/incident states, which causes
+   * `requestURL` (and therefore `getHealth`) to throw — making those states
+   * unobservable. This variant is used by `useClusterHealth` so the sidebar
+   * can display degraded and incident states rather than falling back to
+   * `unknown` on every non-2xx response.
+   */
+  getHealthStatus: async (): Promise<HealthResponse> => {
+    const headers = withAuthHeaders({ "Content-Type": "application/json" });
+    const response = await fetch("/health", { headers });
+    if (response.status === 401) {
+      clearApiKey();
+      throw new ApiError(401, "Authentication required");
+    }
+    const text = await response.text();
+    if (!text) throw new ApiError(response.status, "Empty health response");
+    return JSON.parse(text) as HealthResponse;
+  },
   getDatabaseSchema: () => request<DatabaseSchemaResponse>("/database/schema"),
   queryDatabase: (body: DatabaseQueryRequest) =>
     request<DatabaseQueryResponse>("/database/query", {

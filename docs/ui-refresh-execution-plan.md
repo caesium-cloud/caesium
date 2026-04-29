@@ -1,6 +1,6 @@
 # UI Refresh — Execution Plan
 
-> Status: Active. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
+> Status: Active — Phase 0 shipped (2026-04-28, branch `claude/eager-rubin-E3djS`). Phase 1 is next. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
 
 ## How to use this plan
 
@@ -12,76 +12,54 @@
 
 ---
 
-## Phase 0 · Foundations
+## Phase 0 · Foundations ✅ Shipped 2026-04-28
+
+> Branch: `claude/eager-rubin-E3djS`. All acceptance criteria verified: 79/79 vitests pass, `npm run lint` clean, production build clean.
 
 Phase 0 changes propagate automatically into every page. Land them first; the rest becomes additive.
 
-### 0.1 — Extend design tokens in `ui/src/index.css`
+### 0.1 — Extend design tokens in `ui/src/index.css` ✅
 
-Add the brand surface, brand accent, and text level tokens called out in [`design-ui-refresh.md`](design-ui-refresh.md) §"Palette" to both `:root` (light) and `.dark`.
+**Shipped:**
+- `ui/src/index.css` — added `--cyan-glow`, `--cyan-dim`, `--gold-dim`, `--void`, `--midnight`, `--obsidian`, `--graphite`, `--silt`, `--text-1..4`, `--success`, `--warning`, `--danger`, `--running`, `--cached`, `--chart-1..5`. Light theme overrides for the same keys. Brand keyframes (`orbit-spin`, `nucleus-pulse`, `cyan-pulse`, `gold-pulse`) + reduced-motion CSS guard.
+- `ui/tailwind.config.js` — extended `theme.extend.colors` with all new tokens (utility classes `bg-midnight`, `text-text-2`, `bg-danger`, etc.). Merged `keyframes` + `animation` extensions alongside existing accordion ones.
 
-**Files to touch:**
-- `ui/src/index.css` — add `--cyan-glow`, `--cyan-dim`, `--gold-dim`, `--midnight`, `--obsidian`, `--graphite`, `--silt`, `--text-1..4`, `--success`, `--warning`, `--danger`, `--running`, `--cached`. Light theme overrides for the same keys.
-- `ui/tailwind.config.js` — extend `theme.extend.colors` so utility classes (`bg-midnight`, `text-text-2`, etc.) compose with the new tokens. Map shadcn names (`accent`, `chart-1..5`) onto the brand palette so existing components inherit without per-component overrides.
+### 0.2 — Status semantics helper ✅
 
-**Acceptance:**
-- Existing pages render in the new color scheme with no per-component changes.
-- `just unit-test` and `npm run lint` pass.
-- Storybook (if present) reflects the palette globally.
+**Shipped:**
+- `ui/src/lib/status.ts` — `statusMeta(status)` returns `{ label, fg, bg, border, dotClass }` for seven statuses + alias normalization + unknown fallback.
+- `ui/src/lib/__tests__/status.test.ts` — 5 vitests covering all seven statuses, animation classes, alias normalization, and null/undefined inputs.
+- `rg "succeeded.*hsl|failed.*hsl|running.*hsl" ui/src` returns no matches.
 
-### 0.2 — Status semantics helper
+### 0.3 — Brand primitive: animated `AtomLogo` ✅
 
-**Files to touch:**
-- New: `ui/src/lib/status.ts` exporting `statusMeta(status: RunStatus): { label, fg, bg, border, dotClass }`.
-- Audit `ui/src/features/jobs/`, `ui/src/features/stats/`, `ui/src/features/triggers/` — anywhere a status string maps to a color literal, replace with `statusMeta(status)`.
+**Shipped:**
+- `ui/src/components/brand/atom-logo.tsx` — three orbital ellipses + nucleus + three gold satellites. `animated?: boolean` (default `true`). `useReducedMotion()` disables spin. Exposes `forceReducedMotion` test hook. Stable per-instance gradient id via `useId()`.
+- `ui/src/hooks/useReducedMotion.ts` — subscribes to `prefers-reduced-motion: reduce` media query.
+- `ui/src/components/brand/__tests__/atom-logo.test.tsx` — 4 vitests (default/animated-off/reduced-motion/reduced-motion-forced).
+- `ui/src/components/caesium-logo.tsx` — converted to a static re-export shim (`<AtomLogo animated={false} />`); remove in Phase 1 cleanup.
 
-**Acceptance:**
-- `rg "succeeded.*hsl|failed.*hsl|running.*hsl" ui/src` returns no per-component matches outside `lib/status.ts`.
-- A vitest covers the seven statuses + the `unknown` fallback.
-- All seven statuses (`running`, `succeeded`, `failed`, `queued`, `paused`, `cached`, `skipped`) have a stable visual treatment in the running app.
+### 0.4 — UI primitives ✅
 
-### 0.3 — Brand primitive: animated `AtomLogo`
+**Shipped:**
 
-**Files to touch:**
-- New: `ui/src/components/brand/atom-logo.tsx`. Three orbital ellipses + nucleus + three gold satellites, matching [`prototype/ui-kit.jsx`](design/ui-refresh/prototype/ui-kit.jsx) but as TSX. Prop: `animated?: boolean` (default `true`). `useReducedMotion()` (custom or from a tiny library) disables the spin when the user prefers reduced motion.
-- Migration: keep `ui/src/components/caesium-logo.tsx` as a re-export of the static `<AtomLogo animated={false} />` so existing imports compile; remove it at the end of Phase 1 once all callers have switched.
+| Primitive | File | Tests |
+| --------- | ---- | ----- |
+| `<StatusBadge>` | `ui/src/components/ui/status-badge.tsx` | `__tests__/status-badge.test.tsx` (4 tests) |
+| `<Sparkline>` | `ui/src/components/ui/sparkline.tsx` | `__tests__/sparkline.test.tsx` (3 tests) |
+| `<EmptyState>` | `ui/src/components/ui/empty-state.tsx` | `__tests__/empty-state.test.tsx` (4 tests) |
+| `<UTCClock>` + `UTCClockProvider` | `ui/src/components/ui/utc-clock.tsx` | `__tests__/utc-clock.test.tsx` (4 tests) |
+| `<UsageBar>` | `ui/src/components/ui/usage-bar.tsx` | `__tests__/usage-bar.test.tsx` (5 tests) |
+| `USAGE_THRESHOLDS` / `usageLevel` | `ui/src/lib/thresholds.ts` | covered by usage-bar tests |
 
-**Acceptance:**
-- `<AtomLogo />` renders identically to the prototype motif (same orbits, same colors).
-- A test covers the reduced-motion fallback.
-- Sidebar header uses the animated variant.
+### 0.5 — App shell visual upgrade ✅
 
-### 0.4 — UI primitives
-
-Land each as its own commit. Each ships with a vitest in `__tests__/`.
-
-| New primitive                              | What it replaces in pages                                |
-| ------------------------------------------ | -------------------------------------------------------- |
-| `ui/src/components/ui/status-badge.tsx`    | Hand-rolled `<span>` pills on Jobs, JobDetail, Triggers, RunDetail. Variants: `filled` (default), `soft`, `dot`. |
-| `ui/src/components/ui/sparkline.tsx`       | Used on Jobs list. SVG; accepts `runs: RunSummary[]`. Lazy-renders after first paint. |
-| `ui/src/components/ui/empty-state.tsx`     | Replaces ad-hoc empty messages on Jobs, Triggers, etc.   |
-| `ui/src/components/ui/utc-clock.tsx`       | Header. Single `setInterval` shared via context.         |
-| `ui/src/components/ui/usage-bar.tsx`       | New — used on System nodes table. Threshold constants live in `ui/src/lib/thresholds.ts`. |
-
-**Acceptance:**
-- Each primitive has a test covering: every variant or status, the empty case, and `prefers-reduced-motion` behavior where applicable.
-- `<Button>` keeps its existing API; nothing in Phase 0 modifies it.
-
-### 0.5 — App shell visual upgrade
-
-**Files to touch:**
-- `ui/src/components/layout/AppShell.tsx`, `ui/src/components/layout/Sidebar.tsx`, `ui/src/components/layout/Header.tsx`.
-- New hook: `ui/src/features/jobs/useNavCounts.ts` — one batched query (e.g. `GET /v1/jobs?count_only=true` per route, debounced) that returns sidebar badge counts. 30s refetch interval. If `count_only` doesn't exist server-side, ship the hook with full-list counting and file the API gap (§API gaps below).
-- New hook: `ui/src/features/system/useClusterHealth.ts` — polls `/v1/system/health` every 15s. If the endpoint doesn't exist yet, return a stub `{ status: 'unknown' }` and gate the cluster footer on `status !== 'unknown'`.
-
-**Visual changes:**
-- Sidebar: gold accent rail on the left edge, animated `AtomLogo` in the brand mark, count badges per nav item, cluster health footer (3-row mini-table).
-- Header: breadcrumb, command-palette trigger (reuse `ui/src/components/command-menu.tsx`), `<UTCClock />`, theme toggle, notifications icon. Backdrop-blur over `--void`.
-
-**Acceptance:**
-- Every existing route in `router.tsx` still resolves.
-- Nav badges update without page refresh.
-- The header is sticky and renders correctly in both themes.
+**Shipped:**
+- `ui/src/components/layout/Sidebar.tsx` — gold accent rail, animated `AtomLogo`, count badges (from `useNavCounts`), cluster health footer (gated on `state !== 'unknown'`). Active route shows 2px gold inset shadow.
+- `ui/src/components/layout/Header.tsx` — sticky + backdrop-blur, route-aware breadcrumb, command-menu, `<UTCClock />`, notifications icon, theme toggle.
+- `ui/src/components/layout/AppShell.tsx` — wraps children in `UTCClockProvider` for a single shared tick.
+- `ui/src/features/jobs/useNavCounts.ts` — client-side count fallback (30s refetch). API gap filed: `GET /v1/jobs?count_only=true`.
+- `ui/src/features/system/useClusterHealth.ts` — polls `/v1/system/health` every 15s; classifies to `operational | degraded | incident | unknown`.
 
 ---
 

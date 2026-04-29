@@ -59,6 +59,38 @@ export default {
           gold: "hsl(var(--caesium-gold))",
           void: "hsl(var(--caesium-void))",
         },
+        // Brand surfaces / accents (extended palette).
+        cyan: {
+          DEFAULT: "hsl(var(--cyan))",
+          glow: "hsl(var(--cyan-glow))",
+          dim: "hsl(var(--cyan-dim))",
+        },
+        gold: {
+          DEFAULT: "hsl(var(--gold))",
+          dim: "hsl(var(--gold-dim))",
+        },
+        void: "hsl(var(--void))",
+        midnight: "hsl(var(--midnight))",
+        obsidian: "hsl(var(--obsidian))",
+        graphite: "hsl(var(--graphite))",
+        silt: "hsl(var(--silt))",
+        // Text levels.
+        "text-1": "hsl(var(--text-1))",
+        "text-2": "hsl(var(--text-2))",
+        "text-3": "hsl(var(--text-3))",
+        "text-4": "hsl(var(--text-4))",
+        // Status semantics.
+        success: "hsl(var(--success))",
+        warning: "hsl(var(--warning))",
+        danger: "hsl(var(--danger))",
+        running: "hsl(var(--running))",
+        cached: "hsl(var(--cached))",
+        // Chart palette (shadcn-compatible).
+        "chart-1": "hsl(var(--chart-1))",
+        "chart-2": "hsl(var(--chart-2))",
+        "chart-3": "hsl(var(--chart-3))",
+        "chart-4": "hsl(var(--chart-4))",
+        "chart-5": "hsl(var(--chart-5))",
         sidebar: {
           DEFAULT: "hsl(var(--sidebar))",
           foreground: "hsl(var(--sidebar-foreground))",
@@ -89,10 +121,42 @@ export default {
           from: { height: "var(--radix-accordion-content-height)" },
           to: { height: "0" },
         },
+        "orbit-spin": {
+          from: { transform: "rotate(0deg)" },
+          to: { transform: "rotate(360deg)" },
+        },
+        "nucleus-pulse": {
+          "0%, 100%": { transform: "scale(1)", opacity: "1" },
+          "50%": { transform: "scale(1.18)", opacity: "0.85" },
+        },
+        "cyan-pulse": {
+          "0%, 100%": {
+            boxShadow:
+              "0 0 0 0 hsl(var(--cyan) / 0.55), 0 0 14px 0 hsl(var(--cyan) / 0.5)",
+          },
+          "70%": {
+            boxShadow:
+              "0 0 0 9px hsl(var(--cyan) / 0), 0 0 14px 0 hsl(var(--cyan) / 0.5)",
+          },
+        },
+        "gold-pulse": {
+          "0%, 100%": {
+            boxShadow:
+              "0 0 0 0 hsl(var(--gold) / 0.55), 0 0 12px 0 hsl(var(--gold) / 0.4)",
+          },
+          "70%": {
+            boxShadow:
+              "0 0 0 8px hsl(var(--gold) / 0), 0 0 12px 0 hsl(var(--gold) / 0.4)",
+          },
+        },
       },
       animation: {
         "accordion-down": "accordion-down 0.2s ease-out",
         "accordion-up": "accordion-up 0.2s ease-out",
+        "orbit-spin": "orbit-spin 22s linear infinite",
+        "nucleus-pulse": "nucleus-pulse 2.4s ease-in-out infinite",
+        "cyan-pulse": "cyan-pulse 1.6s ease-out infinite",
+        "gold-pulse": "gold-pulse 2s ease-out infinite",
       },
     },
   },

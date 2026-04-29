@@ -3,6 +3,7 @@ import { Sidebar } from "./Sidebar";
 import { Header } from "./Header";
 import { useEffect } from "react";
 import { events } from "@/lib/events";
+import { UTCClockProvider } from "@/components/ui/utc-clock";
 
 export function AppShell() {
   const navigate = useNavigate();
@@ -46,14 +47,16 @@ export function AppShell() {
   }, [navigate]);
 
   return (
-    <div className="flex h-screen w-full bg-transparent text-foreground">
-      <Sidebar />
-      <div className="flex flex-col flex-1 overflow-hidden">
-        <Header />
-        <main className="flex-1 overflow-auto p-6 animate-in fade-in duration-500 md:p-8">
-          <Outlet />
-        </main>
+    <UTCClockProvider>
+      <div className="flex h-screen w-full bg-transparent text-foreground">
+        <Sidebar />
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <Header />
+          <main className="flex-1 overflow-auto p-6 animate-in fade-in duration-500 md:p-8">
+            <Outlet />
+          </main>
+        </div>
       </div>
-    </div>
+    </UTCClockProvider>
   );
 }
