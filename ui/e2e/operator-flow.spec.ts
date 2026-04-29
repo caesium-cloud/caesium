@@ -52,7 +52,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
 
   await page.goto("/jobs");
 
-  const row = page.locator("tr", { hasText: alias }).first();
+  const row = page.locator('[data-testid="job-row"]', { hasText: alias }).first();
   await expect(row).toBeVisible();
 
   await row.locator('button[title="Trigger run"]').click();
@@ -66,18 +66,18 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await node.click();
 
   await expect(page.getByTestId("task-detail-panel")).toBeVisible();
-  await expect(page.getByText("Live", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("task-detail-panel").getByText("Live", { exact: true })).toBeVisible();
   await expect(page.getByTestId("task-log-plaintext")).toContainText("Starting log streaming showcase");
 
-  await expect(page.getByText("succeeded", { exact: true }).first()).toBeVisible({ timeout: 90_000 });
+  await expect(page.locator('[data-status="succeeded"]').first()).toBeVisible({ timeout: 90_000 });
 
   await page.reload();
   node = page.locator(".react-flow__node").first();
   await expect(node).toBeVisible();
   await node.click();
 
-  await expect(page.getByText("Retained", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("task-log-plaintext")).toContainText(
+  await expect(page.getByTestId("run-log-viewer").getByText("Retained", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-log-plaintext")).toContainText(
     "stream complete: retained logs should remain available after cleanup",
   );
 });
