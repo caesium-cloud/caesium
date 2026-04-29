@@ -2,7 +2,6 @@ package stats
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"

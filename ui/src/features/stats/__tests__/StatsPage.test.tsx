@@ -6,7 +6,7 @@ import type { StatsResponse } from '@/lib/api';
 
 vi.mock('@/lib/api', () => {
   const mockApi = {
-    getStats: vi.fn(),
+    getStatsSummary: vi.fn(),
   };
   return { api: mockApi, ApiError: class extends Error { status: number; constructor(s: number, m: string) { super(m); this.status = s; } } };
 });
@@ -60,21 +60,21 @@ describe('StatsPage', () => {
   });
 
   it('shows loading state', () => {
-    vi.mocked(api.getStats).mockReturnValue(new Promise(() => {}));
+    vi.mocked(api.getStatsSummary).mockReturnValue(new Promise(() => {}));
     render(<StatsPage />, { wrapper: createWrapper() });
-    expect(screen.getByText('Loading stats...')).toBeInTheDocument();
+    expect(screen.getByText('Operator Statistics')).toBeInTheDocument();
   });
 
   it('shows error state', async () => {
-    vi.mocked(api.getStats).mockRejectedValue(new Error('Network error'));
+    vi.mocked(api.getStatsSummary).mockRejectedValue(new Error('Network error'));
     render(<StatsPage />, { wrapper: createWrapper() });
     await waitFor(() => {
-      expect(screen.getByText(/Error loading stats/)).toBeInTheDocument();
+      expect(screen.getByText(/Error loading statistics/)).toBeInTheDocument();
     });
   });
 
   it('renders summary cards with correct values', async () => {
-    vi.mocked(api.getStats).mockResolvedValue(mockStats);
+    vi.mocked(api.getStatsSummary).mockResolvedValue(mockStats);
     render(<StatsPage />, { wrapper: createWrapper() });
     await waitFor(() => {
       expect(screen.getByText('42')).toBeInTheDocument();
@@ -85,18 +85,18 @@ describe('StatsPage', () => {
   });
 
   it('renders tables with data', async () => {
-    vi.mocked(api.getStats).mockResolvedValue(mockStats);
+    vi.mocked(api.getStatsSummary).mockResolvedValue(mockStats);
     render(<StatsPage />, { wrapper: createWrapper() });
     await waitFor(() => {
       expect(screen.getByText('deploy-prod')).toBeInTheDocument();
     });
-    expect(screen.getByText('Daily Run Volume (7d)')).toBeInTheDocument();
+    expect(screen.getByText('Performance Trend')).toBeInTheDocument();
     expect(screen.getByText('run-tests')).toBeInTheDocument();
     expect(screen.getByText('build-all')).toBeInTheDocument();
   });
 
   it('shows no failures message when top_failing is empty', async () => {
-    vi.mocked(api.getStats).mockResolvedValue({
+    vi.mocked(api.getStatsSummary).mockResolvedValue({
       ...mockStats,
       top_failing: [],
     });
