@@ -202,14 +202,14 @@ func TestExtractWebhookParams(t *testing.T) {
 }
 
 func TestExtractWebhookParamsResolvesSecretReference(t *testing.T) {
-	oldResolver := secretResolver
-	t.Cleanup(func() { secretResolver = oldResolver })
-	SetSecretResolver(stubSecretResolver{
+	t.Parallel()
+
+	resolver := stubSecretResolver{
 		resolve: func(_ context.Context, ref string) (string, error) {
 			require.Equal(t, "secret://env/webhook_token", ref)
 			return "resolved-token", nil
 		},
-	})
+	}
 
 	trigger := &models.Trigger{
 		ID:   uuid.New(),
@@ -222,7 +222,7 @@ func TestExtractWebhookParamsResolvesSecretReference(t *testing.T) {
 		}`,
 	}
 
-	h, err := New(trigger)
+	h, err := New(trigger, WithSecretResolver(resolver))
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(stdhttp.MethodPost, "/v1/hooks/github/push", bytes.NewReader(nil))
@@ -259,26 +259,21 @@ func TestExtractWebhookParamsSupportsBasicAuth(t *testing.T) {
 }
 
 func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
-	oldListJobs := listJobs
-	oldRunJob := runJob
-	t.Cleanup(func() {
-		listJobs = oldListJobs
-		runJob = oldRunJob
-	})
+	t.Parallel()
 
 	var (
 		seen []map[string]string
 		mu   sync.Mutex
 		done = make(chan struct{}, 2)
 	)
-	listJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
+	listJobsFn := func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		return models.Jobs{
 			&models.Job{ID: uuid.New(), Alias: "first"},
 			&models.Job{ID: uuid.New(), Alias: "second", Paused: true},
 			&models.Job{ID: uuid.New(), Alias: "third"},
 		}, nil
 	}
-	runJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string) error {
 		copied := make(map[string]string, len(params))
 		for k, v := range params {
 			copied[k] = v
@@ -298,6 +293,8 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 				"source":      "webhook",
 			},
 		},
+		listJobs: listJobsFn,
+		runJob:   runJobFn,
 	}
 
 	err := h.FireWithParams(context.Background(), map[string]string{
@@ -329,18 +326,13 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 }
 
 func TestFireUsesDefaultsWhenParamsMissing(t *testing.T) {
-	oldListJobs := listJobs
-	oldRunJob := runJob
-	t.Cleanup(func() {
-		listJobs = oldListJobs
-		runJob = oldRunJob
-	})
+	t.Parallel()
 
 	done := make(chan map[string]string, 1)
-	listJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
+	listJobsFn := func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		return models.Jobs{&models.Job{ID: uuid.New(), Alias: "only"}}, nil
 	}
-	runJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string) error {
 		copied := make(map[string]string, len(params))
 		for k, v := range params {
 			copied[k] = v
@@ -354,6 +346,8 @@ func TestFireUsesDefaultsWhenParamsMissing(t *testing.T) {
 		config: Config{
 			DefaultParams: map[string]string{"environment": "prod"},
 		},
+		listJobs: listJobsFn,
+		runJob:   runJobFn,
 	}
 
 	err := h.Fire(context.Background())
@@ -433,28 +427,30 @@ func TestValidateTimestampSkippedForBearerScheme(t *testing.T) {
 }
 
 func TestValidateTimestampAcceptsFreshTimestamp(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000060, 0) }
+	t.Parallel()
 
-	h := &HTTP{config: Config{
-		TimestampHeader: "X-Webhook-Timestamp",
-		SignatureScheme: "hmac-sha256",
-	}}
+	h := &HTTP{
+		config: Config{
+			TimestampHeader: "X-Webhook-Timestamp",
+			SignatureScheme: "hmac-sha256",
+		},
+		now: func() time.Time { return time.Unix(1713000060, 0) },
+	}
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.NoError(t, h.validateTimestamp(req))
 }
 
 func TestValidateTimestampRejectsExpired(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000600, 0) } // 10 minutes later
+	t.Parallel()
 
-	h := &HTTP{config: Config{
-		TimestampHeader: "X-Webhook-Timestamp",
-		SignatureScheme: "hmac-sha256",
-	}}
+	h := &HTTP{
+		config: Config{
+			TimestampHeader: "X-Webhook-Timestamp",
+			SignatureScheme: "hmac-sha256",
+		},
+		now: func() time.Time { return time.Unix(1713000600, 0) }, // 10 minutes later
+	}
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
@@ -472,52 +468,53 @@ func TestValidateTimestampRejectsMissingHeader(t *testing.T) {
 }
 
 func TestValidateTimestampRejectsFutureTimestamp(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000000, 0) }
+	t.Parallel()
 
-	h := &HTTP{config: Config{
-		TimestampHeader: "X-Webhook-Timestamp",
-		SignatureScheme: "hmac-sha256",
-	}}
+	h := &HTTP{
+		config: Config{
+			TimestampHeader: "X-Webhook-Timestamp",
+			SignatureScheme: "hmac-sha256",
+		},
+		now: func() time.Time { return time.Unix(1713000000, 0) },
+	}
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000600") // 10 minutes in the future
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
 
 func TestValidateTimestampCustomMaxAge(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000120, 0) } // 2 minutes later
+	t.Parallel()
 
-	h := &HTTP{config: Config{
-		TimestampHeader: "X-Webhook-Timestamp",
-		SignatureScheme: "hmac-sha256",
-		MaxTimestampAge: "1m",
-	}}
+	h := &HTTP{
+		config: Config{
+			TimestampHeader: "X-Webhook-Timestamp",
+			SignatureScheme: "hmac-sha256",
+			MaxTimestampAge: "1m",
+		},
+		now: func() time.Time { return time.Unix(1713000120, 0) }, // 2 minutes later
+	}
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.ErrorIs(t, h.validateTimestamp(req), ErrReplayedRequest)
 }
 
 func TestValidateTimestampDefaultSchemeIsHMACSHA256(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000060, 0) }
+	t.Parallel()
 
-	h := &HTTP{config: Config{
-		TimestampHeader: "X-Webhook-Timestamp",
-		// no scheme set — defaults to hmac-sha256
-	}}
+	h := &HTTP{
+		config: Config{
+			TimestampHeader: "X-Webhook-Timestamp",
+			// no scheme set — defaults to hmac-sha256
+		},
+		now: func() time.Time { return time.Unix(1713000060, 0) },
+	}
 	req := httptest.NewRequest(stdhttp.MethodPost, "/", nil)
 	req.Header.Set("X-Webhook-Timestamp", "1713000000")
 	require.NoError(t, h.validateTimestamp(req))
 }
 
 func TestExtractWebhookParamsReplayProtection(t *testing.T) {
-	oldNow := nowFunc
-	t.Cleanup(func() { nowFunc = oldNow })
-	nowFunc = func() time.Time { return time.Unix(1713000600, 0) } // 10 minutes later
+	t.Parallel()
 
 	trigger := &models.Trigger{
 		ID:   uuid.New(),
@@ -533,6 +530,7 @@ func TestExtractWebhookParamsReplayProtection(t *testing.T) {
 
 	h, err := New(trigger)
 	require.NoError(t, err)
+	h.now = func() time.Time { return time.Unix(1713000600, 0) } // 10 minutes later
 
 	body := []byte(`{"ref":"refs/heads/main"}`)
 	mac := hmac.New(sha256.New, []byte("shared-secret"))

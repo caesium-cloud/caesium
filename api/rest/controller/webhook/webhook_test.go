@@ -259,10 +259,6 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 	require.NoError(t, env.Process())
 	metrics.Register()
 
-	oldNow := triggerhttp.ExportNowFunc()
-	t.Cleanup(func() { triggerhttp.SetNowFunc(oldNow) })
-	triggerhttp.SetNowFunc(func() time.Time { return time.Unix(1713000600, 0) })
-
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "github/push", "replayed_request")
 
 	body := `{"ref":"main"}`
@@ -300,6 +296,7 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 		stubJobLister{},
 		nil,
 		func(context.Context, *models.Job, map[string]string) error { return nil },
+		triggerhttp.WithNow(func() time.Time { return time.Unix(1713000600, 0) }),
 	)
 	require.Error(t, err)
 

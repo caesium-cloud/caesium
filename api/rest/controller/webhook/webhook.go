@@ -44,7 +44,7 @@ func ReceiveWith(auditor *auth.AuditLogger) func(*echo.Context) error {
 	}
 }
 
-func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, auditor *auth.AuditLogger, runner Runner) error {
+func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobLister, auditor *auth.AuditLogger, runner Runner, opts ...triggerhttp.Option) error {
 	path := normalizeHookPath(c.Param("*"))
 	if !webhookRateLimiters.Allow(c.RealIP()) {
 		return echo.NewHTTPError(http.StatusTooManyRequests, "rate limit exceeded")
@@ -69,7 +69,7 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	var accepted int
 	var failures []triggerFailure
 	for _, trig := range triggers {
-		httpTrigger, err := triggerhttp.New(trig)
+		httpTrigger, err := triggerhttp.New(trig, opts...)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
@@ -187,10 +187,12 @@ func cloneStringMap(in map[string]string) map[string]string {
 func recordWebhookAuthFailures(path, sourceIP string, failures []triggerFailure, auditor *auth.AuditLogger) {
 	recordedReasons := make(map[string]struct{})
 	for _, f := range failures {
-		if _, seen := recordedReasons[f.reason]; !seen {
-			metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
-			recordedReasons[f.reason] = struct{}{}
+		if _, seen := recordedReasons[f.reason]; seen {
+			continue
 		}
+		recordedReasons[f.reason] = struct{}{}
+
+		metrics.WebhookAuthFailuresTotal.WithLabelValues(path, f.reason).Inc()
 
 		if auditor != nil {
 			if err := auditor.Log(auth.AuditEntry{

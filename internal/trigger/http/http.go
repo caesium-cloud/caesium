@@ -23,6 +23,11 @@ type HTTP struct {
 	trigger.Trigger
 	id     uuid.UUID
 	config Config
+	now    func() time.Time
+
+	secretResolver secret.Resolver
+	listJobs       func(context.Context, string) (models.Jobs, error)
+	runJob         func(context.Context, *models.Job, map[string]string) error
 }
 
 var (
@@ -30,7 +35,33 @@ var (
 	ErrReplayedRequest  = errors.New("replayed request")
 )
 
-func New(t *models.Trigger) (*HTTP, error) {
+type Option func(*HTTP)
+
+func WithNow(fn func() time.Time) Option {
+	return func(h *HTTP) {
+		h.now = fn
+	}
+}
+
+func WithSecretResolver(resolver secret.Resolver) Option {
+	return func(h *HTTP) {
+		h.secretResolver = resolver
+	}
+}
+
+func WithListJobs(fn func(context.Context, string) (models.Jobs, error)) Option {
+	return func(h *HTTP) {
+		h.listJobs = fn
+	}
+}
+
+func WithRunJob(fn func(context.Context, *models.Job, map[string]string) error) Option {
+	return func(h *HTTP) {
+		h.runJob = fn
+	}
+}
+
+func New(t *models.Trigger, opts ...Option) (*HTTP, error) {
 	if t.Type != models.TriggerTypeHTTP {
 		return nil, fmt.Errorf("trigger is %v not %v", t.Type, models.TriggerTypeHTTP)
 	}
@@ -40,7 +71,20 @@ func New(t *models.Trigger) (*HTTP, error) {
 		return nil, err
 	}
 
-	return &HTTP{id: t.ID, config: cfg}, nil
+	h := &HTTP{
+		id:     t.ID,
+		config: cfg,
+		now:    time.Now,
+		secretResolver: defaultSecretResolver,
+		listJobs:       defaultListJobs,
+		runJob:         defaultRunJob,
+	}
+
+	for _, opt := range opts {
+		opt(h)
+	}
+
+	return h, nil
 }
 
 func (h *HTTP) Listen(ctx context.Context) {
@@ -64,7 +108,7 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) err
 		"id", h.id,
 		"type", models.TriggerTypeHTTP)
 
-	jobs, err := listJobs(ctx, h.id.String())
+	jobs, err := h.listJobs(ctx, h.id.String())
 	if err != nil {
 		return err
 	}
@@ -85,7 +129,7 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) err
 		}
 		runtimeParams := cloneParams(mergedParams)
 		go func(jobModel *models.Job, params map[string]string) {
-			if err := runJob(context.WithoutCancel(ctx), jobModel, params); err != nil {
+			if err := h.runJob(context.WithoutCancel(ctx), jobModel, params); err != nil {
 				log.Error("job run failure", "id", jobModel.ID, "error", err)
 			}
 		}(jobModel, runtimeParams)
@@ -103,7 +147,7 @@ func (h *HTTP) MergeParams(params map[string]string) map[string]string {
 }
 
 func (h *HTTP) ExtractWebhookParams(ctx context.Context, req *stdhttp.Request, body []byte) (map[string]string, error) {
-	resolvedSecret, err := resolveSecret(ctx, h.config.Secret)
+	resolvedSecret, err := h.resolveSecret(ctx, h.config.Secret)
 	if err != nil {
 		return nil, err
 	}
@@ -146,7 +190,7 @@ func (h *HTTP) validateTimestamp(req *stdhttp.Request) error {
 		return ErrReplayedRequest
 	}
 
-	age := nowFunc().Sub(ts)
+	age := h.now().Sub(ts)
 	if age < 0 {
 		age = -age
 	}
@@ -156,28 +200,19 @@ func (h *HTTP) validateTimestamp(req *stdhttp.Request) error {
 	return nil
 }
 
-var nowFunc = time.Now
-
-// SetNowFunc overrides the clock function used for replay protection.
-// Intended for testing.
-func SetNowFunc(fn func() time.Time) { nowFunc = fn }
-
-// ExportNowFunc returns the current clock function for test save/restore.
-func ExportNowFunc() func() time.Time { return nowFunc }
-
 func (h *HTTP) ID() uuid.UUID {
 	return h.id
 }
 
 var (
-	secretResolver secret.Resolver
+	defaultSecretResolver secret.Resolver
 
-	listJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
+	defaultListJobs = func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		req := &jsvc.ListRequest{TriggerID: triggerID}
 		return jsvc.Service(ctx).List(req)
 	}
 
-	runJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	defaultRunJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
 		if j == nil {
 			return fmt.Errorf("job is nil")
 		}
@@ -186,7 +221,7 @@ var (
 )
 
 func SetSecretResolver(resolver secret.Resolver) {
-	secretResolver = resolver
+	defaultSecretResolver = resolver
 }
 
 func cloneParams(params map[string]string) map[string]string {
@@ -221,13 +256,13 @@ func parseTimestamp(value string) (time.Time, error) {
 	return time.Parse(time.RFC3339, value)
 }
 
-func resolveSecret(ctx context.Context, value string) (string, error) {
+func (h *HTTP) resolveSecret(ctx context.Context, value string) (string, error) {
 	value = strings.TrimSpace(value)
 	if value == "" || !strings.HasPrefix(value, "secret://") {
 		return value, nil
 	}
-	if secretResolver == nil {
+	if h.secretResolver == nil {
 		return "", fmt.Errorf("secret resolver is not configured")
 	}
-	return secretResolver.Resolve(ctx, value)
+	return h.secretResolver.Resolve(ctx, value)
 }
