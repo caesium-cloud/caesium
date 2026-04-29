@@ -35,6 +35,7 @@ type HealthChecks struct {
 	Database   *CheckResult `json:"database"`
 	ActiveRuns *CheckResult `json:"active_runs"`
 	Triggers   *CheckResult `json:"triggers"`
+	Nodes      *CheckResult `json:"nodes"`
 }
 
 // HealthResponse defines the data the Health REST endpoint returns.
@@ -60,6 +61,9 @@ func Health(c *echo.Context) error {
 
 	// Trigger count (informational, does not affect overall status)
 	checks.Triggers = checkTriggers()
+
+	// Nodes count (informational)
+	checks.Nodes = checkNodes()
 
 	code := http.StatusOK
 	if overall == Degraded {
@@ -99,5 +103,16 @@ func checkTriggers() *CheckResult {
 	conn := db.Connection()
 	var count int64
 	conn.Model(&models.Trigger{}).Count(&count)
+	return &CheckResult{Count: count}
+}
+
+func checkNodes() *CheckResult {
+	conn := db.Connection()
+	var count int64
+	// Simplified node count based on active workers for now
+	conn.Model(&models.TaskRun{}).Where("status = ?", "running").Select("COUNT(DISTINCT claimed_by)").Scan(&count)
+	if count == 0 {
+		count = 1 // Assume at least 1 node if running
+	}
 	return &CheckResult{Count: count}
 }

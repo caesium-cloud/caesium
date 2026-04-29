@@ -194,6 +194,13 @@ export interface FailingJob {
   last_failure?: string;
 }
 
+export interface FailingAtom {
+  job_id: string;
+  alias: string;
+  atom_name: string;
+  failure_count: number;
+}
+
 export interface SlowestJob {
   job_id: string;
   alias: string;
@@ -203,6 +210,7 @@ export interface SlowestJob {
 export interface StatsResponse {
   jobs: JobStats;
   top_failing: FailingJob[];
+  top_failing_atoms: FailingAtom[];
   slowest_jobs: SlowestJob[];
   success_rate_trend: DailyStats[];
 }
@@ -226,7 +234,66 @@ export interface HealthResponse {
     database?: HealthCheckResult;
     active_runs?: HealthCheckResult;
     triggers?: HealthCheckResult;
+    nodes?: HealthCheckResult;
   };
+}
+
+export interface Node {
+  address: string;
+  role: string;
+  arch: string;
+  cpu: number;
+  mem: number;
+  workers_busy: number;
+  workers_total: number;
+  uptime: string;
+}
+
+export interface SystemFeatures {
+  database_console_enabled: boolean;
+  log_console_enabled: boolean;
+  ui_refresh_v2_system: boolean;
+}
+
+export interface LintRequest {
+  definitions: unknown[];
+}
+
+export interface LintMessage {
+  message: string;
+  line?: number;
+}
+
+export interface LintSummary {
+  steps: string;
+}
+
+export interface LintResponse {
+  errors: LintMessage[];
+  warnings: LintMessage[];
+  summary: LintSummary;
+}
+
+export interface DiffJobSpec {
+  Alias: string;
+  Labels?: Record<string, string>;
+  Annotations?: Record<string, string>;
+  Trigger?: {
+    Type: string;
+    Configuration: Record<string, unknown>;
+  };
+  Steps?: unknown[];
+}
+
+export interface DiffUpdate {
+  Alias: string;
+  Diff: string;
+}
+
+export interface DiffResponse {
+  added: DiffJobSpec[];
+  removed: DiffJobSpec[];
+  modified: DiffUpdate[];
 }
 
 export interface ApplyJobDefResponse {
@@ -364,6 +431,18 @@ export const api = {
   deleteTaskCache: (jobId: string, taskName: string) =>
     request<void>(`/jobs/${jobId}/cache/${encodeURIComponent(taskName)}`, { method: "DELETE" }),
   pruneCache: () => request<CachePruneResponse>("/cache/prune", { method: "POST" }),
+  getSystemNodes: () => request<Node[]>("/system/nodes"),
+  getSystemFeatures: () => request<SystemFeatures>("/system/features"),
+  lintJobDef: (yaml: string) =>
+    request<LintResponse>("/jobdefs/lint", {
+      method: "POST",
+      body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
+    }),
+  diffJobDef: (yaml: string) =>
+    request<DiffResponse>("/jobdefs/diff", {
+      method: "POST",
+      body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
+    }),
   triggerJob: (jobId: string, body?: TriggerRunRequest) =>
     request<JobRun>(`/jobs/${jobId}/run`, {
       method: "POST",
@@ -392,6 +471,7 @@ export const api = {
   getAtom: (id: string) => request<Atom>(`/atoms/${id}`),
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
+  getStatsSummary: (window: string = "7d") => request<StatsResponse>(`/stats/summary?window=${window}`),
   getHealth: () => requestURL<HealthResponse>("/health"),
   /**
    * Like `getHealth` but reads the response body on any non-401 status code.

@@ -1,10 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type Trigger, type TriggerCreateRequest, type TriggerUpdateRequest } from "@/lib/api";
 import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RelativeTime } from "@/components/relative-time";
+import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Dialog,
   DialogContent,
@@ -14,13 +14,14 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Zap, Clock, Globe, ChevronDown, ChevronRight, Plus, Pencil } from "lucide-react";
-import { useMemo, useState } from "react";
+import { Clock, Globe, Plus, Pencil, Copy, Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
+import { useMemo, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { parseExpression } from "cron-parser";
 
 const inputClass =
-  "w-full rounded-md border bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
-const labelClass = "mb-1 block text-xs font-medium uppercase tracking-wide text-muted-foreground";
+  "w-full rounded-md border border-graphite/50 bg-midnight/50 px-3 py-2 text-sm text-text-1 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-glow";
+const labelClass = "mb-1 block text-[10px] font-bold uppercase tracking-widest text-text-3";
 const textareaClass = `${inputClass} min-h-[112px] font-mono text-xs`;
 
 type HTTPTriggerFormState = {
@@ -31,7 +32,6 @@ type HTTPTriggerFormState = {
   signatureHeader: string;
   paramMappingText: string;
   defaultParamsText: string;
-  /** Config keys not managed by the form, preserved on round-trip. */
   extraConfig: Record<string, unknown>;
 };
 
@@ -56,7 +56,7 @@ function parseTriggerConfiguration(trigger: Trigger) {
       return parsed as Record<string, unknown>;
     }
   } catch {
-    // ignore malformed config in UI summary
+    // ignore malformed config
   }
   return {};
 }
@@ -148,51 +148,61 @@ function errorMessage(error: unknown) {
   return "Request failed";
 }
 
-function CronPreview({ expression }: { expression: string }) {
-  const describe = (expr: string) => {
-    const parts = expr.trim().split(/\s+/);
-    if (parts.length < 5) return expr;
-    const [min, hour, dom, month, dow] = parts;
-    if (min === "0" && hour === "*" && dom === "*" && month === "*" && dow === "*") return "Every hour";
-    if (min === "0" && hour === "0" && dom === "*" && month === "*" && dow === "*") return "Daily at midnight";
-    if (min === "0" && hour === "0" && dom === "*" && month === "*" && dow === "1") return "Every Monday at midnight";
-    if (dom === "*" && month === "*" && dow === "*") {
-      if (hour === "*") return `Every minute :${min.padStart(2, "0")}`;
-      return `Daily at ${hour.padStart(2, "0")}:${min.padStart(2, "0")}`;
-    }
-    return expr;
-  };
+function NextFire({ expression }: { expression: string }) {
+  const [nextDate, setNextDate] = useState<Date | null>(null);
+
+  useEffect(() => {
+    const compute = () => {
+      try {
+        const interval = parseExpression(expression);
+        setNextDate(interval.next().toDate());
+      } catch {
+        setNextDate(null);
+      }
+    };
+    
+    compute();
+    const timer = setInterval(compute, 60000);
+    return () => clearInterval(timer);
+  }, [expression]);
+
+  if (!nextDate) return <span className="text-[10px] text-text-4 font-mono">Invalid cron</span>;
+
   return (
-    <span className="text-xs text-muted-foreground font-mono" title={expression}>
-      {describe(expression)}
+    <span className="text-[10px] font-mono text-text-2 bg-midnight/30 px-2 py-1 rounded border border-graphite/20">
+      Next: <RelativeTime date={nextDate.toISOString()} />
     </span>
   );
 }
 
-function TriggerConfig({ trigger }: { trigger: Trigger }) {
-  const config = parseTriggerConfiguration(trigger);
+function CopyWebhookUrl({ path }: { path: string }) {
+  const [copied, setCopied] = useState(false);
+  const fullUrl = `${window.location.origin}${path}`;
 
-  if (trigger.type === "cron") {
-    const expr = (config.expression || config.cron || trigger.configuration) as string;
-    return (
-      <div className="flex items-center gap-2">
-        <Clock className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-        <CronPreview expression={expr} />
-      </div>
-    );
-  }
-  if (trigger.type === "http") {
-    const route = webhookRoute(config.path);
-    return (
-      <div className="flex items-center gap-2">
-        <Globe className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
-        <span className="text-xs text-muted-foreground font-mono">
-          {route || "HTTP webhook"}
-        </span>
-      </div>
-    );
-  }
-  return <span className="text-xs text-muted-foreground font-mono">{String(trigger.configuration ?? "").slice(0, 60)}</span>;
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    await navigator.clipboard.writeText(fullUrl);
+    setCopied(true);
+    toast.success("Webhook URL copied");
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <div 
+      className="flex items-center gap-2 bg-midnight/40 border border-graphite/30 rounded-md px-2 py-1 max-w-sm"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <code className="text-[10px] text-text-3 font-mono truncate flex-1">{fullUrl}</code>
+      <Button 
+        variant="ghost" 
+        size="icon" 
+        className="h-5 w-5 text-text-4 hover:text-cyan-glow hover:bg-transparent" 
+        onClick={handleCopy}
+      >
+        {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+      </Button>
+    </div>
+  );
 }
 
 export function TriggersPage() {
@@ -295,53 +305,69 @@ export function TriggersPage() {
   if (isLoading) {
     return (
       <div className="p-8 space-y-4">
-        <Skeleton className="h-8 w-48" />
+        <Skeleton className="h-8 w-48 bg-graphite/20" />
         <div className="grid gap-4">
-          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-24 w-full" />)}
+          {[1, 2, 3].map((i) => <Skeleton key={i} className="h-20 w-full bg-graphite/10" />)}
         </div>
       </div>
     );
   }
-  if (error) return <div className="p-8 text-center text-destructive">Error loading triggers: {error.message}</div>;
+  
+  if (error) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 text-center">
+        <div className="text-destructive mb-2 font-bold">Error loading triggers</div>
+        <div className="text-text-3 text-sm">{error.message}</div>
+      </div>
+    );
+  }
 
   return (
     <>
-      <div className="space-y-4">
+      <div className="space-y-6">
         <div className="flex items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold tracking-tight">Triggers</h1>
-            <p className="text-sm text-muted-foreground mt-0.5">Cron schedules and HTTP webhooks</p>
+            <p className="text-sm text-text-3 mt-1">Cron schedules and HTTP webhooks</p>
           </div>
-          <div className="flex items-center gap-3">
-            <span className="text-sm text-muted-foreground">{filtered.length} trigger{filtered.length !== 1 ? "s" : ""}</span>
-            <Button size="sm" onClick={openCreateDialog}>
+          <div className="flex items-center gap-4">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-text-4 hidden sm:inline-block">
+              {filtered.length} trigger{filtered.length !== 1 ? "s" : ""}
+            </span>
+            <Button size="sm" onClick={openCreateDialog} className="bg-cyan-glow text-midnight hover:bg-cyan-dim">
               <Plus className="mr-1.5 h-3.5 w-3.5" />
               New HTTP Trigger
             </Button>
           </div>
         </div>
 
-        <div className="flex gap-2">
-          {triggerTypes.map((type) => (
-            <button
-              key={type}
-              onClick={() => setTypeFilter(typeFilter === type ? null : type)}
-              className={cn(
-                "rounded-full px-3 py-1 text-xs border transition-colors flex items-center gap-1.5",
-                typeFilter === type
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "bg-background text-muted-foreground border-border hover:border-primary hover:text-primary",
-              )}
-            >
-              {type === "cron" ? <Clock className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
-              {type}
-            </button>
-          ))}
-        </div>
+        {triggerTypes.length > 0 && (
+          <div className="flex gap-2">
+            {triggerTypes.map((type) => {
+              const isActive = typeFilter === type;
+              return (
+                <button
+                  key={type}
+                  onClick={() => setTypeFilter(isActive ? null : type)}
+                  className={cn(
+                    "rounded-full px-3 py-1.5 text-xs border transition-colors flex items-center gap-1.5 font-medium",
+                    isActive
+                      ? "bg-cyan-glow/10 text-cyan-glow border-cyan-glow/30"
+                      : "bg-midnight/50 text-text-3 border-graphite/50 hover:border-text-3 hover:text-text-2",
+                  )}
+                >
+                  {type === "cron" ? <Clock className="h-3 w-3" /> : <Globe className="h-3 w-3" />}
+                  <span className="capitalize">{type}</span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {filtered.length === 0 && (
-          <div className="rounded-md border bg-card h-24 flex items-center justify-center text-muted-foreground text-sm">
-            No triggers found.
+          <div className="rounded-md border border-graphite/30 bg-midnight/30 h-32 flex flex-col items-center justify-center text-text-4 text-sm">
+            <Globe className="h-6 w-6 mb-2 opacity-20" />
+            No triggers found
           </div>
         )}
 
@@ -350,94 +376,143 @@ export function TriggersPage() {
             const config = parseTriggerConfiguration(trigger);
             const isHttp = trigger.type === "http";
             const webhookPath = webhookRoute(config.path);
-            const signatureScheme = typeof config.signatureScheme === "string" ? config.signatureScheme : "";
+            const isExpanded = expanded === trigger.id;
+            const expr = (config.expression || config.cron || trigger.configuration) as string;
 
             return (
-              <Card key={trigger.id} className="overflow-hidden">
-                <div
-                  className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-muted/30 transition-colors"
-                  onClick={() => setExpanded(expanded === trigger.id ? null : trigger.id)}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div className="shrink-0">
-                      {expanded === trigger.id
-                        ? <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                        : <ChevronRight className="h-4 w-4 text-muted-foreground" />}
+              <Card 
+                key={trigger.id} 
+                className={cn(
+                  "overflow-hidden transition-colors border-graphite/30",
+                  isExpanded ? "bg-midnight/60 border-graphite/50" : "bg-midnight/30 hover:bg-midnight/50 hover:border-graphite/50 cursor-pointer"
+                )}
+                onClick={() => !isExpanded && setExpanded(trigger.id)}
+              >
+                <div className="flex items-center justify-between px-5 py-4">
+                  <div className="flex items-center gap-4 min-w-0 flex-1">
+                    <div className="shrink-0 flex items-center justify-center w-10">
+                      {trigger.type === "cron" ? (
+                        <div className="h-8 w-8 rounded-full bg-cyan-glow/10 flex items-center justify-center text-cyan-glow border border-cyan-glow/20">
+                          <Clock className="h-4 w-4" />
+                        </div>
+                      ) : (
+                        <div className="h-8 w-8 rounded-full bg-gold/10 flex items-center justify-center text-gold border border-gold/20">
+                          <Globe className="h-4 w-4" />
+                        </div>
+                      )}
                     </div>
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className="font-medium text-sm">{trigger.alias}</span>
-                        <Badge variant={trigger.type === "cron" ? "secondary" : "outline"} className="text-[10px]">
-                          {trigger.type === "cron"
-                            ? <Clock className="h-2.5 w-2.5 mr-1" />
-                            : <Globe className="h-2.5 w-2.5 mr-1" />}
-                          {trigger.type}
-                        </Badge>
+                    <div className="min-w-0 flex-1 grid grid-cols-1 md:grid-cols-[2fr_3fr_1fr] items-center gap-4">
+                      <div className="truncate">
+                        <div className="font-semibold text-text-1 text-sm truncate">{trigger.alias}</div>
+                        <div className="text-[10px] text-text-4 font-mono truncate mt-0.5">ID: {trigger.id.substring(0, 8)}</div>
                       </div>
-                      <div className="mt-0.5">
-                        <TriggerConfig trigger={trigger} />
+                      
+                      <div className="hidden md:flex items-center">
+                        {isHttp && webhookPath ? (
+                          <CopyWebhookUrl path={webhookPath} />
+                        ) : trigger.type === "cron" ? (
+                          <div className="flex flex-col">
+                            <code className="text-xs text-text-2 font-mono">{expr}</code>
+                            <div className="mt-1">
+                              <NextFire expression={expr} />
+                            </div>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-text-4 font-mono truncate max-w-[200px]">
+                            {String(trigger.configuration ?? "").slice(0, 40)}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="hidden md:flex justify-end">
+                        <StatusBadge status="running" label="active" />
                       </div>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 shrink-0 ml-4" onClick={(e) => e.stopPropagation()}>
-                    <span className="text-xs text-muted-foreground hidden sm:block">
-                      <RelativeTime date={trigger.updated_at} />
-                    </span>
+                  
+                  <div className="flex items-center gap-3 shrink-0 ml-4">
                     {isHttp && (
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => openEditDialog(trigger)}
+                        className="h-7 text-xs bg-transparent border-graphite/50 text-text-3 hover:text-text-1"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditDialog(trigger);
+                        }}
                         disabled={editorPending}
                       >
-                        <Pencil className="h-3.5 w-3.5 mr-1.5" />
+                        <Pencil className="h-3 w-3 mr-1.5" />
                         Edit
                       </Button>
                     )}
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      className="h-7 w-7 text-text-4 hover:text-text-2"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setExpanded(isExpanded ? null : trigger.id);
+                      }}
+                    >
+                      {isExpanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                    </Button>
                   </div>
                 </div>
 
-                {expanded === trigger.id && (
-                  <div className="border-t bg-muted/20 px-4 py-3 space-y-3">
-                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm">
+                {isExpanded && (
+                  <div className="border-t border-graphite/20 bg-black/20 px-5 py-4 space-y-4">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                       <div>
-                        <p className="text-xs text-muted-foreground mb-1">ID</p>
-                        <p className="font-mono text-xs">{trigger.id}</p>
+                        <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Full ID</p>
+                        <p className="font-mono text-xs text-text-2 break-all">{trigger.id}</p>
                       </div>
                       <div>
-                        <p className="text-xs text-muted-foreground mb-1">Created</p>
-                        <p className="text-xs"><RelativeTime date={trigger.created_at} /></p>
+                        <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Status</p>
+                        <StatusBadge status="running" label="active" />
                       </div>
                       <div>
-                        <p className="text-xs text-muted-foreground mb-1">Updated</p>
-                        <p className="text-xs"><RelativeTime date={trigger.updated_at} /></p>
+                        <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Created</p>
+                        <p className="text-xs text-text-2"><RelativeTime date={trigger.created_at} /></p>
                       </div>
-                      {isHttp && webhookPath && (
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Webhook</p>
-                          <p className="font-mono text-xs">{webhookPath}</p>
-                        </div>
-                      )}
-                      {isHttp && signatureScheme && (
-                        <div>
-                          <p className="text-xs text-muted-foreground mb-1">Auth</p>
-                          <p className="text-xs">{signatureScheme}</p>
-                        </div>
-                      )}
+                      <div>
+                        <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Updated</p>
+                        <p className="text-xs text-text-2"><RelativeTime date={trigger.updated_at} /></p>
+                      </div>
                     </div>
+                    
+                    <div className="md:hidden">
+                      <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Action</p>
+                      {isHttp && webhookPath ? (
+                          <div className="mt-1 max-w-[300px]">
+                            <CopyWebhookUrl path={webhookPath} />
+                          </div>
+                        ) : trigger.type === "cron" ? (
+                          <div className="flex flex-col mt-1">
+                            <code className="text-xs text-text-2 font-mono bg-midnight/40 px-2 py-1 rounded inline-block w-max">{expr}</code>
+                            <div className="mt-2">
+                              <NextFire expression={expr} />
+                            </div>
+                          </div>
+                        ) : null}
+                    </div>
+
                     <div>
-                      <p className="text-xs text-muted-foreground mb-1">Configuration</p>
-                      <pre className="bg-code-bg text-code-fg rounded p-3 text-xs overflow-auto max-h-48">
+                      <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Raw Configuration</p>
+                      <pre className="bg-void border border-graphite/30 text-text-2 rounded-md p-3 text-[11px] overflow-auto max-h-48 font-mono">
                         {Object.keys(config).length > 0
                           ? JSON.stringify(config, null, 2)
                           : trigger.configuration}
                       </pre>
                     </div>
+
                     {isHttp && (
-                      <div className="rounded-md border border-yellow-500/30 bg-yellow-500/5 px-3 py-2 text-xs text-muted-foreground">
-                        <Zap className="h-3 w-3 inline mr-1.5 text-yellow-500" />
-                        Manual fire is now an operator-only API action via <code className="mx-1 rounded bg-muted px-1 py-0.5">POST /v1/triggers/:id/fire</code>.
-                        External systems should post to the webhook route above.
+                      <div className="rounded-md border border-gold/20 bg-gold/5 px-3 py-2 text-xs text-text-3 flex items-start gap-2">
+                        <Zap className="h-3.5 w-3.5 text-gold shrink-0 mt-0.5" />
+                        <div>
+                          Manual fire is an operator-only API action via <code className="font-mono text-[10px] text-text-2 bg-midnight/50 px-1 py-0.5 rounded border border-graphite/30 mx-1">POST /v1/triggers/:id/fire</code>.
+                          External systems should POST to the webhook URL instead.
+                        </div>
                       </div>
                     )}
                   </div>
@@ -449,14 +524,14 @@ export function TriggersPage() {
       </div>
 
       <Dialog open={editorOpen} onOpenChange={(open) => !editorPending && setEditorOpen(open)}>
-        <DialogContent className="max-w-2xl">
+        <DialogContent className="max-w-2xl bg-midnight border-graphite/50 text-text-1">
           <DialogHeader>
-            <DialogTitle>{editorMode === "create" ? "New HTTP Trigger" : "Edit HTTP Trigger"}</DialogTitle>
-            <DialogDescription>
+            <DialogTitle className="text-xl font-bold">{editorMode === "create" ? "New HTTP Trigger" : "Edit HTTP Trigger"}</DialogTitle>
+            <DialogDescription className="text-text-3">
               Configure the webhook route, auth, and request-body mappings. Standalone triggers only run jobs that already reference them.
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleEditorSubmit} className="space-y-4">
+          <form onSubmit={handleEditorSubmit} className="space-y-5 mt-2">
             <div className="grid gap-4 sm:grid-cols-2">
               <div>
                 <label className={labelClass}>Alias</label>
@@ -497,7 +572,7 @@ export function TriggersPage() {
                 <select
                   value={formState.signatureScheme}
                   onChange={(event) => setFormState((current) => ({ ...current, signatureScheme: event.target.value }))}
-                  className={inputClass}
+                  className={cn(inputClass, "appearance-none")}
                   disabled={editorPending}
                 >
                   <option value="">Default</option>
@@ -527,6 +602,7 @@ export function TriggersPage() {
                   onChange={(event) => setFormState((current) => ({ ...current, paramMappingText: event.target.value }))}
                   className={textareaClass}
                   disabled={editorPending}
+                  placeholder="{&#34;ref&#34;: &#34;$.ref&#34;}"
                 />
               </div>
               <div>
@@ -536,22 +612,33 @@ export function TriggersPage() {
                   onChange={(event) => setFormState((current) => ({ ...current, defaultParamsText: event.target.value }))}
                   className={textareaClass}
                   disabled={editorPending}
+                  placeholder="{&#34;env&#34;: &#34;production&#34;}"
                 />
               </div>
             </div>
 
-            <div className="rounded-md border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              Param mappings use simple JSONPath expressions like <code className="mx-1 rounded bg-muted px-1 py-0.5">$.ref</code> and
-              <code className="mx-1 rounded bg-muted px-1 py-0.5">$</code> for the whole payload.
+            <div className="rounded-md border border-graphite/30 bg-midnight/40 px-3 py-2.5 text-xs text-text-3">
+              Param mappings use simple JSONPath expressions like <code className="mx-1 rounded bg-black/40 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$.ref</code> and
+              <code className="mx-1 rounded bg-black/40 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$</code> for the whole payload.
             </div>
 
-            {formError && <p className="text-sm text-destructive">{formError}</p>}
+            {formError && <p className="text-sm text-danger font-medium">{formError}</p>}
 
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setEditorOpen(false)} disabled={editorPending}>
+            <DialogFooter className="pt-2">
+              <Button 
+                type="button" 
+                variant="outline" 
+                onClick={() => setEditorOpen(false)} 
+                disabled={editorPending}
+                className="bg-transparent border-graphite/50 text-text-2 hover:bg-graphite/20 hover:text-text-1"
+              >
                 Cancel
               </Button>
-              <Button type="submit" disabled={editorPending}>
+              <Button 
+                type="submit" 
+                disabled={editorPending}
+                className="bg-cyan-glow text-midnight hover:bg-cyan-dim"
+              >
                 {editorPending
                   ? (editorMode === "create" ? "Creating..." : "Saving...")
                   : (editorMode === "create" ? "Create Trigger" : "Save Trigger")}

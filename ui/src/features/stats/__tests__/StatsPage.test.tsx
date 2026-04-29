@@ -35,6 +35,7 @@ const mockStats: StatsResponse = {
     { job_id: 'job-1', alias: 'deploy-prod', failure_count: 5 },
     { job_id: 'job-2', alias: 'run-tests', failure_count: 3 },
   ],
+  top_failing_atoms: [],
   slowest_jobs: [
     { job_id: 'job-3', alias: 'build-all', avg_duration_seconds: 120.5 },
   ],

@@ -15,6 +15,7 @@ import (
 	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
+	"github.com/caesium-cloud/caesium/api/rest/controller/system"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
 	"github.com/caesium-cloud/caesium/internal/auth"
@@ -90,6 +91,8 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	// job definitions
 	{
 		g.POST("/jobdefs/apply", jobdef.Apply)
+		g.POST("/jobdefs/lint", jobdef.Lint)
+		g.POST("/jobdefs/diff", jobdef.Diff)
 	}
 
 	// triggers
@@ -104,6 +107,13 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	// stats
 	{
 		g.GET("/stats", stats.Get)
+		g.GET("/stats/summary", stats.Summary)
+	}
+
+	// system
+	{
+		g.GET("/system/nodes", system.Nodes)
+		g.GET("/system/features", system.Features)
 	}
 
 	// server logs

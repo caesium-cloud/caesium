@@ -2,6 +2,7 @@ package stats
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -11,13 +12,14 @@ import (
 
 // StatsResponse is the top-level statistics payload.
 type StatsResponse struct {
-	Jobs             JobStats     `json:"jobs"`
-	TopFailing       []FailingJob `json:"top_failing"`
-	SlowestJobs      []SlowestJob `json:"slowest_jobs"`
-	SuccessRateTrend []DailyStats `json:"success_rate_trend"`
+	Jobs             JobStats      `json:"jobs"`
+	TopFailing       []FailingJob  `json:"top_failing"`
+	TopFailingAtoms  []FailingAtom `json:"top_failing_atoms"`
+	SlowestJobs      []SlowestJob  `json:"slowest_jobs"`
+	SuccessRateTrend []DailyStats  `json:"success_rate_trend"`
 }
 
-// DailyStats describes success rate for a specific day.
+// DailyStats describes success rate for a specific day or hour.
 type DailyStats struct {
 	Date        string  `json:"date"`
 	RunCount    int64   `json:"run_count"`
@@ -40,6 +42,14 @@ type FailingJob struct {
 	LastFailure  *time.Time `json:"last_failure"`
 }
 
+// FailingAtom describes a frequently failing atom.
+type FailingAtom struct {
+	JobID        string `json:"job_id"`
+	Alias        string `json:"alias"`
+	AtomName     string `json:"atom_name"`
+	FailureCount int64  `json:"failure_count"`
+}
+
 // SlowestJob describes a job with high average duration.
 type SlowestJob struct {
 	JobID              string  `json:"job_id"`
@@ -59,8 +69,7 @@ func New(ctx context.Context) *Service {
 }
 
 // durationExpr returns a SQL expression computing the difference in seconds
-// between completed_at and started_at. The expression is dialect-aware:
-// Postgres uses EXTRACT(EPOCH FROM ...), SQLite/DQLite uses JULIANDAY arithmetic.
+// between completed_at and started_at.
 func (s *Service) durationExpr() string {
 	if s.db.Name() == "postgres" {
 		return "EXTRACT(EPOCH FROM (completed_at - started_at))"
@@ -68,42 +77,64 @@ func (s *Service) durationExpr() string {
 	return "(JULIANDAY(completed_at) - JULIANDAY(started_at)) * 86400"
 }
 
-// Get computes aggregate statistics from job_runs and task_runs.
+// Get is a legacy wrapper for Summary("7d").
 func (s *Service) Get() (*StatsResponse, error) {
+	return s.Summary("7d")
+}
+
+// Summary computes aggregate statistics for the given window.
+func (s *Service) Summary(window string) (*StatsResponse, error) {
 	resp := &StatsResponse{}
 	durExpr := s.durationExpr()
 
-	// Total distinct jobs
+	var since time.Time
+	var days int
+	var hourly bool
+
+	switch window {
+	case "24h":
+		since = time.Now().UTC().Add(-24 * time.Hour)
+		days = 24
+		hourly = true
+	case "30d":
+		since = time.Now().UTC().Add(-30 * 24 * time.Hour)
+		days = 30
+	default: // 7d
+		since = time.Now().UTC().Add(-7 * 24 * time.Hour)
+		days = 7
+	}
+
+	// Total distinct jobs (not windowed)
 	s.db.WithContext(s.ctx).Model(&models.Job{}).Count(&resp.Jobs.Total)
 
-	// Recent runs (last 24 hours)
-	since := time.Now().UTC().Add(-24 * time.Hour)
+	// Recent runs (always 24h as per spec KPI)
+	recentSince := time.Now().UTC().Add(-24 * time.Hour)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("started_at >= ?", since).
+		Where("started_at >= ?", recentSince).
 		Count(&resp.Jobs.RecentRuns)
 
-	// Success rate across all completed runs
+	// Success rate in window
 	var totalCompleted int64
 	var totalSucceeded int64
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("status IN ?", []string{"succeeded", "failed"}).
+		Where("status IN ? AND started_at >= ?", []string{"succeeded", "failed"}, since).
 		Count(&totalCompleted)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("status = ?", "succeeded").
+		Where("status = ? AND started_at >= ?", "succeeded", since).
 		Count(&totalSucceeded)
 	if totalCompleted > 0 {
 		resp.Jobs.SuccessRate = float64(totalSucceeded) / float64(totalCompleted)
 	}
 
-	// Average duration of completed runs
+	// Average duration in window
 	var avgResult struct{ Avg float64 }
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("AVG(" + durExpr + ") as avg").
-		Where("completed_at IS NOT NULL").
+		Where("completed_at IS NOT NULL AND started_at >= ?", since).
 		Scan(&avgResult)
 	resp.Jobs.AvgDurationSeconds = avgResult.Avg
 
-	// Top failing jobs (up to 5)
+	// Top failing jobs (up to 5) in window
 	type failRow struct {
 		JobID        string
 		FailureCount int64
@@ -112,7 +143,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	var failRows []failRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("job_id, COUNT(*) as failure_count, MAX(completed_at) as last_failure").
-		Where("status = ?", "failed").
+		Where("status = ? AND started_at >= ?", "failed", since).
 		Group("job_id").
 		Order("failure_count DESC").
 		Limit(5).
@@ -120,16 +151,41 @@ func (s *Service) Get() (*StatsResponse, error) {
 
 	resp.TopFailing = make([]FailingJob, 0, len(failRows))
 	for _, row := range failRows {
-		alias := s.lookupAlias(row.JobID)
 		resp.TopFailing = append(resp.TopFailing, FailingJob{
 			JobID:        row.JobID,
-			Alias:        alias,
+			Alias:        s.lookupAlias(row.JobID),
 			FailureCount: row.FailureCount,
 			LastFailure:  row.LastFailure,
 		})
 	}
 
-	// Slowest jobs (up to 5)
+	// Top failing atoms (up to 5) in window
+	var atomRows []struct {
+		JobID        string
+		AtomName     string
+		FailureCount int64
+	}
+	s.db.WithContext(s.ctx).Model(&models.TaskRun{}).
+		Select("job_runs.job_id, tasks.name as atom_name, COUNT(*) as failure_count").
+		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
+		Joins("JOIN tasks ON tasks.id = task_runs.task_id").
+		Where("task_runs.status = ? AND job_runs.started_at >= ?", "failed", since).
+		Group("job_runs.job_id, tasks.name").
+		Order("failure_count DESC").
+		Limit(5).
+		Scan(&atomRows)
+
+	resp.TopFailingAtoms = make([]FailingAtom, 0, len(atomRows))
+	for _, row := range atomRows {
+		resp.TopFailingAtoms = append(resp.TopFailingAtoms, FailingAtom{
+			JobID:        row.JobID,
+			Alias:        s.lookupAlias(row.JobID),
+			AtomName:     row.AtomName,
+			FailureCount: row.FailureCount,
+		})
+	}
+
+	// Slowest jobs (up to 5) in window
 	type slowRow struct {
 		JobID string
 		Avg   float64
@@ -137,7 +193,7 @@ func (s *Service) Get() (*StatsResponse, error) {
 	var slowRows []slowRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("job_id, AVG(" + durExpr + ") as avg").
-		Where("completed_at IS NOT NULL").
+		Where("completed_at IS NOT NULL AND started_at >= ?", since).
 		Group("job_id").
 		Order("avg DESC").
 		Limit(5).
@@ -145,62 +201,79 @@ func (s *Service) Get() (*StatsResponse, error) {
 
 	resp.SlowestJobs = make([]SlowestJob, 0, len(slowRows))
 	for _, row := range slowRows {
-		alias := s.lookupAlias(row.JobID)
 		resp.SlowestJobs = append(resp.SlowestJobs, SlowestJob{
 			JobID:              row.JobID,
-			Alias:              alias,
+			Alias:              s.lookupAlias(row.JobID),
 			AvgDurationSeconds: row.Avg,
 		})
 	}
 
-	// Success rate trend (last 7 days)
+	// Trend data
 	var trendData []struct {
-		Day      string
+		Point    string
 		Succ     int64
 		RunCount int64
 	}
-	dayExpr := "strftime('%Y-%m-%d', started_at, 'utc')"
-	if s.db.Name() == "postgres" {
-		dayExpr = "TO_CHAR(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+
+	pointExpr := "strftime('%Y-%m-%d', started_at, 'utc')"
+	if hourly {
+		pointExpr = "strftime('%Y-%m-%dT%H:00:00Z', started_at, 'utc')"
 	}
 
-	now := time.Now().UTC()
-	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-	sevenDaysAgo := today.Add(-6 * 24 * time.Hour)
+	if s.db.Name() == "postgres" {
+		if hourly {
+			pointExpr = "TO_CHAR(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:00:00\"Z\"')"
+		} else {
+			pointExpr = "TO_CHAR(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD')"
+		}
+	}
+
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select(dayExpr+" as day, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
-		Where("started_at >= ? AND status IN ?", sevenDaysAgo, []string{"succeeded", "failed"}).
-		Group("day").
-		Order("day ASC").
+		Select(pointExpr+" as point, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
+		Where("started_at >= ? AND status IN ?", since, []string{"succeeded", "failed"}).
+		Group("point").
+		Order("point ASC").
 		Scan(&trendData)
 
-	type dailyAggregate struct {
-		successRate float64
-		runCount    int64
-	}
-
-	trendMap := make(map[string]dailyAggregate, len(trendData))
+	trendMap := make(map[string]DailyStats, len(trendData))
 	for _, d := range trendData {
 		rate := 0.0
 		if d.RunCount > 0 {
 			rate = float64(d.Succ) / float64(d.RunCount)
 		}
-		trendMap[d.Day] = dailyAggregate{
-			successRate: rate,
-			runCount:    d.RunCount,
+		trendMap[d.Point] = DailyStats{
+			Date:        d.Point,
+			RunCount:    d.RunCount,
+			SuccessRate: rate,
 		}
 	}
 
-	resp.SuccessRateTrend = make([]DailyStats, 0, 7)
-	for i := 0; i < 7; i++ {
-		day := sevenDaysAgo.Add(time.Duration(i) * 24 * time.Hour)
-		dayStr := day.Format("2006-01-02")
-		aggregate := trendMap[dayStr]
-		resp.SuccessRateTrend = append(resp.SuccessRateTrend, DailyStats{
-			Date:        dayStr,
-			RunCount:    aggregate.runCount,
-			SuccessRate: aggregate.successRate,
-		})
+	resp.SuccessRateTrend = make([]DailyStats, 0, days)
+	if hourly {
+		now := time.Now().UTC()
+		startHour := now.Add(-23 * time.Hour).Truncate(time.Hour)
+		for i := 0; i < 24; i++ {
+			hour := startHour.Add(time.Duration(i) * time.Hour)
+			hourStr := hour.Format("2006-01-02T15:04:05Z")
+			point := trendMap[hourStr]
+			if point.Date == "" {
+				point.Date = hourStr
+			}
+			resp.SuccessRateTrend = append(resp.SuccessRateTrend, point)
+		}
+	} else {
+		now := time.Now().UTC()
+		today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		startDay := today.Add(time.Duration(-(days - 1)) * 24 * time.Hour)
+		for i := 0; i < days; i++ {
+			day := startDay.Add(time.Duration(i) * 24 * time.Hour)
+			dayStr := day.Format("2006-01-02")
+			point := trendMap[dayStr]
+			if point.Date == "" {
+				point.Date = dayStr
+			}
+			resp.SuccessRateTrend = append(resp.SuccessRateTrend, point)
+		}
 	}
 
 	return resp, nil
