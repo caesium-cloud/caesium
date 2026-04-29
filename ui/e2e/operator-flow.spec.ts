@@ -76,8 +76,8 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await expect(node).toBeVisible();
   await node.click();
 
-  await expect(page.getByText("Retained", { exact: true })).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByTestId("task-log-plaintext")).toContainText(
+  await expect(page.getByTestId("run-log-viewer").getByText("Retained", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-log-plaintext")).toContainText(
     "stream complete: retained logs should remain available after cleanup",
   );
 });

@@ -16,7 +16,7 @@ interface RunLogViewerProps {
 type LogLine = { id: number; text: string };
 
 // Mirrors the server header values from the existing LogViewer component.
-type LogState = "loading" | "streaming" | "complete" | "pending" | "unavailable" | "error" | "empty";
+type LogState = "loading" | "streaming" | "complete" | "retained" | "pending" | "unavailable" | "error" | "empty";
 
 const SCROLL_KEY_PREFIX = "caesium-run-log-scroll:";
 
@@ -138,7 +138,8 @@ export function RunLogViewer({
         }
 
         const sourceHeader = response.headers.get("X-Caesium-Log-Source");
-        setStatus(sourceHeader === "live" ? "streaming" : "complete");
+        const isPersisted = sourceHeader === "persisted";
+        setStatus(sourceHeader === "live" ? "streaming" : isPersisted ? "retained" : "complete");
 
         const reader = response.body?.getReader();
         if (!reader) { setStatus("empty"); return; }
@@ -176,7 +177,7 @@ export function RunLogViewer({
           setLines((prev) => [...prev, { id: ++lineIdRef.current, text: buffer }]);
         }
 
-        setStatus(sawOutput ? "complete" : "empty");
+        setStatus(sawOutput ? (isPersisted ? "retained" : "complete") : "empty");
       } catch (err) {
         if (err instanceof Error && err.name === "AbortError") return;
         setStatus("error");
@@ -197,7 +198,7 @@ export function RunLogViewer({
   const virtualItems = rowVirtualizer.getVirtualItems();
 
   return (
-    <div className="relative flex flex-col h-full bg-[#020617] text-[#e2e8f0] font-mono text-[11px]">
+    <div data-testid="run-log-viewer" className="relative flex flex-col h-full bg-[#020617] text-[#e2e8f0] font-mono text-[11px]">
       {/* Status bar */}
       <div className="flex items-center gap-2 px-3 py-1.5 border-b border-white/5 bg-black/20 shrink-0">
         <StatusPill status={status} />
@@ -205,6 +206,10 @@ export function RunLogViewer({
           <span className="text-red-400/80 truncate">{taskError}</span>
         )}
       </div>
+      {/* Hidden full-text mirror for e2e content assertions */}
+      <pre data-testid="run-log-plaintext" className="sr-only">
+        {lines.map((l) => l.text).join("\n")}
+      </pre>
 
       {/* Log lines (virtualized) */}
       <div
@@ -280,6 +285,7 @@ function StatusPill({ status }: { status: LogStatus }) {
     loading:     { label: "Loading",     cls: "bg-white/10 text-[#94a3b8]" },
     streaming:   { label: "Live",        cls: "bg-emerald-500/10 border-emerald-500/30 text-emerald-300" },
     complete:    { label: "Complete",    cls: "bg-blue-500/10 border-blue-500/30 text-blue-300" },
+    retained:    { label: "Retained",    cls: "bg-blue-500/10 border-blue-500/30 text-blue-300" },
     pending:     { label: "Pending",     cls: "bg-amber-500/10 border-amber-500/30 text-amber-300" },
     unavailable: { label: "Unavailable", cls: "bg-white/5 border-white/10 text-[#64748b]" },
     error:       { label: "Error",       cls: "bg-red-500/10 border-red-500/30 text-red-300" },
