@@ -17,7 +17,7 @@ import { toast } from "sonner";
 import { Clock, Globe, Plus, Pencil, Copy, Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import { parseExpression } from "cron-parser";
+import cronParser from "cron-parser";
 
 const inputClass =
   "w-full rounded-md border border-graphite/50 bg-midnight/50 px-3 py-2 text-sm text-text-1 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-glow";
@@ -154,7 +154,7 @@ function NextFire({ expression }: { expression: string }) {
   useEffect(() => {
     const compute = () => {
       try {
-        const interval = parseExpression(expression);
+        const interval = cronParser.parse(expression);
         setNextDate(interval.next().toDate());
       } catch {
         setNextDate(null);
