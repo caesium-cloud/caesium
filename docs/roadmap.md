@@ -101,15 +101,9 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 **Design doc**: [`design-sla-management.md`](design-sla-management.md)
 
-### 2.4 UI Refresh (Caesium Console v2)
+### 2.4 UI Refresh (Caesium Console v2) ✅ Shipped 2026-04-28
 
-**Current state**: The embedded UI (under `ui/`) is functionally complete — Jobs, Job Detail, Run Detail, Stats, Triggers, Atoms, JobDefs, and System pages all ship — but visually generic. Each page reinvents status colors, badges, and density choices, and the brand identity (atom motif, cyan + gold) is barely visible. The v1 plan ([`ui_implementation_plan.md`](ui_implementation_plan.md)) closed out the feature scope; this entry tracks the visual + primitive layer.
-
-**Target state**: A coherent design system shipped as four phased PR trains. Phase 0 lands tokens, status semantics, primitives (`AtomLogo`, `StatusBadge`, `Sparkline`, `EmptyState`, `UTCClock`, `UsageBar`), and the AppShell; existing pages take on the refreshed look automatically. Phase 1 rebuilds the high-traffic surfaces (Jobs list, Job Detail with live DAG overlay, Run Detail with Gantt + virtualized logs). Phase 2 polishes Stats and Triggers. Phase 3 ships the net-new server work for System (`/v1/system/health|nodes|features|cache/prune`) and JobDefs (`/v1/jobdefs/lint|diff|history`) behind a feature flag.
-
-**Design doc**: [`design-ui-refresh.md`](design-ui-refresh.md)
-**Execution plan**: [`ui-refresh-execution-plan.md`](ui-refresh-execution-plan.md)
-**Reference prototype**: [`design/ui-refresh/`](design/ui-refresh/)
+Design system, status semantics, and full page refreshes shipped across PRs [#146](https://github.com/caesiumcloud/caesium/pull/146), [#147](https://github.com/caesiumcloud/caesium/pull/147), and [#148](https://github.com/caesiumcloud/caesium/pull/148). Phases 0–4 complete. See [`ui_implementation_plan.md`](ui_implementation_plan.md) for the shipped feature record.
 
 ### 2.5 Cost Tracking & Resource Awareness
 
@@ -249,5 +243,3 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
 - [Design: Task Templates](design-task-templates.md) — P2 reusable steps
 - [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
-- [Design: UI Refresh](design-ui-refresh.md) — P2 console v2
-- [UI Refresh Execution Plan](ui-refresh-execution-plan.md) — P2 phased implementation
