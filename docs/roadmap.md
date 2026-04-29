@@ -103,7 +103,7 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 ### 2.4 UI Refresh (Caesium Console v2) ✅ Shipped 2026-04-28
 
-Design system, status semantics, and full page refreshes shipped across PRs [#146](https://github.com/caesiumcloud/caesium/pull/146), [#147](https://github.com/caesiumcloud/caesium/pull/147), and [#148](https://github.com/caesiumcloud/caesium/pull/148). Phases 0–4 complete. See [`ui_implementation_plan.md`](ui_implementation_plan.md) for the shipped feature record.
+Design system, status semantics, and full page refreshes shipped across PRs [#146](https://github.com/caesium-cloud/caesium/pull/146), [#147](https://github.com/caesium-cloud/caesium/pull/147), and [#148](https://github.com/caesium-cloud/caesium/pull/148). Phases 0–4 complete. See [`ui_implementation_plan.md`](ui_implementation_plan.md) for the shipped feature record.
 
 ### 2.5 Cost Tracking & Resource Awareness
 

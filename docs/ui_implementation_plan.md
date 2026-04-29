@@ -30,7 +30,7 @@ The embedded UI is already in production shape for the core operator workflow:
 
 ### UI Refresh (2026-04) — Shipped
 
-Full visual-layer redesign shipped across PRs [#146](https://github.com/caesiumcloud/caesium/pull/146), [#147](https://github.com/caesiumcloud/caesium/pull/147), and [#148](https://github.com/caesiumcloud/caesium/pull/148).
+Full visual-layer redesign shipped across PRs [#146](https://github.com/caesium-cloud/caesium/pull/146), [#147](https://github.com/caesium-cloud/caesium/pull/147), and [#148](https://github.com/caesium-cloud/caesium/pull/148).
 
 - [x] Design tokens, status semantics, `<AtomLogo>`, and UI primitives (Phase 0)
 - [x] App shell visual upgrade: animated sidebar, breadcrumb header, UTC clock (Phase 0)
