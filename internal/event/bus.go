@@ -36,6 +36,8 @@ const (
 	TypeBackfillFailed    Type = "backfill_failed"
 	TypeBackfillCancelled Type = "backfill_cancelled"
 	TypeRunRetried        Type = "run_retried"
+	TypeRunTimedOut       Type = "run_timed_out"
+	TypeSLAMissed         Type = "sla_missed"
 )
 
 // Event represents a system event.

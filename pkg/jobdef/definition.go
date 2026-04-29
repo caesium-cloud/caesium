@@ -54,6 +54,24 @@ const (
 	SchemaValidationFail     = "fail"
 )
 
+// SLAConfig defines the service-level agreement for a job.
+type SLAConfig struct {
+	// Duration is the maximum time a run may take before an SLA miss alert is
+	// emitted, measured from the run's start time. Does not cancel execution.
+	Duration time.Duration `yaml:"duration,omitempty" json:"duration,omitempty"`
+
+	// CompletedBy is a wall-clock time of day in "HH:MM" format (UTC) by
+	// which the job must have a successfully completed run. If no run has
+	// completed by this time, an SLA miss alert is emitted — even if the job
+	// was never triggered.
+	CompletedBy string `yaml:"completedBy,omitempty" json:"completedBy,omitempty"`
+}
+
+// HasSLA returns true if any SLA constraint is configured.
+func (s *SLAConfig) HasSLA() bool {
+	return s != nil && (s.Duration > 0 || s.CompletedBy != "")
+}
+
 // Metadata contains descriptive data for the job.
 type Metadata struct {
 	Alias            string            `yaml:"alias" json:"alias"`
@@ -62,6 +80,14 @@ type Metadata struct {
 	MaxParallelTasks int               `yaml:"maxParallelTasks,omitempty" json:"maxParallelTasks,omitempty"`
 	TaskTimeout      time.Duration     `yaml:"taskTimeout,omitempty" json:"taskTimeout,omitempty"`
 	RunTimeout       time.Duration     `yaml:"runTimeout,omitempty" json:"runTimeout,omitempty"`
+	// SLA defines the service-level agreement for this job. It supports two
+	// modes that may be used independently or together:
+	//   duration    — max run duration before an SLA miss alert (relative to
+	//                 run start; does not cancel execution).
+	//   completedBy — wall-clock time of day ("HH:MM", UTC) by which the job
+	//                 must have a successfully completed run. Alerts even if
+	//                 no run has started.
+	SLA              *SLAConfig        `yaml:"sla,omitempty" json:"sla,omitempty"`
 	// SchemaValidation controls runtime output schema validation.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
 	SchemaValidation string      `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
