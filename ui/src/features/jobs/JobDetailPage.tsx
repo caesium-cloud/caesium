@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange, History, List, Pause, Play, Settings2, FileText } from "lucide-react";
+import { CalendarRange, History, List, Pause, Play, Settings2, FileText, Zap } from "lucide-react";
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
@@ -9,6 +9,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { StatusBadge } from "@/components/ui/status-badge";
 import {
   Dialog,
   DialogContent,
@@ -35,9 +36,23 @@ export function JobDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
   const [backfillDialogOpen, setBackfillDialogOpen] = useState(false);
+  const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
+
+  // URL-hash driven node selection
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => {
+    const hash = window.location.hash.slice(1);
+    return hash || null;
+  });
+
+  const handleNodeSelect = (taskId: string | null) => {
+    setSelectedTaskId(taskId);
+    if (taskId) {
+      window.history.replaceState(null, "", `#${taskId}`);
+    } else {
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+  };
 
   const { data: job, isLoading: isLoadingJob } = useQuery({
     queryKey: ["job", jobId],
@@ -287,27 +302,28 @@ export function JobDetailPage() {
       {/* Header row */}
       <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
         <div>
-          <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight">{job.alias}</h1>
-            <Badge variant={job.paused ? "outline" : "secondary"} className={job.paused ? "border-amber-500/40 text-amber-300" : ""}>
-              {job.paused ? "Paused" : "Active"}
-            </Badge>
-            {featuredRun ? renderRunStatus(featuredRun.status) : null}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span className="font-mono">{job.id}</span>
-            {featuredRun ? (
-              <>
-                <span>·</span>
-                <span>{activeRun ? "Active run started" : "Last run"} <RelativeTime date={featuredRun.started_at} /></span>
-                <span>·</span>
-                <span className="font-mono">
-                  <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
-                </span>
-              </>
-            ) : null}
-          </div>
-          {featuredRun ? <div className="mt-3"><RunCacheSummary run={featuredRun} /></div> : null}
+            <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">Pipeline</div>
+            <div className="flex items-center gap-2.5">
+              <h1 className="text-xl font-semibold text-text-1 tracking-tight">{job.alias}</h1>
+              <StatusBadge status={job.paused ? "paused" : (featuredRun?.status ?? "queued")} size="sm" />
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
+              <span className="font-mono text-text-4">{shortId(job.id)}</span>
+              {featuredRun ? (
+                <>
+                  <span className="text-text-4">·</span>
+                  <span>
+                    {activeRun ? "Started" : "Last run"}{" "}
+                    <RelativeTime date={featuredRun.started_at} />
+                  </span>
+                  <span className="text-text-4">·</span>
+                  <span className="font-mono tabular-nums">
+                    <Duration start={featuredRun.started_at} end={featuredRun.completed_at} />
+                  </span>
+                </>
+              ) : null}
+            </div>
+            {featuredRun ? <div className="mt-2"><RunCacheSummary run={featuredRun} /></div> : null}
         </div>
         <div className="flex items-center gap-2">
           {/* Secondary view buttons */}
@@ -370,36 +386,39 @@ export function JobDetailPage() {
         style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
       >
         {/* Compact overlay status bar */}
-        <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5">
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <div className="flex items-center justify-between border-b border-border/50 px-4 py-1.5 gap-4">
+          <div className="flex items-center gap-2 text-xs text-text-3 min-w-0">
             {featuredRun ? (
               <>
-                <span>
-                  {activeRun ? "Live overlay from" : "Latest overlay from"} run{" "}
+                {activeRun && (
+                  <span className="flex items-center gap-1.5">
+                    <Zap className="h-3 w-3 text-cyan-glow animate-pulse" />
+                    <span className="text-cyan-glow/80 font-medium">Live</span>
+                  </span>
+                )}
+                <span className="truncate">
+                  {activeRun ? "Overlay from" : "Latest overlay — run"}{" "}
                   <Link
                     to="/jobs/$jobId/runs/$runId"
                     params={{ jobId, runId: featuredRun.id }}
-                    className="font-mono text-blue-400 hover:underline"
+                    className="font-mono text-cyan-glow/70 hover:text-cyan-glow"
                   >
                     {shortId(featuredRun.id)}
                   </Link>
                 </span>
-                {featuredRun ? (
-                  <Badge variant={activeRun ? "running" : "secondary"} className="text-[10px] px-1.5 py-0">
-                    {activeRun ? "Live" : "Latest"}
-                  </Badge>
-                ) : null}
               </>
             ) : (
-              <span>DAG topology only — trigger a run to populate task state</span>
+              <span className="text-text-4">DAG topology — trigger a run to see live state</span>
             )}
           </div>
-          <div className="flex items-center gap-2">
-            {featuredRun ? <RunCacheSummary run={featuredRun} compact /> : null}
+
+          <div className="flex items-center gap-3 shrink-0">
+            {/* Live task counters */}
+            {featuredRun && (
+              <DagCounters tasks={featuredRun.tasks} />
+            )}
             {job.paused && (
-              <Badge variant="outline" className="border-amber-500/40 text-amber-300 text-[10px] px-1.5 py-0">
-                Paused
-              </Badge>
+              <StatusBadge status="paused" variant="soft" size="sm" />
             )}
           </div>
         </div>
@@ -414,7 +433,7 @@ export function JobDetailPage() {
               taskMetadata={taskMetadata}
               taskStatus={taskStatus}
               taskRunData={featuredRunTasks}
-              onNodeClick={featuredRun ? setSelectedTaskId : undefined}
+              onNodeClick={featuredRun ? handleNodeSelect : undefined}
               selectedTaskId={selectedTaskId}
             />
           ) : null}
@@ -430,7 +449,7 @@ export function JobDetailPage() {
             taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
             jobId={jobId}
             runId={featuredRun.id}
-            onClose={() => setSelectedTaskId(null)}
+            onClose={() => handleNodeSelect(null)}
           />
         ) : null}
       </div>
@@ -477,6 +496,26 @@ export function JobDetailPage() {
         onOpenChange={setBackfillDialogOpen}
         disabled={job.paused}
       />
+    </div>
+  );
+}
+
+/* ── DAG live counters ── */
+
+function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
+  if (!tasks || tasks.length === 0) return null;
+  const done = tasks.filter((t) => t.status === "succeeded" || t.status === "completed").length;
+  const running = tasks.filter((t) => t.status === "running").length;
+  const cached = tasks.filter((t) => t.status === "cached").length;
+  const queued = tasks.filter((t) => t.status === "pending" || t.status === "queued").length;
+  const total = tasks.length;
+
+  return (
+    <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
+      <span className="text-success/80">{done}/{total} done</span>
+      {running > 0 && <span className="text-cyan-glow/80">{running} active</span>}
+      {cached > 0 && <span className="text-cached/80">{cached} cached</span>}
+      {queued > 0 && <span className="text-text-4">{queued} queued</span>}
     </div>
   );
 }

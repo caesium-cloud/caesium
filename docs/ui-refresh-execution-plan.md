@@ -1,6 +1,6 @@
 # UI Refresh — Execution Plan
 
-> Status: Active — Phase 0 shipped (2026-04-28, branch `claude/eager-rubin-E3djS`). Phase 1 is next. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
+> Status: Active — Phase 0 shipped (2026-04-28, branch `claude/eager-rubin-E3djS`). Phase 1 shipped (2026-04-28, branch `claude/wizardly-sutherland-c39d8e`). Phase 2 is next. Companion to [`design-ui-refresh.md`](design-ui-refresh.md). Each phase is its own PR train; each step lists files to touch, API gaps, and acceptance criteria so an agent can pick up a single bullet without rereading the design.
 
 ## How to use this plan
 
@@ -63,11 +63,35 @@ Phase 0 changes propagate automatically into every page. Land them first; the re
 
 ---
 
-## Phase 1 · High-traffic paths
+## Phase 1 · High-traffic paths ✅ Shipped 2026-04-28
+
+> Branch: `claude/wizardly-sutherland-c39d8e`. All acceptance criteria verified: 79/79 vitests pass, tsc --noEmit clean, eslint clean (one expected TanStack Virtual incompatible-library warning).
 
 These are the pages operators stare at. Land Phase 0 first; skip ahead and you'll reinvent the primitives.
 
-### 1.1 — Jobs list
+### 1.1 — Jobs list ✅
+
+**Shipped:**
+- `ui/src/features/jobs/useJobsView.ts` — `useJobsView()` hook: URL-param-driven filter/search/sort via `window.history.replaceState`, SSE event subscriptions (run events + pause events + task_cached), client-side status counts, `lastRuns` mapping from `job.last_runs` (backend field, gracefully empty until API ships), live activity feed (capped at 20 entries).
+- `ui/src/features/jobs/JobsPage.tsx` — full rewrite: eyebrow label, 5-chip `<FilterBar>` segmented control with counts, Tailwind `grid-cols` layout (not `<table>`), `<StatusBadge>` throughout, `<Sparkline>` column (lazy renders after first frame), action buttons appear on row hover only, `<ActivityFeed>` from SSE stream, `<EmptyState>` when filters yield zero rows.
+
+### 1.2 — Job Detail + DAG ✅
+
+**Shipped:**
+- `ui/src/features/jobs/JobDetailPage.tsx` — upgraded header: eyebrow label, `<StatusBadge>` replacing raw `<Badge>`, `shortId` instead of full UUID. Live overlay strip: cyan pulse `<Zap>` icon when active, `<DagCounters>` mini strip (done/active/cached/queued). URL hash node selection: `#taskId` written on select, cleared on deselect, read on mount for deep-link sharing. `onClose` uses `handleNodeSelect(null)` to also clear the hash.
+
+### 1.3 — Run Detail + logs ✅
+
+**Shipped:**
+- `ui/src/features/jobs/RunDetailPage.tsx` — breadcrumb nav, eyebrow label, `<StatusBadge>`, collapsible Gantt timeline section (wraps existing `RunTimeline`), action cluster (All runs / Re-run / Cancel), task-level `<RunLogViewer>` opens below the timeline when a DAG node is selected.
+- `ui/src/features/jobs/RunLogViewer.tsx` — new component: `@tanstack/react-virtual` row virtualizer (60fps at 50k lines), streaming fetch from `/v1/jobs/.../logs`, status pill (Loading / Live / Complete / Error / Empty), at-bottom detection with `setAtBottom`, "Jump to live" pill shown when scrolled up during a running task, scroll position persisted to `sessionStorage` keyed on `runId:taskId`.
+
+**Remaining API gaps (unchanged):**
+- `lastRuns` field on Job DTO — sparklines show dash until backend ships this field.
+
+---
+
+### 1.1 — Jobs list (original spec)
 
 **File:** `ui/src/features/jobs/JobsPage.tsx` (replace existing).
 
