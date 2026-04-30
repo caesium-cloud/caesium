@@ -16,6 +16,7 @@ import {
   LogShell,
   LogToolbar,
 } from "@/components/logs";
+import { withAuthHeaders } from "@/lib/auth";
 import { buildLogFilterResult } from "./logFiltering";
 
 const logHeaderState = "X-Caesium-Log-State";
@@ -148,7 +149,7 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       try {
         const response = await fetch(
           `/v1/jobs/${jobId}/runs/${runId}/logs?${new URLSearchParams({ task_id: taskId })}`,
-          { signal: abortController.signal },
+          { signal: abortController.signal, headers: withAuthHeaders() },
         );
 
         const sourceHeader = response.headers.get(logHeaderSource);
