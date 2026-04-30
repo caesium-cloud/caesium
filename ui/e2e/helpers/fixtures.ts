@@ -29,7 +29,7 @@ export async function loadFixtureDefinition(filename: string): Promise<FixtureDe
   }
   const def = raw as FixtureDefinition;
 
-  const suffix = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1_000_000).toString(36)}`;
+  const suffix = crypto.randomUUID().split("-")[0];
   const baseAlias = String(def.metadata?.alias ?? path.basename(filename, ".job.yaml"));
   def.metadata = { ...(def.metadata ?? {}), alias: `${baseAlias}-${suffix}` };
 
