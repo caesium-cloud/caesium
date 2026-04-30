@@ -15,7 +15,6 @@ import { shortId } from "@/lib/utils";
 import { getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
 import { RunCacheSummary } from "./RunCacheSummary";
-import { RunLogViewer } from "./RunLogViewer";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
@@ -316,34 +315,6 @@ export function RunDetailPage() {
           </div>
         )}
       </div>
-
-      {/* Log viewer for selected task */}
-      {selectedTaskId && (
-        <div className="rounded-md border border-border/50 bg-card overflow-hidden">
-          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border/50">
-            <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
-              Logs — {atoms?.[runTasks[selectedTaskId]?.atom_id]?.image?.split("/").pop()?.split(":")[0] ?? shortId(selectedTaskId)}
-            </span>
-            <button
-              type="button"
-              className="text-[10px] text-text-4 hover:text-text-2 transition-colors"
-              onClick={() => setSelectedTaskId(null)}
-            >
-              Close
-            </button>
-          </div>
-          <div className="h-80">
-            <RunLogViewer
-              jobId={jobId}
-              runId={runId}
-              taskId={selectedTaskId}
-              isRunning={isLive}
-              taskStatus={runTasks[selectedTaskId]?.status}
-              taskError={runTasks[selectedTaskId]?.error}
-            />
-          </div>
-        </div>
-      )}
 
       {/* Run parameters */}
       {run.params && Object.keys(run.params).length > 0 ? (
