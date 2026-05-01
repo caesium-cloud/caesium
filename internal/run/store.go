@@ -578,26 +578,33 @@ func executionEventRecord(evt event.Event) models.ExecutionEvent {
 }
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
-	now := time.Now().UTC()
-	pendingEvents := make([]event.Event, 0, 1)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID).
-			Updates(map[string]interface{}{
-				"status":     string(TaskStatusRunning),
-				"runtime_id": runtimeID,
-				"started_at": now,
-			}).Error; err != nil {
-			return err
-		}
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
-			if err != nil {
+	var pendingEvents []event.Event
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ?", runID, taskID).
+				Updates(map[string]interface{}{
+					"status":     string(TaskStatusRunning),
+					"runtime_id": runtimeID,
+					"started_at": now,
+				}).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -606,29 +613,36 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 }
 
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
-	now := time.Now().UTC()
-	pendingEvents := make([]event.Event, 0, 1)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
-			Updates(map[string]interface{}{
-				"runtime_id": runtimeID,
-				"started_at": now,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return ErrTaskClaimMismatch
-		}
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
-			if err != nil {
-				return err
+	var pendingEvents []event.Event
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			result := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
+				Updates(map[string]interface{}{
+					"runtime_id": runtimeID,
+					"started_at": now,
+				})
+			if result.Error != nil {
+				return result.Error
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			if result.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
+			}
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -2067,6 +2081,8 @@ func isStoreContentionErr(err error) bool {
 	return strings.Contains(msg, "database is locked") ||
 		strings.Contains(msg, "database table is locked") ||
 		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "database is busy") ||
+		strings.Contains(msg, "checkpoint in progress") ||
 		strings.Contains(msg, "sqlite_busy") ||
 		strings.Contains(msg, "sqlite_locked")
 }

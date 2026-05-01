@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -372,6 +373,20 @@ func TestWithStoreBusyRetryRetriesSQLiteContention(t *testing.T) {
 		attempts++
 		if attempts == 1 {
 			return sqlite3.Error{Code: sqlite3.ErrBusy}
+		}
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
+}
+
+func TestWithStoreBusyRetryRetriesCheckpointContention(t *testing.T) {
+	attempts := 0
+	err := withStoreBusyRetry(func() error {
+		attempts++
+		if attempts == 1 {
+			return errors.New("checkpoint in progress")
 		}
 		return nil
 	})
