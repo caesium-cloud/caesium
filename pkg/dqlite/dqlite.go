@@ -296,7 +296,7 @@ func ClusterNodes(ctx context.Context) ([]client.NodeInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer c.Close()
+	defer func() { _ = c.Close() }()
 
 	return c.Cluster(ctx)
 }

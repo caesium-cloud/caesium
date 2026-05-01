@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/canonical/go-dqlite/v3/client"
 	"gorm.io/gorm"
 )
 
@@ -58,13 +59,13 @@ func (s *Service) Nodes() ([]Node, error) {
 
 	addrMap := make(map[string]NodeRole) // address -> role
 	for _, n := range cluster {
-		role := RoleVoter
+		var role NodeRole
 		switch n.Role {
-		case 0:
+		case client.Voter:
 			role = RoleVoter
-		case 1:
+		case 1: // Standby
 			role = RoleStandby
-		case 2:
+		case 2: // Spare
 			role = RoleSpare
 		default:
 			role = NodeRole(fmt.Sprintf("unknown(%d)", n.Role))
