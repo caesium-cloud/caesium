@@ -393,6 +393,7 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 }
 
 func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error {
+	metrics.TaskRegisterBatchSize.Observe(float64(len(inputs)))
 	if len(inputs) == 0 {
 		return nil
 	}

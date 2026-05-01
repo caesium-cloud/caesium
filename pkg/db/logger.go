@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/dbtrace"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -53,6 +54,7 @@ func (l *zapLogger) Trace(_ context.Context, begin time.Time, fc func() (sql str
 
 	elapsed := time.Since(begin)
 	sql, rows := fc()
+	dbtrace.Record(sql, rows, elapsed, err)
 
 	fields := []interface{}{
 		"source", "gorm",

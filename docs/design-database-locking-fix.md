@@ -168,19 +168,20 @@ Goal: bound the Raft cost as worker count grows, and reduce the need for tight p
 
 Goal: investigate residual issues and tighten the operational surface area.
 
-- [ ] **Investigate the `unknown data type: 0` log line.**
+- [x] **Investigate the `unknown data type: 0` log line.**
   - File: `pkg/dqlite/dqlite.go:47-61`.
   - Capture the surrounding context (statement / params) when `client.LogWarn` fires with this string. If it persists post-Phase 0, file an upstream issue against `canonical/go-dqlite`.
   - Acceptance: either the warnings are gone after Phase 0, or we have a minimal repro pinned to the code path.
   - Risk: none — investigative.
+  - Status: instrumentation added. Matching dqlite warnings now include a bounded `recent_db_statements` field populated from GORM trace output so the nearby statement path can be identified if the warning persists.
 
-- [ ] **Add `caesium_task_register_batch_size` histogram.**
+- [x] **Add `caesium_task_register_batch_size` histogram.**
   - File: `internal/metrics/metrics.go`.
   - Observe the input length on each `RegisterTasks` call.
   - Acceptance: dashboards show batch-size distribution, useful for diagnosing degenerate single-task registrations.
   - Risk: none.
 
-- [ ] **Document new env vars and operational guidance.**
+- [x] **Document new env vars and operational guidance.**
   - File: `docs/configuration.md` (or wherever env vars are listed).
   - Cover `CAESIUM_WORKER_RECLAIM_INTERVAL`, `CAESIUM_DATABASE_MAX_OPEN_CONNS`, `CAESIUM_DATABASE_MAX_IDLE_CONNS`, `CAESIUM_INTERNAL_WAKEUP_TOKEN`.
   - Acceptance: docs PR merged alongside the last code change that introduces each var.

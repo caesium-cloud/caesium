@@ -72,6 +72,9 @@ Use metrics:
 - `caesium_worker_lease_expirations_total{node_id}`
 - `caesium_db_busy_retries_total`
 - `caesium_reclaim_duration_seconds`
+- `caesium_task_register_batch_size`
+
+Dqlite warnings that contain `unknown data type: 0` include a `recent_db_statements` field with the last few rendered GORM statements observed by the process. Use that context to identify the nearby code path before escalating to an upstream go-dqlite issue.
 
 ## Tuning Guidance
 
@@ -79,8 +82,10 @@ Use metrics:
 - Increase `CAESIUM_MAX_PARALLEL_TASKS` for better local mode utilization.
 - Increase `CAESIUM_WORKER_LEASE_TTL` for long-running tasks to reduce reclaim churn.
 - Increase `CAESIUM_WORKER_RECLAIM_INTERVAL` to reduce reclaim write pressure.
+- Keep `CAESIUM_DATABASE_MAX_IDLE_CONNS` less than or equal to `CAESIUM_DATABASE_MAX_OPEN_CONNS`. Raise open connections cautiously and watch `caesium_db_busy_retries_total`; a higher pool can improve read/write overlap but can also add leader-side contention.
 - Keep `CAESIUM_WORKER_POLL_INTERVAL` high enough to act as a fallback, not the primary coordination path. Lower it only when distributed wakeups are disabled or unhealthy.
 - Use `CAESIUM_NODE_LABELS` + task `nodeSelector` to place specialized workloads.
+- Prefer larger `RegisterTasks` batches. `caesium_task_register_batch_size` should normally show one sample per job run near that run's DAG width; a distribution pinned at `1` means callers are bypassing the batched path.
 
 ## Troubleshooting
 

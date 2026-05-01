@@ -25,6 +25,7 @@ func (s *MetricsSuite) SetupTest() {
 		JobRunDurationSeconds,
 		TaskRunsTotal,
 		TaskRunDurationSeconds,
+		TaskRegisterBatchSize,
 		JobsActive,
 		CallbackRunsTotal,
 		TriggerFiresTotal,
@@ -97,6 +98,18 @@ func (s *MetricsSuite) TestTaskRunDurationObserves() {
 		}
 	}
 	s.True(found, "expected task histogram sample")
+}
+
+func (s *MetricsSuite) TestTaskRegisterBatchSizeObserves() {
+	var before dto.Metric
+	s.Require().NoError(TaskRegisterBatchSize.Write(&before))
+
+	TaskRegisterBatchSize.Observe(12)
+
+	var after dto.Metric
+	s.Require().NoError(TaskRegisterBatchSize.Write(&after))
+	s.Equal(before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
+	s.InDelta(before.GetHistogram().GetSampleSum()+12, after.GetHistogram().GetSampleSum(), 0.000001)
 }
 
 func (s *MetricsSuite) TestJobsActiveGauge() {
