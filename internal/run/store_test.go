@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -265,6 +266,86 @@ func TestRegisterTaskPersistsSchemaValidationConfig(t *testing.T) {
 	require.NoError(t, db.First(&persisted, "job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).Error)
 	require.JSONEq(t, string(schema), string(persisted.OutputSchema))
 	require.Equal(t, job.SchemaValidation, persisted.SchemaValidation)
+}
+
+func TestRegisterTasksBatchesReadyEventsAndSkipsExisting(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	now := time.Now().UTC()
+
+	trigger := &models.Trigger{
+		ID:        uuid.New(),
+		Alias:     "batch-trigger",
+		Type:      models.TriggerTypeCron,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{
+		ID:        uuid.New(),
+		Alias:     "batch-job",
+		TriggerID: trigger.ID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(job).Error)
+
+	runRecord, err := store.Start(job.ID, &trigger.ID)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine:3.23",
+		Command:   `["echo","batch"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	taskA := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "a", CreatedAt: now, UpdatedAt: now}
+	taskB := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "b", CreatedAt: now, UpdatedAt: now}
+	taskC := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "c", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create([]*models.Task{taskA, taskB, taskC}).Error)
+
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID:                      uuid.New(),
+		JobRunID:                runRecord.ID,
+		TaskID:                  taskA.ID,
+		AtomID:                  atom.ID,
+		Engine:                  atom.Engine,
+		Image:                   atom.Image,
+		Command:                 atom.Command,
+		Status:                  string(TaskStatusPending),
+		Attempt:                 1,
+		MaxAttempts:             1,
+		OutstandingPredecessors: 0,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}).Error)
+
+	require.NoError(t, store.RegisterTasks(runRecord.ID, []RegisterTaskInput{
+		{Task: taskA, Atom: atom, OutstandingPredecessors: 0},
+		{Task: taskB, Atom: atom, OutstandingPredecessors: 0},
+		{Task: taskC, Atom: atom, OutstandingPredecessors: 1},
+	}))
+
+	var taskRunCount int64
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runRecord.ID).Count(&taskRunCount).Error)
+	require.Equal(t, int64(3), taskRunCount)
+
+	var readyEvents []models.ExecutionEvent
+	require.NoError(t, db.Where("run_id = ? AND type = ?", runRecord.ID, string(event.TypeTaskReady)).Find(&readyEvents).Error)
+	require.Len(t, readyEvents, 1)
+	require.NotNil(t, readyEvents[0].TaskID)
+	require.NotNil(t, readyEvents[0].JobID)
+	require.Equal(t, taskB.ID, *readyEvents[0].TaskID)
+	require.Equal(t, job.ID, *readyEvents[0].JobID)
 }
 
 func TestClaimAwareTaskLifecycleMethods(t *testing.T) {

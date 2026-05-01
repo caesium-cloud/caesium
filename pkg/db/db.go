@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -12,6 +13,11 @@ import (
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
+)
+
+const (
+	defaultMaxOpenConns = 4
+	defaultMaxIdleConns = 2
 )
 
 var (
@@ -62,16 +68,35 @@ func Connection() *gorm.DB {
 			log.Fatal("failed to connect to database", "error", err)
 		}
 
+		if sqlDB, err := gdb.DB(); err == nil {
+			configureConnectionPool(sqlDB, env.Variables().DatabaseMaxOpenConns, env.Variables().DatabaseMaxIdleConns)
+		}
+
 		if dbType == "internal" || dbType == dqlite.DriverName {
-			if sqlDB, err := gdb.DB(); err == nil {
-				sqlDB.SetMaxOpenConns(1)
-			}
 			// Enable foreign key enforcement for SQLite-based databases.
 			gdb.Exec("PRAGMA foreign_keys = ON")
 		}
 	})
 
 	return gdb
+}
+
+func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
+	if sqlDB == nil {
+		return
+	}
+	if maxOpen <= 0 {
+		maxOpen = defaultMaxOpenConns
+	}
+	if maxIdle <= 0 {
+		maxIdle = defaultMaxIdleConns
+	}
+	if maxIdle > maxOpen {
+		maxIdle = maxOpen
+	}
+
+	sqlDB.SetMaxOpenConns(maxOpen)
+	sqlDB.SetMaxIdleConns(maxIdle)
 }
 
 func Migrate() (err error) {

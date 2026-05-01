@@ -149,7 +149,7 @@ func TestClaimerReclaimExpiredResetsStaleRunningTasks(t *testing.T) {
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerLeaseExpirationsTotal, "node-a"), float64(1))
 }
 
-func TestClaimerClaimNextRecordsClaimContentionMetric(t *testing.T) {
+func TestClaimerClaimNextReturnsNilWhenClaimRaceIsLost(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() {
 		jobdeftestutil.CloseDB(db)
@@ -176,7 +176,11 @@ END;
 	claimed, err := claimer.ClaimNext(context.Background())
 	require.NoError(t, err)
 	require.Nil(t, claimed)
-	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, "node-racer"), float64(1))
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "id = ?", task.ID).Error)
+	require.Equal(t, string(run.TaskStatusPending), persisted.Status)
+	require.Equal(t, "", persisted.ClaimedBy)
 }
 
 func TestWithBusyRetryRetriesBusyErrors(t *testing.T) {

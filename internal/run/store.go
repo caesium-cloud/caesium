@@ -148,6 +148,12 @@ type Store struct {
 	startedRuns map[uuid.UUID]struct{}
 }
 
+type RegisterTaskInput struct {
+	Task                    *models.Task
+	Atom                    *models.Atom
+	OutstandingPredecessors int
+}
+
 var (
 	defaultStore     *Store
 	defaultStoreOnce sync.Once
@@ -354,45 +360,54 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
-	if task == nil || atom == nil {
-		return errors.New("run: task and atom must be provided")
-	}
+	return s.RegisterTasks(runID, []RegisterTaskInput{{
+		Task:                    task,
+		Atom:                    atom,
+		OutstandingPredecessors: outstanding,
+	}})
+}
 
-	var existing models.TaskRun
-	err := s.db.Where("job_run_id = ? AND task_id = ?", runID, task.ID).First(&existing).Error
-	if err == nil {
+func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error {
+	if len(inputs) == 0 {
 		return nil
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
 
-	command := atom.Command
-	if command == "" {
-		if cmd := atom.Cmd(); len(cmd) > 0 {
-			if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
-				command = string(encoded)
-			}
+	taskIDs := make([]uuid.UUID, 0, len(inputs))
+	seenInputTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+	for _, input := range inputs {
+		if input.Task == nil || input.Atom == nil {
+			return errors.New("run: task and atom must be provided")
 		}
+		if _, ok := seenInputTaskIDs[input.Task.ID]; ok {
+			continue
+		}
+		seenInputTaskIDs[input.Task.ID] = struct{}{}
+		taskIDs = append(taskIDs, input.Task.ID)
 	}
 
-	maxAttempts := task.Retries + 1
-	if maxAttempts < 1 {
-		maxAttempts = 1
+	var jobRun models.JobRun
+	jobRunFound := true
+	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		jobRunFound = false
+	}
+
+	var jobID uuid.UUID
+	if jobRunFound {
+		jobID = jobRun.JobID
+	} else {
+		jobID = inputs[0].Task.JobID
 	}
 
 	var job models.Job
 	jobFound := true
-	if err := s.db.Select("schema_validation", "cache_config").First(&job, "id = ?", task.JobID).Error; err != nil {
+	if err := s.db.Select("id", "schema_validation", "cache_config").First(&job, "id = ?", jobID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		jobFound = false
-	}
-
-	schemaValidation := ""
-	if jobFound && len(task.OutputSchema) > 0 {
-		schemaValidation = job.SchemaValidation
 	}
 
 	envCache := cache.ConfigFromEnv()
@@ -400,53 +415,112 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 	if jobFound {
 		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
 	}
-	resolvedCache := jobdefschema.ResolveCacheConfig(
-		decodeCacheConfig(task.CacheConfig),
-		jobCacheConfig,
-		envCache.Enabled,
-		envCache.TTL,
-	)
 
-	record := &models.TaskRun{
-		ID:                      uuid.New(),
-		JobRunID:                runID,
-		TaskID:                  task.ID,
-		AtomID:                  task.AtomID,
-		Engine:                  atom.Engine,
-		Image:                   atom.Image,
-		Command:                 command,
-		Status:                  string(TaskStatusPending),
-		NodeSelector:            maps.Clone(task.NodeSelector),
-		Attempt:                 1,
-		MaxAttempts:             maxAttempts,
-		OutstandingPredecessors: outstanding,
-		CacheEnabled:            resolvedCache.Enabled,
-		CacheTTL:                resolvedCache.TTL,
-		CacheVersion:            resolvedCache.Version,
-		OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
-		SchemaValidation:        schemaValidation,
-	}
-
-	pendingEvents := make([]event.Event, 0, 1)
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(record).Error; err != nil {
-			return err
-		}
-		if outstanding == 0 && s.eventStore != nil {
-			evt := event.Event{
-				Type:      event.TypeTaskReady,
-				RunID:     runID,
-				TaskID:    task.ID,
-				Timestamp: time.Now().UTC(),
-			}
-			var jobRun models.JobRun
-			if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
-				evt.JobID = jobRun.JobID
-			}
-			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+	pendingEvents := make([]event.Event, 0, len(inputs))
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		existingTaskIDs := make([]uuid.UUID, 0)
+		if len(taskIDs) > 0 {
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id IN ?", runID, taskIDs).
+				Pluck("task_id", &existingTaskIDs).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, evt)
+		}
+		existing := make(map[uuid.UUID]struct{}, len(existingTaskIDs))
+		for _, taskID := range existingTaskIDs {
+			existing[taskID] = struct{}{}
+		}
+
+		records := make([]models.TaskRun, 0, len(inputs))
+		readyEvents := make([]event.Event, 0, len(inputs))
+		seenNewTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+		for _, input := range inputs {
+			task := input.Task
+			atom := input.Atom
+			if _, ok := existing[task.ID]; ok {
+				continue
+			}
+			if _, ok := seenNewTaskIDs[task.ID]; ok {
+				continue
+			}
+			seenNewTaskIDs[task.ID] = struct{}{}
+
+			command := atom.Command
+			if command == "" {
+				if cmd := atom.Cmd(); len(cmd) > 0 {
+					if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
+						command = string(encoded)
+					}
+				}
+			}
+
+			maxAttempts := task.Retries + 1
+			if maxAttempts < 1 {
+				maxAttempts = 1
+			}
+
+			schemaValidation := ""
+			if jobFound && len(task.OutputSchema) > 0 {
+				schemaValidation = job.SchemaValidation
+			}
+
+			resolvedCache := jobdefschema.ResolveCacheConfig(
+				decodeCacheConfig(task.CacheConfig),
+				jobCacheConfig,
+				envCache.Enabled,
+				envCache.TTL,
+			)
+
+			records = append(records, models.TaskRun{
+				ID:                      uuid.New(),
+				JobRunID:                runID,
+				TaskID:                  task.ID,
+				AtomID:                  task.AtomID,
+				Engine:                  atom.Engine,
+				Image:                   atom.Image,
+				Command:                 command,
+				Status:                  string(TaskStatusPending),
+				NodeSelector:            maps.Clone(task.NodeSelector),
+				Attempt:                 1,
+				MaxAttempts:             maxAttempts,
+				OutstandingPredecessors: input.OutstandingPredecessors,
+				CacheEnabled:            resolvedCache.Enabled,
+				CacheTTL:                resolvedCache.TTL,
+				CacheVersion:            resolvedCache.Version,
+				OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
+				SchemaValidation:        schemaValidation,
+			})
+
+			if input.OutstandingPredecessors == 0 && s.eventStore != nil {
+				readyEvents = append(readyEvents, event.Event{
+					Type:      event.TypeTaskReady,
+					JobID:     jobID,
+					RunID:     runID,
+					TaskID:    task.ID,
+					Timestamp: time.Now().UTC(),
+				})
+			}
+		}
+
+		if len(records) == 0 {
+			return nil
+		}
+		if err := tx.Create(&records).Error; err != nil {
+			return err
+		}
+		if len(readyEvents) > 0 {
+			eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
+			for _, evt := range readyEvents {
+				eventRecords = append(eventRecords, executionEventRecord(evt))
+			}
+			if err := tx.Create(&eventRecords).Error; err != nil {
+				return err
+			}
+			for idx := range readyEvents {
+				readyEvents[idx].Sequence = eventRecords[idx].Sequence
+				readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
+			}
+			pendingEvents = readyEvents
 		}
 		return nil
 	})
@@ -454,6 +528,31 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 		s.publishEvents(pendingEvents...)
 	}
 	return err
+}
+
+func executionEventRecord(evt event.Event) models.ExecutionEvent {
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now().UTC()
+	}
+
+	record := models.ExecutionEvent{
+		Type:      string(evt.Type),
+		Payload:   []byte(evt.Payload),
+		CreatedAt: evt.Timestamp,
+	}
+	if evt.JobID != uuid.Nil {
+		jobID := evt.JobID
+		record.JobID = &jobID
+	}
+	if evt.RunID != uuid.Nil {
+		runID := evt.RunID
+		record.RunID = &runID
+	}
+	if evt.TaskID != uuid.Nil {
+		taskID := evt.TaskID
+		record.TaskID = &taskID
+	}
+	return record
 }
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {

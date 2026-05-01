@@ -22,6 +22,8 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WORKER_POLL_INTERVAL` | `2s` | Poll cadence for new claimable tasks. |
 | `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts. |
 | `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
+| `CAESIUM_DATABASE_MAX_OPEN_CONNS` | `4` | Max SQL connections per node for dqlite/PostgreSQL. |
+| `CAESIUM_DATABASE_MAX_IDLE_CONNS` | `2` | Max idle SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
 

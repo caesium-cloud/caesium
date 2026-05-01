@@ -16,6 +16,8 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Nil(s.T(), Process())
 	assert.NotNil(s.T(), Variables())
 	assert.Equal(s.T(), "info", Variables().LogLevel)
+	assert.Equal(s.T(), 4, Variables().DatabaseMaxOpenConns)
+	assert.Equal(s.T(), 2, Variables().DatabaseMaxIdleConns)
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
