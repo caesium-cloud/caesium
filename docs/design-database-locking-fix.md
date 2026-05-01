@@ -1,6 +1,6 @@
 # Design: Distributed Mode Database Locking Remediation
 
-> Status: Proposed. Tracks remediation work for `database is locked` errors observed in 3-node distributed (dqlite) deployments. Items are grouped by phase; tick them off as PRs land.
+> Status: Proposed. Tracks remediation work for `database is locked` errors observed in 3-node distributed (dqlite) deployments, and lays out a path to scale the same dqlite-backed architecture to hundreds of worker nodes and thousands of concurrent tasks. Items are grouped by phase; tick them off as PRs land.
 
 ## Problem Statement
 
@@ -14,6 +14,26 @@ The audit identified four contributing factors, all of which are confirmed by co
 4. **Protocol warnings.** `unknown data type: 0` from go-dqlite suggests serialization stress during contention windows.
 
 Code inspection surfaced additional root causes the audit missed; they're called out in [Findings](#findings) and addressed by the action items below.
+
+A core Caesium tenet is **no external infrastructure dependencies** — dqlite is the storage layer and stays the storage layer. The plan therefore targets dqlite throughout, including the horizontal-scale phase. See [Scaling target](#scaling-target) for the design center and [Operational risks at scale](#operational-risks-at-scale) for known dqlite-specific issues we accept and mitigate.
+
+## Scaling target
+
+The plan is sized for the following deployment shapes, all reachable on a single dqlite cluster (no PostgreSQL, etcd, Kafka, or other external systems):
+
+| Shape | Nodes | Concurrent task lifecycles | How |
+|---|---|---|---|
+| Small | 3–5 | hundreds | Phase 0 + Phase 1 fixes; default voter-only topology. |
+| Medium | 10–50 | low thousands | Phase 0–2; spare-role topology so most workers don't replicate the Raft log. |
+| Large | 100–500 | tens of thousands | Phase 0–4; sharded write path via multiple dqlite databases on the same Raft cluster. |
+
+The architectural anchors that make this possible without external infra:
+
+- **dqlite roles separate Raft membership from application membership.** A cluster has 3 Voters and 3 Standbys (Raft-replicated); every additional node joins as a Spare and acts as a leader-aware client. The Raft cost is bounded at ~6 nodes regardless of total worker count.
+- **`app.Open(name)` supports multiple databases per cluster.** Each database has an independent write queue and engine thread on the leader. Sharding `task_runs` / `events` across N databases multiplies write throughput linearly until the leader's NVMe / network is saturated.
+- **Sharding stays inside one Raft cluster.** Operators still deploy one binary, one bootstrap command, one set of peer addresses. No cross-cluster federation, no second control plane.
+
+Beyond ~500 worker nodes or sustained tens of thousands of writes/sec the plan deliberately stops; that regime needs a different conversation about whether to split into multiple Caesium control planes (still infra-free, just more than one). It is **not** addressed here.
 
 ---
 
@@ -109,28 +129,37 @@ Goal: collapse N transactions into 1 where possible; replace read-then-write wit
   - Acceptance: `select * from jobs` and `select * from job_runs` execute at most once per `RegisterTasks` call regardless of input length (verify via GORM SQL log).
   - Risk: low.
 
-### Phase 2 — Better cross-node coordination (moderate, optional after Phase 1 measurement)
+### Phase 2 — Cross-node coordination and cluster topology (moderate)
 
-Goal: reduce the need for tight polling once write contention is no longer the bottleneck.
+Goal: bound the Raft cost as worker count grows, and reduce the need for tight polling once write contention is no longer the bottleneck. This is the "Medium" deployment shape from the [Scaling target](#scaling-target).
+
+- [ ] **Adopt the spare-role topology so worker count is decoupled from Raft cost.**
+  - Files: `pkg/dqlite/dqlite.go:64-69`, `pkg/env/env.go`, `cmd/start/start.go`.
+  - Today `app.New` is called with `WithAddress` and `WithCluster` only, accepting the dqlite library defaults. Add `app.WithVoters(3)` and `app.WithStandbys(3)` so the leader's `RolesAdjustmentFrequency` (default 30s) keeps exactly 3 voters and 3 standbys; every additional node automatically settles as a Spare. Spares don't replicate the Raft log and don't vote, but still act as leader-aware SQL clients via `app.Open` — i.e. fully functional Caesium worker nodes.
+  - Add `CAESIUM_DATABASE_VOTERS` (default 3) and `CAESIUM_DATABASE_STANDBYS` (default 3); operators tune these for their HA target. Voter count must be odd and ≥ 3.
+  - Document the recommended deployment: 3 control-plane nodes (voter), 0–3 standby nodes for failover headroom, all remaining nodes joined as spares.
+  - Acceptance: a 10-node test cluster shows exactly 3 nodes with `RAFT_VOTER`, ≤3 with `RAFT_STANDBY`, and the rest with `RAFT_SPARE` in `dqlite-dump-cluster` (or equivalent client API). Killing a voter triggers promotion of a standby within `2 × RolesAdjustmentFrequency`.
+  - Risk: low. Defaults match the library defaults; behaviour is unchanged for existing 3-node deployments. Larger clusters benefit immediately because Raft replication stops scaling with worker count.
 
 - [ ] **Introduce distributed wakeups for task readiness.**
   - Files: `cmd/start/start.go:235-236`, new `internal/worker/wakeup_distributed.go`.
-  - On task-ready / lease-expired events, fanout a small UDP or HTTP `POST /internal/wakeup` to peer node addresses (already known via `env.Variables().DatabaseNodes` in `pkg/dqlite/dqlite.go:67`).
+  - On task-ready / lease-expired events, fanout an HTTP `POST /internal/wakeup` to peer node addresses (discovered via dqlite's cluster client API, **not** `env.Variables().DatabaseNodes` — that only contains bootstrap peers, not spares). Recommend reusing the existing internal HTTP server and TLS / auth story rather than adding a UDP path; the message is one packet per event and HTTP overhead is negligible at this rate.
   - Receiving node signals its local wakeup channel.
   - Authenticate with a shared secret (`CAESIUM_INTERNAL_WAKEUP_TOKEN`); drop unauthenticated requests.
-  - Acceptance: registering tasks on node A causes node B to claim within `<200ms` instead of waiting for the next poll. Confirmed via integration test in `test/`.
-  - Risk: medium. Network failures must not block event publication; treat wakeups as best-effort hints, not deliveries.
+  - At cluster sizes above ~50 nodes, switch from full fanout to **gossip** (forward to log(N) randomly-chosen peers, with a TTL of 2–3 hops) to keep wakeups O(N log N) cluster-wide. Implement behind `CAESIUM_WAKEUP_FANOUT_MODE=full|gossip` and default to `full` until cluster size warrants gossip.
+  - Acceptance: registering tasks on node A causes node B to claim within `<200ms` instead of waiting for the next poll. In a 50-node test cluster, gossip mode delivers wakeups to ≥99% of peers within `<500ms`.
+  - Risk: medium. Network failures must not block event publication; treat wakeups as best-effort hints, not deliveries. Gossip implementation must be tested for partition tolerance.
 
-- [ ] **Make `ReclaimExpired` a leader-only or single-flight responsibility.**
-  - File: `internal/worker/claimer.go:162`, `cmd/start/start.go`.
-  - Option A (preferred): use `client.Leader()` from the dqlite client to check if this node is the current Raft leader; non-leaders skip reclaim.
-  - Option B (fallback): add a `cluster_locks` row with `name='reclaim_expired'`, `held_by`, `expires_at`; nodes try to acquire via a CAS UPDATE, only the holder runs reclaim.
-  - Acceptance: in a 3-node cluster, reclaim transactions execute on exactly one node at a time. Failover within `2 × reclaimInterval` if the leader/holder dies.
-  - Risk: medium. Must handle leader churn cleanly; option B is simpler but adds a row.
+- [ ] **Make `ReclaimExpired` a leader-only responsibility.**
+  - Files: `internal/worker/claimer.go:162`, `cmd/start/start.go`.
+  - Option A (preferred): use the dqlite client's `Leader()` lookup to check if this node hosts the current Raft leader; non-leaders skip reclaim entirely. Re-check on a short interval so failover takes over reclaim within `~2 × RolesAdjustmentFrequency`.
+  - Option B (fallback): add a `cluster_locks` row with `name='reclaim_expired'`, `held_by`, `expires_at`; nodes try to acquire via a CAS UPDATE, only the holder runs reclaim. Useful if leader detection proves flaky.
+  - Acceptance: in a 10-node cluster, reclaim transactions execute on exactly one node at a time. Failover within `2 × RolesAdjustmentFrequency` if the leader dies.
+  - Risk: medium. Must handle leader churn cleanly; option B is simpler but adds a hot row.
 
 - [ ] **Raise default poll interval from 2s to 15s** (only after distributed wakeups land).
   - Files: `pkg/env/env.go:60`, `internal/worker/worker.go:38`.
-  - Acceptance: end-to-end run latency unchanged within 5% versus baseline once wakeups are in place; cluster-wide DB QPS for the task_runs table drops by an order of magnitude.
+  - Acceptance: end-to-end run latency unchanged within 5% versus baseline once wakeups are in place; cluster-wide DB QPS for the `task_runs` table drops by an order of magnitude.
   - Risk: low after wakeups; high without them. Strictly gated on prior checkbox.
 
 ### Phase 3 — Cleanup and observability
@@ -161,6 +190,49 @@ Goal: investigate residual issues and tighten the operational surface area.
   - Acceptance: event delivery survives a `SIGKILL` between commit and publish in an integration test.
   - Risk: medium. Orthogonal to locking but a known bug — schedule independently if reviewers prefer.
 
+### Phase 4 — Horizontal scale via sharded write path (large, design-level)
+
+Goal: scale to the "Large" deployment shape — 100–500 worker nodes and tens of thousands of concurrent tasks — without leaving dqlite. Phase 4 is a design-level commitment with several sub-PRs; treat each checkbox as the milestone gate, not a single change.
+
+The unlock is that `App.Open(name)` on a single dqlite cluster opens an independent database with its own engine thread and write queue on the leader. Sharding the hot tables across N databases linearly multiplies write throughput on the same Raft cluster. Cross-database `ATTACH` is intentionally disabled in dqlite (see [canonical/dqlite#441](https://github.com/canonical/dqlite/issues/441)), so each shard must be transactionally self-contained — manageable for our schema because DAG state is naturally per-job.
+
+- [ ] **Define the shard boundary and routing key.**
+  - Hot, write-heavy tables (`task_runs`, `events`, optionally `job_runs`) shard by `hash(job_run_id) % N`. All rows for a given run live in one shard so per-run transactions stay local.
+  - Catalog tables (`jobs`, `triggers`, `atoms`, `tasks`, `secrets`, `users`) stay in the **catalog** database (`caesium`). They're write-light and read-heavy; replication via standbys covers them fine.
+  - History tables (`task_runs`, `events` for terminal runs) move to a **cold** database (`caesium_history`) on a configurable lag. The hot path never scans cold rows.
+  - Acceptance: a written-down schema doc enumerates which table lives in which database, and the runtime routes accordingly.
+
+- [ ] **Build a shard router in the data layer.**
+  - Files: `pkg/db/db.go`, new `pkg/db/router.go`.
+  - Replace the single `*gorm.DB` returned by `Connection()` with a `Router` that dispatches by table + shard key. Most call sites get the catalog DB; run-scoped sites get the run's hot shard.
+  - Static shard count `CAESIUM_DATABASE_SHARDS` (default 1, so this is a no-op until operators opt in). Power-of-two recommended for clean rebalancing later.
+  - Acceptance: at `CAESIUM_DATABASE_SHARDS=1` the system is byte-identical to today; at `CAESIUM_DATABASE_SHARDS=8`, 50 concurrent runs distribute across 8 hot shards roughly evenly.
+  - Risk: high. This is the largest refactor in the plan; gate behind a feature flag and ship the router with shards=1 first to flush out call-site mistakes before any deployment turns it up.
+
+- [ ] **Per-shard ClaimNext and ReclaimExpired.**
+  - Files: `internal/worker/claimer.go`, `cmd/start/start.go`.
+  - Each worker iterates shards (round-robin, with a per-worker shard offset to avoid herd) and runs `ClaimNext` against each shard's DB connection. Reclaim runs once per shard on the leader.
+  - Acceptance: with 8 shards and 16 workers, no single shard sees more than `2 × (workers/shards)` concurrent claim attempts.
+  - Risk: medium. Per-shard fairness needs a test — pathological cases include all jobs hashing to one shard for a window.
+
+- [ ] **Cold-shard archiver.**
+  - File: new `internal/run/archiver.go`.
+  - Background loop that, per hot shard, copies terminal `job_runs` + child rows to `caesium_history` and deletes from the hot shard. Configurable lag (default 24h) so live UI / debugging still hits hot data.
+  - Acceptance: hot shard row counts plateau under steady load; history shard grows monotonically; UI queries that span both transparently union (helper at the router level).
+  - Risk: medium. Two-shard delete-then-insert is not atomic; use idempotent upserts on the history side, only delete from hot once the history insert is confirmed.
+
+- [ ] **Spare-aware bootstrap and operations.**
+  - Files: `cmd/start/start.go`, deployment docs.
+  - Document the recommended Helm/systemd shape: 3 voter pods (small dedicated nodes), N spare pods (worker pool, autoscaled). Spares need only `WithCluster([voter addresses])` to join; they pick up the spare role automatically per Phase 2.
+  - Acceptance: `helm/` chart and example systemd units demonstrate the topology; a fresh operator can stand up a 50-spare cluster from the docs alone.
+  - Risk: low. Documentation + chart updates only.
+
+- [ ] **Tune dqlite for high-write workloads.**
+  - File: `pkg/dqlite/dqlite.go`.
+  - Apply `app.WithSnapshotParams(...)` and snapshot/trailing-log settings so WAL doesn't grow unbounded under sustained write load (see [Operational risks at scale](#operational-risks-at-scale)).
+  - Acceptance: under a 24h soak at 1000 writes/sec/shard, on-disk footprint stays within 2× the steady-state working-set size.
+  - Risk: medium. Snapshot tuning is the area where dqlite has the most reported production issues; needs careful validation.
+
 ---
 
 ## Test plan
@@ -170,20 +242,47 @@ Each phase needs measurement before and after. All numbers below are illustrativ
 - **Unit tests**
   - `internal/worker/claimer_test.go`: extend with a contention harness that fakes `SQLITE_BUSY` returns and asserts retry behaviour.
   - `internal/run/store_test.go`: add `RegisterTasks` cases — empty input, mixed new/existing tasks, idempotent re-registration, batch with mixed `outstanding_predecessors`.
+  - `pkg/db/router_test.go` (Phase 4): shard-key routing, catalog vs hot vs cold dispatch, fallback when shard count is 1.
 - **Integration tests** (`test/`, run with `-tags=integration`)
-  - 3-node dqlite cluster, 20 jobs × 50 tasks each, 4 concurrent runs per job. Assert no `database is locked` surfaced to callers; assert end-to-end completion within a budget.
+  - **Small (Phase 0–1):** 3-node dqlite cluster, 20 jobs × 50 tasks each, 4 concurrent runs per job. Assert no `database is locked` surfaced to callers; assert end-to-end completion within a budget.
+  - **Medium (Phase 2):** 10-node cluster with 3 voters + 3 standbys + 4 spares. Verify role assignment, leader-only reclaim, and distributed-wakeup latency. Kill a voter; confirm standby promotion within `2 × RolesAdjustmentFrequency`.
+  - **Large (Phase 4):** 20-node cluster, `CAESIUM_DATABASE_SHARDS=8`, 200 jobs × 100 tasks. Verify per-shard write rate, archiver behaviour, and that catalog-table queries don't degrade under hot-shard load.
 - **Load test** (manual, documented in this PR)
-  - Use the `just integration-test` harness extended with a contention scenario. Capture: `caesium_worker_claim_contention_total` rate, `caesium_db_busy_retries_total` rate, p50/p99 of `ClaimNext` and `ReclaimExpired`, count of `database is locked` log lines, end-to-end run wall time.
+  - Use the `just integration-test` harness extended with a contention scenario. Capture: `caesium_worker_claim_contention_total` rate, `caesium_db_busy_retries_total` rate, p50/p99 of `ClaimNext` and `ReclaimExpired`, count of `database is locked` log lines, end-to-end run wall time, dqlite leader CPU, dqlite RSS, on-disk footprint over 24h.
+
+---
+
+## Operational risks at scale
+
+dqlite has known production issues that surface specifically at the write rates and uptimes Phase 4 targets. We accept dqlite as the storage layer (per the no-external-infra tenet) and mitigate.
+
+| Risk | Evidence | Mitigation |
+|---|---|---|
+| **Memory growth on the leader** | [k8s-dqlite#196](https://github.com/canonical/k8s-dqlite/issues/196), [dqlite#494](https://github.com/canonical/dqlite/issues/494) — MicroK8s observed steady RSS growth where SQLite/etcd were bounded. | Phase 3 metrics on dqlite RSS; alert on growth rate. Schedule periodic leader handover (`Handover()`) to recycle memory. Cap WAL via snapshot tuning (Phase 4 last item). |
+| **Single core pinned to 100% under load** | [microk8s#3227](https://github.com/canonical/microk8s/issues/3227), [k8s-dqlite#36](https://github.com/canonical/k8s-dqlite/issues/36). dqlite's engine is single-threaded per database. | Phase 4 sharding directly addresses this — multiple databases give multiple engine threads on the leader. Run voter nodes on hosts with high single-thread performance. |
+| **Write amplification / WAL growth** | [microk8s#3064](https://github.com/canonical/microk8s/issues/3064) — 30 TB written in 2 weeks. | Tune snapshot frequency and trailing-log retention via `app.WithSnapshotParams`. Treat dqlite leader disk as a hot path; run on NVMe with provisioned IOPS. |
+| **Leader churn under load** | General Raft behaviour; aggravated by long write transactions blocking heartbeats. | Phase 1 batching shortens transaction duration. Phase 2 leader-only reclaim avoids long scans on followers. Set raft heartbeat / election timeouts conservatively; document recommended values. |
+| **`unknown data type: 0` warnings** | Observed in our own logs; suspected serialization stress. | Phase 0 should make these vanish by reducing contention. Phase 3 captures repro if they persist; file upstream. |
+| **No public reference of dqlite at >50-node clusters** | Search of LXD, MicroK8s, and Canonical docs returns no documented limits; largest production references are double-digit node counts. | Phase 2's spare topology is the unblocker — Raft cost stays at ~6 nodes regardless of worker count. Validate with the Phase 2 / Phase 4 integration tests before claiming production-readiness above 50 nodes. |
+
+Operational guidance to publish alongside Phase 4:
+
+- Run voters on dedicated nodes (small, well-resourced, NVMe, isolated from worker noise).
+- Monitor: dqlite leader CPU (per core, not aggregated), RSS, on-disk WAL size, snapshot count, time-since-last-snapshot, role transitions per hour.
+- Plan for periodic rolling leader handover (e.g. weekly) until upstream memory issues are resolved.
 
 ---
 
 ## Rollout
 
 - Each phase ships behind feature flags / env vars where listed; default-on for Phase 0, default-on for Phase 1 once a release cycle passes, default-on for Phase 2 only after distributed wakeups have soaked.
-- A single release note per phase, calling out new env vars, default changes, and any operational guidance (e.g., upgrading dqlite peers in lockstep).
+- Phase 4 is opt-in indefinitely via `CAESIUM_DATABASE_SHARDS` (default 1). Defaults change only after a multi-month soak in a Caesium-operated reference cluster.
+- A single release note per phase, calling out new env vars, default changes, and any operational guidance (e.g., upgrading dqlite peers in lockstep, rolling leader handover cadence).
 
 ## Open questions
 
-- Is there appetite to adopt postgres for distributed mode as a longer-term option, or is dqlite a hard requirement? Several Phase 1/2 changes (single-statement claim with `RETURNING`, `MaxOpenConns`) are also wins on postgres but the calculus differs.
 - Should `CAESIUM_WORKER_CLAIM_MODE` default to `single_statement` after Phase 1, or stay opt-in until a release cycle of telemetry validates it?
-- Phase 2 distributed wakeups: UDP vs HTTP? UDP is lower overhead; HTTP reuses our existing TLS / auth story. Recommend HTTP unless profiling shows it matters.
+- Phase 2 wakeups gossip threshold: hard-code at 50 nodes, or expose `CAESIUM_WAKEUP_GOSSIP_THRESHOLD` so operators can tune?
+- Phase 4 archiver: keep terminal runs in the hot shard for 24h (current proposal), or shorter? Trade-off is UI freshness vs hot-shard size. Could be per-job configurable.
+- Phase 4 shard count: static via env var (current proposal) or dynamic resharding? Dynamic is significantly more complex; defer until a real operator hits the static-shard ceiling.
+- Is there value in exposing the catalog / hot / cold split in the data-source REST API (`api/rest/service/database/database.go:248`) so external query tools can target specific shards? Probably yes for debugging; defer until Phase 4 ships.
