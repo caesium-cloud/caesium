@@ -9,6 +9,7 @@ This directory mixes current-source operator documentation with design records a
 - [job-schema-reference.md](job-schema-reference.md): Generated schema reference from `pkg/jobdef`.
 - [backfill.md](backfill.md): Backfill behavior across API, CLI, and UI.
 - [parallel-execution-operations.md](parallel-execution-operations.md): Distributed execution configuration, rollout, and troubleshooting.
+- [database-sharding.md](database-sharding.md): Phase 4 database shard layout, routing contract, and constraints.
 - [open_lineage.md](open_lineage.md): OpenLineage configuration, transports, and observability.
 - [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
 - [airflow-parity.md](airflow-parity.md): Implemented Airflow-style authoring and operator semantics.

@@ -2,6 +2,8 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -18,12 +20,16 @@ import (
 const (
 	defaultMaxOpenConns = 4
 	defaultMaxIdleConns = 2
+
+	catalogDatabaseName = "caesium"
+	historyDatabaseName = "caesium_history"
+	hotShardNameFormat  = "caesium_hot_%02d"
 )
 
 var (
-	once sync.Once
-	gdb  *gorm.DB
-	err  error
+	routerOnce    sync.Once
+	defaultRouter *Router
+	routerErr     error
 )
 
 func gormLogLevel() gormlogger.LogLevel {
@@ -38,47 +44,126 @@ func gormLogLevel() gormlogger.LogLevel {
 }
 
 func Connection() *gorm.DB {
-	once.Do(func() {
-		dbType := env.Variables().DatabaseType
+	return DefaultRouter().Catalog()
+}
 
-		log.Info("establishing db connection", "type", dbType)
-
-		cfg := &gorm.Config{
-			Logger: NewLogger().LogMode(gormLogLevel()),
-		}
-
-		switch dbType {
-		case "postgres":
-			gdb, err = gorm.Open(
-				postgres.Open(env.Variables().DatabaseDSN),
-				cfg,
-			)
-		case "internal":
-			fallthrough
-		case dqlite.DriverName:
-			fallthrough
-		default:
-			gdb, err = gorm.Open(
-				dqlite.Open(""),
-				cfg,
-			)
-		}
-
-		if err != nil {
-			log.Fatal("failed to connect to database", "error", err)
-		}
-
-		if sqlDB, err := gdb.DB(); err == nil {
-			configureConnectionPool(sqlDB, env.Variables().DatabaseMaxOpenConns, env.Variables().DatabaseMaxIdleConns)
-		}
-
-		if dbType == "internal" || dbType == dqlite.DriverName {
-			// Enable foreign key enforcement for SQLite-based databases.
-			gdb.Exec("PRAGMA foreign_keys = ON")
+// DefaultRouter returns the process-wide database router.
+func DefaultRouter() *Router {
+	routerOnce.Do(func() {
+		defaultRouter, routerErr = openRouterFromEnv()
+		if routerErr != nil {
+			log.Fatal("failed to connect to database", "error", routerErr)
 		}
 	})
 
-	return gdb
+	return defaultRouter
+}
+
+func openRouterFromEnv() (*Router, error) {
+	vars := env.Variables()
+	dbType := strings.ToLower(strings.TrimSpace(vars.DatabaseType))
+	shardCount := vars.DatabaseShards
+	if shardCount <= 0 {
+		shardCount = 1
+	}
+	if shardCount > 1 && !isInternalDqlite(dbType) {
+		return nil, fmt.Errorf("CAESIUM_DATABASE_SHARDS > 1 requires the internal dqlite database backend")
+	}
+
+	catalog, err := openConnection(catalogDatabaseName, true)
+	if err != nil {
+		return nil, err
+	}
+
+	hot := make([]*gorm.DB, shardCount)
+	if shardCount == 1 {
+		hot[0] = catalog
+	} else {
+		for idx := range hot {
+			conn, err := openConnection(fmt.Sprintf(hotShardNameFormat, idx), false)
+			if err != nil {
+				return nil, err
+			}
+			hot[idx] = conn
+		}
+	}
+
+	cold := catalog
+	if shardCount > 1 {
+		cold, err = openConnection(historyDatabaseName, false)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	router, err := NewRouter(catalog, hot, cold)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Info(
+		"database router initialized",
+		"type", vars.DatabaseType,
+		"shards", router.ShardCount(),
+	)
+	return router, nil
+}
+
+func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, error) {
+	vars := env.Variables()
+	dbType := strings.ToLower(strings.TrimSpace(vars.DatabaseType))
+
+	log.Info("establishing db connection", "type", vars.DatabaseType, "database", databaseName)
+
+	cfg := &gorm.Config{
+		Logger: NewLogger().LogMode(gormLogLevel()),
+	}
+	if !enforceForeignKeys {
+		cfg.DisableForeignKeyConstraintWhenMigrating = true
+	}
+
+	var (
+		conn *gorm.DB
+		err  error
+	)
+	switch dbType {
+	case "postgres":
+		conn, err = gorm.Open(
+			postgres.Open(vars.DatabaseDSN),
+			cfg,
+		)
+	case "internal":
+		fallthrough
+	case dqlite.DriverName:
+		fallthrough
+	default:
+		conn, err = gorm.Open(
+			dqlite.Open(databaseName),
+			cfg,
+		)
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	if sqlDB, err := conn.DB(); err == nil {
+		configureConnectionPool(sqlDB, vars.DatabaseMaxOpenConns, vars.DatabaseMaxIdleConns)
+	}
+
+	if isInternalDqlite(dbType) && enforceForeignKeys {
+		// Enable foreign key enforcement for SQLite-based catalog databases.
+		conn.Exec("PRAGMA foreign_keys = ON")
+	}
+	return conn, nil
+}
+
+func isInternalDqlite(dbType string) bool {
+	switch strings.ToLower(strings.TrimSpace(dbType)) {
+	case "", "internal", dqlite.DriverName:
+		return true
+	default:
+		return false
+	}
 }
 
 func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
@@ -100,14 +185,23 @@ func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
 }
 
 func Migrate() (err error) {
-	for _, model := range models.All {
-		if err = Connection().AutoMigrate(model); err != nil {
+	router := DefaultRouter()
+	if err = migrateModels(router.Catalog(), models.All...); err != nil {
+		return err
+	}
+	if router.ShardCount() > 1 {
+		for _, shard := range router.HotShards() {
+			if err = migrateModels(shard, hotPathModels()...); err != nil {
+				return err
+			}
+		}
+		if err = migrateModels(router.Cold(), hotPathModels()...); err != nil {
 			return
 		}
 	}
 
 	var triggers []models.Trigger
-	if err = Connection().Where("type = ?", models.TriggerTypeHTTP).Find(&triggers).Error; err != nil {
+	if err = router.Catalog().Where("type = ?", models.TriggerTypeHTTP).Find(&triggers).Error; err != nil {
 		return
 	}
 	for idx := range triggers {
@@ -115,7 +209,7 @@ func Migrate() (err error) {
 		if err = trigger.ApplyDerivedFields(); err != nil {
 			return
 		}
-		if err = Connection().
+		if err = router.Catalog().
 			Model(&models.Trigger{}).
 			Where("id = ?", trigger.ID).
 			Update("normalized_path", trigger.NormalizedPath).
@@ -124,4 +218,22 @@ func Migrate() (err error) {
 		}
 	}
 	return
+}
+
+func migrateModels(conn *gorm.DB, models ...interface{}) error {
+	for _, model := range models {
+		if err := conn.AutoMigrate(model); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func hotPathModels() []interface{} {
+	return []interface{}{
+		&models.JobRun{},
+		&models.TaskRun{},
+		&models.CallbackRun{},
+		&models.ExecutionEvent{},
+	}
 }

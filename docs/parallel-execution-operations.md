@@ -24,6 +24,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
 | `CAESIUM_DATABASE_MAX_OPEN_CONNS` | `4` | Max SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_MAX_IDLE_CONNS` | `2` | Max idle SQL connections per node for dqlite/PostgreSQL. |
+| `CAESIUM_DATABASE_SHARDS` | `1` | Number of dqlite hot write shards. Values greater than `1` are Phase 4 horizontal-scaling mode and require the internal dqlite backend. |
 | `CAESIUM_DATABASE_VOTERS` | `3` | Target dqlite voter count. Must be odd and at least 3. |
 | `CAESIUM_DATABASE_STANDBYS` | `3` | Target dqlite standby count for failover headroom. Extra nodes settle as spares. |
 | `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
@@ -38,6 +39,8 @@ Use three stable control-plane nodes as voters. Add up to three standby nodes wh
 Set the same `CAESIUM_DATABASE_VOTERS` and `CAESIUM_DATABASE_STANDBYS` values on every node. For a 10-node deployment, the recommended shape is 3 voters, 3 standbys, and 4 spares.
 
 Distributed wakeups use the dqlite cluster membership list, not `CAESIUM_DATABASE_NODES`, so spare workers receive wakeup hints after they join. Set the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` on every node. The sender uses `Authorization: Bearer <token>` and receivers reject missing or incorrect tokens.
+
+`CAESIUM_DATABASE_SHARDS=1` keeps every table in the catalog database. Higher shard counts open `caesium_hot_XX` databases on the same dqlite cluster and route run lifecycle rows by job run ID. See [database-sharding.md](database-sharding.md) for the table map and router contract.
 
 ## Rollout Procedure (Distributed Mode)
 

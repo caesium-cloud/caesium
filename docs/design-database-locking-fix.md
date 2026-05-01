@@ -199,17 +199,21 @@ Goal: scale to the "Large" deployment shape — 100–500 worker nodes and tens 
 
 The unlock is that `App.Open(name)` on a single dqlite cluster opens an independent database with its own engine thread and write queue on the leader. Sharding the hot tables across N databases linearly multiplies write throughput on the same Raft cluster. Cross-database `ATTACH` is intentionally disabled in dqlite (see [canonical/dqlite#441](https://github.com/canonical/dqlite/issues/441)), so each shard must be transactionally self-contained — manageable for our schema because DAG state is naturally per-job.
 
-- [ ] **Define the shard boundary and routing key.**
+Status: Phase 4 foundation is underway. The current implementation adds named dqlite database opens, `CAESIUM_DATABASE_SHARDS`, the `pkg/db.Router` routing primitive, and the table-placement contract in `docs/database-sharding.md`. Runtime call sites still need to migrate from the compatibility catalog connection to router-aware run-scoped paths before `CAESIUM_DATABASE_SHARDS>1` is production-ready.
+
+- [x] **Define the shard boundary and routing key.**
   - Hot, write-heavy tables (`task_runs`, `events`, optionally `job_runs`) shard by `hash(job_run_id) % N`. All rows for a given run live in one shard so per-run transactions stay local.
   - Catalog tables (`jobs`, `triggers`, `atoms`, `tasks`, `secrets`, `users`) stay in the **catalog** database (`caesium`). They're write-light and read-heavy; replication via standbys covers them fine.
   - History tables (`task_runs`, `events` for terminal runs) move to a **cold** database (`caesium_history`) on a configurable lag. The hot path never scans cold rows.
   - Acceptance: a written-down schema doc enumerates which table lives in which database, and the runtime routes accordingly.
+  - Status: table placement and routing-key contract are documented in `docs/database-sharding.md`; runtime call-site migration is covered by the router and per-shard milestones below.
 
 - [ ] **Build a shard router in the data layer.**
   - Files: `pkg/db/db.go`, new `pkg/db/router.go`.
   - Replace the single `*gorm.DB` returned by `Connection()` with a `Router` that dispatches by table + shard key. Most call sites get the catalog DB; run-scoped sites get the run's hot shard.
   - Static shard count `CAESIUM_DATABASE_SHARDS` (default 1, so this is a no-op until operators opt in). Power-of-two recommended for clean rebalancing later.
   - Acceptance: at `CAESIUM_DATABASE_SHARDS=1` the system is byte-identical to today; at `CAESIUM_DATABASE_SHARDS=8`, 50 concurrent runs distribute across 8 hot shards roughly evenly.
+  - Status: `pkg/db.Router`, `db.DefaultRouter()`, named dqlite database opens, and router unit tests are implemented. Compatibility `db.Connection()` still returns the catalog DB while run-scoped call sites are migrated incrementally.
   - Risk: high. This is the largest refactor in the plan; gate behind a feature flag and ship the router with shards=1 first to flush out call-site mistakes before any deployment turns it up.
 
 - [ ] **Per-shard ClaimNext and ReclaimExpired.**

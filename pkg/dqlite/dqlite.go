@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,10 +28,12 @@ const (
 	// DriverName is the default driver name for dqlite.
 	DriverName = "dqlite"
 
-	dqliteBusyTimeout = 5 * time.Second
+	defaultDatabaseName = "caesium"
+	dqliteBusyTimeout   = 5 * time.Second
 )
 
 var (
+	appMu      sync.Mutex
 	currentApp atomic.Pointer[dqliteapp.App]
 
 	ErrNoNativeApp = errors.New("dqlite: native app is not active")
@@ -54,6 +57,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 	if dialector.DriverName == "" {
 		dialector.DriverName = DriverName
 	}
+	databaseName := databaseNameFromDSN(dialector.DSN)
 
 	supportsSQLPragmas := true
 	if dialector.Conn != nil {
@@ -80,29 +84,15 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 			fn("dqlite", dqliteLogFields(l, msg)...)
 		}
 
-		vars := env.Variables()
-		dqApp, err := dqliteapp.New(
-			vars.DatabasePath,
-			dqliteapp.WithAddress(vars.NodeAddress),
-			dqliteapp.WithCluster(vars.DatabaseNodes),
-			dqliteapp.WithVoters(vars.DatabaseVoters),
-			dqliteapp.WithStandBys(vars.DatabaseStandbys),
-			dqliteapp.WithLogFunc(logFunc),
-			dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
-		)
+		dqApp, err := nativeApp(context.Background(), logFunc)
 		if err != nil {
 			return err
 		}
 
-		if err := dqApp.Ready(context.Background()); err != nil {
-			return err
-		}
-
-		conn, err := dqApp.Open(context.Background(), "caesium")
+		conn, err := dqApp.Open(context.Background(), databaseName)
 		if err != nil {
 			return err
 		}
-		currentApp.Store(dqApp)
 
 		db.ConnPool = conn
 	}
@@ -135,6 +125,48 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ClauseBuilders[k] = v
 	}
 	return
+}
+
+func databaseNameFromDSN(dsn string) string {
+	name := strings.TrimSpace(dsn)
+	if name == "" {
+		return defaultDatabaseName
+	}
+	return name
+}
+
+func nativeApp(ctx context.Context, logFunc func(client.LogLevel, string, ...interface{})) (*dqliteapp.App, error) {
+	if dqApp := currentApp.Load(); dqApp != nil {
+		return dqApp, nil
+	}
+
+	appMu.Lock()
+	defer appMu.Unlock()
+
+	if dqApp := currentApp.Load(); dqApp != nil {
+		return dqApp, nil
+	}
+
+	vars := env.Variables()
+	dqApp, err := dqliteapp.New(
+		vars.DatabasePath,
+		dqliteapp.WithAddress(vars.NodeAddress),
+		dqliteapp.WithCluster(vars.DatabaseNodes),
+		dqliteapp.WithVoters(vars.DatabaseVoters),
+		dqliteapp.WithStandBys(vars.DatabaseStandbys),
+		dqliteapp.WithLogFunc(logFunc),
+		dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := dqApp.Ready(ctx); err != nil {
+		return nil, err
+	}
+
+	currentApp.Store(dqApp)
+	return dqApp, nil
 }
 
 func dqliteLogFields(level client.LogLevel, msg string) []interface{} {

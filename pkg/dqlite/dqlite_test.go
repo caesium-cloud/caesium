@@ -31,6 +31,12 @@ func TestDialectorAppliesConnectionPragmas(t *testing.T) {
 	require.Equal(t, 1, synchronous)
 }
 
+func TestDatabaseNameFromDSN(t *testing.T) {
+	require.Equal(t, defaultDatabaseName, databaseNameFromDSN(""))
+	require.Equal(t, defaultDatabaseName, databaseNameFromDSN("  "))
+	require.Equal(t, "caesium_hot_03", databaseNameFromDSN(" caesium_hot_03 "))
+}
+
 func TestClusterRequiresNativeApp(t *testing.T) {
 	_, err := Cluster(context.Background())
 	require.True(t, errors.Is(err, ErrNoNativeApp))
