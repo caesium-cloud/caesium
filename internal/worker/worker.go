@@ -9,6 +9,8 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
+const defaultReclaimInterval = 30 * time.Second
+
 type TaskClaimer interface {
 	ClaimNext(ctx context.Context) (*models.TaskRun, error)
 }
@@ -20,11 +22,13 @@ type ExpiredReclaimer interface {
 }
 
 type Worker struct {
-	claimer      TaskClaimer
-	pool         *Pool
-	pollInterval time.Duration
-	executor     TaskExecutor
-	wakeups      <-chan struct{}
+	claimer         TaskClaimer
+	pool            *Pool
+	pollInterval    time.Duration
+	reclaimInterval time.Duration
+	lastReclaim     time.Time
+	executor        TaskExecutor
+	wakeups         <-chan struct{}
 }
 
 func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, executor TaskExecutor) *Worker {
@@ -42,15 +46,26 @@ func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, exec
 	}
 
 	return &Worker{
-		claimer:      claimer,
-		pool:         pool,
-		pollInterval: pollInterval,
-		executor:     executor,
+		claimer:         claimer,
+		pool:            pool,
+		pollInterval:    pollInterval,
+		reclaimInterval: defaultReclaimInterval,
+		lastReclaim:     initialLastReclaim(time.Now(), defaultReclaimInterval),
+		executor:        executor,
 	}
 }
 
 func (w *Worker) WithWakeups(ch <-chan struct{}) *Worker {
 	w.wakeups = ch
+	return w
+}
+
+func (w *Worker) WithReclaimInterval(interval time.Duration) *Worker {
+	if interval <= 0 {
+		interval = defaultReclaimInterval
+	}
+	w.reclaimInterval = interval
+	w.lastReclaim = initialLastReclaim(time.Now(), interval)
 	return w
 }
 
@@ -63,11 +78,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		default:
 		}
 
-		if reclaimer, ok := w.claimer.(ExpiredReclaimer); ok {
-			if err := reclaimer.ReclaimExpired(ctx); err != nil && ctx.Err() == nil {
-				log.Error("failed to reclaim expired tasks", "error", err)
-			}
-		}
+		w.reclaimIfDue(ctx)
 
 		task, err := w.claimer.ClaimNext(ctx)
 		if err != nil {
@@ -96,6 +107,32 @@ func (w *Worker) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+func (w *Worker) reclaimIfDue(ctx context.Context) {
+	reclaimer, ok := w.claimer.(ExpiredReclaimer)
+	if !ok {
+		return
+	}
+	if time.Since(w.lastReclaim) < w.reclaimInterval {
+		return
+	}
+
+	w.lastReclaim = time.Now()
+	if err := reclaimer.ReclaimExpired(ctx); err != nil && ctx.Err() == nil {
+		log.Error("failed to reclaim expired tasks", "error", err)
+	}
+}
+
+func initialLastReclaim(now time.Time, interval time.Duration) time.Time {
+	return now.Add(-interval).Add(randomReclaimOffset(interval))
+}
+
+func randomReclaimOffset(interval time.Duration) time.Duration {
+	if interval <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int64N(int64(interval)))
 }
 
 func waitForWork(ctx context.Context, wakeups <-chan struct{}, d time.Duration) error {

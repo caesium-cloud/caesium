@@ -115,6 +115,8 @@ func start(cmd *cobra.Command, args []string) error {
 		vars.WorkerPoolSize,
 		"worker_poll_interval",
 		vars.WorkerPollInterval,
+		"worker_reclaim_interval",
+		vars.WorkerReclaimInterval,
 		"worker_lease_ttl",
 		vars.WorkerLeaseTTL,
 		"node_labels",
@@ -225,6 +227,8 @@ func start(cmd *cobra.Command, args []string) error {
 				poolSize,
 				"poll_interval",
 				vars.WorkerPollInterval,
+				"reclaim_interval",
+				vars.WorkerReclaimInterval,
 				"lease_ttl",
 				vars.WorkerLeaseTTL,
 			)
@@ -233,7 +237,9 @@ func start(cmd *cobra.Command, args []string) error {
 			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
 			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
 			wakeups := worker.SubscribeWakeups(ctx, bus)
-			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).WithWakeups(wakeups)
+			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
+				WithReclaimInterval(vars.WorkerReclaimInterval).
+				WithWakeups(wakeups)
 			errs <- w.Run(ctx)
 		}()
 	} else {

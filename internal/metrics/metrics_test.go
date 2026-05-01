@@ -30,6 +30,8 @@ func (s *MetricsSuite) SetupTest() {
 		TriggerFiresTotal,
 		WorkerClaimsTotal,
 		WorkerClaimContentionTotal,
+		DBBusyRetriesTotal,
+		ReclaimDurationSeconds,
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
 		WebhookAuthFailuresTotal,
@@ -133,6 +135,35 @@ func (s *MetricsSuite) TestWorkerClaimContentionTotalIncrements() {
 
 	val := metrictestutil.CounterValue(s.T(), WorkerClaimContentionTotal, "node-a")
 	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestDBBusyRetriesTotalIncrements() {
+	DBBusyRetriesTotal.Inc()
+	DBBusyRetriesTotal.Inc()
+
+	var m dto.Metric
+	s.Require().NoError(DBBusyRetriesTotal.Write(&m))
+	s.GreaterOrEqual(m.GetCounter().GetValue(), float64(2))
+}
+
+func (s *MetricsSuite) TestReclaimDurationSecondsObserves() {
+	ReclaimDurationSeconds.Observe(0.125)
+
+	families, err := s.registry.Gather()
+	s.Require().NoError(err)
+
+	found := false
+	for _, fam := range families {
+		if fam.GetName() == "caesium_reclaim_duration_seconds" {
+			for _, m := range fam.GetMetric() {
+				h := m.GetHistogram()
+				if h != nil && h.GetSampleCount() > 0 {
+					found = true
+				}
+			}
+		}
+	}
+	s.True(found, "expected reclaim duration histogram sample")
 }
 
 func (s *MetricsSuite) TestWorkerLeaseExpirationsTotalAdds() {

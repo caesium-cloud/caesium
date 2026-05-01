@@ -83,6 +83,21 @@ var (
 		[]string{"node_id"},
 	)
 
+	DBBusyRetriesTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_db_busy_retries_total",
+			Help: "Total number of database busy/locked retry attempts.",
+		},
+	)
+
+	ReclaimDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "caesium_reclaim_duration_seconds",
+			Help:    "Duration of expired task lease reclaim attempts in seconds.",
+			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5},
+		},
+	)
+
 	WorkerLeaseExpirationsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_worker_lease_expirations_total",
@@ -194,6 +209,8 @@ func Register() {
 			TriggerFiresTotal,
 			WorkerClaimsTotal,
 			WorkerClaimContentionTotal,
+			DBBusyRetriesTotal,
+			ReclaimDurationSeconds,
 			WorkerLeaseExpirationsTotal,
 			TaskRetriesTotal,
 			BackfillRunsTotal,
