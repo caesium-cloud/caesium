@@ -10,6 +10,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
+	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -23,6 +25,20 @@ type ImporterTestSuite struct {
 
 func TestImporterSuite(t *testing.T) {
 	suite.Run(t, new(ImporterTestSuite))
+}
+
+func TestWithImporterBusyRetryRetriesSQLiteContention(t *testing.T) {
+	attempts := 0
+	err := withImporterBusyRetry(context.Background(), func() error {
+		attempts++
+		if attempts == 1 {
+			return sqlite3.Error{Code: sqlite3.ErrBusy}
+		}
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
 }
 
 func (s *ImporterTestSuite) SetupTest() {

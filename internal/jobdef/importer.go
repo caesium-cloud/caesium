@@ -5,16 +5,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -23,6 +26,14 @@ var (
 	ErrDuplicateJob       = errors.New("job alias already exists")
 	ErrProvenanceConflict = errors.New("job definition provenance conflict")
 	ErrJobRunning         = errors.New("job has a running run")
+
+	importerBusyRetryBackoffs = []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+	}
 )
 
 // Importer coordinates persistence of job definitions.
@@ -71,40 +82,48 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	}
 
 	var result *models.Job
-	err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
-		if err != nil {
-			return err
-		}
-		if existing != nil {
-			if err := i.guardJobMutationTx(tx, existing, opts); err != nil {
+	err := withImporterBusyRetry(ctx, func() error {
+		var attemptResult *models.Job
+		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			existing, err := i.findJobByAliasTx(tx, def.Metadata.Alias)
+			if err != nil {
 				return err
 			}
-		}
+			if existing != nil {
+				if err := i.guardJobMutationTx(tx, existing, opts); err != nil {
+					return err
+				}
+			}
 
-		jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
+			jobModel, triggerModel, err := i.upsertJobAndTriggerTx(tx, existing, def, opts)
+			if err != nil {
+				return err
+			}
+			if triggerModel != nil {
+				jobModel.TriggerID = triggerModel.ID
+			}
+
+			taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def.Steps, opts)
+			if err != nil {
+				return err
+			}
+			if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, taskByName, opts); err != nil {
+				return err
+			}
+			if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
+				return err
+			}
+			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
+				return err
+			}
+
+			attemptResult = jobModel
+			return nil
+		})
 		if err != nil {
 			return err
 		}
-		if triggerModel != nil {
-			jobModel.TriggerID = triggerModel.ID
-		}
-
-		taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def.Steps, opts)
-		if err != nil {
-			return err
-		}
-		if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, taskByName, opts); err != nil {
-			return err
-		}
-		if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
-			return err
-		}
-		if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
-			return err
-		}
-
-		result = jobModel
+		result = attemptResult
 		return nil
 	})
 	if err != nil {
@@ -127,38 +146,111 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 	}
 
 	var pruned int
-	err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		query := tx.Model(&models.Job{})
-		if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
-			query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
-		}
-
-		var jobs []models.Job
-		if err := query.Find(&jobs).Error; err != nil {
-			return err
-		}
-
-		toRetire := make([]*models.Job, 0, len(jobs))
-		for idx := range jobs {
-			jobModel := &jobs[idx]
-			if _, ok := desiredSet[jobModel.Alias]; ok {
-				continue
+	err := withImporterBusyRetry(ctx, func() error {
+		var attemptPruned int
+		err := i.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			query := tx.Model(&models.Job{})
+			if opts != nil && strings.TrimSpace(opts.SourceID) != "" {
+				query = query.Where("provenance_source_id = ?", strings.TrimSpace(opts.SourceID))
 			}
-			toRetire = append(toRetire, jobModel)
-		}
-		if len(toRetire) == 0 {
+
+			var jobs []models.Job
+			if err := query.Find(&jobs).Error; err != nil {
+				return err
+			}
+
+			toRetire := make([]*models.Job, 0, len(jobs))
+			for idx := range jobs {
+				jobModel := &jobs[idx]
+				if _, ok := desiredSet[jobModel.Alias]; ok {
+					continue
+				}
+				toRetire = append(toRetire, jobModel)
+			}
+			if len(toRetire) == 0 {
+				return nil
+			}
+			if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
+				return err
+			}
+			if err := i.retireJobsTx(tx, toRetire); err != nil {
+				return err
+			}
+			attemptPruned = len(toRetire)
 			return nil
-		}
-		if err := i.ensureJobsNotRunningTx(tx, toRetire); err != nil {
+		})
+		if err != nil {
 			return err
 		}
-		if err := i.retireJobsTx(tx, toRetire); err != nil {
-			return err
-		}
-		pruned = len(toRetire)
+		pruned = attemptPruned
 		return nil
 	})
 	return pruned, err
+}
+
+func withImporterBusyRetry(ctx context.Context, fn func() error) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		err = fn()
+		if err == nil || !isImporterContentionErr(err) {
+			return err
+		}
+		if attempt >= len(importerBusyRetryBackoffs) {
+			return err
+		}
+
+		metrics.DBBusyRetriesTotal.Inc()
+		if sleepErr := sleepImporterBusyRetry(ctx, importerBusyRetryBackoffs[attempt]); sleepErr != nil {
+			return sleepErr
+		}
+	}
+}
+
+func sleepImporterBusyRetry(ctx context.Context, base time.Duration) error {
+	timer := time.NewTimer(jitterImporterBusyRetryBackoff(base))
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func jitterImporterBusyRetryBackoff(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+
+	maxJitter := int64(base / 5)
+	if maxJitter <= 0 {
+		return base
+	}
+	return base - time.Duration(rand.Int64N(maxJitter+1))
+}
+
+func isImporterContentionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "database is busy") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_locked")
 }
 
 func (i *Importer) findJobByAliasTx(tx *gorm.DB, alias string) (*models.Job, error) {
