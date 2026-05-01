@@ -475,6 +475,10 @@ var harnessMetricSpecs = map[string]metricSpec{
 		labelNames: []string{"job_id", "status"},
 		read:       readCounterVec(metrics.CallbackRunsTotal),
 	},
+	"caesium_db_busy_retries_total": {
+		labelNames: nil,
+		read:       readCounter(metrics.DBBusyRetriesTotal),
+	},
 	"caesium_job_runs_total": {
 		labelNames: []string{"job_id", "status"},
 		read:       readCounterVec(metrics.JobRunsTotal),
@@ -523,6 +527,20 @@ var harnessMetricSpecs = map[string]metricSpec{
 		labelNames: []string{"node_id"},
 		read:       readCounterVec(metrics.WorkerLeaseExpirationsTotal),
 	},
+}
+
+func readCounter(counter prometheus.Counter) func([]string) (float64, error) {
+	return func(labelValues []string) (float64, error) {
+		if len(labelValues) != 0 {
+			return 0, fmt.Errorf("metric does not accept labels")
+		}
+
+		var metric dto.Metric
+		if err := counter.(prometheus.Metric).Write(&metric); err != nil {
+			return 0, err
+		}
+		return metric.GetCounter().GetValue(), nil
+	}
 }
 
 func readCounterVec(vec *prometheus.CounterVec) func([]string) (float64, error) {

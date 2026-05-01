@@ -30,6 +30,7 @@ These files are useful context, but each should be treated according to its stat
 - [design-arm64-support.md](design-arm64-support.md)
 - [design-event-triggers.md](design-event-triggers.md)
 - [design-concurrency-priority.md](design-concurrency-priority.md)
+- [design-database-locking-fix.md](design-database-locking-fix.md)
 - [design-sla-management.md](design-sla-management.md)
 - [design-task-templates.md](design-task-templates.md)
 - [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md)

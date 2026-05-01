@@ -65,6 +65,34 @@ func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
 	}
 }
 
+func TestWorkerRunThrottlesReclaimUntilPreviousIdleClaim(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	claimer := &reclaimingSequenceClaimer{
+		sequenceClaimer: sequenceClaimer{
+			responses: []claimerResponse{
+				{},
+				{},
+				{task: &models.TaskRun{ID: uuid.New()}},
+			},
+		},
+	}
+
+	worker := NewWorker(claimer, NewPool(1), time.Millisecond, func(_ context.Context, _ *models.TaskRun) {
+		cancel()
+	}).WithReclaimInterval(time.Hour)
+	worker.lastReclaim = time.Now().Add(-2 * time.Hour)
+
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&claimer.reclaims); got != 1 {
+		t.Fatalf("expected 1 reclaim attempt, got %d", got)
+	}
+}
+
 func TestSleepWithContextHandlesTinyDurations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -95,4 +123,14 @@ func (s *sequenceClaimer) ClaimNext(context.Context) (*models.TaskRun, error) {
 	resp := s.responses[0]
 	s.responses = s.responses[1:]
 	return resp.task, resp.err
+}
+
+type reclaimingSequenceClaimer struct {
+	sequenceClaimer
+	reclaims int32
+}
+
+func (s *reclaimingSequenceClaimer) ReclaimExpired(context.Context) error {
+	atomic.AddInt32(&s.reclaims, 1)
+	return nil
 }

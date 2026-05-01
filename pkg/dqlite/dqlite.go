@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -19,8 +20,12 @@ import (
 	"gorm.io/gorm/schema"
 )
 
-// DriverName is the default driver name for dqlite.
-const DriverName = "dqlite"
+const (
+	// DriverName is the default driver name for dqlite.
+	DriverName = "dqlite"
+
+	dqliteBusyTimeout = 5 * time.Second
+)
 
 type Dialector struct {
 	DriverName string
@@ -41,9 +46,13 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		dialector.DriverName = DriverName
 	}
 
+	supportsSQLPragmas := true
 	if dialector.Conn != nil {
 		db.ConnPool = dialector.Conn
 	} else {
+		// go-dqlite rejects SQL PRAGMA statements with SQLITE_AUTH; configure
+		// the busy timeout through its native node option instead.
+		supportsSQLPragmas = false
 		logFunc := func(l client.LogLevel, format string, a ...interface{}) {
 			// log info by default
 			fn := log.Info
@@ -66,6 +75,7 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 			app.WithAddress(env.Variables().NodeAddress),
 			app.WithCluster(env.Variables().DatabaseNodes),
 			app.WithLogFunc(logFunc),
+			app.WithBusyTimeout(dqliteBusyTimeout),
 		)
 		if err != nil {
 			return err
@@ -81,6 +91,12 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		}
 
 		db.ConnPool = conn
+	}
+
+	if supportsSQLPragmas {
+		if err := setConnectionPragmas(context.Background(), db.ConnPool); err != nil {
+			return err
+		}
 	}
 
 	var version string
@@ -105,6 +121,18 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ClauseBuilders[k] = v
 	}
 	return
+}
+
+func setConnectionPragmas(ctx context.Context, conn gorm.ConnPool) error {
+	for _, stmt := range []string{
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA synchronous=NORMAL",
+	} {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("%s: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
 func (dialector Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {

@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -178,6 +179,45 @@ END;
 	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.WorkerClaimContentionTotal, "node-racer"), float64(1))
 }
 
+func TestWithBusyRetryRetriesBusyErrors(t *testing.T) {
+	restoreBackoffs := setBusyRetryBackoffsForTest([]time.Duration{0, 0})
+	defer restoreBackoffs()
+
+	attempts := 0
+	retries := 0
+	err := withBusyRetry(context.Background(), func() error {
+		attempts++
+		if attempts < 3 {
+			return sqlite3.Error{Code: sqlite3.ErrBusy}
+		}
+		return nil
+	}, func(error) {
+		retries++
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 3, attempts)
+	require.Equal(t, 2, retries)
+}
+
+func TestWithBusyRetryExhaustsBusyErrors(t *testing.T) {
+	restoreBackoffs := setBusyRetryBackoffsForTest([]time.Duration{0, 0})
+	defer restoreBackoffs()
+
+	attempts := 0
+	retries := 0
+	err := withBusyRetry(context.Background(), func() error {
+		attempts++
+		return sqlite3.Error{Code: sqlite3.ErrLocked}
+	}, func(error) {
+		retries++
+	})
+
+	require.Error(t, err)
+	require.Equal(t, 3, attempts)
+	require.Equal(t, 2, retries)
+}
+
 func TestClaimerClaimNextRespectsNodeSelector(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() {
@@ -331,4 +371,12 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
+}
+
+func setBusyRetryBackoffsForTest(backoffs []time.Duration) func() {
+	previous := busyRetryBackoffs
+	busyRetryBackoffs = backoffs
+	return func() {
+		busyRetryBackoffs = previous
+	}
 }
