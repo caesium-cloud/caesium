@@ -284,3 +284,19 @@ func compareVersion(version1, version2 string) int {
 	}
 	return 0
 }
+
+// ClusterNodes returns the current list of nodes in the dqlite cluster.
+func ClusterNodes(ctx context.Context) ([]client.NodeInfo, error) {
+	v := env.Variables()
+	if v.DatabaseType != "internal" && v.DatabaseType != DriverName {
+		return nil, nil
+	}
+
+	c, err := client.New(ctx, v.NodeAddress)
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
+
+	return c.Cluster(ctx)
+}

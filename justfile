@@ -277,3 +277,41 @@ helm-template:
 
 helm-test:
     helm test caesium --timeout 120s
+
+# Deploy Caesium in a distributed 3-node Raft cluster on local Kubernetes
+k8s-distributed: build-release
+    @if ! kubectl cluster-info >/dev/null 2>&1; then echo "Error: Kubernetes cluster not reachable. Ensure Docker Desktop K8s or Kind is running." && exit 1; fi
+    # Load image into cluster (Docker Desktop K8s sees local images by default, but this ensures it's fresh)
+    # Note: For Kind, you'd use 'kind load docker-image'
+    helm upgrade --install caesium ./helm/caesium \
+        --set replicaCount=3 \
+        --set image.repository={{ local_image_ref }} \
+        --set image.tag={{ tag }} \
+        --set image.pullPolicy=IfNotPresent \
+        --set config.extraEnv[0].name=CAESIUM_EXECUTION_MODE \
+        --set config.extraEnv[0].value=distributed \
+        --set kubernetes.engine.enabled=true \
+        --set persistence.enabled=false \
+        --wait
+    @echo "Caesium distributed cluster is ready."
+
+# Stop the local Kubernetes deployment
+k8s-down:
+    helm uninstall caesium
+
+# Port-forward to the Caesium service (run in background or separate terminal)
+k8s-port-forward:
+    @echo "Port-forwarding Caesium UI to http://localhost:{{ port }}..."
+    kubectl port-forward service/caesium {{ port }}:8080
+
+# View logs for all Caesium pods
+k8s-logs:
+    kubectl logs -l app.kubernetes.io/name=caesium --all-containers=true -f --tail=100
+
+# Hydrate example jobs into the Kubernetes-hosted Caesium instance
+k8s-hydrate:
+    {{ container_cli }} run --platform {{ platform }} \
+        --rm \
+        --network=host \
+        -v {{ repo_dir }}/docs/examples:/examples:ro \
+        {{ local_image_ref }}:{{ tag }} job apply --server http://host.docker.internal:{{ port }} --path /examples
