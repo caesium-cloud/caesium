@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
@@ -346,6 +347,37 @@ func TestRegisterTasksBatchesReadyEventsAndSkipsExisting(t *testing.T) {
 	require.NotNil(t, readyEvents[0].JobID)
 	require.Equal(t, taskB.ID, *readyEvents[0].TaskID)
 	require.Equal(t, job.ID, *readyEvents[0].JobID)
+}
+
+func TestRegisterTasksReturnsMissingJobRunError(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	task := &models.Task{ID: uuid.New(), JobID: uuid.New(), AtomID: uuid.New()}
+	atom := &models.Atom{ID: task.AtomID, Engine: models.AtomEngineDocker, Image: "alpine:3.23"}
+
+	err := store.RegisterTasks(uuid.New(), []RegisterTaskInput{
+		{Task: task, Atom: atom, OutstandingPredecessors: 0},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "job run")
+}
+
+func TestWithStoreBusyRetryRetriesSQLiteContention(t *testing.T) {
+	attempts := 0
+	err := withStoreBusyRetry(func() error {
+		attempts++
+		if attempts == 1 {
+			return sqlite3.Error{Code: sqlite3.ErrBusy}
+		}
+		return nil
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 2, attempts)
 }
 
 func TestClaimAwareTaskLifecycleMethods(t *testing.T) {

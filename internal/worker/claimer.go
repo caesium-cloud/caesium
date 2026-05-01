@@ -144,6 +144,10 @@ WHERE id = (
 	ORDER BY tr.created_at ASC
 	LIMIT 1
 )
+AND status = ?
+AND outstanding_predecessors = ?
+AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)
+AND job_run_id IN (SELECT id FROM job_runs WHERE status = ?)
 RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS claim_job_id`
 
 	args := []interface{}{
@@ -157,6 +161,7 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 		now,
 	}
 	args = append(args, selectorArgs...)
+	args = append(args, string(run.TaskStatusPending), 0, now, string(run.StatusRunning))
 
 	var claimed claimedTaskRunRow
 	result := tx.Raw(sql, args...).Scan(&claimed)
