@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/dbtrace"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	dqliteapp "github.com/canonical/go-dqlite/v3/app"
@@ -75,7 +76,8 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 				fn = log.Error
 			}
 
-			fn("dqlite", "msg", fmt.Sprintf(format, a...), "source", "dqlite")
+			msg := fmt.Sprintf(format, a...)
+			fn("dqlite", dqliteLogFields(l, msg)...)
 		}
 
 		vars := env.Variables()
@@ -133,6 +135,18 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 		db.ClauseBuilders[k] = v
 	}
 	return
+}
+
+func dqliteLogFields(level client.LogLevel, msg string) []interface{} {
+	fields := []interface{}{"msg", msg, "source", "dqlite"}
+	if level == client.LogWarn && isUnknownDataTypeWarning(msg) {
+		fields = append(fields, "recent_db_statements", dbtrace.Recent(8))
+	}
+	return fields
+}
+
+func isUnknownDataTypeWarning(msg string) bool {
+	return strings.Contains(strings.ToLower(msg), "unknown data type: 0")
 }
 
 func setConnectionPragmas(ctx context.Context, conn gorm.ConnPool) error {

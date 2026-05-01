@@ -99,6 +99,38 @@ func (s *StoreMetricsSuite) TestCompleteWithErrorRecordsFailure() {
 	s.Equal(float64(1), ctr)
 }
 
+func (s *StoreMetricsSuite) TestRegisterTasksObservesBatchSize() {
+	jobID := uuid.New()
+	run, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	atomID := uuid.New()
+	taskA := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID}
+	taskB := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID}
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
+	s.Require().NoError(s.db.Create([]*models.Task{taskA, taskB}).Error)
+	s.Require().NoError(s.db.Create(atom).Error)
+
+	beforeCount, beforeSum := s.histogramValue(metrics.TaskRegisterBatchSize)
+	s.Require().NoError(s.store.RegisterTasks(run.ID, []RegisterTaskInput{
+		{Task: taskA, Atom: atom, OutstandingPredecessors: 0},
+		{Task: taskB, Atom: atom, OutstandingPredecessors: 1},
+	}))
+
+	afterCount, afterSum := s.histogramValue(metrics.TaskRegisterBatchSize)
+	s.Equal(beforeCount+1, afterCount)
+	s.InDelta(beforeSum+2, afterSum, 0.000001)
+}
+
+func (s *StoreMetricsSuite) TestRegisterTasksEmptyInputObservesZeroBatchSize() {
+	beforeCount, beforeSum := s.histogramValue(metrics.TaskRegisterBatchSize)
+	s.Require().NoError(s.store.RegisterTasks(uuid.New(), nil))
+
+	afterCount, afterSum := s.histogramValue(metrics.TaskRegisterBatchSize)
+	s.Equal(beforeCount+1, afterCount)
+	s.Equal(beforeSum, afterSum)
+}
+
 func (s *StoreMetricsSuite) TestCompleteTaskRecordsMetrics() {
 	jobID := uuid.New()
 	run, err := s.store.Start(jobID, nil)
@@ -209,5 +241,13 @@ func (s *StoreMetricsSuite) histogramValues(vec *prometheus.HistogramVec, labels
 	s.Require().NoError(err)
 	s.Require().NoError(observer.(prometheus.Metric).Write(&m))
 	h := m.GetHistogram()
+	return h.GetSampleCount(), h.GetSampleSum()
+}
+
+func (s *StoreMetricsSuite) histogramValue(histogram prometheus.Histogram) (uint64, float64) {
+	var m dto.Metric
+	s.Require().NoError(histogram.Write(&m))
+	h := m.GetHistogram()
+	s.Require().NotNil(h)
 	return h.GetSampleCount(), h.GetSampleSum()
 }

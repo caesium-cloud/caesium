@@ -43,6 +43,14 @@ var (
 		[]string{"job_id", "engine", "status"},
 	)
 
+	TaskRegisterBatchSize = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "caesium_task_register_batch_size",
+			Help:    "Number of task registration inputs per RegisterTasks call.",
+			Buckets: []float64{0, 1, 2, 5, 10, 25, 50, 100, 250, 500, 1000},
+		},
+	)
+
 	JobsActive = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "caesium_jobs_active",
@@ -204,6 +212,7 @@ func Register() {
 			JobRunDurationSeconds,
 			TaskRunsTotal,
 			TaskRunDurationSeconds,
+			TaskRegisterBatchSize,
 			JobsActive,
 			CallbackRunsTotal,
 			TriggerFiresTotal,

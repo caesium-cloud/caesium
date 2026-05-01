@@ -5,7 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/dbtrace"
+	"github.com/canonical/go-dqlite/v3/client"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -35,4 +38,36 @@ func TestClusterRequiresNativeApp(t *testing.T) {
 	isLeader, err := IsLocalLeader(context.Background())
 	require.False(t, isLeader)
 	require.True(t, errors.Is(err, ErrNoNativeApp))
+}
+
+func TestDqliteLogFieldsAttachRecentStatementsForUnknownDataTypeWarning(t *testing.T) {
+	dbtrace.Reset()
+	t.Cleanup(dbtrace.Reset)
+	dbtrace.Record("select * from task_runs where id = 'abc'", 1, time.Millisecond, nil)
+
+	fields := dqliteLogFields(client.LogWarn, "protocol warning: unknown data type: 0")
+
+	fieldMap := make(map[string]interface{}, len(fields)/2)
+	for idx := 0; idx < len(fields)-1; idx += 2 {
+		key, ok := fields[idx].(string)
+		require.True(t, ok)
+		fieldMap[key] = fields[idx+1]
+	}
+
+	recent, ok := fieldMap["recent_db_statements"].([]dbtrace.Statement)
+	require.True(t, ok)
+	require.Len(t, recent, 1)
+	require.Contains(t, recent[0].SQL, "task_runs")
+}
+
+func TestDqliteLogFieldsOnlyAttachContextToSpecificWarnings(t *testing.T) {
+	dbtrace.Reset()
+	t.Cleanup(dbtrace.Reset)
+	dbtrace.Record("select 1", 1, time.Millisecond, nil)
+
+	fields := dqliteLogFields(client.LogWarn, "leader changed")
+
+	for idx := 0; idx < len(fields)-1; idx += 2 {
+		require.NotEqual(t, "recent_db_statements", fields[idx])
+	}
 }
