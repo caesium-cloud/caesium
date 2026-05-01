@@ -76,16 +76,16 @@ Goal: eliminate the bulk of `database is locked` errors with low-risk changes th
 
 - [ ] **Wrap `ClaimNext` and `ReclaimExpired` with bounded `SQLITE_BUSY`/`LOCKED` retry.**
   - File: `internal/worker/claimer.go`.
-  - Helper `withBusyRetry(ctx, fn)` performing up to 5 attempts with exponential backoff (10ms, 20ms, 40ms, 80ms, 160ms) plus per-attempt jitter, total ~310ms cap. Reuse `isClaimContentionErr` (line 231).
+  - Helper `withBusyRetry(ctx, backoffs, fn)` performing up to 5 attempts with per-claimer exponential backoff (10ms, 20ms, 40ms, 80ms, 160ms) plus per-attempt jitter, total ~310ms cap. Reuse `isClaimContentionErr` (line 231).
   - Wrap the transaction calls at `claimer.go:67` and `:170`. Increment `caesium_worker_claim_contention_total` on each retry, not just on the first.
   - Acceptance: under simulated contention (see [Test plan](#test-plan)), `ClaimNext` returns success when `busy_timeout` plus retry can resolve it. Errors only bubble up after exhausting retries.
   - Risk: low. Retries are bounded; backoff is short.
 
 - [ ] **Throttle `ReclaimExpired` so it does not run every iteration.**
   - File: `internal/worker/worker.go:66-69`.
-  - Run reclaim only when `ClaimNext` returned no task in the previous iteration **and** at least `reclaimInterval` has passed since the last reclaim (default 30s, env-configurable as `CAESIUM_WORKER_RECLAIM_INTERVAL`).
+  - Run reclaim only when at least `reclaimInterval` has passed since the last reclaim (default 30s, env-configurable as `CAESIUM_WORKER_RECLAIM_INTERVAL`).
   - Stagger by adding a per-worker random offset at `Worker` init so the cluster-wide reclaim cadence is naturally desynchronized.
-  - Acceptance: in a 3-node cluster idle test, the rate of reclaim transactions falls by ~15× while no expired lease lingers more than `leaseTTL + reclaimInterval`.
+  - Acceptance: in a 3-node cluster test, the rate of reclaim transactions falls by ~15× while no expired lease lingers more than `leaseTTL + reclaimInterval`.
   - Risk: low. Lease TTL is 5min by default; even a 30s reclaim cadence has ample headroom.
 
 - [ ] **Surface a `caesium_db_busy_retries_total` counter and `caesium_reclaim_duration_seconds` histogram.**

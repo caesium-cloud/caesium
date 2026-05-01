@@ -70,8 +70,6 @@ func (w *Worker) WithReclaimInterval(interval time.Duration) *Worker {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	previousClaimIdle := false
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -80,7 +78,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		default:
 		}
 
-		w.reclaimIfDue(ctx, previousClaimIdle)
+		w.reclaimIfDue(ctx)
 
 		task, err := w.claimer.ClaimNext(ctx)
 		if err != nil {
@@ -90,7 +88,6 @@ func (w *Worker) Run(ctx context.Context) error {
 			}
 			log.Error("failed to claim next task", "error", err)
 		}
-		previousClaimIdle = err == nil && task == nil
 
 		if err != nil || task == nil {
 			if sleepErr := waitForWork(ctx, w.wakeups, w.pollInterval); sleepErr != nil {
@@ -112,10 +109,7 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Worker) reclaimIfDue(ctx context.Context, previousClaimIdle bool) {
-	if !previousClaimIdle {
-		return
-	}
+func (w *Worker) reclaimIfDue(ctx context.Context) {
 	reclaimer, ok := w.claimer.(ExpiredReclaimer)
 	if !ok {
 		return

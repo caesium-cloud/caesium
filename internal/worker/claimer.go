@@ -20,19 +20,12 @@ import (
 
 const defaultLeaseTTL = 5 * time.Minute
 
-var busyRetryBackoffs = []time.Duration{
-	10 * time.Millisecond,
-	20 * time.Millisecond,
-	40 * time.Millisecond,
-	80 * time.Millisecond,
-	160 * time.Millisecond,
-}
-
 type Claimer struct {
-	nodeID     string
-	nodeLabels map[string]string
-	store      *run.Store
-	leaseTTL   time.Duration
+	nodeID            string
+	nodeLabels        map[string]string
+	store             *run.Store
+	leaseTTL          time.Duration
+	busyRetryBackoffs []time.Duration
 }
 
 func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLabels ...map[string]string) *Claimer {
@@ -55,10 +48,21 @@ func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLab
 	}
 
 	return &Claimer{
-		nodeID:     nodeID,
-		nodeLabels: labels,
-		store:      store,
-		leaseTTL:   leaseTTL,
+		nodeID:            nodeID,
+		nodeLabels:        labels,
+		store:             store,
+		leaseTTL:          leaseTTL,
+		busyRetryBackoffs: defaultBusyRetryBackoffSchedule(),
+	}
+}
+
+func defaultBusyRetryBackoffSchedule() []time.Duration {
+	return []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
 	}
 }
 
@@ -71,7 +75,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	var claimed *models.TaskRun
 	pendingEvents := make([]event.Event, 0, 1)
 
-	err := withBusyRetry(ctx, func() error {
+	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -90,6 +94,8 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 				Table("task_runs AS tr").
 				Select("tr.*").
 				Joins("JOIN job_runs AS jr ON jr.id = tr.job_run_id").
+				// Pending rows can still carry claim metadata after an interrupted or
+				// partially rolled-back handoff, so claim only unclaimed or expired rows.
 				Where(
 					"jr.status = ? AND tr.status = ? AND tr.outstanding_predecessors = ? AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?)",
 					string(run.StatusRunning),
@@ -185,13 +191,15 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 	}()
 
 	pendingEvents := make([]event.Event, 0, 8)
-	err := withBusyRetry(ctx, func() error {
+	var reclaimedCount int64
+	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
 		now := time.Now().UTC()
 		attemptEvents := make([]event.Event, 0, 8)
+		var attemptReclaimedCount int64
 
 		err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			runningRunIDs := tx.Model(&models.JobRun{}).
@@ -247,17 +255,19 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				}
 				attemptEvents = append(attemptEvents, readyEvt)
 			}
-			if result.RowsAffected > 0 {
-				metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(result.RowsAffected))
-			}
+			attemptReclaimedCount = result.RowsAffected
 			return nil
 		})
 		if err == nil {
 			pendingEvents = attemptEvents
+			reclaimedCount = attemptReclaimedCount
 		}
 		return err
 	}, c.observeBusyRetry)
 	if err == nil {
+		if reclaimedCount > 0 {
+			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(reclaimedCount))
+		}
 		c.store.PublishEvents(pendingEvents...)
 	}
 	return err
@@ -267,14 +277,14 @@ func (c *Claimer) observeBusyRetry(error) {
 	metrics.WorkerClaimContentionTotal.WithLabelValues(c.nodeID).Inc()
 }
 
-func withBusyRetry(ctx context.Context, fn func() error, onRetry func(error)) error {
+func withBusyRetry(ctx context.Context, backoffs []time.Duration, fn func() error, onRetry func(error)) error {
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = fn()
 		if err == nil || !isClaimContentionErr(err) {
 			return err
 		}
-		if attempt >= len(busyRetryBackoffs) {
+		if attempt >= len(backoffs) {
 			return err
 		}
 
@@ -282,7 +292,7 @@ func withBusyRetry(ctx context.Context, fn func() error, onRetry func(error)) er
 		if onRetry != nil {
 			onRetry(err)
 		}
-		if sleepErr := sleepBusyRetry(ctx, busyRetryBackoffs[attempt]); sleepErr != nil {
+		if sleepErr := sleepBusyRetry(ctx, backoffs[attempt]); sleepErr != nil {
 			return sleepErr
 		}
 	}

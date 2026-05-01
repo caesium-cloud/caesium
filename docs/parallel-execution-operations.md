@@ -20,7 +20,7 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WORKER_ENABLED` | `true` | Enables distributed worker loop on this node. |
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent claimed tasks per node. |
 | `CAESIUM_WORKER_POLL_INTERVAL` | `2s` | Poll cadence for new claimable tasks. |
-| `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts after an idle claim pass. |
+| `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts. |
 | `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
@@ -64,7 +64,7 @@ Use metrics:
 - Increase `CAESIUM_WORKER_POOL_SIZE` to raise per-node throughput.
 - Increase `CAESIUM_MAX_PARALLEL_TASKS` for better local mode utilization.
 - Increase `CAESIUM_WORKER_LEASE_TTL` for long-running tasks to reduce reclaim churn.
-- Increase `CAESIUM_WORKER_RECLAIM_INTERVAL` to reduce idle-cluster reclaim write pressure.
+- Increase `CAESIUM_WORKER_RECLAIM_INTERVAL` to reduce reclaim write pressure.
 - Decrease `CAESIUM_WORKER_POLL_INTERVAL` for lower claim latency (at higher DB pressure).
 - Use `CAESIUM_NODE_LABELS` + task `nodeSelector` to place specialized workloads.
 

@@ -65,15 +65,14 @@ func TestWorkerRunContinuesAfterClaimErrors(t *testing.T) {
 	}
 }
 
-func TestWorkerRunThrottlesReclaimUntilPreviousIdleClaim(t *testing.T) {
+func TestWorkerRunReclaimsWhenDueBeforeBusyClaimLoop(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
 	claimer := &reclaimingSequenceClaimer{
 		sequenceClaimer: sequenceClaimer{
 			responses: []claimerResponse{
-				{},
-				{},
+				{task: &models.TaskRun{ID: uuid.New()}},
 				{task: &models.TaskRun{ID: uuid.New()}},
 			},
 		},

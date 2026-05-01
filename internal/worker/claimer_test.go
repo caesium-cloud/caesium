@@ -180,12 +180,9 @@ END;
 }
 
 func TestWithBusyRetryRetriesBusyErrors(t *testing.T) {
-	restoreBackoffs := setBusyRetryBackoffsForTest([]time.Duration{0, 0})
-	defer restoreBackoffs()
-
 	attempts := 0
 	retries := 0
-	err := withBusyRetry(context.Background(), func() error {
+	err := withBusyRetry(context.Background(), []time.Duration{0, 0}, func() error {
 		attempts++
 		if attempts < 3 {
 			return sqlite3.Error{Code: sqlite3.ErrBusy}
@@ -201,12 +198,9 @@ func TestWithBusyRetryRetriesBusyErrors(t *testing.T) {
 }
 
 func TestWithBusyRetryExhaustsBusyErrors(t *testing.T) {
-	restoreBackoffs := setBusyRetryBackoffsForTest([]time.Duration{0, 0})
-	defer restoreBackoffs()
-
 	attempts := 0
 	retries := 0
-	err := withBusyRetry(context.Background(), func() error {
+	err := withBusyRetry(context.Background(), []time.Duration{0, 0}, func() error {
 		attempts++
 		return sqlite3.Error{Code: sqlite3.ErrLocked}
 	}, func(error) {
@@ -371,12 +365,4 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 
 func ptrTime(v time.Time) *time.Time {
 	return &v
-}
-
-func setBusyRetryBackoffsForTest(backoffs []time.Duration) func() {
-	previous := busyRetryBackoffs
-	busyRetryBackoffs = backoffs
-	return func() {
-		busyRetryBackoffs = previous
-	}
 }
