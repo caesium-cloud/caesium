@@ -453,12 +453,18 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}
 
+	registerInputs := make([]run.RegisterTaskInput, 0, len(tasks))
 	for _, t := range tasks {
 		atomModel := atomsByTask[t.ID]
-		if err := store.RegisterTask(runID, t, atomModel, indegree[t.ID]); err != nil {
-			runErr = err
-			return err
-		}
+		registerInputs = append(registerInputs, run.RegisterTaskInput{
+			Task:                    t,
+			Atom:                    atomModel,
+			OutstandingPredecessors: indegree[t.ID],
+		})
+	}
+	if err := store.RegisterTasks(runID, registerInputs); err != nil {
+		runErr = err
+		return err
 	}
 
 	currentRun, err := store.Get(runID)

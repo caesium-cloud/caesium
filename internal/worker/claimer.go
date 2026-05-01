@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"math/rand/v2"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,9 +13,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
-	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
-	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -86,85 +86,13 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 		attemptEvents := make([]event.Event, 0, 1)
 
 		err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			var candidates []models.TaskRun
-			runningRunIDs := tx.Model(&models.JobRun{}).
-				Select("id").
-				Where("status = ?", string(run.StatusRunning))
-			err := tx.
-				Table("task_runs AS tr").
-				Select("tr.*").
-				Joins("JOIN job_runs AS jr ON jr.id = tr.job_run_id").
-				// Pending rows can still carry claim metadata after an interrupted or
-				// partially rolled-back handoff, so claim only unclaimed or expired rows.
-				Where(
-					"jr.status = ? AND tr.status = ? AND tr.outstanding_predecessors = ? AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?)",
-					string(run.StatusRunning),
-					string(run.TaskStatusPending),
-					0,
-					now,
-				).
-				Order("tr.created_at ASC").
-				Limit(64).
-				Find(&candidates).Error
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil
-			}
+			claimedTask, evt, err := c.claimNextTx(tx, now, leaseExpiry)
 			if err != nil {
 				return err
 			}
-			if len(candidates) == 0 {
-				return nil
-			}
-
-			for _, candidate := range candidates {
-				if !matchesNodeSelector(candidate.NodeSelector, c.nodeLabels) {
-					continue
-				}
-
-				result := tx.Model(&models.TaskRun{}).
-					Where(
-						"id = ? AND job_run_id IN (?) AND status = ? AND outstanding_predecessors = ? AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)",
-						candidate.ID,
-						runningRunIDs,
-						string(run.TaskStatusPending),
-						0,
-						now,
-					).
-					Updates(map[string]interface{}{
-						"claimed_by":       c.nodeID,
-						"claim_expires_at": leaseExpiry,
-						"claim_attempt":    candidate.ClaimAttempt + 1,
-						"status":           string(run.TaskStatusRunning),
-					})
-				if result.Error != nil {
-					return result.Error
-				}
-				if result.RowsAffected == 0 {
-					// Another node won the race.
-					metrics.WorkerClaimContentionTotal.WithLabelValues(c.nodeID).Inc()
-					continue
-				}
-
-				claimedTask := &models.TaskRun{}
-				if err := tx.First(claimedTask, "id = ?", candidate.ID).Error; err != nil {
-					return err
-				}
-				claimed = claimedTask
-				evt := event.Event{
-					Type:      event.TypeTaskClaimed,
-					Timestamp: time.Now().UTC(),
-				}
-				var jobRun models.JobRun
-				if err := tx.Select("job_id").First(&jobRun, "id = ?", claimedTask.JobRunID).Error; err == nil {
-					evt.JobID = jobRun.JobID
-				}
-				evt.RunID = claimedTask.JobRunID
-				evt.TaskID = claimedTask.TaskID
-				if err := c.store.RecordEventTx(tx, &evt); err != nil {
-					return err
-				}
-				attemptEvents = append(attemptEvents, evt)
-				break
+			claimed = claimedTask
+			if evt != nil {
+				attemptEvents = append(attemptEvents, *evt)
 			}
 			return nil
 		})
@@ -182,6 +110,147 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	c.store.PublishEvents(pendingEvents...)
 
 	return claimed, nil
+}
+
+func (c *Claimer) claimNextTx(tx *gorm.DB, now, leaseExpiry time.Time) (*models.TaskRun, *event.Event, error) {
+	claimed, jobID, err := c.claimNextSingleStatementTx(tx, now, leaseExpiry)
+	if err != nil {
+		return nil, nil, err
+	}
+	if claimed == nil {
+		return nil, nil, nil
+	}
+	evt, err := c.recordTaskClaimedEventTx(tx, claimed, jobID)
+	return claimed, evt, err
+}
+
+func (c *Claimer) claimNextSingleStatementTx(tx *gorm.DB, now, leaseExpiry time.Time) (*models.TaskRun, uuid.UUID, error) {
+	selectorSQL, selectorArgs, err := c.nodeSelectorPredicateSQL(tx.Name(), "tr")
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	sql := `
+UPDATE task_runs
+SET claimed_by = ?, claim_expires_at = ?, claim_attempt = claim_attempt + 1, status = ?, updated_at = ?
+WHERE id = (
+	SELECT tr.id
+	FROM task_runs AS tr
+	JOIN job_runs AS jr ON jr.id = tr.job_run_id
+	WHERE jr.status = ?
+		AND tr.status = ?
+		AND tr.outstanding_predecessors = ?
+		AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?)
+		AND ` + selectorSQL + `
+	ORDER BY tr.created_at ASC
+	LIMIT 1
+)
+AND status = ?
+AND outstanding_predecessors = ?
+AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)
+AND job_run_id IN (SELECT id FROM job_runs WHERE status = ?)
+RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS claim_job_id`
+
+	args := []interface{}{
+		c.nodeID,
+		leaseExpiry,
+		string(run.TaskStatusRunning),
+		now,
+		string(run.StatusRunning),
+		string(run.TaskStatusPending),
+		0,
+		now,
+	}
+	args = append(args, selectorArgs...)
+	args = append(args, string(run.TaskStatusPending), 0, now, string(run.StatusRunning))
+
+	var claimed claimedTaskRunRow
+	result := tx.Raw(sql, args...).Scan(&claimed)
+	if result.Error != nil {
+		return nil, uuid.Nil, result.Error
+	}
+	if result.RowsAffected == 0 || claimed.ID == uuid.Nil {
+		return nil, uuid.Nil, nil
+	}
+	return &claimed.TaskRun, claimed.ClaimJobID, nil
+}
+
+type claimedTaskRunRow struct {
+	models.TaskRun
+	ClaimJobID uuid.UUID `gorm:"column:claim_job_id"`
+}
+
+func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun, jobID uuid.UUID) (*event.Event, error) {
+	if claimed == nil {
+		return nil, nil
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskClaimed,
+		JobID:     jobID,
+		RunID:     claimed.JobRunID,
+		TaskID:    claimed.TaskID,
+		Timestamp: time.Now().UTC(),
+	}
+	if err := c.store.RecordEventTx(tx, &evt); err != nil {
+		return nil, err
+	}
+	return &evt, nil
+}
+
+func (c *Claimer) nodeSelectorPredicateSQL(dialect, tableAlias string) (string, []interface{}, error) {
+	column := tableAlias + ".node_selector"
+	jsonExpr, valueExpr, keyExpr := sqliteNodeSelectorJSONExprs(column)
+	switch dialect {
+	case "dqlite", "sqlite":
+	case "postgres":
+		jsonExpr = "COALESCE(" + column + ", '{}'::json)"
+		valueExpr = "BTRIM(ns.value)"
+		keyExpr = "ns.key"
+	default:
+		return "", nil, errors.New("worker: unsupported claim database dialect: " + dialect)
+	}
+
+	iteratorSQL := nodeSelectorIteratorSQL(dialect, jsonExpr)
+	if len(c.nodeLabels) == 0 {
+		return "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '')", nil, nil
+	}
+
+	keys := make([]string, 0, len(c.nodeLabels))
+	for key := range c.nodeLabels {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	args := make([]interface{}, 0, len(keys)*3)
+	inPlaceholders := make([]string, 0, len(keys))
+	caseParts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		inPlaceholders = append(inPlaceholders, "?")
+		args = append(args, key)
+	}
+	for _, key := range keys {
+		caseParts = append(caseParts, "WHEN ? THEN ?")
+		args = append(args, key, c.nodeLabels[key])
+	}
+
+	sql := "NOT EXISTS (SELECT 1 FROM " + iteratorSQL + " WHERE " + valueExpr + " <> '' AND (" + keyExpr + " NOT IN (" +
+		strings.Join(inPlaceholders, ",") + ") OR " + valueExpr + " <> CASE " + keyExpr + " " +
+		strings.Join(caseParts, " ") + " ELSE NULL END))"
+	return sql, args, nil
+}
+
+func sqliteNodeSelectorJSONExprs(column string) (jsonExpr, valueExpr, keyExpr string) {
+	jsonExpr = "CASE WHEN " + column + " IS NULL OR " + column + " = '' THEN '{}' ELSE " + column + " END"
+	valueExpr = "TRIM(CAST(ns.value AS TEXT))"
+	keyExpr = "CAST(ns.key AS TEXT)"
+	return jsonExpr, valueExpr, keyExpr
+}
+
+func nodeSelectorIteratorSQL(dialect, jsonExpr string) string {
+	if dialect == "postgres" {
+		return "json_each_text(" + jsonExpr + ") AS ns(key, value)"
+	}
+	return "json_each(" + jsonExpr + ") AS ns"
 }
 
 func (c *Claimer) ReclaimExpired(ctx context.Context) error {
@@ -336,6 +405,8 @@ func isClaimContentionErr(err error) bool {
 	return strings.Contains(msg, "database is locked") ||
 		strings.Contains(msg, "database table is locked") ||
 		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "database is busy") ||
+		strings.Contains(msg, "checkpoint in progress") ||
 		strings.Contains(msg, "sqlite_busy") ||
 		strings.Contains(msg, "sqlite_locked")
 }
@@ -361,26 +432,4 @@ func ParseNodeLabels(raw string) map[string]string {
 		values[key] = value
 	}
 	return values
-}
-
-func matchesNodeSelector(selector datatypes.JSONMap, nodeLabels map[string]string) bool {
-	if len(selector) == 0 {
-		return true
-	}
-
-	for key, raw := range jsonmap.ToStringMap(selector) {
-		expected := strings.TrimSpace(raw)
-		if expected == "" {
-			continue
-		}
-
-		actual, ok := nodeLabels[key]
-		if !ok {
-			return false
-		}
-		if actual != expected {
-			return false
-		}
-	}
-	return true
 }

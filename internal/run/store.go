@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
+	"github.com/mattn/go-sqlite3"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -148,12 +151,26 @@ type Store struct {
 	startedRuns map[uuid.UUID]struct{}
 }
 
+type RegisterTaskInput struct {
+	Task                    *models.Task
+	Atom                    *models.Atom
+	OutstandingPredecessors int
+}
+
 var (
 	defaultStore     *Store
 	defaultStoreOnce sync.Once
 )
 
 var ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
+
+var storeBusyRetryBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	20 * time.Millisecond,
+	40 * time.Millisecond,
+	80 * time.Millisecond,
+	160 * time.Millisecond,
+}
 
 func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
@@ -233,40 +250,47 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 		model.Params = encoded
 	}
 
-	pendingEvents := make([]event.Event, 0, 1)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(model).Error; err != nil {
-			return err
-		}
-
-		if s.eventStore != nil {
-			payload, err := json.Marshal(&JobRun{
-				ID:        model.ID,
-				JobID:     model.JobID,
-				Status:    Status(model.Status),
-				StartedAt: model.StartedAt,
-				CreatedAt: model.CreatedAt,
-				UpdatedAt: model.UpdatedAt,
-				Tasks:     []*TaskRun{},
-			})
-			if err != nil {
+	var pendingEvents []event.Event
+	if err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(model).Error; err != nil {
 				return err
 			}
 
-			evt := event.Event{
-				Type:      event.TypeRunStarted,
-				JobID:     jobID,
-				RunID:     model.ID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
-			}
-			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
-				return err
-			}
-			pendingEvents = append(pendingEvents, evt)
-		}
+			if s.eventStore != nil {
+				payload, err := json.Marshal(&JobRun{
+					ID:        model.ID,
+					JobID:     model.JobID,
+					Status:    Status(model.Status),
+					StartedAt: model.StartedAt,
+					CreatedAt: model.CreatedAt,
+					UpdatedAt: model.UpdatedAt,
+					Tasks:     []*TaskRun{},
+				})
+				if err != nil {
+					return err
+				}
 
-		return nil
+				evt := event.Event{
+					Type:      event.TypeRunStarted,
+					JobID:     jobID,
+					RunID:     model.ID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				}
+				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, evt)
+			}
+
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+		}
+		return err
 	}); err != nil {
 		return nil, err
 	}
@@ -305,40 +329,47 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 		model.Params = encoded
 	}
 
-	pendingEvents := make([]event.Event, 0, 1)
-	if err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(model).Error; err != nil {
-			return err
-		}
-
-		if s.eventStore != nil {
-			payload, err := json.Marshal(&JobRun{
-				ID:        model.ID,
-				JobID:     model.JobID,
-				Status:    Status(model.Status),
-				StartedAt: model.StartedAt,
-				CreatedAt: model.CreatedAt,
-				UpdatedAt: model.UpdatedAt,
-				Tasks:     []*TaskRun{},
-			})
-			if err != nil {
+	var pendingEvents []event.Event
+	if err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(model).Error; err != nil {
 				return err
 			}
 
-			evt := event.Event{
-				Type:      event.TypeRunStarted,
-				JobID:     jobID,
-				RunID:     model.ID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
-			}
-			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
-				return err
-			}
-			pendingEvents = append(pendingEvents, evt)
-		}
+			if s.eventStore != nil {
+				payload, err := json.Marshal(&JobRun{
+					ID:        model.ID,
+					JobID:     model.JobID,
+					Status:    Status(model.Status),
+					StartedAt: model.StartedAt,
+					CreatedAt: model.CreatedAt,
+					UpdatedAt: model.UpdatedAt,
+					Tasks:     []*TaskRun{},
+				})
+				if err != nil {
+					return err
+				}
 
-		return nil
+				evt := event.Event{
+					Type:      event.TypeRunStarted,
+					JobID:     jobID,
+					RunID:     model.ID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				}
+				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, evt)
+			}
+
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+		}
+		return err
 	}); err != nil {
 		return nil, err
 	}
@@ -354,45 +385,44 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
-	if task == nil || atom == nil {
-		return errors.New("run: task and atom must be provided")
-	}
+	return s.RegisterTasks(runID, []RegisterTaskInput{{
+		Task:                    task,
+		Atom:                    atom,
+		OutstandingPredecessors: outstanding,
+	}})
+}
 
-	var existing models.TaskRun
-	err := s.db.Where("job_run_id = ? AND task_id = ?", runID, task.ID).First(&existing).Error
-	if err == nil {
+func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error {
+	if len(inputs) == 0 {
 		return nil
 	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
 
-	command := atom.Command
-	if command == "" {
-		if cmd := atom.Cmd(); len(cmd) > 0 {
-			if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
-				command = string(encoded)
-			}
+	taskIDs := make([]uuid.UUID, 0, len(inputs))
+	seenInputTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+	for _, input := range inputs {
+		if input.Task == nil || input.Atom == nil {
+			return errors.New("run: task and atom must be provided")
 		}
+		if _, ok := seenInputTaskIDs[input.Task.ID]; ok {
+			continue
+		}
+		seenInputTaskIDs[input.Task.ID] = struct{}{}
+		taskIDs = append(taskIDs, input.Task.ID)
 	}
 
-	maxAttempts := task.Retries + 1
-	if maxAttempts < 1 {
-		maxAttempts = 1
+	var jobRun models.JobRun
+	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+		return fmt.Errorf("run: job run %s not found: %w", runID, err)
 	}
+	jobID := jobRun.JobID
 
 	var job models.Job
 	jobFound := true
-	if err := s.db.Select("schema_validation", "cache_config").First(&job, "id = ?", task.JobID).Error; err != nil {
+	if err := s.db.Select("id", "schema_validation", "cache_config").First(&job, "id = ?", jobID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
 		jobFound = false
-	}
-
-	schemaValidation := ""
-	if jobFound && len(task.OutputSchema) > 0 {
-		schemaValidation = job.SchemaValidation
 	}
 
 	envCache := cache.ConfigFromEnv()
@@ -400,55 +430,121 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 	if jobFound {
 		jobCacheConfig = decodeCacheConfig(job.CacheConfig)
 	}
-	resolvedCache := jobdefschema.ResolveCacheConfig(
-		decodeCacheConfig(task.CacheConfig),
-		jobCacheConfig,
-		envCache.Enabled,
-		envCache.TTL,
-	)
 
-	record := &models.TaskRun{
-		ID:                      uuid.New(),
-		JobRunID:                runID,
-		TaskID:                  task.ID,
-		AtomID:                  task.AtomID,
-		Engine:                  atom.Engine,
-		Image:                   atom.Image,
-		Command:                 command,
-		Status:                  string(TaskStatusPending),
-		NodeSelector:            maps.Clone(task.NodeSelector),
-		Attempt:                 1,
-		MaxAttempts:             maxAttempts,
-		OutstandingPredecessors: outstanding,
-		CacheEnabled:            resolvedCache.Enabled,
-		CacheTTL:                resolvedCache.TTL,
-		CacheVersion:            resolvedCache.Version,
-		OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
-		SchemaValidation:        schemaValidation,
-	}
+	var pendingEvents []event.Event
+	err := withStoreBusyRetry(func() error {
+		var attemptEvents []event.Event
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			existingTaskIDs := make([]uuid.UUID, 0)
+			if len(taskIDs) > 0 {
+				if err := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND task_id IN ?", runID, taskIDs).
+					Pluck("task_id", &existingTaskIDs).Error; err != nil {
+					return err
+				}
+			}
+			existing := make(map[uuid.UUID]struct{}, len(existingTaskIDs))
+			for _, taskID := range existingTaskIDs {
+				existing[taskID] = struct{}{}
+			}
 
-	pendingEvents := make([]event.Event, 0, 1)
-	err = s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(record).Error; err != nil {
-			return err
-		}
-		if outstanding == 0 && s.eventStore != nil {
-			evt := event.Event{
-				Type:      event.TypeTaskReady,
-				RunID:     runID,
-				TaskID:    task.ID,
-				Timestamp: time.Now().UTC(),
+			records := make([]models.TaskRun, 0, len(inputs))
+			readyEvents := make([]event.Event, 0, len(inputs))
+			seenNewTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+			for _, input := range inputs {
+				task := input.Task
+				atom := input.Atom
+				if _, ok := existing[task.ID]; ok {
+					continue
+				}
+				if _, ok := seenNewTaskIDs[task.ID]; ok {
+					continue
+				}
+				seenNewTaskIDs[task.ID] = struct{}{}
+
+				command := atom.Command
+				if command == "" {
+					if cmd := atom.Cmd(); len(cmd) > 0 {
+						if encoded, marshalErr := json.Marshal(cmd); marshalErr == nil {
+							command = string(encoded)
+						}
+					}
+				}
+
+				maxAttempts := task.Retries + 1
+				if maxAttempts < 1 {
+					maxAttempts = 1
+				}
+
+				schemaValidation := ""
+				if jobFound && len(task.OutputSchema) > 0 {
+					schemaValidation = job.SchemaValidation
+				}
+
+				resolvedCache := jobdefschema.ResolveCacheConfig(
+					decodeCacheConfig(task.CacheConfig),
+					jobCacheConfig,
+					envCache.Enabled,
+					envCache.TTL,
+				)
+
+				records = append(records, models.TaskRun{
+					ID:                      uuid.New(),
+					JobRunID:                runID,
+					TaskID:                  task.ID,
+					AtomID:                  task.AtomID,
+					Engine:                  atom.Engine,
+					Image:                   atom.Image,
+					Command:                 command,
+					Status:                  string(TaskStatusPending),
+					NodeSelector:            maps.Clone(task.NodeSelector),
+					Attempt:                 1,
+					MaxAttempts:             maxAttempts,
+					OutstandingPredecessors: input.OutstandingPredecessors,
+					CacheEnabled:            resolvedCache.Enabled,
+					CacheTTL:                resolvedCache.TTL,
+					CacheVersion:            resolvedCache.Version,
+					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
+					SchemaValidation:        schemaValidation,
+				})
+
+				if input.OutstandingPredecessors == 0 && s.eventStore != nil {
+					readyEvents = append(readyEvents, event.Event{
+						Type:      event.TypeTaskReady,
+						JobID:     jobID,
+						RunID:     runID,
+						TaskID:    task.ID,
+						Timestamp: time.Now().UTC(),
+					})
+				}
 			}
-			var jobRun models.JobRun
-			if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
-				evt.JobID = jobRun.JobID
+
+			if len(records) == 0 {
+				return nil
 			}
-			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, evt)
+			if len(readyEvents) > 0 {
+				eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
+				for _, evt := range readyEvents {
+					eventRecords = append(eventRecords, executionEventRecord(evt))
+				}
+				if err := tx.Create(&eventRecords).Error; err != nil {
+					return err
+				}
+				for idx := range readyEvents {
+					readyEvents[idx].Sequence = eventRecords[idx].Sequence
+					readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
+				}
+				attemptEvents = readyEvents
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -456,27 +552,59 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 	return err
 }
 
+func executionEventRecord(evt event.Event) models.ExecutionEvent {
+	if evt.Timestamp.IsZero() {
+		evt.Timestamp = time.Now().UTC()
+	}
+
+	record := models.ExecutionEvent{
+		Type:      string(evt.Type),
+		Payload:   []byte(evt.Payload),
+		CreatedAt: evt.Timestamp,
+	}
+	if evt.JobID != uuid.Nil {
+		jobID := evt.JobID
+		record.JobID = &jobID
+	}
+	if evt.RunID != uuid.Nil {
+		runID := evt.RunID
+		record.RunID = &runID
+	}
+	if evt.TaskID != uuid.Nil {
+		taskID := evt.TaskID
+		record.TaskID = &taskID
+	}
+	return record
+}
+
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
-	now := time.Now().UTC()
-	pendingEvents := make([]event.Event, 0, 1)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID).
-			Updates(map[string]interface{}{
-				"status":     string(TaskStatusRunning),
-				"runtime_id": runtimeID,
-				"started_at": now,
-			}).Error; err != nil {
-			return err
-		}
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
-			if err != nil {
+	var pendingEvents []event.Event
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			if err := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ?", runID, taskID).
+				Updates(map[string]interface{}{
+					"status":     string(TaskStatusRunning),
+					"runtime_id": runtimeID,
+					"started_at": now,
+				}).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -485,29 +613,36 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 }
 
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
-	now := time.Now().UTC()
-	pendingEvents := make([]event.Event, 0, 1)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
-			Updates(map[string]interface{}{
-				"runtime_id": runtimeID,
-				"started_at": now,
-			})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected == 0 {
-			return ErrTaskClaimMismatch
-		}
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
-			if err != nil {
-				return err
+	var pendingEvents []event.Event
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			result := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
+				Updates(map[string]interface{}{
+					"runtime_id": runtimeID,
+					"started_at": now,
+				})
+			if result.Error != nil {
+				return result.Error
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			if result.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
+			}
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -570,149 +705,159 @@ func (s *Store) CacheHitTaskClaimed(runID, taskID uuid.UUID, source CacheHitSour
 }
 
 func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
-	pendingEvents := make([]event.Event, 0, 8)
+	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		now := time.Now().UTC()
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 8)
+		attemptSkippedTaskIDs := make([]uuid.UUID, 0)
 
-		// Verify the task run exists (and matches claim if enforced).
-		var taskRun models.TaskRun
-		taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
-		if enforceClaim {
-			taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
-		}
-		if err := taskQuery.First(&taskRun).Error; err != nil {
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+
+			// Verify the task run exists (and matches claim if enforced).
+			var taskRun models.TaskRun
+			taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
 			if enforceClaim {
+				taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+			}
+			if err := taskQuery.First(&taskRun).Error; err != nil {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return err
+			}
+
+			updateQuery := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			if enforceClaim {
+				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+			}
+
+			updates := map[string]interface{}{
+				"status":              string(TaskStatusCached),
+				"completed_at":        now,
+				"result":              result,
+				"cache_hit":           true,
+				"cache_origin_run_id": source.RunID,
+				"cache_created_at":    source.CreatedAt,
+				"cache_expires_at":    source.ExpiresAt,
+			}
+			if len(output) > 0 {
+				encoded, marshalErr := json.Marshal(output)
+				if marshalErr != nil {
+					return fmt.Errorf("marshalling task output: %w", marshalErr)
+				}
+				updates["output"] = encoded
+			}
+			if len(branchSelections) > 0 {
+				encoded, marshalErr := json.Marshal(branchSelections)
+				if marshalErr != nil {
+					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
+				}
+				updates["branch_selections"] = encoded
+			}
+
+			resultUpdate := updateQuery.Updates(updates)
+			if resultUpdate.Error != nil {
+				return resultUpdate.Error
+			}
+			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
-			return err
-		}
 
-		updateQuery := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID)
-		if enforceClaim {
-			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
-		}
-
-		updates := map[string]interface{}{
-			"status":              string(TaskStatusCached),
-			"completed_at":        now,
-			"result":              result,
-			"cache_hit":           true,
-			"cache_origin_run_id": source.RunID,
-			"cache_created_at":    source.CreatedAt,
-			"cache_expires_at":    source.ExpiresAt,
-		}
-		if len(output) > 0 {
-			encoded, marshalErr := json.Marshal(output)
-			if marshalErr != nil {
-				return fmt.Errorf("marshalling task output: %w", marshalErr)
-			}
-			updates["output"] = encoded
-		}
-		if len(branchSelections) > 0 {
-			encoded, marshalErr := json.Marshal(branchSelections)
-			if marshalErr != nil {
-				return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-			}
-			updates["branch_selections"] = encoded
-		}
-
-		resultUpdate := updateQuery.Updates(updates)
-		if resultUpdate.Error != nil {
-			return resultUpdate.Error
-		}
-		if enforceClaim && resultUpdate.RowsAffected == 0 {
-			return ErrTaskClaimMismatch
-		}
-
-		// Load the task model for edge traversal and branch detection.
-		var taskModel models.Task
-		if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
-			return err
-		}
-
-		edges, err := s.successorEdgesTx(tx, taskModel)
-		if err != nil {
-			return err
-		}
-
-		// Determine branch filtering if this is a branch-type task.
-		var branchSelectedIDs map[uuid.UUID]bool
-		if len(edges) > 0 && taskModel.Type == "branch" {
-			successorIDs := make([]uuid.UUID, 0, len(edges))
-			for _, edge := range edges {
-				successorIDs = append(successorIDs, edge.ToTaskID)
-			}
-			var successorTasks []models.Task
-			if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
-				return err
-			}
-			successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
-			for _, st := range successorTasks {
-				if st.Name != "" {
-					successorNameToID[st.Name] = st.ID
-				}
-			}
-
-			branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
-			for _, name := range branchSelections {
-				if id, ok := successorNameToID[name]; ok {
-					branchSelectedIDs[id] = true
-				}
-			}
-		}
-
-		for _, edge := range edges {
-			// Branch filtering: skip successors not selected by the branch.
-			if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
-				reason := fmt.Sprintf("not selected by branch task %s", taskID)
-				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &pendingEvents)
-				if err != nil {
-					return err
-				}
-				skippedTaskIDs = append(skippedTaskIDs, skipped...)
-				continue
-			}
-
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
-				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+			// Load the task model for edge traversal and branch detection.
+			var taskModel models.Task
+			if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
 				return err
 			}
 
-			var successor models.TaskRun
-			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
-				successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
-				shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
-				if err != nil {
-					return err
-				}
-				if shouldRun {
-					if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &pendingEvents); err != nil {
-						return err
-					}
-					continue
-				}
-
-				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &pendingEvents)
-				if err != nil {
-					return err
-				}
-				skippedTaskIDs = append(skippedTaskIDs, skipped...)
-			}
-		}
-
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskCached, runID, taskID)
+			edges, err := s.successorEdgesTx(tx, taskModel)
 			if err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, *evt)
-		}
 
-		return nil
+			// Determine branch filtering if this is a branch-type task.
+			var branchSelectedIDs map[uuid.UUID]bool
+			if len(edges) > 0 && taskModel.Type == "branch" {
+				successorIDs := make([]uuid.UUID, 0, len(edges))
+				for _, edge := range edges {
+					successorIDs = append(successorIDs, edge.ToTaskID)
+				}
+				var successorTasks []models.Task
+				if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+					return err
+				}
+				successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
+				for _, st := range successorTasks {
+					if st.Name != "" {
+						successorNameToID[st.Name] = st.ID
+					}
+				}
+
+				branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
+				for _, name := range branchSelections {
+					if id, ok := successorNameToID[name]; ok {
+						branchSelectedIDs[id] = true
+					}
+				}
+			}
+
+			for _, edge := range edges {
+				// Branch filtering: skip successors not selected by the branch.
+				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
+					reason := fmt.Sprintf("not selected by branch task %s", taskID)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents)
+					if err != nil {
+						return err
+					}
+					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+					continue
+				}
+
+				if err := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
+					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+					return err
+				}
+
+				var successor models.TaskRun
+				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
+					successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
+					shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
+					if err != nil {
+						return err
+					}
+					if shouldRun {
+						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents); err != nil {
+							return err
+						}
+						continue
+					}
+
+					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents)
+					if err != nil {
+						return err
+					}
+					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+				}
+			}
+
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskCached, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+			skippedTaskIDs = attemptSkippedTaskIDs
+		}
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -960,203 +1105,213 @@ func (s *Store) shouldRunTaskTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, str
 }
 
 func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
-	pendingEvents := make([]event.Event, 0, 8)
+	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		now := time.Now().UTC()
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 8)
+		attemptSkippedTaskIDs := make([]uuid.UUID, 0)
 
-		status := taskStatusFromResult(result)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
 
-		// Capture task metadata for metrics before updating.
-		var taskRun models.TaskRun
-		taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
-		if enforceClaim {
-			taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
-		}
-		if err := taskQuery.First(&taskRun).Error; err == nil {
-			var jobRun models.JobRun
-			if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
-				jobID := jobRun.JobID.String()
-				engine := string(taskRun.Engine)
-				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
-				if taskRun.StartedAt != nil {
-					duration := now.Sub(*taskRun.StartedAt).Seconds()
-					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).Observe(duration)
+			status := taskStatusFromResult(result)
+
+			// Capture task metadata for metrics before updating.
+			var taskRun models.TaskRun
+			taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			if enforceClaim {
+				taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+			}
+			if err := taskQuery.First(&taskRun).Error; err == nil {
+				var jobRun models.JobRun
+				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
+					jobID := jobRun.JobID.String()
+					engine := string(taskRun.Engine)
+					metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
+					if taskRun.StartedAt != nil {
+						duration := now.Sub(*taskRun.StartedAt).Seconds()
+						metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).Observe(duration)
+					}
 				}
+			} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTaskClaimMismatch
 			}
-		} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
-			return ErrTaskClaimMismatch
-		}
 
-		updateQuery := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID)
-		if enforceClaim {
-			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
-		}
-
-		updates := map[string]interface{}{
-			"status":              string(status),
-			"completed_at":        now,
-			"result":              result,
-			"cache_hit":           false,
-			"cache_origin_run_id": nil,
-			"cache_created_at":    nil,
-			"cache_expires_at":    nil,
-		}
-		if len(output) > 0 {
-			encoded, marshalErr := json.Marshal(output)
-			if marshalErr != nil {
-				return fmt.Errorf("marshalling task output: %w", marshalErr)
+			updateQuery := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			if enforceClaim {
+				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
-			updates["output"] = encoded
-		}
-		if len(branchSelections) > 0 {
-			encoded, marshalErr := json.Marshal(branchSelections)
-			if marshalErr != nil {
-				return fmt.Errorf("marshalling branch selections: %w", marshalErr)
-			}
-			updates["branch_selections"] = encoded
-		}
-		if status == TaskStatusFailed {
-			msg := result
-			switch Result(result) {
-			case "failure":
-				msg = "command exited with non-zero status"
-			case "startup_failure":
-				msg = "atom failed to start (check image/command)"
-			case "resource_failure":
-				msg = "atom exhausted resources (e.g. OOM)"
-			case "killed":
-				msg = "atom was forcefully killed"
-			case "terminated":
-				msg = "atom was gracefully terminated"
-			}
-			updates["error"] = msg
-		}
 
-		resultUpdate := updateQuery.Updates(updates)
-		if resultUpdate.Error != nil {
-			return resultUpdate.Error
-		}
-		if enforceClaim && resultUpdate.RowsAffected == 0 {
-			return ErrTaskClaimMismatch
-		}
-
-		if status == TaskStatusFailed {
-			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
-				if err != nil {
-					return err
+			updates := map[string]interface{}{
+				"status":              string(status),
+				"completed_at":        now,
+				"result":              result,
+				"cache_hit":           false,
+				"cache_origin_run_id": nil,
+				"cache_created_at":    nil,
+				"cache_expires_at":    nil,
+			}
+			if len(output) > 0 {
+				encoded, marshalErr := json.Marshal(output)
+				if marshalErr != nil {
+					return fmt.Errorf("marshalling task output: %w", marshalErr)
 				}
-				pendingEvents = append(pendingEvents, *evt)
+				updates["output"] = encoded
 			}
-			return nil
-		}
-
-		// Load the task model once — needed for both edge fallback and branch
-		// type detection.
-		var taskModel models.Task
-		if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
-			return err
-		}
-
-		edges, err := s.successorEdgesTx(tx, taskModel)
-		if err != nil {
-			return err
-		}
-
-		// Determine branch filtering if this is a branch-type task.
-		var branchSelectedIDs map[uuid.UUID]bool
-		if len(edges) > 0 && taskModel.Type == "branch" {
-			// Build valid target names from successor tasks.
-			successorIDs := make([]uuid.UUID, 0, len(edges))
-			for _, edge := range edges {
-				successorIDs = append(successorIDs, edge.ToTaskID)
-			}
-			var successorTasks []models.Task
-			if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
-				return err
-			}
-			successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
-			validTargets := make([]string, 0, len(successorTasks))
-			for _, st := range successorTasks {
-				if st.Name != "" {
-					successorNameToID[st.Name] = st.ID
-					validTargets = append(validTargets, st.Name)
+			if len(branchSelections) > 0 {
+				encoded, marshalErr := json.Marshal(branchSelections)
+				if marshalErr != nil {
+					return fmt.Errorf("marshalling branch selections: %w", marshalErr)
 				}
+				updates["branch_selections"] = encoded
 			}
-
-			// Validate selections.
-			validSet := make(map[string]bool, len(validTargets))
-			for _, name := range validTargets {
-				validSet[name] = true
-			}
-			for _, name := range branchSelections {
-				if !validSet[name] {
-					return fmt.Errorf("branch selected unknown step %q; valid targets: %v", name, validTargets)
+			if status == TaskStatusFailed {
+				msg := result
+				switch Result(result) {
+				case "failure":
+					msg = "command exited with non-zero status"
+				case "startup_failure":
+					msg = "atom failed to start (check image/command)"
+				case "resource_failure":
+					msg = "atom exhausted resources (e.g. OOM)"
+				case "killed":
+					msg = "atom was forcefully killed"
+				case "terminated":
+					msg = "atom was gracefully terminated"
 				}
+				updates["error"] = msg
 			}
 
-			// Build the set of selected successor IDs.
-			// An empty set means "skip all downstream" (no markers emitted).
-			branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
-			for _, name := range branchSelections {
-				if id, ok := successorNameToID[name]; ok {
-					branchSelectedIDs[id] = true
-				}
+			resultUpdate := updateQuery.Updates(updates)
+			if resultUpdate.Error != nil {
+				return resultUpdate.Error
 			}
-		}
-
-		for _, edge := range edges {
-			// Branch filtering: skip successors not selected by the branch.
-			if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
-				reason := fmt.Sprintf("not selected by branch task %s", taskID)
-				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &pendingEvents)
-				if err != nil {
-					return err
-				}
-				skippedTaskIDs = append(skippedTaskIDs, skipped...)
-				continue
+			if enforceClaim && resultUpdate.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
 			}
 
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
-				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
-				return err
-			}
-
-			var successor models.TaskRun
-			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
-				successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
-				shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
-				if err != nil {
-					return err
-				}
-				if shouldRun {
-					if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &pendingEvents); err != nil {
+			if status == TaskStatusFailed {
+				if s.eventStore != nil {
+					evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
+					if err != nil {
 						return err
 					}
-					continue
+					attemptEvents = append(attemptEvents, *evt)
 				}
-
-				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &pendingEvents)
-				if err != nil {
-					return err
-				}
-				skippedTaskIDs = append(skippedTaskIDs, skipped...)
+				return nil
 			}
-		}
 
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID)
+			// Load the task model once — needed for both edge fallback and branch
+			// type detection.
+			var taskModel models.Task
+			if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+				return err
+			}
+
+			edges, err := s.successorEdgesTx(tx, taskModel)
 			if err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, *evt)
-		}
 
-		return nil
+			// Determine branch filtering if this is a branch-type task.
+			var branchSelectedIDs map[uuid.UUID]bool
+			if len(edges) > 0 && taskModel.Type == "branch" {
+				// Build valid target names from successor tasks.
+				successorIDs := make([]uuid.UUID, 0, len(edges))
+				for _, edge := range edges {
+					successorIDs = append(successorIDs, edge.ToTaskID)
+				}
+				var successorTasks []models.Task
+				if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+					return err
+				}
+				successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
+				validTargets := make([]string, 0, len(successorTasks))
+				for _, st := range successorTasks {
+					if st.Name != "" {
+						successorNameToID[st.Name] = st.ID
+						validTargets = append(validTargets, st.Name)
+					}
+				}
+
+				// Validate selections.
+				validSet := make(map[string]bool, len(validTargets))
+				for _, name := range validTargets {
+					validSet[name] = true
+				}
+				for _, name := range branchSelections {
+					if !validSet[name] {
+						return fmt.Errorf("branch selected unknown step %q; valid targets: %v", name, validTargets)
+					}
+				}
+
+				// Build the set of selected successor IDs.
+				// An empty set means "skip all downstream" (no markers emitted).
+				branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
+				for _, name := range branchSelections {
+					if id, ok := successorNameToID[name]; ok {
+						branchSelectedIDs[id] = true
+					}
+				}
+			}
+
+			for _, edge := range edges {
+				// Branch filtering: skip successors not selected by the branch.
+				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
+					reason := fmt.Sprintf("not selected by branch task %s", taskID)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents)
+					if err != nil {
+						return err
+					}
+					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+					continue
+				}
+
+				if err := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
+					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+					return err
+				}
+
+				var successor models.TaskRun
+				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
+					successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
+					shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
+					if err != nil {
+						return err
+					}
+					if shouldRun {
+						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents); err != nil {
+							return err
+						}
+						continue
+					}
+
+					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents)
+					if err != nil {
+						return err
+					}
+					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+				}
+			}
+
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+			skippedTaskIDs = attemptSkippedTaskIDs
+		}
+		return err
 	})
 	if err == nil {
 		s.publishEvents(pendingEvents...)
@@ -1882,6 +2037,54 @@ func (s *Store) publishEvents(events ...event.Event) {
 
 func (s *Store) PublishEvents(events ...event.Event) {
 	s.publishEvents(events...)
+}
+
+func withStoreBusyRetry(fn func() error) error {
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = fn()
+		if err == nil || !isStoreContentionErr(err) {
+			return err
+		}
+		if attempt >= len(storeBusyRetryBackoffs) {
+			return err
+		}
+
+		metrics.DBBusyRetriesTotal.Inc()
+		time.Sleep(jitterStoreBusyRetryBackoff(storeBusyRetryBackoffs[attempt]))
+	}
+}
+
+func jitterStoreBusyRetryBackoff(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+
+	maxJitter := int64(base / 5)
+	if maxJitter <= 0 {
+		return base
+	}
+	return base - time.Duration(rand.Int64N(maxJitter+1))
+}
+
+func isStoreContentionErr(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
+	}
+
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "database table is locked") ||
+		strings.Contains(msg, "database schema is locked") ||
+		strings.Contains(msg, "database is busy") ||
+		strings.Contains(msg, "checkpoint in progress") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_locked")
 }
 
 // PredecessorOutputs returns a map of step-name → output key-values for all

@@ -100,7 +100,7 @@ Status: implemented in PR #153. The production dqlite path uses the native `app.
 
 Goal: collapse N transactions into 1 where possible; replace read-then-write with single CAS.
 
-- [ ] **Batch task registration into a single transaction.**
+- [x] **Batch task registration into a single transaction.**
   - Files: `internal/job/job.go:456-462`, `internal/run/store.go:356`.
   - Add `Store.RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error` that:
     1. Performs one `SELECT id, schema_validation, cache_config FROM jobs WHERE id = ?` and one `SELECT job_id FROM job_runs WHERE id = ?` ahead of the loop.
@@ -108,24 +108,24 @@ Goal: collapse N transactions into 1 where possible; replace read-then-write wit
     3. Inserts them with a single `tx.Create(&records)` (GORM batches into a multi-row INSERT).
     4. Inserts `task_ready` events for tasks with `outstanding_predecessors = 0` in a single `tx.Create(&events)`.
   - Keep existing `RegisterTask` as a thin wrapper that calls the batch path with one input, so callers outside `internal/job/job.go` continue to work.
-  - Acceptance: registering a 50-task DAG produces 1 outer transaction and at most 3 SQL statements (jobs lookup, task_runs insert, events insert), confirmed via GORM logger in debug mode.
+  - Acceptance: registering a 50-task DAG performs one job-run lookup, one job lookup, one existing-task prequery for idempotency, and batched `task_runs` / `events` inserts.
   - Risk: medium. Need to preserve idempotency — current code skips already-existing rows (`store.go:362-365`); preserve by pre-querying existing `task_id`s and excluding them from the batch.
 
-- [ ] **Replace `ClaimNext` read-then-update with a single `UPDATE ... RETURNING`.**
+- [x] **Replace `ClaimNext` read-then-update with a single `UPDATE ... RETURNING`.**
   - File: `internal/worker/claimer.go:67-150`.
   - Issue one `UPDATE task_runs SET claimed_by = ?, claim_expires_at = ?, claim_attempt = claim_attempt + 1, status = 'running' WHERE id = (SELECT tr.id FROM task_runs tr JOIN job_runs jr ON jr.id = tr.job_run_id WHERE jr.status = 'running' AND tr.status = 'pending' AND tr.outstanding_predecessors = 0 AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?) AND <node-selector predicate> ORDER BY tr.created_at ASC LIMIT 1) RETURNING *`.
   - dqlite supports `RETURNING` (already detected at `pkg/dqlite/dqlite.go:91`).
-  - Node selector: if all selectors are equality on string keys, encode as SQL predicates against a normalized projection; otherwise keep a small candidate read (limit 8) and fall back to per-row CAS UPDATE for those matches.
+  - Node selector: selectors are equality-only string maps in the current job schema, so encode matching directly with SQLite/dqlite `json_each` and PostgreSQL `json_each_text` predicates.
   - Acceptance: the common case (no selectors / equality only) issues a single SQL statement per `ClaimNext`. Existing `claimer_test.go` cases pass, plus new tests covering selector matching and miss-the-race scenarios.
-  - Risk: medium. Selector logic is the only tricky part; gate behind `CAESIUM_WORKER_CLAIM_MODE=single_statement` initially.
+  - Risk: medium. Selector logic is the only tricky part. Because Caesium is pre-alpha, this ships directly rather than behind a compatibility mode.
 
-- [ ] **Raise `MaxOpenConns` for dqlite from 1 to 4 (configurable).**
+- [x] **Raise `MaxOpenConns` for dqlite from 1 to 4 (configurable).**
   - File: `pkg/db/db.go:67`.
   - Add `CAESIUM_DATABASE_MAX_OPEN_CONNS` env var (default 4) and `CAESIUM_DATABASE_MAX_IDLE_CONNS` (default 2). Apply both to dqlite and postgres paths.
   - Acceptance: under a load test driving 50 concurrent claims, p99 `ClaimNext` latency drops at least 30% versus Phase 0 baseline. No `dqlite: database is locked` errors observed up to N=8.
   - Risk: medium-high. dqlite serializes writes at the leader regardless, but multiple local conns let reads and writes overlap. Too high may worsen leader-side contention or memory use; bake at 4 first.
 
-- [ ] **Hoist `RegisterTask` per-row lookups out of the per-task loop.**
+- [x] **Hoist `RegisterTask` per-row lookups out of the per-task loop.**
   - File: `internal/run/store.go:386,443`.
   - Folded into the batch refactor above; explicit checkbox so reviewers verify both lookups now happen once per batch.
   - Acceptance: `select * from jobs` and `select * from job_runs` execute at most once per `RegisterTasks` call regardless of input length (verify via GORM SQL log).
@@ -182,7 +182,7 @@ Goal: investigate residual issues and tighten the operational surface area.
 
 - [ ] **Document new env vars and operational guidance.**
   - File: `docs/configuration.md` (or wherever env vars are listed).
-  - Cover `CAESIUM_WORKER_RECLAIM_INTERVAL`, `CAESIUM_DATABASE_MAX_OPEN_CONNS`, `CAESIUM_DATABASE_MAX_IDLE_CONNS`, `CAESIUM_INTERNAL_WAKEUP_TOKEN`, `CAESIUM_WORKER_CLAIM_MODE`.
+  - Cover `CAESIUM_WORKER_RECLAIM_INTERVAL`, `CAESIUM_DATABASE_MAX_OPEN_CONNS`, `CAESIUM_DATABASE_MAX_IDLE_CONNS`, `CAESIUM_INTERNAL_WAKEUP_TOKEN`.
   - Acceptance: docs PR merged alongside the last code change that introduces each var.
   - Risk: none.
 
@@ -277,13 +277,12 @@ Operational guidance to publish alongside Phase 4:
 
 ## Rollout
 
-- Each phase ships behind feature flags / env vars where listed; default-on for Phase 0, default-on for Phase 1 once a release cycle passes, default-on for Phase 2 only after distributed wakeups have soaked.
+- Each phase ships behind feature flags / env vars where listed; default-on for Phase 0 and Phase 1 while Caesium remains pre-alpha, default-on for Phase 2 only after distributed wakeups have soaked.
 - Phase 4 is opt-in indefinitely via `CAESIUM_DATABASE_SHARDS` (default 1). Defaults change only after a multi-month soak in a Caesium-operated reference cluster.
 - A single release note per phase, calling out new env vars, default changes, and any operational guidance (e.g., upgrading dqlite peers in lockstep, rolling leader handover cadence).
 
 ## Open questions
 
-- Should `CAESIUM_WORKER_CLAIM_MODE` default to `single_statement` after Phase 1, or stay opt-in until a release cycle of telemetry validates it?
 - Phase 2 wakeups gossip threshold: hard-code at 50 nodes, or expose `CAESIUM_WAKEUP_GOSSIP_THRESHOLD` so operators can tune?
 - Phase 4 archiver: keep terminal runs in the hot shard for 24h (current proposal), or shorter? Trade-off is UI freshness vs hot-shard size. Could be per-job configurable.
 - Phase 4 shard count: static via env var (current proposal) or dynamic resharding? Dynamic is significantly more complex; defer until a real operator hits the static-shard ceiling.
