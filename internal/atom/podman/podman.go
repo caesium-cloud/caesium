@@ -85,11 +85,14 @@ func (cli *podmanClient) ContainerStop(id string, timeout *time.Duration) error 
 	if timeout != nil {
 		t = uint(timeout.Seconds())
 	}
-	return containers.Stop(cli.ctx, id, &containers.StopOptions{Timeout: &t})
+
+	// Preserve the Podman client stored in the context while allowing cleanup
+	// to run after the run/task context has reached its deadline.
+	return containers.Stop(context.WithoutCancel(cli.ctx), id, &containers.StopOptions{Timeout: &t})
 }
 
 func (cli *podmanClient) ContainerRemove(id string, force *bool, removeVolumes *bool) error {
-	_, err := containers.Remove(cli.ctx, id, &containers.RemoveOptions{
+	_, err := containers.Remove(context.WithoutCancel(cli.ctx), id, &containers.RemoveOptions{
 		Force:   force,
 		Volumes: removeVolumes,
 	})
