@@ -37,6 +37,8 @@ const (
 	short   = "Start a caesium scheduling instance"
 	long    = "This command starts a caesium scheduling instance"
 	example = "caesium start"
+
+	dqliteWakeupPeerCacheTTL = 5 * time.Second
 )
 
 var (
@@ -106,7 +108,10 @@ func start(cmd *cobra.Command, args []string) error {
 				Token:      vars.InternalWakeupToken,
 				FanoutMode: vars.WakeupFanoutMode,
 				Signaler:   wakeupSignaler,
-				Resolver:   dqliteWakeupPeerResolver(vars.NodeAddress, vars.Port),
+				Resolver: worker.NewCachedWakeupPeerResolver(
+					dqliteWakeupPeerResolver(vars.NodeAddress, vars.Port),
+					dqliteWakeupPeerCacheTTL,
+				),
 			})
 			internalWakeupHandler = func(ctx context.Context, id string, ttl int) {
 				distributedWakeups.HandleRemote(ctx, worker.WakeupMessage{ID: id, TTL: ttl})

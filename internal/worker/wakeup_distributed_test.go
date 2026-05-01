@@ -21,6 +21,40 @@ func TestWakeupURLForNodeAddress(t *testing.T) {
 	require.Equal(t, "http://[fd00::12]:8080/internal/wakeup", u)
 }
 
+func TestCachedWakeupPeerResolverCachesWithinTTL(t *testing.T) {
+	now := time.Unix(100, 0)
+	var calls atomic.Int32
+
+	resolver := &cachedWakeupPeerResolver{
+		resolver: WakeupPeerResolverFunc(func(context.Context) ([]string, error) {
+			if calls.Add(1) == 1 {
+				return []string{"peer-a"}, nil
+			}
+			return []string{"peer-b"}, nil
+		}),
+		ttl: 5 * time.Second,
+		now: func() time.Time {
+			return now
+		},
+	}
+
+	peers, err := resolver.WakeupPeers(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"peer-a"}, peers)
+
+	peers[0] = "mutated"
+	peers, err = resolver.WakeupPeers(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"peer-a"}, peers)
+	require.Equal(t, int32(1), calls.Load())
+
+	now = now.Add(6 * time.Second)
+	peers, err = resolver.WakeupPeers(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, []string{"peer-b"}, peers)
+	require.Equal(t, int32(2), calls.Load())
+}
+
 func TestDistributedWakeupsBroadcastFullFanout(t *testing.T) {
 	const token = "shared-secret"
 	var hits atomic.Int32
@@ -39,7 +73,9 @@ func TestDistributedWakeupsBroadcastFullFanout(t *testing.T) {
 
 	d.broadcast(context.Background(), WakeupMessage{ID: "wakeup-1"})
 
-	require.Equal(t, int32(2), hits.Load())
+	require.Eventually(t, func() bool {
+		return hits.Load() == 2
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestDistributedWakeupsHandleRemoteSignalsOncePerID(t *testing.T) {
@@ -63,6 +99,35 @@ func TestDistributedWakeupsHandleRemoteSignalsOncePerID(t *testing.T) {
 	case <-time.After(50 * time.Millisecond):
 		// expected
 	}
+}
+
+func TestDistributedWakeupsHandleRemoteGossipDetachesRequestContext(t *testing.T) {
+	const token = "shared-secret"
+	var hits atomic.Int32
+
+	signaler := NewWakeupSignaler()
+	server := wakeupTestServer(t, token, &hits)
+	d := NewDistributedWakeups(DistributedWakeupConfig{
+		Token:      token,
+		FanoutMode: WakeupFanoutGossip,
+		Signaler:   signaler,
+		Resolver: WakeupPeerResolverFunc(func(ctx context.Context) ([]string, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return []string{server.URL}, nil
+		}),
+		HTTPClient: server.Client(),
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	d.HandleRemote(ctx, WakeupMessage{ID: "wakeup-ctx", TTL: 1})
+
+	assertSignal(t, signaler.C(), "remote wakeup")
+	require.Eventually(t, func() bool {
+		return hits.Load() == 1
+	}, time.Second, 10*time.Millisecond)
 }
 
 func TestDistributedWakeupsGossipSelectsLogarithmicFanout(t *testing.T) {

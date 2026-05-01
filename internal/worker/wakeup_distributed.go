@@ -84,9 +84,57 @@ type DistributedWakeups struct {
 	now    func() time.Time
 }
 
+type cachedWakeupPeerResolver struct {
+	resolver WakeupPeerResolver
+	ttl      time.Duration
+	now      func() time.Time
+
+	mu       sync.Mutex
+	cacheSet bool
+	peers    []string
+	expires  time.Time
+}
+
 type WakeupMessage struct {
 	ID  string `json:"id,omitempty"`
 	TTL int    `json:"ttl,omitempty"`
+}
+
+func NewCachedWakeupPeerResolver(resolver WakeupPeerResolver, ttl time.Duration) WakeupPeerResolver {
+	if resolver == nil || ttl <= 0 {
+		return resolver
+	}
+	return &cachedWakeupPeerResolver{
+		resolver: resolver,
+		ttl:      ttl,
+		now:      time.Now,
+	}
+}
+
+func (r *cachedWakeupPeerResolver) WakeupPeers(ctx context.Context) ([]string, error) {
+	now := r.now()
+
+	r.mu.Lock()
+	if r.cacheSet && now.Before(r.expires) {
+		peers := append([]string(nil), r.peers...)
+		r.mu.Unlock()
+		return peers, nil
+	}
+	r.mu.Unlock()
+
+	peers, err := r.resolver.WakeupPeers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cached := append([]string(nil), peers...)
+	r.mu.Lock()
+	r.peers = cached
+	r.expires = r.now().Add(r.ttl)
+	r.cacheSet = true
+	r.mu.Unlock()
+
+	return append([]string(nil), cached...), nil
 }
 
 func NewDistributedWakeups(cfg DistributedWakeupConfig) *DistributedWakeups {
@@ -163,7 +211,7 @@ func (d *DistributedWakeups) HandleRemote(ctx context.Context, msg WakeupMessage
 	d.signaler.Signal()
 	if d.mode == WakeupFanoutGossip && msg.TTL > 0 {
 		msg.TTL--
-		go d.broadcast(ctx, msg)
+		go d.broadcast(context.WithoutCancel(ctx), msg)
 	}
 }
 
@@ -184,16 +232,12 @@ func (d *DistributedWakeups) broadcast(ctx context.Context, msg WakeupMessage) {
 		return
 	}
 
-	var wg sync.WaitGroup
 	for _, peer := range peers {
 		peer := peer
-		wg.Add(1)
 		go func() {
-			defer wg.Done()
 			d.postWakeup(ctx, peer, msg)
 		}()
 	}
-	wg.Wait()
 }
 
 func (d *DistributedWakeups) selectPeers(peers []string) []string {
