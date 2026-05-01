@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -19,8 +22,10 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
+type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
+
 // Start launches Caesium's API.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) error {
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, wakeupHandler InternalWakeupHandler) error {
 	e := echo.New()
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
@@ -28,6 +33,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// health
 	e.GET("/health", Health)
 	e.GET("/auth/status", authStatus(vars))
+	registerInternalWakeup(e, vars, wakeupHandler)
 
 	// metrics
 	e.Use(echoprometheus.NewMiddleware("caesium"))
@@ -45,6 +51,64 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 		Address: fmt.Sprintf(":%v", vars.Port),
 	}
 	return sc.Start(ctx, e)
+}
+
+type internalWakeupRequest struct {
+	ID  string `json:"id,omitempty"`
+	TTL int    `json:"ttl,omitempty"`
+}
+
+func registerInternalWakeup(e *echo.Echo, vars env.Environment, handler InternalWakeupHandler) {
+	token := strings.TrimSpace(vars.InternalWakeupToken)
+	if token == "" || handler == nil {
+		return
+	}
+
+	e.POST("/internal/wakeup", func(c *echo.Context) error {
+		if !authorizedInternalWakeup(c.Request(), token) {
+			return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+		}
+
+		var req internalWakeupRequest
+		if c.Request().Body != nil {
+			err := json.NewDecoder(c.Request().Body).Decode(&req)
+			if err != nil && err != io.EOF {
+				return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+			}
+		}
+		if req.TTL < 0 {
+			req.TTL = 0
+		}
+		if req.TTL > 8 {
+			req.TTL = 8
+		}
+
+		handler(c.Request().Context(), req.ID, req.TTL)
+		return c.NoContent(http.StatusNoContent)
+	})
+}
+
+func authorizedInternalWakeup(req *http.Request, token string) bool {
+	if token == "" {
+		return false
+	}
+
+	if constantTimeEqual(req.Header.Get("X-Caesium-Wakeup-Token"), token) {
+		return true
+	}
+
+	auth := strings.TrimSpace(req.Header.Get("Authorization"))
+	if len(auth) > len("Bearer ") && strings.EqualFold(auth[:len("Bearer ")], "Bearer ") {
+		return constantTimeEqual(strings.TrimSpace(auth[len("Bearer "):]), token)
+	}
+	return false
+}
+
+func constantTimeEqual(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
 func authStatus(vars env.Environment) echo.HandlerFunc {

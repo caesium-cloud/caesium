@@ -2,14 +2,16 @@ package dqlite
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
-	"github.com/canonical/go-dqlite/v3/app"
+	dqliteapp "github.com/canonical/go-dqlite/v3/app"
 	"github.com/canonical/go-dqlite/v3/client"
 	_ "github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
@@ -25,6 +27,12 @@ const (
 	DriverName = "dqlite"
 
 	dqliteBusyTimeout = 5 * time.Second
+)
+
+var (
+	currentApp atomic.Pointer[dqliteapp.App]
+
+	ErrNoNativeApp = errors.New("dqlite: native app is not active")
 )
 
 type Dialector struct {
@@ -70,25 +78,29 @@ func (dialector Dialector) Initialize(db *gorm.DB) (err error) {
 			fn("dqlite", "msg", fmt.Sprintf(format, a...), "source", "dqlite")
 		}
 
-		app, err := app.New(
-			env.Variables().DatabasePath,
-			app.WithAddress(env.Variables().NodeAddress),
-			app.WithCluster(env.Variables().DatabaseNodes),
-			app.WithLogFunc(logFunc),
-			app.WithBusyTimeout(dqliteBusyTimeout),
+		vars := env.Variables()
+		dqApp, err := dqliteapp.New(
+			vars.DatabasePath,
+			dqliteapp.WithAddress(vars.NodeAddress),
+			dqliteapp.WithCluster(vars.DatabaseNodes),
+			dqliteapp.WithVoters(vars.DatabaseVoters),
+			dqliteapp.WithStandBys(vars.DatabaseStandbys),
+			dqliteapp.WithLogFunc(logFunc),
+			dqliteapp.WithBusyTimeout(dqliteBusyTimeout),
 		)
 		if err != nil {
 			return err
 		}
 
-		if err := app.Ready(context.Background()); err != nil {
+		if err := dqApp.Ready(context.Background()); err != nil {
 			return err
 		}
 
-		conn, err := app.Open(context.Background(), "caesium")
+		conn, err := dqApp.Open(context.Background(), "caesium")
 		if err != nil {
 			return err
 		}
+		currentApp.Store(dqApp)
 
 		db.ConnPool = conn
 	}
@@ -133,6 +145,68 @@ func setConnectionPragmas(ctx context.Context, conn gorm.ConnPool) error {
 		}
 	}
 	return nil
+}
+
+// ClusterNode is a dqlite cluster member visible to the current native app.
+type ClusterNode struct {
+	ID       uint64
+	Address  string
+	Role     string
+	IsLeader bool
+}
+
+// Cluster returns the current dqlite cluster membership from the leader.
+func Cluster(ctx context.Context) ([]ClusterNode, error) {
+	dqApp := currentApp.Load()
+	if dqApp == nil {
+		return nil, ErrNoNativeApp
+	}
+
+	cli, err := dqApp.FindLeader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = cli.Close() }()
+
+	leader, err := cli.Leader(ctx)
+	if err != nil {
+		return nil, err
+	}
+	nodes, err := cli.Cluster(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	cluster := make([]ClusterNode, 0, len(nodes))
+	for _, node := range nodes {
+		cluster = append(cluster, ClusterNode{
+			ID:       node.ID,
+			Address:  node.Address,
+			Role:     node.Role.String(),
+			IsLeader: leader != nil && node.ID == leader.ID,
+		})
+	}
+	return cluster, nil
+}
+
+// IsLocalLeader reports whether this process hosts the current dqlite leader.
+func IsLocalLeader(ctx context.Context) (bool, error) {
+	dqApp := currentApp.Load()
+	if dqApp == nil {
+		return false, ErrNoNativeApp
+	}
+
+	cli, err := dqApp.FindLeader(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = cli.Close() }()
+
+	leader, err := cli.Leader(ctx)
+	if err != nil {
+		return false, err
+	}
+	return leader != nil && leader.Address == dqApp.Address(), nil
 }
 
 func (dialector Dialector) ClauseBuilders() map[string]clause.ClauseBuilder {

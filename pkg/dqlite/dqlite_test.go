@@ -3,6 +3,7 @@ package dqlite
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"testing"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -25,4 +26,13 @@ func TestDialectorAppliesConnectionPragmas(t *testing.T) {
 	var synchronous int
 	require.NoError(t, conn.QueryRowContext(context.Background(), "PRAGMA synchronous").Scan(&synchronous))
 	require.Equal(t, 1, synchronous)
+}
+
+func TestClusterRequiresNativeApp(t *testing.T) {
+	_, err := Cluster(context.Background())
+	require.True(t, errors.Is(err, ErrNoNativeApp))
+
+	isLeader, err := IsLocalLeader(context.Background())
+	require.False(t, isLeader)
+	require.True(t, errors.Is(err, ErrNoNativeApp))
 }

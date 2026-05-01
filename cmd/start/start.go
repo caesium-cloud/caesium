@@ -26,6 +26,7 @@ import (
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/spf13/cobra"
@@ -95,6 +96,31 @@ func start(cmd *cobra.Command, args []string) error {
 	runsvc.New(ctx).SetBus(bus)
 
 	vars := env.Variables()
+	distributedMode := strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
+	wakeupSignaler := worker.NewWakeupSignaler()
+	var distributedWakeups *worker.DistributedWakeups
+	var internalWakeupHandler api.InternalWakeupHandler
+	if distributedMode {
+		if strings.TrimSpace(vars.InternalWakeupToken) != "" {
+			distributedWakeups = worker.NewDistributedWakeups(worker.DistributedWakeupConfig{
+				Token:      vars.InternalWakeupToken,
+				FanoutMode: vars.WakeupFanoutMode,
+				Signaler:   wakeupSignaler,
+				Resolver:   dqliteWakeupPeerResolver(vars.NodeAddress, vars.Port),
+			})
+			internalWakeupHandler = func(ctx context.Context, id string, ttl int) {
+				distributedWakeups.HandleRemote(ctx, worker.WakeupMessage{ID: id, TTL: ttl})
+			}
+			go func() {
+				log.Info("launching distributed wakeup fanout", "mode", vars.WakeupFanoutMode)
+				if err := distributedWakeups.Start(ctx, bus); err != nil && ctx.Err() == nil {
+					log.Error("distributed wakeup fanout exited", "error", err)
+				}
+			}()
+		} else {
+			log.Warn("distributed wakeups disabled; set CAESIUM_INTERNAL_WAKEUP_TOKEN to enable cross-node wakeups")
+		}
+	}
 
 	// --- Authentication & Authorization ---
 	authSvc, auditor, limiter := initAuth(ctx, vars)
@@ -119,6 +145,12 @@ func start(cmd *cobra.Command, args []string) error {
 		vars.WorkerReclaimInterval,
 		"worker_lease_ttl",
 		vars.WorkerLeaseTTL,
+		"database_voters",
+		vars.DatabaseVoters,
+		"database_standbys",
+		vars.DatabaseStandbys,
+		"wakeup_fanout_mode",
+		vars.WakeupFanoutMode,
 		"node_labels",
 		vars.NodeLabels,
 	)
@@ -202,7 +234,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx, bus, authSvc, auditor, limiter)
+		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler)
 	}()
 
 	go func() {
@@ -210,7 +242,7 @@ func start(cmd *cobra.Command, args []string) error {
 		errs <- executor.Start(ctx)
 	}()
 
-	if vars.WorkerEnabled && strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed") {
+	if vars.WorkerEnabled && distributedMode {
 		go func() {
 			poolSize := vars.WorkerPoolSize
 			if poolSize < 1 {
@@ -236,10 +268,15 @@ func start(cmd *cobra.Command, args []string) error {
 			store := run.Default()
 			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
 			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
-			wakeups := worker.SubscribeWakeups(ctx, bus)
+			wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
 			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
 				WithReclaimInterval(vars.WorkerReclaimInterval).
 				WithWakeups(wakeups)
+			if usesInternalDqlite(vars.DatabaseType) {
+				w = w.WithReclaimGate(worker.ReclaimGateFunc(func(ctx context.Context) (bool, error) {
+					return dqlite.IsLocalLeader(ctx)
+				}))
+			}
 			errs <- w.Run(ctx)
 		}()
 	} else {
@@ -255,6 +292,38 @@ func start(cmd *cobra.Command, args []string) error {
 	defer shutdown()
 
 	return <-errs
+}
+
+func usesInternalDqlite(databaseType string) bool {
+	switch strings.ToLower(strings.TrimSpace(databaseType)) {
+	case "", "internal", "dqlite":
+		return true
+	default:
+		return false
+	}
+}
+
+func dqliteWakeupPeerResolver(localNodeAddress string, apiPort int) worker.WakeupPeerResolver {
+	return worker.WakeupPeerResolverFunc(func(ctx context.Context) ([]string, error) {
+		nodes, err := dqlite.Cluster(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		peers := make([]string, 0, len(nodes))
+		for _, node := range nodes {
+			if node.Address == "" || node.Address == localNodeAddress {
+				continue
+			}
+			wakeupURL, err := worker.WakeupURLForNodeAddress(node.Address, apiPort)
+			if err != nil {
+				log.Warn("skipping dqlite peer for wakeup fanout", "address", node.Address, "error", err)
+				continue
+			}
+			peers = append(peers, wakeupURL)
+		}
+		return peers, nil
+	})
 }
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.

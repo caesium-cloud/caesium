@@ -135,7 +135,7 @@ Goal: collapse N transactions into 1 where possible; replace read-then-write wit
 
 Goal: bound the Raft cost as worker count grows, and reduce the need for tight polling once write contention is no longer the bottleneck. This is the "Medium" deployment shape from the [Scaling target](#scaling-target).
 
-- [ ] **Adopt the spare-role topology so worker count is decoupled from Raft cost.**
+- [x] **Adopt the spare-role topology so worker count is decoupled from Raft cost.**
   - Files: `pkg/dqlite/dqlite.go:64-69`, `pkg/env/env.go`, `cmd/start/start.go`.
   - Today `app.New` is called with `WithAddress` and `WithCluster` only, accepting the dqlite library defaults. Add `app.WithVoters(3)` and `app.WithStandbys(3)` so the leader's `RolesAdjustmentFrequency` (default 30s) keeps exactly 3 voters and 3 standbys; every additional node automatically settles as a Spare. Spares don't replicate the Raft log and don't vote, but still act as leader-aware SQL clients via `app.Open` — i.e. fully functional Caesium worker nodes.
   - Add `CAESIUM_DATABASE_VOTERS` (default 3) and `CAESIUM_DATABASE_STANDBYS` (default 3); operators tune these for their HA target. Voter count must be odd and ≥ 3.
@@ -143,7 +143,7 @@ Goal: bound the Raft cost as worker count grows, and reduce the need for tight p
   - Acceptance: a 10-node test cluster shows exactly 3 nodes with `RAFT_VOTER`, ≤3 with `RAFT_STANDBY`, and the rest with `RAFT_SPARE` in `dqlite-dump-cluster` (or equivalent client API). Killing a voter triggers promotion of a standby within `2 × RolesAdjustmentFrequency`.
   - Risk: low. Defaults match the library defaults; behaviour is unchanged for existing 3-node deployments. Larger clusters benefit immediately because Raft replication stops scaling with worker count.
 
-- [ ] **Introduce distributed wakeups for task readiness.**
+- [x] **Introduce distributed wakeups for task readiness.**
   - Files: `cmd/start/start.go:235-236`, new `internal/worker/wakeup_distributed.go`.
   - On task-ready / lease-expired events, fanout an HTTP `POST /internal/wakeup` to peer node addresses (discovered via dqlite's cluster client API, **not** `env.Variables().DatabaseNodes` — that only contains bootstrap peers, not spares). Recommend reusing the existing internal HTTP server and TLS / auth story rather than adding a UDP path; the message is one packet per event and HTTP overhead is negligible at this rate.
   - Receiving node signals its local wakeup channel.
@@ -152,14 +152,14 @@ Goal: bound the Raft cost as worker count grows, and reduce the need for tight p
   - Acceptance: registering tasks on node A causes node B to claim within `<200ms` instead of waiting for the next poll. In a 50-node test cluster, gossip mode delivers wakeups to ≥99% of peers within `<500ms`.
   - Risk: medium. Network failures must not block event publication; treat wakeups as best-effort hints, not deliveries. Gossip implementation must be tested for partition tolerance.
 
-- [ ] **Make `ReclaimExpired` a leader-only responsibility.**
+- [x] **Make `ReclaimExpired` a leader-only responsibility.**
   - Files: `internal/worker/claimer.go:162`, `cmd/start/start.go`.
   - Option A (preferred): use the dqlite client's `Leader()` lookup to check if this node hosts the current Raft leader; non-leaders skip reclaim entirely. Re-check on a short interval so failover takes over reclaim within `~2 × RolesAdjustmentFrequency`.
   - Option B (fallback): add a `cluster_locks` row with `name='reclaim_expired'`, `held_by`, `expires_at`; nodes try to acquire via a CAS UPDATE, only the holder runs reclaim. Useful if leader detection proves flaky.
   - Acceptance: in a 10-node cluster, reclaim transactions execute on exactly one node at a time. Failover within `2 × RolesAdjustmentFrequency` if the leader dies.
   - Risk: medium. Must handle leader churn cleanly; option B is simpler but adds a hot row.
 
-- [ ] **Raise default poll interval from 2s to 15s** (only after distributed wakeups land).
+- [x] **Raise default poll interval from 2s to 15s** (only after distributed wakeups land).
   - Files: `pkg/env/env.go:60`, `internal/worker/worker.go:38`.
   - Acceptance: end-to-end run latency unchanged within 5% versus baseline once wakeups are in place; cluster-wide DB QPS for the `task_runs` table drops by an order of magnitude.
   - Risk: low after wakeups; high without them. Strictly gated on prior checkbox.
