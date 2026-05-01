@@ -19,13 +19,25 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_EXECUTION_MODE` | `local` | `local` or `distributed` execution model. |
 | `CAESIUM_WORKER_ENABLED` | `true` | Enables distributed worker loop on this node. |
 | `CAESIUM_WORKER_POOL_SIZE` | `4` | Max concurrent claimed tasks per node. |
-| `CAESIUM_WORKER_POLL_INTERVAL` | `2s` | Poll cadence for new claimable tasks. |
+| `CAESIUM_WORKER_POLL_INTERVAL` | `15s` | Fallback poll cadence for new claimable tasks. Distributed wakeups should handle normal claim latency. |
 | `CAESIUM_WORKER_RECLAIM_INTERVAL` | `30s` | Minimum interval between expired-lease reclaim attempts. |
 | `CAESIUM_WORKER_LEASE_TTL` | `5m` | Lease duration for claimed tasks before reclaim. |
 | `CAESIUM_DATABASE_MAX_OPEN_CONNS` | `4` | Max SQL connections per node for dqlite/PostgreSQL. |
 | `CAESIUM_DATABASE_MAX_IDLE_CONNS` | `2` | Max idle SQL connections per node for dqlite/PostgreSQL. |
+| `CAESIUM_DATABASE_VOTERS` | `3` | Target dqlite voter count. Must be odd and at least 3. |
+| `CAESIUM_DATABASE_STANDBYS` | `3` | Target dqlite standby count for failover headroom. Extra nodes settle as spares. |
+| `CAESIUM_INTERNAL_WAKEUP_TOKEN` | `""` | Shared bearer token required for cross-node wakeups via `POST /internal/wakeup`. |
+| `CAESIUM_WAKEUP_FANOUT_MODE` | `full` | Wakeup fanout strategy: `full` for every peer, or `gossip` for large clusters. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
+
+## Dqlite Topology
+
+Use three stable control-plane nodes as voters. Add up to three standby nodes when you want fast failover without increasing quorum size. All remaining worker nodes can join the same dqlite cluster as spares; spares do not replicate the Raft log or vote, but they still open the Caesium database and claim work through the dqlite leader.
+
+Set the same `CAESIUM_DATABASE_VOTERS` and `CAESIUM_DATABASE_STANDBYS` values on every node. For a 10-node deployment, the recommended shape is 3 voters, 3 standbys, and 4 spares.
+
+Distributed wakeups use the dqlite cluster membership list, not `CAESIUM_DATABASE_NODES`, so spare workers receive wakeup hints after they join. Set the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` on every node. The sender uses `Authorization: Bearer <token>` and receivers reject missing or incorrect tokens.
 
 ## Rollout Procedure (Distributed Mode)
 
@@ -67,7 +79,7 @@ Use metrics:
 - Increase `CAESIUM_MAX_PARALLEL_TASKS` for better local mode utilization.
 - Increase `CAESIUM_WORKER_LEASE_TTL` for long-running tasks to reduce reclaim churn.
 - Increase `CAESIUM_WORKER_RECLAIM_INTERVAL` to reduce reclaim write pressure.
-- Decrease `CAESIUM_WORKER_POLL_INTERVAL` for lower claim latency (at higher DB pressure).
+- Keep `CAESIUM_WORKER_POLL_INTERVAL` high enough to act as a fallback, not the primary coordination path. Lower it only when distributed wakeups are disabled or unhealthy.
 - Use `CAESIUM_NODE_LABELS` + task `nodeSelector` to place specialized workloads.
 
 ## Troubleshooting

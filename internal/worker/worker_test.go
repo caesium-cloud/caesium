@@ -92,6 +92,33 @@ func TestWorkerRunReclaimsWhenDueBeforeBusyClaimLoop(t *testing.T) {
 	}
 }
 
+func TestWorkerRunSkipsReclaimWhenGateDenies(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	claimer := &reclaimingSequenceClaimer{
+		sequenceClaimer: sequenceClaimer{
+			responses: []claimerResponse{{task: &models.TaskRun{ID: uuid.New()}}},
+		},
+	}
+
+	worker := NewWorker(claimer, NewPool(1), time.Millisecond, func(_ context.Context, _ *models.TaskRun) {
+		cancel()
+	}).WithReclaimInterval(time.Hour).
+		WithReclaimGate(ReclaimGateFunc(func(context.Context) (bool, error) {
+			return false, nil
+		}))
+	worker.lastReclaim = time.Now().Add(-2 * time.Hour)
+
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&claimer.reclaims); got != 0 {
+		t.Fatalf("expected no reclaim attempt, got %d", got)
+	}
+}
+
 func TestSleepWithContextHandlesTinyDurations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()

@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -89,6 +92,42 @@ func TestRegisterMetricsProtectedWhenAuthEnabled(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "caesium_")
+}
+
+func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
+	e := echo.New()
+	var called atomic.Bool
+	var gotID string
+	var gotTTL int
+	registerInternalWakeup(e, env.Environment{InternalWakeupToken: "secret"}, func(_ context.Context, id string, ttl int) {
+		called.Store(true)
+		gotID = id
+		gotTTL = ttl
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.False(t, called.Load())
+
+	req = httptest.NewRequest(http.MethodPost, "/internal/wakeup", strings.NewReader(`{"id":"abc","ttl":2}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.True(t, called.Load())
+	require.Equal(t, "abc", gotID)
+	require.Equal(t, 2, gotTTL)
+}
+
+func TestRegisterInternalWakeupSkippedWhenDisabled(t *testing.T) {
+	e := echo.New()
+	registerInternalWakeup(e, env.Environment{}, func(context.Context, string, int) {})
+
+	require.False(t, hasRoute(e, http.MethodPost, "/internal/wakeup"))
 }
 
 func performRequest(t *testing.T, handler echo.HandlerFunc, method, path string) *httptest.ResponseRecorder {

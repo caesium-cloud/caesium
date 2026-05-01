@@ -48,6 +48,17 @@ func TestSubscribeWakeups_WakesOnRunStarted(t *testing.T) {
 	assertSignal(t, ch, "TypeRunStarted")
 }
 
+func TestSubscribeWakeups_WakesOnExternalSignal(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	signaler := NewWakeupSignaler()
+	ch := SubscribeWakeups(ctx, nil, signaler.C())
+
+	signaler.Signal()
+	assertSignal(t, ch, "external signal")
+}
+
 func TestSubscribeWakeups_IgnoresIrrelevantEvents(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -3,6 +3,7 @@ package env
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -18,10 +19,33 @@ func Process() error {
 	if err := envconfig.Process("caesium", variables); err != nil {
 		return fmt.Errorf("failed to process environment variables: %w", err)
 	}
+	if err := validate(); err != nil {
+		return err
+	}
 
 	// set the log level
 	if err := log.SetLevel(variables.LogLevel); err != nil {
 		return fmt.Errorf("failed to set log level: %w", err)
+	}
+
+	return nil
+}
+
+func validate() error {
+	dbType := strings.ToLower(strings.TrimSpace(variables.DatabaseType))
+	if dbType == "" || dbType == "internal" || dbType == "dqlite" {
+		if variables.DatabaseVoters < 3 || variables.DatabaseVoters%2 == 0 {
+			return fmt.Errorf("CAESIUM_DATABASE_VOTERS must be an odd number greater than or equal to 3")
+		}
+		if variables.DatabaseStandbys < 0 {
+			return fmt.Errorf("CAESIUM_DATABASE_STANDBYS must be greater than or equal to 0")
+		}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(variables.WakeupFanoutMode)) {
+	case "", "full", "gossip":
+	default:
+		return fmt.Errorf("CAESIUM_WAKEUP_FANOUT_MODE must be one of: full, gossip")
 	}
 
 	return nil
@@ -52,6 +76,8 @@ type Environment struct {
 	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
 	DatabaseMaxOpenConns          int           `default:"4" split_words:"true"`
 	DatabaseMaxIdleConns          int           `default:"2" split_words:"true"`
+	DatabaseVoters                int           `default:"3" split_words:"true"`
+	DatabaseStandbys              int           `default:"3" split_words:"true"`
 	DatabaseConsoleEnabled        bool          `default:"false" split_words:"true"`
 	ManualTriggerAPIKey           string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
 	MaxParallelTasks              int           `split_words:"true"`
@@ -59,10 +85,12 @@ type Environment struct {
 	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
 	ExecutionMode                 string        `default:"local" split_words:"true"`
 	WorkerEnabled                 bool          `default:"true" split_words:"true"`
-	WorkerPollInterval            time.Duration `default:"2s" split_words:"true"`
+	WorkerPollInterval            time.Duration `default:"15s" split_words:"true"`
 	WorkerReclaimInterval         time.Duration `default:"30s" split_words:"true"`
 	WorkerLeaseTTL                time.Duration `default:"5m" split_words:"true"`
 	WorkerPoolSize                int           `default:"4" split_words:"true"`
+	InternalWakeupToken           string        `default:"" split_words:"true"`
+	WakeupFanoutMode              string        `default:"full" split_words:"true"`
 	AtomPollInterval              time.Duration `default:"1s" split_words:"true"`
 	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
 	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`

@@ -3,6 +3,7 @@ package env
 import (
 	"os"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
@@ -18,6 +19,10 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), "info", Variables().LogLevel)
 	assert.Equal(s.T(), 4, Variables().DatabaseMaxOpenConns)
 	assert.Equal(s.T(), 2, Variables().DatabaseMaxIdleConns)
+	assert.Equal(s.T(), 3, Variables().DatabaseVoters)
+	assert.Equal(s.T(), 3, Variables().DatabaseStandbys)
+	assert.Equal(s.T(), 15*time.Second, Variables().WorkerPollInterval)
+	assert.Equal(s.T(), "full", Variables().WakeupFanoutMode)
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {

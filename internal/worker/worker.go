@@ -9,7 +9,10 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
-const defaultReclaimInterval = 30 * time.Second
+const (
+	defaultPollInterval    = 15 * time.Second
+	defaultReclaimInterval = 30 * time.Second
+)
 
 type TaskClaimer interface {
 	ClaimNext(ctx context.Context) (*models.TaskRun, error)
@@ -21,12 +24,23 @@ type ExpiredReclaimer interface {
 	ReclaimExpired(ctx context.Context) error
 }
 
+type ReclaimGate interface {
+	CanReclaim(ctx context.Context) (bool, error)
+}
+
+type ReclaimGateFunc func(context.Context) (bool, error)
+
+func (f ReclaimGateFunc) CanReclaim(ctx context.Context) (bool, error) {
+	return f(ctx)
+}
+
 type Worker struct {
 	claimer         TaskClaimer
 	pool            *Pool
 	pollInterval    time.Duration
 	reclaimInterval time.Duration
 	lastReclaim     time.Time
+	reclaimGate     ReclaimGate
 	executor        TaskExecutor
 	wakeups         <-chan struct{}
 }
@@ -39,7 +53,7 @@ func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, exec
 		pool = NewPool(1)
 	}
 	if pollInterval <= 0 {
-		pollInterval = 2 * time.Second
+		pollInterval = defaultPollInterval
 	}
 	if executor == nil {
 		executor = func(context.Context, *models.TaskRun) {}
@@ -57,6 +71,11 @@ func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, exec
 
 func (w *Worker) WithWakeups(ch <-chan struct{}) *Worker {
 	w.wakeups = ch
+	return w
+}
+
+func (w *Worker) WithReclaimGate(gate ReclaimGate) *Worker {
+	w.reclaimGate = gate
 	return w
 }
 
@@ -119,6 +138,18 @@ func (w *Worker) reclaimIfDue(ctx context.Context) {
 	}
 
 	w.lastReclaim = time.Now()
+	if w.reclaimGate != nil {
+		canReclaim, err := w.reclaimGate.CanReclaim(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Warn("failed to evaluate reclaim leadership", "error", err)
+			}
+			return
+		}
+		if !canReclaim {
+			return
+		}
+	}
 	if err := reclaimer.ReclaimExpired(ctx); err != nil && ctx.Err() == nil {
 		log.Error("failed to reclaim expired tasks", "error", err)
 	}
