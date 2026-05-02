@@ -33,6 +33,12 @@ func Process() error {
 
 func validate() error {
 	dbType := strings.ToLower(strings.TrimSpace(variables.DatabaseType))
+	if variables.DatabaseShards < 1 {
+		return fmt.Errorf("CAESIUM_DATABASE_SHARDS must be greater than or equal to 1")
+	}
+	if variables.DatabaseShards > 1 && dbType != "" && dbType != "internal" && dbType != "dqlite" {
+		return fmt.Errorf("CAESIUM_DATABASE_SHARDS greater than 1 requires CAESIUM_DATABASE_TYPE=internal")
+	}
 	if dbType == "" || dbType == "internal" || dbType == "dqlite" {
 		if variables.DatabaseVoters < 3 || variables.DatabaseVoters%2 == 0 {
 			return fmt.Errorf("CAESIUM_DATABASE_VOTERS must be an odd number greater than or equal to 3")
@@ -76,6 +82,7 @@ type Environment struct {
 	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
 	DatabaseMaxOpenConns          int           `default:"4" split_words:"true"`
 	DatabaseMaxIdleConns          int           `default:"2" split_words:"true"`
+	DatabaseShards                int           `default:"1" split_words:"true"`
 	DatabaseVoters                int           `default:"3" split_words:"true"`
 	DatabaseStandbys              int           `default:"3" split_words:"true"`
 	DatabaseConsoleEnabled        bool          `default:"false" split_words:"true"`
