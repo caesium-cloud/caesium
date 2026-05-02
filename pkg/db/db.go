@@ -196,28 +196,28 @@ func Migrate() (err error) {
 			}
 		}
 		if err = migrateModels(router.Cold(), hotPathModels()...); err != nil {
-			return
+			return err
 		}
 	}
 
 	var triggers []models.Trigger
 	if err = router.Catalog().Where("type = ?", models.TriggerTypeHTTP).Find(&triggers).Error; err != nil {
-		return
+		return err
 	}
 	for idx := range triggers {
 		trigger := &triggers[idx]
 		if err = trigger.ApplyDerivedFields(); err != nil {
-			return
+			return err
 		}
 		if err = router.Catalog().
 			Model(&models.Trigger{}).
 			Where("id = ?", trigger.ID).
 			Update("normalized_path", trigger.NormalizedPath).
 			Error; err != nil {
-			return
+			return err
 		}
 	}
-	return
+	return nil
 }
 
 func migrateModels(conn *gorm.DB, models ...interface{}) error {
