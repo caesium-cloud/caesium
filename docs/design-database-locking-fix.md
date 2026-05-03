@@ -187,11 +187,12 @@ Goal: investigate residual issues and tighten the operational surface area.
   - Acceptance: docs PR merged alongside the last code change that introduces each var.
   - Risk: none.
 
-- [ ] **Consider durable event outbox.** (Stretch.)
+- [x] **Consider durable event bus replay state.** (Stretch.)
   - File: `internal/run/store.go:454`.
-  - Today, `publishEvents` runs after the transaction commits; events are lost on crash. Move publication onto a polled outbox table.
-  - Acceptance: event delivery survives a `SIGKILL` between commit and publish in an integration test.
+  - Today, `publishEvents` runs after the transaction commits; events are lost on crash. Move bus dispatch state into the durable event row so pending events can be replayed after restart.
+  - Acceptance: event delivery survives a `SIGKILL` between commit and bus dispatch in an integration test.
   - Risk: medium. Orthogonal to locking but a known bug — schedule independently if reviewers prefer.
+  - Status: implemented with `execution_events.bus_dispatch_pending` and `execution_events.bus_dispatched_at`. Event rows are marked pending for bus dispatch transactionally with the event write, normal in-process dispatch clears the flag, and the server starts an event bus dispatcher to replay pending rows after restart.
 
 ### Phase 4 — Horizontal scale via sharded write path (large, design-level)
 

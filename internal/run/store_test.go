@@ -348,6 +348,8 @@ func TestRegisterTasksBatchesReadyEventsAndSkipsExisting(t *testing.T) {
 	require.NotNil(t, readyEvents[0].JobID)
 	require.Equal(t, taskB.ID, *readyEvents[0].TaskID)
 	require.Equal(t, job.ID, *readyEvents[0].JobID)
+	require.True(t, readyEvents[0].BusDispatchPending)
+	require.Nil(t, readyEvents[0].BusDispatchedAt)
 }
 
 func TestRegisterTasksReturnsMissingJobRunError(t *testing.T) {

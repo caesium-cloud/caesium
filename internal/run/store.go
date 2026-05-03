@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -559,9 +560,10 @@ func executionEventRecord(evt event.Event) models.ExecutionEvent {
 	}
 
 	record := models.ExecutionEvent{
-		Type:      string(evt.Type),
-		Payload:   []byte(evt.Payload),
-		CreatedAt: evt.Timestamp,
+		Type:               string(evt.Type),
+		Payload:            []byte(evt.Payload),
+		BusDispatchPending: true,
+		CreatedAt:          evt.Timestamp,
 	}
 	if evt.JobID != uuid.Nil {
 		jobID := evt.JobID
@@ -2028,12 +2030,7 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 }
 
 func (s *Store) publishEvents(events ...event.Event) {
-	if s.bus == nil {
-		return
-	}
-	for _, evt := range events {
-		s.bus.Publish(evt)
-	}
+	event.PublishAndMarkBusDispatched(context.Background(), s.bus, s.eventStore, events...)
 }
 
 func (s *Store) PublishEvents(events ...event.Event) {

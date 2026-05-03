@@ -213,6 +213,13 @@ func start(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
+	go func() {
+		log.Info("launching event bus dispatcher")
+		if err := event.NewBusDispatcher(event.NewStore(db.Connection()), bus).Start(ctx); err != nil && ctx.Err() == nil {
+			log.Error("event bus dispatcher exited", "error", err)
+		}
+	}()
+
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
 	if err != nil {

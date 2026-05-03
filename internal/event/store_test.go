@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
@@ -49,6 +51,89 @@ func TestAppendTx(t *testing.T) {
 	require.NoError(t, tx.Commit().Error)
 
 	require.Equal(t, uint64(2), evt2.Sequence, "second event should have sequence 2")
+}
+
+func TestAppendTxMarksEventPendingBusDispatch(t *testing.T) {
+	s := openStore(t)
+
+	evt := &Event{Type: TypeRunStarted, JobID: uuid.New()}
+	tx := s.db.Begin()
+	require.NoError(t, s.AppendTx(tx, evt))
+	require.NoError(t, tx.Commit().Error)
+
+	pending, err := s.ListPendingBusDispatch(context.Background(), 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, evt.Sequence, pending[0].Sequence)
+
+	var row models.ExecutionEvent
+	require.NoError(t, s.db.First(&row, "sequence = ?", evt.Sequence).Error)
+	require.True(t, row.BusDispatchPending)
+	require.Nil(t, row.BusDispatchedAt)
+}
+
+func TestPublishAndMarkBusDispatchedPublishesAndMarksEvent(t *testing.T) {
+	s := openStore(t)
+	bus := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := bus.Subscribe(ctx, Filter{})
+	require.NoError(t, err)
+
+	evt := &Event{Type: TypeRunStarted, JobID: uuid.New()}
+	tx := s.db.Begin()
+	require.NoError(t, s.AppendTx(tx, evt))
+	require.NoError(t, tx.Commit().Error)
+
+	PublishAndMarkBusDispatched(ctx, bus, s, *evt)
+
+	select {
+	case got := <-ch:
+		require.Equal(t, evt.Sequence, got.Sequence)
+		require.Equal(t, evt.Type, got.Type)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for dispatched event")
+	}
+
+	pending, err := s.ListPendingBusDispatch(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+
+	var row models.ExecutionEvent
+	require.NoError(t, s.db.First(&row, "sequence = ?", evt.Sequence).Error)
+	require.False(t, row.BusDispatchPending)
+	require.NotNil(t, row.BusDispatchedAt)
+}
+
+func TestBusDispatcherDispatchOncePublishesPendingEvent(t *testing.T) {
+	s := openStore(t)
+	bus := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := bus.Subscribe(ctx, Filter{})
+	require.NoError(t, err)
+
+	evt := &Event{Type: TypeTaskReady, JobID: uuid.New(), RunID: uuid.New(), TaskID: uuid.New()}
+	tx := s.db.Begin()
+	require.NoError(t, s.AppendTx(tx, evt))
+	require.NoError(t, tx.Commit().Error)
+
+	dispatcher := NewBusDispatcher(s, bus)
+	require.NoError(t, dispatcher.DispatchOnce(ctx))
+
+	select {
+	case got := <-ch:
+		require.Equal(t, evt.Sequence, got.Sequence)
+		require.Equal(t, evt.Type, got.Type)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for event bus dispatch")
+	}
+
+	pending, err := s.ListPendingBusDispatch(ctx, 10)
+	require.NoError(t, err)
+	require.Empty(t, pending)
 }
 
 func TestAppendTx_NilTransaction(t *testing.T) {
