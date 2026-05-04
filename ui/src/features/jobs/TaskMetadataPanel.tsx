@@ -146,14 +146,14 @@ interface SchemaViolationsSectionProps {
 function SchemaViolationsSection({ violations }: SchemaViolationsSectionProps) {
   return (
     <div className="md:col-span-2">
-      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-amber-600">Schema Violations</div>
-      <div className="rounded-md border border-amber-200 bg-amber-50 p-2 dark:border-amber-900 dark:bg-amber-950/30">
+      <div className="mb-1 text-xs font-medium uppercase tracking-wide text-warning">Schema Violations</div>
+      <div className="rounded-md border border-warning/30 bg-warning/10 p-2">
         {violations.map((v, i) => (
           <div key={i} className="flex gap-2 font-mono text-xs">
             {v.key && (
-              <span className="font-semibold text-amber-700 dark:text-amber-400">{v.key}:</span>
+              <span className="font-semibold text-warning">{v.key}:</span>
             )}
-            <span className="text-amber-800 dark:text-amber-300">{v.message}</span>
+            <span className="text-warning/90">{v.message}</span>
           </div>
         ))}
       </div>

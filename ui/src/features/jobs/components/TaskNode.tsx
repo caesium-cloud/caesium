@@ -26,29 +26,29 @@ export const TaskNode = memo(({ data }: NodeProps) => {
     switch (status) {
       case 'completed':
       case 'succeeded':
-        return <CheckCircle2 data-testid="status-icon-succeeded" className="w-5 h-5 text-green-400 fill-green-500/10" />;
+        return <CheckCircle2 data-testid="status-icon-succeeded" className="w-5 h-5 text-success fill-success/10" />;
       case 'failed':
-        return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-red-400 fill-red-500/10" />;
+        return <XCircle data-testid="status-icon-failed" className="w-5 h-5 text-danger fill-danger/10" />;
       case 'cached':
-        return <Archive data-testid="status-icon-cached" className="w-5 h-5 text-teal-300 fill-teal-400/10" />;
+        return <Archive data-testid="status-icon-cached" className="w-5 h-5 text-cached fill-cached/10" />;
       case 'running':
-        return <Activity data-testid="status-icon-running" className="w-5 h-5 text-blue-400 animate-spin" />;
+        return <Activity data-testid="status-icon-running" className="w-5 h-5 text-running animate-spin" />;
       case 'skipped':
-        return <SkipForward data-testid="status-icon-skipped" className="w-5 h-5 text-slate-400" />;
+        return <SkipForward data-testid="status-icon-skipped" className="w-5 h-5 text-text-3" />;
       case 'pending':
-        return <Clock data-testid="status-icon-pending" className="w-5 h-5 text-slate-500" />;
+        return <Clock data-testid="status-icon-pending" className="w-5 h-5 text-text-4" />;
       default:
-        return <Circle data-testid="status-icon-unknown" className="w-5 h-5 text-slate-600" />;
+        return <Circle data-testid="status-icon-unknown" className="w-5 h-5 text-text-4" />;
     }
   };
 
   const getEngineIcon = () => {
     const e = (engine || atom?.engine || '').toLowerCase();
-    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-blue-400" />;
-    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-purple-400" />;
-    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-yellow-400" />;
-    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-slate-500" />;
+    if (e.includes('docker')) return <Container data-testid="engine-icon-docker" className="w-3.5 h-3.5 text-running" />;
+    if (e.includes('kubernetes') || e.includes('k8s')) return <Cloud data-testid="engine-icon-kubernetes" className="w-3.5 h-3.5 text-running" />;
+    if (e.includes('podman')) return <Zap data-testid="engine-icon-podman" className="w-3.5 h-3.5 text-accent" />;
+    if (e.includes('wasm')) return <Zap data-testid="engine-icon-wasm" className="w-3.5 h-3.5 text-warning" />;
+    return <Settings data-testid="engine-icon-unknown" className="w-3.5 h-3.5 text-text-3" />;
   };
 
   const getProcessedCommand = () => {
@@ -77,17 +77,17 @@ export const TaskNode = memo(({ data }: NodeProps) => {
     switch (status) {
       case 'completed':
       case 'succeeded':
-        return 'border-emerald-400/45 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.16),hsl(160_84%_36%/0.2)_30%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_rgba(16,185,129,0.16)]';
+        return 'border-success/45 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.16),hsl(var(--success)/0.2)_30%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_hsl(var(--success)/0.16)]';
       case 'failed':
-        return 'border-red-400/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(8_86%_58%/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_rgba(248,113,113,0.16)]';
+        return 'border-danger/50 bg-[linear-gradient(160deg,hsl(var(--caesium-cyan)/0.14),hsl(var(--danger)/0.18)_34%,hsl(var(--node-surface)/0.95)_80%)] shadow-[0_0_24px_hsl(var(--danger)/0.16)]';
       case 'running':
-        return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_rgba(0,180,216,0.28)]';
+        return 'border-caesium-cyan/70 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.28),hsl(var(--caesium-cyan)/0.12)_36%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_30px_hsl(var(--caesium-cyan)/0.28)]';
       case 'cached':
-        return 'border-dashed border-teal-400/55 bg-[linear-gradient(155deg,rgba(45,212,191,0.16),rgba(56,189,248,0.08)_34%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_rgba(45,212,191,0.14)]';
+        return 'border-dashed border-cached/55 bg-[linear-gradient(155deg,hsl(var(--cached)/0.16),hsl(var(--caesium-cyan)/0.08)_34%,hsl(var(--node-surface)/0.95)_78%)] shadow-[0_0_24px_hsl(var(--cached)/0.14)]';
       case 'skipped':
-        return 'border-slate-500/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
+        return 'border-text-3/30 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.06),hsl(var(--node-surface)/0.92)_32%)] shadow-none opacity-60';
       default:
-        return 'border-caesium-cyan/35 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--caesium-cyan)/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_rgba(0,180,216,0.14)]';
+        return 'border-caesium-cyan/35 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--caesium-cyan)/0.08)_32%,hsl(var(--node-surface)/0.94)_78%)] shadow-[0_0_22px_hsl(var(--caesium-cyan)/0.14)]';
     }
   };
 
@@ -146,39 +146,39 @@ export const TaskNode = memo(({ data }: NodeProps) => {
           className={cn(
             "custom-scrollbar h-[72px] overflow-y-auto rounded-lg border px-2.5 py-1.5 shadow-inner",
             error && status !== 'skipped'
-              ? "border-red-500/20 bg-red-500/10"
+              ? "border-danger/20 bg-danger/10"
               : error && status === 'skipped'
-                ? "border-slate-500/20 bg-slate-500/5"
+                ? "border-text-3/20 bg-text-3/5"
                 : "border-caesium-cyan/20 bg-muted/70",
             isShell && !error && "border-caesium-cyan/30"
           )}
         >
           {error && status === 'skipped' ? (
             <div className="flex gap-2 items-start">
-              <SkipForward className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
+              <SkipForward className="w-3.5 h-3.5 text-text-3 shrink-0 mt-0.5" />
               <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-slate-400/80 uppercase tracking-wider">Skipped</span>
-                <span className="text-[9px] text-slate-400/70 font-mono leading-relaxed break-all line-clamp-3">
+                <span className="text-[8px] font-bold text-text-3/80 uppercase tracking-wider">Skipped</span>
+                <span className="text-[9px] text-text-3/70 font-mono leading-relaxed break-all line-clamp-3">
                   {error}
                 </span>
               </div>
             </div>
           ) : error ? (
             <div className="flex gap-2 items-start">
-              <AlertTriangle className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+              <AlertTriangle className="w-3.5 h-3.5 text-danger shrink-0 mt-0.5" />
               <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-red-500/80 uppercase tracking-wider">Error Details</span>
-                <span className="text-[9px] text-red-400/90 font-mono leading-relaxed break-all line-clamp-3">
+                <span className="text-[8px] font-bold text-danger/80 uppercase tracking-wider">Error Details</span>
+                <span className="text-[9px] text-danger/90 font-mono leading-relaxed break-all line-clamp-3">
                   {error}
                 </span>
               </div>
             </div>
           ) : status === 'cached' ? (
             <div className="flex gap-2 items-start">
-              <Archive className="w-3.5 h-3.5 text-teal-300 shrink-0 mt-0.5" />
+              <Archive className="w-3.5 h-3.5 text-cached shrink-0 mt-0.5" />
               <div className="flex flex-col gap-0.5 min-w-0">
-                <span className="text-[8px] font-bold text-teal-200/90 uppercase tracking-wider">Reused Result</span>
-                <span className="text-[9px] text-teal-100/85 font-mono leading-relaxed line-clamp-3">
+                <span className="text-[8px] font-bold text-cached/90 uppercase tracking-wider">Reused Result</span>
+                <span className="text-[9px] text-cached/85 font-mono leading-relaxed line-clamp-3">
                   Successful output restored from cache. No container started.
                 </span>
               </div>

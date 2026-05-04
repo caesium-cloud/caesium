@@ -321,8 +321,8 @@ function ClusterTopology({ nodes }: { nodes: Node[] }) {
     <svg viewBox="0 0 220 220" className="w-full h-[220px]">
       <defs>
         <radialGradient id="topo-glow" cx="0.5" cy="0.5" r="0.5">
-          <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.3" />
-          <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0" />
+          <stop offset="0%" stopColor="hsl(var(--cyan))" stopOpacity="0.3" />
+          <stop offset="100%" stopColor="hsl(var(--cyan))" stopOpacity="0" />
         </radialGradient>
       </defs>
       {/* connections */}
@@ -333,14 +333,14 @@ function ClusterTopology({ nodes }: { nodes: Node[] }) {
           <line key={`${i}-${j}`}
             x1={cx + Math.cos(a1) * R} y1={cy + Math.sin(a1) * R}
             x2={cx + Math.cos(a2) * R} y2={cy + Math.sin(a2) * R}
-            stroke="var(--cyan)" strokeOpacity="0.3" strokeWidth="1" strokeDasharray="2 3"
+            stroke="hsl(var(--cyan))" strokeOpacity="0.3" strokeWidth="1" strokeDasharray="2 3"
           />
         );
       }))}
       {/* center label */}
       <circle cx={cx} cy={cy} r="40" fill="url(#topo-glow)" />
-      <text x={cx} y={cy - 2} textAnchor="middle" fontSize="9" fill="var(--text-3)" style={{ letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>quorum</text>
-      <text x={cx} y={cy + 12} textAnchor="middle" fontSize="14" fill="var(--text-1)" fontWeight="500" className="font-mono">{nodes.length}/{nodes.length}</text>
+      <text x={cx} y={cy - 2} textAnchor="middle" fontSize="9" fill="hsl(var(--text-3))" style={{ letterSpacing: "0.18em", textTransform: "uppercase", fontWeight: 600 }}>quorum</text>
+      <text x={cx} y={cy + 12} textAnchor="middle" fontSize="14" fill="hsl(var(--text-1))" fontWeight="500" className="font-mono">{nodes.length}/{nodes.length}</text>
       {/* nodes */}
       {nodes.map((n, i) => {
         const angle = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
@@ -350,9 +350,9 @@ function ClusterTopology({ nodes }: { nodes: Node[] }) {
         const isLeader = i === 0;
         return (
           <g key={n.address}>
-            <circle cx={x} cy={y} r="14" fill={isLeader ? "var(--gold)" : "var(--cyan)"} opacity="0.18" />
-            <circle cx={x} cy={y} r="8" fill={isLeader ? "var(--gold)" : "var(--cyan)"} stroke="var(--midnight)" strokeWidth="2" />
-            <text x={x} y={y + Math.sin(angle) * 24 + (Math.sin(angle) > 0 ? 8 : -2)} textAnchor="middle" fontSize="9" fill="var(--text-2)" className="font-mono">{n.address.split(":")[0]}</text>
+            <circle cx={x} cy={y} r="14" fill={isLeader ? "hsl(var(--gold))" : "hsl(var(--cyan))"} opacity="0.18" />
+            <circle cx={x} cy={y} r="8" fill={isLeader ? "hsl(var(--gold))" : "hsl(var(--cyan))"} stroke="hsl(var(--midnight))" strokeWidth="2" />
+            <text x={x} y={y + Math.sin(angle) * 24 + (Math.sin(angle) > 0 ? 8 : -2)} textAnchor="middle" fontSize="9" fill="hsl(var(--text-2))" className="font-mono">{n.address.split(":")[0]}</text>
           </g>
         );
       })}

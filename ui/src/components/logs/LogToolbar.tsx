@@ -11,7 +11,7 @@ export function LogToolbar({ children, status, className }: LogToolbarProps) {
   return (
     <div
       className={cn(
-        "flex flex-wrap items-center gap-2 border-b border-slate-800 bg-slate-950/80 px-3 py-2",
+        "flex flex-wrap items-center gap-2 border-b border-graphite/50 bg-obsidian/80 px-3 py-2",
         className,
       )}
     >

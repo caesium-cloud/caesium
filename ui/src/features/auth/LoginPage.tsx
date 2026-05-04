@@ -57,48 +57,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   );
 
   return (
-    <div
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: "100vh",
-        background: "var(--background, #09090b)",
-        color: "var(--foreground, #fafafa)",
-      }}
-    >
+    <div className="flex min-h-screen items-center justify-center bg-background text-foreground">
       <form
         onSubmit={handleSubmit}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "1rem",
-          width: "100%",
-          maxWidth: "400px",
-          padding: "2rem",
-          border: "1px solid var(--border, #27272a)",
-          borderRadius: "0.5rem",
-          background: "var(--card, #0a0a0a)",
-        }}
+        className="flex w-full max-w-[400px] flex-col gap-4 rounded-lg border border-border bg-card p-8"
       >
-        <h1
-          style={{
-            fontSize: "1.25rem",
-            fontWeight: 600,
-            textAlign: "center",
-            marginBottom: "0.5rem",
-          }}
-        >
-          Caesium
-        </h1>
+        <h1 className="mb-2 text-center text-xl font-semibold">Caesium</h1>
 
-        <p
-          style={{
-            fontSize: "0.875rem",
-            textAlign: "center",
-            opacity: 0.7,
-          }}
-        >
+        <p className="text-center text-sm text-muted-foreground">
           Enter your API key to continue
         </p>
 
@@ -109,54 +75,22 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           placeholder="csk_live_..."
           autoFocus
           autoComplete="off"
-          style={{
-            padding: "0.5rem 0.75rem",
-            borderRadius: "0.375rem",
-            border: "1px solid var(--border, #27272a)",
-            background: "var(--input, #09090b)",
-            color: "inherit",
-            fontSize: "0.875rem",
-            fontFamily: "monospace",
-          }}
+          className="rounded-md border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none transition focus:border-primary"
         />
 
         {error && (
-          <p
-            style={{
-              fontSize: "0.8rem",
-              color: "var(--destructive, #ef4444)",
-              margin: 0,
-            }}
-          >
-            {error}
-          </p>
+          <p className="m-0 text-[0.8rem] text-destructive">{error}</p>
         )}
 
         <button
           type="submit"
           disabled={loading}
-          style={{
-            padding: "0.5rem 1rem",
-            borderRadius: "0.375rem",
-            border: "none",
-            background: "var(--primary, #fafafa)",
-            color: "var(--primary-foreground, #09090b)",
-            fontWeight: 500,
-            cursor: loading ? "not-allowed" : "pointer",
-            opacity: loading ? 0.6 : 1,
-          }}
+          className="rounded-md border-none bg-primary px-4 py-2 font-medium text-primary-foreground transition disabled:cursor-not-allowed disabled:opacity-60"
         >
           {loading ? "Verifying..." : "Sign In"}
         </button>
 
-        <p
-          style={{
-            fontSize: "0.75rem",
-            textAlign: "center",
-            opacity: 0.5,
-            margin: 0,
-          }}
-        >
+        <p className="m-0 text-center text-xs text-muted-foreground">
           Key is stored in memory only and cleared on tab close
         </p>
       </form>

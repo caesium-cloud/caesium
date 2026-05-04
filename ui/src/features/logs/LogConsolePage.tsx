@@ -25,23 +25,23 @@ import {
 import { useLogStream, type LogEntry } from "./useLogStream";
 
 const LEVEL_COLORS: Record<string, string> = {
-  debug: "text-slate-400 bg-slate-400/10",
-  info: "text-blue-400 bg-blue-400/10",
-  warn: "text-yellow-400 bg-yellow-400/10",
-  error: "text-red-400 bg-red-400/10",
-  dpanic: "text-red-500 bg-red-500/10",
-  panic: "text-red-600 bg-red-600/10",
-  fatal: "text-red-700 bg-red-700/10",
+  debug: "text-text-3 bg-text-3/10",
+  info: "text-running bg-running/10",
+  warn: "text-warning bg-warning/10",
+  error: "text-danger bg-danger/10",
+  dpanic: "text-danger bg-danger/15",
+  panic: "text-danger bg-danger/20",
+  fatal: "text-danger bg-danger/25",
 };
 
 const LEVEL_DOT_COLORS: Record<string, string> = {
-  debug: "fill-slate-400",
-  info: "fill-blue-400",
-  warn: "fill-yellow-400",
-  error: "fill-red-400",
-  dpanic: "fill-red-500",
-  panic: "fill-red-600",
-  fatal: "fill-red-700",
+  debug: "fill-[hsl(var(--text-3))]",
+  info: "fill-[hsl(var(--running))]",
+  warn: "fill-[hsl(var(--warning))]",
+  error: "fill-[hsl(var(--danger))]",
+  dpanic: "fill-[hsl(var(--danger))]",
+  panic: "fill-[hsl(var(--danger))]",
+  fatal: "fill-[hsl(var(--danger))]",
 };
 
 const LEVELS = ["debug", "info", "warn", "error"] as const;
@@ -144,8 +144,8 @@ export function LogConsolePage() {
           <LogBadge
             className={
               connected
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                : "border-red-500/30 bg-red-500/10 text-red-300"
+                ? "border-success/30 bg-success/10 text-success"
+                : "border-danger/30 bg-danger/10 text-danger"
             }
           >
             {connected ? (
@@ -165,7 +165,7 @@ export function LogConsolePage() {
       }
     >
       {/* Level filter */}
-      <div className="flex items-center rounded-md border border-slate-700 overflow-hidden">
+      <div className="flex items-center rounded-md border border-graphite/60 overflow-hidden">
         {LEVELS.map((lvl) => (
           <button
             key={lvl}
@@ -174,7 +174,7 @@ export function LogConsolePage() {
               "px-2.5 py-1 text-xs font-medium capitalize transition-colors",
               minLevel === lvl
                 ? "bg-primary text-primary-foreground"
-                : "bg-slate-900 text-slate-400 hover:bg-slate-800 hover:text-slate-200",
+                : "bg-midnight text-text-3 hover:bg-graphite/40 hover:text-text-1",
             )}
           >
             {lvl}
@@ -186,7 +186,7 @@ export function LogConsolePage() {
       <select
         value={levelData?.level ?? "info"}
         onChange={(e) => setLevelMutation.mutate({ level: e.target.value })}
-        className="h-7 rounded-md border border-slate-700 bg-slate-900 px-2 text-xs text-slate-300"
+        className="h-7 rounded-md border border-graphite/60 bg-midnight px-2 text-xs text-text-2"
         title="Server log level"
       >
         {LEVELS.map((lvl) => (
@@ -208,7 +208,7 @@ export function LogConsolePage() {
         <Button
           variant="ghost"
           size="sm"
-          className="h-7 px-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+          className="h-7 px-2 text-xs text-text-2 hover:bg-graphite/40 hover:text-text-1"
           onClick={paused ? resume : pause}
         >
           {paused ? <Play className="h-3 w-3 mr-1" /> : <Pause className="h-3 w-3 mr-1" />}
@@ -217,7 +217,7 @@ export function LogConsolePage() {
         <Button
           variant="ghost"
           size="sm"
-          className="h-7 px-2 text-xs text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+          className="h-7 px-2 text-xs text-text-2 hover:bg-graphite/40 hover:text-text-1"
           onClick={clear}
         >
           <Trash2 className="h-3 w-3 mr-1" />
@@ -293,17 +293,17 @@ function LogRow({
   onToggle: () => void;
 }) {
   const ts = new Date(entry.ts).toISOString().slice(11, 23); // HH:mm:ss.SSS
-  const dotColor = LEVEL_DOT_COLORS[entry.level] ?? "fill-slate-400";
-  const badgeColor = LEVEL_COLORS[entry.level] ?? "text-slate-400 bg-slate-400/10";
+  const dotColor = LEVEL_DOT_COLORS[entry.level] ?? "fill-[hsl(var(--text-3))]";
+  const badgeColor = LEVEL_COLORS[entry.level] ?? "text-text-3 bg-text-3/10";
   const hasFields = entry.fields && Object.keys(entry.fields).length > 0;
 
   return (
     <>
       <tr
-        className="hover:bg-white/5 cursor-pointer border-b border-white/5"
+        className="hover:bg-graphite/30 cursor-pointer border-b border-graphite/30"
         onClick={hasFields ? onToggle : undefined}
       >
-        <td className="py-0.5 px-2 text-slate-500 whitespace-nowrap align-top w-[85px]">
+        <td className="py-0.5 px-2 text-text-4 whitespace-nowrap align-top w-[85px]">
           {ts}
         </td>
         <td className="py-0.5 px-1 align-top w-[52px]">
@@ -312,17 +312,17 @@ function LogRow({
             {entry.level}
           </span>
         </td>
-        <td className="py-0.5 px-2 text-slate-200 break-all align-top">
+        <td className="py-0.5 px-2 text-text-1 break-all align-top">
           {entry.msg}
           {entry.caller && (
-            <span className="ml-2 text-slate-600">{entry.caller}</span>
+            <span className="ml-2 text-text-4">{entry.caller}</span>
           )}
         </td>
       </tr>
       {expanded && hasFields && (
-        <tr className="bg-white/[0.02]">
+        <tr className="bg-graphite/15">
           <td colSpan={3} className="px-4 py-2">
-            <pre className="text-[11px] text-slate-400 whitespace-pre-wrap break-all">
+            <pre className="text-[11px] text-text-3 whitespace-pre-wrap break-all">
               {JSON.stringify(entry.fields, null, 2)}
             </pre>
           </td>

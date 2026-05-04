@@ -14,7 +14,7 @@ interface BackfillsViewProps {
 function renderBackfillStatus(backfill: Backfill) {
   if (backfill.status === "running" && backfill.cancel_requested_at) {
     return (
-      <Badge variant="outline" className="border-amber-500/40 text-amber-300">
+      <Badge variant="outline" className="border-warning/40 text-warning">
         Cancelling
       </Badge>
     );

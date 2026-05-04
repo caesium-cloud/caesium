@@ -157,7 +157,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
             const outputCount = sourceRun?.output ? Object.keys(sourceRun.output).length : 0;
             const hasOutputs = outputCount > 0;
             const isBranchSkipped = targetStatus === 'skipped' && sourceStatus === 'succeeded';
-            const stroke = isBranchSkipped ? '#64748b' : edgeColor(sourceStatus);
+            const stroke = isBranchSkipped ? 'hsl(var(--text-3))' : edgeColor(sourceStatus);
             const sourceName = sourceTask?.name || e.from;
             const targetName = targetTask?.name || e.to;
             const contractSchema = sourceTask?.name && targetTask?.input_schema
@@ -259,17 +259,17 @@ function normalizeTaskStatus(status?: string) {
 function edgeColor(status: string) {
     switch (status) {
         case 'running':
-            return '#00b4d8';
+            return 'hsl(var(--running))';
         case 'succeeded':
-            return '#10b981';
+            return 'hsl(var(--success))';
         case 'cached':
-            return '#14b8a6';
+            return 'hsl(var(--cached))';
         case 'failed':
-            return '#f97316';
+            return 'hsl(var(--danger))';
         case 'skipped':
-            return '#f59e0b';
+            return 'hsl(var(--warning))';
         default:
-            return '#64748b';
+            return 'hsl(var(--text-3))';
     }
 }
 
@@ -277,18 +277,18 @@ function EdgeDetails({ edge }: { edge: EdgeDetailsState }) {
     return (
         <div className="space-y-5">
             <div className="flex flex-wrap items-center gap-2">
-                <span className="rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+                <span className="rounded-full border border-success/35 bg-success/10 px-2.5 py-1 text-xs font-semibold text-success">
                     {edge.outputCount} {edge.outputCount === 1 ? 'output' : 'outputs'}
                 </span>
                 <span
                     className={`inline-flex items-center rounded-full border px-2 py-1 ${
                         edge.contractDefined
-                            ? 'border-blue-500/35 bg-blue-500/10'
-                            : 'border-slate-400/35 bg-slate-500/10'
+                            ? 'border-running/35 bg-running/10'
+                            : 'border-text-3/30 bg-text-3/10'
                     }`}
                     title={edge.contractDefined ? 'Consumer requirements declared' : 'No consumer requirements declared'}
                 >
-                    <ShieldCheck className={`h-3 w-3 ${edge.contractDefined ? 'text-blue-400' : 'text-slate-500'}`} />
+                    <ShieldCheck className={`h-3 w-3 ${edge.contractDefined ? 'text-running' : 'text-text-3'}`} />
                 </span>
             </div>
 
@@ -377,7 +377,7 @@ function SchemaPreview({
                             <span className="font-mono font-semibold text-foreground">{key}</span>
                             <span className="font-mono text-muted-foreground">{type}</span>
                             {isRequired ? (
-                                <span className="rounded border border-blue-500/35 bg-blue-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700 dark:text-blue-300">
+                                <span className="rounded border border-running/35 bg-running/10 px-1.5 py-0.5 text-[10px] font-semibold text-running">
                                     required
                                 </span>
                             ) : null}

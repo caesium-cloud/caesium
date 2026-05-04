@@ -1,20 +1,19 @@
 import { useState } from "react";
 import type { TaskRun } from "@/lib/api";
 import { shortId } from "@/lib/utils";
+import { statusMeta } from "@/lib/status";
 
 interface Props {
   tasks: TaskRun[];
   runStartedAt: string;
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  succeeded: "#22c55e",
-  cached: "#14b8a6",
-  failed: "#ef4444",
-  running: "#00b4d8",
-  skipped: "#a3a3a3",
-  pending: "#6b7280",
-};
+// Statuses surfaced in the timeline legend, in display order.
+const LEGEND_STATUSES = ["succeeded", "cached", "failed", "running", "skipped", "queued"] as const;
+
+function colorFor(status: string): string {
+  return statusMeta(status).fg;
+}
 
 function formatMs(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -76,7 +75,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
             y={i * ROW_H}
             width={LABEL_W + BAR_AREA + 20}
             height={ROW_H}
-            fill={i % 2 === 0 ? "transparent" : "rgba(128,128,128,0.04)"}
+            fill={i % 2 === 0 ? "transparent" : "hsl(var(--text-3) / 0.04)"}
           />
         ))}
 
@@ -90,7 +89,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
               y1={0}
               x2={x}
               y2={svgHeight - 28}
-              stroke="rgba(128,128,128,0.15)"
+              stroke="hsl(var(--text-3) / 0.18)"
               strokeDasharray="3,3"
             />
           );
@@ -100,7 +99,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
         {taskTimes.map(({ task, start, end }, i) => {
           const barX = LABEL_W + (start / maxEnd) * BAR_AREA;
           const barW = Math.max(2, ((end - start) / maxEnd) * BAR_AREA);
-          const color = STATUS_COLORS[task.status] ?? STATUS_COLORS.pending;
+          const color = colorFor(task.status);
           const label = task.image
             ? task.image.split("/").pop()?.split(":")[0] ?? shortId(task.atom_id)
             : shortId(task.atom_id);
@@ -126,7 +125,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
                 y={i * ROW_H + BAR_Y_OFFSET}
                 width={BAR_AREA}
                 height={BAR_H}
-                fill="rgba(128,128,128,0.08)"
+                fill="hsl(var(--text-3) / 0.1)"
                 rx={3}
               />
 
@@ -157,7 +156,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
                   y={i * ROW_H + BAR_Y_OFFSET + BAR_H / 2 + 4}
                   textAnchor="middle"
                   fontSize={9}
-                  fill="white"
+                  fill="hsl(var(--background))"
                   fontWeight="600"
                 >
                   {formatMs(duration)}
@@ -181,13 +180,13 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
           y1={svgHeight - 28}
           x2={LABEL_W + BAR_AREA}
           y2={svgHeight - 28}
-          stroke="rgba(128,128,128,0.3)"
+          stroke="hsl(var(--text-3) / 0.35)"
         />
         {ticks.map((tick, i) => {
           const x = LABEL_W + (tick / maxEnd) * BAR_AREA;
           return (
             <g key={i}>
-              <line x1={x} y1={svgHeight - 28} x2={x} y2={svgHeight - 22} stroke="rgba(128,128,128,0.4)" />
+              <line x1={x} y1={svgHeight - 28} x2={x} y2={svgHeight - 22} stroke="hsl(var(--text-3) / 0.45)" />
               <text
                 x={x}
                 y={svgHeight - 10}
@@ -205,10 +204,10 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
 
       {/* Legend */}
       <div className="flex flex-wrap gap-4 mt-3 px-1">
-        {Object.entries(STATUS_COLORS).map(([status, color]) => (
+        {LEGEND_STATUSES.map((status) => (
           <div key={status} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: color, opacity: 0.75 }} />
-            {status}
+            <span className="inline-block w-3 h-3 rounded-sm" style={{ backgroundColor: colorFor(status), opacity: 0.75 }} />
+            {status === "queued" ? "pending" : status}
           </div>
         ))}
       </div>

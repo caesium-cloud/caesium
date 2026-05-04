@@ -286,22 +286,22 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       : null;
 
   const banner = error && status === "skipped" ? (
-    <div className="border-b border-slate-500/20 bg-slate-500/10 px-4 py-2.5">
+    <div className="border-b border-text-3/20 bg-text-3/10 px-4 py-2.5">
       <div className="flex items-start gap-3">
-        <SkipForward className="mt-0.5 h-3.5 w-3.5 shrink-0 text-slate-400" />
+        <SkipForward className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-3" />
         <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Skipped</div>
-          <div className="font-mono text-[10px] leading-relaxed text-slate-400/80">{error}</div>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-text-3">Skipped</div>
+          <div className="font-mono text-[10px] leading-relaxed text-text-3/80">{error}</div>
         </div>
       </div>
     </div>
   ) : error ? (
-    <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2.5">
+    <div className="border-b border-danger/20 bg-danger/10 px-4 py-2.5">
       <div className="flex items-start gap-3">
-        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" />
+        <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger" />
         <div className="min-w-0">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-red-400">Task Error</div>
-          <div className="font-mono text-[10px] leading-relaxed text-red-300">{error}</div>
+          <div className="text-[10px] font-bold uppercase tracking-wider text-danger">Task Error</div>
+          <div className="font-mono text-[10px] leading-relaxed text-danger/90">{error}</div>
         </div>
       </div>
     </div>
@@ -313,13 +313,13 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
         <>
           <LogBadge>{renderStateLabel(logState)}</LogBadge>
           {logSource === "live" && (
-            <LogBadge className="border-emerald-500/30 bg-emerald-500/10 text-emerald-200">Live</LogBadge>
+            <LogBadge className="border-success/30 bg-success/10 text-success">Live</LogBadge>
           )}
           {logSource === "persisted" && (
-            <LogBadge className="border-blue-500/30 bg-blue-500/10 text-blue-200">Retained</LogBadge>
+            <LogBadge className="border-running/30 bg-running/10 text-running">Retained</LogBadge>
           )}
           {logTruncated && (
-            <LogBadge className="border-amber-500/30 bg-amber-500/10 text-amber-200">Truncated</LogBadge>
+            <LogBadge className="border-warning/30 bg-warning/10 text-warning">Truncated</LogBadge>
           )}
         </>
       }
@@ -337,8 +337,8 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
         className={cn(
           "rounded-md border px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition-colors",
           caseSensitive
-            ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-200"
-            : "border-slate-700 bg-slate-900 text-slate-400 hover:border-slate-600 hover:text-slate-200",
+            ? "border-cyan/40 bg-cyan/10 text-cyan-glow"
+            : "border-graphite/60 bg-midnight text-text-3 hover:border-graphite hover:text-text-1",
         )}
       >
         Aa
@@ -347,7 +347,7 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       <Button
         type="button"
         variant="ghost"
-        className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-slate-300 hover:bg-slate-800 hover:text-slate-50"
+        className="h-7 gap-1.5 px-2 text-[10px] font-semibold uppercase tracking-wide text-text-2 hover:bg-graphite/40 hover:text-text-1"
         onClick={handleCopy}
         disabled={!hasVisibleOutput}
       >
@@ -370,12 +370,12 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       emptyState={filteredEmptyState || emptyState}
       hasVisibleOutput={hasVisibleOutput}
     >
-      <div ref={terminalRef} className="h-full w-full overflow-hidden bg-slate-950 px-3 py-2" />
+      <div ref={terminalRef} className="h-full w-full overflow-hidden bg-obsidian px-3 py-2" />
       <pre data-testid="task-log-plaintext" className="sr-only">
         {filterResult.renderedText}
       </pre>
       {transportError && (
-        <div className="absolute inset-x-0 top-0 border-b border-red-500/20 bg-red-500/10 px-4 py-2.5 text-[11px] text-red-200">
+        <div className="absolute inset-x-0 top-0 border-b border-danger/20 bg-danger/10 px-4 py-2.5 text-[11px] text-danger">
           {transportError}
         </div>
       )}
