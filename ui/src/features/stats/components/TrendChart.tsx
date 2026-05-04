@@ -48,61 +48,61 @@ export function TrendChart({ data }: TrendChartProps) {
   return (
     <ResponsiveContainer width="100%" height={350}>
       <ComposedChart data={chartData} margin={{ top: 20, right: 20, bottom: 20, left: 20 }}>
-        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--graphite)" opacity={0.3} />
-        <XAxis 
-          dataKey="name" 
+        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="hsl(var(--graphite))" opacity={0.3} />
+        <XAxis
+          dataKey="name"
           tickFormatter={formatDateLabel}
-          stroke="var(--text-3)"
+          stroke="hsl(var(--text-3))"
           fontSize={12}
           tickLine={false}
           axisLine={false}
         />
-        <YAxis 
+        <YAxis
           yAxisId="left"
-          stroke="var(--text-3)"
+          stroke="hsl(var(--text-3))"
           fontSize={12}
           tickLine={false}
           axisLine={false}
           allowDecimals={false}
         />
-        <YAxis 
+        <YAxis
           yAxisId="right"
           orientation="right"
-          stroke="var(--text-3)"
+          stroke="hsl(var(--text-3))"
           fontSize={12}
           tickLine={false}
           axisLine={false}
           domain={[0, 100]}
           tickFormatter={(v) => `${v}%`}
         />
-        <Tooltip 
-          contentStyle={{ 
-            backgroundColor: 'var(--midnight)',
-            borderColor: 'var(--graphite)',
-            color: 'var(--text-1)',
+        <Tooltip
+          contentStyle={{
+            backgroundColor: 'hsl(var(--midnight))',
+            borderColor: 'hsl(var(--graphite))',
+            color: 'hsl(var(--text-1))',
             borderRadius: '8px',
           }}
           itemStyle={{ fontSize: '12px' }}
         />
-        <Legend 
-          verticalAlign="top" 
-          align="right" 
+        <Legend
+          verticalAlign="top"
+          align="right"
           wrapperStyle={{ paddingBottom: '20px', fontSize: '12px' }}
         />
-        <Bar 
-          yAxisId="left" 
-          dataKey="runs" 
-          name="Run Volume" 
-          fill="var(--cyan-glow)" 
-          radius={[4, 4, 0, 0]} 
+        <Bar
+          yAxisId="left"
+          dataKey="runs"
+          name="Run Volume"
+          fill="hsl(var(--cyan-glow))"
+          radius={[4, 4, 0, 0]}
           opacity={0.6}
         />
-        <Line 
-          yAxisId="right" 
-          type="monotone" 
-          dataKey="rate" 
-          name="Success Rate" 
-          stroke="var(--success)" 
+        <Line
+          yAxisId="right"
+          type="monotone"
+          dataKey="rate"
+          name="Success Rate"
+          stroke="hsl(var(--success))"
           strokeWidth={2}
           dot={false}
           activeDot={{ r: 4, strokeWidth: 0 }}

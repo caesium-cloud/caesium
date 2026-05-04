@@ -189,7 +189,7 @@ describe("JobDAG", () => {
 
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-output-count", "2");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-contract-defined", "true");
-    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "#64748b");
+    expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "hsl(var(--text-3))");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-dasharray", "6 3");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-animated", "false");
   });

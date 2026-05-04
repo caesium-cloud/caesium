@@ -30,32 +30,32 @@ export function FailureAtomsChart({ data }: FailureAtomsChartProps) {
         layout="vertical" 
         margin={{ top: 5, right: 30, left: 10, bottom: 5 }}
       >
-        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="var(--graphite)" opacity={0.3} />
+        <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="hsl(var(--graphite))" opacity={0.3} />
         <XAxis type="number" hide />
-        <YAxis 
-          dataKey="atom_name" 
-          type="category" 
-          stroke="var(--text-3)"
+        <YAxis
+          dataKey="atom_name"
+          type="category"
+          stroke="hsl(var(--text-3))"
           fontSize={11}
           tickLine={false}
           axisLine={false}
           width={100}
         />
-        <Tooltip 
-          cursor={{ fill: 'var(--graphite)', opacity: 0.1 }}
-          contentStyle={{ 
-            backgroundColor: 'var(--midnight)',
-            borderColor: 'var(--graphite)',
-            color: 'var(--text-1)',
+        <Tooltip
+          cursor={{ fill: 'hsl(var(--graphite))', opacity: 0.1 }}
+          contentStyle={{
+            backgroundColor: 'hsl(var(--midnight))',
+            borderColor: 'hsl(var(--graphite))',
+            color: 'hsl(var(--text-1))',
             borderRadius: '8px',
           }}
           itemStyle={{ fontSize: '12px' }}
           formatter={(value, _name, props) => [value, `Failures (${props.payload.alias})`]}
         />
-        <Bar 
-          dataKey="failure_count" 
-          fill="var(--danger)" 
-          radius={[0, 4, 4, 0]} 
+        <Bar
+          dataKey="failure_count"
+          fill="hsl(var(--danger))"
+          radius={[0, 4, 4, 0]}
           barSize={20}
         >
           {data.map((_, index) => (

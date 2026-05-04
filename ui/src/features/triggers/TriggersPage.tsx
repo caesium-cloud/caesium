@@ -472,7 +472,7 @@ export function TriggersPage() {
                 </div>
 
                 {isExpanded && (
-                  <div className="border-t border-graphite/20 bg-black/20 px-5 py-4 space-y-4">
+                  <div className="border-t border-graphite/20 bg-obsidian/40 px-5 py-4 space-y-4">
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
                       <div className="col-span-2 md:col-span-1">
                         <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Full ID</p>
@@ -625,8 +625,8 @@ export function TriggersPage() {
             </div>
 
             <div className="rounded-md border border-graphite/30 bg-midnight/40 px-3 py-2.5 text-xs text-text-3">
-              Param mappings use simple JSONPath expressions like <code className="mx-1 rounded bg-black/40 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$.ref</code> and
-              <code className="mx-1 rounded bg-black/40 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$</code> for the whole payload.
+              Param mappings use simple JSONPath expressions like <code className="mx-1 rounded bg-void/60 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$.ref</code> and
+              <code className="mx-1 rounded bg-void/60 border border-graphite/40 px-1 py-0.5 text-[10px] text-text-2 font-mono">$</code> for the whole payload.
             </div>
 
             {formError && <p className="text-sm text-danger font-medium">{formError}</p>}

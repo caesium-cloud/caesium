@@ -219,25 +219,25 @@ export function TaskDetailPanel({
             <div className="p-4 space-y-4">
               {/* Error banner */}
               {runTask?.error && status === "skipped" ? (
-                <div className="rounded-lg border border-slate-500/20 bg-slate-500/10 px-3 py-2.5 flex gap-3 items-start">
-                  <SkipForward className="w-4 h-4 text-slate-400 shrink-0 mt-0.5" />
+                <div className="rounded-lg border border-text-3/20 bg-text-3/10 px-3 py-2.5 flex gap-3 items-start">
+                  <SkipForward className="w-4 h-4 text-text-3 shrink-0 mt-0.5" />
                   <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                    <span className="text-[10px] font-bold text-text-3 uppercase tracking-wider">
                       Skipped
                     </span>
-                    <span className="text-xs text-slate-400/80 font-mono leading-relaxed break-all">
+                    <span className="text-xs text-text-3/80 font-mono leading-relaxed break-all">
                       {runTask.error}
                     </span>
                   </div>
                 </div>
               ) : runTask?.error ? (
-                <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2.5 flex gap-3 items-start">
-                  <AlertTriangle className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                <div className="rounded-lg border border-danger/20 bg-danger/10 px-3 py-2.5 flex gap-3 items-start">
+                  <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
                   <div className="flex flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-red-500 uppercase tracking-wider">
+                    <span className="text-[10px] font-bold text-danger uppercase tracking-wider">
                       Error
                     </span>
-                    <span className="text-xs text-red-400 font-mono leading-relaxed break-all">
+                    <span className="text-xs text-danger/90 font-mono leading-relaxed break-all">
                       {runTask.error}
                     </span>
                   </div>
@@ -245,16 +245,16 @@ export function TaskDetailPanel({
               ) : null}
 
               {cached ? (
-                <div className="rounded-lg border border-teal-500/30 bg-teal-500/10 px-3 py-2.5 flex gap-3 items-start">
-                  <Archive className="w-4 h-4 text-teal-500 shrink-0 mt-0.5" />
+                <div className="rounded-lg border border-cached/30 bg-cached/10 px-3 py-2.5 flex gap-3 items-start">
+                  <Archive className="w-4 h-4 text-cached shrink-0 mt-0.5" />
                   <div className="flex flex-1 flex-col gap-1 min-w-0">
-                    <span className="text-[10px] font-bold text-teal-700 dark:text-teal-300 uppercase tracking-wider">
+                    <span className="text-[10px] font-bold text-cached uppercase tracking-wider">
                       Reused successful output
                     </span>
-                    <span className="text-xs text-teal-700 dark:text-teal-300">
+                    <span className="text-xs text-cached">
                       This task completed from cache, so no new container had to run for this step.
                     </span>
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-teal-700 dark:text-teal-300">
+                    <div className="flex flex-wrap items-center gap-2 text-xs text-cached">
                       {runTask?.cache_origin_run_id ? (
                         <Link to="/jobs/$jobId/runs/$runId" params={{ jobId, runId: runTask.cache_origin_run_id }} className="font-mono hover:underline">
                           Source run {runTask.cache_origin_run_id.slice(0, 8)}
@@ -340,16 +340,16 @@ export function TaskDetailPanel({
 function StatusDot({ status }: { status: string }) {
   const color =
     status === "succeeded" || status === "completed"
-      ? "bg-emerald-400 shadow-emerald-400/50"
+      ? "bg-success shadow-success/50"
       : status === "cached"
-        ? "bg-teal-400 shadow-teal-400/50"
+        ? "bg-cached shadow-cached/50"
       : status === "failed"
-        ? "bg-red-400 shadow-red-400/50"
+        ? "bg-danger shadow-danger/50"
         : status === "running"
-          ? "bg-blue-400 shadow-blue-400/50 animate-pulse"
+          ? "bg-running shadow-running/50 animate-pulse"
           : status === "skipped"
-            ? "bg-slate-400"
-            : "bg-slate-500";
+            ? "bg-text-3"
+            : "bg-text-4";
 
   return (
     <span

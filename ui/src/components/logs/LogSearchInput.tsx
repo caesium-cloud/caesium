@@ -17,16 +17,16 @@ export function LogSearchInput({
   return (
     <div
       className={cn(
-        "flex min-w-[180px] flex-1 items-center gap-2 rounded-md border border-slate-800 bg-slate-900/80 px-2.5 py-1.5",
+        "flex min-w-[180px] flex-1 items-center gap-2 rounded-md border border-graphite/50 bg-midnight/60 px-2.5 py-1.5",
         className,
       )}
     >
-      <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+      <Search className="h-3.5 w-3.5 shrink-0 text-text-4" />
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full bg-transparent text-xs text-slate-100 outline-none placeholder:text-slate-500"
+        className="w-full bg-transparent text-xs text-text-1 outline-none placeholder:text-text-4"
       />
     </div>
   );
