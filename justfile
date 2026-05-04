@@ -30,6 +30,12 @@ sock := env("CAESIUM_SOCK", default_sock)
 port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
 
+# Local Docker registry used by `just k8s-distributed` to push freshly-built
+# images into the cluster's containerd. Port 5050 sidesteps the macOS
+# AirPlay Receiver, which binds 5000 by default.
+k8s_registry_port := env("CAESIUM_K8S_REGISTRY_PORT", "5050")
+k8s_registry_name := "caesium-dev-registry"
+
 validate-platform:
     @if [ "{{ platform }}" != "linux/amd64" ] && [ "{{ platform }}" != "linux/arm64" ]; then \
       echo "Unsupported CAESIUM_PLATFORM '{{ platform }}' (supported: linux/amd64, linux/arm64)"; \
@@ -278,21 +284,53 @@ helm-template:
 helm-test:
     helm test caesium --timeout 120s
 
-# Deploy Caesium in a distributed 3-node Raft cluster on local Kubernetes
-k8s-distributed: build-release
+# Spin up the local dev registry and configure the cluster's containerd to
+# pull from it via host.docker.internal. Idempotent. Targets Docker Desktop
+# Kubernetes; other clusters (Kind, Minikube) need different wiring.
+k8s-registry-up:
     @if ! kubectl cluster-info >/dev/null 2>&1; then echo "Error: Kubernetes cluster not reachable. Ensure Docker Desktop K8s or Kind is running." && exit 1; fi
-    # Load image into cluster (Docker Desktop K8s sees local images by default, but this ensures it's fresh)
-    # Note: For Kind, you'd use 'kind load docker-image'
-    helm upgrade --install caesium ./helm/caesium \
-        --set replicaCount=3 \
-        --set image.repository={{ local_image_ref }} \
-        --set image.tag={{ tag }} \
-        --set image.pullPolicy=IfNotPresent \
-        --set config.extraEnv[0].name=CAESIUM_EXECUTION_MODE \
-        --set config.extraEnv[0].value=distributed \
-        --set kubernetes.engine.enabled=true \
-        --set persistence.enabled=false \
-        --wait
+    @ctx="$(kubectl config current-context)"; \
+        if [ "$ctx" != "docker-desktop" ]; then \
+            echo "Warning: detected context '$ctx'. This helper is verified on Docker Desktop. Other clusters may need different setup."; \
+        fi
+    @if ! {{ container_cli }} inspect {{ k8s_registry_name }} >/dev/null 2>&1; then \
+        echo "Starting local registry on 127.0.0.1:{{ k8s_registry_port }}..."; \
+        {{ container_cli }} run -d --restart=always --name {{ k8s_registry_name }} \
+            -p 127.0.0.1:{{ k8s_registry_port }}:5000 registry:2 >/dev/null; \
+    elif [ "$({{ container_cli }} inspect -f '{{ "{{.State.Running}}" }}' {{ k8s_registry_name }})" != "true" ]; then \
+        echo "Restarting stopped local registry {{ k8s_registry_name }}..."; \
+        {{ container_cli }} start {{ k8s_registry_name }} >/dev/null; \
+    else \
+        echo "Local registry {{ k8s_registry_name }} already running."; \
+    fi
+    @./scripts/k8s-registry-bypass.sh {{ k8s_registry_port }}
+
+# Tear down the local dev registry (does not affect deployed pods).
+k8s-registry-down:
+    -{{ container_cli }} rm -f {{ k8s_registry_name }}
+
+# Deploy Caesium in a distributed 3-node Raft cluster on local Kubernetes.
+# Tags the image with a unique dev tag, pushes to the local registry, and
+# helm-deploys with pullPolicy=Always so each invocation rolls out the freshly
+# built bits. See `k8s-registry-up` for the registry/containerd wiring.
+k8s-distributed: build-release k8s-registry-up
+    @dev_tag="dev-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"; \
+        if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then \
+            dev_tag="${dev_tag}-dirty-$(date +%s)"; \
+        fi; \
+        echo "Pushing image to local dev registry as ${dev_tag}..."; \
+        {{ container_cli }} tag {{ local_image_ref }}:{{ tag }} localhost:{{ k8s_registry_port }}/{{ image }}:${dev_tag}; \
+        {{ container_cli }} push localhost:{{ k8s_registry_port }}/{{ image }}:${dev_tag} >/dev/null; \
+        helm upgrade --install caesium ./helm/caesium \
+            --set replicaCount=3 \
+            --set image.repository=host.docker.internal:{{ k8s_registry_port }}/{{ image }} \
+            --set image.tag=${dev_tag} \
+            --set image.pullPolicy=Always \
+            --set config.extraEnv[0].name=CAESIUM_EXECUTION_MODE \
+            --set config.extraEnv[0].value=distributed \
+            --set kubernetes.engine.enabled=true \
+            --set persistence.enabled=false \
+            --wait
     @echo "Caesium distributed cluster is ready."
 
 # Stop the local Kubernetes deployment
