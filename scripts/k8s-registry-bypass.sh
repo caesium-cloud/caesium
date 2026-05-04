@@ -8,10 +8,27 @@
 # local registry is unreachable. We write a hosts.toml under
 # `/etc/containerd/certs.d/host.docker.internal:<port>/` on the node;
 # containerd 1.5+ picks the per-host file up dynamically.
+#
+# The privileged pod takes ~5–10s to schedule, run, and clean up. Since
+# this script is in the `k8s-distributed` dependency chain, that adds up
+# across the dev loop. We cache successful runs per (cluster UID, port)
+# and skip the pod when the marker is fresh — recreating the cluster
+# rotates the UID and invalidates the cache automatically. Set
+# CAESIUM_K8S_REGISTRY_BYPASS_FORCE=1 to bypass the cache.
 set -euo pipefail
 
 port="${1:-5050}"
 pod="caesium-registry-bypass"
+
+cluster_uid="$(kubectl get ns kube-system -o jsonpath='{.metadata.uid}' 2>/dev/null || echo unknown)"
+marker_dir="${TMPDIR:-/tmp}/caesium-k8s-registry-bypass"
+marker="${marker_dir}/${cluster_uid}.${port}.done"
+
+if [ -z "${CAESIUM_K8S_REGISTRY_BYPASS_FORCE:-}" ] && [ -f "$marker" ]; then
+    echo "  Bypass already configured for this cluster (cache: $marker)"
+    exit 0
+fi
+
 node="$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')"
 
 # Drop any leftover pod from a previous run.
@@ -74,4 +91,6 @@ if [ "${phase:-}" != "Succeeded" ]; then
     exit 1
 fi
 
+mkdir -p "$marker_dir"
+: >"$marker"
 echo "  $(echo "$logs" | tail -n 1)"

@@ -293,10 +293,13 @@ k8s-registry-up:
         if [ "$ctx" != "docker-desktop" ]; then \
             echo "Warning: detected context '$ctx'. This helper is verified on Docker Desktop. Other clusters may need different setup."; \
         fi
-    @if ! {{ container_cli }} ps --filter name=^/{{ k8s_registry_name }}$ --format '{{ "{{.Names}}" }}' | grep -q .; then \
+    @if ! {{ container_cli }} inspect {{ k8s_registry_name }} >/dev/null 2>&1; then \
         echo "Starting local registry on 127.0.0.1:{{ k8s_registry_port }}..."; \
         {{ container_cli }} run -d --restart=always --name {{ k8s_registry_name }} \
             -p 127.0.0.1:{{ k8s_registry_port }}:5000 registry:2 >/dev/null; \
+    elif [ "$({{ container_cli }} inspect -f '{{ "{{.State.Running}}" }}' {{ k8s_registry_name }})" != "true" ]; then \
+        echo "Restarting stopped local registry {{ k8s_registry_name }}..."; \
+        {{ container_cli }} start {{ k8s_registry_name }} >/dev/null; \
     else \
         echo "Local registry {{ k8s_registry_name }} already running."; \
     fi
