@@ -203,8 +203,8 @@ func (w *Watcher) scanCompletedBySLA(ctx context.Context, now time.Time) {
 	// Single batch query: for each candidate job, find the latest
 	// successful run completion time since the earliest window.
 	type jobLatest struct {
-		JobID       uuid.UUID  `gorm:"column:job_id"`
-		LatestCompl time.Time  `gorm:"column:latest_compl"`
+		JobID       uuid.UUID `gorm:"column:job_id"`
+		LatestCompl time.Time `gorm:"column:latest_compl"`
 	}
 	var rows []jobLatest
 	if err := w.db.WithContext(ctx).
@@ -324,7 +324,7 @@ func (w *Watcher) persistAndPublish(ctx context.Context, evt *event.Event) {
 			return
 		}
 	}
-	w.bus.Publish(*evt)
+	event.PublishAndMarkBusDispatched(ctx, w.bus, w.store, *evt)
 }
 
 func buildRunEventPayload(r models.JobRun, errorMsg string) json.RawMessage {

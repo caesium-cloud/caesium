@@ -3,6 +3,7 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -12,7 +13,6 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"sync"
 )
 
 type Job interface {
@@ -72,12 +72,7 @@ func (j *jobService) WithDatabase(conn *gorm.DB) Job {
 }
 
 func (j *jobService) publishEvents(events ...event.Event) {
-	if j.bus == nil {
-		return
-	}
-	for _, evt := range events {
-		j.bus.Publish(evt)
-	}
+	event.PublishAndMarkBusDispatched(j.ctx, j.bus, j.eventStore, events...)
 }
 
 type ListRequest struct {

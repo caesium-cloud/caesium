@@ -36,12 +36,13 @@ func (s *Store) AppendTx(tx *gorm.DB, evt *Event) error {
 	}
 
 	record := &models.ExecutionEvent{
-		Type:      string(evt.Type),
-		JobID:     uuidPtr(evt.JobID),
-		RunID:     uuidPtr(evt.RunID),
-		TaskID:    uuidPtr(evt.TaskID),
-		Payload:   []byte(evt.Payload),
-		CreatedAt: evt.Timestamp,
+		Type:               string(evt.Type),
+		JobID:              uuidPtr(evt.JobID),
+		RunID:              uuidPtr(evt.RunID),
+		TaskID:             uuidPtr(evt.TaskID),
+		Payload:            []byte(evt.Payload),
+		BusDispatchPending: true,
+		CreatedAt:          evt.Timestamp,
 	}
 
 	if err := tx.Create(record).Error; err != nil {

@@ -76,6 +76,8 @@ Use metrics:
 
 Dqlite warnings that contain `unknown data type: 0` include a `recent_db_statements` field with the last few rendered GORM statements observed by the process. Use that context to identify the nearby code path before escalating to an upstream go-dqlite issue.
 
+Execution events are marked with `bus_dispatch_pending=true` before commit. Normal in-process dispatch clears the flag and records `bus_dispatched_at`; after a restart, the event bus dispatcher replays any still-pending rows so wakeups, notifications, lineage, and SSE live delivery recover from a crash between commit and dispatch. Delivery is at-least-once, so downstream consumers should continue to treat event `sequence` as the dedupe key.
+
 ## Tuning Guidance
 
 - Increase `CAESIUM_WORKER_POOL_SIZE` to raise per-node throughput.
