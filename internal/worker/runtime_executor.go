@@ -481,9 +481,16 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 
 // monitorTask blocks until the engine reports the atom has terminated and
 // returns the post-Wait atom snapshot, periodically renewing the worker lease.
-// The caller is responsible for stopping/cleaning up the atom — monitorTask
-// only intervenes with engine.Stop on a deadline-exceeded timeout, so that
-// the caller can read logs from the live container/pod before teardown.
+//
+// On the success path the caller is responsible for stopping/cleaning up the
+// atom — monitorTask intentionally leaves it running so the caller can read
+// logs from the live container/pod before teardown.
+//
+// On any error path (deadline exceeded, parent cancellation, engine.Wait
+// failure) monitorTask makes a best-effort engine.Stop before returning, so
+// failures don't leak orphaned containers/pods. The Stop uses a detached
+// context inside each engine implementation so cleanup still runs even when
+// the parent context has been cancelled.
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) (atom.Atom, error) {
 	ticker := time.NewTicker(leaseRenewInterval(e.workerLeaseTTL))
 	defer ticker.Stop()
@@ -500,18 +507,29 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 		}{atom: next, err: err}
 	}()
 
+	stopAtom := func() error {
+		return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
+			stopErr := stopAtom()
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+				if stopErr != nil {
 					return a, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskRun.TaskID, e.taskTimeout, a.ID(), stopErr)
 				}
 				return a, fmt.Errorf("task %s timed out after %s", taskRun.TaskID, e.taskTimeout)
 			}
+			if stopErr != nil {
+				log.Warn("failed to stop atom after task cancellation", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
+			}
 			return a, ctx.Err()
 		case result := <-waitResult:
 			if result.err != nil {
+				if stopErr := stopAtom(); stopErr != nil {
+					log.Warn("failed to stop atom after engine wait error", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
+				}
 				return a, result.err
 			}
 			return result.atom, nil
