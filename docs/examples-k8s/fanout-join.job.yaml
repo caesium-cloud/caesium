@@ -1,0 +1,53 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-fanout-join-demo
+  labels:
+    team: platform
+    runtime: kubernetes
+    scenario: dag-join
+  annotations:
+    owner: platform-oncall
+    purpose: "Exercise fan-out/fan-in DAG rendering using the Kubernetes engine"
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+    timezone: "UTC"
+steps:
+  - name: bootstrap
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo bootstrap && date"]
+    env:
+      PIPELINE_ID: k8s-fanout-join-demo
+      RUN_MODE: hydrated
+    next:
+      - lint
+      - unit-test
+  - name: lint
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo lint branch"]
+    dependsOn: bootstrap
+    next: package
+  - name: unit-test
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo unit-test branch"]
+    dependsOn: bootstrap
+    next: package
+  - name: package
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo packaging build artifacts"]
+    dependsOn:
+      - lint
+      - unit-test
+    next: publish
+  - name: publish
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo publishing artifacts"]
+    dependsOn: package

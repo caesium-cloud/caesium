@@ -1,0 +1,94 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-task-outputs-demo
+  labels:
+    team: platform
+    runtime: kubernetes
+    scenario: data-passing
+  annotations:
+    owner: platform-oncall
+    purpose: "Exercise structured task output passing between Kubernetes-engine steps"
+trigger:
+  type: cron
+  configuration:
+    cron: "*/10 * * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Extracting data from source..."
+        sleep 1
+        ROW_COUNT=$((RANDOM % 9000 + 1000))
+        echo "Extracted $ROW_COUNT rows"
+        echo '##caesium::output {"row_count": "'$ROW_COUNT'", "source": "warehouse-prod", "format": "parquet"}'
+    next:
+      - transform-a
+      - transform-b
+
+  - name: transform-a
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Transform A: received $CAESIUM_OUTPUT_EXTRACT_ROW_COUNT rows from $CAESIUM_OUTPUT_EXTRACT_SOURCE"
+        sleep 1
+        PROCESSED=$((CAESIUM_OUTPUT_EXTRACT_ROW_COUNT * 80 / 100))
+        echo "Processed $PROCESSED rows (80% pass rate)"
+        echo '##caesium::output {"processed_rows": "'$PROCESSED'", "transform": "enrichment"}'
+    dependsOn: extract
+    next: load
+
+  - name: transform-b
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Transform B: aggregating $CAESIUM_OUTPUT_EXTRACT_ROW_COUNT rows from $CAESIUM_OUTPUT_EXTRACT_SOURCE"
+        sleep 2
+        GROUPS=$((CAESIUM_OUTPUT_EXTRACT_ROW_COUNT / 100))
+        echo "Aggregated into $GROUPS groups"
+        echo '##caesium::output {"group_count": "'$GROUPS'", "transform": "aggregation"}'
+    dependsOn: extract
+    next: load
+
+  - name: load
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Loading results from upstream transforms..."
+        echo "  Transform A: $CAESIUM_OUTPUT_TRANSFORM_A_PROCESSED_ROWS rows ($CAESIUM_OUTPUT_TRANSFORM_A_TRANSFORM)"
+        echo "  Transform B: $CAESIUM_OUTPUT_TRANSFORM_B_GROUP_COUNT groups ($CAESIUM_OUTPUT_TRANSFORM_B_TRANSFORM)"
+        sleep 1
+        TOTAL=$((CAESIUM_OUTPUT_TRANSFORM_A_PROCESSED_ROWS + CAESIUM_OUTPUT_TRANSFORM_B_GROUP_COUNT))
+        echo "Loaded $TOTAL total records to destination"
+        echo '##caesium::output {"total_loaded": "'$TOTAL'", "destination": "analytics-db"}'
+    dependsOn:
+      - transform-a
+      - transform-b
+    next: notify
+
+  - name: notify
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "Pipeline complete!"
+        echo "  Loaded $CAESIUM_OUTPUT_LOAD_TOTAL_LOADED records to $CAESIUM_OUTPUT_LOAD_DESTINATION"
+        echo "Done."
+    dependsOn: load

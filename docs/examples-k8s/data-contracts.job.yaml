@@ -1,0 +1,104 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-data-contracts-demo
+  labels:
+    team: platform
+    runtime: kubernetes
+    scenario: schema-validation
+  annotations:
+    owner: platform-oncall
+    purpose: "Demonstrates outputSchema/inputSchema data contracts under the Kubernetes engine"
+  schemaValidation: warn
+trigger:
+  type: cron
+  configuration:
+    cron: "*/15 * * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    engine: kubernetes
+    image: alpine:3.23
+    outputSchema:
+      type: object
+      properties:
+        row_count:  { type: integer }
+        source:     { type: string }
+        format:     { type: string }
+      required: [row_count, source, format]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Extracting data from warehouse..."
+        sleep 1
+        ROW_COUNT=$((RANDOM % 9000 + 1000))
+        echo "Extracted $ROW_COUNT rows"
+        echo '##caesium::output {"row_count": "'$ROW_COUNT'", "source": "warehouse-prod", "format": "parquet"}'
+
+  - name: transform
+    engine: kubernetes
+    image: alpine:3.23
+    dependsOn: [extract]
+    inputSchema:
+      extract:
+        required: [row_count, source]
+        properties:
+          row_count: { type: integer }
+          source:    { type: string }
+    outputSchema:
+      type: object
+      properties:
+        processed_rows: { type: integer }
+        output_path:    { type: string }
+        transform_id:   { type: string }
+      required: [processed_rows, output_path, transform_id]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Transforming $CAESIUM_OUTPUT_EXTRACT_ROW_COUNT rows from $CAESIUM_OUTPUT_EXTRACT_SOURCE..."
+        sleep 1
+        PROCESSED=$((CAESIUM_OUTPUT_EXTRACT_ROW_COUNT * 85 / 100))
+        echo "Kept $PROCESSED rows after deduplication"
+        echo '##caesium::output {"processed_rows": "'$PROCESSED'", "output_path": "/data/transformed.parquet", "transform_id": "txn-'$(date +%s)'"}'
+
+  - name: load
+    engine: kubernetes
+    image: alpine:3.23
+    dependsOn: [transform]
+    inputSchema:
+      transform:
+        required: [processed_rows, output_path]
+        properties:
+          processed_rows: { type: integer }
+    outputSchema:
+      type: object
+      properties:
+        rows_written:  { type: integer }
+        destination:   { type: string }
+        duration_ms:   { type: integer }
+      required: [rows_written, destination, duration_ms]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Loading $CAESIUM_OUTPUT_TRANSFORM_PROCESSED_ROWS rows from $CAESIUM_OUTPUT_TRANSFORM_OUTPUT_PATH..."
+        sleep 1
+        echo "Wrote to analytics-db"
+        echo '##caesium::output {"rows_written": "unknown", "destination": "analytics-db", "duration_ms": "412"}'
+
+  - name: notify
+    engine: kubernetes
+    image: alpine:3.23
+    dependsOn: [load]
+    command:
+      - sh
+      - -c
+      - |
+        echo "Pipeline complete!"
+        echo "  Destination : $CAESIUM_OUTPUT_LOAD_DESTINATION"
+        echo "  Rows written: $CAESIUM_OUTPUT_LOAD_ROWS_WRITTEN"
+        echo "  Duration    : ${CAESIUM_OUTPUT_LOAD_DURATION_MS}ms"
+        echo "Done."

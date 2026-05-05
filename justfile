@@ -346,10 +346,13 @@ k8s-port-forward:
 k8s-logs:
     kubectl logs -l app.kubernetes.io/name=caesium --all-containers=true -f --tail=100
 
-# Hydrate example jobs into the Kubernetes-hosted Caesium instance
+# Hydrate example jobs into the Kubernetes-hosted Caesium instance.
+# Uses examples-k8s/ (engine: kubernetes) so the steps run as pods inside
+# the cluster — the docker-engine examples in docs/examples/ would fail
+# here because pods don't have access to the host Docker daemon.
 k8s-hydrate:
     {{ container_cli }} run --platform {{ platform }} \
         --rm \
         --network=host \
-        -v {{ repo_dir }}/docs/examples:/examples:ro \
+        -v {{ repo_dir }}/docs/examples-k8s:/examples:ro \
         {{ local_image_ref }}:{{ tag }} job apply --server http://host.docker.internal:{{ port }} --path /examples

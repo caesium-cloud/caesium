@@ -1,0 +1,28 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-nightly-etl
+  labels:
+    team: platform
+    runtime: kubernetes
+  annotations:
+    purpose: "Minimal sequential ETL using the in-cluster Kubernetes engine"
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extracting data"]
+  - name: transform
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo transforming data"]
+  - name: load
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo loading data"]
