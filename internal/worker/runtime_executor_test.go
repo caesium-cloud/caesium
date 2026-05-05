@@ -1,10 +1,15 @@
 package worker
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/atom"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -15,6 +20,79 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+// TestMonitorTaskReturnsPostWaitAtom locks in the contract that monitorTask
+// returns the atom snapshot produced by engine.Wait, not the pre-Wait atom
+// it was handed. Regression guard: if monitorTask reverts to discarding the
+// Wait result, executeTask would record TaskRun.Result from the pre-execution
+// pod state — which the kubernetes engine reports as "unknown" (Pending phase),
+// causing every k8s task to fail with the "task X failed with result \"unknown\""
+// error users hit on `just k8s-distributed`.
+func TestMonitorTaskReturnsPostWaitAtom(t *testing.T) {
+	preExec := &fakeMonitorAtom{id: "pod-1", result: atom.Unknown}
+	postExec := &fakeMonitorAtom{id: "pod-1", result: atom.Success}
+
+	engine := &fakeMonitorEngine{waitResult: postExec}
+	executor := &runtimeExecutor{}
+	taskRun := &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()}
+
+	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, atom.Success, got.Result(), "monitorTask must return the atom from Wait, not the pre-Wait input")
+	require.Zero(t, engine.stopCalls, "monitorTask must not call engine.Stop on success — caller stops the atom after reading logs")
+}
+
+func TestMonitorTaskReturnsInputAtomOnWaitError(t *testing.T) {
+	preExec := &fakeMonitorAtom{id: "pod-1", result: atom.Unknown}
+	engine := &fakeMonitorEngine{waitErr: errors.New("watch closed")}
+	executor := &runtimeExecutor{}
+	taskRun := &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()}
+
+	got, err := executor.monitorTask(context.Background(), taskRun, engine, preExec)
+	require.Error(t, err)
+	require.Same(t, preExec, got, "on Wait error monitorTask should return the input atom so the caller can still call Stop with its ID")
+}
+
+type fakeMonitorAtom struct {
+	id     string
+	result atom.Result
+}
+
+func (a *fakeMonitorAtom) ID() string           { return a.id }
+func (a *fakeMonitorAtom) State() atom.State    { return atom.Stopped }
+func (a *fakeMonitorAtom) Result() atom.Result  { return a.result }
+func (a *fakeMonitorAtom) CreatedAt() time.Time { return time.Time{} }
+func (a *fakeMonitorAtom) StartedAt() time.Time { return time.Time{} }
+func (a *fakeMonitorAtom) StoppedAt() time.Time { return time.Time{} }
+func (a *fakeMonitorAtom) Engine() atom.Engine  { return nil }
+
+type fakeMonitorEngine struct {
+	waitResult atom.Atom
+	waitErr    error
+	stopCalls  int
+}
+
+func (e *fakeMonitorEngine) Get(*atom.EngineGetRequest) (atom.Atom, error)   { return e.waitResult, nil }
+func (e *fakeMonitorEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) {
+	return nil, nil
+}
+func (e *fakeMonitorEngine) Create(*atom.EngineCreateRequest) (atom.Atom, error) {
+	return e.waitResult, nil
+}
+func (e *fakeMonitorEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	if e.waitErr != nil {
+		return nil, e.waitErr
+	}
+	return e.waitResult, nil
+}
+func (e *fakeMonitorEngine) Stop(*atom.EngineStopRequest) error {
+	e.stopCalls++
+	return nil
+}
+func (e *fakeMonitorEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
 
 func TestLeaseRenewInterval(t *testing.T) {
 	tests := []struct {

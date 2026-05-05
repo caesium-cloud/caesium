@@ -350,12 +350,18 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	if err := e.monitorTask(taskCtx, taskRun, engine, a); err != nil {
-		return err
+	finalAtom, monitorErr := e.monitorTask(taskCtx, taskRun, engine, a)
+	if monitorErr != nil {
+		return monitorErr
 	}
+	// monitorTask returns the post-Wait atom snapshot whose Result/State
+	// reflect actual execution. The original `a` from Create() is pre-execution
+	// state and would report Result=Unknown for the kubernetes engine.
+	a = finalAtom
 
 	// Parse structured task output and branch markers in a single pass
-	// over the log stream (no full buffering).
+	// over the log stream (no full buffering). Logs must be fetched before
+	// engine.Stop runs, because Stop tears down the underlying container/pod.
 	var taskOutput map[string]string
 	var branchSelections []string
 	var logSnapshot *run.TaskLogSnapshot
@@ -379,6 +385,10 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 				}
 			}
 		}
+	}
+
+	if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+		log.Warn("failed to stop atom after task completion", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 	}
 
 	// Runtime schema validation: if the task declares an outputSchema and the job has
@@ -469,7 +479,12 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 	}
 }
 
-func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) error {
+// monitorTask blocks until the engine reports the atom has terminated and
+// returns the post-Wait atom snapshot, periodically renewing the worker lease.
+// The caller is responsible for stopping/cleaning up the atom — monitorTask
+// only intervenes with engine.Stop on a deadline-exceeded timeout, so that
+// the caller can read logs from the live container/pod before teardown.
+func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) (atom.Atom, error) {
 	ticker := time.NewTicker(leaseRenewInterval(e.workerLeaseTTL))
 	defer ticker.Stop()
 
@@ -490,17 +505,16 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
-					return fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskRun.TaskID, e.taskTimeout, a.ID(), stopErr)
+					return a, fmt.Errorf("task %s timed out after %s and failed to stop atom %s: %w", taskRun.TaskID, e.taskTimeout, a.ID(), stopErr)
 				}
-				return fmt.Errorf("task %s timed out after %s", taskRun.TaskID, e.taskTimeout)
+				return a, fmt.Errorf("task %s timed out after %s", taskRun.TaskID, e.taskTimeout)
 			}
-			return ctx.Err()
+			return a, ctx.Err()
 		case result := <-waitResult:
 			if result.err != nil {
-				return result.err
+				return a, result.err
 			}
-			a = result.atom
-			return engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true})
+			return result.atom, nil
 		case <-ticker.C:
 			if err := e.renewLease(taskRun); err != nil {
 				log.Error("failed to renew worker task lease", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)

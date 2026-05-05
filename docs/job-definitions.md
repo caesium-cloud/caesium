@@ -10,6 +10,8 @@ just hydrate
 
 The command mounts `docs/examples/` into a short-lived CLI container and applies each manifest via the REST API.
 
+For the in-cluster Kubernetes deployment (`just k8s-distributed`), use `just k8s-hydrate` instead. It loads a parallel set of manifests under `docs/examples-k8s/` whose steps declare `engine: kubernetes`, so each step runs as a pod inside the cluster rather than against the host Docker daemon (which is unreachable from cluster pods).
+
 ## Minimal Example
 
 ```yaml
