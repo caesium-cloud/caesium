@@ -2082,7 +2082,11 @@ func isStoreContentionErr(err error) bool {
 		strings.Contains(msg, "database is busy") ||
 		strings.Contains(msg, "checkpoint in progress") ||
 		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked")
+		strings.Contains(msg, "sqlite_locked") ||
+		// Connection-state poisoning following an earlier failed rollback —
+		// retry on a fresh pooled connection usually succeeds. See
+		// internal/backfill/store.go::isContentionErr for the full rationale.
+		strings.Contains(msg, "cannot start a transaction within a transaction")
 }
 
 // PredecessorOutputs returns a map of step-name → output key-values for all
