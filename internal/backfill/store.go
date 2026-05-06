@@ -53,7 +53,7 @@ func Default() *Store {
 }
 
 func (s *Store) Create(b *models.Backfill) error {
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Create(b).Error
 	})
 }
@@ -77,7 +77,7 @@ func (s *Store) List(jobID uuid.UUID) ([]*models.Backfill, error) {
 // RequestCancel persists a cancellation request for a running backfill.
 func (s *Store) RequestCancel(id uuid.UUID) error {
 	now := time.Now().UTC()
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
 			Updates(map[string]interface{}{
@@ -90,7 +90,7 @@ func (s *Store) RequestCancel(id uuid.UUID) error {
 // work has drained.
 func (s *Store) MarkCancelled(id uuid.UUID) error {
 	now := time.Now().UTC()
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
 			Updates(map[string]interface{}{
@@ -106,7 +106,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 	if failed {
 		status = models.BackfillStatusFailed
 	}
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ? AND status = ?", id, string(models.BackfillStatusRunning)).
 			Updates(map[string]interface{}{
@@ -117,7 +117,7 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 }
 
 func (s *Store) IncrementCompleted(id uuid.UUID) error {
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ?", id).
 			UpdateColumn("completed_runs", gorm.Expr("completed_runs + 1")).Error
@@ -125,7 +125,7 @@ func (s *Store) IncrementCompleted(id uuid.UUID) error {
 }
 
 func (s *Store) IncrementFailed(id uuid.UUID) error {
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ?", id).
 			UpdateColumn("failed_runs", gorm.Expr("failed_runs + 1")).Error
@@ -134,7 +134,7 @@ func (s *Store) IncrementFailed(id uuid.UUID) error {
 
 // SetTotalRuns updates the total_runs counter on a backfill.
 func (s *Store) SetTotalRuns(id uuid.UUID, total int) error {
-	return withBusyRetry(func() error {
+	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ?", id).
 			UpdateColumn("total_runs", total).Error
@@ -199,7 +199,16 @@ func (s *Store) LatestRunForLogicalDate(jobID uuid.UUID, logicalDate string) (st
 // withBusyRetry retries the given operation when it fails with a transient
 // dqlite/SQLite contention or connection-state error. See isContentionErr for
 // the recognised classes.
-func withBusyRetry(fn func() error) error {
+//
+// On the connection-state poisoning case (a `cannot start a transaction within
+// a transaction` error left over from a prior failed rollback), the helper
+// also issues a best-effort `ROLLBACK` against the global pool before sleeping.
+// On a poisoned connection that ROLLBACK clears the leftover BEGIN; on a clean
+// connection it errors out harmlessly with "no transaction is active". This
+// follows the pattern from canonical/lxd/lxd/db/query/transaction.go and
+// dramatically improves per-retry success when one of the pooled connections
+// has been poisoned by a prior `checkpoint in progress` error.
+func (s *Store) withBusyRetry(fn func() error) error {
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = fn()
@@ -210,9 +219,30 @@ func withBusyRetry(fn func() error) error {
 			return err
 		}
 
+		if isPoisonedConnErr(err) {
+			// Errors from this Exec are intentionally ignored — see comment above.
+			_ = s.db.Exec("ROLLBACK").Error
+		}
+
 		metrics.DBBusyRetriesTotal.Inc()
 		time.Sleep(jitterBackoff(busyRetryBackoffs[attempt]))
 	}
+}
+
+// isPoisonedConnErr matches the narrow case where a pooled connection has
+// been left with a stale active transaction. Distinct from isContentionErr,
+// which also covers transient busy/locked errors that don't require active
+// recovery.
+func isPoisonedConnErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	for ; err != nil; err = errors.Unwrap(err) {
+		if strings.Contains(strings.ToLower(err.Error()), "cannot start a transaction within a transaction") {
+			return true
+		}
+	}
+	return false
 }
 
 func jitterBackoff(base time.Duration) time.Duration {
