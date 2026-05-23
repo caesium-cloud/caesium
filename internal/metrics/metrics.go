@@ -8,6 +8,17 @@ import (
 
 var registerOnce sync.Once
 
+// DBWriteCategory constants for use with DBWritesTotal.
+const (
+	DBWriteCategoryTaskRunInsert  = "task_run_insert"
+	DBWriteCategoryTaskRunStatus  = "task_run_status"
+	DBWriteCategoryEventInsert    = "event_insert"
+	DBWriteCategoryLeaseRenewal   = "lease_renewal"
+	DBWriteCategoryCallback       = "callback"
+	DBWriteCategoryCommand        = "command"
+	DBWriteCategoryCheckpoint     = "checkpoint"
+)
+
 var (
 	JobRunsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -202,6 +213,22 @@ var (
 		},
 		[]string{"path", "reason"},
 	)
+
+	// DBWritesTotal counts durable database writes by category. Categories:
+	//   task_run_insert   – new task_runs row (RegisterTasks)
+	//   task_run_status   – status UPDATE on task_runs (claim, start, complete, fail, skip, retry)
+	//   event_insert      – new execution_events row
+	//   lease_renewal     – UPDATE task_runs SET claim_expires_at (worker heartbeat)
+	//   callback          – INSERT or UPDATE on callback_runs
+	//   command           – reserved for future run_commands table writes
+	//   checkpoint        – reserved for future run_checkpoints table writes
+	DBWritesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_db_writes_total",
+			Help: "Total durable database writes by category (task_run_insert, task_run_status, event_insert, lease_renewal, callback, command, checkpoint).",
+		},
+		[]string{"category"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -232,6 +259,7 @@ func Register() {
 			AuthKeyAgeSeconds,
 			AuditLogEntriesTotal,
 			WebhookAuthFailuresTotal,
+			DBWritesTotal,
 		)
 	})
 }

@@ -527,6 +527,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunInsert).Add(float64(len(records)))
 			if len(readyEvents) > 0 {
 				eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
 				for _, evt := range readyEvents {
@@ -535,6 +536,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 				if err := tx.Create(&eventRecords).Error; err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Add(float64(len(eventRecords)))
 				for idx := range readyEvents {
 					readyEvents[idx].Sequence = eventRecords[idx].Sequence
 					readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
@@ -595,6 +597,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 				}).Error; err != nil {
 				return err
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 			if s.eventStore != nil {
 				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
 				if err != nil {
@@ -633,6 +636,7 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 			if result.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 			if s.eventStore != nil {
 				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
 				if err != nil {
@@ -767,6 +771,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 			// Load the task model for edge traversal and branch detection.
 			var taskModel models.Task
@@ -822,6 +827,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 				var successor models.TaskRun
 				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
@@ -975,6 +981,7 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 		return err
 	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 	*pendingEvents = append(*pendingEvents, evt)
 	return nil
 }
@@ -997,6 +1004,7 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 	if result.RowsAffected == 0 {
 		return false, nil
 	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 	if s.eventStore != nil {
 		evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID)
@@ -1193,6 +1201,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 			if status == TaskStatusFailed {
 				if s.eventStore != nil {
@@ -1276,6 +1285,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 				var successor models.TaskRun
 				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
@@ -1366,6 +1376,7 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 				return skipped, err
 			}
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 			var successor models.TaskRun
 			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err != nil {
@@ -1455,6 +1466,7 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 		if s.eventStore != nil {
 			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
@@ -1513,6 +1525,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 
 		if s.eventStore != nil {
 			evt, err := s.recordTaskEventTx(tx, event.TypeTaskRetrying, runID, taskID)
@@ -1538,6 +1551,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 				if err := s.eventStore.AppendTx(tx, &readyEvt); err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 				pendingEvents = append(pendingEvents, readyEvt)
 			}
 		}
@@ -1567,6 +1581,7 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 			}).Error; err != nil {
 			return err
 		}
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		if s.eventStore != nil {
 			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID)
 			if err != nil {
@@ -2025,6 +2040,7 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 		if err := s.eventStore.AppendTx(db, &evt); err != nil {
 			return nil, err
 		}
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 	}
 	return &evt, nil
 }

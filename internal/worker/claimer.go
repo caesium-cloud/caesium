@@ -106,6 +106,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	}
 	if claimed != nil {
 		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 	}
 	c.store.PublishEvents(pendingEvents...)
 
@@ -194,6 +195,7 @@ func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun,
 	if err := c.store.RecordEventTx(tx, &evt); err != nil {
 		return nil, err
 	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 	return &evt, nil
 }
 
@@ -294,6 +296,9 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			if result.Error != nil {
 				return result.Error
 			}
+			if result.RowsAffected > 0 {
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(result.RowsAffected))
+			}
 
 			for _, taskRun := range expired {
 				var jobRun models.JobRun
@@ -310,6 +315,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				if err := c.store.RecordEventTx(tx, &leaseEvt); err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 				attemptEvents = append(attemptEvents, leaseEvt)
 
 				readyEvt := event.Event{
@@ -322,6 +328,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				if err := c.store.RecordEventTx(tx, &readyEvt); err != nil {
 					return err
 				}
+				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
 				attemptEvents = append(attemptEvents, readyEvt)
 			}
 			attemptReclaimedCount = result.RowsAffected

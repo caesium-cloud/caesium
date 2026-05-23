@@ -337,6 +337,34 @@ k8s-distributed: build-release k8s-registry-up
 k8s-down:
     helm uninstall caesium
 
+# Run the Phase 0 load harness against a locally-running Caesium server.
+# Expects the server to already be up (just run) and reachable at CAESIUM_LOAD_SERVER.
+# Writes a JSON/markdown report to docs/load-baseline-YYYY-MM-DD.md by default.
+#
+# Key env vars (all have defaults):
+#   CAESIUM_LOAD_SERVER        — server URL (default: http://127.0.0.1:8080)
+#   CAESIUM_LOAD_JOBS          — number of synthetic jobs (default: 10)
+#   CAESIUM_LOAD_FAN_OUT       — DAG fan-out width per layer (default: 4)
+#   CAESIUM_LOAD_DEPTH         — DAG depth / number of layers (default: 3)
+#   CAESIUM_LOAD_TASK_DURATION — per-task sleep duration (default: 1s)
+#   CAESIUM_LOAD_CONCURRENCY   — runs triggered in parallel (default: 1)
+#   CAESIUM_MANUAL_TRIGGER_API_KEY — API key if auth is enabled
+#
+load-test:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    report_file="${CAESIUM_LOAD_OUTPUT:-docs/load-baseline-$(date +%Y-%m-%d).md}"
+    echo "Running load harness — report will be written to ${report_file}"
+    go run ./test/load/harness.go \
+        -server "${CAESIUM_LOAD_SERVER:-http://127.0.0.1:8080}" \
+        -jobs "${CAESIUM_LOAD_JOBS:-10}" \
+        -fan-out "${CAESIUM_LOAD_FAN_OUT:-4}" \
+        -depth "${CAESIUM_LOAD_DEPTH:-3}" \
+        -task-duration "${CAESIUM_LOAD_TASK_DURATION:-1s}" \
+        -concurrency "${CAESIUM_LOAD_CONCURRENCY:-1}" \
+        -api-key "${CAESIUM_MANUAL_TRIGGER_API_KEY:-}" \
+        -output "${report_file}"
+
 # Port-forward to the Caesium service (run in background or separate terminal)
 k8s-port-forward:
     @echo "Port-forwarding Caesium UI to http://localhost:{{ port }}..."

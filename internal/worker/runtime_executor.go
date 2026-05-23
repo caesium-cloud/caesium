@@ -547,9 +547,13 @@ func (e *runtimeExecutor) renewLease(taskRun *models.TaskRun) error {
 	}
 
 	nextExpiry := time.Now().UTC().Add(e.workerLeaseTTL)
-	return e.store.DB().Model(&models.TaskRun{}).
+	if err := e.store.DB().Model(&models.TaskRun{}).
 		Where("id = ? AND claimed_by = ?", taskRun.ID, taskRun.ClaimedBy).
-		Update("claim_expires_at", nextExpiry).Error
+		Update("claim_expires_at", nextExpiry).Error; err != nil {
+		return err
+	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
+	return nil
 }
 
 func leaseRenewInterval(leaseTTL time.Duration) time.Duration {
