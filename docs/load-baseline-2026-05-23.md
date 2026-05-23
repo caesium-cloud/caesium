@@ -22,7 +22,7 @@ Caesium server started via `just run` against the local Docker engine
 (single-node, `CAESIUM_EXECUTION_MODE=local` — the default). Load harness
 driven via `just load-test`. Two passes:
 
-**Pass 1 — minimal smoke (3 jobs × fan-out=2 × depth=2 = ~5 tasks/run = 15 task lifecycles):**
+**Pass 1 — minimal smoke (3 jobs × fan-out=2 × depth=2 → `buildDAGSteps` emits 1 root + 2 fan-in + 1 join = 4 tasks/run × 3 jobs = 12 task lifecycles):**
 
 | Category | Count | Share |
 |---|---|---|
@@ -31,7 +31,7 @@ driven via `just load-test`. Two passes:
 | `event_insert` | 36 | **42.9%** (tied dominant) |
 | `lease_renewal` | 0 | 0.0% (local mode) |
 | `callback` | 0 | 0.0% |
-| **TOTAL** | **84** | 5.6 writes/task |
+| **TOTAL** | **84** | 7.0 writes/task |
 
 **Pass 2 — realistic load (10 jobs × fan-out=4 × depth=3 = 10 tasks/run = 100 task lifecycles, 3 concurrent runs):**
 
@@ -49,7 +49,7 @@ End-to-end p50/p99: 4s/6s per run. `caesium_db_busy_retries_total` delta: 7 (mil
 
 1. **`task_run_status` is the actual dominant category, not `event_insert`.** The analytical prediction had events slightly ahead (~38% vs. ~35%). In practice the order is reversed — events: 41.7%, status: 44.4% — and the gap is driven by predecessor-counter UPDATEs in `CompleteTask` that the analytical model underweighted.
 
-2. **Per-task overhead matches the design's "6–10 rows/task" estimate.** Pass 1 measured 5.6/task; Pass 2 measured 7.2/task. The increase tracks fan-out width (more successors → more predecessor-decrement UPDATEs).
+2. **Per-task overhead matches the design's "6–10 rows/task" estimate.** Pass 1 measured 7.0/task; Pass 2 measured 7.2/task. Both passes land in the predicted band, and the small Pass-1-to-Pass-2 delta tracks fan-out width (more successors → more predecessor-decrement UPDATEs).
 
 3. **Local mode has zero `lease_renewal` and `claim`-driven writes.** Distributed mode would shift the distribution — lease_renewal would likely appear at the ~15–25% predicted level. This baseline understates the value of Phase 1.2 (lease batching) for distributed deployments specifically.
 

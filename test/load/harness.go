@@ -79,8 +79,8 @@ type jobMeta struct {
 }
 
 type triggerDef struct {
-	Type          string            `json:"type"`
-	Configuration map[string]string `json:"configuration"`
+	Type          string         `json:"type"`
+	Configuration map[string]any `json:"configuration"`
 }
 
 type stepDef struct {
@@ -224,8 +224,11 @@ func (c *client) do(ctx context.Context, method, path string, body interface{}) 
 	return c.http.Do(req)
 }
 
-func (c *client) applyJob(ctx context.Context, def jobDef) error {
-	body := map[string]interface{}{"definitions": []jobDef{def}}
+// applyDefinitions sends a batch of job definitions in a single
+// POST /v1/jobdefs/apply call. The apply response carries only counts
+// ({applied, pruned}); callers resolve IDs via a subsequent listJobs call.
+func (c *client) applyDefinitions(ctx context.Context, defs []jobDef) error {
+	body := map[string]any{"definitions": defs}
 	resp, err := c.do(ctx, http.MethodPost, "/v1/jobdefs/apply", body)
 	if err != nil {
 		return err
@@ -233,9 +236,35 @@ func (c *client) applyJob(ctx context.Context, def jobDef) error {
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("apply job %s: HTTP %d: %s", def.Metadata.Alias, resp.StatusCode, strings.TrimSpace(string(raw)))
+		return fmt.Errorf("apply %d definitions: HTTP %d: %s", len(defs), resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return nil
+}
+
+// listJobs returns a flat array of {id, alias} pairs for every job on the
+// server. Used to build a one-shot alias→ID lookup table after a batch apply.
+func (c *client) listJobs(ctx context.Context) ([]struct{ ID, Alias string }, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/jobs", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("list jobs: HTTP %d", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var entries []struct {
+		ID    string `json:"id"`
+		Alias string `json:"alias"`
+	}
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return nil, fmt.Errorf("parse list-jobs response: %w", err)
+	}
+	out := make([]struct{ ID, Alias string }, len(entries))
+	for i, e := range entries {
+		out[i] = struct{ ID, Alias string }{ID: e.ID, Alias: e.Alias}
+	}
+	return out, nil
 }
 
 // getRunStatus returns the status of a job run. The runs endpoint is scoped
@@ -401,37 +430,56 @@ func (h *harness) waitForServer(ctx context.Context) error {
 	}
 }
 
-// applyJobs registers all synthetic DAG jobs on the server and returns a
-// slice of (alias, route) pairs for triggering.
+// appliedJob pairs a job's stable alias with its server-assigned UUID.
 type appliedJob struct {
 	alias string
 	id    string
 }
 
+// applyJobs builds the synthetic job definitions, applies them in a single
+// batched POST /v1/jobdefs/apply, then resolves all aliases to IDs in a single
+// GET /v1/jobs. Both round-trips are O(1) in jobCount instead of O(N) per
+// definition, which keeps harness setup time bounded for large workloads.
 func (h *harness) applyJobs(ctx context.Context) ([]appliedJob, error) {
 	cfg := h.cfg
 	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration)
 
-	results := make([]appliedJob, 0, cfg.jobCount)
+	defs := make([]jobDef, 0, cfg.jobCount)
+	aliases := make([]string, 0, cfg.jobCount)
 	for i := 0; i < cfg.jobCount; i++ {
 		alias := fmt.Sprintf("load-test-job-%d", i)
 		path := fmt.Sprintf("/load/%s", alias)
-		def := jobDef{
+		defs = append(defs, jobDef{
 			APIVersion: "v1",
 			Kind:       "Job",
 			Metadata:   jobMeta{Alias: alias},
 			Trigger: triggerDef{
 				Type:          "http",
-				Configuration: map[string]string{"path": path},
+				Configuration: map[string]any{"path": path},
 			},
 			Steps: steps,
-		}
-		if err := h.client.applyJob(ctx, def); err != nil {
-			return nil, fmt.Errorf("apply job %d: %w", i, err)
-		}
-		jobID, err := h.resolveJobID(ctx, alias)
-		if err != nil {
-			return nil, fmt.Errorf("resolve job %d: %w", i, err)
+		})
+		aliases = append(aliases, alias)
+	}
+
+	if err := h.client.applyDefinitions(ctx, defs); err != nil {
+		return nil, fmt.Errorf("apply %d definitions: %w", len(defs), err)
+	}
+
+	entries, err := h.client.listJobs(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list jobs for ID resolution: %w", err)
+	}
+	idByAlias := make(map[string]string, len(entries))
+	for _, e := range entries {
+		idByAlias[e.Alias] = e.ID
+	}
+
+	results := make([]appliedJob, 0, cfg.jobCount)
+	for _, alias := range aliases {
+		jobID, ok := idByAlias[alias]
+		if !ok {
+			return nil, fmt.Errorf("alias %s missing from list-jobs response", alias)
 		}
 		results = append(results, appliedJob{alias: alias, id: jobID})
 	}
@@ -598,35 +646,6 @@ func (h *harness) startRun(ctx context.Context, jobID string) (string, error) {
 		return "", fmt.Errorf("run job %s: response missing id", jobID)
 	}
 	return result.ID, nil
-}
-
-// resolveJobID looks up a job by alias via GET /v1/jobs. The list endpoint
-// doesn't filter by alias server-side (the query param is ignored), so we
-// fetch the full list and filter client-side. Response is a flat array of
-// jobs with id/alias fields embedded from models.Job.
-func (h *harness) resolveJobID(ctx context.Context, alias string) (string, error) {
-	resp, err := h.client.do(ctx, http.MethodGet, "/v1/jobs", nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("lookup %s: HTTP %d", alias, resp.StatusCode)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	var jobs []struct {
-		ID    string `json:"id"`
-		Alias string `json:"alias"`
-	}
-	if jErr := json.Unmarshal(raw, &jobs); jErr != nil {
-		return "", jErr
-	}
-	for _, j := range jobs {
-		if j.Alias == alias {
-			return j.ID, nil
-		}
-	}
-	return "", fmt.Errorf("lookup %s: no matching job in %d results", alias, len(jobs))
 }
 
 // ---------------------------------------------------------------------------
