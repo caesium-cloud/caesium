@@ -95,6 +95,7 @@ type Environment struct {
 	WorkerPollInterval            time.Duration `default:"15s" split_words:"true"`
 	WorkerReclaimInterval         time.Duration `default:"30s" split_words:"true"`
 	WorkerLeaseTTL                time.Duration `default:"5m" split_words:"true"`
+	WorkerLeaseRenewInterval      time.Duration `default:"0" split_words:"true"`
 	WorkerPoolSize                int           `default:"4" split_words:"true"`
 	InternalWakeupToken           string        `default:"" split_words:"true"`
 	WakeupFanoutMode              string        `default:"full" split_words:"true"`

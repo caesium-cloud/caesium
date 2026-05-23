@@ -279,11 +279,12 @@ func start(cmd *cobra.Command, args []string) error {
 
 			store := run.Default()
 			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
-			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.WorkerLeaseTTL, vars.TaskFailurePolicy)
+			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.TaskFailurePolicy)
 			wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
 			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
 				WithReclaimInterval(vars.WorkerReclaimInterval).
-				WithWakeups(wakeups)
+				WithWakeups(wakeups).
+				WithLeaseRenewal(store, vars.WorkerLeaseTTL, vars.WorkerLeaseRenewInterval)
 			if usesInternalDqlite(vars.DatabaseType) {
 				w = w.WithReclaimGate(worker.ReclaimGateFunc(func(ctx context.Context) (bool, error) {
 					return dqlite.IsLocalLeader(ctx)

@@ -160,3 +160,226 @@ func (s *reclaimingSequenceClaimer) ReclaimExpired(context.Context) error {
 	atomic.AddInt32(&s.reclaims, 1)
 	return nil
 }
+
+// fakeLeaseRenewer records calls to RenewLeases for test assertions. By
+// default each call returns rowsAffected == len(ids); a test can override via
+// rowsAffectedFn to simulate a partial match (e.g. reassigned claim).
+type fakeLeaseRenewer struct {
+	mu             sync.Mutex
+	calls          []renewCall
+	rowsAffectedFn func(nodeID string, ids []uuid.UUID) int64
+}
+
+type renewCall struct {
+	nodeID    string
+	ids       []uuid.UUID
+	expiresAt time.Time
+}
+
+func (f *fakeLeaseRenewer) RenewLeases(_ context.Context, nodeID string, ids []uuid.UUID, expiresAt time.Time) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]uuid.UUID, len(ids))
+	copy(cp, ids)
+	f.calls = append(f.calls, renewCall{nodeID: nodeID, ids: cp, expiresAt: expiresAt})
+	if f.rowsAffectedFn != nil {
+		return f.rowsAffectedFn(nodeID, cp), nil
+	}
+	return int64(len(cp)), nil
+}
+
+func (f *fakeLeaseRenewer) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakeLeaseRenewer) lastCall() (renewCall, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return renewCall{}, false
+	}
+	return f.calls[len(f.calls)-1], true
+}
+
+// makeTask constructs a TaskRun with the given nodeID and claim expiry.
+func makeTask(nodeID string, claimExpiresAt time.Time) *models.TaskRun {
+	tr := &models.TaskRun{
+		ID:        uuid.New(),
+		TaskID:    uuid.New(),
+		JobRunID:  uuid.New(),
+		ClaimedBy: nodeID,
+	}
+	tr.ClaimExpiresAt = &claimExpiresAt
+	return tr
+}
+
+// TestBatchedRenewal_NoInflightNoUpdate verifies that with zero in-flight
+// claims, renewLeasesNow never calls the LeaseRenewer.
+func TestBatchedRenewal_NoInflightNoUpdate(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	leaseTTL := 5 * time.Minute
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, leaseTTL, 0)
+
+	w.renewLeasesNow(t.Context())
+
+	if got := renewer.callCount(); got != 0 {
+		t.Fatalf("expected 0 RenewLeases calls with no in-flight tasks, got %d", got)
+	}
+}
+
+// TestBatchedRenewal_NInflightOneUpdate verifies that with N in-flight claims
+// all within lease_ttl/2 of expiry, exactly one RenewLeases call is issued
+// covering all of them.
+func TestBatchedRenewal_NInflightOneUpdate(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	leaseTTL := 5 * time.Minute
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, leaseTTL, 0)
+
+	nodeID := "node-a"
+	// Add 4 in-flight tasks that expire in 1 minute (< halfTTL = 2.5 min).
+	imminent := time.Now().Add(time.Minute)
+	ids := make(map[uuid.UUID]struct{}, 4)
+	for i := 0; i < 4; i++ {
+		task := makeTask(nodeID, imminent)
+		ids[task.ID] = struct{}{}
+		w.trackInFlight(task)
+	}
+
+	w.renewLeasesNow(t.Context())
+
+	if got := renewer.callCount(); got != 1 {
+		t.Fatalf("expected exactly 1 RenewLeases call, got %d", got)
+	}
+	call, _ := renewer.lastCall()
+	if call.nodeID != nodeID {
+		t.Fatalf("expected nodeID %q, got %q", nodeID, call.nodeID)
+	}
+	if len(call.ids) != len(ids) {
+		t.Fatalf("expected %d IDs in batched UPDATE, got %d", len(ids), len(call.ids))
+	}
+	for _, id := range call.ids {
+		if _, ok := ids[id]; !ok {
+			t.Fatalf("unexpected ID %s in batched UPDATE", id)
+		}
+	}
+}
+
+// TestBatchedRenewal_SkipWhenNotNeeded verifies that no UPDATE is issued when
+// all in-flight claims have claim_expires_at > now + lease_ttl/2.
+func TestBatchedRenewal_SkipWhenNotNeeded(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	leaseTTL := 5 * time.Minute
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, leaseTTL, 0)
+
+	nodeID := "node-a"
+	// Tasks expire in 4 minutes — well beyond halfTTL of 2.5 minutes.
+	distant := time.Now().Add(4 * time.Minute)
+	for i := 0; i < 3; i++ {
+		w.trackInFlight(makeTask(nodeID, distant))
+	}
+
+	w.renewLeasesNow(t.Context())
+
+	if got := renewer.callCount(); got != 0 {
+		t.Fatalf("expected 0 RenewLeases calls (skip-when-not-needed), got %d", got)
+	}
+}
+
+// TestBatchedRenewal_OtherNodeNotTouched registers in-flight claims for two
+// different nodes (shouldn't happen in production, but the safety must hold).
+// renewLeasesNow must issue one UPDATE per node, each containing only that
+// node's IDs — never sending a cross-node ID into another node's WHERE clause.
+func TestBatchedRenewal_OtherNodeNotTouched(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	leaseTTL := 5 * time.Minute
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, leaseTTL, 0)
+
+	nodeA := "node-a"
+	nodeB := "node-b"
+	imminent := time.Now().Add(time.Minute) // within halfTTL -> renewal needed
+
+	taskA := makeTask(nodeA, imminent)
+	taskB := makeTask(nodeB, imminent)
+
+	w.trackInFlight(taskA)
+	// Directly insert a node-b entry into the in-flight map to simulate a
+	// cross-node scenario.
+	w.inFlightMu.Lock()
+	w.inFlight[taskB.ID] = &inFlightClaim{claimedBy: nodeB, claimExpiresAt: imminent}
+	w.inFlightMu.Unlock()
+
+	w.renewLeasesNow(t.Context())
+
+	// Exactly one UPDATE per node, never mixing IDs across nodes.
+	if got := renewer.callCount(); got != 2 {
+		t.Fatalf("expected 2 RenewLeases calls (one per node), got %d", got)
+	}
+	seen := map[string]uuid.UUID{}
+	renewer.mu.Lock()
+	for _, call := range renewer.calls {
+		if len(call.ids) != 1 {
+			t.Fatalf("expected each call to carry exactly its node's ID, got %d for %q", len(call.ids), call.nodeID)
+		}
+		seen[call.nodeID] = call.ids[0]
+	}
+	renewer.mu.Unlock()
+	if got, want := seen[nodeA], taskA.ID; got != want {
+		t.Fatalf("node-a UPDATE got id %s, want %s", got, want)
+	}
+	if got, want := seen[nodeB], taskB.ID; got != want {
+		t.Fatalf("node-b UPDATE got id %s, want %s", got, want)
+	}
+}
+
+// TestBatchedRenewal_ZeroLeaseTTLNoRenewal verifies that constructing a worker
+// with leaseTTL == 0 disables the renewal goroutine entirely; a zero TTL would
+// otherwise make every tick set claim_expires_at = now, immediately expiring
+// every in-flight lease and causing all running tasks to be reclaimed.
+func TestBatchedRenewal_ZeroLeaseTTLNoRenewal(t *testing.T) {
+	renewer := &fakeLeaseRenewer{}
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, 0, 0)
+
+	w.trackInFlight(makeTask("node-a", time.Now().Add(-time.Hour))) // already expired
+	w.renewLeasesNow(t.Context())
+
+	if got := renewer.callCount(); got != 0 {
+		t.Fatalf("expected 0 RenewLeases calls with zero leaseTTL, got %d", got)
+	}
+}
+
+// TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate verifies that when the DB
+// reports zero rows affected (every claim was reassigned between snapshot and
+// write), the worker neither bumps the counter nor advances the in-memory
+// expiry — keeping in-memory state honest with the DB.
+func TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate(t *testing.T) {
+	renewer := &fakeLeaseRenewer{
+		rowsAffectedFn: func(_ string, _ []uuid.UUID) int64 { return 0 },
+	}
+	leaseTTL := 5 * time.Minute
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithLeaseRenewal(renewer, leaseTTL, 0)
+
+	imminent := time.Now().Add(time.Minute)
+	task := makeTask("node-a", imminent)
+	w.trackInFlight(task)
+
+	w.renewLeasesNow(t.Context())
+
+	if got := renewer.callCount(); got != 1 {
+		t.Fatalf("expected 1 RenewLeases call (still attempted), got %d", got)
+	}
+
+	w.inFlightMu.Lock()
+	claim := w.inFlight[task.ID]
+	w.inFlightMu.Unlock()
+	if !claim.claimExpiresAt.Equal(imminent) {
+		t.Fatalf("expected in-memory expiry unchanged when rows_affected=0, got %v want %v", claim.claimExpiresAt, imminent)
+	}
+}
