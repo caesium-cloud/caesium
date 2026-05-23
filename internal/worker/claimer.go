@@ -20,6 +20,26 @@ import (
 
 const defaultLeaseTTL = 5 * time.Minute
 
+// dbWriteCounts accumulates per-category DB write counts during a single retry
+// attempt. Must be reset() at the start of each retry closure and commit()'d
+// only after the retry returns nil; otherwise transactions retried due to
+// busy/locked errors will over-count.
+type dbWriteCounts struct {
+	taskRunStatus int
+	eventInsert   int
+}
+
+func (c *dbWriteCounts) reset() { *c = dbWriteCounts{} }
+
+func (c *dbWriteCounts) commit() {
+	if c.taskRunStatus > 0 {
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(c.taskRunStatus))
+	}
+	if c.eventInsert > 0 {
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Add(float64(c.eventInsert))
+	}
+}
+
 type Claimer struct {
 	nodeID            string
 	nodeLabels        map[string]string
@@ -74,6 +94,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 
 	var claimed *models.TaskRun
 	pendingEvents := make([]event.Event, 0, 1)
+	var counts dbWriteCounts
 
 	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
@@ -83,10 +104,11 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 		now := time.Now().UTC()
 		leaseExpiry := now.Add(c.leaseTTL)
 		claimed = nil
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
 
 		err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-			claimedTask, evt, err := c.claimNextTx(tx, now, leaseExpiry)
+			claimedTask, evt, err := c.claimNextTx(tx, now, leaseExpiry, &counts)
 			if err != nil {
 				return err
 			}
@@ -107,13 +129,14 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	if claimed != nil {
 		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
 		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
+		counts.commit()
 	}
 	c.store.PublishEvents(pendingEvents...)
 
 	return claimed, nil
 }
 
-func (c *Claimer) claimNextTx(tx *gorm.DB, now, leaseExpiry time.Time) (*models.TaskRun, *event.Event, error) {
+func (c *Claimer) claimNextTx(tx *gorm.DB, now, leaseExpiry time.Time, counts *dbWriteCounts) (*models.TaskRun, *event.Event, error) {
 	claimed, jobID, err := c.claimNextSingleStatementTx(tx, now, leaseExpiry)
 	if err != nil {
 		return nil, nil, err
@@ -121,7 +144,7 @@ func (c *Claimer) claimNextTx(tx *gorm.DB, now, leaseExpiry time.Time) (*models.
 	if claimed == nil {
 		return nil, nil, nil
 	}
-	evt, err := c.recordTaskClaimedEventTx(tx, claimed, jobID)
+	evt, err := c.recordTaskClaimedEventTx(tx, claimed, jobID, counts)
 	return claimed, evt, err
 }
 
@@ -180,7 +203,7 @@ type claimedTaskRunRow struct {
 	ClaimJobID uuid.UUID `gorm:"column:claim_job_id"`
 }
 
-func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun, jobID uuid.UUID) (*event.Event, error) {
+func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun, jobID uuid.UUID, counts *dbWriteCounts) (*event.Event, error) {
 	if claimed == nil {
 		return nil, nil
 	}
@@ -195,7 +218,7 @@ func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun,
 	if err := c.store.RecordEventTx(tx, &evt); err != nil {
 		return nil, err
 	}
-	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
+	counts.eventInsert++
 	return &evt, nil
 }
 
@@ -263,12 +286,14 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 
 	pendingEvents := make([]event.Event, 0, 8)
 	var reclaimedCount int64
+	var counts dbWriteCounts
 	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
 		now := time.Now().UTC()
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
 		var attemptReclaimedCount int64
 
@@ -296,9 +321,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			if result.Error != nil {
 				return result.Error
 			}
-			if result.RowsAffected > 0 {
-				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(result.RowsAffected))
-			}
+			counts.taskRunStatus += int(result.RowsAffected)
 
 			for _, taskRun := range expired {
 				var jobRun models.JobRun
@@ -315,7 +338,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				if err := c.store.RecordEventTx(tx, &leaseEvt); err != nil {
 					return err
 				}
-				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
+				counts.eventInsert++
 				attemptEvents = append(attemptEvents, leaseEvt)
 
 				readyEvt := event.Event{
@@ -328,7 +351,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				if err := c.store.RecordEventTx(tx, &readyEvt); err != nil {
 					return err
 				}
-				metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Inc()
+				counts.eventInsert++
 				attemptEvents = append(attemptEvents, readyEvt)
 			}
 			attemptReclaimedCount = result.RowsAffected
@@ -341,6 +364,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 		return err
 	}, c.observeBusyRetry)
 	if err == nil {
+		counts.commit()
 		if reclaimedCount > 0 {
 			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(reclaimedCount))
 		}
