@@ -1073,7 +1073,9 @@ func TestRenewLeasesHappyPath(t *testing.T) {
 	id := seedClaimedTaskRun(t, store, nodeID)
 
 	newExpiry := time.Now().UTC().Add(10 * time.Minute)
-	require.NoError(t, store.RenewLeases(t.Context(), nodeID, []uuid.UUID{id}, newExpiry))
+	rowsAffected, err := store.RenewLeases(t.Context(), nodeID, []uuid.UUID{id}, newExpiry)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rowsAffected)
 
 	var tr models.TaskRun
 	require.NoError(t, db.First(&tr, "id = ?", id).Error)
@@ -1086,8 +1088,10 @@ func TestRenewLeasesEmptyIDsIsNoOp(t *testing.T) {
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
 	store := NewStore(db)
-	// Should return nil without hitting the DB.
-	require.NoError(t, store.RenewLeases(t.Context(), "node-a", nil, time.Now().Add(time.Minute)))
+	// Should return (0, nil) without hitting the DB.
+	rowsAffected, err := store.RenewLeases(t.Context(), "node-a", nil, time.Now().Add(time.Minute))
+	require.NoError(t, err)
+	require.Equal(t, int64(0), rowsAffected)
 }
 
 func TestRenewLeasesDoesNotTouchOtherNode(t *testing.T) {
@@ -1108,9 +1112,12 @@ func TestRenewLeasesDoesNotTouchOtherNode(t *testing.T) {
 	originalExpiryB := trBBefore.ClaimExpiresAt
 
 	// Renew only node-a's claims, passing node-b's ID in the list too.  The
-	// claimed_by predicate should prevent node-b's row from being updated.
+	// claimed_by predicate should prevent node-b's row from being updated, and
+	// rowsAffected should reflect only node-a's matching row.
 	newExpiry := time.Now().UTC().Add(10 * time.Minute)
-	require.NoError(t, store.RenewLeases(t.Context(), nodeA, []uuid.UUID{idA, idB}, newExpiry))
+	rowsAffected, err := store.RenewLeases(t.Context(), nodeA, []uuid.UUID{idA, idB}, newExpiry)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), rowsAffected)
 
 	// node-a's row should be extended.
 	var trA models.TaskRun

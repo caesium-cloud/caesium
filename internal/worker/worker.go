@@ -43,9 +43,11 @@ func (f ReclaimGateFunc) CanReclaim(ctx context.Context) (bool, error) {
 }
 
 // LeaseRenewer is implemented by any component that can issue a single batched
-// UPDATE extending claim_expires_at for a set of in-flight task runs.
+// UPDATE extending claim_expires_at for a set of in-flight task runs. Returns
+// the number of rows actually updated; useful for both metric accuracy and
+// detecting concurrent claim reassignment.
 type LeaseRenewer interface {
-	RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID, newExpiresAt time.Time) error
+	RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID, newExpiresAt time.Time) (int64, error)
 }
 
 // inFlightClaim records the minimal state needed to decide whether renewal is
@@ -147,8 +149,11 @@ func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	// Start the batched lease renewal goroutine only when configured.
-	if w.leaseRenewer != nil && w.leaseRenewInterval > 0 {
+	// Start the batched lease renewal goroutine only when configured. A zero
+	// leaseTTL would cause renewLeasesNow to set claim_expires_at = now on every
+	// tick, immediately expiring all in-flight leases — so refuse to start the
+	// goroutine in that case.
+	if w.leaseRenewer != nil && w.leaseTTL > 0 && w.leaseRenewInterval > 0 {
 		go w.runLeaseRenewal(ctx)
 	}
 
@@ -237,53 +242,69 @@ func (w *Worker) runLeaseRenewal(ctx context.Context) {
 	}
 }
 
-// renewLeasesNow collects all in-flight claims, skips the UPDATE if none are
-// within lease_ttl/2 of expiry, and otherwise issues a single batched UPDATE.
+// renewLeasesNow groups in-flight claims by their claimedBy node, skips the
+// UPDATE for groups where no claim is within lease_ttl/2 of expiry, and
+// otherwise issues one batched UPDATE per node. In-memory expiry is updated
+// only for IDs whose DB row was actually renewed — so a claim reassigned to
+// another node between the renewal decision and the write keeps its true
+// expiry in memory, matching what the DB now holds.
 func (w *Worker) renewLeasesNow(ctx context.Context) {
-	if w.leaseRenewer == nil {
+	if w.leaseRenewer == nil || w.leaseTTL <= 0 {
 		return
 	}
 
 	now := time.Now().UTC()
 	halfTTL := w.leaseTTL / 2
 
+	// Snapshot the in-flight set grouped by claimedBy. A worker normally tracks
+	// claims for a single node, but a stale or cross-node claim should not
+	// contaminate another node's UPDATE.
 	w.inFlightMu.Lock()
-	ids := make([]uuid.UUID, 0, len(w.inFlight))
-	nodeID := ""
+	byNode := make(map[string][]uuid.UUID)
 	needsRenewal := false
 	for id, claim := range w.inFlight {
-		ids = append(ids, id)
-		if nodeID == "" {
-			nodeID = claim.claimedBy
-		}
-		// Renewal is needed if any claim is within lease_ttl/2 of expiry.
-		if halfTTL <= 0 || claim.claimExpiresAt.IsZero() || claim.claimExpiresAt.Sub(now) <= halfTTL {
+		byNode[claim.claimedBy] = append(byNode[claim.claimedBy], id)
+		if !needsRenewal && (claim.claimExpiresAt.IsZero() || claim.claimExpiresAt.Sub(now) <= halfTTL) {
 			needsRenewal = true
 		}
 	}
 	w.inFlightMu.Unlock()
 
-	if len(ids) == 0 || !needsRenewal {
+	if !needsRenewal {
 		return
 	}
 
 	newExpiresAt := now.Add(w.leaseTTL)
-	if err := w.leaseRenewer.RenewLeases(ctx, nodeID, ids, newExpiresAt); err != nil {
-		if ctx.Err() == nil {
-			log.Error("failed to renew worker task leases", "node_id", nodeID, "count", len(ids), "error", err)
+	for nodeID, ids := range byNode {
+		if len(ids) == 0 {
+			continue
 		}
-		return
-	}
-	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
+		rowsAffected, err := w.leaseRenewer.RenewLeases(ctx, nodeID, ids, newExpiresAt)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Error("failed to renew worker task leases", "node_id", nodeID, "count", len(ids), "error", err)
+			}
+			continue
+		}
+		if rowsAffected <= 0 {
+			// Nothing was actually renewed (every claim was reassigned in the
+			// window). Don't touch the counter or the in-memory expiries —
+			// stale rows will surface on the next tick or expire naturally.
+			continue
+		}
+		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Add(float64(rowsAffected))
 
-	// Update the in-memory expiry so the next tick re-evaluates correctly.
-	w.inFlightMu.Lock()
-	for _, id := range ids {
-		if claim, ok := w.inFlight[id]; ok {
-			claim.claimExpiresAt = newExpiresAt
+		// Update the in-memory expiry only for the IDs we attempted to renew
+		// AND whose claimedBy is still nodeID (the latter check guards against
+		// a concurrent local reassignment between snapshot and write).
+		w.inFlightMu.Lock()
+		for _, id := range ids {
+			if claim, ok := w.inFlight[id]; ok && claim.claimedBy == nodeID {
+				claim.claimExpiresAt = newExpiresAt
+			}
 		}
+		w.inFlightMu.Unlock()
 	}
-	w.inFlightMu.Unlock()
 }
 
 func (w *Worker) reclaimIfDue(ctx context.Context) {
