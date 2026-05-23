@@ -434,7 +434,9 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	}
 
 	var pendingEvents []event.Event
+	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		var attemptEvents []event.Event
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			existingTaskIDs := make([]uuid.UUID, 0)
@@ -527,6 +529,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
+			counts.taskRunInsert += len(records)
 			if len(readyEvents) > 0 {
 				eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
 				for _, evt := range readyEvents {
@@ -535,6 +538,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 				if err := tx.Create(&eventRecords).Error; err != nil {
 					return err
 				}
+				counts.eventInsert += len(eventRecords)
 				for idx := range readyEvents {
 					readyEvents[idx].Sequence = eventRecords[idx].Sequence
 					readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
@@ -549,6 +553,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		return err
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -582,7 +587,9 @@ func executionEventRecord(evt event.Event) models.ExecutionEvent {
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 	var pendingEvents []event.Event
+	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
@@ -595,8 +602,9 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 				}).Error; err != nil {
 				return err
 			}
+			counts.taskRunStatus++
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
 				if err != nil {
 					return err
 				}
@@ -610,6 +618,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		return err
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -617,7 +626,9 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
+	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
@@ -633,8 +644,9 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 			if result.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			counts.taskRunStatus++
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID)
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
 				if err != nil {
 					return err
 				}
@@ -648,6 +660,7 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 		return err
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -710,7 +723,9 @@ func (s *Store) CacheHitTaskClaimed(runID, taskID uuid.UUID, source CacheHitSour
 func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
 	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
+	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
 		attemptSkippedTaskIDs := make([]uuid.UUID, 0)
 
@@ -767,6 +782,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			counts.taskRunStatus++
 
 			// Load the task model for edge traversal and branch detection.
 			var taskModel models.Task
@@ -809,7 +825,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 				// Branch filtering: skip successors not selected by the branch.
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
 					if err != nil {
 						return err
 					}
@@ -822,6 +838,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 					return err
 				}
+				counts.taskRunStatus++
 
 				var successor models.TaskRun
 				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
@@ -831,14 +848,14 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 						return err
 					}
 					if shouldRun {
-						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents); err != nil {
+						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents, &counts); err != nil {
 							return err
 						}
 						continue
 					}
 
 					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents, &counts)
 					if err != nil {
 						return err
 					}
@@ -847,7 +864,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			}
 
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskCached, runID, taskID)
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskCached, runID, taskID, &counts)
 				if err != nil {
 					return err
 				}
@@ -863,6 +880,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 		return err
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return skippedTaskIDs, err
@@ -955,7 +973,7 @@ func (s *Store) successorEdgesTx(tx *gorm.DB, task models.Task) ([]models.TaskEd
 	return nil, err
 }
 
-func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pendingEvents *[]event.Event) error {
+func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
 	if s.eventStore == nil {
 		return nil
 	}
@@ -975,11 +993,12 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 		return err
 	}
+	counts.eventInsert++
 	*pendingEvents = append(*pendingEvents, evt)
 	return nil
 }
 
-func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event) (bool, error) {
+func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
 	result := tx.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
 		Updates(map[string]interface{}{
@@ -997,9 +1016,10 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 	if result.RowsAffected == 0 {
 		return false, nil
 	}
+	counts.taskRunStatus++
 
 	if s.eventStore != nil {
-		evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID)
+		evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, counts)
 		if err != nil {
 			return false, err
 		}
@@ -1110,7 +1130,9 @@ func (s *Store) shouldRunTaskTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, str
 func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
 	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
+	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
+		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
 		attemptSkippedTaskIDs := make([]uuid.UUID, 0)
 
@@ -1193,10 +1215,11 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
+			counts.taskRunStatus++
 
 			if status == TaskStatusFailed {
 				if s.eventStore != nil {
-					evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
+					evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID, &counts)
 					if err != nil {
 						return err
 					}
@@ -1263,7 +1286,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 				// Branch filtering: skip successors not selected by the branch.
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
 					if err != nil {
 						return err
 					}
@@ -1276,6 +1299,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 					return err
 				}
+				counts.taskRunStatus++
 
 				var successor models.TaskRun
 				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
@@ -1285,14 +1309,14 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 						return err
 					}
 					if shouldRun {
-						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents); err != nil {
+						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents, &counts); err != nil {
 							return err
 						}
 						continue
 					}
 
 					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents)
+					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents, &counts)
 					if err != nil {
 						return err
 					}
@@ -1301,7 +1325,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			}
 
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID)
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID, &counts)
 				if err != nil {
 					return err
 				}
@@ -1317,6 +1341,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		return err
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return skippedTaskIDs, err
@@ -1326,7 +1351,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 // skipped within the given transaction. Descendants are only skipped once all
 // of their predecessors are terminal and their trigger rules remain
 // unsatisfied.
-func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event) ([]uuid.UUID, error) {
+func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) ([]uuid.UUID, error) {
 	type queuedSkip struct {
 		taskID uuid.UUID
 		reason string
@@ -1339,7 +1364,7 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 		current := queue[0]
 		queue = queue[1:]
 
-		markedSkipped, err := s.markTaskSkippedTx(tx, runID, current.taskID, current.reason, pendingEvents)
+		markedSkipped, err := s.markTaskSkippedTx(tx, runID, current.taskID, current.reason, pendingEvents, counts)
 		if err != nil {
 			return skipped, err
 		}
@@ -1366,6 +1391,7 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
 				return skipped, err
 			}
+			counts.taskRunStatus++
 
 			var successor models.TaskRun
 			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err != nil {
@@ -1380,7 +1406,7 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 				return skipped, err
 			}
 			if shouldRun {
-				if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, pendingEvents); err != nil {
+				if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, pendingEvents, counts); err != nil {
 					return skipped, err
 				}
 				continue
@@ -1433,6 +1459,7 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 	}
 
 	pendingEvents := make([]event.Event, 0, 1)
+	var counts dbWriteCounts
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		updateQuery := tx.Model(&models.TaskRun{}).
 			Where("job_run_id = ? AND task_id = ?", runID, taskID)
@@ -1455,9 +1482,10 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
+		counts.taskRunStatus++
 
 		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID)
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID, &counts)
 			if err != nil {
 				return err
 			}
@@ -1466,6 +1494,7 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		return nil
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -1483,6 +1512,7 @@ func (s *Store) RetryTaskClaimed(runID, taskID uuid.UUID, attempt int, claimedBy
 
 func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
 	pendingEvents := make([]event.Event, 0, 2)
+	var counts dbWriteCounts
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		updateQuery := tx.Model(&models.TaskRun{}).
 			Where("job_run_id = ? AND task_id = ?", runID, taskID)
@@ -1513,9 +1543,10 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
+		counts.taskRunStatus++
 
 		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskRetrying, runID, taskID)
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskRetrying, runID, taskID, &counts)
 			if err != nil {
 				return err
 			}
@@ -1538,6 +1569,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 				if err := s.eventStore.AppendTx(tx, &readyEvt); err != nil {
 					return err
 				}
+				counts.eventInsert++
 				pendingEvents = append(pendingEvents, readyEvt)
 			}
 		}
@@ -1545,6 +1577,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		return nil
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -1553,6 +1586,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 	now := time.Now().UTC()
 	pendingEvents := make([]event.Event, 0, 1)
+	var counts dbWriteCounts
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&models.TaskRun{}).
 			Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
@@ -1567,8 +1601,9 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 			}).Error; err != nil {
 			return err
 		}
+		counts.taskRunStatus++
 		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID)
+			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, &counts)
 			if err != nil {
 				return err
 			}
@@ -1577,6 +1612,7 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 		return nil
 	})
 	if err == nil {
+		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
 	return err
@@ -1987,7 +2023,7 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 	}
 }
 
-func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID) (*event.Event, error) {
+func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID, counts *dbWriteCounts) (*event.Event, error) {
 	var taskRun models.TaskRun
 	if err := db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
 		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
@@ -2025,6 +2061,7 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 		if err := s.eventStore.AppendTx(db, &evt); err != nil {
 			return nil, err
 		}
+		counts.eventInsert++
 	}
 	return &evt, nil
 }
@@ -2035,6 +2072,33 @@ func (s *Store) publishEvents(events ...event.Event) {
 
 func (s *Store) PublishEvents(events ...event.Event) {
 	s.publishEvents(events...)
+}
+
+// dbWriteCounts accumulates per-category DB write counts during a single retry
+// attempt. Must be reset() at the start of each retry closure and commit()'d
+// only after the retry returns nil; otherwise transactions retried due to
+// busy/locked errors will over-count.
+type dbWriteCounts struct {
+	taskRunInsert int
+	taskRunStatus int
+	eventInsert   int
+	callback      int
+	leaseRenewal  int
+}
+
+func (c *dbWriteCounts) reset() { *c = dbWriteCounts{} }
+
+func (c *dbWriteCounts) commit() {
+	add := func(category string, n int) {
+		if n > 0 {
+			metrics.DBWritesTotal.WithLabelValues(category).Add(float64(n))
+		}
+	}
+	add(metrics.DBWriteCategoryTaskRunInsert, c.taskRunInsert)
+	add(metrics.DBWriteCategoryTaskRunStatus, c.taskRunStatus)
+	add(metrics.DBWriteCategoryEventInsert, c.eventInsert)
+	add(metrics.DBWriteCategoryCallback, c.callback)
+	add(metrics.DBWriteCategoryLeaseRenewal, c.leaseRenewal)
 }
 
 func withStoreBusyRetry(fn func() error) error {
@@ -2211,6 +2275,7 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 	pendingEvents := make([]event.Event, 0, 2)
 	var jobID uuid.UUID
+	var counts dbWriteCounts
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		// 1. Verify the run exists and is in a terminal state (failed/succeeded).
@@ -2299,7 +2364,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 
 			// If all predecessors are already done, emit a task_ready event.
 			if outstanding == 0 {
-				if err := s.appendTaskReadyEventTx(tx, runID, taskID, &pendingEvents); err != nil {
+				if err := s.appendTaskReadyEventTx(tx, runID, taskID, &pendingEvents, &counts); err != nil {
 					return err
 				}
 			}
@@ -2334,6 +2399,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 		return nil, err
 	}
 
+	counts.commit()
 	s.publishEvents(pendingEvents...)
 
 	// Track this run in the active set so Complete() will decrement the gauge.

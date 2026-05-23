@@ -40,6 +40,7 @@ func (s *StoreMetricsSuite) SetupTest() {
 	metrics.JobsActive.Reset()
 	metrics.CallbackRunsTotal.Reset()
 	metrics.TriggerFiresTotal.Reset()
+	metrics.DBWritesTotal.Reset()
 }
 
 func (s *StoreMetricsSuite) TearDownTest() {
@@ -217,6 +218,62 @@ func (s *StoreMetricsSuite) TestCompleteResumedRunDoesNotDecrementGauge() {
 	// Counter should still record the completion.
 	ctr := s.counterValue(metrics.JobRunsTotal, jobID.String(), "succeeded")
 	s.Equal(float64(1), ctr)
+}
+
+func (s *StoreMetricsSuite) TestDBWritesTotalIncrements() {
+	jobID := uuid.New()
+	run, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	atomID := uuid.New()
+	taskID := uuid.New()
+	task := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID}
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
+	s.Require().NoError(s.db.Create(task).Error)
+	s.Require().NoError(s.db.Create(atom).Error)
+
+	// RegisterTasks: should produce task_run_insert = 1.
+	s.Require().NoError(s.store.RegisterTask(run.ID, task, atom, 0))
+	s.Equal(float64(1), s.dbWriteValue(metrics.DBWriteCategoryTaskRunInsert))
+
+	// StartTask: should produce task_run_status = 1.
+	s.Require().NoError(s.store.StartTask(run.ID, taskID, "container-1"))
+	s.Equal(float64(1), s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus))
+
+	// CompleteTask: should produce task_run_status += 1.
+	s.Require().NoError(s.store.CompleteTask(run.ID, taskID, "ok", nil, nil))
+	s.GreaterOrEqual(s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus), float64(2))
+
+	// event_insert should be non-zero from task_ready + task_started + task_succeeded events.
+	s.Greater(s.dbWriteValue(metrics.DBWriteCategoryEventInsert), float64(0))
+}
+
+func (s *StoreMetricsSuite) TestDBWritesTotalFailTask() {
+	jobID := uuid.New()
+	run, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	atomID := uuid.New()
+	taskID := uuid.New()
+	task := &models.Task{ID: taskID, JobID: jobID, AtomID: atomID}
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
+	s.Require().NoError(s.db.Create(task).Error)
+	s.Require().NoError(s.db.Create(atom).Error)
+	s.Require().NoError(s.store.RegisterTask(run.ID, task, atom, 0))
+	s.Require().NoError(s.store.StartTask(run.ID, taskID, "container-1"))
+
+	beforeStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	s.Require().NoError(s.store.FailTask(run.ID, taskID, fmt.Errorf("crash")))
+	afterStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	s.Equal(float64(1), afterStatus-beforeStatus, "FailTask should produce exactly one task_run_status write")
+}
+
+func (s *StoreMetricsSuite) dbWriteValue(category string) float64 {
+	var m dto.Metric
+	counter, err := metrics.DBWritesTotal.GetMetricWithLabelValues(category)
+	s.Require().NoError(err)
+	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
+	return m.GetCounter().GetValue()
 }
 
 func (s *StoreMetricsSuite) counterValue(vec *prometheus.CounterVec, labels ...string) float64 {

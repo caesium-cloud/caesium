@@ -294,6 +294,7 @@ func (d *Dispatcher) invokeCallback(ctx context.Context, cb models.Callback, met
 	if err := d.db.WithContext(ctx).Create(runRecord).Error; err != nil {
 		return fmt.Errorf("record callback run: %w", err)
 	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryCallback).Inc()
 
 	handler, ok := lookupHandler(cb.Type)
 	if !ok {
@@ -335,8 +336,12 @@ func (d *Dispatcher) completeCallbackRun(ctx context.Context, id uuid.UUID, stat
 	if errMsg != "" {
 		updates["error"] = errMsg
 	}
-	return d.db.WithContext(ctx).
+	if err := d.db.WithContext(ctx).
 		Model(&models.CallbackRun{}).
 		Where("id = ?", id).
-		Updates(updates).Error
+		Updates(updates).Error; err != nil {
+		return err
+	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryCallback).Inc()
+	return nil
 }
