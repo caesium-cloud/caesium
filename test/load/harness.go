@@ -100,8 +100,9 @@ type stepDef struct {
 // Final layer: one join task that depends on all layer depth-1 tasks.
 // All tasks sleep for taskDuration seconds and emit one caesium::output line.
 func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
-	// Use floating-point seconds so sub-second durations are honored; busybox
-	// sleep accepts decimal values. Floor at 1ms so we never emit "sleep 0".
+	// Use floating-point seconds so sub-second durations are honored;
+	// busybox:1.36.1 sleep accepts decimal values. Floor at 1ms so we never
+	// emit "sleep 0".
 	sleepSec := taskDuration.Seconds()
 	if sleepSec < 0.001 {
 		sleepSec = 0.001
