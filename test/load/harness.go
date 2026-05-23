@@ -79,11 +79,8 @@ type jobMeta struct {
 }
 
 type triggerDef struct {
-	HTTP *httpTrigger `json:"http,omitempty"`
-}
-
-type httpTrigger struct {
-	Route string `json:"route"`
+	Type          string            `json:"type"`
+	Configuration map[string]string `json:"configuration"`
 }
 
 type stepDef struct {
@@ -227,40 +224,24 @@ func (c *client) do(ctx context.Context, method, path string, body interface{}) 
 	return c.http.Do(req)
 }
 
-func (c *client) applyJob(ctx context.Context, def jobDef) (string, error) {
-	body := map[string][]jobDef{"jobs": {def}}
-	resp, err := c.do(ctx, http.MethodPost, "/v1/jobs/apply", body)
+func (c *client) applyJob(ctx context.Context, def jobDef) error {
+	body := map[string]interface{}{"definitions": []jobDef{def}}
+	resp, err := c.do(ctx, http.MethodPost, "/v1/jobdefs/apply", body)
 	if err != nil {
-		return "", err
+		return err
 	}
 	defer resp.Body.Close()
-
-	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("apply job %s: HTTP %d: %s", def.Metadata.Alias, resp.StatusCode, strings.TrimSpace(string(raw)))
+		raw, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("apply job %s: HTTP %d: %s", def.Metadata.Alias, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
-
-	// Parse out the ID of the upserted job.
-	var result struct {
-		Jobs []struct {
-			ID    string `json:"id"`
-			Alias string `json:"alias"`
-		} `json:"jobs"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", fmt.Errorf("parse apply response: %w", err)
-	}
-	for _, j := range result.Jobs {
-		if j.Alias == def.Metadata.Alias {
-			return j.ID, nil
-		}
-	}
-	return "", fmt.Errorf("job %s not found in apply response", def.Metadata.Alias)
+	return nil
 }
 
-// getRunStatus returns the status of a job run.
-func (c *client) getRunStatus(ctx context.Context, runID string) (string, error) {
-	resp, err := c.do(ctx, http.MethodGet, "/v1/runs/"+runID, nil)
+// getRunStatus returns the status of a job run. The runs endpoint is scoped
+// under the parent job: /v1/jobs/:job_id/runs/:run_id.
+func (c *client) getRunStatus(ctx context.Context, jobID, runID string) (string, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/v1/jobs/"+jobID+"/runs/"+runID, nil)
 	if err != nil {
 		return "", err
 	}
@@ -422,25 +403,37 @@ func (h *harness) waitForServer(ctx context.Context) error {
 
 // applyJobs registers all synthetic DAG jobs on the server and returns a
 // slice of (alias, route) pairs for triggering.
-func (h *harness) applyJobs(ctx context.Context) ([]struct{ alias, route string }, error) {
+type appliedJob struct {
+	alias string
+	id    string
+}
+
+func (h *harness) applyJobs(ctx context.Context) ([]appliedJob, error) {
 	cfg := h.cfg
 	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration)
 
-	results := make([]struct{ alias, route string }, 0, cfg.jobCount)
+	results := make([]appliedJob, 0, cfg.jobCount)
 	for i := 0; i < cfg.jobCount; i++ {
 		alias := fmt.Sprintf("load-test-job-%d", i)
-		route := fmt.Sprintf("/load/%s", alias)
+		path := fmt.Sprintf("/load/%s", alias)
 		def := jobDef{
 			APIVersion: "v1",
 			Kind:       "Job",
 			Metadata:   jobMeta{Alias: alias},
-			Trigger:    triggerDef{HTTP: &httpTrigger{Route: route}},
-			Steps:      steps,
+			Trigger: triggerDef{
+				Type:          "http",
+				Configuration: map[string]string{"path": path},
+			},
+			Steps: steps,
 		}
-		if _, err := h.client.applyJob(ctx, def); err != nil {
+		if err := h.client.applyJob(ctx, def); err != nil {
 			return nil, fmt.Errorf("apply job %d: %w", i, err)
 		}
-		results = append(results, struct{ alias, route string }{alias, "/v1/jobs/" + alias + "/trigger"})
+		jobID, err := h.resolveJobID(ctx, alias)
+		if err != nil {
+			return nil, fmt.Errorf("resolve job %d: %w", i, err)
+		}
+		results = append(results, appliedJob{alias: alias, id: jobID})
 	}
 	return results, nil
 }
@@ -487,7 +480,7 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
-			rr := h.triggerAndWait(ctx, j.alias, j.route)
+			rr := h.triggerAndWait(ctx, j.alias, j.id)
 			resultsMu.Lock()
 			results = append(results, rr)
 			resultsMu.Unlock()
@@ -532,34 +525,16 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 }
 
 // triggerAndWait fires a job run via its HTTP trigger and polls until terminal.
-func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string) runResult {
+func (h *harness) triggerAndWait(ctx context.Context, alias, jobID string) runResult {
 	rr := runResult{alias: alias, startedAt: time.Now()}
 
-	// Try HTTP trigger first; fall back to POST /v1/jobs/:alias/run.
-	var (
-		runID   string
-		err     error
-		trigErr error
-	)
-	runID, trigErr = h.tryHTTPTrigger(ctx, triggerPath)
-	if runID == "" {
-		runID, err = h.tryFallbackRun(ctx, alias)
-	}
-
-	if runID == "" {
-		if err == nil {
-			if trigErr != nil {
-				err = fmt.Errorf("trigger %s: %w", alias, trigErr)
-			} else {
-				err = fmt.Errorf("trigger %s: could not obtain run ID", alias)
-			}
-		}
-		rr.err = err
+	runID, err := h.startRun(ctx, jobID)
+	if err != nil {
+		rr.err = fmt.Errorf("trigger %s: %w", alias, err)
 		rr.finishedAt = time.Now()
 		rr.status = "trigger_failed"
 		return rr
 	}
-
 	rr.runID = runID
 
 	// Poll until terminal.
@@ -576,7 +551,7 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string)
 		case <-time.After(pollInterval):
 		}
 
-		status, pollErr := h.client.getRunStatus(ctx, runID)
+		status, pollErr := h.client.getRunStatus(ctx, jobID, runID)
 		if pollErr != nil {
 			// Transient; keep polling.
 			continue
@@ -598,56 +573,39 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string)
 	return rr
 }
 
-// tryHTTPTrigger POSTs to the configured trigger path. Returns the runID on
-// success, or ("", err) on transport or HTTP error. Non-2xx responses are
-// reported as an error so callers can decide whether to fall through to the
-// jobs/:id/run fallback path.
-func (h *harness) tryHTTPTrigger(ctx context.Context, triggerPath string) (string, error) {
-	resp, err := h.client.do(ctx, http.MethodPost, triggerPath, nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("trigger %s: HTTP %d", triggerPath, resp.StatusCode)
-	}
-	raw, _ := io.ReadAll(resp.Body)
-	var result struct {
-		ID string `json:"id"`
-	}
-	if jErr := json.Unmarshal(raw, &result); jErr != nil {
-		return "", jErr
-	}
-	return result.ID, nil
-}
-
-// tryFallbackRun resolves alias → job ID, then POSTs /v1/jobs/:id/run.
-func (h *harness) tryFallbackRun(ctx context.Context, alias string) (string, error) {
-	jobID, err := h.resolveJobID(ctx, alias)
-	if err != nil {
-		return "", err
-	}
+// startRun POSTs to /v1/jobs/:id/run and returns the new run's ID. The webhook
+// path (/v1/hooks/*) is not used because its 202 response carries no body,
+// which would make per-run tracking impossible. POST /v1/jobs/:id/run returns
+// the JobRun object including the run ID.
+func (h *harness) startRun(ctx context.Context, jobID string) (string, error) {
 	resp, err := h.client.do(ctx, http.MethodPost, "/v1/jobs/"+jobID+"/run", nil)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("fallback trigger %s: HTTP %d", alias, resp.StatusCode)
+		raw, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("run job %s: HTTP %d: %s", jobID, resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	raw, _ := io.ReadAll(resp.Body)
 	var result struct {
 		ID string `json:"id"`
 	}
 	if jErr := json.Unmarshal(raw, &result); jErr != nil {
-		return "", jErr
+		return "", fmt.Errorf("parse run response: %w", jErr)
+	}
+	if result.ID == "" {
+		return "", fmt.Errorf("run job %s: response missing id", jobID)
 	}
 	return result.ID, nil
 }
 
-// resolveJobID looks up a job by alias via /v1/jobs?alias=.
+// resolveJobID looks up a job by alias via GET /v1/jobs. The list endpoint
+// doesn't filter by alias server-side (the query param is ignored), so we
+// fetch the full list and filter client-side. Response is a flat array of
+// jobs with id/alias fields embedded from models.Job.
 func (h *harness) resolveJobID(ctx context.Context, alias string) (string, error) {
-	resp, err := h.client.do(ctx, http.MethodGet, "/v1/jobs?alias="+alias, nil)
+	resp, err := h.client.do(ctx, http.MethodGet, "/v1/jobs", nil)
 	if err != nil {
 		return "", err
 	}
@@ -656,18 +614,19 @@ func (h *harness) resolveJobID(ctx context.Context, alias string) (string, error
 		return "", fmt.Errorf("lookup %s: HTTP %d", alias, resp.StatusCode)
 	}
 	raw, _ := io.ReadAll(resp.Body)
-	var jobList struct {
-		Jobs []struct {
-			ID string `json:"id"`
-		} `json:"jobs"`
+	var jobs []struct {
+		ID    string `json:"id"`
+		Alias string `json:"alias"`
 	}
-	if jErr := json.Unmarshal(raw, &jobList); jErr != nil {
+	if jErr := json.Unmarshal(raw, &jobs); jErr != nil {
 		return "", jErr
 	}
-	if len(jobList.Jobs) == 0 {
-		return "", fmt.Errorf("lookup %s: no job found", alias)
+	for _, j := range jobs {
+		if j.Alias == alias {
+			return j.ID, nil
+		}
 	}
-	return jobList.Jobs[0].ID, nil
+	return "", fmt.Errorf("lookup %s: no matching job in %d results", alias, len(jobs))
 }
 
 // ---------------------------------------------------------------------------
