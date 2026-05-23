@@ -536,60 +536,14 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string)
 	rr := runResult{alias: alias, startedAt: time.Now()}
 
 	// Try HTTP trigger first; fall back to POST /v1/jobs/:alias/run.
-	var runID string
-	var err error
-
-	triggerResp, trigErr := h.client.do(ctx, http.MethodPost, triggerPath, nil)
-	if trigErr == nil && triggerResp.StatusCode < 300 {
-		raw, _ := io.ReadAll(triggerResp.Body)
-		triggerResp.Body.Close()
-		var result struct {
-			ID string `json:"id"`
-		}
-		if jErr := json.Unmarshal(raw, &result); jErr == nil && result.ID != "" {
-			runID = result.ID
-		}
-	} else if triggerResp != nil {
-		triggerResp.Body.Close()
-	}
-
+	var (
+		runID   string
+		err     error
+		trigErr error
+	)
+	runID, trigErr = h.tryHTTPTrigger(ctx, triggerPath)
 	if runID == "" {
-		// Fallback: POST /v1/jobs/:alias/run using alias lookup.
-		// First look up the job to get its ID.
-		jobResp, lookupErr := h.client.do(ctx, http.MethodGet, "/v1/jobs?alias="+alias, nil)
-		if lookupErr == nil && jobResp.StatusCode < 300 {
-			raw, _ := io.ReadAll(jobResp.Body)
-			jobResp.Body.Close()
-			var jobList struct {
-				Jobs []struct {
-					ID string `json:"id"`
-				} `json:"jobs"`
-			}
-			if jErr := json.Unmarshal(raw, &jobList); jErr == nil && len(jobList.Jobs) > 0 {
-				jobID := jobList.Jobs[0].ID
-				runResp, runErr := h.client.do(ctx, http.MethodPost, "/v1/jobs/"+jobID+"/run", nil)
-				if runErr == nil && runResp.StatusCode < 300 {
-					raw, _ := io.ReadAll(runResp.Body)
-					runResp.Body.Close()
-					var runResult struct {
-						ID string `json:"id"`
-					}
-					if jErr := json.Unmarshal(raw, &runResult); jErr == nil {
-						runID = runResult.ID
-					}
-				} else if runResp != nil {
-					runResp.Body.Close()
-					err = fmt.Errorf("fallback trigger %s: HTTP %d", alias, runResp.StatusCode)
-				}
-			}
-			if jobResp != nil {
-				jobResp.Body.Close()
-			}
-		} else {
-			if jobResp != nil {
-				jobResp.Body.Close()
-			}
-		}
+		runID, err = h.tryFallbackRun(ctx, alias)
 	}
 
 	if runID == "" {
@@ -642,6 +596,78 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string)
 	rr.finishedAt = time.Now()
 	rr.status = "timeout"
 	return rr
+}
+
+// tryHTTPTrigger POSTs to the configured trigger path. Returns the runID on
+// success, or ("", err) on transport or HTTP error. Non-2xx responses are
+// reported as an error so callers can decide whether to fall through to the
+// jobs/:id/run fallback path.
+func (h *harness) tryHTTPTrigger(ctx context.Context, triggerPath string) (string, error) {
+	resp, err := h.client.do(ctx, http.MethodPost, triggerPath, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("trigger %s: HTTP %d", triggerPath, resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var result struct {
+		ID string `json:"id"`
+	}
+	if jErr := json.Unmarshal(raw, &result); jErr != nil {
+		return "", jErr
+	}
+	return result.ID, nil
+}
+
+// tryFallbackRun resolves alias → job ID, then POSTs /v1/jobs/:id/run.
+func (h *harness) tryFallbackRun(ctx context.Context, alias string) (string, error) {
+	jobID, err := h.resolveJobID(ctx, alias)
+	if err != nil {
+		return "", err
+	}
+	resp, err := h.client.do(ctx, http.MethodPost, "/v1/jobs/"+jobID+"/run", nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("fallback trigger %s: HTTP %d", alias, resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var result struct {
+		ID string `json:"id"`
+	}
+	if jErr := json.Unmarshal(raw, &result); jErr != nil {
+		return "", jErr
+	}
+	return result.ID, nil
+}
+
+// resolveJobID looks up a job by alias via /v1/jobs?alias=.
+func (h *harness) resolveJobID(ctx context.Context, alias string) (string, error) {
+	resp, err := h.client.do(ctx, http.MethodGet, "/v1/jobs?alias="+alias, nil)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return "", fmt.Errorf("lookup %s: HTTP %d", alias, resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	var jobList struct {
+		Jobs []struct {
+			ID string `json:"id"`
+		} `json:"jobs"`
+	}
+	if jErr := json.Unmarshal(raw, &jobList); jErr != nil {
+		return "", jErr
+	}
+	if len(jobList.Jobs) == 0 {
+		return "", fmt.Errorf("lookup %s: no job found", alias)
+	}
+	return jobList.Jobs[0].ID, nil
 }
 
 // ---------------------------------------------------------------------------
