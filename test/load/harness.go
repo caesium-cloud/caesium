@@ -21,7 +21,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"os"
 	"sort"
@@ -68,11 +67,11 @@ func defaultConfig() config {
 
 // jobDef is the minimal YAML-equivalent payload we send to the server.
 type jobDef struct {
-	APIVersion string      `json:"apiVersion"`
-	Kind       string      `json:"kind"`
-	Metadata   jobMeta     `json:"metadata"`
-	Trigger    triggerDef  `json:"trigger"`
-	Steps      []stepDef   `json:"steps"`
+	APIVersion string     `json:"apiVersion"`
+	Kind       string     `json:"kind"`
+	Metadata   jobMeta    `json:"metadata"`
+	Trigger    triggerDef `json:"trigger"`
+	Steps      []stepDef  `json:"steps"`
 }
 
 type jobMeta struct {
@@ -101,9 +100,11 @@ type stepDef struct {
 // Final layer: one join task that depends on all layer depth-1 tasks.
 // All tasks sleep for taskDuration seconds and emit one caesium::output line.
 func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
-	sleepSec := int(math.Ceil(taskDuration.Seconds()))
-	if sleepSec < 1 {
-		sleepSec = 1
+	// Use floating-point seconds so sub-second durations are honored; busybox
+	// sleep accepts decimal values. Floor at 1ms so we never emit "sleep 0".
+	sleepSec := taskDuration.Seconds()
+	if sleepSec < 0.001 {
+		sleepSec = 0.001
 	}
 
 	// Single-step fast path.
@@ -112,7 +113,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 			{
 				Name:    "task-root",
 				Image:   "busybox:1.36.1",
-				Command: []string{"sh", "-c", fmt.Sprintf("sleep %d && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
+				Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 			},
 		}
 	}
@@ -128,7 +129,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	steps = append(steps, stepDef{
 		Name:    rootName,
 		Image:   "busybox:1.36.1",
-		Command: []string{"sh", "-c", fmt.Sprintf("sleep %d && echo '##caesium::output {\"step\":\"root\"}'", sleepSec)},
+		Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"root\"}'", sleepSec)},
 		Next:    rootNexts,
 	})
 
@@ -146,7 +147,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 			steps = append(steps, stepDef{
 				Name:      name,
 				Image:     "busybox:1.36.1",
-				Command:   []string{"sh", "-c", fmt.Sprintf("sleep %d && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
+				Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 				DependsOn: dependsOn,
 				Next:      []string{nextName},
 			})
@@ -168,7 +169,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 		steps = append(steps, stepDef{
 			Name:      name,
 			Image:     "busybox:1.36.1",
-			Command:   []string{"sh", "-c", fmt.Sprintf("sleep %d && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
+			Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 			DependsOn: dependsOn,
 			Next:      []string{"task-join"},
 		})
@@ -178,7 +179,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	steps = append(steps, stepDef{
 		Name:      "task-join",
 		Image:     "busybox:1.36.1",
-		Command:   []string{"sh", "-c", fmt.Sprintf("sleep %d && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
+		Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 		DependsOn: joinDeps,
 	})
 
@@ -256,28 +257,6 @@ func (c *client) applyJob(ctx context.Context, def jobDef) (string, error) {
 	return "", fmt.Errorf("job %s not found in apply response", def.Metadata.Alias)
 }
 
-// triggerHTTP fires a manual HTTP trigger for the given alias.
-func (c *client) triggerHTTP(ctx context.Context, route string) (string, error) {
-	resp, err := c.do(ctx, http.MethodPost, route, nil)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return "", fmt.Errorf("trigger %s: HTTP %d: %s", route, resp.StatusCode, strings.TrimSpace(string(raw)))
-	}
-
-	var result struct {
-		ID string `json:"id"`
-	}
-	if err := json.Unmarshal(raw, &result); err != nil {
-		return "", fmt.Errorf("parse trigger response: %w", err)
-	}
-	return result.ID, nil
-}
-
 // getRunStatus returns the status of a job run.
 func (c *client) getRunStatus(ctx context.Context, runID string) (string, error) {
 	resp, err := c.do(ctx, http.MethodGet, "/v1/runs/"+runID, nil)
@@ -328,6 +307,11 @@ func parseCounter(text, metricName string, labels map[string]string) float64 {
 		if !strings.HasPrefix(line, metricName) {
 			continue
 		}
+		// Reject prefix-only matches (e.g., `caesium_db_writes_total_bucket`
+		// would otherwise match `caesium_db_writes_total`).
+		if rest := line[len(metricName):]; len(rest) > 0 && rest[0] != '{' && rest[0] != ' ' && rest[0] != '\t' {
+			continue
+		}
 
 		allMatch := true
 		for k, v := range labels {
@@ -355,16 +339,16 @@ func parseCounter(text, metricName string, labels map[string]string) float64 {
 }
 
 type metricSample struct {
-	ts              time.Time
-	taskRunInsert   float64
-	taskRunStatus   float64
-	eventInsert     float64
-	leaseRenewal    float64
-	callback        float64
-	command         float64
-	checkpoint      float64
-	dbBusyRetries   float64
-	claimsTotal     float64
+	ts            time.Time
+	taskRunInsert float64
+	taskRunStatus float64
+	eventInsert   float64
+	leaseRenewal  float64
+	callback      float64
+	command       float64
+	checkpoint    float64
+	dbBusyRetries float64
+	claimsTotal   float64
 }
 
 func sampleMetrics(ctx context.Context, c *client) (metricSample, error) {
@@ -390,12 +374,12 @@ func sampleMetrics(ctx context.Context, c *client) (metricSample, error) {
 // ---------------------------------------------------------------------------
 
 type runResult struct {
-	runID     string
-	alias     string
-	startedAt time.Time
+	runID      string
+	alias      string
+	startedAt  time.Time
 	finishedAt time.Time
-	status    string
-	err       error
+	status     string
+	err        error
 }
 
 // ---------------------------------------------------------------------------
@@ -496,11 +480,9 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 	pending.Store(int64(h.cfg.jobCount))
 
 	sem := make(chan struct{}, h.cfg.concurrency)
-	errCh := make(chan error, h.cfg.jobCount)
 
-	for i, j := range jobs {
+	for _, j := range jobs {
 		j := j
-		_ = i
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
@@ -509,9 +491,6 @@ func (h *harness) run(ctx context.Context) (*report, error) {
 			results = append(results, rr)
 			resultsMu.Unlock()
 			pending.Add(-1)
-			if rr.err != nil {
-				errCh <- rr.err
-			}
 		}()
 	}
 
@@ -669,23 +648,23 @@ func (h *harness) triggerAndWait(ctx context.Context, alias, triggerPath string)
 // ---------------------------------------------------------------------------
 
 type report struct {
-	cfg           config
-	totalDuration time.Duration
-	runsSucceeded int
-	runsFailed    int
-	runsTimeout   int
+	cfg               config
+	totalDuration     time.Duration
+	runsSucceeded     int
+	runsFailed        int
+	runsTimeout       int
 	runsTriggerFailed int
 
 	// Delta counts (end - baseline).
-	deltaTaskRunInsert  float64
-	deltaTaskRunStatus  float64
-	deltaEventInsert    float64
-	deltaLeaseRenewal   float64
-	deltaCallback       float64
-	deltaCommand        float64
-	deltaCheckpoint     float64
-	deltaDBBusyRetries  float64
-	deltaClaimsTotal    float64
+	deltaTaskRunInsert float64
+	deltaTaskRunStatus float64
+	deltaEventInsert   float64
+	deltaLeaseRenewal  float64
+	deltaCallback      float64
+	deltaCommand       float64
+	deltaCheckpoint    float64
+	deltaDBBusyRetries float64
+	deltaClaimsTotal   float64
 
 	// Per-second rates during the run.
 	peakTaskRunStatusPerSec float64
@@ -693,10 +672,10 @@ type report struct {
 	peakLeaseRenewalPerSec  float64
 
 	// Task latency (approximated from run duration and task count).
-	totalTasks      int
-	taskDuration    time.Duration
-	endToEndP50     time.Duration
-	endToEndP99     time.Duration
+	totalTasks   int
+	taskDuration time.Duration
+	endToEndP50  time.Duration
+	endToEndP99  time.Duration
 
 	// Intermediate samples for rate computation.
 	samples []metricSample
