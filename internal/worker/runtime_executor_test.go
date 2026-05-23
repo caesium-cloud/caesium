@@ -121,22 +121,25 @@ func (e *fakeMonitorEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error)
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-func TestLeaseRenewInterval(t *testing.T) {
+func TestBatchLeaseRenewInterval(t *testing.T) {
 	tests := []struct {
-		name string
-		ttl  time.Duration
-		want time.Duration
+		name     string
+		leaseTTL time.Duration
+		override time.Duration
+		want     time.Duration
 	}{
-		{name: "default when ttl disabled", ttl: 0, want: defaultLeaseRenewInterval},
-		{name: "half ttl", ttl: 20 * time.Second, want: 10 * time.Second},
-		{name: "minimum bound", ttl: 1500 * time.Millisecond, want: minLeaseRenewInterval},
+		{name: "no TTL no override uses 1s minimum", leaseTTL: 0, override: 0, want: time.Second},
+		{name: "5m TTL default is ttl/4", leaseTTL: 5 * time.Minute, override: 0, want: 75 * time.Second},
+		{name: "20s TTL default is 5s", leaseTTL: 20 * time.Second, override: 0, want: 5 * time.Second},
+		{name: "1s TTL floored to 1s minimum", leaseTTL: time.Second, override: 0, want: time.Second},
+		{name: "override respected", leaseTTL: 5 * time.Minute, override: 30 * time.Second, want: 30 * time.Second},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := leaseRenewInterval(tt.ttl)
+			got := batchLeaseRenewInterval(tt.leaseTTL, tt.override)
 			if got != tt.want {
-				t.Fatalf("leaseRenewInterval(%s)=%s, want %s", tt.ttl, got, tt.want)
+				t.Fatalf("batchLeaseRenewInterval(%s, %s)=%s, want %s", tt.leaseTTL, tt.override, got, tt.want)
 			}
 		})
 	}

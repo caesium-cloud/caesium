@@ -28,18 +28,15 @@ import (
 const (
 	taskFailurePolicyHalt     = "halt"
 	taskFailurePolicyContinue = "continue"
-	defaultLeaseRenewInterval = 1 * time.Second
-	minLeaseRenewInterval     = 1 * time.Second
 )
 
 type runtimeExecutor struct {
 	store             *run.Store
 	taskTimeout       time.Duration
-	workerLeaseTTL    time.Duration
 	continueOnFailure bool
 }
 
-func NewRuntimeExecutor(store *run.Store, taskTimeout, workerLeaseTTL time.Duration, failurePolicy string) TaskExecutor {
+func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string) TaskExecutor {
 	if store == nil {
 		panic("runtime executor requires run store")
 	}
@@ -47,7 +44,6 @@ func NewRuntimeExecutor(store *run.Store, taskTimeout, workerLeaseTTL time.Durat
 	return (&runtimeExecutor{
 		store:             store,
 		taskTimeout:       taskTimeout,
-		workerLeaseTTL:    workerLeaseTTL,
 		continueOnFailure: normalizeTaskFailurePolicy(failurePolicy) == taskFailurePolicyContinue,
 	}).Execute
 }
@@ -238,10 +234,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			log.Error("failed to persist worker task retry state", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", retryErr)
 		}
 
-		// Update local attempt counter and sleep while renewing the lease.
+		// Update local attempt counter and sleep before the next attempt.
+		// Lease renewal during the delay is handled by the per-node batched renewal
+		// ticker on the Worker.
 		taskRun.Attempt = attempt + 1
 		if delay > 0 {
-			e.sleepRenewingLease(ctx, taskRun, delay)
+			e.sleepRetryDelay(ctx, delay)
 		}
 
 		if ctx.Err() != nil {
@@ -275,35 +273,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	}
 }
 
-// sleepRenewingLease sleeps for the given duration while periodically renewing the task lease.
-func (e *runtimeExecutor) sleepRenewingLease(ctx context.Context, taskRun *models.TaskRun, delay time.Duration) {
-	renewInterval := leaseRenewInterval(e.workerLeaseTTL)
-	deadline := time.Now().Add(delay)
-
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			return
-		}
-
-		next := remaining
-		if renewInterval > 0 && renewInterval < next {
-			next = renewInterval
-		}
-
-		timer := time.NewTimer(next)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-timer.C:
-		}
-
-		if time.Now().Before(deadline) {
-			if err := e.renewLease(taskRun); err != nil {
-				log.Error("failed to renew worker task lease during retry delay", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
-			}
-		}
+// sleepRetryDelay sleeps for the given duration, respecting context cancellation.
+// Lease renewal during retry delays is handled by the per-node batched renewal
+// ticker on the Worker (see Worker.runLeaseRenewal).
+func (e *runtimeExecutor) sleepRetryDelay(ctx context.Context, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 }
 
@@ -480,7 +458,7 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 }
 
 // monitorTask blocks until the engine reports the atom has terminated and
-// returns the post-Wait atom snapshot, periodically renewing the worker lease.
+// returns the post-Wait atom snapshot.
 //
 // On the success path the caller is responsible for stopping/cleaning up the
 // atom — monitorTask intentionally leaves it running so the caller can read
@@ -491,10 +469,11 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 // failures don't leak orphaned containers/pods. The Stop uses a detached
 // context inside each engine implementation so cleanup still runs even when
 // the parent context has been cancelled.
+//
+// Lease renewal is no longer done per-task inside monitorTask. The Worker
+// issues a single batched UPDATE for all in-flight claims via its per-node
+// renewal ticker (see Worker.runLeaseRenewal).
 func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskRun, engine atom.Engine, a atom.Atom) (atom.Atom, error) {
-	ticker := time.NewTicker(leaseRenewInterval(e.workerLeaseTTL))
-	defer ticker.Stop()
-
 	waitResult := make(chan struct {
 		atom atom.Atom
 		err  error
@@ -533,39 +512,8 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 				return a, result.err
 			}
 			return result.atom, nil
-		case <-ticker.C:
-			if err := e.renewLease(taskRun); err != nil {
-				log.Error("failed to renew worker task lease", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", err)
-			}
 		}
 	}
-}
-
-func (e *runtimeExecutor) renewLease(taskRun *models.TaskRun) error {
-	if taskRun == nil || e.workerLeaseTTL <= 0 || strings.TrimSpace(taskRun.ClaimedBy) == "" {
-		return nil
-	}
-
-	nextExpiry := time.Now().UTC().Add(e.workerLeaseTTL)
-	if err := e.store.DB().Model(&models.TaskRun{}).
-		Where("id = ? AND claimed_by = ?", taskRun.ID, taskRun.ClaimedBy).
-		Update("claim_expires_at", nextExpiry).Error; err != nil {
-		return err
-	}
-	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
-	return nil
-}
-
-func leaseRenewInterval(leaseTTL time.Duration) time.Duration {
-	if leaseTTL <= 0 {
-		return defaultLeaseRenewInterval
-	}
-
-	interval := leaseTTL / 2
-	if interval < minLeaseRenewInterval {
-		return minLeaseRenewInterval
-	}
-	return interval
 }
 
 func newEngine(ctx context.Context, engineType models.AtomEngine) (atom.Engine, error) {

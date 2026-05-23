@@ -1035,3 +1035,93 @@ func TestCompleteTaskWithBranchSkipSkipsAllSuccessJoin(t *testing.T) {
 	require.Equal(t, TaskStatusSkipped, statusByTask[join.ID].Status)
 	require.Equal(t, 0, statusByTask[join.ID].OutstandingPredecessors)
 }
+
+// seedClaimedTaskRun inserts a task_run row that looks like it has been claimed
+// by nodeID and returns the row's UUID.
+func seedClaimedTaskRun(t *testing.T, store *Store, nodeID string) uuid.UUID {
+	t.Helper()
+
+	now := time.Now().UTC()
+	expires := now.Add(5 * time.Minute)
+
+	taskRunID := uuid.New()
+	tr := &models.TaskRun{
+		ID:             taskRunID,
+		JobRunID:       uuid.New(),
+		TaskID:         uuid.New(),
+		AtomID:         uuid.New(),
+		Engine:         models.AtomEngineDocker,
+		Image:          "alpine:3.23",
+		Status:         string(TaskStatusRunning),
+		ClaimedBy:      nodeID,
+		ClaimExpiresAt: &expires,
+		Attempt:        1,
+		MaxAttempts:    1,
+		CreatedAt:      now,
+		UpdatedAt:      now,
+	}
+	require.NoError(t, store.db.Create(tr).Error)
+	return taskRunID
+}
+
+func TestRenewLeasesHappyPath(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	nodeID := "node-a"
+	id := seedClaimedTaskRun(t, store, nodeID)
+
+	newExpiry := time.Now().UTC().Add(10 * time.Minute)
+	require.NoError(t, store.RenewLeases(t.Context(), nodeID, []uuid.UUID{id}, newExpiry))
+
+	var tr models.TaskRun
+	require.NoError(t, db.First(&tr, "id = ?", id).Error)
+	require.NotNil(t, tr.ClaimExpiresAt)
+	require.WithinDuration(t, newExpiry, *tr.ClaimExpiresAt, time.Second)
+}
+
+func TestRenewLeasesEmptyIDsIsNoOp(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	// Should return nil without hitting the DB.
+	require.NoError(t, store.RenewLeases(t.Context(), "node-a", nil, time.Now().Add(time.Minute)))
+}
+
+func TestRenewLeasesDoesNotTouchOtherNode(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+
+	nodeA := "node-a"
+	nodeB := "node-b"
+
+	idA := seedClaimedTaskRun(t, store, nodeA)
+	idB := seedClaimedTaskRun(t, store, nodeB)
+
+	// Fetch original expiry for node-b's row so we can assert it is unchanged.
+	var trBBefore models.TaskRun
+	require.NoError(t, db.First(&trBBefore, "id = ?", idB).Error)
+	originalExpiryB := trBBefore.ClaimExpiresAt
+
+	// Renew only node-a's claims, passing node-b's ID in the list too.  The
+	// claimed_by predicate should prevent node-b's row from being updated.
+	newExpiry := time.Now().UTC().Add(10 * time.Minute)
+	require.NoError(t, store.RenewLeases(t.Context(), nodeA, []uuid.UUID{idA, idB}, newExpiry))
+
+	// node-a's row should be extended.
+	var trA models.TaskRun
+	require.NoError(t, db.First(&trA, "id = ?", idA).Error)
+	require.NotNil(t, trA.ClaimExpiresAt)
+	require.WithinDuration(t, newExpiry, *trA.ClaimExpiresAt, time.Second)
+
+	// node-b's row must be untouched.
+	var trBAfter models.TaskRun
+	require.NoError(t, db.First(&trBAfter, "id = ?", idB).Error)
+	if originalExpiryB != nil && trBAfter.ClaimExpiresAt != nil {
+		require.Equal(t, originalExpiryB.Unix(), trBAfter.ClaimExpiresAt.Unix())
+	}
+}

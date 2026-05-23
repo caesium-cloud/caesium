@@ -3,15 +3,23 @@ package worker
 import (
 	"context"
 	"math/rand/v2"
+	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 )
 
 const (
 	defaultPollInterval    = 15 * time.Second
 	defaultReclaimInterval = 30 * time.Second
+
+	// defaultLeaseRenewDivisor is the fraction of lease_ttl used as the
+	// renewal interval when no explicit interval is configured.  ttl/4 gives
+	// three full renewal cycles before a lease would expire.
+	defaultLeaseRenewDivisor = 4
 )
 
 type TaskClaimer interface {
@@ -34,6 +42,19 @@ func (f ReclaimGateFunc) CanReclaim(ctx context.Context) (bool, error) {
 	return f(ctx)
 }
 
+// LeaseRenewer is implemented by any component that can issue a single batched
+// UPDATE extending claim_expires_at for a set of in-flight task runs.
+type LeaseRenewer interface {
+	RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID, newExpiresAt time.Time) error
+}
+
+// inFlightClaim records the minimal state needed to decide whether renewal is
+// required for a single in-flight task run.
+type inFlightClaim struct {
+	claimedBy      string
+	claimExpiresAt time.Time
+}
+
 type Worker struct {
 	claimer         TaskClaimer
 	pool            *Pool
@@ -43,6 +64,13 @@ type Worker struct {
 	reclaimGate     ReclaimGate
 	executor        TaskExecutor
 	wakeups         <-chan struct{}
+
+	// Batched lease renewal.
+	leaseRenewer       LeaseRenewer
+	leaseTTL           time.Duration
+	leaseRenewInterval time.Duration
+	inFlightMu         sync.Mutex
+	inFlight           map[uuid.UUID]*inFlightClaim
 }
 
 func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, executor TaskExecutor) *Worker {
@@ -66,6 +94,7 @@ func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, exec
 		reclaimInterval: defaultReclaimInterval,
 		lastReclaim:     initialLastReclaim(time.Now(), defaultReclaimInterval),
 		executor:        executor,
+		inFlight:        make(map[uuid.UUID]*inFlightClaim),
 	}
 }
 
@@ -88,7 +117,41 @@ func (w *Worker) WithReclaimInterval(interval time.Duration) *Worker {
 	return w
 }
 
+// WithLeaseRenewal configures per-node batched lease renewal.
+//
+//   - renewer issues a single UPDATE for all in-flight claims at once.
+//   - leaseTTL is the configured claim TTL; it drives the renewal cadence and
+//     the skip-when-not-needed threshold.
+//   - renewInterval is the override interval; pass 0 to use leaseTTL/4.
+func (w *Worker) WithLeaseRenewal(renewer LeaseRenewer, leaseTTL, renewInterval time.Duration) *Worker {
+	w.leaseRenewer = renewer
+	w.leaseTTL = leaseTTL
+	w.leaseRenewInterval = batchLeaseRenewInterval(leaseTTL, renewInterval)
+	return w
+}
+
+// batchLeaseRenewInterval derives the per-node batched renewal interval.
+// If override > 0 it is used directly; otherwise leaseTTL/4 is used (minimum 1s).
+func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {
+	if override > 0 {
+		return override
+	}
+	if leaseTTL <= 0 {
+		return time.Second
+	}
+	interval := leaseTTL / defaultLeaseRenewDivisor
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
+}
+
 func (w *Worker) Run(ctx context.Context) error {
+	// Start the batched lease renewal goroutine only when configured.
+	if w.leaseRenewer != nil && w.leaseRenewInterval > 0 {
+		go w.runLeaseRenewal(ctx)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -116,9 +179,16 @@ func (w *Worker) Run(ctx context.Context) error {
 			continue
 		}
 
+		// Register the claim before submitting so the renewal ticker can see it
+		// as soon as the goroutine is alive, even before execution starts.
+		w.trackInFlight(task)
+
 		if err := w.pool.Submit(ctx, func() {
+			defer w.untrackInFlight(task.ID)
 			w.executor(ctx, task)
 		}); err != nil {
+			// Submit failed (context cancelled); undo the registration.
+			w.untrackInFlight(task.ID)
 			if ctx.Err() != nil {
 				w.pool.Wait()
 				return nil
@@ -126,6 +196,94 @@ func (w *Worker) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// trackInFlight registers a task run as in-flight for lease renewal purposes.
+func (w *Worker) trackInFlight(task *models.TaskRun) {
+	if task == nil {
+		return
+	}
+	claim := &inFlightClaim{
+		claimedBy: task.ClaimedBy,
+	}
+	if task.ClaimExpiresAt != nil {
+		claim.claimExpiresAt = *task.ClaimExpiresAt
+	}
+	w.inFlightMu.Lock()
+	w.inFlight[task.ID] = claim
+	w.inFlightMu.Unlock()
+}
+
+// untrackInFlight removes a task run from the in-flight set when execution ends.
+func (w *Worker) untrackInFlight(id uuid.UUID) {
+	w.inFlightMu.Lock()
+	delete(w.inFlight, id)
+	w.inFlightMu.Unlock()
+}
+
+// runLeaseRenewal is the background goroutine that fires the per-node batched
+// lease renewal on a fixed cadence.
+func (w *Worker) runLeaseRenewal(ctx context.Context) {
+	ticker := time.NewTicker(w.leaseRenewInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.renewLeasesNow(ctx)
+		}
+	}
+}
+
+// renewLeasesNow collects all in-flight claims, skips the UPDATE if none are
+// within lease_ttl/2 of expiry, and otherwise issues a single batched UPDATE.
+func (w *Worker) renewLeasesNow(ctx context.Context) {
+	if w.leaseRenewer == nil {
+		return
+	}
+
+	now := time.Now().UTC()
+	halfTTL := w.leaseTTL / 2
+
+	w.inFlightMu.Lock()
+	ids := make([]uuid.UUID, 0, len(w.inFlight))
+	nodeID := ""
+	needsRenewal := false
+	for id, claim := range w.inFlight {
+		ids = append(ids, id)
+		if nodeID == "" {
+			nodeID = claim.claimedBy
+		}
+		// Renewal is needed if any claim is within lease_ttl/2 of expiry.
+		if halfTTL <= 0 || claim.claimExpiresAt.IsZero() || claim.claimExpiresAt.Sub(now) <= halfTTL {
+			needsRenewal = true
+		}
+	}
+	w.inFlightMu.Unlock()
+
+	if len(ids) == 0 || !needsRenewal {
+		return
+	}
+
+	newExpiresAt := now.Add(w.leaseTTL)
+	if err := w.leaseRenewer.RenewLeases(ctx, nodeID, ids, newExpiresAt); err != nil {
+		if ctx.Err() == nil {
+			log.Error("failed to renew worker task leases", "node_id", nodeID, "count", len(ids), "error", err)
+		}
+		return
+	}
+	metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
+
+	// Update the in-memory expiry so the next tick re-evaluates correctly.
+	w.inFlightMu.Lock()
+	for _, id := range ids {
+		if claim, ok := w.inFlight[id]; ok {
+			claim.claimExpiresAt = newExpiresAt
+		}
+	}
+	w.inFlightMu.Unlock()
 }
 
 func (w *Worker) reclaimIfDue(ctx context.Context) {

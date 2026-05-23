@@ -226,6 +226,20 @@ func decodeCacheConfig(raw []byte) interface{} {
 	return decoded
 }
 
+// RenewLeases extends claim_expires_at for all task runs identified by ids that
+// are still claimed by nodeID. The WHERE clause on claimed_by ensures that any
+// task whose claim was reassigned after expiry is not accidentally extended.
+// An empty ids slice is a no-op (no database round-trip).
+func (s *Store) RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID, newExpiresAt time.Time) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	return s.db.WithContext(ctx).
+		Model(&models.TaskRun{}).
+		Where("claimed_by = ? AND id IN ?", nodeID, ids).
+		Update("claim_expires_at", newExpiresAt).Error
+}
+
 func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
