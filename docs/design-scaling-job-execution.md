@@ -107,19 +107,24 @@ Each in-flight run is owned by exactly one node for its lifetime. The owner hold
 
 The owner is the node assigned to a run by `hash(run_id) % owner_eligible_nodes`, where `owner_eligible_nodes` is the set of currently-live nodes with `CAESIUM_RUN_OWNER_ENABLED=true`. This is *separate from* the database shard the run's hot rows live in (`hash(run_id) % CAESIUM_DATABASE_SHARDS`, per PR #157) — there is one dqlite Raft cluster with one leader, and any owner's writes round-trip to that leader. Using the same hash key gives natural cache-affinity if `owner_eligible_nodes == CAESIUM_DATABASE_SHARDS`, but the two concepts are independent and either can be reconfigured without touching the other.
 
-On `RunStarted` the originating node writes a `run_leases` row in the catalog DB:
+On `RunStarted` the originating node writes a `run_leases` row in the catalog DB. Schemas in this doc are expressed in SQLite-compatible types (`TEXT`, `INTEGER`, `BLOB`, `DATETIME`); GORM normalizes to the active backend, so PostgreSQL deployments map `DATETIME` → `TIMESTAMP` and `TEXT` (for JSON payloads) → `JSONB` via the existing column tagging convention.
 
 ```
 run_leases (
-  run_id          uuid primary key,
-  owner_node      text not null,
-  acquired_at     timestamptz not null,
-  lease_expires_at timestamptz not null,
-  generation      bigint not null
+  run_id            TEXT PRIMARY KEY,                  -- uuid as text per existing GORM convention
+  owner_node        TEXT NOT NULL,
+  acquired_at       DATETIME NOT NULL,
+  lease_expires_at  DATETIME NOT NULL,
+  generation        INTEGER NOT NULL
 )
 ```
 
-Only the lease holder is permitted to write to that run's hot rows (enforced at the data-layer router by checking the local node identity against the in-process lease cache; mismatch → reject with a structured error so the caller can retry against the new owner).
+Only the lease holder is permitted to write to that run's hot rows. The fence is enforced at two layers:
+
+1. **In-process** — the data-layer router checks the local node identity against the in-process lease cache; mismatch → reject with a structured error so the caller can retry against the new owner.
+2. **Database** — the run's hot-shard tables gain an `owner_generation` column (added to `task_runs`, `execution_events`, `callback_runs`, `run_checkpoints`). Every coordination write includes `AND owner_generation = <current_generation>` in its `WHERE` clause; rows initially written by the owner are stamped with the owner's generation at insert time. This guards against split-brain windows where a stale owner is still reachable by the dqlite leader before the in-process cache detects loss of lease.
+
+If a write affects zero rows because of the generation predicate, the caller treats it as a fence failure and drops state — same code path as in-process detection.
 
 Lease renewal piggybacks on the per-node lease-renewal ticker built in Phase 1.2 — one batched UPDATE per node covers every run lease that node owns.
 
@@ -157,7 +162,7 @@ DispatchEnvelope {
 
 CompleteEnvelope {
   run_id, task_id, owner_generation, attempt, worker_node, dispatch_token
-  status: succeeded | failed | skipped | cached
+  status: succeeded | failed | cached     // NOT skipped — see below
   result, outputs, error
 }
 ```
@@ -168,8 +173,11 @@ Validation rules at the owner's `/internal/complete` handler:
 2. Owner has an outstanding dispatch record for `(run_id, task_id, attempt)` and the stored `dispatch_token` matches.
 3. `worker_node` matches the recipient from the original dispatch.
 4. Task is currently in `running` status in owner memory.
+5. `status ∈ {succeeded, failed, cached}` — workers MUST NOT report `skipped`.
 
 Any mismatch → 409 with a structured error; the completion is *not* applied. This prevents (a) stale workers from a previous owner generation, (b) duplicate completions after a re-dispatched retry, (c) completion forgery by any holder of the shared internal token — the dispatch token is per-task per-attempt, generated and held only by the current owner. Worker identity is asserted by the dispatched recipient string, not derived from the request; mTLS on the internal endpoints (separate credentials from the existing `CAESIUM_INTERNAL_WAKEUP_TOKEN`) is the recommended secondary fence and is required for `CAESIUM_RUN_OWNER_ENABLED=true`.
+
+**Why `skipped` is excluded from worker-reported status.** `skipped` is an owner-side DAG decision — produced by branch logic, trigger-rule evaluation, and recursive descendant propagation when an upstream task fails or a branch is not taken (see `skipTaskAndDescendantsTx` and `markTaskSkippedTx` in `internal/run/store.go`). Applying a `skipped` status without running the propagation logic would leave successors stuck at `pending` and downstream branch-filtered tasks never skipped, corrupting DAG state. Workers report only execution outcomes (`succeeded`, `failed`, `cached`); the owner transitions tasks to `skipped` itself when DAG rules require it.
 
 Selection uses the existing node-label affinity rules + a simple least-loaded heuristic — workers report their current in-flight count in the dispatch ACK.
 
@@ -181,11 +189,13 @@ Owner writes a checkpoint to a new hot-shard table `run_checkpoints` every `min(
 
 ```
 run_checkpoints (
-  run_id            uuid not null,
-  sequence_high     bigint not null,    -- highest event sequence covered
-  created_at        timestamptz not null,
-  state_proto       bytea not null,     -- compact protobuf of in-memory state
-  primary key (run_id, sequence_high)
+  run_id            TEXT NOT NULL,
+  sequence_high     INTEGER NOT NULL,   -- highest event sequence covered
+  created_at        DATETIME NOT NULL,
+  owner_generation  INTEGER NOT NULL,   -- generation of the writing owner; fence column
+  state_proto       BLOB NOT NULL,      -- compact protobuf of in-memory state
+  is_incremental    INTEGER NOT NULL,   -- 0 = full snapshot, 1 = delta vs prior checkpoint
+  PRIMARY KEY (run_id, sequence_high)
 )
 ```
 
@@ -193,18 +203,36 @@ run_checkpoints (
 
 ```proto
 message RunState {
-  map<string, TaskState> tasks = 1;   // taskID → status, attempt, claimed_by, lease_expires_at
+  map<string, TaskState> tasks = 1;             // only tasks past 'pending' (see below)
   map<string, int32> outstanding_predecessors = 2;
-  repeated string ready_queue = 3;    // task IDs in dispatch order
+  repeated string ready_queue = 3;              // task IDs in dispatch order
   int64 sequence_high = 4;
+  int64 owner_generation = 5;
+}
+
+message TaskState {
+  string status = 1;                            // pending | running | succeeded | failed | skipped | cached
+  int32 attempt = 2;                            // current attempt counter
+  string claimed_by = 3;                        // worker node identity, empty if not dispatched
+  int64 lease_expires_at_unix_ms = 4;          // 0 if not dispatched
+  bytes dispatch_token = 5;                     // current outstanding dispatch nonce, empty if not dispatched
 }
 ```
 
-Old checkpoints are pruned: keep last N=3 per run for safety, then delete on terminal-run archival.
+**Checkpoint size optimization (large DAGs).** For runs at the scaling-target ceiling (thousands of tasks), serializing the full status map every 2s would be wasteful — most tasks reach a terminal state and stay there for the rest of the run. Two mitigations apply together:
+
+1. **Active-only snapshot.** Include only tasks whose status is not yet terminal in `tasks` and `outstanding_predecessors`. Terminal tasks are recoverable from `task_runs` directly (via `terminal_sequence` scan), so excluding them from the checkpoint is safe.
+2. **Incremental checkpoints.** Every Nth checkpoint (configurable via `CAESIUM_RUN_CHECKPOINT_FULL_EVERY`, default 10) is a full snapshot; intervening checkpoints are deltas containing only `(task_id, new_state)` pairs that changed since the prior checkpoint. The `is_incremental` column distinguishes them. Recovery walks back to the most recent full snapshot, applies all deltas through `sequence_high`, then layers post-checkpoint terminal rows.
+
+For a 10,000-task run with ~200 concurrently-active tasks, this keeps each checkpoint blob in the low-KB range instead of growing linearly with total task count.
+
+Old checkpoints are pruned: keep last N=3 full snapshots and all deltas between them per run, then delete on terminal-run archival.
 
 **Terminal task states** are always persisted as `task_runs` rows immediately, never deferred. The terminal vocabulary matches the existing code: `succeeded`, `failed`, `skipped`, `cached` (see `internal/run/store.go:43-48` and the `IsTerminalSuccess` helper at `:52`). A future helper `IsTerminal(status)` should be introduced and reused everywhere terminal detection happens (owner replay, archiver, recovery scan) so the vocabulary lives in one place.
 
-Every terminal `task_runs` write is stamped with the owner's current per-run event sequence cursor (`terminal_sequence` column, monotonically increasing per run, never reused). This is what makes recovery deterministic — see below.
+Every terminal `task_runs` write is stamped with the owner's current per-run event sequence cursor (`terminal_sequence` column, monotonically increasing per run, never reused) and the owner's current `owner_generation`. The two columns together make recovery both deterministic and split-brain-safe — see below.
+
+The hot-shard `task_runs` table gains a composite index `(job_run_id, terminal_sequence)` to support O(log N + K) recovery scans for the post-checkpoint tail, where K is the number of terminal rows since the last checkpoint (typically tens, not the full run width).
 
 The owner's commit order is:
 
@@ -243,17 +271,23 @@ This preserves the existing API contract; no UI or external query needs to know 
 
 ```
 run_commands (
-  id              uuid primary key,
-  run_id          uuid not null,
-  command_type    text not null,        -- cancel, retry, signal, ...
-  payload         jsonb,
-  created_at      timestamptz not null,
-  applied_at      timestamptz,
-  applied_by      text                  -- owner_node:generation
+  id              TEXT PRIMARY KEY,         -- uuid as text
+  run_id          TEXT NOT NULL,
+  command_type    TEXT NOT NULL,            -- cancel, retry, signal, ...
+  payload         TEXT,                     -- JSON string; mapped to JSONB on Postgres via GORM
+  created_at      DATETIME NOT NULL,
+  applied_at      DATETIME,
+  applied_by      TEXT                      -- owner_node:generation
 )
 ```
 
-Owner polls `run_commands WHERE run_id IN (owned) AND applied_at IS NULL` on its tick (every ~1s). Commands are applied in `created_at` order; applied row is marked atomically with the operation it caused. Owner unavailable → commands queue; next owner on lease takeover drains the queue before resuming dispatch.
+Indexes: `(run_id, applied_at)` partial index `WHERE applied_at IS NULL` so the pending-command lookup stays fast as the table grows.
+
+**Delivery is push-then-poll, not poll-alone.** The mutation-write path emits a `run_command_created` event on the existing event bus. Owners subscribed to events for their owned runs apply the command immediately (typical latency: tens of ms). The polling fallback runs at a relaxed interval — `CAESIUM_RUN_COMMAND_POLL_INTERVAL`, default 10s instead of 1s — and exists only to catch (a) commands written while the owner was briefly unsubscribed (lease handoff), (b) bus-delivery failures, (c) the small window after a takeover before the new owner is fully subscribed. This collapses catalog-DB QPS for command polling from `O(owner_count / 1s)` to `O(owner_count / 10s)` while keeping the typical apply latency lower than the previous polling approach.
+
+Commands are applied in `created_at` order; applied row is marked atomically with the operation it caused. Owner unavailable → commands queue; next owner on lease takeover drains the queue before resuming dispatch.
+
+**Pruning.** `run_commands` rows are deleted as part of the cold-shard archival job for their parent run (the same job that moves terminal `task_runs` and `execution_events` to `caesium_history`). For runs that never reach the archive threshold (e.g., long-lived runs), an opportunistic vacuum deletes commands with `applied_at IS NOT NULL AND applied_at < now() - 30d`. This keeps the table bounded by the recently-active-run set, not by total history.
 
 ### Compatibility with PR #157 and the locking-fix plan
 
@@ -292,7 +326,7 @@ A 4–8× reduction in per-task write footprint, on top of Phase 1's 3–5× red
 |---|---|---|---|
 | Worker crash mid-task | Owner's lease expiry on dispatched task | Owner reassigns task (`attempt += 1`) | One task re-executes |
 | Owner crash | `run_leases.lease_expires_at` passes | Another node CAS-acquires, replays checkpoint + terminal rows | One checkpoint interval of in-flight work re-dispatched |
-| Network partition (owner isolated) | Owner cannot renew lease → loses ownership. New owner re-dispatches with fresh `dispatch_token` and incremented `attempt`. Stale owner's completes are rejected at `/internal/complete` by generation/token fence. | Stale owner drops state on next lease-renewal failure | Brief duplicate-dispatch window; worker-side idempotency on `(run_id, task_id, attempt)` plus owner-side fence rejection means no terminal state can be applied twice |
+| Network partition (owner isolated) | Owner cannot renew lease → loses ownership. New owner re-dispatches with fresh `dispatch_token` and incremented `attempt`. Stale owner's completes are rejected at `/internal/complete` by generation/token fence; any direct DB write from the stale owner is rejected by the `owner_generation` predicate on hot-shard tables (zero rows affected). | Stale owner drops state on next lease-renewal failure | Brief duplicate-dispatch window; worker-side idempotency on `(run_id, task_id, attempt)` plus owner-side fence rejection AND DB-level generation fence means no terminal state can be applied twice |
 | Stale or forged complete RPC | `/internal/complete` fence check (generation, attempt, dispatch_token, worker_node) returns 409 | Owner emits a `caesium_complete_rejected_total{reason}` counter; rejected completion is dropped without state change | No correctness loss; observability surface for ongoing partition or misconfigured worker |
 | Hot-shard leader change | dqlite role transition | Owner's writes briefly fail; retried with backoff | Bounded checkpoint lag (~1s typical) |
 | Worker dispatch endpoint unreachable | Owner sees POST failure | Owner retries with backoff; falls back to writing the task to its hot shard with `claimed_by=""` so ClaimNext recovery path picks it up | Increased task start latency; no correctness loss |
@@ -302,10 +336,15 @@ A 4–8× reduction in per-task write footprint, on top of Phase 1's 3–5× red
 
 - **Unit tests.**
   - Owner state machine: status transitions, predecessor decrements, ready-queue ordering, checkpoint serialization round-trips.
-  - Checkpoint + terminal-row replay: synthesize a checkpoint + N terminal rows covering all four terminal statuses (`succeeded`, `failed`, `skipped`, `cached`); assert reconstructed state equals state at the time of crash. Explicitly cover `cached` since it is the easiest status to miss in a terminal helper.
+  - Checkpoint + terminal-row replay: synthesize a checkpoint + N terminal rows covering all four terminal statuses (`succeeded`, `failed`, `skipped`, `cached`); assert reconstructed state equals state at the time of crash. Explicitly cover `cached` (easiest to miss in a terminal helper) and `skipped` (must be applied via owner-side propagation, not from a worker complete).
+  - Worker-reported status vocabulary: `/internal/complete` rejects any `status` outside `{succeeded, failed, cached}`; specifically asserts that a `skipped` complete is rejected with `caesium_complete_rejected_total{reason="invalid_status"}` incremented.
   - Sequence-based recovery: replay with terminal rows arriving out of `created_at` order but in correct `terminal_sequence` order; assert deterministic outcome. Replay with a gap in `terminal_sequence`; assert the gap'd task is treated as expired and re-dispatched.
+  - Incremental checkpoint replay: assert that recovery walks back to the last full snapshot, applies each delta in `sequence_high` order, then layers the post-checkpoint tail. Pathological case: corrupt one delta proto and assert the recovery path falls back to "rebuild from terminal rows only".
+  - DB-level generation fence: simulate a stale owner with `owner_generation = G` attempting a coordination write to a row whose current `owner_generation = G+1`; assert zero rows affected and the caller treats it as a fence failure.
   - Lease CAS: concurrent owner acquisition test (two goroutines race, one wins, one observes generation mismatch).
-  - Fence rejection: `/internal/complete` table-driven test covering each rejection cause — stale `owner_generation`, stale `attempt`, wrong `worker_node`, missing or mismatched `dispatch_token`, run not currently owned by this node. Each case asserts the rejection counter increments and state is unchanged.
+  - Fence rejection: `/internal/complete` table-driven test covering each rejection cause — stale `owner_generation`, stale `attempt`, wrong `worker_node`, missing or mismatched `dispatch_token`, run not currently owned by this node, invalid `status`. Each case asserts the rejection counter increments and state is unchanged.
+  - Command delivery: event-bus-driven path delivers within `<100ms` p99; polling fallback picks up commands written during a simulated bus-delivery failure.
+  - mTLS prerequisite: startup with `CAESIUM_RUN_OWNER_ENABLED=true` and missing mTLS material fails fast with a clear error.
 - **Integration tests** (`test/`, `-tags=integration`).
   - 3-node cluster, run-owner enabled, 20 jobs × 50 tasks. Assert per-task DB write count via the new `caesium_db_writes_total` counters; assert end-to-end DAG completion within Phase 0 baseline budget.
   - Owner-crash injection: kill the owner node mid-run, assert another node acquires, run completes, no task executed >1 time at terminal state (idempotency check via `attempt` field).
@@ -321,6 +360,12 @@ A 4–8× reduction in per-task write footprint, on top of Phase 1's 3–5× red
 - Phase 2 ships behind `CAESIUM_RUN_OWNER_ENABLED` (default off) indefinitely. Default-on only after a multi-month soak in a Caesium-operated reference cluster, and once the recovery path has been exercised in integration tests under partition + crash injection.
 - When `CAESIUM_RUN_OWNER_ENABLED=false`, the entire run-owner path is bypassed; the system behaves exactly as Phase 1 + PR #157.
 
+**Prerequisites for `CAESIUM_RUN_OWNER_ENABLED=true`** — startup MUST refuse to enable run-owner mode unless all of the following are configured:
+
+1. **mTLS on internal endpoints.** `/internal/dispatch` and `/internal/complete` require client-certificate validation. Configure via `CAESIUM_INTERNAL_MTLS_CA`, `CAESIUM_INTERNAL_MTLS_CERT`, `CAESIUM_INTERNAL_MTLS_KEY` on every node. The dispatch fence is the primary correctness guard; mTLS is the transport-layer defense-in-depth that prevents any unauthorized client from even reaching the handler. Run-owner without mTLS is not a supported configuration — startup fails fast with a clear error.
+2. **Distinct internal credentials.** The mTLS material above must be different from the `CAESIUM_INTERNAL_WAKEUP_TOKEN` (separate credentials per blast-radius class).
+3. **Phase 1 has soaked** at the operator's target throughput so the harness can demonstrate the run-owner path is actually needed (avoid enabling complexity for headroom you already have).
+
 ## Operational Risks
 
 | Risk | Mitigation |
@@ -328,7 +373,9 @@ A 4–8× reduction in per-task write footprint, on top of Phase 1's 3–5× red
 | Owner becomes a hotspot for runs with many concurrent tasks | Per-node concurrent-runs cap (`CAESIUM_RUN_OWNER_MAX_RUNS`, default 1024); excess runs route to least-loaded peer |
 | Checkpoint write bursts saturate hot-shard leader | Per-shard checkpoint write rate-limit; backpressure to owners via 429-equivalent |
 | Stale-owner duplicate dispatch on partition | Per-(task, attempt) `dispatch_token` plus owner generation in dispatch/complete envelopes; owner rejects completes with stale generation/token/attempt/worker. Tokens are owner-memory-only — a new owner re-dispatches with a fresh token, so a forged or replayed token from any prior generation cannot mark a task terminal |
-| Shared bearer token leaked or misused for internal endpoints | Run-owner dispatch/complete require mTLS (or a token distinct from `CAESIUM_INTERNAL_WAKEUP_TOKEN`); the dispatch fence is the primary safety, mTLS is the secondary |
+| Shared bearer token leaked or misused for internal endpoints | mTLS is *required* for `CAESIUM_RUN_OWNER_ENABLED=true` — startup refuses to enable run-owner without mTLS material. Credentials are distinct from `CAESIUM_INTERNAL_WAKEUP_TOKEN`. The application-layer dispatch fence is the primary correctness guard; mTLS prevents unauthorized clients from reaching the handler at all |
+| `run_commands` table growth | Bus-driven delivery keeps poll interval at 10s, partial index on `(run_id, applied_at) WHERE applied_at IS NULL`, cold-shard archival deletes applied rows alongside parent run; opportunistic vacuum for very-long-running runs deletes commands older than 30d |
+| Large-DAG checkpoint blob size | Active-only state (terminal tasks excluded), incremental checkpoints between full snapshots, `CAESIUM_RUN_CHECKPOINT_FULL_EVERY` tunable; recovery walks back to the last full + applies deltas |
 | Catalog cache staleness causes claim of cancelled run | Always check `run_leases.generation` on completion writes; reject if stale |
 | Recovery scan grows unbounded for very-long-running runs | Cap un-checkpointed tail at `2× CAESIUM_RUN_CHECKPOINT_INTERVAL`; force a checkpoint if exceeded |
 
