@@ -137,6 +137,34 @@ func (ls *LeaseStore) OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.U
 	return ids, nil
 }
 
+// OwnedRunsWithGenerations returns a map of run IDs to lease generations for
+// every non-expired lease owned by ownerNode, in a single query. Used by the
+// dispatch loop to avoid an N+1 GetLease pattern on every tick.
+func (ls *LeaseStore) OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error) {
+	if ls == nil || ls.db == nil {
+		return nil, nil
+	}
+
+	var leases []models.RunLease
+	if err := ls.db.WithContext(ctx).
+		Select("run_id", "generation").
+		Where("owner_node = ? AND lease_expires_at > ?", ownerNode, time.Now().UTC()).
+		Find(&leases).Error; err != nil {
+		return nil, err
+	}
+
+	out := make(map[uuid.UUID]int64, len(leases))
+	for _, l := range leases {
+		id, err := uuid.Parse(l.RunID)
+		if err != nil {
+			log.Warn("run_leases: unparseable run_id", "run_id", l.RunID, "error", err)
+			continue
+		}
+		out[id] = l.Generation
+	}
+	return out, nil
+}
+
 // IsOwner returns true if ownerNode currently holds a valid (non-expired) lease
 // on runID.  Used to validate requests before acting as owner.
 func (ls *LeaseStore) IsOwner(ctx context.Context, ownerNode string, runID uuid.UUID) (bool, error) {

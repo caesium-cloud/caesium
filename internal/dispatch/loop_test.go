@@ -47,12 +47,8 @@ type testOwnerReader struct {
 	ls *run.LeaseStore
 }
 
-func (r *testOwnerReader) OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.UUID, error) {
-	return r.ls.OwnedRuns(ctx, ownerNode)
-}
-
-func (r *testOwnerReader) GetLease(ctx context.Context, runID uuid.UUID) (*models.RunLease, error) {
-	return r.ls.GetLease(ctx, runID)
+func (r *testOwnerReader) OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error) {
+	return r.ls.OwnedRunsWithGenerations(ctx, ownerNode)
 }
 
 // testTaskReader wraps run.Store to satisfy TaskPendingReader.
@@ -430,103 +426,22 @@ func TestDispatchLoop_SelfDispatch(t *testing.T) {
 		"WorkerNode should reference the local host")
 }
 
-// TestDispatchLoop_RoundRobin verifies that 6 tasks across 3 peers results in
-// 2 dispatches per peer (one synchronous tick with a fresh counter).
+// TestDispatchLoop_RoundRobin verifies that 6 tasks across 3 peer node IDs
+// are distributed exactly 2 per peer. All dispatches reach a single mux server
+// (so the test doesn't have to engineer 3 servers on the same port); the
+// distribution is observed via the WorkerNode field on each received
+// DispatchRequest. This is enabled by the PeerBaseURL config override, which
+// the test points at the mux for every peer node ID.
 func TestDispatchLoop_RoundRobin(t *testing.T) {
 	metrics.Register()
 
-	type serverState struct {
-		s     *httptest.Server
-		count atomic.Int32
-	}
-
-	const numPeers = 3
 	const numTasks = 6
 
-	states := make([]*serverState, numPeers)
-	peerNodeIDs := make([]string, numPeers)   // "127.0.0.1:PORT" strings
-	peerAPIPorts := make([]int, numPeers)
-
-	for i := range states {
-		st := &serverState{}
-		st.s = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			st.count.Add(1)
-			w.WriteHeader(http.StatusAccepted)
-		}))
-		states[i] = st
-		peerNodeIDs[i], peerAPIPorts[i] = serverNodeID(t, st.s)
-		t.Cleanup(st.s.Close)
-	}
-
-	db := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db) })
-	ls := run.NewLeaseStore(db)
-	store := run.NewStore(db).WithLeaseStore(ls)
-	runID := uuid.New()
-
-	// Use the first server as the owning node.
-	ownerNodeID := peerNodeIDs[0]
-	ownerAPIPort := peerAPIPorts[0]
-	_, err := ls.AcquireLease(context.Background(), runID, ownerNodeID, 30*time.Second)
-	require.NoError(t, err)
-
-	for i := 0; i < numTasks; i++ {
-		insertPendingTask(t, store, runID, uuid.New())
-	}
-
-	// Peer lister returns the other nodes (self is appended by the loop).
-	// We give the peer lister the "dqlite node address" style strings (host:port)
-	// for the other servers; the loop builds the http URL using their respective ports.
-	// BUT — the loop uses a single APIPort for ALL peers.  For multi-server tests we
-	// need all servers on the same logical API port, which isn't achievable with
-	// httptest.NewServer on random ports.
-	//
-	// Solution: inject peers as already-constructed base URLs via a custom PeerLister
-	// that bypasses the nodeAddrToBaseURL conversion by pre-building full URLs.
-	// We wrap the PeerLister to return addresses that map through nodeAddrToBaseURL
-	// correctly for each peer's actual port.
-	//
-	// Since each peer has a different actual port, we configure APIPort=0 and
-	// override buildPeerURLs by injecting a PeerLister that returns the peer
-	// node IDs (host:PORT) and setting each peer's API port as its node port.
-	// But the loop only has ONE APIPort.
-	//
-	// Simplest correct approach: use a custom PeerLister that returns full base URLs
-	// as "addresses", and set APIPort=80 so that nodeAddrToBaseURL produces
-	// "http://host:80" — but then we need the test servers on port 80 too.
-	//
-	// The real solution: build a custom PeerLister that bypasses nodeAddrToBaseURL
-	// and returns ready-to-use base URLs.  We can do this by embedding the full URL
-	// in a way that net.SplitHostPort parses correctly.  The cleanest approach is
-	// to use a mock that directly controls the URL.
-	//
-	// For the round-robin test specifically, use a single-port approach: route all
-	// peers through a mux that distributes to the actual backend servers.
-	// Alternatively: use a custom dispatch function.
-	//
-	// PRACTICAL approach: we only need to assert that all 6 tasks are dispatched
-	// and each of 3 URLs receives exactly 2.  We can do this with a custom mux
-	// that acts as the single "server" and routes based on a dispatch counter.
-	// But that doesn't test actual round-robin.
-	//
-	// BEST approach for this codebase: create a PeerLister that returns
-	// "host:PORT" where PORT IS the API port the loop will use.  Since each
-	// server has a unique port, configure APIPort to be the actual server port.
-	// The catch: there's ONE APIPort per loop, not one per peer.
-	//
-	// For a deterministic round-robin test, we use ONE apiPort shared by all
-	// servers (via a reverse proxy / single mux), and verify distribution.
-	//
-	// Simpler: test PendingTasksForDispatch cap + the round-robin counter directly.
-	// We assert round-robin by calling dispatchRun manually and verifying counter
-	// increments, using a single server that records WorkerNode from each request.
-
-	// Use the FIRST server as the sole receiving endpoint; instrument it to
-	// capture WorkerNode values.  The round-robin test verifies that the counter
-	// advances across 6 dispatches even if they all go to the same server.
-	var workerNodes []string
-	var wnMu sync.Mutex
-
+	// Single mux server captures every dispatch and records its WorkerNode.
+	var (
+		wnMu        sync.Mutex
+		workerNodes []string
+	)
 	mux := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req DispatchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
@@ -538,70 +453,56 @@ func TestDispatchLoop_RoundRobin(t *testing.T) {
 	}))
 	t.Cleanup(mux.Close)
 
-	muxNodeID, muxAPIPort := serverNodeID(t, mux)
+	// 3 logical peer node IDs (matching the dqlite-port style that
+	// CAESIUM_NODE_ADDRESS uses). Self is omitted so buildPeers gives us
+	// exactly these three plus self (the owner) for 4 total — but the owner's
+	// nodeID is one of these three, so dedup keeps it at 3.
+	const ownerNodeID = "node-a:9001"
+	peerNodeIDs := []string{ownerNodeID, "node-b:9001", "node-c:9001"}
 
-	// Build peer list of 3 "nodes" all pointing to the mux but with different
-	// node IDs so round-robin counter advances across them.
-	loopPeers := []string{
-		"node-a:9001",
-		"node-b:9001",
-		"node-c:9001",
-	}
-	peers := &testPeerLister{}
-	peers.setPeers(loopPeers)
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ls := run.NewLeaseStore(db)
+	store := run.NewStore(db).WithLeaseStore(ls)
 
-	// Use muxNodeID as self so buildPeerURLs always returns the mux URL.
-	// The 3 external "peers" will produce dead URLs (port 8080), but since
-	// the mux is at muxAPIPort and round-robin advances the counter, we can
-	// verify the counter goes through all 3 positions.
-	//
-	// Actually, let's use a simpler direct test: call tick() once and verify
-	// the atomic counter advanced by numTasks positions.
-
-	db2 := testutil.OpenTestDB(t)
-	t.Cleanup(func() { testutil.CloseDB(db2) })
-	ls2 := run.NewLeaseStore(db2)
-	store2 := run.NewStore(db2).WithLeaseStore(ls2)
-	runID2 := uuid.New()
-	_, err = ls2.AcquireLease(context.Background(), runID2, muxNodeID, 30*time.Second)
+	runID := uuid.New()
+	_, err := ls.AcquireLease(context.Background(), runID, ownerNodeID, 30*time.Second)
 	require.NoError(t, err)
 	for i := 0; i < numTasks; i++ {
-		insertPendingTask(t, store2, runID2, uuid.New())
+		insertPendingTask(t, store, runID, uuid.New())
 	}
 
 	loop := NewDispatchLoop(DispatchLoopConfig{
-		NodeID:     muxNodeID,
-		APIPort:    muxAPIPort,
+		NodeID:     ownerNodeID,
+		APIPort:    8080, // unused because PeerBaseURL overrides
 		Token:      loopToken,
-		Interval:   50 * time.Millisecond,
+		Interval:   time.Hour, // we call tick() directly
 		BatchSize:  64,
 		Deadline:   5 * time.Minute,
-		LeaseStore: &testOwnerReader{ls2},
-		Store:      &testTaskReader{store2},
-		Peers:      &testPeerLister{}, // only self (mux)
+		LeaseStore: &testOwnerReader{ls},
+		Store:      &testTaskReader{store},
+		Peers:      &testPeerLister{peers: peerNodeIDs},
+		// All peer node IDs resolve to the same mux URL so dispatches actually
+		// land somewhere observable; WorkerNode keeps the original nodeID so we
+		// can verify distribution.
+		PeerBaseURL: func(_ string) string { return mux.URL },
 	})
 
-	// Run a single tick.
 	loop.tick(context.Background())
 
 	wnMu.Lock()
-	wns := append([]string(nil), workerNodes...)
+	got := append([]string(nil), workerNodes...)
 	wnMu.Unlock()
 
-	require.Len(t, wns, numTasks,
-		"all %d tasks should be dispatched in one tick", numTasks)
+	require.Len(t, got, numTasks, "every task should be dispatched in one tick")
 
-	// All WorkerNode values should be the same (the mux) because only self is
-	// in the peer list.  The key assertion is that counter advanced by numTasks.
-	counterAfter := loop.counter.Load()
-	require.Equal(t, uint64(numTasks), counterAfter,
-		"round-robin counter should have advanced by numTasks=%d", numTasks)
-
-	_ = ownerNodeID
-	_ = ownerAPIPort
-	_ = states
-	_ = peerNodeIDs
-	_ = peerAPIPorts
-	_ = store
-	_ = ls
+	counts := map[string]int{}
+	for _, wn := range got {
+		counts[wn]++
+	}
+	for _, peerID := range peerNodeIDs {
+		require.Equal(t, numTasks/len(peerNodeIDs), counts[peerID],
+			"peer %q should receive numTasks/numPeers=%d dispatches, got %d",
+			peerID, numTasks/len(peerNodeIDs), counts[peerID])
+	}
 }

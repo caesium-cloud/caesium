@@ -21,11 +21,11 @@ package dispatch
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -37,9 +37,10 @@ import (
 
 // DispatchRejectionReason labels for caesium_dispatch_rejected_total.
 const (
-	DispatchReasonNetworkError   = "network_error"
-	DispatchReasonWorkerRejected = "worker_rejected"
-	DispatchReasonNoPeers        = "no_peers"
+	DispatchReasonNetworkError       = "network_error"
+	DispatchReasonWorkerRejected     = "worker_rejected"
+	DispatchReasonNoPeers            = "no_peers"             // peer discovery returned empty list (bootstrap)
+	DispatchReasonPeerDiscoveryError = "peer_discovery_error" // peer discovery RPC failed
 )
 
 // PeerLister provides the current set of dispatch-eligible peer node addresses.
@@ -58,9 +59,22 @@ func (f PeerListerFunc) DispatchPeers(ctx context.Context) ([]string, error) {
 }
 
 // OwnerReader provides run-lease ownership queries used by the dispatch loop.
+//
+// OwnedRunsWithGenerations returns owned runIDs mapped to their current
+// lease generation in a single query — used per-tick to avoid an N+1
+// GetLease pattern as the owned set grows.
 type OwnerReader interface {
-	OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.UUID, error)
-	GetLease(ctx context.Context, runID uuid.UUID) (*models.RunLease, error)
+	OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error)
+}
+
+// peer pairs a peer's canonical node identity (host:dqlitePort — matches the
+// receiving handler's nodeID, derived from CAESIUM_NODE_ADDRESS) with the HTTP
+// base URL the dispatch loop POSTs to (http://host:apiPort). The receiving
+// handler validates `req.WorkerNode == h.nodeID`; using the dqlite-port
+// identity here is what makes that validation pass.
+type peer struct {
+	nodeID  string
+	baseURL string
 }
 
 // TaskPendingReader provides pending-task queries used by the dispatch loop.
@@ -92,6 +106,12 @@ type DispatchLoopConfig struct {
 	Store TaskPendingReader
 	// Peers resolves the current peer list.
 	Peers PeerLister
+	// PeerBaseURL maps a raw peer node address (host:dqlitePort) to the HTTP
+	// base URL the dispatch loop POSTs to (http://host:apiPort). Optional;
+	// tests override it to route multiple distinct peer node IDs to a single
+	// mux server. Production leaves it nil and the loop falls back to the
+	// default (build URL from APIPort).
+	PeerBaseURL func(nodeAddr string) string
 }
 
 // DispatchLoop is the per-node push-dispatch goroutine for Phase A2.
@@ -137,46 +157,51 @@ func (l *DispatchLoop) Run(ctx context.Context) {
 // tasks, and POST a DispatchRequest for each task up to BatchSize.
 func (l *DispatchLoop) tick(ctx context.Context) {
 	// 1. Discover peers (includes self).
-	peers, err := l.cfg.Peers.DispatchPeers(ctx)
+	rawPeers, err := l.cfg.Peers.DispatchPeers(ctx)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
 		log.Warn("dispatch loop: peer discovery failed", "error", err)
-		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
+		// Distinct from no_peers (empty list = normal bootstrap) so dashboards
+		// can alert on real RPC failures separately.
+		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonPeerDiscoveryError).Inc()
 		return
 	}
-	// Normalise peers to dispatch URLs; include self in the rotation.
-	peerURLs := l.buildPeerURLs(peers)
-	if len(peerURLs) == 0 {
+	// Normalise peers to {nodeID, baseURL} pairs; include self in the rotation.
+	peers := l.buildPeers(rawPeers)
+	if len(peers) == 0 {
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
 	}
 
-	// 2. Find runs this node owns.
-	ownedRunIDs, err := l.cfg.LeaseStore.OwnedRuns(ctx, l.cfg.NodeID)
+	// 2. Find runs this node owns AND their current generation in one query
+	//    (avoids the N+1 GetLease pattern as the owned set grows).
+	ownedRuns, err := l.cfg.LeaseStore.OwnedRunsWithGenerations(ctx, l.cfg.NodeID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Warn("dispatch loop: OwnedRuns failed", "error", err)
+		log.Warn("dispatch loop: OwnedRunsWithGenerations failed", "error", err)
 		return
 	}
-	if len(ownedRunIDs) == 0 {
+	if len(ownedRuns) == 0 {
 		return // nothing to do
 	}
 
-	// 3. For each owned run, find ready tasks and dispatch them.
-	for _, runID := range ownedRunIDs {
+	// 3. For each owned run, find ready tasks and dispatch them concurrently.
+	for runID, generation := range ownedRuns {
 		if ctx.Err() != nil {
 			return
 		}
-		l.dispatchRun(ctx, runID, peerURLs)
+		l.dispatchRun(ctx, runID, generation, peers)
 	}
 }
 
 // dispatchRun dispatches up to BatchSize ready tasks for a single owned run.
-func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, peerURLs []string) {
+// Each task's PostDispatch fires in a worker goroutine bounded by BatchSize/4
+// (capped at 16) so slow or unreachable workers don't serialise the tick.
+func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
 	tasks, err := l.cfg.Store.PendingTasksForDispatch(ctx, runID, l.cfg.BatchSize)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -190,110 +215,123 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, peerURL
 		return
 	}
 
-	// Get the current lease generation for this run so we can stamp it into
-	// the DispatchRequest.  A GetLease call per owned run is acceptable: we
-	// only poll runs we own, and the count is bounded by CAESIUM_RUN_OWNER_MAX_RUNS.
-	lease, err := l.cfg.LeaseStore.GetLease(ctx, runID)
-	if err != nil || lease == nil {
-		if ctx.Err() != nil {
-			return
-		}
-		log.Warn("dispatch loop: GetLease failed; skipping run",
-			"run_id", runID, "error", err)
-		return
+	// Bound the per-tick concurrent dispatches so we don't fan out 64 goroutines
+	// for every owned run. 16 is a soft cap that keeps slow workers from
+	// stalling the loop while not requiring a full worker-pool abstraction.
+	const maxConcurrent = 16
+	concurrency := len(tasks)
+	if concurrency > maxConcurrent {
+		concurrency = maxConcurrent
 	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
 
 	for i := range tasks {
 		if ctx.Err() != nil {
-			return
+			break
 		}
 		task := &tasks[i]
 
-		// Pick a peer via round-robin (atomic counter so concurrent ticks
-		// from different runs don't drift, even though Phase A2 only runs a
-		// single tick goroutine).
+		// Pick a peer via round-robin (atomic counter is per-loop, so per-task
+		// dispatch rotation is monotonic across runs and ticks).
 		idx := l.counter.Add(1) - 1
-		peerURL := peerURLs[idx%uint64(len(peerURLs))]
+		p := peers[idx%uint64(len(peers))]
 
 		req := DispatchRequest{
 			RunID:           runID,
 			TaskID:          task.TaskID,
-			OwnerGeneration: lease.Generation,
+			OwnerGeneration: generation,
 			Attempt:         task.Attempt,
-			WorkerNode:      peerNodeIDFromURL(peerURL, l.cfg.APIPort),
-			Deadline:        time.Now().UTC().Add(l.cfg.Deadline),
+			// nodeID matches the recipient's CAESIUM_NODE_ADDRESS so the
+			// handler's `req.WorkerNode == h.nodeID` check passes.
+			WorkerNode: p.nodeID,
+			Deadline:   time.Now().UTC().Add(l.cfg.Deadline),
 		}
 
-		dispatchURL := peerURL + "/internal/dispatch"
-		accepted, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
-		if postErr != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Warn("dispatch loop: PostDispatch network error",
-				"run_id", runID,
-				"task_id", task.TaskID,
-				"peer", peerURL,
-				"error", postErr,
-			)
-			metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNetworkError).Inc()
-			// Leave task unclaimed; ClaimNext recovery will pick it up.
-			continue
-		}
-		if !accepted {
-			log.Warn("dispatch loop: worker rejected dispatch",
-				"run_id", runID,
-				"task_id", task.TaskID,
-				"peer", peerURL,
-			)
-			metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonWorkerRejected).Inc()
-			// Leave task unclaimed; ClaimNext recovery will pick it up.
-			continue
-		}
-
-		metrics.DispatchSentTotal.Inc()
-		log.Debug("dispatch loop: task dispatched",
-			"run_id", runID,
-			"task_id", task.TaskID,
-			"peer", peerURL,
-		)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p peer, req DispatchRequest) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			l.postOne(ctx, runID, p, req)
+		}(p, req)
 	}
+	wg.Wait()
 }
 
-// buildPeerURLs converts raw node addresses (host:dqlitePort) to base HTTP
-// URLs (http://host:apiPort) suitable for PostDispatch.  Self is always
-// appended at the end so the round-robin always has at least one target.
-func (l *DispatchLoop) buildPeerURLs(peers []string) []string {
-	seen := make(map[string]struct{}, len(peers)+1)
-	urls := make([]string, 0, len(peers)+1)
+// postOne does the actual HTTP call + metric/log accounting for one dispatch.
+func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest) {
+	dispatchURL := p.baseURL + "/internal/dispatch"
+	accepted, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
+	if postErr != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		log.Warn("dispatch loop: PostDispatch network error",
+			"run_id", runID,
+			"task_id", req.TaskID,
+			"peer", p.nodeID,
+			"error", postErr,
+		)
+		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNetworkError).Inc()
+		return
+	}
+	if !accepted {
+		log.Warn("dispatch loop: worker rejected dispatch",
+			"run_id", runID,
+			"task_id", req.TaskID,
+			"peer", p.nodeID,
+		)
+		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonWorkerRejected).Inc()
+		return
+	}
+	metrics.DispatchSentTotal.Inc()
+	log.Debug("dispatch loop: task dispatched",
+		"run_id", runID,
+		"task_id", req.TaskID,
+		"peer", p.nodeID,
+	)
+}
 
-	for _, addr := range peers {
-		u := l.nodeAddrToBaseURL(addr)
-		if u == "" {
-			continue
+// buildPeers normalises raw peer addresses (host:dqlitePort) into peer pairs
+// of {nodeID = host:dqlitePort, baseURL = http://host:apiPort}.  Self is
+// always appended at the end so the round-robin always has at least one target.
+func (l *DispatchLoop) buildPeers(rawPeers []string) []peer {
+	seen := make(map[string]struct{}, len(rawPeers)+1)
+	out := make([]peer, 0, len(rawPeers)+1)
+
+	add := func(addr string) {
+		canonical := strings.TrimSpace(addr)
+		if canonical == "" || strings.HasPrefix(canonical, "@") {
+			return
 		}
-		if _, ok := seen[u]; ok {
-			continue
+		if _, ok := seen[canonical]; ok {
+			return
 		}
-		seen[u] = struct{}{}
-		urls = append(urls, u)
+		baseURL := l.nodeAddrToBaseURL(canonical)
+		if baseURL == "" {
+			return
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, peer{nodeID: canonical, baseURL: baseURL})
 	}
 
+	for _, addr := range rawPeers {
+		add(addr)
+	}
 	// Always include self so single-node setups dispatch to themselves.
-	selfURL := l.nodeAddrToBaseURL(l.cfg.NodeID)
-	if selfURL != "" {
-		if _, ok := seen[selfURL]; !ok {
-			seen[selfURL] = struct{}{}
-			urls = append(urls, selfURL)
-		}
-	}
+	add(l.cfg.NodeID)
 
-	return urls
+	return out
 }
 
 // nodeAddrToBaseURL converts "host:dqlitePort" (the dqlite / CAESIUM_NODE_ADDRESS
-// format) to "http://host:apiPort".  Returns "" on parse failure.
+// format) to "http://host:apiPort".  Returns "" on parse failure. The config's
+// PeerBaseURL override takes precedence when set.
 func (l *DispatchLoop) nodeAddrToBaseURL(nodeAddr string) string {
+	if l.cfg.PeerBaseURL != nil {
+		return l.cfg.PeerBaseURL(nodeAddr)
+	}
 	host, _, err := net.SplitHostPort(nodeAddr)
 	if err != nil {
 		host = strings.TrimSpace(nodeAddr)
@@ -305,22 +343,4 @@ func (l *DispatchLoop) nodeAddrToBaseURL(nodeAddr string) string {
 		Scheme: "http",
 		Host:   net.JoinHostPort(host, strconv.Itoa(l.cfg.APIPort)),
 	}).String()
-}
-
-// peerNodeIDFromURL extracts the "host:apiPort" node identity from the base
-// URL that was constructed by buildPeerURLs / nodeAddrToBaseURL.  The returned
-// string is used as WorkerNode in the DispatchRequest so the recipient can
-// validate "dispatch addressed to me".
-func peerNodeIDFromURL(baseURL string, apiPort int) string {
-	u, err := url.Parse(baseURL)
-	if err != nil || u.Host == "" {
-		return baseURL
-	}
-	host, port, err := net.SplitHostPort(u.Host)
-	if err != nil {
-		// No port in URL host — shouldn't happen given buildPeerURLs, but be safe.
-		return fmt.Sprintf("%s:%d", u.Host, apiPort)
-	}
-	_ = port
-	return net.JoinHostPort(host, strconv.Itoa(apiPort))
 }

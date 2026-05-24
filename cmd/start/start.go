@@ -187,7 +187,7 @@ func start(cmd *cobra.Command, args []string) error {
 		dispatchLoop := dispatch.NewDispatchLoop(dispatch.DispatchLoopConfig{
 			NodeID:     vars.NodeAddress,
 			APIPort:    vars.Port,
-			Token:      strings.TrimSpace(vars.InternalWakeupToken),
+			Token:      token,
 			Interval:   vars.RunOwnerDispatchInterval,
 			BatchSize:  vars.RunOwnerDispatchBatch,
 			Deadline:   vars.RunOwnerDispatchDeadline,
