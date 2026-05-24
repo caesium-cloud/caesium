@@ -362,6 +362,7 @@ load-test:
         -depth "${CAESIUM_LOAD_DEPTH:-3}" \
         -task-duration "${CAESIUM_LOAD_TASK_DURATION:-1s}" \
         -concurrency "${CAESIUM_LOAD_CONCURRENCY:-1}" \
+        -engine "${CAESIUM_LOAD_ENGINE:-docker}" \
         -api-key "${CAESIUM_MANUAL_TRIGGER_API_KEY:-}" \
         -output "${report_file}"
 

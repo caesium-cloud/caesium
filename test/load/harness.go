@@ -45,6 +45,7 @@ type config struct {
 	sampleRate   time.Duration
 	outputFile   string
 	apiKey       string
+	engine       string // docker | kubernetes | podman; default docker
 }
 
 func defaultConfig() config {
@@ -58,6 +59,7 @@ func defaultConfig() config {
 		sampleRate:   envDurOrDefault("CAESIUM_LOAD_SAMPLE_RATE", 5*time.Second),
 		outputFile:   envOrDefault("CAESIUM_LOAD_OUTPUT", ""),
 		apiKey:       envOrDefault("CAESIUM_MANUAL_TRIGGER_API_KEY", ""),
+		engine:       envOrDefault("CAESIUM_LOAD_ENGINE", "docker"),
 	}
 }
 
@@ -85,6 +87,7 @@ type triggerDef struct {
 
 type stepDef struct {
 	Name      string   `json:"name"`
+	Engine    string   `json:"engine,omitempty"`
 	Image     string   `json:"image"`
 	Command   []string `json:"command,omitempty"`
 	Next      []string `json:"next,omitempty"`
@@ -96,7 +99,7 @@ type stepDef struct {
 // Layers 1..depth-1: fanOut tasks each.
 // Final layer: one join task that depends on all layer depth-1 tasks.
 // All tasks sleep for taskDuration seconds and emit one caesium::output line.
-func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
+func buildDAGSteps(fanOut, depth int, taskDuration time.Duration, engine string) []stepDef {
 	// Use floating-point seconds so sub-second durations are honored;
 	// busybox:1.36.1 sleep accepts decimal values. Floor at 1ms so we never
 	// emit "sleep 0".
@@ -110,6 +113,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 		return []stepDef{
 			{
 				Name:    "task-root",
+				Engine:  engine,
 				Image:   "busybox:1.36.1",
 				Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 			},
@@ -126,6 +130,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	}
 	steps = append(steps, stepDef{
 		Name:    rootName,
+		Engine:  engine,
 		Image:   "busybox:1.36.1",
 		Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"root\"}'", sleepSec)},
 		Next:    rootNexts,
@@ -144,6 +149,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 			}
 			steps = append(steps, stepDef{
 				Name:      name,
+				Engine:    engine,
 				Image:     "busybox:1.36.1",
 				Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 				DependsOn: dependsOn,
@@ -166,6 +172,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 		}
 		steps = append(steps, stepDef{
 			Name:      name,
+			Engine:    engine,
 			Image:     "busybox:1.36.1",
 			Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 			DependsOn: dependsOn,
@@ -176,6 +183,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	// Join task.
 	steps = append(steps, stepDef{
 		Name:      "task-join",
+		Engine:    engine,
 		Image:     "busybox:1.36.1",
 		Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 		DependsOn: joinDeps,
@@ -462,7 +470,7 @@ type appliedJob struct {
 // definition, which keeps harness setup time bounded for large workloads.
 func (h *harness) applyJobs(ctx context.Context) ([]appliedJob, error) {
 	cfg := h.cfg
-	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration)
+	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration, cfg.engine)
 
 	defs := make([]jobDef, 0, cfg.jobCount)
 	aliases := make([]string, 0, cfg.jobCount)
@@ -936,6 +944,7 @@ func main() {
 	flag.DurationVar(&cfg.sampleRate, "sample-rate", cfg.sampleRate, "How often to sample Prometheus metrics")
 	flag.StringVar(&cfg.outputFile, "output", cfg.outputFile, "Write report to file (default: stdout only)")
 	flag.StringVar(&cfg.apiKey, "api-key", cfg.apiKey, "API key for authenticated endpoints")
+	flag.StringVar(&cfg.engine, "engine", cfg.engine, "Task engine: docker (default), kubernetes, or podman. Must match what the target Caesium deployment supports.")
 	flag.Parse()
 
 	h := newHarness(cfg)
