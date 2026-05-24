@@ -54,6 +54,50 @@ func (s *Store) AppendTx(tx *gorm.DB, evt *Event) error {
 	return nil
 }
 
+// AppendBatchTx inserts multiple events in a single INSERT statement and
+// back-fills Sequence and Timestamp on each Event from the inserted rows.
+// The slice must be non-empty; callers should call AppendTx for single events.
+func (s *Store) AppendBatchTx(tx *gorm.DB, evts []*Event) error {
+	if tx == nil {
+		return errors.New("event: append batch requires transaction")
+	}
+	if len(evts) == 0 {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	records := make([]models.ExecutionEvent, len(evts))
+	for i, evt := range evts {
+		if evt == nil {
+			return errors.New("event: append batch requires non-nil events")
+		}
+		ts := evt.Timestamp
+		if ts.IsZero() {
+			ts = now
+		}
+		records[i] = models.ExecutionEvent{
+			Type:               string(evt.Type),
+			JobID:              uuidPtr(evt.JobID),
+			RunID:              uuidPtr(evt.RunID),
+			TaskID:             uuidPtr(evt.TaskID),
+			Payload:            []byte(evt.Payload),
+			BusDispatchPending: true,
+			CreatedAt:          ts,
+		}
+	}
+
+	if err := tx.Create(&records).Error; err != nil {
+		return err
+	}
+
+	// Back-fill sequence and timestamp from inserted rows.
+	for i, evt := range evts {
+		evt.Sequence = records[i].Sequence
+		evt.Timestamp = records[i].CreatedAt
+	}
+	return nil
+}
+
 func (s *Store) LatestSequence(ctx context.Context) (uint64, error) {
 	var seq uint64
 	err := s.db.WithContext(ctx).

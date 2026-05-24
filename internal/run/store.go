@@ -841,8 +841,9 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 				}
 			}
 
+			// Partition edges: skipped (branch-filtered) vs. predecessors to decrement.
+			var toDecrementIDs []uuid.UUID
 			for _, edge := range edges {
-				// Branch filtering: skip successors not selected by the branch.
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
 					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
@@ -852,43 +853,85 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
 					continue
 				}
-
-				if err := tx.Model(&models.TaskRun{}).
-					Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
-					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
-					return err
-				}
-				counts.taskRunStatus++
-
-				var successor models.TaskRun
-				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
-					successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
-					shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
-					if err != nil {
-						return err
-					}
-					if shouldRun {
-						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents, &counts); err != nil {
-							return err
-						}
-						continue
-					}
-
-					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents, &counts)
-					if err != nil {
-						return err
-					}
-					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
-				}
+				toDecrementIDs = append(toDecrementIDs, edge.ToTaskID)
 			}
 
-			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskCached, runID, taskID, &counts)
+			// Batch-decrement outstanding_predecessors for all non-skipped successors.
+			updatedSuccessors, err := s.batchDecrementPredecessorsTx(tx, runID, toDecrementIDs)
+			if err != nil {
+				return err
+			}
+			counts.taskRunStatus += len(toDecrementIDs)
+
+			// Collect all events to emit (task_cached + task_ready for newly-ready successors).
+			var batchEvts []*event.Event
+
+			// Evaluate trigger rules and collect task_ready events.
+			for i := range updatedSuccessors {
+				successor := &updatedSuccessors[i]
+				if successor.OutstandingPredecessors != 0 || successor.Status != string(TaskStatusPending) {
+					continue
+				}
+				shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, successor.TaskID)
 				if err != nil {
 					return err
 				}
-				attemptEvents = append(attemptEvents, *evt)
+				if shouldRun {
+					var jobRun models.JobRun
+					if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+						return err
+					}
+					readyEvt := &event.Event{
+						Type:      event.TypeTaskReady,
+						JobID:     jobRun.JobID,
+						RunID:     runID,
+						TaskID:    successor.TaskID,
+						Timestamp: time.Now().UTC(),
+					}
+					batchEvts = append(batchEvts, readyEvt)
+					continue
+				}
+
+				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
+				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, skipRuleReason, &attemptEvents, &counts)
+				if err != nil {
+					return err
+				}
+				attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+			}
+
+			if s.eventStore != nil {
+				// Build task_cached event and add to batch.
+				var taskRunModel models.TaskRun
+				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
+					return err
+				}
+				var jobRun models.JobRun
+				if err := tx.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
+					return err
+				}
+				taskPayload := convertRunTaskModel(&taskRunModel)
+				taskPayload.JobAlias = jobRun.Job.Alias
+				taskPayload.JobLabels = jsonmap.ToStringMap(jobRun.Job.Labels)
+				taskPayload.ID = taskRunModel.ID
+				payload, marshalErr := json.Marshal(taskPayload)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				cachedEvt := &event.Event{
+					Type:      event.TypeTaskCached,
+					JobID:     jobRun.JobID,
+					RunID:     runID,
+					TaskID:    taskID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				}
+				// task_cached goes first so sequence ordering is consistent.
+				batchEvts = append([]*event.Event{cachedEvt}, batchEvts...)
+
+				if err := s.appendBatchEventsTx(tx, batchEvts, &attemptEvents, &counts); err != nil {
+					return err
+				}
 			}
 
 			return nil
@@ -1015,6 +1058,44 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 	}
 	counts.eventInsert++
 	*pendingEvents = append(*pendingEvents, evt)
+	return nil
+}
+
+// batchDecrementPredecessorsTx decrements outstanding_predecessors by 1 for
+// all successorIDs in a single UPDATE statement and returns the updated rows.
+// This replaces the per-successor UPDATE loop in completeTask and cacheHitTask.
+func (s *Store) batchDecrementPredecessorsTx(tx *gorm.DB, runID uuid.UUID, successorIDs []uuid.UUID) ([]models.TaskRun, error) {
+	if len(successorIDs) == 0 {
+		return nil, nil
+	}
+
+	if err := tx.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id IN ?", runID, successorIDs).
+		UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+		return nil, err
+	}
+
+	// SELECT the updated rows to determine which successors hit zero and are still pending.
+	var updated []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id IN ?", runID, successorIDs).Find(&updated).Error; err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// appendBatchEventsTx inserts all events in evts with a single INSERT statement.
+// It back-fills Sequence and Timestamp on each event and appends them to pendingEvents.
+func (s *Store) appendBatchEventsTx(tx *gorm.DB, evts []*event.Event, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	if s.eventStore == nil || len(evts) == 0 {
+		return nil
+	}
+	if err := s.eventStore.AppendBatchTx(tx, evts); err != nil {
+		return err
+	}
+	counts.eventInsert += len(evts)
+	for _, e := range evts {
+		*pendingEvents = append(*pendingEvents, *e)
+	}
 	return nil
 }
 
@@ -1302,8 +1383,9 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 				}
 			}
 
+			// Partition edges: skipped (branch-filtered) vs. predecessors to decrement.
+			var toDecrementIDs []uuid.UUID
 			for _, edge := range edges {
-				// Branch filtering: skip successors not selected by the branch.
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
 					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
@@ -1313,43 +1395,85 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
 					continue
 				}
-
-				if err := tx.Model(&models.TaskRun{}).
-					Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
-					UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
-					return err
-				}
-				counts.taskRunStatus++
-
-				var successor models.TaskRun
-				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err == nil &&
-					successor.OutstandingPredecessors == 0 && successor.Status == string(TaskStatusPending) {
-					shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, edge.ToTaskID)
-					if err != nil {
-						return err
-					}
-					if shouldRun {
-						if err := s.appendTaskReadyEventTx(tx, runID, edge.ToTaskID, &attemptEvents, &counts); err != nil {
-							return err
-						}
-						continue
-					}
-
-					skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
-					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, skipRuleReason, &attemptEvents, &counts)
-					if err != nil {
-						return err
-					}
-					attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
-				}
+				toDecrementIDs = append(toDecrementIDs, edge.ToTaskID)
 			}
 
-			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskSucceeded, runID, taskID, &counts)
+			// Batch-decrement outstanding_predecessors for all non-skipped successors.
+			updatedSuccessors, err := s.batchDecrementPredecessorsTx(tx, runID, toDecrementIDs)
+			if err != nil {
+				return err
+			}
+			counts.taskRunStatus += len(toDecrementIDs)
+
+			// Collect all events to emit (task_succeeded + task_ready for newly-ready successors).
+			var batchEvts []*event.Event
+
+			// Evaluate trigger rules and collect task_ready events.
+			for i := range updatedSuccessors {
+				successor := &updatedSuccessors[i]
+				if successor.OutstandingPredecessors != 0 || successor.Status != string(TaskStatusPending) {
+					continue
+				}
+				shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, successor.TaskID)
 				if err != nil {
 					return err
 				}
-				attemptEvents = append(attemptEvents, *evt)
+				if shouldRun {
+					var jobRun models.JobRun
+					if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+						return err
+					}
+					readyEvt := &event.Event{
+						Type:      event.TypeTaskReady,
+						JobID:     jobRun.JobID,
+						RunID:     runID,
+						TaskID:    successor.TaskID,
+						Timestamp: time.Now().UTC(),
+					}
+					batchEvts = append(batchEvts, readyEvt)
+					continue
+				}
+
+				skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
+				skipped, err := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, skipRuleReason, &attemptEvents, &counts)
+				if err != nil {
+					return err
+				}
+				attemptSkippedTaskIDs = append(attemptSkippedTaskIDs, skipped...)
+			}
+
+			if s.eventStore != nil {
+				// Build task_succeeded event and add to batch.
+				var taskRunModel models.TaskRun
+				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
+					return err
+				}
+				var jobRun models.JobRun
+				if err := tx.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
+					return err
+				}
+				taskPayload := convertRunTaskModel(&taskRunModel)
+				taskPayload.JobAlias = jobRun.Job.Alias
+				taskPayload.JobLabels = jsonmap.ToStringMap(jobRun.Job.Labels)
+				taskPayload.ID = taskRunModel.ID
+				payload, marshalErr := json.Marshal(taskPayload)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				succeededEvt := &event.Event{
+					Type:      event.TypeTaskSucceeded,
+					JobID:     jobRun.JobID,
+					RunID:     runID,
+					TaskID:    taskID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				}
+				// task_succeeded goes first so sequence ordering is consistent.
+				batchEvts = append([]*event.Event{succeededEvt}, batchEvts...)
+
+				if err := s.appendBatchEventsTx(tx, batchEvts, &attemptEvents, &counts); err != nil {
+					return err
+				}
 			}
 
 			return nil
@@ -1405,17 +1529,28 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 			return skipped, err
 		}
 
+		// Batch-decrement outstanding_predecessors for all successors of this skipped task.
+		successorIDs := make([]uuid.UUID, 0, len(edges))
 		for _, edge := range edges {
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).
-				UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
-				return skipped, err
-			}
-			counts.taskRunStatus++
+			successorIDs = append(successorIDs, edge.ToTaskID)
+		}
 
-			var successor models.TaskRun
-			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, edge.ToTaskID).First(&successor).Error; err != nil {
-				return skipped, err
+		updatedSuccessors, err := s.batchDecrementPredecessorsTx(tx, runID, successorIDs)
+		if err != nil {
+			return skipped, err
+		}
+		counts.taskRunStatus += len(successorIDs)
+
+		// Build a quick lookup map from the updated rows.
+		updatedByTaskID := make(map[uuid.UUID]*models.TaskRun, len(updatedSuccessors))
+		for i := range updatedSuccessors {
+			updatedByTaskID[updatedSuccessors[i].TaskID] = &updatedSuccessors[i]
+		}
+
+		for _, edge := range edges {
+			successor, ok := updatedByTaskID[edge.ToTaskID]
+			if !ok {
+				continue
 			}
 			if successor.Status != string(TaskStatusPending) || successor.OutstandingPredecessors != 0 {
 				continue
@@ -1566,31 +1701,48 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		counts.taskRunStatus++
 
 		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskRetrying, runID, taskID, &counts)
-			if err != nil {
+			// Build retrying event payload.
+			var taskRunModel models.TaskRun
+			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			var jobRun models.JobRun
+			if err := tx.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
+				return err
+			}
+			taskPayload := convertRunTaskModel(&taskRunModel)
+			taskPayload.JobAlias = jobRun.Job.Alias
+			taskPayload.JobLabels = jsonmap.ToStringMap(jobRun.Job.Labels)
+			taskPayload.ID = taskRunModel.ID
+			payload, marshalErr := json.Marshal(taskPayload)
+			if marshalErr != nil {
+				return marshalErr
+			}
 
-			var taskRun models.TaskRun
-			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err == nil &&
-				taskRun.OutstandingPredecessors == 0 {
-				var jobRun models.JobRun
-				if err := tx.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
-					return err
-				}
-				readyEvt := event.Event{
+			batchEvts := []*event.Event{
+				{
+					Type:      event.TypeTaskRetrying,
+					JobID:     jobRun.JobID,
+					RunID:     runID,
+					TaskID:    taskID,
+					Timestamp: time.Now().UTC(),
+					Payload:   payload,
+				},
+			}
+
+			// If the task has no outstanding predecessors, also emit task_ready.
+			if taskRunModel.OutstandingPredecessors == 0 {
+				batchEvts = append(batchEvts, &event.Event{
 					Type:      event.TypeTaskReady,
 					JobID:     jobRun.JobID,
 					RunID:     runID,
 					TaskID:    taskID,
 					Timestamp: time.Now().UTC(),
-				}
-				if err := s.eventStore.AppendTx(tx, &readyEvt); err != nil {
-					return err
-				}
-				counts.eventInsert++
-				pendingEvents = append(pendingEvents, readyEvt)
+				})
+			}
+
+			if err := s.appendBatchEventsTx(tx, batchEvts, &pendingEvents, &counts); err != nil {
+				return err
 			}
 		}
 

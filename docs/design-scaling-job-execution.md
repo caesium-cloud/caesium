@@ -95,9 +95,20 @@ Catalog reads (`jobs`, `tasks`, `task_edges`, `triggers`) hit the leader for eve
 - Expected impact: catalog read QPS to leader drops ~10–100× depending on job churn.
 - Acceptance: a synthetic catalog-update propagates to all nodes' caches within `<2s` p99; cache hit ratio on `ClaimNext` reads is ≥99% at steady state.
 
+### 1.4 Predecessor-counter UPDATE batching
+
+The Phase 0 baseline (2026-05-23) identified `task_run_status` as the actual dominant write category at 44.4% of total writes — slightly ahead of `event_insert` at 41.7%. A significant share comes from `CompleteTask` issuing one `UPDATE task_runs SET outstanding_predecessors = outstanding_predecessors - 1` per successor. For a fan-out=4 join task, this is 4 separate UPDATEs per parent completion.
+
+Replace the per-successor UPDATE loop in `completeTask`, `cacheHitTask`, and `skipTaskAndDescendantsTx` with a single `UPDATE task_runs SET outstanding_predecessors = ... WHERE job_run_id = ? AND task_id IN (?, ?, ?, ...)`. Follow with a SELECT of the updated rows to identify which successors hit zero and are still `pending` — those are the ones to evaluate trigger rules for and potentially emit `task_ready` events. Trigger-rule and branch-filtering logic (`satisfiesTriggerRule`, `shouldRunTaskTx`, branch_selections) is unchanged; it runs on the in-memory result set of the batched UPDATE, not via additional DB round-trips.
+
+- Files: `internal/run/store.go` (new `batchDecrementPredecessorsTx` and `appendBatchEventsTx` helpers; refactored `completeTask`, `cacheHitTask`, `skipTaskAndDescendantsTx`, `retryTask`), `internal/event/store.go` (new `AppendBatchTx`), `internal/worker/claimer.go` (`ReclaimExpired` event batching).
+- Risk: low. Semantic behavior is unchanged — only the number of DB round-trips within a transaction changes.
+- Expected impact: a fan-out=4 completion drops from 4 predecessor-counter UPDATEs + 4 event INSERTs to 1 batched UPDATE + 1 batched INSERT, reducing the two dominant write categories by ~4× at that fan-out. Combined with 1.1, a 10-task run (1 root + 4 lane-1 + 4 lane-2 + 1 join) drops from ~7.2 writes/task toward ~2–3 writes/task.
+- Acceptance: `caesium_db_writes_total{category="task_run_status"}` and `caesium_db_writes_total{category="event_insert"}` rates fall proportionally to average fan-out on the Phase 0 baseline workload; end-to-end DAG completion time unchanged within 5%.
+
 ### Phase 1 → Phase 2 gate
 
-After all three Phase 1 PRs land, re-run the Phase 0 harness. If the per-shard ceiling has moved past your target throughput, Phase 2 is deferred. Phase 2 proceeds only if the new measurement shows status UPDATEs and predecessor-counter UPDATEs are the next dominant write category — which is the bottleneck the run-owner pattern is specifically designed to eliminate.
+After all four Phase 1 PRs land, re-run the Phase 0 harness. If the per-shard ceiling has moved past your target throughput, Phase 2 is deferred. Phase 2 proceeds only if the new measurement shows status UPDATEs and predecessor-counter UPDATEs are the next dominant write category — which is the bottleneck the run-owner pattern is specifically designed to eliminate.
 
 ## Phase 2: Run-Owner Coordination (Family B)
 
