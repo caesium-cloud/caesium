@@ -45,6 +45,7 @@ type config struct {
 	sampleRate   time.Duration
 	outputFile   string
 	apiKey       string
+	engine       string // docker | kubernetes | podman; default docker
 }
 
 func defaultConfig() config {
@@ -58,6 +59,7 @@ func defaultConfig() config {
 		sampleRate:   envDurOrDefault("CAESIUM_LOAD_SAMPLE_RATE", 5*time.Second),
 		outputFile:   envOrDefault("CAESIUM_LOAD_OUTPUT", ""),
 		apiKey:       envOrDefault("CAESIUM_MANUAL_TRIGGER_API_KEY", ""),
+		engine:       envOrDefault("CAESIUM_LOAD_ENGINE", "docker"),
 	}
 }
 
@@ -85,6 +87,7 @@ type triggerDef struct {
 
 type stepDef struct {
 	Name      string   `json:"name"`
+	Engine    string   `json:"engine,omitempty"`
 	Image     string   `json:"image"`
 	Command   []string `json:"command,omitempty"`
 	Next      []string `json:"next,omitempty"`
@@ -96,7 +99,7 @@ type stepDef struct {
 // Layers 1..depth-1: fanOut tasks each.
 // Final layer: one join task that depends on all layer depth-1 tasks.
 // All tasks sleep for taskDuration seconds and emit one caesium::output line.
-func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
+func buildDAGSteps(fanOut, depth int, taskDuration time.Duration, engine string) []stepDef {
 	// Use floating-point seconds so sub-second durations are honored;
 	// busybox:1.36.1 sleep accepts decimal values. Floor at 1ms so we never
 	// emit "sleep 0".
@@ -110,6 +113,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 		return []stepDef{
 			{
 				Name:    "task-root",
+				Engine:  engine,
 				Image:   "busybox:1.36.1",
 				Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 			},
@@ -126,6 +130,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	}
 	steps = append(steps, stepDef{
 		Name:    rootName,
+		Engine:  engine,
 		Image:   "busybox:1.36.1",
 		Command: []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"root\"}'", sleepSec)},
 		Next:    rootNexts,
@@ -144,6 +149,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 			}
 			steps = append(steps, stepDef{
 				Name:      name,
+				Engine:    engine,
 				Image:     "busybox:1.36.1",
 				Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 				DependsOn: dependsOn,
@@ -166,6 +172,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 		}
 		steps = append(steps, stepDef{
 			Name:      name,
+			Engine:    engine,
 			Image:     "busybox:1.36.1",
 			Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"step\":\"%s\"}'", sleepSec, name)},
 			DependsOn: dependsOn,
@@ -176,6 +183,7 @@ func buildDAGSteps(fanOut, depth int, taskDuration time.Duration) []stepDef {
 	// Join task.
 	steps = append(steps, stepDef{
 		Name:      "task-join",
+		Engine:    engine,
 		Image:     "busybox:1.36.1",
 		Command:   []string{"sh", "-c", fmt.Sprintf("sleep %g && echo '##caesium::output {\"done\":\"1\"}'", sleepSec)},
 		DependsOn: joinDeps,
@@ -350,7 +358,8 @@ func parseCounter(text, metricName string, labels map[string]string) float64 {
 }
 
 type metricSample struct {
-	ts            time.Time
+	ts time.Time
+	// Row counts (caesium_db_writes_total).
 	taskRunInsert float64
 	taskRunStatus float64
 	eventInsert   float64
@@ -358,8 +367,17 @@ type metricSample struct {
 	callback      float64
 	command       float64
 	checkpoint    float64
-	dbBusyRetries float64
-	claimsTotal   float64
+	// Statement counts (caesium_db_statements_total). Same categories;
+	// rows/statements is the batching factor.
+	taskRunInsertStmts float64
+	taskRunStatusStmts float64
+	eventInsertStmts   float64
+	leaseRenewalStmts  float64
+	callbackStmts      float64
+	commandStmts       float64
+	checkpointStmts    float64
+	dbBusyRetries      float64
+	claimsTotal        float64
 }
 
 func sampleMetrics(ctx context.Context, c *client) (metricSample, error) {
@@ -368,13 +386,23 @@ func sampleMetrics(ctx context.Context, c *client) (metricSample, error) {
 		return metricSample{}, err
 	}
 	s := metricSample{ts: time.Now()}
-	s.taskRunInsert = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "task_run_insert"})
-	s.taskRunStatus = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "task_run_status"})
-	s.eventInsert = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "event_insert"})
-	s.leaseRenewal = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "lease_renewal"})
-	s.callback = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "callback"})
-	s.command = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "command"})
-	s.checkpoint = parseCounter(text, "caesium_db_writes_total", map[string]string{"category": "checkpoint"})
+	cat := func(name, category string) float64 {
+		return parseCounter(text, name, map[string]string{"category": category})
+	}
+	s.taskRunInsert = cat("caesium_db_writes_total", "task_run_insert")
+	s.taskRunStatus = cat("caesium_db_writes_total", "task_run_status")
+	s.eventInsert = cat("caesium_db_writes_total", "event_insert")
+	s.leaseRenewal = cat("caesium_db_writes_total", "lease_renewal")
+	s.callback = cat("caesium_db_writes_total", "callback")
+	s.command = cat("caesium_db_writes_total", "command")
+	s.checkpoint = cat("caesium_db_writes_total", "checkpoint")
+	s.taskRunInsertStmts = cat("caesium_db_statements_total", "task_run_insert")
+	s.taskRunStatusStmts = cat("caesium_db_statements_total", "task_run_status")
+	s.eventInsertStmts = cat("caesium_db_statements_total", "event_insert")
+	s.leaseRenewalStmts = cat("caesium_db_statements_total", "lease_renewal")
+	s.callbackStmts = cat("caesium_db_statements_total", "callback")
+	s.commandStmts = cat("caesium_db_statements_total", "command")
+	s.checkpointStmts = cat("caesium_db_statements_total", "checkpoint")
 	s.dbBusyRetries = parseCounter(text, "caesium_db_busy_retries_total", nil)
 	s.claimsTotal = parseCounter(text, "caesium_worker_claims_total", nil)
 	return s, nil
@@ -442,7 +470,7 @@ type appliedJob struct {
 // definition, which keeps harness setup time bounded for large workloads.
 func (h *harness) applyJobs(ctx context.Context) ([]appliedJob, error) {
 	cfg := h.cfg
-	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration)
+	steps := buildDAGSteps(cfg.fanOut, cfg.depth, cfg.taskDuration, cfg.engine)
 
 	defs := make([]jobDef, 0, cfg.jobCount)
 	aliases := make([]string, 0, cfg.jobCount)
@@ -660,7 +688,7 @@ type report struct {
 	runsTimeout       int
 	runsTriggerFailed int
 
-	// Delta counts (end - baseline).
+	// Delta row counts (end - baseline).
 	deltaTaskRunInsert float64
 	deltaTaskRunStatus float64
 	deltaEventInsert   float64
@@ -668,8 +696,17 @@ type report struct {
 	deltaCallback      float64
 	deltaCommand       float64
 	deltaCheckpoint    float64
-	deltaDBBusyRetries float64
-	deltaClaimsTotal   float64
+	// Delta statement counts (end - baseline). Rows / statements is the
+	// batching factor: > 1 means each statement touches multiple rows.
+	deltaTaskRunInsertStmts float64
+	deltaTaskRunStatusStmts float64
+	deltaEventInsertStmts   float64
+	deltaLeaseRenewalStmts  float64
+	deltaCallbackStmts      float64
+	deltaCommandStmts       float64
+	deltaCheckpointStmts    float64
+	deltaDBBusyRetries      float64
+	deltaClaimsTotal        float64
 
 	// Per-second rates during the run.
 	peakTaskRunStatusPerSec float64
@@ -724,7 +761,7 @@ func buildReport(
 		r.endToEndP99 = durations[int(float64(len(durations))*0.99)]
 	}
 
-	// Delta counters.
+	// Delta row counts.
 	r.deltaTaskRunInsert = end.taskRunInsert - baseline.taskRunInsert
 	r.deltaTaskRunStatus = end.taskRunStatus - baseline.taskRunStatus
 	r.deltaEventInsert = end.eventInsert - baseline.eventInsert
@@ -732,6 +769,14 @@ func buildReport(
 	r.deltaCallback = end.callback - baseline.callback
 	r.deltaCommand = end.command - baseline.command
 	r.deltaCheckpoint = end.checkpoint - baseline.checkpoint
+	// Delta statement counts.
+	r.deltaTaskRunInsertStmts = end.taskRunInsertStmts - baseline.taskRunInsertStmts
+	r.deltaTaskRunStatusStmts = end.taskRunStatusStmts - baseline.taskRunStatusStmts
+	r.deltaEventInsertStmts = end.eventInsertStmts - baseline.eventInsertStmts
+	r.deltaLeaseRenewalStmts = end.leaseRenewalStmts - baseline.leaseRenewalStmts
+	r.deltaCallbackStmts = end.callbackStmts - baseline.callbackStmts
+	r.deltaCommandStmts = end.commandStmts - baseline.commandStmts
+	r.deltaCheckpointStmts = end.checkpointStmts - baseline.checkpointStmts
 	r.deltaDBBusyRetries = end.dbBusyRetries - baseline.dbBusyRetries
 	r.deltaClaimsTotal = end.claimsTotal - baseline.claimsTotal
 
@@ -813,28 +858,39 @@ func (r *report) print(w io.Writer) {
 	fmt.Fprintln(w, "--- DB Write Breakdown (delta over harness run) ---")
 	fmt.Fprintln(w, "")
 	tw := tabwriter.NewWriter(w, 0, 0, 3, ' ', 0)
-	fmt.Fprintf(tw, "Category\tCount\tShare\n")
-	fmt.Fprintf(tw, "--------\t-----\t-----\n")
+	fmt.Fprintf(tw, "Category\tRows\tStmts\tRows/Stmt\tShare\n")
+	fmt.Fprintf(tw, "--------\t----\t-----\t---------\t-----\n")
 	cats := []struct {
-		name string
-		val  float64
+		name  string
+		rows  float64
+		stmts float64
 	}{
-		{"task_run_insert", r.deltaTaskRunInsert},
-		{"task_run_status", r.deltaTaskRunStatus},
-		{"event_insert", r.deltaEventInsert},
-		{"lease_renewal", r.deltaLeaseRenewal},
-		{"callback", r.deltaCallback},
-		{"command", r.deltaCommand},
-		{"checkpoint", r.deltaCheckpoint},
+		{"task_run_insert", r.deltaTaskRunInsert, r.deltaTaskRunInsertStmts},
+		{"task_run_status", r.deltaTaskRunStatus, r.deltaTaskRunStatusStmts},
+		{"event_insert", r.deltaEventInsert, r.deltaEventInsertStmts},
+		{"lease_renewal", r.deltaLeaseRenewal, r.deltaLeaseRenewalStmts},
+		{"callback", r.deltaCallback, r.deltaCallbackStmts},
+		{"command", r.deltaCommand, r.deltaCommandStmts},
+		{"checkpoint", r.deltaCheckpoint, r.deltaCheckpointStmts},
 	}
+	var totalStmts float64
 	for _, c := range cats {
+		totalStmts += c.stmts
 		pct := 0.0
 		if total > 0 {
-			pct = c.val / total * 100
+			pct = c.rows / total * 100
 		}
-		fmt.Fprintf(tw, "%s\t%.0f\t%.1f%%\n", c.name, c.val, pct)
+		batching := "—"
+		if c.stmts > 0 {
+			batching = fmt.Sprintf("%.1f", c.rows/c.stmts)
+		}
+		fmt.Fprintf(tw, "%s\t%.0f\t%.0f\t%s\t%.1f%%\n", c.name, c.rows, c.stmts, batching, pct)
 	}
-	fmt.Fprintf(tw, "TOTAL\t%.0f\t100%%\n", total)
+	overallBatching := "—"
+	if totalStmts > 0 {
+		overallBatching = fmt.Sprintf("%.1f", total/totalStmts)
+	}
+	fmt.Fprintf(tw, "TOTAL\t%.0f\t%.0f\t%s\t100%%\n", total, totalStmts, overallBatching)
 	tw.Flush()
 	fmt.Fprintln(w, "")
 	fmt.Fprintf(w, "Dominant category:   %s (%.0f writes, %.1f%% of total)\n",
@@ -888,6 +944,7 @@ func main() {
 	flag.DurationVar(&cfg.sampleRate, "sample-rate", cfg.sampleRate, "How often to sample Prometheus metrics")
 	flag.StringVar(&cfg.outputFile, "output", cfg.outputFile, "Write report to file (default: stdout only)")
 	flag.StringVar(&cfg.apiKey, "api-key", cfg.apiKey, "API key for authenticated endpoints")
+	flag.StringVar(&cfg.engine, "engine", cfg.engine, "Task engine: docker (default), kubernetes, or podman. Must match what the target Caesium deployment supports.")
 	flag.Parse()
 
 	h := newHarness(cfg)

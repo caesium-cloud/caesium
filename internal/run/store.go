@@ -549,7 +549,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 			if err := tx.Create(&records).Error; err != nil {
 				return err
 			}
-			counts.taskRunInsert += len(records)
+			counts.addTaskRunInsert(len(records))
 			if len(readyEvents) > 0 {
 				eventRecords := make([]models.ExecutionEvent, 0, len(readyEvents))
 				for _, evt := range readyEvents {
@@ -558,7 +558,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 				if err := tx.Create(&eventRecords).Error; err != nil {
 					return err
 				}
-				counts.eventInsert += len(eventRecords)
+				counts.addEventInsert(len(eventRecords))
 				for idx := range readyEvents {
 					readyEvents[idx].Sequence = eventRecords[idx].Sequence
 					readyEvents[idx].Timestamp = eventRecords[idx].CreatedAt
@@ -622,7 +622,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 				}).Error; err != nil {
 				return err
 			}
-			counts.taskRunStatus++
+			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
 				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
 				if err != nil {
@@ -664,7 +664,7 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 			if result.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
-			counts.taskRunStatus++
+			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
 				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
 				if err != nil {
@@ -802,7 +802,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
-			counts.taskRunStatus++
+			counts.addTaskRunStatus(1)
 
 			// Load the task model for edge traversal and branch detection.
 			var taskModel models.Task
@@ -861,7 +861,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			if err != nil {
 				return err
 			}
-			counts.taskRunStatus += len(toDecrementIDs)
+			counts.addTaskRunStatus(len(toDecrementIDs))
 
 			// Collect all events to emit (task_cached + task_ready for newly-ready successors).
 			var batchEvts []*event.Event
@@ -1056,7 +1056,7 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 		return err
 	}
-	counts.eventInsert++
+	counts.addEventInsert(1)
 	*pendingEvents = append(*pendingEvents, evt)
 	return nil
 }
@@ -1092,7 +1092,7 @@ func (s *Store) appendBatchEventsTx(tx *gorm.DB, evts []*event.Event, pendingEve
 	if err := s.eventStore.AppendBatchTx(tx, evts); err != nil {
 		return err
 	}
-	counts.eventInsert += len(evts)
+	counts.addEventInsert(len(evts))
 	for _, e := range evts {
 		*pendingEvents = append(*pendingEvents, *e)
 	}
@@ -1117,7 +1117,7 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 	if result.RowsAffected == 0 {
 		return false, nil
 	}
-	counts.taskRunStatus++
+	counts.addTaskRunStatus(1)
 
 	if s.eventStore != nil {
 		evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, counts)
@@ -1316,7 +1316,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if enforceClaim && resultUpdate.RowsAffected == 0 {
 				return ErrTaskClaimMismatch
 			}
-			counts.taskRunStatus++
+			counts.addTaskRunStatus(1)
 
 			if status == TaskStatusFailed {
 				if s.eventStore != nil {
@@ -1403,7 +1403,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if err != nil {
 				return err
 			}
-			counts.taskRunStatus += len(toDecrementIDs)
+			counts.addTaskRunStatus(len(toDecrementIDs))
 
 			// Collect all events to emit (task_succeeded + task_ready for newly-ready successors).
 			var batchEvts []*event.Event
@@ -1539,7 +1539,7 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 		if err != nil {
 			return skipped, err
 		}
-		counts.taskRunStatus += len(successorIDs)
+		counts.addTaskRunStatus(len(successorIDs))
 
 		// Build a quick lookup map from the updated rows.
 		updatedByTaskID := make(map[uuid.UUID]*models.TaskRun, len(updatedSuccessors))
@@ -1637,7 +1637,7 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
-		counts.taskRunStatus++
+		counts.addTaskRunStatus(1)
 
 		if s.eventStore != nil {
 			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID, &counts)
@@ -1698,7 +1698,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		if enforceClaim && resultUpdate.RowsAffected == 0 {
 			return ErrTaskClaimMismatch
 		}
-		counts.taskRunStatus++
+		counts.addTaskRunStatus(1)
 
 		if s.eventStore != nil {
 			// Build retrying event payload.
@@ -1773,7 +1773,7 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 			}).Error; err != nil {
 			return err
 		}
-		counts.taskRunStatus++
+		counts.addTaskRunStatus(1)
 		if s.eventStore != nil {
 			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, &counts)
 			if err != nil {
@@ -2233,7 +2233,7 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 		if err := s.eventStore.AppendTx(db, &evt); err != nil {
 			return nil, err
 		}
-		counts.eventInsert++
+		counts.addEventInsert(1)
 	}
 	return &evt, nil
 }
@@ -2250,27 +2250,73 @@ func (s *Store) PublishEvents(events ...event.Event) {
 // attempt. Must be reset() at the start of each retry closure and commit()'d
 // only after the retry returns nil; otherwise transactions retried due to
 // busy/locked errors will over-count.
+//
+// Each category tracks both rows (total work) and stmts (round-trips). A
+// batched UPDATE/INSERT bumps stmts by 1 and rows by N. The two counters
+// together let dashboards compute "rows per statement" to quantify how
+// effective batching is — the headline indicator for Phase 1.1 / 1.4 wins.
 type dbWriteCounts struct {
-	taskRunInsert int
-	taskRunStatus int
-	eventInsert   int
-	callback      int
-	leaseRenewal  int
+	taskRunInsertRows  int
+	taskRunInsertStmts int
+	taskRunStatusRows  int
+	taskRunStatusStmts int
+	eventInsertRows    int
+	eventInsertStmts   int
+	callbackRows       int
+	callbackStmts      int
+	leaseRenewalRows   int
+	leaseRenewalStmts  int
 }
 
 func (c *dbWriteCounts) reset() { *c = dbWriteCounts{} }
 
+// addTaskRunInsert records one batched INSERT touching n rows.
+func (c *dbWriteCounts) addTaskRunInsert(rows int) {
+	if rows <= 0 {
+		return
+	}
+	c.taskRunInsertRows += rows
+	c.taskRunInsertStmts++
+}
+
+// addTaskRunStatus records one batched UPDATE touching n rows.
+func (c *dbWriteCounts) addTaskRunStatus(rows int) {
+	if rows <= 0 {
+		return
+	}
+	c.taskRunStatusRows += rows
+	c.taskRunStatusStmts++
+}
+
+// addEventInsert records one batched INSERT touching n rows.
+func (c *dbWriteCounts) addEventInsert(rows int) {
+	if rows <= 0 {
+		return
+	}
+	c.eventInsertRows += rows
+	c.eventInsertStmts++
+}
+
+// NOTE: addCallback and addLeaseRenewal accessors are intentionally omitted —
+// the callback and lease_renewal categories don't flow through the
+// accumulator-with-retry pattern (callback.go and worker.go emit metrics
+// directly outside retry loops). commit() still emits both counters if the
+// fields are non-zero so future callers can drop the accessors back in.
+
 func (c *dbWriteCounts) commit() {
-	add := func(category string, n int) {
-		if n > 0 {
-			metrics.DBWritesTotal.WithLabelValues(category).Add(float64(n))
+	emit := func(category string, rows, stmts int) {
+		if rows > 0 {
+			metrics.DBWritesTotal.WithLabelValues(category).Add(float64(rows))
+		}
+		if stmts > 0 {
+			metrics.DBStatementsTotal.WithLabelValues(category).Add(float64(stmts))
 		}
 	}
-	add(metrics.DBWriteCategoryTaskRunInsert, c.taskRunInsert)
-	add(metrics.DBWriteCategoryTaskRunStatus, c.taskRunStatus)
-	add(metrics.DBWriteCategoryEventInsert, c.eventInsert)
-	add(metrics.DBWriteCategoryCallback, c.callback)
-	add(metrics.DBWriteCategoryLeaseRenewal, c.leaseRenewal)
+	emit(metrics.DBWriteCategoryTaskRunInsert, c.taskRunInsertRows, c.taskRunInsertStmts)
+	emit(metrics.DBWriteCategoryTaskRunStatus, c.taskRunStatusRows, c.taskRunStatusStmts)
+	emit(metrics.DBWriteCategoryEventInsert, c.eventInsertRows, c.eventInsertStmts)
+	emit(metrics.DBWriteCategoryCallback, c.callbackRows, c.callbackStmts)
+	emit(metrics.DBWriteCategoryLeaseRenewal, c.leaseRenewalRows, c.leaseRenewalStmts)
 }
 
 func withStoreBusyRetry(fn func() error) error {

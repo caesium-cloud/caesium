@@ -10,13 +10,13 @@ var registerOnce sync.Once
 
 // DBWriteCategory constants for use with DBWritesTotal.
 const (
-	DBWriteCategoryTaskRunInsert  = "task_run_insert"
-	DBWriteCategoryTaskRunStatus  = "task_run_status"
-	DBWriteCategoryEventInsert    = "event_insert"
-	DBWriteCategoryLeaseRenewal   = "lease_renewal"
-	DBWriteCategoryCallback       = "callback"
-	DBWriteCategoryCommand        = "command"
-	DBWriteCategoryCheckpoint     = "checkpoint"
+	DBWriteCategoryTaskRunInsert = "task_run_insert"
+	DBWriteCategoryTaskRunStatus = "task_run_status"
+	DBWriteCategoryEventInsert   = "event_insert"
+	DBWriteCategoryLeaseRenewal  = "lease_renewal"
+	DBWriteCategoryCallback      = "callback"
+	DBWriteCategoryCommand       = "command"
+	DBWriteCategoryCheckpoint    = "checkpoint"
 )
 
 var (
@@ -214,7 +214,12 @@ var (
 		[]string{"path", "reason"},
 	)
 
-	// DBWritesTotal counts durable database writes by category. Categories:
+	// DBWritesTotal counts durable database writes by category, measured in
+	// rows touched (so a batched UPDATE/INSERT increments by the row count, not
+	// by one). Use this for capacity-planning and "how much work is the DB
+	// doing." For "how many round-trips" use DBStatementsTotal below.
+	//
+	// Categories:
 	//   task_run_insert   – new task_runs row (RegisterTasks)
 	//   task_run_status   – status UPDATE on task_runs (claim, start, complete, fail, skip, retry)
 	//   event_insert      – new execution_events row
@@ -225,7 +230,20 @@ var (
 	DBWritesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_db_writes_total",
-			Help: "Total durable database writes by category (task_run_insert, task_run_status, event_insert, lease_renewal, callback, command, checkpoint).",
+			Help: "Total durable database writes by category, measured in rows touched.",
+		},
+		[]string{"category"},
+	)
+
+	// DBStatementsTotal counts distinct SQL statements executed by category —
+	// each batched INSERT or UPDATE increments by 1 regardless of row count.
+	// Pair with DBWritesTotal: rows/statements ratio quantifies batching
+	// effectiveness. Phase 1.1 (event coalescing) and 1.4 (predecessor-counter
+	// UPDATE batching) reduce statement count without changing row count.
+	DBStatementsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_db_statements_total",
+			Help: "Total distinct SQL statements executed by category. A batched UPDATE/INSERT increments by 1 regardless of row count; pair with caesium_db_writes_total to compute rows/statement (batching factor).",
 		},
 		[]string{"category"},
 	)
@@ -260,6 +278,7 @@ func Register() {
 			AuditLogEntriesTotal,
 			WebhookAuthFailuresTotal,
 			DBWritesTotal,
+			DBStatementsTotal,
 		)
 	})
 }
