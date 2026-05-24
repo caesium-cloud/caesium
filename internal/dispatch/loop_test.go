@@ -36,12 +36,6 @@ func (p *testPeerLister) DispatchPeers(_ context.Context) ([]string, error) {
 	return append([]string(nil), p.peers...), nil
 }
 
-func (p *testPeerLister) setPeers(peers []string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.peers = peers
-}
-
 // testOwnerReader wraps run.LeaseStore to satisfy OwnerReader.
 type testOwnerReader struct {
 	ls *run.LeaseStore
