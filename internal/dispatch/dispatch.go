@@ -425,3 +425,21 @@ func WarnIfNoMTLS() {
 			"CAESIUM_INTERNAL_MTLS_CERT, and CAESIUM_INTERNAL_MTLS_KEY.",
 	)
 }
+
+// WarnIfNoToken emits a startup warning when owner mode is on but the
+// internal wakeup token is not set.  Without the token, the dispatch and
+// complete endpoints reject every request (bearer-token check fails closed),
+// so run-owner dispatch is silently inert — adding lease overhead with zero
+// benefit.  Mirrors WarnIfNoMTLS in tone and intent; warn-only for now.
+func WarnIfNoToken(token string) {
+	if strings.TrimSpace(token) != "" {
+		return
+	}
+	log.Warn(
+		"run-owner mode is enabled but CAESIUM_INTERNAL_WAKEUP_TOKEN is not set; " +
+			"the /internal/dispatch and /internal/complete endpoints require a " +
+			"Bearer token and will reject every request without one — " +
+			"run-owner dispatch will be silently inert. " +
+			"Set CAESIUM_INTERNAL_WAKEUP_TOKEN on every node to enable dispatch.",
+	)
+}
