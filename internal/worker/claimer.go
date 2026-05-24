@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"math/rand/v2"
 	"sort"
@@ -187,7 +188,10 @@ func (c *Claimer) claimNextSingleStatementTx(tx *gorm.DB, now, leaseExpiry time.
 	// SQLite/dqlite.  run_leases.run_id is always TEXT.  On Postgres we must
 	// cast to avoid a type-mismatch error; on SQLite the comparison works
 	// without any cast.
-	liveLeaseGuard := c.liveLeaseGuardSQL(tx.Name(), "tr")
+	liveLeaseGuard, err := c.liveLeaseGuardSQL(tx.Name(), "tr")
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
 
 	sql := `
 UPDATE task_runs
@@ -246,21 +250,26 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 //   - No run_leases row           → NOT EXISTS true → claimable (owner mode off).
 //   - Live lease (expires_at > ?) → NOT EXISTS false → defer to owner's dispatch loop.
 //   - Expired lease               → NOT EXISTS true → claimable (recovery path).
-func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string) string {
+func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string) (string, error) {
 	// job_run_id is a native UUID column on Postgres; a text column on
 	// SQLite/dqlite.  run_leases.run_id is always TEXT.  Cast only on Postgres.
+	// Mirror nodeSelectorPredicateSQL: reject unknown dialects rather than
+	// silently defaulting, so a future backend that needs different casting
+	// surfaces the misconfiguration at claim time instead of producing wrong SQL.
 	var jobRunIDExpr string
 	switch dialect {
+	case "dqlite", "sqlite":
+		jobRunIDExpr = tableAlias + ".job_run_id"
 	case "postgres":
 		jobRunIDExpr = "CAST(" + tableAlias + ".job_run_id AS TEXT)"
-	default: // dqlite, sqlite
-		jobRunIDExpr = tableAlias + ".job_run_id"
+	default:
+		return "", fmt.Errorf("worker claimer: unsupported dialect %q for live-lease guard", dialect)
 	}
 	return "NOT EXISTS (" +
 		"SELECT 1 FROM run_leases rl " +
 		"WHERE rl.run_id = " + jobRunIDExpr + " " +
 		"AND rl.lease_expires_at > ?" +
-		")"
+		")", nil
 }
 
 type claimedTaskRunRow struct {
@@ -376,20 +385,25 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			// WHERE rl.run_id = <job_run_id_expr> AND rl.lease_expires_at > ?)"
 			// and handles the Postgres UUID→TEXT cast internally via tableAlias.
 			// One bound parameter (now) is appended via liveLeaseArgs.
-			liveLeaseGuard := c.liveLeaseGuardSQL(tx.Name(), "task_runs")
-			liveLeaseArgs := []interface{}{now}
+			liveLeaseGuard, err := c.liveLeaseGuardSQL(tx.Name(), "task_runs")
+			if err != nil {
+				return err
+			}
+
+			// Shared between the Find (to collect events) and the Updates (to
+			// reset claims) so the expiry criteria can't drift between them.
+			// liveLeaseGuard binds one parameter (now); it trails the three
+			// static args.
+			expiredWhere := "job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND " + liveLeaseGuard
+			expiredArgs := []interface{}{runningRunIDs, string(run.TaskStatusRunning), now, now}
 
 			var expired []models.TaskRun
-			if err := tx.
-				Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND "+liveLeaseGuard,
-					append([]interface{}{runningRunIDs, string(run.TaskStatusRunning), now}, liveLeaseArgs...)...).
-				Find(&expired).Error; err != nil {
+			if err := tx.Where(expiredWhere, expiredArgs...).Find(&expired).Error; err != nil {
 				return err
 			}
 
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id IN (?) AND status = ? AND claim_expires_at IS NOT NULL AND claim_expires_at < ? AND "+liveLeaseGuard,
-					append([]interface{}{runningRunIDs, string(run.TaskStatusRunning), now}, liveLeaseArgs...)...).
+				Where(expiredWhere, expiredArgs...).
 				Updates(map[string]interface{}{
 					"status":           string(run.TaskStatusPending),
 					"claimed_by":       "",
