@@ -112,21 +112,19 @@ func (p *retryConnPool) QueryContext(ctx context.Context, query string, args ...
 }
 
 func (p *retryConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
-	// (*sql.Row).Err() is not populated until Scan, and sql.Row has no
-	// exported constructor, so we surface contention by probing with a
-	// QueryContext retry first, then returning a fresh QueryRowContext. The
-	// extra read happens only on the rare contention path.
-	var row *sql.Row
-	_ = p.retry(ctx, func() error {
-		rows, err := p.pool.QueryContext(ctx, query, args...)
-		if err != nil {
-			return err
-		}
-		_ = rows.Close()
-		return nil
-	})
-	row = p.pool.QueryRowContext(ctx, query, args...)
-	return row
+	// database/sql defers all errors from QueryRowContext to (*sql.Row).Scan,
+	// and *sql.Row has no exported constructor, so the decorator cannot inspect
+	// the result or re-run across the caller's Scan boundary. We therefore
+	// delegate plainly rather than probe-then-call (the previous approach issued
+	// two round-trips on every call and still left the real call unretried).
+	//
+	// This is an acceptable gap: GORM only routes through QueryRowContext for
+	// the explicit `.Row()` API, whose sole users in this codebase are the
+	// schema migrator's sqlite_master / PRAGMA reads in pkg/dqlite/migrator.go.
+	// Those run at startup against low-contention metadata, before the server
+	// takes traffic. Every hot-path read goes through QueryContext (First/Take/
+	// Find/Scan all use it), which IS retried above.
+	return p.pool.QueryRowContext(ctx, query, args...)
 }
 
 // BeginTx delegates to the underlying pool and returns the raw transaction so
