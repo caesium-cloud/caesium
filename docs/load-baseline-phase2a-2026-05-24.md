@@ -36,7 +36,7 @@
 | End-to-end p50 | 31s | 31s | unchanged |
 | End-to-end p99 | 32s | 31s | unchanged |
 | Wall-clock run time | 67s | 66s | unchanged |
-| Claims total | 42 | 63 | +50% (claimer is still the hot path) |
+| `caesium_worker_claims_total` | 42 | 63 | +50% (claimer is still the hot path) |
 
 10/10 runs succeeded in both configurations.
 
@@ -54,7 +54,7 @@ The Phase A brief (and the design doc) called for the executor to actively push 
 
 1. Acquires a `run_leases` row on `Start()` (works).
 2. Renews leases via the per-node ticker (works).
-3. Stamps `owner_generation` on `task_runs` it claims (works — but only at claim time, not dispatch time).
+3. Stamps `owner_generation` on `task_runs` it dispatches via `ClaimTaskForDispatch` (works — but the dispatch path is never invoked here; `ClaimNext` does not stamp `owner_generation`, so on this run no row ever gets stamped).
 4. Has dispatch and complete handlers ready to receive (works — but no one calls them).
 5. **Workers still pick up tasks via ClaimNext** because nothing replaced that loop.
 
@@ -63,7 +63,7 @@ Evidence:
 - `caesium_worker_claims_total = 63` — workers are claiming via the existing path, just like pre-Phase-A.
 - 10 `run_leases` rows + lease renewals are pure overhead with no compensating reduction in claim contention.
 
-This explains the +56% busy_retries: Phase A added writes (lease INSERT + 13 batched UPDATEs + `owner_generation` column writes) without removing any of the existing claim/start/complete contention. The substrate works in isolation; the routing decision that would replace ClaimNext for owned runs is missing.
+This explains the +56% busy_retries: Phase A added writes (lease INSERT + 13 batched UPDATEs) without removing any of the existing claim/start/complete contention. (Note: `owner_generation` column writes don't contribute here because `ClaimNext` doesn't stamp the column — only the dispatch path does, and the dispatch path is never invoked on this run.) The substrate works in isolation; the routing decision that would replace ClaimNext for owned runs is missing.
 
 ## Conclusions
 
