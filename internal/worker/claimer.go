@@ -323,36 +323,64 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			}
 			counts.taskRunStatus += int(result.RowsAffected)
 
-			for _, taskRun := range expired {
-				var jobRun models.JobRun
-				if err := tx.Select("job_id").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
-					return err
+			// Batch all lease-expired + task-ready events into a single INSERT.
+			if len(expired) > 0 {
+				// Collect unique job IDs we need.
+				jobRunByID := make(map[uuid.UUID]models.JobRun, len(expired))
+				for _, taskRun := range expired {
+					if _, ok := jobRunByID[taskRun.JobRunID]; ok {
+						continue
+					}
+					var jobRun models.JobRun
+					if err := tx.Select("job_id").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
+						return err
+					}
+					jobRunByID[taskRun.JobRunID] = jobRun
 				}
-				leaseEvt := event.Event{
-					Type:      event.TypeTaskLeaseExpired,
-					JobID:     jobRun.JobID,
-					RunID:     taskRun.JobRunID,
-					TaskID:    taskRun.TaskID,
-					Timestamp: time.Now().UTC(),
-				}
-				if err := c.store.RecordEventTx(tx, &leaseEvt); err != nil {
-					return err
-				}
-				counts.eventInsert++
-				attemptEvents = append(attemptEvents, leaseEvt)
 
-				readyEvt := event.Event{
-					Type:      event.TypeTaskReady,
-					JobID:     jobRun.JobID,
-					RunID:     taskRun.JobRunID,
-					TaskID:    taskRun.TaskID,
-					Timestamp: time.Now().UTC(),
+				now := time.Now().UTC()
+				eventRecords := make([]models.ExecutionEvent, 0, len(expired)*2)
+				for _, taskRun := range expired {
+					jobRun := jobRunByID[taskRun.JobRunID]
+					jobIDPtr := &jobRun.JobID
+					runIDCopy := taskRun.JobRunID
+					taskIDCopy := taskRun.TaskID
+					eventRecords = append(eventRecords,
+						models.ExecutionEvent{
+							Type:               string(event.TypeTaskLeaseExpired),
+							JobID:              jobIDPtr,
+							RunID:              &runIDCopy,
+							TaskID:             &taskIDCopy,
+							BusDispatchPending: true,
+							CreatedAt:          now,
+						},
+						models.ExecutionEvent{
+							Type:               string(event.TypeTaskReady),
+							JobID:              jobIDPtr,
+							RunID:              &runIDCopy,
+							TaskID:             &taskIDCopy,
+							BusDispatchPending: true,
+							CreatedAt:          now,
+						},
+					)
 				}
-				if err := c.store.RecordEventTx(tx, &readyEvt); err != nil {
+				if err := tx.Create(&eventRecords).Error; err != nil {
 					return err
 				}
-				counts.eventInsert++
-				attemptEvents = append(attemptEvents, readyEvt)
+				counts.eventInsert += len(eventRecords)
+
+				// Build bus-dispatch events from the inserted records.
+				for i := range eventRecords {
+					rec := &eventRecords[i]
+					attemptEvents = append(attemptEvents, event.Event{
+						Sequence:  rec.Sequence,
+						Type:      event.Type(rec.Type),
+						JobID:     derefUUID(rec.JobID),
+						RunID:     derefUUID(rec.RunID),
+						TaskID:    derefUUID(rec.TaskID),
+						Timestamp: rec.CreatedAt,
+					})
+				}
 			}
 			attemptReclaimedCount = result.RowsAffected
 			return nil
@@ -444,6 +472,13 @@ func isClaimContentionErr(err error) bool {
 		// retry on a fresh pooled connection usually succeeds. See
 		// internal/backfill/store.go::isContentionErr for the full rationale.
 		strings.Contains(msg, "cannot start a transaction within a transaction")
+}
+
+func derefUUID(id *uuid.UUID) uuid.UUID {
+	if id == nil {
+		return uuid.Nil
+	}
+	return *id
 }
 
 func ParseNodeLabels(raw string) map[string]string {

@@ -268,6 +268,108 @@ func (s *StoreMetricsSuite) TestDBWritesTotalFailTask() {
 	s.Equal(float64(1), afterStatus-beforeStatus, "FailTask should produce exactly one task_run_status write")
 }
 
+// TestFanOutCompletionWriteCounts asserts that completing a root task with
+// fan-out=4 successors produces the correct row counts in the DB write metrics:
+// exactly 4 task_run_status writes (1 batched UPDATE touching 4 rows, counted
+// as 4) and at least 1 event_insert write (1 batched INSERT for
+// task_succeeded + 4×task_ready = 5 rows, counted as 5).
+func (s *StoreMetricsSuite) TestFanOutCompletionWriteCounts() {
+	jobID := uuid.New()
+	run, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	atomID := uuid.New()
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
+	s.Require().NoError(s.db.Create(atom).Error)
+
+	root := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "root"}
+	lane1 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane1"}
+	lane2 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane2"}
+	lane3 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane3"}
+	lane4 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane4"}
+	s.Require().NoError(s.db.Create([]*models.Task{root, lane1, lane2, lane3, lane4}).Error)
+
+	now := time.Now().UTC()
+	edges := []models.TaskEdge{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane1.ID, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane2.ID, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane3.ID, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane4.ID, CreatedAt: now, UpdatedAt: now},
+	}
+	s.Require().NoError(s.db.Create(&edges).Error)
+
+	s.Require().NoError(s.store.RegisterTask(run.ID, root, atom, 0))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane1, atom, 1))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane2, atom, 1))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane3, atom, 1))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane4, atom, 1))
+	s.Require().NoError(s.store.StartTask(run.ID, root.ID, "container-root"))
+
+	beforeStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+
+	s.Require().NoError(s.store.CompleteTask(run.ID, root.ID, "ok", nil, nil))
+
+	afterStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+
+	// 1 status write for the task itself + 4 for the predecessor decrements = 5 total.
+	s.Equal(float64(5), afterStatus-beforeStatus,
+		"fan-out=4 completion: expected 1 (complete) + 4 (predecessors) = 5 task_run_status writes")
+
+	// task_succeeded (1) + task_ready×4 = 5 event rows in one batch INSERT.
+	s.Equal(float64(5), afterEvent-beforeEvent,
+		"fan-out=4 completion: expected 5 event rows (1 task_succeeded + 4 task_ready) in one batch")
+}
+
+// TestCacheHitCompletionWriteCounts verifies that CacheHitTask with fan-out=2
+// also produces batched write counts.
+func (s *StoreMetricsSuite) TestCacheHitCompletionWriteCounts() {
+	jobID := uuid.New()
+	run, err := s.store.Start(jobID, nil)
+	s.Require().NoError(err)
+
+	atomID := uuid.New()
+	atom := &models.Atom{ID: atomID, Engine: models.AtomEngineDocker, Image: "busybox:1.36.1"}
+	s.Require().NoError(s.db.Create(atom).Error)
+
+	root := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "root"}
+	lane1 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane1"}
+	lane2 := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomID, Name: "lane2"}
+	s.Require().NoError(s.db.Create([]*models.Task{root, lane1, lane2}).Error)
+
+	now := time.Now().UTC()
+	edges := []models.TaskEdge{
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane1.ID, CreatedAt: now, UpdatedAt: now},
+		{ID: uuid.New(), JobID: jobID, FromTaskID: root.ID, ToTaskID: lane2.ID, CreatedAt: now, UpdatedAt: now},
+	}
+	s.Require().NoError(s.db.Create(&edges).Error)
+
+	s.Require().NoError(s.store.RegisterTask(run.ID, root, atom, 0))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane1, atom, 1))
+	s.Require().NoError(s.store.RegisterTask(run.ID, lane2, atom, 1))
+
+	beforeStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+
+	_, err = s.store.CacheHitTask(run.ID, root.ID, CacheHitSource{
+		RunID:     uuid.New(),
+		CreatedAt: time.Now().UTC(),
+	}, "ok", nil, nil)
+	s.Require().NoError(err)
+
+	afterStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+
+	// 1 for cache hit status + 2 for predecessor decrements = 3.
+	s.Equal(float64(3), afterStatus-beforeStatus,
+		"fan-out=2 cache hit: expected 1 (cached) + 2 (predecessors) = 3 task_run_status writes")
+
+	// task_cached (1) + task_ready×2 = 3 event rows.
+	s.Equal(float64(3), afterEvent-beforeEvent,
+		"fan-out=2 cache hit: expected 3 event rows (1 task_cached + 2 task_ready) in one batch")
+}
+
 func (s *StoreMetricsSuite) dbWriteValue(category string) float64 {
 	var m dto.Metric
 	counter, err := metrics.DBWritesTotal.GetMetricWithLabelValues(category)
