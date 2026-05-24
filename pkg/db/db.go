@@ -117,6 +117,14 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 
 	cfg := &gorm.Config{
 		Logger: NewLogger().LogMode(gormLogLevel()),
+		// Execute top-level single-row Create/Update/Delete as one autocommit
+		// statement instead of wrapping each in an implicit BEGIN/COMMIT. A
+		// single INSERT/UPDATE/DELETE is atomic in SQLite/dqlite regardless, so
+		// this is safe, and it lets the connection-pool busy-retry (see
+		// retryPlugin) cover single writes — the implicit transaction would
+		// otherwise route the write onto a *sql.Tx that bypasses pool retry.
+		// Explicit db.Transaction(fn) closures are unaffected by this flag.
+		SkipDefaultTransaction: true,
 	}
 	if !enforceForeignKeys {
 		cfg.DisableForeignKeyConstraintWhenMigrating = true
@@ -143,6 +151,16 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 		)
 	}
 	if err != nil {
+		return nil, err
+	}
+
+	// Wrap the connection pool with transparent busy-retry for single
+	// autocommit statements (reads and single-row writes outside an explicit
+	// transaction). This is the global backstop that covers every call site
+	// uniformly, including bare reads in the DAG-execution path that no
+	// per-call-site wrapper guards. In-transaction statements bypass it by
+	// construction; see retryConnPool for the safety rationale.
+	if err := conn.Use(retryPlugin{}); err != nil {
 		return nil, err
 	}
 

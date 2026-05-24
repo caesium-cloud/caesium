@@ -14,6 +14,7 @@ import (
 	"github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func TestStorePersistsRunState(t *testing.T) {
@@ -110,6 +111,46 @@ func TestStorePersistsRunState(t *testing.T) {
 
 	finalStore := NewStore(db)
 	finalRun, err := finalStore.Get(runRecord.ID)
+	require.NoError(t, err)
+	require.Equal(t, StatusSucceeded, finalRun.Status)
+}
+
+// TestCompleteRetriesTransientContention pins that Store.Complete routes
+// through withStoreBusyRetry. Complete runs on the run-completion path taken by
+// every job run; before this guard a transient "checkpoint in progress" /
+// "database is locked" on the completion write (or its bookkeeping SELECT)
+// propagated to the caller and marked an otherwise-successful run as failed —
+// the exact integration flake in TestBackfillBasicHappyPath. Here we inject a
+// one-shot contention error on the job_runs UPDATE and assert the run still
+// commits as succeeded and Complete returns nil.
+func TestCompleteRetriesTransientContention(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	fired := false
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:one_shot_contention", func(tx *gorm.DB) {
+		if fired || tx.Statement.Table != "job_runs" {
+			return
+		}
+		fired = true
+		_ = tx.AddError(errors.New("checkpoint in progress"))
+	}))
+	t.Cleanup(func() {
+		_ = db.Callback().Update().Remove("test:one_shot_contention")
+	})
+
+	require.NoError(t, store.Complete(runRecord.ID, nil))
+	require.True(t, fired, "expected the injected contention error to fire at least once")
+
+	finalRun, err := store.Get(runRecord.ID)
 	require.NoError(t, err)
 	require.Equal(t, StatusSucceeded, finalRun.Status)
 }
