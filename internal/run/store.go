@@ -2297,23 +2297,11 @@ func (c *dbWriteCounts) addEventInsert(rows int) {
 	c.eventInsertStmts++
 }
 
-// addCallback records one INSERT/UPDATE touching n rows.
-func (c *dbWriteCounts) addCallback(rows int) {
-	if rows <= 0 {
-		return
-	}
-	c.callbackRows += rows
-	c.callbackStmts++
-}
-
-// addLeaseRenewal records one batched UPDATE touching n rows.
-func (c *dbWriteCounts) addLeaseRenewal(rows int) {
-	if rows <= 0 {
-		return
-	}
-	c.leaseRenewalRows += rows
-	c.leaseRenewalStmts++
-}
+// NOTE: addCallback and addLeaseRenewal accessors are intentionally omitted —
+// the callback and lease_renewal categories don't flow through the
+// accumulator-with-retry pattern (callback.go and worker.go emit metrics
+// directly outside retry loops). commit() still emits both counters if the
+// fields are non-zero so future callers can drop the accessors back in.
 
 func (c *dbWriteCounts) commit() {
 	emit := func(category string, rows, stmts int) {
