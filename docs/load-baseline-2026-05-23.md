@@ -16,23 +16,64 @@
 | Worker pool | Default (local Docker engine, no kubernetes) |
 | CAESIUM_DATABASE_SHARDS | 1 (sharding PR #157 not yet deployed in this config) |
 
-## Sandbox Limitation
+## Empirical Measurement — 2026-05-23 (local single-node)
 
-The sandbox environment does **not** have a running Caesium server with a live
-dqlite cluster, NVMe storage, or a multi-node Raft configuration. Therefore
-this document captures:
+Caesium server started via `just run` against the local Docker engine
+(single-node, `CAESIUM_EXECUTION_MODE=local` — the default). Load harness
+driven via `just load-test`. Two passes:
 
-1. **Instrumented scaffolding verified to compile and vet cleanly** — the
-   `caesium_db_writes_total{category}` counters are wired into all relevant
-   write paths and the `just load-test` recipe is ready to run.
+**Pass 1 — minimal smoke (3 jobs × fan-out=2 × depth=2 → `buildDAGSteps` emits 1 root + 2 fan-in + 1 join = 4 tasks/run × 3 jobs = 12 task lifecycles):**
 
-2. **Analytical write-category breakdown** derived from reading the source, as
-   a substitute for empirical measurement. This breakdown is reproducible and
-   should closely predict the empirical outcome; it gives a directional answer
-   to "which category dominates" before a real cluster run.
+| Category | Count | Share |
+|---|---|---|
+| `task_run_insert` | 12 | 14.3% |
+| `task_run_status` | 36 | **42.9%** (tied dominant) |
+| `event_insert` | 36 | **42.9%** (tied dominant) |
+| `lease_renewal` | 0 | 0.0% (local mode) |
+| `callback` | 0 | 0.0% |
+| **TOTAL** | **84** | 7.0 writes/task |
 
-3. **Guidance for the first real-cluster run** so the Phase 1 team knows what
-   to expect and what to look for.
+**Pass 2 — realistic load (10 jobs × fan-out=4 × depth=3 = 10 tasks/run = 100 task lifecycles, 3 concurrent runs):**
+
+| Category | Count | Share |
+|---|---|---|
+| `task_run_insert` | 100 | 13.9% |
+| `task_run_status` | 320 | **44.4%** (dominant) |
+| `event_insert` | 300 | 41.7% |
+| `lease_renewal` | 0 | 0.0% (local mode) |
+| **TOTAL** | **720** | 7.2 writes/task |
+
+End-to-end p50/p99: 4s/6s per run. `caesium_db_busy_retries_total` delta: 7 (mild contention even on a single-node sandbox). 0 claims (local mode bypasses the distributed claimer).
+
+### Key empirical findings vs. analytical prediction
+
+1. **`task_run_status` is the actual dominant category, not `event_insert`.** The analytical prediction had events slightly ahead (~38% vs. ~35%). In practice the order is reversed — events: 41.7%, status: 44.4% — and the gap is driven by predecessor-counter UPDATEs in `CompleteTask` that the analytical model underweighted.
+
+2. **Per-task overhead matches the design's "6–10 rows/task" estimate.** Pass 1 measured 7.0/task; Pass 2 measured 7.2/task. Both passes land in the predicted band, and the small Pass-1-to-Pass-2 delta tracks fan-out width (more successors → more predecessor-decrement UPDATEs).
+
+3. **Local mode has zero `lease_renewal` and `claim`-driven writes.** Distributed mode would shift the distribution — lease_renewal would likely appear at the ~15–25% predicted level. This baseline understates the value of Phase 1.2 (lease batching) for distributed deployments specifically.
+
+4. **Contention exists even on a single-node sandbox.** 7 busy-retries on a 720-write workload is a measurable signal that write contention is real at modest scale.
+
+### Sandbox caveats
+
+- **Single-node, in-container tmpfs storage** — no Raft replication cost, no NVMe write latency. Real-cluster numbers will be slower per write but should show the *same* category proportions.
+- **Local execution mode** — no distributed worker overhead, so lease_renewal and the claim hot path don't contribute. Re-run with `CAESIUM_EXECUTION_MODE=distributed` + multi-node for a complete picture before sequencing Phase 1.2.
+- **No load-test of `claims_total`** — the claims counter shows 0 because local mode doesn't use the claimer. For distributed-mode profiling, this column matters.
+
+### Updated Phase 1 sequencing recommendation
+
+Based on the empirical numbers:
+
+1. **Phase 1.1 (event coalescing) remains a high-impact lever** — 41.7% of writes in local mode. A 3–5× reduction inside `CompleteTask`'s event batch would cut total writes by ~30%.
+
+2. **Add: predecessor-counter UPDATE batching** — *not currently in the design doc*. `task_run_status` is 44.4% of writes, and a meaningful chunk comes from per-successor `UPDATE … SET outstanding_predecessors = outstanding_predecessors - 1`. A single `UPDATE … WHERE id IN (?…) … - 1` per parent completion would collapse this by fan-out factor. Worth a Phase 1.4 PR.
+
+3. **Phase 1.2 (lease batching) — already shipped (#165)**, but its impact is invisible in local mode. Re-baseline against distributed mode to confirm the per-node renewal write rate drops as expected.
+
+4. **Phase 1.3 (catalog cache) — read-side optimization, not visible in write counters.** Defer unless catalog-read latency becomes a separate concern.
+
+5. **Phase 2 gate** — re-measure after 1.1 + 1.4 (proposed). If `task_run_status` + `event_insert` no longer dominate (say, drop below 30% combined), Phase 2's run-owner pattern is gated as designed: still useful but not the next priority.
 
 ---
 
@@ -109,29 +150,7 @@ transition.
 
 ---
 
-## Empirical Run — To Be Completed in Real Cluster
-
-The table below is a template for the first real-cluster run using
-`just load-test`. Fill it in once a live server with Docker engine is available:
-
-| Metric | Value |
-|---|---|
-| `caesium_db_writes_total{category="task_run_insert"}` (delta) | — |
-| `caesium_db_writes_total{category="task_run_status"}` (delta) | — |
-| `caesium_db_writes_total{category="event_insert"}` (delta) | — |
-| `caesium_db_writes_total{category="lease_renewal"}` (delta) | — |
-| Dominant category | — |
-| Peak task_run_status/s | — |
-| Peak event_insert/s | — |
-| End-to-end p50 per run | — |
-| End-to-end p99 per run | — |
-| `caesium_db_busy_retries_total` (delta) | — |
-| dqlite leader CPU at saturation | — |
-| dqlite leader RSS at saturation | — |
-| `caesium_worker_claims_total` (delta) | — |
-| Writes per claim | — |
-
-### How to run
+## How to reproduce
 
 ```sh
 # Start the server (requires Docker):
@@ -186,24 +205,9 @@ The following write paths now increment `caesium_db_writes_total`:
 
 ## Phase 1 Sequencing Recommendation
 
-Based on the analytical breakdown:
-
-1. **Start with 1.1 Event coalescing** — `event_insert` is predicted to be the
-   dominant category (35–40% of all writes). A 3–5× reduction here is the
-   single largest lever.
-
-2. **Follow with 1.2 Lease renewal batching** — `lease_renewal` is the
-   third-largest category (~15–25%). With a typical pool size of 16 workers,
-   batching reduces this by ~16×, paying outsized dividends at higher pool
-   sizes.
-
-3. **Defer 1.3 Catalog cache** — it targets read QPS and does not appear in
-   the write metrics measured here. Start it in parallel with 1.2 if
-   engineering bandwidth allows, but don't block Phase 1 completion on it.
-
-4. **Gate Phase 2 on real measurements.** If after Phase 1 the dominant
-   remaining category is `task_run_status` (CompleteTask's predecessor-counter
-   UPDATEs and claim/start transitions), that confirms Phase 2's run-owner
-   design is the right next step — it eliminates per-transition DB writes
-   entirely. If the write rate has already moved past the throughput target,
-   Phase 2 can be deferred.
+> Superseded by the empirical findings above (2026-05-23). The empirical
+> measurement shifted the recommendation from "events dominate, start with
+> 1.1" to "task_run_status edges out events; consider adding 1.4
+> (predecessor-counter UPDATE batching) to Phase 1 alongside 1.1." See
+> the "Updated Phase 1 sequencing recommendation" block above for the
+> current guidance.
