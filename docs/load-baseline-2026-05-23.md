@@ -211,3 +211,118 @@ The following write paths now increment `caesium_db_writes_total`:
 > (predecessor-counter UPDATE batching) to Phase 1 alongside 1.1." See
 > the "Updated Phase 1 sequencing recommendation" block above for the
 > current guidance.
+
+---
+
+## Post-Phase-1 Re-baseline — 2026-05-23
+
+After PRs #165 (1.2 lease batching) and #167 (1.1 event coalescing + 1.4
+predecessor batching) merged, the harness was re-run against the same single-node
+sandbox to measure delta.
+
+**Caesium commit:** `648b118` (master with all Phase 1 work merged).
+
+### Local mode — identical workload to Pass 2 above
+
+| Category | Pre-Phase-1 (#166) | Post-Phase-1 | Delta |
+|---|---|---|---|
+| `task_run_insert` | 100 (13.9%) | 100 (13.9%) | 0 |
+| `task_run_status` | 320 (44.4%) | 320 (44.4%) | 0 |
+| `event_insert` | 300 (41.7%) | 300 (41.7%) | 0 |
+| `lease_renewal` | 0 (0.0%) | 0 (0.0%) | 0 (local mode) |
+| **TOTAL** | **720** | **720** | **0** |
+| `caesium_db_busy_retries_total` | 7 | 8 | +1 (noise) |
+| End-to-end p50/p99 | 4s / 6s | 4s / 6s | 0 |
+
+**Why row counts are unchanged:** the `caesium_db_writes_total` counter increments
+by row count (`Add(N)`), not statement count. Phase 1.1 collapses N event
+INSERTs into one multi-row INSERT, and Phase 1.4 collapses N predecessor
+UPDATEs into one IN-clause UPDATE — but the total rows written stays the same.
+The benefit is in *roundtrip count*, *dqlite leader contention*, and
+*per-completion latency under sustained load* — none of which the row counter
+directly measures, and none of which manifest on a single-node sandbox at this
+modest concurrency.
+
+To make this visible, the harness would need an additional
+`caesium_db_statements_total{category}` counter that increments once per
+statement regardless of row count. That's a follow-up item; the current
+metric is still useful for tracking total DB work done.
+
+### Distributed mode — short tasks (500ms × 100 tasks)
+
+| Category | Count | Share |
+|---|---|---|
+| `task_run_insert` | 100 | 10.9% |
+| `task_run_status` | 420 | **45.7%** (dominant) |
+| `event_insert` | 400 | 43.5% |
+| `lease_renewal` | 0 | 0.0% |
+| **TOTAL** | **920** | 9.2 writes/claim |
+| `caesium_db_busy_retries_total` | 10 | — |
+| `caesium_worker_claims_total` | 100 | — |
+| End-to-end p50/p99 | 6s / 6s | — |
+
+Distributed adds ~2 writes per claim (the claim UPDATE in `ClaimNext` plus the
+`task_claimed` event) on top of the local-mode footprint. The +200 difference
+vs. local mode (920 vs 720) tracks `2 × 100 = 200` extra writes for 100 claims.
+
+`lease_renewal` is still zero because the 500ms task duration is far below
+the renewal trigger threshold (`lease_ttl/2 = 15s`) — the
+skip-when-not-needed branch in PR #165 correctly determines no renewal is
+needed and exits early.
+
+### Distributed mode — long tasks (45s × 8 tasks) to exercise lease renewal
+
+| Category | Count | Share |
+|---|---|---|
+| `task_run_insert` | 8 | 9.1% |
+| `task_run_status` | 32 | 36.4% |
+| `event_insert` | 32 | 36.4% |
+| `lease_renewal` | 16 | **18.2%** |
+| **TOTAL** | **88** | 11.0 writes/claim |
+| `caesium_db_busy_retries_total` | 1 | — |
+| End-to-end p50/p99 | 2m18s / 2m18s | — |
+
+`lease_renewal` now shows 16 row updates — matching ~2 batched renewal cycles
+× 8 in-flight claims per cycle. This is the row-count view of PR #165's
+batching: in the *unbatched* world this would still be 16 row updates but
+spread across 16 individual UPDATE statements; with PR #165 it's 16 rows
+across **2 statements** (one per renewal cycle), and that's the bit the
+row counter doesn't surface but `caesium_db_busy_retries_total` shows as
+~zero contention.
+
+### Conclusions
+
+1. **Phase 1's per-statement reduction is invisible to the row-counting metric.**
+   The metric still functions as a "total DB work" indicator. Phase 1.1/1.4's
+   actual wins (fewer roundtrips, lower contention, faster completion latency)
+   would surface in a `caesium_db_statements_total{category}` counter or in
+   sustained-load latency profiling — neither of which exists yet. Worth a
+   future small PR.
+
+2. **Phase 1.2 lease batching works as designed in distributed mode.** The
+   skip-when-not-needed path keeps `lease_renewal` at 0 for short-running
+   workloads (where it would otherwise be pointless overhead) and batches all
+   in-flight claims into one statement when renewal is needed. The 16 rows in
+   the 45s-task test represent 2 statements covering 8 claims each.
+
+3. **Phase 2 (run-owner) gate decision deferred to real-cluster numbers.**
+   Single-node sandbox doesn't surface the per-statement contention or
+   per-shard write-rate ceiling that would justify Phase 2's complexity. A
+   multi-node distributed integration run with sustained throughput is what
+   should make the call — not these single-node row-count measurements.
+
+4. **Phase 1.3 (catalog cache) remains deferred.** Catalog read QPS doesn't
+   show up in the write counters at all; deciding whether to ship 1.3 should
+   be driven by catalog-read latency / leader-CPU profiling, not by
+   re-baselining the write counter.
+
+### Follow-up: per-statement counter
+
+Add `caesium_db_statements_total{category}` to make the post-batching wins
+quantifiable. The two counters would tell different stories:
+
+- **Rows:** total work done in the DB. Unchanged by batching, useful for
+  capacity planning.
+- **Statements:** count of round-trips to dqlite. Cut by Phase 1.1/1.4
+  proportionally to fan-out width; the headline metric for "is batching
+  working?"
