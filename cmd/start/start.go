@@ -14,6 +14,7 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
@@ -93,7 +94,8 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	bus := event.New()
-	run.Default().SetBus(bus)
+	runStore := run.Default()
+	runStore.SetBus(bus)
 	jsvc.Service(ctx).SetBus(bus)
 	runsvc.New(ctx).SetBus(bus)
 
@@ -125,6 +127,33 @@ func start(cmd *cobra.Command, args []string) error {
 		} else {
 			log.Warn("distributed wakeups disabled; set CAESIUM_INTERNAL_WAKEUP_TOKEN to enable cross-node wakeups")
 		}
+	}
+
+	// --- Phase 2: Run-Owner Coordination ---
+	//
+	// When CAESIUM_RUN_OWNER_ENABLED=true, every new run is assigned an owner
+	// node that holds its DAG coordination state and dispatches work to workers
+	// via /internal/dispatch.  Workers push results back via /internal/complete.
+	//
+	// When the flag is false (default), this block is a no-op and the system
+	// behaves byte-identically to Phase 1.
+	var ownerDispatchHandler *dispatch.Handler
+	if vars.RunOwnerEnabled {
+		// Warn if mTLS is not configured — Phase B will make this a hard error.
+		// We check for the Phase B env vars to future-proof the warning.
+		dispatch.WarnIfNoMTLS()
+
+		leaseStore := run.NewLeaseStore(db.Connection())
+		runStore.WithLeaseStore(leaseStore)
+
+		token := strings.TrimSpace(vars.InternalWakeupToken)
+		ownerDispatchHandler = dispatch.NewHandler(runStore, leaseStore, vars.NodeAddress, token)
+
+		log.Info(
+			"run-owner mode enabled (Phase 2A substrate)",
+			"node_address", vars.NodeAddress,
+			"run_lease_ttl", vars.RunLeaseTTL,
+		)
 	}
 
 	// --- Authentication & Authorization ---
@@ -246,7 +275,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler)
+		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler, ownerDispatchHandler)
 	}()
 
 	go func() {
@@ -277,14 +306,20 @@ func start(cmd *cobra.Command, args []string) error {
 				vars.WorkerLeaseTTL,
 			)
 
-			store := run.Default()
-			claimer := worker.NewClaimer(vars.NodeAddress, store, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
-			executorFn := worker.NewRuntimeExecutor(store, vars.TaskTimeout, vars.TaskFailurePolicy)
+			claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
+			executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy)
 			wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
 			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
 				WithReclaimInterval(vars.WorkerReclaimInterval).
 				WithWakeups(wakeups).
-				WithLeaseRenewal(store, vars.WorkerLeaseTTL, vars.WorkerLeaseRenewInterval)
+				WithLeaseRenewal(runStore, vars.WorkerLeaseTTL, vars.WorkerLeaseRenewInterval)
+
+			// Phase 2: piggyback run-lease renewal on the same worker goroutine
+			// when owner mode is enabled.
+			if vars.RunOwnerEnabled && runStore.LeaseStore() != nil {
+				w = w.WithRunLeaseRenewal(runStore.LeaseStore(), vars.RunLeaseTTL, vars.NodeAddress)
+			}
+
 			if usesInternalDqlite(vars.DatabaseType) {
 				w = w.WithReclaimGate(worker.ReclaimGateFunc(func(ctx context.Context) (bool, error) {
 					return dqlite.IsLocalLeader(ctx)

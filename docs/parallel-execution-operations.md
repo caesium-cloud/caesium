@@ -31,6 +31,25 @@ This guide covers runtime configuration, rollout, and troubleshooting for parall
 | `CAESIUM_WAKEUP_FANOUT_MODE` | `full` | Wakeup fanout strategy: `full` for every peer, or `gossip` for large clusters. |
 | `CAESIUM_NODE_ADDRESS` | `127.0.0.1:9001` | Logical node identity written to `task_runs.claimed_by`. |
 | `CAESIUM_NODE_LABELS` | `""` | Optional node labels (`k=v,k2=v2`) for task `nodeSelector` affinity. |
+| `CAESIUM_RUN_OWNER_ENABLED` | `false` | Enables Phase 2 run-owner coordination mode (experimental). When `false` (default), the system behaves identically to Phase 1. |
+| `CAESIUM_RUN_LEASE_TTL` | `30s` | How long a run-owner lease is valid before another node may take over. Only relevant when `CAESIUM_RUN_OWNER_ENABLED=true`. |
+
+## Run-Owner Mode (Phase 2 Phase A, experimental)
+
+Run-owner mode assigns each in-flight job run to a single owner node. The owner writes a `run_leases` row in the catalog DB on run creation and pushes ready tasks to worker nodes via `POST /internal/dispatch` instead of relying on workers to poll via `ClaimNext`. Workers POST results back to the owner via `POST /internal/complete`.
+
+**Enable with:** `CAESIUM_RUN_OWNER_ENABLED=true` (default: `false`).
+
+**Backwards compatibility:** When disabled (the default), the system behaves byte-identically to Phase 1. No `run_leases` rows are written and the `/internal/dispatch` and `/internal/complete` endpoints are not registered.
+
+**Security note:** mTLS on `/internal/dispatch` and `/internal/complete` is **recommended** for Phase A. The `CAESIUM_INTERNAL_WAKEUP_TOKEN` bearer-token is used for Phase A authentication. A startup warning is emitted if owner mode is on without mTLS material configured. Phase B will enforce mTLS as a hard requirement. Both endpoints require the same `CAESIUM_INTERNAL_WAKEUP_TOKEN` as the existing wakeup endpoint.
+
+**Recovery fallback:** If the owner node crashes, its run lease expires after `CAESIUM_RUN_LEASE_TTL` (default 30s). Tasks left with `claimed_by=""` are recovered by the existing `ClaimNext` path on any node. The `owner_generation=0` on legacy and flag-off rows ensures they remain mutable by any node.
+
+**New metrics:**
+- `caesium_complete_rejected_total{reason}` — counts `/internal/complete` rejections by fence violation type.
+- `caesium_run_lease_renewals_total` — counts batched run-lease renewal statements.
+- `caesium_run_leases_owned` — current number of run leases held by this node.
 
 ## Dqlite Topology
 

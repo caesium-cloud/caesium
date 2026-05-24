@@ -12,6 +12,17 @@ import (
 	"github.com/google/uuid"
 )
 
+// RunLeaseRenewer is implemented by the run.LeaseStore and used by the
+// worker's run-lease renewal goroutine.
+type RunLeaseRenewer interface {
+	// RenewRunLeases extends lease_expires_at for all runs in runIDs that
+	// are still owned by ownerNode.  Returns the number of rows updated.
+	RenewRunLeases(ctx context.Context, ownerNode string, runIDs []uuid.UUID, newExpiresAt time.Time) (int64, error)
+	// OwnedRuns returns the IDs of all runs currently owned by ownerNode
+	// whose leases have not yet expired.
+	OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.UUID, error)
+}
+
 const (
 	defaultPollInterval    = 15 * time.Second
 	defaultReclaimInterval = 30 * time.Second
@@ -67,12 +78,17 @@ type Worker struct {
 	executor        TaskExecutor
 	wakeups         <-chan struct{}
 
-	// Batched lease renewal.
+	// Batched task-claim lease renewal.
 	leaseRenewer       LeaseRenewer
 	leaseTTL           time.Duration
 	leaseRenewInterval time.Duration
 	inFlightMu         sync.Mutex
 	inFlight           map[uuid.UUID]*inFlightClaim
+
+	// Batched run-lease renewal (Phase 2 run-owner mode).
+	runLeaseRenewer RunLeaseRenewer
+	runLeaseTTL     time.Duration
+	runLeaseNodeID  string
 }
 
 func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, executor TaskExecutor) *Worker {
@@ -132,6 +148,17 @@ func (w *Worker) WithLeaseRenewal(renewer LeaseRenewer, leaseTTL, renewInterval 
 	return w
 }
 
+// WithRunLeaseRenewal configures per-node batched run-lease renewal for
+// Phase 2 run-owner mode.  Piggybacked on the same ticker cadence as task
+// claim renewals (leaseTTL/4).  nodeID is the CAESIUM_NODE_ADDRESS value
+// that identifies this node in run_leases.owner_node.
+func (w *Worker) WithRunLeaseRenewal(renewer RunLeaseRenewer, leaseTTL time.Duration, nodeID string) *Worker {
+	w.runLeaseRenewer = renewer
+	w.runLeaseTTL = leaseTTL
+	w.runLeaseNodeID = nodeID
+	return w
+}
+
 // batchLeaseRenewInterval derives the per-node batched renewal interval.
 // If override > 0 it is used directly; otherwise leaseTTL/4 is used (minimum 1s).
 func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {
@@ -149,12 +176,17 @@ func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	// Start the batched lease renewal goroutine only when configured. A zero
-	// leaseTTL would cause renewLeasesNow to set claim_expires_at = now on every
-	// tick, immediately expiring all in-flight leases — so refuse to start the
-	// goroutine in that case.
+	// Start the batched task-claim lease renewal goroutine only when configured.
+	// A zero leaseTTL would cause renewLeasesNow to set claim_expires_at = now
+	// on every tick, immediately expiring all in-flight leases — so refuse to
+	// start the goroutine in that case.
 	if w.leaseRenewer != nil && w.leaseTTL > 0 && w.leaseRenewInterval > 0 {
 		go w.runLeaseRenewal(ctx)
+	}
+
+	// Start the run-lease renewal goroutine when Phase 2 owner mode is active.
+	if w.runLeaseRenewer != nil && w.runLeaseTTL > 0 && w.runLeaseNodeID != "" {
+		go w.runRunLeaseRenewal(ctx)
 	}
 
 	for {
@@ -305,6 +337,70 @@ func (w *Worker) renewLeasesNow(ctx context.Context) {
 			}
 		}
 		w.inFlightMu.Unlock()
+	}
+}
+
+// runRunLeaseRenewal is the background goroutine that extends run_leases rows
+// for every run owned by this node.  It piggybacks on the same leaseTTL/4
+// cadence as the task-claim renewal ticker so the two renewal paths share
+// tuning knobs.
+func (w *Worker) runRunLeaseRenewal(ctx context.Context) {
+	interval := batchLeaseRenewInterval(w.runLeaseTTL, 0)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			w.renewRunLeasesNow(ctx)
+		}
+	}
+}
+
+// renewRunLeasesNow fetches all run IDs owned by this node and issues a
+// single batched UPDATE extending their lease_expires_at.  If no leases
+// need renewal (all expire far in the future), the UPDATE is still issued —
+// the batching wins are at the row level, not the statement level.
+func (w *Worker) renewRunLeasesNow(ctx context.Context) {
+	if w.runLeaseRenewer == nil || w.runLeaseTTL <= 0 || w.runLeaseNodeID == "" {
+		return
+	}
+
+	runIDs, err := w.runLeaseRenewer.OwnedRuns(ctx, w.runLeaseNodeID)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Error("run owner: failed to list owned runs for lease renewal",
+				"node_id", w.runLeaseNodeID, "error", err)
+		}
+		return
+	}
+	if len(runIDs) == 0 {
+		return
+	}
+
+	// Skip-when-not-needed: if all leases expire well beyond now + leaseTTL/2,
+	// the renewal can wait. We do a simple count-based skip rather than
+	// fetching lease_expires_at for each run to keep this path cheap.
+	// In practice, the ticker interval (leaseTTL/4) fires frequently enough
+	// that we always want to renew when we have owned runs.
+	newExpiresAt := time.Now().UTC().Add(w.runLeaseTTL)
+	rowsAffected, err := w.runLeaseRenewer.RenewRunLeases(ctx, w.runLeaseNodeID, runIDs, newExpiresAt)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Error("run owner: failed to renew run leases",
+				"node_id", w.runLeaseNodeID,
+				"count", len(runIDs),
+				"error", err,
+			)
+		}
+		return
+	}
+
+	if rowsAffected > 0 {
+		metrics.RunLeaseRenewalsTotal.Inc()
+		metrics.RunLeasesOwned.Set(float64(rowsAffected))
 	}
 }
 
