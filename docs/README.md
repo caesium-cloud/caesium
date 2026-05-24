@@ -42,6 +42,7 @@ These files are useful context, but each should be treated according to its stat
 - [brainstorm-differentiators.md](brainstorm-differentiators.md)
 - [load-baseline-2026-05-23.md](load-baseline-2026-05-23.md): Phase 0 load harness baseline measurement output.
 - [load-baseline-distributed-2026-05-24.md](load-baseline-distributed-2026-05-24.md): First distributed-mode (3-node k8s) baseline; validates the Phase 2 gate.
+- [load-baseline-phase2a-2026-05-24.md](load-baseline-phase2a-2026-05-24.md): First measurement of Phase 2 Phase A; surfaces the missing executor-side dispatch loop.
 
 ## Historical Notes
 
