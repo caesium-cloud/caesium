@@ -764,6 +764,31 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 	return err
 }
 
+// PendingTasksForDispatch returns up to limit task_runs rows for runID that
+// are ready for owner-push dispatch: status=pending, claimed_by="", and
+// outstanding_predecessors=0.  The caller (the dispatch loop) uses this to
+// find the next batch of tasks to push to workers each tick.
+//
+// The result is ordered by created_at ASC so earlier-registered tasks are
+// dispatched first, preserving FIFO ordering within a run.  The limit cap
+// prevents a huge fan-out from saturating a single tick.
+func (s *Store) PendingTasksForDispatch(ctx context.Context, runID uuid.UUID, limit int) ([]models.TaskRun, error) {
+	if limit <= 0 {
+		limit = 64
+	}
+	var tasks []models.TaskRun
+	err := s.db.WithContext(ctx).
+		Where("job_run_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0",
+			runID, string(TaskStatusPending)).
+		Order("created_at ASC").
+		Limit(limit).
+		Find(&tasks).Error
+	if err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts

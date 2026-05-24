@@ -33,6 +33,27 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// dqliteDispatchPeerResolver returns a PeerLister that discovers all dqlite
+// cluster members (excluding abstract-unix and empty addresses) and converts
+// them to node-address strings for the dispatch loop.  The loop itself
+// converts these to base HTTP URLs using the API port.
+func dqliteDispatchPeerResolver() dispatch.PeerLister {
+	return dispatch.PeerListerFunc(func(ctx context.Context) ([]string, error) {
+		nodes, err := dqlite.Cluster(ctx)
+		if err != nil {
+			return nil, err
+		}
+		peers := make([]string, 0, len(nodes))
+		for _, node := range nodes {
+			if node.Address == "" || strings.HasPrefix(node.Address, "@") {
+				continue
+			}
+			peers = append(peers, node.Address)
+		}
+		return peers, nil
+	})
+}
+
 const (
 	usage   = "start"
 	short   = "Start a caesium scheduling instance"
@@ -153,7 +174,34 @@ func start(cmd *cobra.Command, args []string) error {
 			"run-owner mode enabled (Phase 2A substrate)",
 			"node_address", vars.NodeAddress,
 			"run_lease_ttl", vars.RunLeaseTTL,
+			"dispatch_interval", vars.RunOwnerDispatchInterval,
+			"dispatch_batch", vars.RunOwnerDispatchBatch,
+			"dispatch_deadline", vars.RunOwnerDispatchDeadline,
 		)
+
+		// --- Phase A2: Executor-side dispatch loop ---
+		//
+		// Polls owned runs for pending tasks and pushes them to workers via
+		// PostDispatch.  If PostDispatch returns false (worker rejected or network
+		// error), the task is left unclaimed and ClaimNext recovery picks it up.
+		dispatchLoop := dispatch.NewDispatchLoop(dispatch.DispatchLoopConfig{
+			NodeID:     vars.NodeAddress,
+			APIPort:    vars.Port,
+			Token:      strings.TrimSpace(vars.InternalWakeupToken),
+			Interval:   vars.RunOwnerDispatchInterval,
+			BatchSize:  vars.RunOwnerDispatchBatch,
+			Deadline:   vars.RunOwnerDispatchDeadline,
+			LeaseStore: leaseStore,
+			Store:      runStore,
+			Peers:      dqliteDispatchPeerResolver(),
+		})
+		go func() {
+			log.Info("launching owner dispatch loop",
+				"node_address", vars.NodeAddress,
+				"interval", vars.RunOwnerDispatchInterval,
+			)
+			dispatchLoop.Run(ctx)
+		}()
 	}
 
 	// --- Authentication & Authorization ---

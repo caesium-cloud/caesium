@@ -284,6 +284,29 @@ var (
 			Help: "Current number of run leases owned by this node (run-owner mode).",
 		},
 	)
+
+	// DispatchRejectedTotal counts owner-push dispatch attempts that were not
+	// accepted by a worker, categorised by reason.
+	//
+	// reason values:
+	//   network_error    – PostDispatch returned a non-nil error (network / timeout)
+	//   worker_rejected  – worker returned 409 (busy, claim mismatch, etc.)
+	//   no_peers         – peer discovery returned an empty list or failed
+	DispatchRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_dispatch_rejected_total",
+			Help: "Total owner-push dispatch attempts rejected or failed, by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// DispatchSentTotal counts dispatch attempts accepted by a worker (202 ACK).
+	DispatchSentTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_dispatch_sent_total",
+			Help: "Total owner-push dispatch requests accepted by a worker (202 ACK).",
+		},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -319,6 +342,8 @@ func Register() {
 			CompleteRejectedTotal,
 			RunLeaseRenewalsTotal,
 			RunLeasesOwned,
+			DispatchRejectedTotal,
+			DispatchSentTotal,
 		)
 	})
 }
