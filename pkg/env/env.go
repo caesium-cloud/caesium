@@ -150,4 +150,17 @@ type Environment struct {
 	// another node may take over.  Default 30s; must be > 0 when owner mode
 	// is enabled.
 	RunLeaseTTL time.Duration `envconfig:"RUN_LEASE_TTL" default:"30s"`
+
+	// CAESIUM_RUN_OWNER_DISPATCH_INTERVAL is the polling cadence for the
+	// per-node owner dispatch loop.  Smaller values reduce task-start latency
+	// at the cost of more DB reads per second.  Default 1s.
+	RunOwnerDispatchInterval time.Duration `envconfig:"RUN_OWNER_DISPATCH_INTERVAL" default:"1s"`
+	// CAESIUM_RUN_OWNER_DISPATCH_BATCH caps the number of tasks dispatched per
+	// tick per owned run.  Prevents a large fan-out from stalling the loop.
+	// Default 64.
+	RunOwnerDispatchBatch int `envconfig:"RUN_OWNER_DISPATCH_BATCH" default:"64"`
+	// CAESIUM_RUN_OWNER_DISPATCH_DEADLINE is the task execution deadline added
+	// to time.Now() in each DispatchRequest.  Workers use this to bound how long
+	// they hold the claim before returning it.  Default 5m.
+	RunOwnerDispatchDeadline time.Duration `envconfig:"RUN_OWNER_DISPATCH_DEADLINE" default:"5m"`
 }
