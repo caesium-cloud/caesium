@@ -141,4 +141,13 @@ type Environment struct {
 	TrustedProxies          string `envconfig:"TRUSTED_PROXIES" default:""`
 	AuthRateLimitPerMinute  int    `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
 	AuthRateLimitBurstAlert int    `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
+
+	// Run-owner coordination (Phase 2).
+	// CAESIUM_RUN_OWNER_ENABLED enables the run-owner coordination mode.
+	// Default false — the system behaves byte-identically to Phase 1 when off.
+	RunOwnerEnabled bool `envconfig:"RUN_OWNER_ENABLED" default:"false"`
+	// CAESIUM_RUN_LEASE_TTL is how long an owner holds a run lease before
+	// another node may take over.  Default 30s; must be > 0 when owner mode
+	// is enabled.
+	RunLeaseTTL time.Duration `envconfig:"RUN_LEASE_TTL" default:"30s"`
 }

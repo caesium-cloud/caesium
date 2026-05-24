@@ -247,6 +247,43 @@ var (
 		},
 		[]string{"category"},
 	)
+
+	// CompleteRejectedTotal counts completions rejected by /internal/complete
+	// due to fence violations.  The reason label distinguishes the specific
+	// rejection cause so operators can diagnose stale owners, partition events,
+	// or misconfigured workers.
+	//
+	// reason values:
+	//   stale_generation  – owner_generation in the envelope != current lease generation
+	//   wrong_worker      – worker_node != the node that received the original dispatch
+	//   invalid_status    – status outside {succeeded, failed, cached} (esp. skipped)
+	//   task_not_running  – task_runs.status != running at the time of the complete
+	//   not_owner         – this node does not currently own the run
+	//   missing_run       – run_id not found
+	//   malformed         – JSON decode or validation failure
+	CompleteRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_complete_rejected_total",
+			Help: "Total /internal/complete requests rejected by the run-owner fence, by reason.",
+		},
+		[]string{"reason"},
+	)
+
+	// RunLeaseRenewalsTotal counts batched run-lease renewal UPDATE statements.
+	RunLeaseRenewalsTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_run_lease_renewals_total",
+			Help: "Total batched run-lease renewal UPDATE statements issued by this node.",
+		},
+	)
+
+	// RunLeasesOwned is the current number of run leases held by this node.
+	RunLeasesOwned = prometheus.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "caesium_run_leases_owned",
+			Help: "Current number of run leases owned by this node (run-owner mode).",
+		},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -279,6 +316,9 @@ func Register() {
 			WebhookAuthFailuresTotal,
 			DBWritesTotal,
 			DBStatementsTotal,
+			CompleteRejectedTotal,
+			RunLeaseRenewalsTotal,
+			RunLeasesOwned,
 		)
 	})
 }

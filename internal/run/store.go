@@ -17,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -150,6 +151,11 @@ type Store struct {
 	// process so that Complete() only decrements the active-jobs gauge
 	// for runs it actually incremented.
 	startedRuns map[uuid.UUID]struct{}
+
+	// leaseStore is non-nil only when CAESIUM_RUN_OWNER_ENABLED=true.
+	// When nil, no run_leases rows are written and the system behaves
+	// byte-identically to Phase 1.
+	leaseStore *LeaseStore
 }
 
 type RegisterTaskInput struct {
@@ -182,6 +188,18 @@ func NewStore(conn *gorm.DB) *Store {
 		eventStore:  event.NewStore(conn),
 		startedRuns: make(map[uuid.UUID]struct{}),
 	}
+}
+
+// WithLeaseStore enables run-owner lease writing.  Call this from startup
+// code when CAESIUM_RUN_OWNER_ENABLED=true.
+func (s *Store) WithLeaseStore(ls *LeaseStore) *Store {
+	s.leaseStore = ls
+	return s
+}
+
+// LeaseStore returns the run lease store, or nil when owner mode is disabled.
+func (s *Store) LeaseStore() *LeaseStore {
+	return s.leaseStore
 }
 
 func Default() *Store {
@@ -321,6 +339,25 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 	// may emit once Start returns.
 	s.publishEvents(pendingEvents...)
 
+	// Phase 2: write run_leases row when owner mode is enabled.
+	// This is done outside the run-creation transaction so that a lease write
+	// failure does not roll back the run itself — the ClaimNext recovery path
+	// still picks up the run if no lease is ever acquired.
+	if s.leaseStore != nil {
+		vars := env.Variables()
+		if _, leaseErr := s.leaseStore.AcquireLease(
+			context.Background(),
+			model.ID,
+			vars.NodeAddress,
+			vars.RunLeaseTTL,
+		); leaseErr != nil {
+			log.Warn("run owner: failed to acquire run lease; run will fall back to ClaimNext",
+				"run_id", model.ID,
+				"error", leaseErr,
+			)
+		}
+	}
+
 	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	s.startedMu.Lock()
 	s.startedRuns[model.ID] = struct{}{}
@@ -396,6 +433,22 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 	}
 
 	s.publishEvents(pendingEvents...)
+
+	// Phase 2: write run_leases row when owner mode is enabled.
+	if s.leaseStore != nil {
+		vars := env.Variables()
+		if _, leaseErr := s.leaseStore.AcquireLease(
+			context.Background(),
+			model.ID,
+			vars.NodeAddress,
+			vars.RunLeaseTTL,
+		); leaseErr != nil {
+			log.Warn("run owner: failed to acquire run lease (backfill); run will fall back to ClaimNext",
+				"run_id", model.ID,
+				"error", leaseErr,
+			)
+		}
+	}
 
 	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
 	s.startedMu.Lock()
@@ -623,6 +676,73 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 				return err
 			}
 			counts.addTaskRunStatus(1)
+			if s.eventStore != nil {
+				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+		}
+		return err
+	})
+	if err == nil {
+		counts.commit()
+		s.publishEvents(pendingEvents...)
+	}
+	return err
+}
+
+// ClaimTaskForDispatch is the Phase 2 dispatch-side equivalent of ClaimNext for
+// a specific task.  It atomically transitions a pending task from
+// (status=pending, claimed_by="") → (status=running, claimed_by=workerNode)
+// in a single UPDATE, mirroring what ClaimNext does but targeting a known task
+// rather than picking the next available one.
+//
+// The ownerGeneration argument is stamped onto owner_generation so subsequent
+// coordination writes can fence against a stale owner.  The WHERE clause
+// includes `AND (owner_generation = ? OR owner_generation = 0)` so the
+// migration-safe path holds: pre-Phase-2A rows with implicit generation 0 are
+// claimable by any owner; rows already stamped by a prior owner are only
+// re-claimable when the generation matches the current lease.
+//
+// Returns ErrTaskClaimMismatch if the task was not in the expected state
+// (already claimed, wrong status, wrong run, stale generation).  The caller
+// should fall back to writing the task with claimed_by="" and letting
+// ClaimNext pick it up.
+func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration) error {
+	var pendingEvents []event.Event
+	var counts dbWriteCounts
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		attemptEvents := make([]event.Event, 0, 1)
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			leaseExpiry := now.Add(leaseTTL)
+
+			result := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)",
+					runID, taskID, string(TaskStatusPending), ownerGeneration).
+				Updates(map[string]interface{}{
+					"status":           string(TaskStatusRunning),
+					"claimed_by":       workerNode,
+					"claim_expires_at": leaseExpiry,
+					"claim_attempt":    gorm.Expr("claim_attempt + 1"),
+					"started_at":       now,
+					"owner_generation": ownerGeneration,
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
+			}
+			counts.addTaskRunStatus(1)
+
 			if s.eventStore != nil {
 				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
 				if err != nil {

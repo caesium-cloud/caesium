@@ -112,6 +112,32 @@ After all four Phase 1 PRs land, re-run the Phase 0 harness. If the per-shard ce
 
 ## Phase 2: Run-Owner Coordination (Family B)
 
+### Phase 2 Phase A — Substrate (this PR)
+
+Phase A delivers the foundational substrate without the in-memory DAG state or checkpoint/replay machinery that produce the larger throughput win.
+
+**What Phase A ships:**
+- `run_leases` table in the catalog DB (schema below).
+- `owner_generation` column on `task_runs`.
+- Owner election in `Store.Start()` when `CAESIUM_RUN_OWNER_ENABLED=true`.
+- Batched run-lease renewal piggybacked on the per-node worker ticker.
+- `POST /internal/dispatch` and `POST /internal/complete` RPCs with bearer-token auth.
+- `caesium_complete_rejected_total{reason}` Prometheus counter.
+- Startup `log.Warn` when owner mode is on without mTLS material configured.
+- `CAESIUM_RUN_OWNER_ENABLED` (default false) and `CAESIUM_RUN_LEASE_TTL` (default 30s) env vars.
+
+**What Phase A explicitly defers to Phase B:**
+- In-memory DAG state (per-task status map, outstanding-predecessor counters, ready queue).
+- Checkpoint/replay machinery (`run_checkpoints` table, `state_proto`, `terminal_sequence` cursor).
+- `dispatch_token` nonce — the per-attempt nonce is paired with in-memory dispatch tracking; Phase A's fence uses `owner_generation + attempt + worker_node` only.
+- mTLS enforcement — Phase A emits `log.Warn` when owner mode is on without mTLS material. Phase B will make it a startup-time hard error.
+- `run_commands` table for cancel/retry/signal mutations through the owner.
+- `CAESIUM_RUN_OWNER_MAX_RUNS` concurrent-runs cap.
+
+**Migration safety:** All existing `task_runs` rows have `owner_generation=0`. Coordination writes in Phase A include `AND (owner_generation = ? OR owner_generation = 0)` in their WHERE clauses so legacy rows remain mutable by any node.
+
+**Backwards compatibility:** When `CAESIUM_RUN_OWNER_ENABLED=false` (the default), no `run_leases` row is written, no dispatch/complete endpoints are registered, and the system behaves byte-identically to Phase 1.
+
 Each in-flight run is owned by exactly one node for its lifetime. The owner holds the run's coordination state in memory and writes to dqlite as bounded-rate checkpoints + terminal-state-only persistence, not per-task transitions.
 
 ### Owner election
@@ -371,9 +397,13 @@ A 4–8× reduction in per-task write footprint, on top of Phase 1's 3–5× red
 - Phase 2 ships behind `CAESIUM_RUN_OWNER_ENABLED` (default off) indefinitely. Default-on only after a multi-month soak in a Caesium-operated reference cluster, and once the recovery path has been exercised in integration tests under partition + crash injection.
 - When `CAESIUM_RUN_OWNER_ENABLED=false`, the entire run-owner path is bypassed; the system behaves exactly as Phase 1 + PR #157.
 
-**Prerequisites for `CAESIUM_RUN_OWNER_ENABLED=true`** — startup MUST refuse to enable run-owner mode unless all of the following are configured:
+**Prerequisites for `CAESIUM_RUN_OWNER_ENABLED=true`:**
 
-1. **mTLS on internal endpoints.** `/internal/dispatch` and `/internal/complete` require client-certificate validation. Configure via `CAESIUM_INTERNAL_MTLS_CA`, `CAESIUM_INTERNAL_MTLS_CERT`, `CAESIUM_INTERNAL_MTLS_KEY` on every node. The dispatch fence is the primary correctness guard; mTLS is the transport-layer defense-in-depth that prevents any unauthorized client from even reaching the handler. Run-owner without mTLS is not a supported configuration — startup fails fast with a clear error.
+**Phase A (current):** mTLS is **recommended but not enforced**. The startup emits a `log.Warn` when owner mode is enabled without mTLS material configured. The application-layer dispatch fence (`owner_generation` + `attempt` + `worker_node`) is the primary correctness guard in Phase A. The `CAESIUM_INTERNAL_WAKEUP_TOKEN` bearer-token check is the transport-level authentication for Phase A.
+
+**Phase B (planned):** startup MUST refuse to enable run-owner mode unless all of the following are configured:
+
+1. **mTLS on internal endpoints.** `/internal/dispatch` and `/internal/complete` will require client-certificate validation. Configure via `CAESIUM_INTERNAL_MTLS_CA`, `CAESIUM_INTERNAL_MTLS_CERT`, `CAESIUM_INTERNAL_MTLS_KEY` on every node. Phase B will make this a startup-time hard error.
 2. **Distinct internal credentials.** The mTLS material above must be different from the `CAESIUM_INTERNAL_WAKEUP_TOKEN` (separate credentials per blast-radius class).
 3. **Phase 1 has soaked** at the operator's target throughput so the harness can demonstrate the run-owner path is actually needed (avoid enabling complexity for headroom you already have).
 

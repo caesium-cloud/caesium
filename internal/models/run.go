@@ -68,10 +68,16 @@ type TaskRun struct {
 	Error                   string         `json:"error,omitempty"`
 	RuntimeID               string         `json:"runtime_id,omitempty"`
 	OutstandingPredecessors int            `gorm:"not null" json:"outstanding_predecessors"`
-	StartedAt               *time.Time     `json:"started_at,omitempty"`
-	CompletedAt             *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt               time.Time      `gorm:"not null" json:"created_at"`
-	UpdatedAt               time.Time      `gorm:"not null" json:"updated_at"`
+	// OwnerGeneration is set to the RunLease.Generation of the owning node when
+	// run-owner mode is active.  Every coordination write by the owner
+	// includes AND (owner_generation = ? OR owner_generation = 0) in its WHERE
+	// clause — the OR = 0 keeps legacy rows (and flag-off rows) mutable by any
+	// node so the migration path stays gradual.  Defaults to 0.
+	OwnerGeneration int64      `gorm:"not null;default:0" json:"owner_generation,omitempty"`
+	StartedAt       *time.Time `json:"started_at,omitempty"`
+	CompletedAt     *time.Time `json:"completed_at,omitempty"`
+	CreatedAt       time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt       time.Time  `gorm:"not null" json:"updated_at"`
 }
 
 // TaskCache stores cached task results keyed by identity hash.
