@@ -41,6 +41,7 @@ func (s *StoreMetricsSuite) SetupTest() {
 	metrics.CallbackRunsTotal.Reset()
 	metrics.TriggerFiresTotal.Reset()
 	metrics.DBWritesTotal.Reset()
+	metrics.DBStatementsTotal.Reset()
 }
 
 func (s *StoreMetricsSuite) TearDownTest() {
@@ -305,21 +306,32 @@ func (s *StoreMetricsSuite) TestFanOutCompletionWriteCounts() {
 	s.Require().NoError(s.store.RegisterTask(run.ID, lane4, atom, 1))
 	s.Require().NoError(s.store.StartTask(run.ID, root.ID, "container-root"))
 
-	beforeStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
-	beforeEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	beforeStatusRows := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEventRows := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	beforeStatusStmts := s.dbStatementValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEventStmts := s.dbStatementValue(metrics.DBWriteCategoryEventInsert)
 
 	s.Require().NoError(s.store.CompleteTask(run.ID, root.ID, "ok", nil, nil))
 
-	afterStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
-	afterEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	afterStatusRows := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEventRows := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	afterStatusStmts := s.dbStatementValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEventStmts := s.dbStatementValue(metrics.DBWriteCategoryEventInsert)
 
-	// 1 status write for the task itself + 4 for the predecessor decrements = 5 total.
-	s.Equal(float64(5), afterStatus-beforeStatus,
-		"fan-out=4 completion: expected 1 (complete) + 4 (predecessors) = 5 task_run_status writes")
+	// 1 status row for the task itself + 4 for the predecessor decrements = 5 rows total,
+	// produced by 2 statements (1 for the completed task UPDATE + 1 batched UPDATE
+	// for the 4 predecessors). Batching factor: 5/2 = 2.5.
+	s.Equal(float64(5), afterStatusRows-beforeStatusRows,
+		"fan-out=4 completion: expected 5 task_run_status rows (1 complete + 4 predecessors)")
+	s.Equal(float64(2), afterStatusStmts-beforeStatusStmts,
+		"fan-out=4 completion: expected 2 task_run_status statements (1 complete UPDATE + 1 batched predecessor UPDATE)")
 
-	// task_succeeded (1) + task_ready×4 = 5 event rows in one batch INSERT.
-	s.Equal(float64(5), afterEvent-beforeEvent,
-		"fan-out=4 completion: expected 5 event rows (1 task_succeeded + 4 task_ready) in one batch")
+	// task_succeeded (1) + task_ready×4 = 5 event rows in one batched INSERT.
+	// Batching factor: 5/1 = 5.0 — the headline win from Phase 1.1.
+	s.Equal(float64(5), afterEventRows-beforeEventRows,
+		"fan-out=4 completion: expected 5 event rows (1 task_succeeded + 4 task_ready)")
+	s.Equal(float64(1), afterEventStmts-beforeEventStmts,
+		"fan-out=4 completion: expected 1 event_insert statement (5 events in one batched INSERT)")
 }
 
 // TestCacheHitCompletionWriteCounts verifies that CacheHitTask with fan-out=2
@@ -349,8 +361,10 @@ func (s *StoreMetricsSuite) TestCacheHitCompletionWriteCounts() {
 	s.Require().NoError(s.store.RegisterTask(run.ID, lane1, atom, 1))
 	s.Require().NoError(s.store.RegisterTask(run.ID, lane2, atom, 1))
 
-	beforeStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
-	beforeEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	beforeStatusRows := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEventRows := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	beforeStatusStmts := s.dbStatementValue(metrics.DBWriteCategoryTaskRunStatus)
+	beforeEventStmts := s.dbStatementValue(metrics.DBWriteCategoryEventInsert)
 
 	_, err = s.store.CacheHitTask(run.ID, root.ID, CacheHitSource{
 		RunID:     uuid.New(),
@@ -358,21 +372,35 @@ func (s *StoreMetricsSuite) TestCacheHitCompletionWriteCounts() {
 	}, "ok", nil, nil)
 	s.Require().NoError(err)
 
-	afterStatus := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
-	afterEvent := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	afterStatusRows := s.dbWriteValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEventRows := s.dbWriteValue(metrics.DBWriteCategoryEventInsert)
+	afterStatusStmts := s.dbStatementValue(metrics.DBWriteCategoryTaskRunStatus)
+	afterEventStmts := s.dbStatementValue(metrics.DBWriteCategoryEventInsert)
 
-	// 1 for cache hit status + 2 for predecessor decrements = 3.
-	s.Equal(float64(3), afterStatus-beforeStatus,
-		"fan-out=2 cache hit: expected 1 (cached) + 2 (predecessors) = 3 task_run_status writes")
+	// 1 cache-hit status + 2 predecessor decrements = 3 rows in 2 statements.
+	s.Equal(float64(3), afterStatusRows-beforeStatusRows,
+		"fan-out=2 cache hit: expected 3 task_run_status rows (1 cached + 2 predecessors)")
+	s.Equal(float64(2), afterStatusStmts-beforeStatusStmts,
+		"fan-out=2 cache hit: expected 2 task_run_status statements")
 
-	// task_cached (1) + task_ready×2 = 3 event rows.
-	s.Equal(float64(3), afterEvent-beforeEvent,
-		"fan-out=2 cache hit: expected 3 event rows (1 task_cached + 2 task_ready) in one batch")
+	// task_cached (1) + task_ready×2 = 3 event rows in 1 batched INSERT.
+	s.Equal(float64(3), afterEventRows-beforeEventRows,
+		"fan-out=2 cache hit: expected 3 event rows (1 task_cached + 2 task_ready)")
+	s.Equal(float64(1), afterEventStmts-beforeEventStmts,
+		"fan-out=2 cache hit: expected 1 event_insert statement (3 events in one batched INSERT)")
 }
 
 func (s *StoreMetricsSuite) dbWriteValue(category string) float64 {
 	var m dto.Metric
 	counter, err := metrics.DBWritesTotal.GetMetricWithLabelValues(category)
+	s.Require().NoError(err)
+	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
+	return m.GetCounter().GetValue()
+}
+
+func (s *StoreMetricsSuite) dbStatementValue(category string) float64 {
+	var m dto.Metric
+	counter, err := metrics.DBStatementsTotal.GetMetricWithLabelValues(category)
 	s.Require().NoError(err)
 	s.Require().NoError(counter.(prometheus.Metric).Write(&m))
 	return m.GetCounter().GetValue()

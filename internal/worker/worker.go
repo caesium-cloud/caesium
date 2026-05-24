@@ -293,6 +293,7 @@ func (w *Worker) renewLeasesNow(ctx context.Context) {
 			continue
 		}
 		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Add(float64(rowsAffected))
+		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryLeaseRenewal).Inc()
 
 		// Update the in-memory expiry only for the IDs we attempted to renew
 		// AND whose claimedBy is still nodeID (the latter check guards against

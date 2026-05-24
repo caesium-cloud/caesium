@@ -23,21 +23,44 @@ const defaultLeaseTTL = 5 * time.Minute
 // dbWriteCounts accumulates per-category DB write counts during a single retry
 // attempt. Must be reset() at the start of each retry closure and commit()'d
 // only after the retry returns nil; otherwise transactions retried due to
-// busy/locked errors will over-count.
+// busy/locked errors will over-count. Each category tracks both rows and
+// stmts; see internal/run/store.go for the equivalent type with full prose.
 type dbWriteCounts struct {
-	taskRunStatus int
-	eventInsert   int
+	taskRunStatusRows  int
+	taskRunStatusStmts int
+	eventInsertRows    int
+	eventInsertStmts   int
 }
 
 func (c *dbWriteCounts) reset() { *c = dbWriteCounts{} }
 
+func (c *dbWriteCounts) addTaskRunStatus(rows int) {
+	if rows <= 0 {
+		return
+	}
+	c.taskRunStatusRows += rows
+	c.taskRunStatusStmts++
+}
+
+func (c *dbWriteCounts) addEventInsert(rows int) {
+	if rows <= 0 {
+		return
+	}
+	c.eventInsertRows += rows
+	c.eventInsertStmts++
+}
+
 func (c *dbWriteCounts) commit() {
-	if c.taskRunStatus > 0 {
-		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(c.taskRunStatus))
+	emit := func(category string, rows, stmts int) {
+		if rows > 0 {
+			metrics.DBWritesTotal.WithLabelValues(category).Add(float64(rows))
+		}
+		if stmts > 0 {
+			metrics.DBStatementsTotal.WithLabelValues(category).Add(float64(stmts))
+		}
 	}
-	if c.eventInsert > 0 {
-		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryEventInsert).Add(float64(c.eventInsert))
-	}
+	emit(metrics.DBWriteCategoryTaskRunStatus, c.taskRunStatusRows, c.taskRunStatusStmts)
+	emit(metrics.DBWriteCategoryEventInsert, c.eventInsertRows, c.eventInsertStmts)
 }
 
 type Claimer struct {
@@ -129,6 +152,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	if claimed != nil {
 		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
 		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
+		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		counts.commit()
 	}
 	c.store.PublishEvents(pendingEvents...)
@@ -218,7 +242,7 @@ func (c *Claimer) recordTaskClaimedEventTx(tx *gorm.DB, claimed *models.TaskRun,
 	if err := c.store.RecordEventTx(tx, &evt); err != nil {
 		return nil, err
 	}
-	counts.eventInsert++
+	counts.addEventInsert(1)
 	return &evt, nil
 }
 
@@ -321,7 +345,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 			if result.Error != nil {
 				return result.Error
 			}
-			counts.taskRunStatus += int(result.RowsAffected)
+			counts.addTaskRunStatus(int(result.RowsAffected))
 
 			// Batch all lease-expired + task-ready events into a single INSERT.
 			if len(expired) > 0 {
@@ -367,7 +391,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				if err := tx.Create(&eventRecords).Error; err != nil {
 					return err
 				}
-				counts.eventInsert += len(eventRecords)
+				counts.addEventInsert(len(eventRecords))
 
 				// Build bus-dispatch events from the inserted records.
 				for i := range eventRecords {
