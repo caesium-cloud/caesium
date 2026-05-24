@@ -41,6 +41,17 @@ const (
 	ReasonMalformed       = "malformed"
 )
 
+// internalClient is the shared HTTP client used for both PostDispatch and
+// PostComplete. Sharing keeps the underlying TCP/keep-alive pool warm
+// across requests so we don't pay connection setup on every dispatch.
+// The per-call timeout is enforced via context.WithTimeout, not on the
+// client itself, so callers can extend it if their workload needs it.
+// Phase B will swap the Transport for one configured with mTLS material
+// (CAESIUM_INTERNAL_MTLS_*); the rest of the call sites stay the same.
+var internalClient = &http.Client{
+	Timeout: 30 * time.Second,
+}
+
 // ValidCompleteStatuses are the only task statuses workers may report.
 // "skipped" is deliberately excluded — skipping is an owner-side DAG decision.
 var ValidCompleteStatuses = map[string]bool{
@@ -71,7 +82,11 @@ type CompleteRequest struct {
 	Status          string            `json:"status"`
 	Result          string            `json:"result,omitempty"`
 	Outputs         map[string]string `json:"outputs,omitempty"`
-	Error           string            `json:"error,omitempty"`
+	// BranchSelections carries the downstream branch names a `type: branch`
+	// task chose at runtime. The owner uses this to propagate `skipped` to the
+	// non-selected branches. Empty for non-branch tasks.
+	BranchSelections []string `json:"branch_selections,omitempty"`
+	Error            string   `json:"error,omitempty"`
 }
 
 // CompleteResponse is the JSON body returned by /internal/complete.
@@ -159,10 +174,19 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive the claim TTL from the envelope's deadline so a tight per-task
+	// deadline doesn't leave a stale 5-min claim if execution finishes early.
+	// Floor at 30s so the renewal ticker has room to extend long-running tasks.
+	ttl := time.Until(req.Deadline)
+	if ttl < 30*time.Second {
+		ttl = 5 * time.Minute
+	}
+
 	// Accept the dispatch: atomically claim the task and mark it as running.
 	// ClaimTaskForDispatch transitions pending→running with claimed_by=nodeID
-	// in one UPDATE (equivalent to ClaimNext but targeting a specific task).
-	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, 5*time.Minute); err != nil {
+	// in one UPDATE (equivalent to ClaimNext but targeting a specific task),
+	// stamping owner_generation so subsequent writes fence against takeover.
+	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl); err != nil {
 		if err == run.ErrTaskClaimMismatch {
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonTaskNotRunning,
@@ -211,8 +235,9 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	var req CompleteRequest
 	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 	if err != nil || json.Unmarshal(body, &req) != nil {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonMalformed).Inc()
-		writeJSON(w, http.StatusConflict, ErrorResponse{
+		// Malformed JSON is a 400, not a fence violation — don't bump the
+		// fence-rejection counter or operators can't trust it for alerting.
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Code:    ReasonMalformed,
 			Message: "failed to decode complete request",
 		})
@@ -231,37 +256,22 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rule 1: this node must currently own the run.
-	owned, err := h.leaseStore.IsOwner(ctx, h.nodeID, req.RunID)
-	if err != nil {
-		log.Error("complete: IsOwner check failed",
-			"run_id", req.RunID,
-			"node_id", h.nodeID,
-			"error", err,
-		)
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonNotOwner).Inc()
-		writeJSON(w, http.StatusConflict, ErrorResponse{
-			Code:    ReasonNotOwner,
-			Message: "failed to verify run ownership",
-		})
-		return
-	}
-	if !owned {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonNotOwner).Inc()
-		writeJSON(w, http.StatusConflict, ErrorResponse{
-			Code:    ReasonNotOwner,
-			Message: "this node does not currently own the run",
-		})
-		return
-	}
-
-	// Rule 2: validate owner_generation against the current lease.
+	// Rules 1 & 2 in a single DB call: GetLease returns the row, we check
+	// ownership (owner_node, expiry) and generation in memory.
 	lease, err := h.leaseStore.GetLease(ctx, req.RunID)
 	if err != nil {
 		metrics.CompleteRejectedTotal.WithLabelValues(ReasonMissingRun).Inc()
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonMissingRun,
 			Message: "run lease not found",
+		})
+		return
+	}
+	if lease.OwnerNode != h.nodeID || lease.LeaseExpiresAt.Before(time.Now().UTC()) {
+		metrics.CompleteRejectedTotal.WithLabelValues(ReasonNotOwner).Inc()
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonNotOwner,
+			Message: "this node does not currently own the run",
 		})
 		return
 	}
@@ -282,7 +292,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	case run.TaskStatusSucceeded, run.TaskStatusFailed:
 		var applyErr error
 		if run.TaskStatus(req.Status) == run.TaskStatusSucceeded {
-			applyErr = h.store.CompleteTaskClaimed(req.RunID, req.TaskID, req.Result, req.WorkerNode, req.Outputs, nil)
+			applyErr = h.store.CompleteTaskClaimed(req.RunID, req.TaskID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
 		} else {
 			applyErr = h.store.FailTaskClaimed(req.RunID, req.TaskID, fmt.Errorf("%s", req.Error), req.WorkerNode)
 		}
@@ -310,7 +320,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	case run.TaskStatusCached:
 		source := run.CacheHitSource{RunID: req.RunID}
-		applyErr := h.store.CacheHitTaskClaimed(req.RunID, req.TaskID, source, req.Result, req.WorkerNode, req.Outputs, nil)
+		applyErr := h.store.CacheHitTaskClaimed(req.RunID, req.TaskID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
 		if applyErr == run.ErrTaskClaimMismatch {
 			metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
 			writeJSON(w, http.StatusConflict, ErrorResponse{
@@ -360,9 +370,7 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Phase B will configure mTLS on this client using CAESIUM_INTERNAL_MTLS_*.
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := internalClient.Do(httpReq)
 	if err != nil {
 		return false, fmt.Errorf("dispatch: http: %w", err)
 	}
@@ -390,8 +398,7 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 	httpReq.Header.Set("Authorization", "Bearer "+token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(httpReq)
+	resp, err := internalClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("complete: http: %w", err)
 	}

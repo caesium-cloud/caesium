@@ -15,12 +15,10 @@ import (
 // RunLeaseRenewer is implemented by the run.LeaseStore and used by the
 // worker's run-lease renewal goroutine.
 type RunLeaseRenewer interface {
-	// RenewRunLeases extends lease_expires_at for all runs in runIDs that
-	// are still owned by ownerNode.  Returns the number of rows updated.
-	RenewRunLeases(ctx context.Context, ownerNode string, runIDs []uuid.UUID, newExpiresAt time.Time) (int64, error)
-	// OwnedRuns returns the IDs of all runs currently owned by ownerNode
-	// whose leases have not yet expired.
-	OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.UUID, error)
+	// RenewOwnedLeases extends lease_expires_at in a single UPDATE for every
+	// non-expired lease owned by ownerNode. Returns the number of rows
+	// renewed, which is also the count of currently owned, non-expired runs.
+	RenewOwnedLeases(ctx context.Context, ownerNode string, newExpiresAt time.Time) (int64, error)
 }
 
 const (
@@ -359,48 +357,34 @@ func (w *Worker) runRunLeaseRenewal(ctx context.Context) {
 	}
 }
 
-// renewRunLeasesNow fetches all run IDs owned by this node and issues a
-// single batched UPDATE extending their lease_expires_at.  If no leases
-// need renewal (all expire far in the future), the UPDATE is still issued —
-// the batching wins are at the row level, not the statement level.
+// renewRunLeasesNow extends lease_expires_at in a single UPDATE for every
+// non-expired lease this node owns. The previous fetch-then-update pair has
+// been collapsed to one round-trip; rowsAffected is the count of currently
+// owned runs, which we publish to the gauge unconditionally (so the gauge
+// resets to 0 cleanly when the owned set empties).
 func (w *Worker) renewRunLeasesNow(ctx context.Context) {
 	if w.runLeaseRenewer == nil || w.runLeaseTTL <= 0 || w.runLeaseNodeID == "" {
 		return
 	}
 
-	runIDs, err := w.runLeaseRenewer.OwnedRuns(ctx, w.runLeaseNodeID)
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Error("run owner: failed to list owned runs for lease renewal",
-				"node_id", w.runLeaseNodeID, "error", err)
-		}
-		return
-	}
-	if len(runIDs) == 0 {
-		return
-	}
-
-	// Skip-when-not-needed: if all leases expire well beyond now + leaseTTL/2,
-	// the renewal can wait. We do a simple count-based skip rather than
-	// fetching lease_expires_at for each run to keep this path cheap.
-	// In practice, the ticker interval (leaseTTL/4) fires frequently enough
-	// that we always want to renew when we have owned runs.
 	newExpiresAt := time.Now().UTC().Add(w.runLeaseTTL)
-	rowsAffected, err := w.runLeaseRenewer.RenewRunLeases(ctx, w.runLeaseNodeID, runIDs, newExpiresAt)
+	rowsAffected, err := w.runLeaseRenewer.RenewOwnedLeases(ctx, w.runLeaseNodeID, newExpiresAt)
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error("run owner: failed to renew run leases",
 				"node_id", w.runLeaseNodeID,
-				"count", len(runIDs),
 				"error", err,
 			)
 		}
 		return
 	}
 
+	// Always publish the current owned-run count, even when zero, so the
+	// gauge accurately reflects the state instead of holding the last
+	// non-zero value indefinitely.
+	metrics.RunLeasesOwned.Set(float64(rowsAffected))
 	if rowsAffected > 0 {
 		metrics.RunLeaseRenewalsTotal.Inc()
-		metrics.RunLeasesOwned.Set(float64(rowsAffected))
 	}
 }
 

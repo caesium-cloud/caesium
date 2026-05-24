@@ -203,6 +203,51 @@ func TestLeaseStore_RenewSkipsWrongOwner(t *testing.T) {
 	require.Equal(t, int64(0), rows, "renewal must not touch rows owned by a different node")
 }
 
+// TestLeaseStore_RenewOwnedLeases verifies that the single-call API extends
+// every non-expired lease for the owner in one round-trip and returns the
+// correct count (which is what feeds the caesium_run_leases_owned gauge).
+func TestLeaseStore_RenewOwnedLeases(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	ls := NewLeaseStore(db)
+	ctx := context.Background()
+
+	const ownerNode = "10.0.0.1:9001"
+	const otherNode = "10.0.0.2:9001"
+
+	// Two owned, one foreign-owned, one expired.
+	runA := uuid.New()
+	runB := uuid.New()
+	runForeign := uuid.New()
+	runExpired := uuid.New()
+
+	_, err := ls.AcquireLease(ctx, runA, ownerNode, 30*time.Second)
+	require.NoError(t, err)
+	_, err = ls.AcquireLease(ctx, runB, ownerNode, 30*time.Second)
+	require.NoError(t, err)
+	_, err = ls.AcquireLease(ctx, runForeign, otherNode, 30*time.Second)
+	require.NoError(t, err)
+	_, err = ls.AcquireLease(ctx, runExpired, ownerNode, 30*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, db.Model(&models.RunLease{}).
+		Where("run_id = ?", runExpired.String()).
+		Update("lease_expires_at", time.Now().UTC().Add(-1*time.Second)).Error)
+
+	newExpiry := time.Now().UTC().Add(120 * time.Second)
+	count, err := ls.RenewOwnedLeases(ctx, ownerNode, newExpiry)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), count,
+		"only non-expired owner-held leases should be renewed (runA + runB)")
+
+	// runA + runB extended; runForeign and runExpired left alone.
+	for _, runID := range []uuid.UUID{runA, runB} {
+		var lease models.RunLease
+		require.NoError(t, db.First(&lease, "run_id = ?", runID.String()).Error)
+		require.WithinDuration(t, newExpiry, lease.LeaseExpiresAt, time.Second)
+	}
+}
+
 // TestLeaseStore_MigrationSafety verifies that an existing task_runs row with
 // owner_generation=0 is mutable.  The OR = 0 predicate in coordination writes
 // is the migration safety net.

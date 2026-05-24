@@ -703,10 +703,18 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 // in a single UPDATE, mirroring what ClaimNext does but targeting a known task
 // rather than picking the next available one.
 //
+// The ownerGeneration argument is stamped onto owner_generation so subsequent
+// coordination writes can fence against a stale owner.  The WHERE clause
+// includes `AND (owner_generation = ? OR owner_generation = 0)` so the
+// migration-safe path holds: pre-Phase-2A rows with implicit generation 0 are
+// claimable by any owner; rows already stamped by a prior owner are only
+// re-claimable when the generation matches the current lease.
+//
 // Returns ErrTaskClaimMismatch if the task was not in the expected state
-// (already claimed, wrong status, wrong run).  The caller should fall back to
-// writing the task with claimed_by="" and letting ClaimNext pick it up.
-func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, leaseTTL time.Duration) error {
+// (already claimed, wrong status, wrong run, stale generation).  The caller
+// should fall back to writing the task with claimed_by="" and letting
+// ClaimNext pick it up.
+func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
@@ -717,14 +725,15 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			leaseExpiry := now.Add(leaseTTL)
 
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0",
-					runID, taskID, string(TaskStatusPending)).
+				Where("job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)",
+					runID, taskID, string(TaskStatusPending), ownerGeneration).
 				Updates(map[string]interface{}{
 					"status":           string(TaskStatusRunning),
 					"claimed_by":       workerNode,
 					"claim_expires_at": leaseExpiry,
 					"claim_attempt":    gorm.Expr("claim_attempt + 1"),
 					"started_at":       now,
+					"owner_generation": ownerGeneration,
 				})
 			if result.Error != nil {
 				return result.Error

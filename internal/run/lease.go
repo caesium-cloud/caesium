@@ -89,6 +89,27 @@ func (ls *LeaseStore) RenewRunLeases(ctx context.Context, ownerNode string, runI
 	return result.RowsAffected, nil
 }
 
+// RenewOwnedLeases extends lease_expires_at in a single UPDATE for every
+// non-expired lease owned by ownerNode — no upstream SELECT required. Returns
+// the number of rows actually renewed (which is also the count of currently
+// owned, non-expired leases).
+//
+// Use this on the per-node renewal ticker; it replaces an OwnedRuns +
+// RenewRunLeases pair with one round-trip.
+func (ls *LeaseStore) RenewOwnedLeases(ctx context.Context, ownerNode string, newExpiresAt time.Time) (int64, error) {
+	if ls == nil || ls.db == nil {
+		return 0, nil
+	}
+	result := ls.db.WithContext(ctx).
+		Model(&models.RunLease{}).
+		Where("owner_node = ? AND lease_expires_at > ?", ownerNode, time.Now().UTC()).
+		Update("lease_expires_at", newExpiresAt)
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 // OwnedRuns returns the IDs of all runs currently owned by ownerNode whose
 // leases have not yet expired.  Used by the renewal ticker to build its batch.
 func (ls *LeaseStore) OwnedRuns(ctx context.Context, ownerNode string) ([]uuid.UUID, error) {

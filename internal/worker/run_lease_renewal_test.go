@@ -6,8 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metricstestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,28 +16,20 @@ import (
 type mockRunLeaseRenewer struct {
 	mu            sync.Mutex
 	renewCalls    int
-	ownedRunIDs   []uuid.UUID
-	renewedIDs    [][]uuid.UUID
+	ownedCount    int64 // rows the next RenewOwnedLeases call should return
 	renewedExpiry []time.Time
 	errorOnRenew  error
 }
 
-func (m *mockRunLeaseRenewer) OwnedRuns(_ context.Context, _ string) ([]uuid.UUID, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]uuid.UUID(nil), m.ownedRunIDs...), nil
-}
-
-func (m *mockRunLeaseRenewer) RenewRunLeases(_ context.Context, _ string, ids []uuid.UUID, newExpiry time.Time) (int64, error) {
+func (m *mockRunLeaseRenewer) RenewOwnedLeases(_ context.Context, _ string, newExpiry time.Time) (int64, error) {
 	if m.errorOnRenew != nil {
 		return 0, m.errorOnRenew
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.renewCalls++
-	m.renewedIDs = append(m.renewedIDs, append([]uuid.UUID(nil), ids...))
 	m.renewedExpiry = append(m.renewedExpiry, newExpiry)
-	return int64(len(ids)), nil
+	return m.ownedCount, nil
 }
 
 // noopRunLeaseClaimer satisfies TaskClaimer and always returns nil (no task).
@@ -46,12 +39,11 @@ func (noopRunLeaseClaimer) ClaimNext(_ context.Context) (*models.TaskRun, error)
 	return nil, nil
 }
 
-// TestRunRunLeaseRenewal_BatchesAllOwnedRuns verifies that the renewal
-// function issues a single batched UPDATE for all runs owned by this node.
-func TestRunRunLeaseRenewal_BatchesAllOwnedRuns(t *testing.T) {
-	renewer := &mockRunLeaseRenewer{
-		ownedRunIDs: []uuid.UUID{uuid.New(), uuid.New(), uuid.New()},
-	}
+// TestRunRunLeaseRenewal_SingleRoundTrip verifies that the renewal path issues
+// exactly one RenewOwnedLeases call regardless of how many runs are owned
+// (the database does the filtering server-side).
+func TestRunRunLeaseRenewal_SingleRoundTrip(t *testing.T) {
+	renewer := &mockRunLeaseRenewer{ownedCount: 3}
 
 	w := &Worker{
 		runLeaseRenewer: renewer,
@@ -63,17 +55,14 @@ func TestRunRunLeaseRenewal_BatchesAllOwnedRuns(t *testing.T) {
 
 	renewer.mu.Lock()
 	defer renewer.mu.Unlock()
-
-	require.Equal(t, 1, renewer.renewCalls, "single batched renewal call expected")
-	require.Len(t, renewer.renewedIDs[0], 3, "all 3 owned runs must be in one call")
+	require.Equal(t, 1, renewer.renewCalls, "single RenewOwnedLeases call expected")
 }
 
-// TestRunRunLeaseRenewal_SkipWhenNoneOwned verifies that no RenewRunLeases
-// call is made when the node owns no runs.
-func TestRunRunLeaseRenewal_SkipWhenNoneOwned(t *testing.T) {
-	renewer := &mockRunLeaseRenewer{
-		ownedRunIDs: []uuid.UUID{},
-	}
+// TestRunRunLeaseRenewal_GaugeResetsToZero verifies that when no runs are
+// owned (RenewOwnedLeases returns 0), the gauge is set to 0 rather than
+// holding its last non-zero value.
+func TestRunRunLeaseRenewal_GaugeResetsToZero(t *testing.T) {
+	renewer := &mockRunLeaseRenewer{ownedCount: 0}
 
 	w := &Worker{
 		runLeaseRenewer: renewer,
@@ -81,21 +70,19 @@ func TestRunRunLeaseRenewal_SkipWhenNoneOwned(t *testing.T) {
 		runLeaseNodeID:  "10.0.0.1:9001",
 	}
 
+	// Prime the gauge with a non-zero value to ensure the reset is observable.
+	metrics.RunLeasesOwned.Set(7)
+
 	w.renewRunLeasesNow(context.Background())
 
-	renewer.mu.Lock()
-	defer renewer.mu.Unlock()
-
-	require.Equal(t, 0, renewer.renewCalls,
-		"no renewal call should be made when no runs are owned")
+	require.Equal(t, float64(0), metricstestutil.GaugeValue(t, metrics.RunLeasesOwned),
+		"gauge must reset to 0 when no runs are owned")
 }
 
 // TestRunRunLeaseRenewal_ExtendsByLeaseTTL verifies that the new expiry is
 // approximately now + leaseTTL.
 func TestRunRunLeaseRenewal_ExtendsByLeaseTTL(t *testing.T) {
-	renewer := &mockRunLeaseRenewer{
-		ownedRunIDs: []uuid.UUID{uuid.New()},
-	}
+	renewer := &mockRunLeaseRenewer{ownedCount: 1}
 
 	const leaseTTL = 30 * time.Second
 

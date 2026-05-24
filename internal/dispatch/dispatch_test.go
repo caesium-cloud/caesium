@@ -159,7 +159,10 @@ func TestHandleComplete_RunNotFound(t *testing.T) {
 	require.Contains(t, []string{ReasonNotOwner, ReasonMissingRun}, resp.Code)
 }
 
-// TestHandleComplete_Malformed tests that malformed JSON is rejected.
+// TestHandleComplete_Malformed verifies that malformed JSON is rejected with
+// 400 Bad Request (a client encoding error), NOT 409 (which is reserved for
+// fence violations). The fence-rejection counter must not be incremented
+// either, so operators can trust it for alerting.
 func TestHandleComplete_Malformed(t *testing.T) {
 	_, _, h := setupHandler(t)
 
@@ -168,7 +171,8 @@ func TestHandleComplete_Malformed(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.HandleComplete(w, req)
 
-	require.Equal(t, http.StatusConflict, w.Code)
+	require.Equal(t, http.StatusBadRequest, w.Code,
+		"malformed JSON must return 400 Bad Request, not 409")
 
 	var resp ErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
