@@ -164,6 +164,10 @@ func start(cmd *cobra.Command, args []string) error {
 		// We check for the Phase B env vars to future-proof the warning.
 		dispatch.WarnIfNoMTLS()
 
+		// Warn if the bearer token is missing — dispatch endpoints reject every
+		// request without it, making run-owner mode silently inert.
+		dispatch.WarnIfNoToken(vars.InternalWakeupToken)
+
 		leaseStore := run.NewLeaseStore(db.Connection())
 		runStore.WithLeaseStore(leaseStore)
 
