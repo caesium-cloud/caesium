@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -72,18 +73,27 @@ var internalClient = &http.Client{
 // retried next tick against another peer).
 const dispatchPostTimeout = 4 * time.Second
 
+// configureMTLSOnce ensures the shared internal client is swapped for its
+// TLS-enabled form exactly once, even if ConfigureInternalMTLS is called from
+// multiple goroutines (e.g. concurrent tests) — avoiding a data race on the
+// package-level internalClient.
+var configureMTLSOnce sync.Once
+
 // ConfigureInternalMTLS replaces the shared internal client with one that
 // presents this node's client certificate and verifies peers against the
 // configured CA.  Called once at startup when run-owner mode is enabled, before
-// any dispatch or completion POST is issued.  Peer internal endpoints are
-// reached over https on the internal port (see DispatchLoopConfig.InternalPort).
+// any dispatch or completion POST is issued.  Subsequent calls are no-ops.  Peer
+// internal endpoints are reached over https on the internal port (see
+// DispatchLoopConfig.InternalPort).
 func ConfigureInternalMTLS(clientTLS *tls.Config) {
-	internalClient = &http.Client{
-		Timeout: 30 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: clientTLS,
-		},
-	}
+	configureMTLSOnce.Do(func() {
+		internalClient = &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: clientTLS,
+			},
+		}
+	})
 }
 
 // ValidCompleteStatuses are the only task statuses workers may report.

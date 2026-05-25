@@ -28,10 +28,15 @@ func NewInternalServer(handler *Handler, addr string, tlsConfig *tls.Config) *In
 	mux.HandleFunc("/internal/complete", handler.HandleComplete)
 	return &InternalServer{
 		srv: &http.Server{
-			Addr:              addr,
-			Handler:           mux,
-			TLSConfig:         tlsConfig,
+			Addr:      addr,
+			Handler:   mux,
+			TLSConfig: tlsConfig,
+			// Bound every phase of a connection so a slow or stuck peer can't
+			// tie up the internal listener (slowloris-style resource exhaustion).
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		},
 	}
 }

@@ -1,6 +1,7 @@
 package run
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -117,6 +118,62 @@ func TestOwnerManager_RecoverThenLoopFlow(t *testing.T) {
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&aRow).Error)
 	require.Equal(t, string(TaskStatusSucceeded), aRow.Status)
 	require.Greater(t, aRow.TerminalSequence, int64(0), "owner completion must stamp a terminal_sequence > 0")
+}
+
+// TestOwnerManager_ConcurrentRunsNoDeadlock exercises several runs through the
+// manager concurrently (adopt, ready, dispatch, complete) to validate the
+// per-run-mutex design: independent runs must proceed in parallel without
+// deadlock or data race (run with -race).
+func TestOwnerManager_ConcurrentRunsNoDeadlock(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+
+	const runs = 8
+	type runInfo struct {
+		runID, a, b uuid.UUID
+	}
+	infos := make([]runInfo, runs)
+	for i := range infos {
+		rid, a, b := seedTwoTaskRun(t, db, store, "node-1")
+		// Simulate both tasks having been claimed by this node (HandleDispatch
+		// does this in the real flow) so the owner-completion claim fence passes.
+		require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", rid).Update("claimed_by", "node-1").Error)
+		infos[i] = runInfo{rid, a, b}
+		require.NoError(t, mgr.Adopt(rid, 1))
+	}
+
+	var wg sync.WaitGroup
+	for _, info := range infos {
+		wg.Add(1)
+		go func(info runInfo) {
+			defer wg.Done()
+			// Drive the run to completion through the manager API concurrently.
+			_ = mgr.ReadyForDispatch(info.runID)
+			mgr.MarkDispatched(info.runID, info.a, "node-1", 1, 0)
+			if _, err := mgr.Complete(info.runID, info.a, TaskStatusSucceeded, "success", "", "node-1", nil, nil); err != nil {
+				t.Errorf("complete a: %v", err)
+			}
+			mgr.MarkDispatched(info.runID, info.b, "node-1", 1, 0)
+			if _, err := mgr.Complete(info.runID, info.b, TaskStatusSucceeded, "success", "", "node-1", nil, nil); err != nil {
+				t.Errorf("complete b: %v", err)
+			}
+		}(info)
+	}
+
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("concurrent run operations deadlocked")
+	}
+
+	// Every run finished and was dropped on completion.
+	for _, info := range infos {
+		require.False(t, mgr.Owns(info.runID), "completed run should be dropped: %s", info.runID)
+	}
 }
 
 func TestOwnerManager_CompleteUnownedRunFallsBack(t *testing.T) {

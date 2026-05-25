@@ -108,8 +108,16 @@ func verifyChainAgainst(pool *x509.CertPool) func([][]byte, [][]*x509.Certificat
 		for _, crt := range certs[1:] {
 			intermediates.AddCert(crt)
 		}
-		if _, err := certs[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: intermediates}); err != nil {
-			return fmt.Errorf("mtls: peer certificate not signed by trusted CA: %w", err)
+		if _, err := certs[0].Verify(x509.VerifyOptions{
+			Roots:         pool,
+			Intermediates: intermediates,
+			// We are verifying the peer as a SERVER (this is the client side):
+			// require serverAuth so a client-only certificate can't be presented
+			// as a server.  Without this, VerifyOptions defaults to
+			// ExtKeyUsageAny and would accept it.
+			KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}); err != nil {
+			return fmt.Errorf("mtls: peer certificate not signed by trusted CA or not valid for server auth: %w", err)
 		}
 		return nil
 	}
