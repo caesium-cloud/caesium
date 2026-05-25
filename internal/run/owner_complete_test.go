@@ -50,7 +50,7 @@ func TestCompleteTaskOwner_WritesTerminalRowsWithoutAdvancing(t *testing.T) {
 		runRecord.ID, taskA.ID, TaskStatusSucceeded, "success", "", "node-1",
 		map[string]string{"k": "v"}, nil,
 		5, 7,
-		[]OwnerSkip{{TaskID: taskB.ID, TerminalSequence: 6, Reason: "branch not selected"}},
+		[]SkippedTask{{TaskID: taskB.ID, TerminalSequence: 6, Reason: "branch not selected"}},
 	)
 	require.NoError(t, err)
 

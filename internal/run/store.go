@@ -1719,7 +1719,7 @@ func (s *Store) CompleteTaskOwner(
 	output map[string]string,
 	branchSelections []string,
 	completedSeq, ownerGen int64,
-	skips []OwnerSkip,
+	skips []SkippedTask,
 ) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
@@ -1843,14 +1843,6 @@ func (s *Store) CompleteTaskOwner(
 		s.publishEvents(pendingEvents...)
 	}
 	return err
-}
-
-// OwnerSkip is a task the run owner decided to skip in memory, paired with the
-// terminal_sequence to stamp on its durable row.
-type OwnerSkip struct {
-	TaskID           uuid.UUID
-	TerminalSequence int64
-	Reason           string
 }
 
 // failureMessage maps a failure result string to a human-readable error, matching

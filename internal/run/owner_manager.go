@@ -206,12 +206,7 @@ func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, resu
 
 	res := or.state.ApplyCompletion(taskID, status, branchSkips)
 
-	ownerSkips := make([]OwnerSkip, len(res.Skipped))
-	for i, sk := range res.Skipped {
-		ownerSkips[i] = OwnerSkip{TaskID: sk.TaskID, TerminalSequence: sk.TerminalSequence, Reason: sk.Reason}
-	}
-
-	if err := m.store.CompleteTaskOwner(runID, taskID, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, ownerSkips); err != nil {
+	if err := m.store.CompleteTaskOwner(runID, taskID, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, res.Skipped); err != nil {
 		return CompleteResult{Owned: true}, err
 	}
 
