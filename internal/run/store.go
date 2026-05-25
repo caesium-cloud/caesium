@@ -1704,6 +1704,184 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	return skippedTaskIDs, err
 }
 
+// CompleteTaskOwner is the run-owner in-memory path's durable terminal write.
+// The owner has already advanced the DAG in memory (run.RunState), so this only
+// persists terminal rows — it does NOT decrement predecessors, evaluate trigger
+// rules, or resolve branches in SQL.  It writes the completed task's terminal
+// row (succeeded/failed) plus each owner-decided skip, stamping terminal_sequence
+// and owner_generation so a recovering owner can replay in order.  Claim-fenced
+// by claimedBy.  Cache-hit completions are not handled here (they remain on the
+// CacheHitTaskClaimed path); the owner routes only succeeded/failed through this.
+func (s *Store) CompleteTaskOwner(
+	runID, taskID uuid.UUID,
+	result, claimedBy string,
+	output map[string]string,
+	branchSelections []string,
+	completedSeq, ownerGen int64,
+	skips []OwnerSkip,
+) error {
+	var pendingEvents []event.Event
+	var counts dbWriteCounts
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		attemptEvents := make([]event.Event, 0, 8+len(skips))
+
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+			status := taskStatusFromResult(result)
+
+			// Metrics for the completed task (mirrors completeTask).
+			var taskRun models.TaskRun
+			tq := tx.Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy)
+			if err := tq.First(&taskRun).Error; err == nil {
+				var jobRun models.JobRun
+				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
+					jobID := jobRun.JobID.String()
+					engine := string(taskRun.Engine)
+					metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
+					if taskRun.StartedAt != nil {
+						metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).
+							Observe(now.Sub(*taskRun.StartedAt).Seconds())
+					}
+				}
+			} else if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTaskClaimMismatch
+			}
+
+			updates := map[string]interface{}{
+				"status":              string(status),
+				"completed_at":        now,
+				"result":              result,
+				"terminal_sequence":   completedSeq,
+				"owner_generation":    ownerGen,
+				"cache_hit":           false,
+				"cache_origin_run_id": nil,
+				"cache_created_at":    nil,
+				"cache_expires_at":    nil,
+			}
+			if len(output) > 0 {
+				encoded, mErr := json.Marshal(output)
+				if mErr != nil {
+					return fmt.Errorf("marshalling task output: %w", mErr)
+				}
+				updates["output"] = encoded
+			}
+			if len(branchSelections) > 0 {
+				encoded, mErr := json.Marshal(branchSelections)
+				if mErr != nil {
+					return fmt.Errorf("marshalling branch selections: %w", mErr)
+				}
+				updates["branch_selections"] = encoded
+			}
+			if status == TaskStatusFailed {
+				updates["error"] = failureMessage(result)
+			}
+
+			res := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy).
+				Updates(updates)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
+			}
+			counts.addTaskRunStatus(1)
+
+			if s.eventStore != nil {
+				evtType := event.TypeTaskSucceeded
+				if status == TaskStatusFailed {
+					evtType = event.TypeTaskFailed
+				}
+				evt, err := s.recordTaskEventTx(tx, evtType, runID, taskID, &counts)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+
+			// Persist owner-decided skips (branch + trigger-rule), each stamped
+			// with its own terminal_sequence.  RunState already enumerated the
+			// full transitive skip set, so this writes them directly without
+			// re-walking descendants.
+			for _, sk := range skips {
+				skRes := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND task_id = ?", runID, sk.TaskID).
+					Where("status NOT IN ?", terminalStatusStrings()).
+					Updates(map[string]interface{}{
+						"status":            string(TaskStatusSkipped),
+						"completed_at":      now,
+						"error":             sk.Reason,
+						"terminal_sequence": sk.TerminalSequence,
+						"owner_generation":  ownerGen,
+					})
+				if skRes.Error != nil {
+					return skRes.Error
+				}
+				if skRes.RowsAffected == 0 {
+					continue // already terminal; nothing to emit
+				}
+				counts.addTaskRunStatus(1)
+				if s.eventStore != nil {
+					evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, sk.TaskID, &counts)
+					if err != nil {
+						return err
+					}
+					attemptEvents = append(attemptEvents, *evt)
+				}
+			}
+			return nil
+		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
+		}
+		return txErr
+	})
+	if err == nil {
+		counts.commit()
+		s.publishEvents(pendingEvents...)
+	}
+	return err
+}
+
+// OwnerSkip is a task the run owner decided to skip in memory, paired with the
+// terminal_sequence to stamp on its durable row.
+type OwnerSkip struct {
+	TaskID           uuid.UUID
+	TerminalSequence int64
+	Reason           string
+}
+
+// failureMessage maps a failure result string to a human-readable error, matching
+// the messages completeTask writes.
+func failureMessage(result string) string {
+	switch Result(result) {
+	case "failure":
+		return "command exited with non-zero status"
+	case "startup_failure":
+		return "atom failed to start (check image/command)"
+	case "resource_failure":
+		return "atom exhausted resources (e.g. OOM)"
+	case "killed":
+		return "atom was forcefully killed"
+	case "terminated":
+		return "atom was gracefully terminated"
+	default:
+		return result
+	}
+}
+
+// terminalStatusStrings returns the terminal task statuses as strings for SQL IN
+// clauses.
+func terminalStatusStrings() []string {
+	return []string{
+		string(TaskStatusSucceeded),
+		string(TaskStatusFailed),
+		string(TaskStatusSkipped),
+		string(TaskStatusCached),
+	}
+}
+
 // skipTaskAndDescendantsTx marks a task and all its transitive descendants as
 // skipped within the given transaction. Descendants are only skipped once all
 // of their predecessors are terminal and their trigger rules remain

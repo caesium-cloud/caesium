@@ -188,4 +188,11 @@ type Environment struct {
 	RunCheckpointEvents    int           `envconfig:"RUN_CHECKPOINT_EVENTS" default:"100"`
 	RunCheckpointInterval  time.Duration `envconfig:"RUN_CHECKPOINT_INTERVAL" default:"2s"`
 	RunCheckpointFullEvery int           `envconfig:"RUN_CHECKPOINT_FULL_EVERY" default:"10"`
+
+	// CAESIUM_RUN_OWNER_IN_MEMORY gates the B3 in-memory advancement path: the
+	// owner advances the DAG in memory (run.RunState), writes only terminal
+	// task_runs rows (no per-transition predecessor UPDATEs), and checkpoints for
+	// fast failover.  Default false — when off, completions take the proven
+	// SQL-advancement path (B2), byte-identical.  Requires RUN_OWNER_ENABLED.
+	RunOwnerInMemory bool `envconfig:"RUN_OWNER_IN_MEMORY" default:"false"`
 }
