@@ -2,7 +2,10 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand/v2"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -10,6 +13,21 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
+
+// ownerBusyBackoffs schedules the worker's retries when the owner answers a
+// completion with 503 (dispatch.ErrOwnerBusy) because of transient dqlite
+// contention.  It is intentionally a touch longer than the owner's own
+// in-handler busy-retry budget so a burst of simultaneous completions spreads
+// out across workers rather than re-colliding on the leader on every retry.
+// ~1.55s total across 6 retries.
+var ownerBusyBackoffs = []time.Duration{
+	25 * time.Millisecond,
+	50 * time.Millisecond,
+	100 * time.Millisecond,
+	200 * time.Millisecond,
+	400 * time.Millisecond,
+	800 * time.Millisecond,
+}
 
 // CompletionSink is the abstraction the runtime executor calls to finalize a
 // task's terminal outcome.  It exists so a single execution path can route its
@@ -135,9 +153,12 @@ func (s *ownerSink) Cached(ctx context.Context, taskRun *models.TaskRun, source 
 }
 
 // send fills the fencing fields common to every completion and POSTs the
-// envelope to the owner.  A failure to report is logged and surfaced as a
-// dispatch-side metric (the task's claim lease eventually expires and recovery
-// re-dispatches) — the error is never swallowed silently.
+// envelope to the owner.  When the owner answers 503 (dispatch.ErrOwnerBusy)
+// because of transient contention, send retries the same request with bounded
+// backoff before giving up; a true fence rejection (409) or a network failure
+// is terminal.  A failure to report is logged and surfaced as a dispatch-side
+// metric (the task's claim lease eventually expires and recovery re-dispatches)
+// — the error is never swallowed silently.
 func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispatch.CompleteRequest) error {
 	req.RunID = taskRun.JobRunID
 	req.TaskID = taskRun.TaskID
@@ -146,31 +167,71 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 	req.WorkerNode = s.workerNode
 
 	url := s.ownerBaseURL + "/internal/complete"
-	resp, err := s.post(ctx, url, s.token, req)
-	if err != nil {
-		metrics.CompleteReportFailedTotal.WithLabelValues("post_error").Inc()
+
+	for attempt := 0; ; attempt++ {
+		resp, err := s.post(ctx, url, s.token, req)
+		if err == nil {
+			if resp != nil && !resp.Accepted {
+				// The owner fenced the completion (stale generation, wrong
+				// worker, etc.).  This is not a transport error; the owner
+				// deliberately rejected it.
+				metrics.CompleteReportFailedTotal.WithLabelValues("owner_rejected").Inc()
+				log.Warn("dispatched task: owner rejected completion",
+					"run_id", req.RunID,
+					"task_id", req.TaskID,
+					"status", req.Status,
+					"reason", resp.Reason,
+				)
+				return fmt.Errorf("owner sink: owner rejected completion: %s", resp.Reason)
+			}
+			return nil
+		}
+
+		// Transient owner-side contention: the owner asked us to re-send the
+		// identical request once its leader frees up.  Back off and retry until
+		// the schedule (or the context) is exhausted.
+		if errors.Is(err, dispatch.ErrOwnerBusy) && attempt < len(ownerBusyBackoffs) {
+			if sleepErr := sleepOwnerBusy(ctx, ownerBusyBackoffs[attempt]); sleepErr == nil {
+				continue
+			}
+			// ctx cancelled while waiting — fall through and treat as terminal.
+		}
+
+		reason := "post_error"
+		if errors.Is(err, dispatch.ErrOwnerBusy) {
+			reason = "owner_busy"
+		}
+		metrics.CompleteReportFailedTotal.WithLabelValues(reason).Inc()
 		log.Error("dispatched task: failed to report completion to owner",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
 			"owner_url", s.ownerBaseURL,
 			"status", req.Status,
+			"attempts", attempt+1,
 			"error", err,
 		)
 		return fmt.Errorf("owner sink: report completion: %w", err)
 	}
-	if resp != nil && !resp.Accepted {
-		// The owner fenced the completion (stale generation, wrong worker, etc.).
-		// This is not a transport error; the owner deliberately rejected it.
-		metrics.CompleteReportFailedTotal.WithLabelValues("owner_rejected").Inc()
-		log.Warn("dispatched task: owner rejected completion",
-			"run_id", req.RunID,
-			"task_id", req.TaskID,
-			"status", req.Status,
-			"reason", resp.Reason,
-		)
-		return fmt.Errorf("owner sink: owner rejected completion: %s", resp.Reason)
+}
+
+// sleepOwnerBusy waits base (minus up to 20% jitter) or returns early if ctx is
+// cancelled.  The jitter de-synchronises a thundering herd of workers all
+// retrying a contended owner at the same instant.
+func sleepOwnerBusy(ctx context.Context, base time.Duration) error {
+	d := base
+	if base > 0 {
+		if maxJitter := int64(base / 5); maxJitter > 0 {
+			d = base - time.Duration(rand.Int64N(maxJitter+1))
+		}
 	}
-	return nil
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // dispatchMeta is the owner-routing metadata a dispatched task carries from the

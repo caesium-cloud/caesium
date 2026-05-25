@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
@@ -40,7 +42,18 @@ const (
 	ReasonNotOwner        = "not_owner"
 	ReasonMissingRun      = "missing_run"
 	ReasonMalformed       = "malformed"
+	// ReasonContention labels caesium_complete_retryable_total when the owner
+	// could not apply a completion because of transient dqlite contention and
+	// answered 503 so the worker retries.  It is NOT a fence violation.
+	ReasonContention = "contention"
 )
+
+// ErrOwnerBusy is returned by PostComplete when the owner answered 503 Service
+// Unavailable: it could not apply the completion because of transient dqlite
+// contention and is asking the worker to retry the identical request.  This is
+// distinct from a fence rejection (409), which is terminal — callers should
+// retry on ErrOwnerBusy and give up on any other error.
+var ErrOwnerBusy = errors.New("owner busy: retryable")
 
 // internalClient is the shared HTTP client used for both PostDispatch and
 // PostComplete. Sharing keeps the underlying TCP/keep-alive pool warm
@@ -416,6 +429,10 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if applyErr != nil {
+			if dqlite.IsContentionError(applyErr) {
+				h.rejectRetryable(w, req, applyErr)
+				return
+			}
 			log.Error("complete: apply failed",
 				"run_id", req.RunID,
 				"task_id", req.TaskID,
@@ -441,6 +458,10 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if applyErr != nil {
+			if dqlite.IsContentionError(applyErr) {
+				h.rejectRetryable(w, req, applyErr)
+				return
+			}
 			log.Error("complete: CacheHitTaskClaimed failed",
 				"run_id", req.RunID,
 				"task_id", req.TaskID,
@@ -455,6 +476,25 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
+}
+
+// rejectRetryable answers a completion the owner could not apply because of
+// transient dqlite contention.  It returns 503 (not 409) so the worker knows
+// the request is safe to re-send once the leader's contention clears, and logs
+// at warn rather than error because this is expected under burst load and is
+// not a lost completion unless the worker exhausts its own retries.
+func (h *Handler) rejectRetryable(w http.ResponseWriter, req CompleteRequest, applyErr error) {
+	metrics.CompleteRetryableTotal.WithLabelValues(ReasonContention).Inc()
+	log.Warn("complete: transient contention, asking worker to retry",
+		"run_id", req.RunID,
+		"task_id", req.TaskID,
+		"status", req.Status,
+		"error", applyErr,
+	)
+	writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
+		Code:    ReasonContention,
+		Message: "owner busy applying completion; retry",
+	})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
@@ -520,6 +560,12 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 	if resp.StatusCode == http.StatusOK {
 		_ = json.Unmarshal(respBody, &result)
 		return &result, nil
+	}
+	// 503: the owner hit transient contention applying the completion and wants
+	// the worker to retry the same request.  Wrap ErrOwnerBusy so the caller can
+	// distinguish it from a terminal fence rejection (409) via errors.Is.
+	if resp.StatusCode == http.StatusServiceUnavailable {
+		return nil, fmt.Errorf("complete: owner returned status %d: %w", resp.StatusCode, ErrOwnerBusy)
 	}
 	return nil, fmt.Errorf("complete: owner returned status %d", resp.StatusCode)
 }

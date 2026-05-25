@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -141,6 +142,93 @@ func TestOwnerSink_OwnerRejectionSurfaces(t *testing.T) {
 	err := sink.Succeeded(context.Background(), sampleTaskRun(), "success", nil, nil)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "stale_generation")
+}
+
+// busyPoster returns dispatch.ErrOwnerBusy (the owner's retryable 503) for the
+// first failFor calls — or every call when alwaysBusy — then accepts.  It lets
+// the retry tests assert exactly how many times the sink re-posted.
+type busyPoster struct {
+	calls      int
+	failFor    int
+	alwaysBusy bool
+}
+
+func (p *busyPoster) post(_ context.Context, _, _ string, _ dispatch.CompleteRequest) (*dispatch.CompleteResponse, error) {
+	p.calls++
+	if p.alwaysBusy || p.calls <= p.failFor {
+		return nil, dispatch.ErrOwnerBusy
+	}
+	return &dispatch.CompleteResponse{Accepted: true}, nil
+}
+
+// withFastOwnerBusyBackoffs shrinks the retry schedule to n×1ms for the
+// duration of the test so the retry tests don't sleep the real ~1.55s budget.
+// Tests using it must not run in parallel while the package var is swapped.
+func withFastOwnerBusyBackoffs(t *testing.T, n int) {
+	t.Helper()
+	orig := ownerBusyBackoffs
+	fast := make([]time.Duration, n)
+	for i := range fast {
+		fast[i] = time.Millisecond
+	}
+	ownerBusyBackoffs = fast
+	t.Cleanup(func() { ownerBusyBackoffs = orig })
+}
+
+// TestOwnerSink_RetriesOnOwnerBusyThenSucceeds asserts the sink re-posts the
+// identical completion when the owner answers 503 (ErrOwnerBusy) and reports
+// success once the owner's contention clears.
+func TestOwnerSink_RetriesOnOwnerBusyThenSucceeds(t *testing.T) {
+	withFastOwnerBusyBackoffs(t, 5)
+	p := &busyPoster{failFor: 2}
+	sink := newOwnerSink(ownerMeta(), p.post)
+
+	err := sink.Succeeded(context.Background(), sampleTaskRun(), "success", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, 3, p.calls, "two 503s then a success = 3 posts")
+}
+
+// TestOwnerSink_OwnerBusyExhaustedSurfaces asserts a sustained 503 is retried
+// across the whole schedule and then surfaced as ErrOwnerBusy (not swallowed),
+// so lease-expiry recovery can re-dispatch the task.
+func TestOwnerSink_OwnerBusyExhaustedSurfaces(t *testing.T) {
+	withFastOwnerBusyBackoffs(t, 3)
+	p := &busyPoster{alwaysBusy: true}
+	sink := newOwnerSink(ownerMeta(), p.post)
+
+	err := sink.Succeeded(context.Background(), sampleTaskRun(), "success", nil, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, dispatch.ErrOwnerBusy)
+	require.Equal(t, len(ownerBusyBackoffs)+1, p.calls, "initial attempt + one retry per backoff entry")
+}
+
+// TestOwnerSink_TerminalErrorNotRetried asserts a non-busy error (a true fence
+// rejection or a network failure) is returned immediately without retrying, so
+// the worker never spins on a permanent rejection.
+func TestOwnerSink_TerminalErrorNotRetried(t *testing.T) {
+	withFastOwnerBusyBackoffs(t, 5)
+	p := &recordingPoster{err: errors.New("connection refused")}
+	sink := newOwnerSink(ownerMeta(), p.post)
+
+	err := sink.Succeeded(context.Background(), sampleTaskRun(), "success", nil, nil)
+	require.Error(t, err)
+	require.Len(t, p.calls, 1, "a terminal (non-busy) error must not be retried")
+}
+
+// TestOwnerSink_OwnerBusyContextCancelStops asserts a cancelled context aborts
+// the retry loop promptly and surfaces the busy error rather than spinning.
+func TestOwnerSink_OwnerBusyContextCancelStops(t *testing.T) {
+	withFastOwnerBusyBackoffs(t, 5)
+	p := &busyPoster{alwaysBusy: true}
+	sink := newOwnerSink(ownerMeta(), p.post)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := sink.Succeeded(ctx, sampleTaskRun(), "success", nil, nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, dispatch.ErrOwnerBusy)
+	require.Equal(t, 1, p.calls, "a pre-cancelled context must stop after the first attempt")
 }
 
 // fakeSink is an injectable CompletionSink for executor tests; it records which

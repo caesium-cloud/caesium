@@ -327,6 +327,24 @@ var (
 		},
 		[]string{"reason"},
 	)
+
+	// CompleteRetryableTotal counts /internal/complete requests the owner could
+	// not apply because of transient dqlite contention and answered with 503 so
+	// the worker retries the same request.  Unlike CompleteRejectedTotal (a
+	// terminal fence violation), a retryable answer is expected under burst load
+	// and is not itself a lost completion — it only becomes one if the worker
+	// exhausts its retries, which is tracked by
+	// caesium_complete_report_failed_total{reason="owner_busy"}.
+	//
+	// reason values:
+	//   contention – the apply (CompleteTaskClaimed/etc) returned a dqlite contention error
+	CompleteRetryableTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_complete_retryable_total",
+			Help: "Total /internal/complete requests answered 503 (retryable) due to transient contention, by reason.",
+		},
+		[]string{"reason"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -365,6 +383,7 @@ func Register() {
 			DispatchRejectedTotal,
 			DispatchSentTotal,
 			CompleteReportFailedTotal,
+			CompleteRetryableTotal,
 		)
 	})
 }
