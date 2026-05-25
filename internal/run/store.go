@@ -8,7 +8,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -17,13 +16,13 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
-	"github.com/mattn/go-sqlite3"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -1944,83 +1943,117 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		errMsg = result.Error()
 	}
 
-	// Look up the run to get jobID and startedAt for metrics.
-	var run models.JobRun
-	if err := s.db.First(&run, "id = ?", runID).Error; err == nil {
-		jobID := run.JobID.String()
-		metrics.JobRunsTotal.WithLabelValues(jobID, string(status)).Inc()
-		// Only decrement the active gauge if this process incremented it.
-		s.startedMu.Lock()
-		_, started := s.startedRuns[runID]
-		if started {
-			delete(s.startedRuns, runID)
-		}
-		s.startedMu.Unlock()
-		if started {
-			metrics.JobsActive.WithLabelValues(jobID).Dec()
-		}
-		duration := now.Sub(run.StartedAt).Seconds()
-		metrics.JobRunDurationSeconds.WithLabelValues(jobID, string(status)).Observe(duration)
-	}
-
-	pendingEvents := make([]event.Event, 0, 2)
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.JobRun{}).
-			Where("id = ?", runID).
-			Updates(map[string]interface{}{
-				"status":       string(status),
-				"completed_at": now,
-				"error":        errMsg,
-			}).Error; err != nil {
-			return err
-		}
-
-		if s.eventStore != nil {
-			run, loadErr := s.loadRunWithDB(tx, runID)
-			if loadErr != nil {
-				return loadErr
-			}
-
-			eventType := event.TypeRunCompleted
-			if status == StatusFailed {
-				eventType = event.TypeRunFailed
-			}
-			payload, marshalErr := json.Marshal(run)
-			if marshalErr != nil {
-				return marshalErr
-			}
-
-			completionEvent := event.Event{
-				Type:      eventType,
-				JobID:     run.JobID,
-				RunID:     runID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
-			}
-			if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
+	// The completion write is on the run-completion path taken by every job
+	// run; an unretried transient "database is locked" / "checkpoint in
+	// progress" here marks an otherwise-successful run as failed. Retry the
+	// whole transaction with bounded backoff. jobID + startedAt (for metrics)
+	// and pendingEvents are captured per attempt and promoted only on success,
+	// so a retried transaction never double-counts or double-publishes — and
+	// the gauge bookkeeping below never depends on a separate best-effort read
+	// that could fail and leak the active-runs gauge.
+	var (
+		pendingEvents []event.Event
+		jobID         uuid.UUID
+		startedAt     time.Time
+	)
+	err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 2)
+		var (
+			attemptJobID     uuid.UUID
+			attemptStartedAt time.Time
+		)
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Model(&models.JobRun{}).
+				Where("id = ?", runID).
+				Updates(map[string]interface{}{
+					"status":       string(status),
+					"completed_at": now,
+					"error":        errMsg,
+				}).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, completionEvent)
 
-			terminalEvent := event.Event{
-				Type:      event.TypeRunTerminal,
-				JobID:     run.JobID,
-				RunID:     runID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
-			}
-			if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
+			// Read jobID + startedAt inside the same retried transaction so the
+			// post-commit metrics/gauge bookkeeping always has them.
+			var jr models.JobRun
+			if err := tx.Select("job_id", "started_at").First(&jr, "id = ?", runID).Error; err != nil {
 				return err
 			}
-			pendingEvents = append(pendingEvents, terminalEvent)
-		}
+			attemptJobID = jr.JobID
+			attemptStartedAt = jr.StartedAt
 
-		return nil
+			if s.eventStore != nil {
+				loaded, loadErr := s.loadRunWithDB(tx, runID)
+				if loadErr != nil {
+					return loadErr
+				}
+
+				eventType := event.TypeRunCompleted
+				if status == StatusFailed {
+					eventType = event.TypeRunFailed
+				}
+				payload, marshalErr := json.Marshal(loaded)
+				if marshalErr != nil {
+					return marshalErr
+				}
+
+				completionEvent := event.Event{
+					Type:      eventType,
+					JobID:     loaded.JobID,
+					RunID:     runID,
+					Timestamp: now,
+					Payload:   payload,
+				}
+				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, completionEvent)
+
+				terminalEvent := event.Event{
+					Type:      event.TypeRunTerminal,
+					JobID:     loaded.JobID,
+					RunID:     runID,
+					Timestamp: now,
+					Payload:   payload,
+				}
+				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, terminalEvent)
+			}
+
+			return nil
+		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
+			jobID = attemptJobID
+			startedAt = attemptStartedAt
+		}
+		return txErr
 	})
-	if err == nil {
-		s.publishEvents(pendingEvents...)
+	if err != nil {
+		return err
 	}
-	return err
+
+	// Emit metrics and clear active-run bookkeeping exactly once, after the
+	// completion write has committed, so retries don't double-count. jobID and
+	// startedAt are guaranteed populated because the transaction succeeded.
+	jobIDStr := jobID.String()
+	metrics.JobRunsTotal.WithLabelValues(jobIDStr, string(status)).Inc()
+	// Only decrement the active gauge if this process incremented it.
+	s.startedMu.Lock()
+	_, started := s.startedRuns[runID]
+	if started {
+		delete(s.startedRuns, runID)
+	}
+	s.startedMu.Unlock()
+	if started {
+		metrics.JobsActive.WithLabelValues(jobIDStr).Dec()
+	}
+	metrics.JobRunDurationSeconds.WithLabelValues(jobIDStr, string(status)).Observe(now.Sub(startedAt).Seconds())
+
+	s.publishEvents(pendingEvents...)
+	return nil
 }
 
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
@@ -2493,27 +2526,11 @@ func jitterStoreBusyRetryBackoff(base time.Duration) time.Duration {
 }
 
 func isStoreContentionErr(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var sqliteErr sqlite3.Error
-	if errors.As(err, &sqliteErr) {
-		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
-	}
-
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "database schema is locked") ||
-		strings.Contains(msg, "database is busy") ||
-		strings.Contains(msg, "checkpoint in progress") ||
-		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked") ||
-		// Connection-state poisoning following an earlier failed rollback —
-		// retry on a fresh pooled connection usually succeeds. See
-		// internal/backfill/store.go::isContentionErr for the full rationale.
-		strings.Contains(msg, "cannot start a transaction within a transaction")
+	// Delegate to the single shared classifier so the matched error strings
+	// live in exactly one place (pkg/dqlite). This helper retries whole
+	// transaction closures; the pkg/db connection-pool retry covers single
+	// autocommit statements.
+	return dqlite.IsContentionError(err)
 }
 
 // PredecessorOutputs returns a map of step-name → output key-values for all

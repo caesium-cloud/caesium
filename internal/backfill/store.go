@@ -4,15 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand/v2"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/google/uuid"
-	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
@@ -59,6 +58,8 @@ func (s *Store) Create(b *models.Backfill) error {
 }
 
 func (s *Store) Get(id uuid.UUID) (*models.Backfill, error) {
+	// Single autocommit read: contention retry is handled globally by the
+	// connection-pool busy-retry in pkg/db, so no per-call-site wrap is needed.
 	var b models.Backfill
 	if err := s.db.First(&b, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -232,17 +233,9 @@ func (s *Store) withBusyRetry(fn func() error) error {
 // isPoisonedConnErr matches the narrow case where a pooled connection has
 // been left with a stale active transaction. Distinct from isContentionErr,
 // which also covers transient busy/locked errors that don't require active
-// recovery.
+// recovery. Delegates to the shared classifier in pkg/dqlite.
 func isPoisonedConnErr(err error) bool {
-	if err == nil {
-		return false
-	}
-	for ; err != nil; err = errors.Unwrap(err) {
-		if strings.Contains(strings.ToLower(err.Error()), "cannot start a transaction within a transaction") {
-			return true
-		}
-	}
-	return false
+	return dqlite.IsConnPoolPoisonedError(err)
 }
 
 func jitterBackoff(base time.Duration) time.Duration {
@@ -272,23 +265,8 @@ func jitterBackoff(base time.Duration) time.Duration {
 //     are likely to draw a clean one. Without retry the poisoned connection
 //     persists for the lifetime of the process and breaks every caller that
 //     happens to receive it — exactly the cascade observed in #155 / #156.
+//
+// Delegates to the single shared classifier in pkg/dqlite.
 func isContentionErr(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var sqliteErr sqlite3.Error
-	if errors.As(err, &sqliteErr) {
-		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
-	}
-
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "database schema is locked") ||
-		strings.Contains(msg, "database is busy") ||
-		strings.Contains(msg, "checkpoint in progress") ||
-		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked") ||
-		strings.Contains(msg, "cannot start a transaction within a transaction")
+	return dqlite.IsContentionError(err)
 }

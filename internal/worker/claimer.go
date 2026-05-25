@@ -14,8 +14,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/google/uuid"
-	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
@@ -544,27 +544,11 @@ func jitterBusyRetryBackoff(base time.Duration) time.Duration {
 }
 
 func isClaimContentionErr(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var sqliteErr sqlite3.Error
-	if errors.As(err, &sqliteErr) {
-		return sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked
-	}
-
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") ||
-		strings.Contains(msg, "database table is locked") ||
-		strings.Contains(msg, "database schema is locked") ||
-		strings.Contains(msg, "database is busy") ||
-		strings.Contains(msg, "checkpoint in progress") ||
-		strings.Contains(msg, "sqlite_busy") ||
-		strings.Contains(msg, "sqlite_locked") ||
-		// Connection-state poisoning following an earlier failed rollback —
-		// retry on a fresh pooled connection usually succeeds. See
-		// internal/backfill/store.go::isContentionErr for the full rationale.
-		strings.Contains(msg, "cannot start a transaction within a transaction")
+	// Delegate to the single shared classifier so the matched error strings
+	// live in exactly one place (pkg/dqlite). This helper retries whole
+	// transaction closures; the pkg/db connection-pool retry covers single
+	// autocommit statements.
+	return dqlite.IsContentionError(err)
 }
 
 func derefUUID(id *uuid.UUID) uuid.UUID {
