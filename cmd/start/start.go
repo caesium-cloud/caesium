@@ -325,6 +325,73 @@ func start(cmd *cobra.Command, args []string) error {
 		}()
 	}
 
+	// Construct the distributed worker synchronously (cheap, no I/O) so that,
+	// when run-owner mode is on, its dispatched-task submit seam can be wired
+	// into the dispatch handler BEFORE the API starts serving /internal/dispatch.
+	// Wiring it before api.Start avoids a data race on the handler's submitter
+	// field and guarantees a dispatch can never arrive at a handler with no
+	// worker attached.
+	var distributedWorker *worker.Worker
+	if vars.WorkerEnabled && distributedMode {
+		poolSize := vars.WorkerPoolSize
+		if poolSize < 1 {
+			poolSize = 1
+		}
+
+		log.Info(
+			"launching distributed worker",
+			"node_address",
+			vars.NodeAddress,
+			"node_labels",
+			vars.NodeLabels,
+			"pool_size",
+			poolSize,
+			"poll_interval",
+			vars.WorkerPollInterval,
+			"reclaim_interval",
+			vars.WorkerReclaimInterval,
+			"lease_ttl",
+			vars.WorkerLeaseTTL,
+		)
+
+		claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
+		executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy)
+		wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
+		distributedWorker = worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
+			WithReclaimInterval(vars.WorkerReclaimInterval).
+			WithWakeups(wakeups).
+			WithLeaseRenewal(runStore, vars.WorkerLeaseTTL, vars.WorkerLeaseRenewInterval)
+
+		// Phase 2: piggyback run-lease renewal on the same worker goroutine
+		// when owner mode is enabled, and enable the inbound dispatch path so
+		// dispatched tasks flow onto this worker's shared pool.
+		if vars.RunOwnerEnabled && runStore.LeaseStore() != nil {
+			distributedWorker = distributedWorker.
+				WithRunLeaseRenewal(runStore.LeaseStore(), vars.RunLeaseTTL, vars.NodeAddress).
+				WithInboundDispatch(strings.TrimSpace(vars.InternalWakeupToken))
+
+			// Hand the dispatch handler the worker's submit seam so accepted
+			// dispatches flow onto the worker's pool (the dispatch→execute step).
+			if ownerDispatchHandler != nil {
+				ownerDispatchHandler = ownerDispatchHandler.WithWorkerSubmitter(distributedWorker)
+			}
+		}
+
+		if usesInternalDqlite(vars.DatabaseType) {
+			distributedWorker = distributedWorker.WithReclaimGate(worker.ReclaimGateFunc(func(ctx context.Context) (bool, error) {
+				return dqlite.IsLocalLeader(ctx)
+			}))
+		}
+	} else {
+		log.Info(
+			"distributed worker disabled",
+			"worker_enabled",
+			vars.WorkerEnabled,
+			"execution_mode",
+			vars.ExecutionMode,
+		)
+	}
+
 	go func() {
 		log.Info("spinning up api")
 		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler, ownerDispatchHandler)
@@ -335,58 +402,10 @@ func start(cmd *cobra.Command, args []string) error {
 		errs <- executor.Start(ctx)
 	}()
 
-	if vars.WorkerEnabled && distributedMode {
+	if distributedWorker != nil {
 		go func() {
-			poolSize := vars.WorkerPoolSize
-			if poolSize < 1 {
-				poolSize = 1
-			}
-
-			log.Info(
-				"launching distributed worker",
-				"node_address",
-				vars.NodeAddress,
-				"node_labels",
-				vars.NodeLabels,
-				"pool_size",
-				poolSize,
-				"poll_interval",
-				vars.WorkerPollInterval,
-				"reclaim_interval",
-				vars.WorkerReclaimInterval,
-				"lease_ttl",
-				vars.WorkerLeaseTTL,
-			)
-
-			claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
-			executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy)
-			wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
-			w := worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
-				WithReclaimInterval(vars.WorkerReclaimInterval).
-				WithWakeups(wakeups).
-				WithLeaseRenewal(runStore, vars.WorkerLeaseTTL, vars.WorkerLeaseRenewInterval)
-
-			// Phase 2: piggyback run-lease renewal on the same worker goroutine
-			// when owner mode is enabled.
-			if vars.RunOwnerEnabled && runStore.LeaseStore() != nil {
-				w = w.WithRunLeaseRenewal(runStore.LeaseStore(), vars.RunLeaseTTL, vars.NodeAddress)
-			}
-
-			if usesInternalDqlite(vars.DatabaseType) {
-				w = w.WithReclaimGate(worker.ReclaimGateFunc(func(ctx context.Context) (bool, error) {
-					return dqlite.IsLocalLeader(ctx)
-				}))
-			}
-			errs <- w.Run(ctx)
+			errs <- distributedWorker.Run(ctx)
 		}()
-	} else {
-		log.Info(
-			"distributed worker disabled",
-			"worker_enabled",
-			vars.WorkerEnabled,
-			"execution_mode",
-			vars.ExecutionMode,
-		)
 	}
 
 	defer shutdown()

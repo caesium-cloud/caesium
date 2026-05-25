@@ -788,6 +788,62 @@ func (s *Store) PendingTasksForDispatch(ctx context.Context, runID uuid.UUID, li
 	return tasks, nil
 }
 
+// LoadDispatchedTaskRun loads the full task_runs row for a task that was just
+// claimed for dispatch.  The (claimedBy, status=running) predicate ensures the
+// row really is the one this node claimed via ClaimTaskForDispatch and not a
+// row another node has since reclaimed.  Returns ErrTaskClaimMismatch if no
+// matching running row exists.  The dispatch handler uses this to obtain the
+// full execution spec (image/command/engine/etc.) to hand to the worker pool.
+func (s *Store) LoadDispatchedTaskRun(runID, taskID uuid.UUID, claimedBy string) (*models.TaskRun, error) {
+	var taskRun models.TaskRun
+	err := s.db.
+		Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?",
+			runID, taskID, claimedBy, string(TaskStatusRunning)).
+		First(&taskRun).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskClaimMismatch
+		}
+		return nil, err
+	}
+	return &taskRun, nil
+}
+
+// ReleaseTaskClaim reverts a task this node claimed for dispatch back to the
+// dispatchable pending state (status=running → pending, claimed_by="",
+// claim_expires_at=nil, runtime_id="", started_at=nil).  It is the rollback
+// used by HandleDispatch when the local worker cannot accept a just-claimed
+// task (buffer full / worker not running): rather than leave the task
+// claimed-but-orphaned, the owner returns it to the pool so the next dispatch
+// tick re-dispatches it (to this or another peer).
+//
+// The owner_generation predicate keeps the release fenced: only the owner that
+// stamped the row (or a legacy generation-0 row) can release it.  The status
+// and claimed_by predicates make the release a no-op (zero rows, no error) if
+// the task already advanced — e.g. a completion landed in the race window.
+func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, ownerGeneration int64) error {
+	return withStoreBusyRetry(func() error {
+		result := s.db.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ? AND (owner_generation = ? OR owner_generation = 0)",
+				runID, taskID, claimedBy, string(TaskStatusRunning), ownerGeneration).
+			Updates(map[string]interface{}{
+				"status":           string(TaskStatusPending),
+				"claimed_by":       "",
+				"claim_expires_at": nil,
+				"runtime_id":       "",
+				"started_at":       nil,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(result.RowsAffected))
+			metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
+		}
+		return nil
+	})
+}
+
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts

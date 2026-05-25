@@ -34,6 +34,13 @@ type runtimeExecutor struct {
 	store             *run.Store
 	taskTimeout       time.Duration
 	continueOnFailure bool
+
+	// localSink finalizes ClaimNext'd tasks against the local DB (unchanged from
+	// Phase 1).  Dispatched tasks build an owner-routed sink per task instead.
+	localSink CompletionSink
+	// completePost is the seam the owner sink uses to POST to /internal/complete.
+	// nil in production → defaults to dispatch.PostComplete; tests inject a fake.
+	completePost completePoster
 }
 
 func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string) TaskExecutor {
@@ -45,13 +52,30 @@ func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePoli
 		store:             store,
 		taskTimeout:       taskTimeout,
 		continueOnFailure: normalizeTaskFailurePolicy(failurePolicy) == taskFailurePolicyContinue,
+		localSink:         NewLocalSink(store),
 	}).Execute
+}
+
+// sinkFor selects the completion sink for a task.  Dispatched tasks (carrying
+// owner metadata in their context) route their terminal outcome back to the
+// owner via /internal/complete; ClaimNext'd tasks complete locally exactly as
+// in Phase 1.  When run-owner mode is off there is never any dispatchMeta, so
+// the local sink is always selected and behavior is byte-identical.
+func (e *runtimeExecutor) sinkFor(ctx context.Context) CompletionSink {
+	if meta, ok := dispatchMetaFrom(ctx); ok {
+		return newOwnerSink(meta, e.completePost)
+	}
+	return e.localSink
 }
 
 func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) {
 	if taskRun == nil {
 		return
 	}
+
+	// Select the completion sink once per task: owner-routed for dispatched
+	// tasks, local DB writes for ClaimNext'd tasks.
+	sink := e.sinkFor(ctx)
 
 	jobAlias := ""
 	resolveJobAlias := func() string {
@@ -157,11 +181,11 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
 			} else if found {
 				log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
-				if err := e.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, run.CacheHitSource{
+				if err := sink.Cached(ctx, taskRun, run.CacheHitSource{
 					RunID:     entry.RunID,
 					CreatedAt: entry.CreatedAt,
 					ExpiresAt: entry.ExpiresAt,
-				}, entry.Result, taskRun.ClaimedBy, entry.Output, entry.BranchSelections); err != nil {
+				}, entry.Result, entry.Output, entry.BranchSelections); err != nil {
 					if errors.Is(err, run.ErrTaskClaimMismatch) {
 						log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 						return
@@ -187,7 +211,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		execErr := e.executeTask(ctx, taskRun)
+		execErr := e.executeTask(ctx, taskRun, sink)
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
@@ -247,7 +271,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 	}
 
-	if persistErr := e.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, lastErr, taskRun.ClaimedBy); persistErr != nil {
+	if persistErr := sink.Failed(ctx, taskRun, lastErr); persistErr != nil {
 		if errors.Is(persistErr, run.ErrTaskClaimMismatch) {
 			log.Info("worker task claim changed before failure persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 			return
@@ -285,7 +309,7 @@ func (e *runtimeExecutor) sleepRetryDelay(ctx context.Context, delay time.Durati
 	}
 }
 
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun) error {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink) error {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -375,7 +399,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 
-	if err := e.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, string(a.Result()), taskRun.ClaimedBy, taskOutput, branchSelections); err != nil {
+	if err := sink.Succeeded(ctx, taskRun, string(a.Result()), taskOutput, branchSelections); err != nil {
 		return err
 	}
 	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.TaskID, logSnapshot); err != nil {

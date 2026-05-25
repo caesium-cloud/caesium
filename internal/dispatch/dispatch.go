@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
@@ -68,7 +69,13 @@ type DispatchRequest struct {
 	OwnerGeneration int64     `json:"owner_generation"`
 	Attempt         int       `json:"attempt"`
 	WorkerNode      string    `json:"worker_node"`
-	Deadline        time.Time `json:"deadline"`
+	// OwnerBaseURL is the owner's own HTTP API base URL
+	// (http://<owner-host>:<apiPort>).  The receiving worker POSTs its task
+	// completion back to OwnerBaseURL + "/internal/complete" so the owner
+	// remains the single writer for its run's hot rows.  Set by the dispatch
+	// loop from the owner's node address + API port.
+	OwnerBaseURL string    `json:"owner_base_url"`
+	Deadline     time.Time `json:"deadline"`
 }
 
 // CompleteRequest is the envelope sent by a worker back to the owner when a
@@ -102,6 +109,35 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
+// InboundDispatch is a task accepted by this node for execution plus the owner
+// metadata it needs to report completion back to the owner.  HandleDispatch
+// builds one of these and hands it to the worker via the WorkerSubmitter.
+type InboundDispatch struct {
+	// Task is the full task_runs row to execute (image/command/engine/etc.).
+	Task *models.TaskRun
+	// OwnerBaseURL is the owner's API base URL; the worker POSTs its completion
+	// to OwnerBaseURL + "/internal/complete".
+	OwnerBaseURL string
+	// OwnerGeneration / Attempt / WorkerNode are the fencing fields the owner
+	// validates on the completion envelope.
+	OwnerGeneration int64
+	Attempt         int
+	WorkerNode      string
+}
+
+// WorkerSubmitter is the seam the dispatch handler uses to hand an accepted
+// task to the local worker's execution pool.  The worker implementation
+// (worker.Worker.SubmitDispatched) enqueues the task onto its inbound channel
+// for the Run loop to drain onto the shared pool.  It returns an error when the
+// worker cannot accept the task (inbound buffer full or worker not running) so
+// HandleDispatch can roll back the claim and let the owner re-dispatch.
+//
+// It is an interface so dispatch tests can inject a fake without standing up a
+// real worker + pool.
+type WorkerSubmitter interface {
+	SubmitDispatched(d InboundDispatch) error
+}
+
 // Handler holds the dependencies needed to serve the dispatch and complete
 // endpoints.
 type Handler struct {
@@ -109,6 +145,10 @@ type Handler struct {
 	leaseStore *run.LeaseStore
 	nodeID     string
 	token      string
+	// submitter hands accepted dispatches to the local worker pool.  When nil
+	// (worker disabled on this node), HandleDispatch cannot execute the task and
+	// rolls back the claim so the owner re-dispatches elsewhere.
+	submitter WorkerSubmitter
 }
 
 // NewHandler constructs a Handler.  store is the run.Store; leaseStore is the
@@ -121,6 +161,14 @@ func NewHandler(store *run.Store, leaseStore *run.LeaseStore, nodeID, token stri
 		nodeID:     nodeID,
 		token:      token,
 	}
+}
+
+// WithWorkerSubmitter wires the local worker's submit seam into the handler so
+// accepted dispatches flow onto the worker's shared execution pool.  Returns
+// the handler for chaining at construction time.
+func (h *Handler) WithWorkerSubmitter(s WorkerSubmitter) *Handler {
+	h.submitter = s
+	return h
 }
 
 // authorized checks the Bearer token in the request's Authorization header.
@@ -182,6 +230,17 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		ttl = 5 * time.Minute
 	}
 
+	// A worker must be wired up to execute the task.  Without one, accepting the
+	// dispatch would claim the task with nobody to run it (the exact orphaning
+	// B1 measured).  Reject before claiming so the owner re-dispatches elsewhere.
+	if h.submitter == nil {
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonTaskNotRunning,
+			Message: "no worker available on this node to execute dispatched tasks",
+		})
+		return
+	}
+
 	// Accept the dispatch: atomically claim the task and mark it as running.
 	// ClaimTaskForDispatch transitions pending→running with claimed_by=nodeID
 	// in one UPDATE (equivalent to ClaimNext but targeting a specific task),
@@ -206,7 +265,59 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Load the full task row to execute (image/command/engine/etc.).  If the
+	// row vanished between claim and load (reclaimed by another node in the
+	// race window), roll back and reject.
+	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, req.TaskID, h.nodeID)
+	if err != nil {
+		h.rollbackClaim(req)
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonTaskNotRunning,
+			Message: "claimed task row not found",
+		})
+		return
+	}
+
+	// Hand the claimed task to the local worker pool.  SubmitDispatched is
+	// non-blocking: it returns an error if the inbound buffer is full or the
+	// worker is not running.  On failure we MUST NOT leave the task
+	// claimed-but-orphaned — roll the claim back to pending so the owner's next
+	// dispatch tick re-dispatches it (here or to a peer), and reject with 409.
+	if submitErr := h.submitter.SubmitDispatched(InboundDispatch{
+		Task:            taskRun,
+		OwnerBaseURL:    req.OwnerBaseURL,
+		OwnerGeneration: req.OwnerGeneration,
+		Attempt:         req.Attempt,
+		WorkerNode:      h.nodeID,
+	}); submitErr != nil {
+		h.rollbackClaim(req)
+		log.Warn("dispatch: worker could not accept task; rolled back claim",
+			"run_id", req.RunID,
+			"task_id", req.TaskID,
+			"error", submitErr,
+		)
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Code:    ReasonTaskNotRunning,
+			Message: "worker busy; task returned to dispatch pool",
+		})
+		return
+	}
+
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// rollbackClaim reverts a just-claimed task back to the dispatchable pending
+// state so the owner re-dispatches it.  Logged but not surfaced to the caller
+// beyond the 409 the caller already returns; a failed rollback is rare (the
+// claim lease still expires and ClaimNext recovery covers it).
+func (h *Handler) rollbackClaim(req DispatchRequest) {
+	if err := h.store.ReleaseTaskClaim(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration); err != nil {
+		log.Error("dispatch: failed to roll back claim after worker rejected task",
+			"run_id", req.RunID,
+			"task_id", req.TaskID,
+			"error", err,
+		)
+	}
 }
 
 // HandleComplete handles POST /internal/complete.

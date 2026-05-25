@@ -307,6 +307,26 @@ var (
 			Help: "Total owner-push dispatch requests accepted by a worker (202 ACK).",
 		},
 	)
+
+	// CompleteReportFailedTotal counts the worker-side failures to report a
+	// dispatched task's completion back to the owner via /internal/complete.
+	// This is the run-owner counterpart to a lost completion: the task ran but
+	// the owner never heard about it, so the claim lease will expire and either
+	// ClaimNext recovery (for an un-owned/expired run) or a re-dispatch picks it
+	// up.  The reason label distinguishes a transport failure from an explicit
+	// owner-side fence rejection so operators can tell a partition apart from a
+	// stale-owner reject.
+	//
+	// reason values:
+	//   post_error      – PostComplete returned a non-nil error (network/timeout)
+	//   owner_rejected  – the owner returned {"accepted": false} (fence violation)
+	CompleteReportFailedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_complete_report_failed_total",
+			Help: "Total worker-side failures to report a dispatched task's completion to the owner, by reason.",
+		},
+		[]string{"reason"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -344,6 +364,7 @@ func Register() {
 			RunLeasesOwned,
 			DispatchRejectedTotal,
 			DispatchSentTotal,
+			CompleteReportFailedTotal,
 		)
 	})
 }

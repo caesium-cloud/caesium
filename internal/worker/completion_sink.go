@@ -1,0 +1,205 @@
+package worker
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/caesium-cloud/caesium/internal/dispatch"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/log"
+)
+
+// CompletionSink is the abstraction the runtime executor calls to finalize a
+// task's terminal outcome.  It exists so a single execution path can route its
+// completion either to the local DB (the ClaimNext pull path, unchanged from
+// Phase 1) or back to the owning node over /internal/complete (the run-owner
+// push-dispatch path).
+//
+// The three methods mirror the three store finalization calls the executor
+// made directly before this abstraction was introduced:
+//
+//	Succeeded → run.Store.CompleteTaskClaimed
+//	Failed    → run.Store.FailTaskClaimed
+//	Cached    → run.Store.CacheHitTaskClaimed
+//
+// The owner re-derives the real terminal status from the result string in
+// CompleteTaskClaimed, so a "failure" result routed through Succeeded still
+// lands as TaskStatusFailed on the owner — byte-identical to the local path.
+type CompletionSink interface {
+	// Succeeded finalizes a task that ran to a normal completion (whatever the
+	// underlying container result was — the result string carries it).
+	Succeeded(ctx context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string) error
+	// Failed finalizes a task whose attempts were exhausted with an error.
+	Failed(ctx context.Context, taskRun *models.TaskRun, failure error) error
+	// Cached finalizes a task satisfied from the result cache.
+	Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error
+}
+
+// localSink is the default sink used by ClaimNext'd tasks.  It calls the same
+// run.Store.*Claimed methods the executor called inline before the sink
+// abstraction existed, so the pull path is byte-identical to Phase 1.
+type localSink struct {
+	store *run.Store
+}
+
+// NewLocalSink returns the default DB-backed completion sink.
+func NewLocalSink(store *run.Store) CompletionSink {
+	return &localSink{store: store}
+}
+
+func (s *localSink) Succeeded(_ context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string) error {
+	return s.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, result, taskRun.ClaimedBy, outputs, branchSelections)
+}
+
+func (s *localSink) Failed(_ context.Context, taskRun *models.TaskRun, failure error) error {
+	return s.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, failure, taskRun.ClaimedBy)
+}
+
+func (s *localSink) Cached(_ context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
+	return s.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, source, result, taskRun.ClaimedBy, outputs, branchSelections)
+}
+
+// completePoster is the seam the owner sink uses to reach the owner's
+// /internal/complete endpoint.  Production wires it to dispatch.PostComplete;
+// tests inject a fake that records the CompleteRequest.
+type completePoster func(ctx context.Context, ownerURL, token string, req dispatch.CompleteRequest) (*dispatch.CompleteResponse, error)
+
+// ownerSink routes a dispatched task's terminal outcome back to the run owner
+// via POST /internal/complete instead of writing the hot rows locally.  This
+// keeps the owner the single writer for its run's coordination rows (preserving
+// the owner_generation fence) and sets up cleanly for the later in-memory-state
+// layer where authoritative state lives in the owner's memory.
+//
+// A dispatched task carries the owner_generation, attempt, owner base URL, and
+// worker_node identity it arrived with; those are threaded onto the sink so the
+// CompleteRequest envelope matches what the owner expects to fence against.
+type ownerSink struct {
+	ownerBaseURL string
+	token        string
+	workerNode   string
+	generation   int64
+	attempt      int
+	post         completePoster
+}
+
+// newOwnerSink builds an owner-routed completion sink from a dispatch envelope's
+// fields.  post is the function used to POST to the owner (dispatch.PostComplete
+// in production, a fake in tests).
+func newOwnerSink(meta dispatchMeta, post completePoster) *ownerSink {
+	if post == nil {
+		post = dispatch.PostComplete
+	}
+	return &ownerSink{
+		ownerBaseURL: meta.OwnerBaseURL,
+		token:        meta.Token,
+		workerNode:   meta.WorkerNode,
+		generation:   meta.OwnerGeneration,
+		attempt:      meta.Attempt,
+		post:         post,
+	}
+}
+
+func (s *ownerSink) Succeeded(ctx context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string) error {
+	return s.send(ctx, taskRun, dispatch.CompleteRequest{
+		Status:           string(run.TaskStatusSucceeded),
+		Result:           result,
+		Outputs:          outputs,
+		BranchSelections: branchSelections,
+	})
+}
+
+func (s *ownerSink) Failed(ctx context.Context, taskRun *models.TaskRun, failure error) error {
+	errMsg := ""
+	if failure != nil {
+		errMsg = failure.Error()
+	}
+	return s.send(ctx, taskRun, dispatch.CompleteRequest{
+		Status: string(run.TaskStatusFailed),
+		Error:  errMsg,
+	})
+}
+
+func (s *ownerSink) Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
+	// The owner reconstructs CacheHitSource on its side; the worker only needs
+	// to report result + outputs + branch selections.  (Phase A's owner handler
+	// builds a CacheHitSource{RunID: req.RunID}; the richer origin metadata is a
+	// Phase B concern and not load-bearing for DAG advancement.)
+	return s.send(ctx, taskRun, dispatch.CompleteRequest{
+		Status:           string(run.TaskStatusCached),
+		Result:           result,
+		Outputs:          outputs,
+		BranchSelections: branchSelections,
+	})
+}
+
+// send fills the fencing fields common to every completion and POSTs the
+// envelope to the owner.  A failure to report is logged and surfaced as a
+// dispatch-side metric (the task's claim lease eventually expires and recovery
+// re-dispatches) — the error is never swallowed silently.
+func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispatch.CompleteRequest) error {
+	req.RunID = taskRun.JobRunID
+	req.TaskID = taskRun.TaskID
+	req.OwnerGeneration = s.generation
+	req.Attempt = s.attempt
+	req.WorkerNode = s.workerNode
+
+	url := s.ownerBaseURL + "/internal/complete"
+	resp, err := s.post(ctx, url, s.token, req)
+	if err != nil {
+		metrics.CompleteReportFailedTotal.WithLabelValues("post_error").Inc()
+		log.Error("dispatched task: failed to report completion to owner",
+			"run_id", req.RunID,
+			"task_id", req.TaskID,
+			"owner_url", s.ownerBaseURL,
+			"status", req.Status,
+			"error", err,
+		)
+		return fmt.Errorf("owner sink: report completion: %w", err)
+	}
+	if resp != nil && !resp.Accepted {
+		// The owner fenced the completion (stale generation, wrong worker, etc.).
+		// This is not a transport error; the owner deliberately rejected it.
+		metrics.CompleteReportFailedTotal.WithLabelValues("owner_rejected").Inc()
+		log.Warn("dispatched task: owner rejected completion",
+			"run_id", req.RunID,
+			"task_id", req.TaskID,
+			"status", req.Status,
+			"reason", resp.Reason,
+		)
+		return fmt.Errorf("owner sink: owner rejected completion: %s", resp.Reason)
+	}
+	return nil
+}
+
+// dispatchMeta is the owner-routing metadata a dispatched task carries from the
+// /internal/dispatch envelope through to its completion sink.  ClaimNext'd
+// (pull-path) tasks have no dispatchMeta and use the local sink.
+type dispatchMeta struct {
+	OwnerBaseURL    string
+	Token           string
+	WorkerNode      string
+	OwnerGeneration int64
+	Attempt         int
+}
+
+// dispatchMetaKey is the context key under which a dispatched task's owner
+// metadata is threaded from the worker to the runtime executor.  Using the
+// context (rather than a field on TaskRun or a shared map) keeps the
+// TaskExecutor signature unchanged and avoids any shared mutable state.
+type dispatchMetaKeyType struct{}
+
+var dispatchMetaKey = dispatchMetaKeyType{}
+
+// withDispatchMeta returns a context carrying the dispatched-task owner metadata.
+func withDispatchMeta(ctx context.Context, meta dispatchMeta) context.Context {
+	return context.WithValue(ctx, dispatchMetaKey, meta)
+}
+
+// dispatchMetaFrom extracts the owner metadata from ctx, if present.  ok is
+// false for ClaimNext'd tasks, which select the local sink.
+func dispatchMetaFrom(ctx context.Context) (dispatchMeta, bool) {
+	meta, ok := ctx.Value(dispatchMetaKey).(dispatchMeta)
+	return meta, ok
+}

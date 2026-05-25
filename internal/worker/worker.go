@@ -2,10 +2,12 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -87,6 +89,28 @@ type Worker struct {
 	runLeaseRenewer RunLeaseRenewer
 	runLeaseTTL     time.Duration
 	runLeaseNodeID  string
+
+	// Inbound dispatched tasks (Phase 2 run-owner push path).  HandleDispatch
+	// hands accepted tasks here via SubmitDispatched; the Run loop drains them
+	// alongside ClaimNext'd tasks and submits each onto the SAME w.pool so the
+	// pool size and backpressure are unified across both paths.  nil until
+	// WithInboundDispatch is called (i.e. owner mode off → byte-identical Phase 1).
+	inbound chan inboundTask
+	// inboundNotify is a wake-only signal poked by SubmitDispatched so the Run
+	// loop's idle wait returns promptly when a dispatched task arrives, instead
+	// of waiting a full poll interval.  Buffered size 1; a missed poke (buffer
+	// already full) is fine because the loop re-checks inbound on every pass.
+	inboundNotify chan struct{}
+	// completionToken is the bearer token the owner sink uses when POSTing a
+	// dispatched task's completion back to the owner's /internal/complete.
+	completionToken string
+}
+
+// inboundTask pairs a dispatched task with the owner metadata the executor
+// needs to route its completion back to the owner.
+type inboundTask struct {
+	task *models.TaskRun
+	meta dispatchMeta
 }
 
 func NewWorker(claimer TaskClaimer, pool *Pool, pollInterval time.Duration, executor TaskExecutor) *Worker {
@@ -157,6 +181,78 @@ func (w *Worker) WithRunLeaseRenewal(renewer RunLeaseRenewer, leaseTTL time.Dura
 	return w
 }
 
+// WithInboundDispatch enables the Phase 2 run-owner push path: the worker
+// accepts dispatched tasks via SubmitDispatched and drains them onto the same
+// execution pool as ClaimNext'd tasks.  completionToken is the bearer token the
+// worker presents when reporting a dispatched task's completion back to the
+// owner's /internal/complete (the CAESIUM_INTERNAL_WAKEUP_TOKEN).
+//
+// The buffer is sized to the pool size (floored at 1): it holds at most one
+// pool's worth of tasks waiting for a slot, which lets the worker absorb a
+// dispatch burst without blocking the Run loop's drain, while bounding memory
+// and keeping backpressure unified with the pool — when the buffer fills,
+// SubmitDispatched rejects and the owner re-dispatches.  Without an explicit
+// call this stays nil and the worker behaves byte-identically to Phase 1.
+func (w *Worker) WithInboundDispatch(completionToken string) *Worker {
+	size := 1
+	if w.pool != nil && cap(w.pool.sem) > size {
+		size = cap(w.pool.sem)
+	}
+	w.inbound = make(chan inboundTask, size)
+	w.inboundNotify = make(chan struct{}, 1)
+	w.completionToken = completionToken
+	return w
+}
+
+// ErrInboundFull is returned by SubmitDispatched when the inbound buffer is at
+// capacity (the worker is saturated).  The dispatch handler treats this as a
+// rejectable condition and rolls the claim back so the owner re-dispatches.
+var ErrInboundFull = errors.New("worker: inbound dispatch buffer full")
+
+// ErrWorkerNotAccepting is returned by SubmitDispatched when the worker is not
+// configured to accept dispatched tasks (WithInboundDispatch was never called).
+var ErrWorkerNotAccepting = errors.New("worker: not accepting dispatched tasks")
+
+// SubmitDispatched enqueues a dispatched task for execution on the worker's
+// shared pool.  It is non-blocking: it returns ErrInboundFull when the inbound
+// buffer is full and ErrWorkerNotAccepting when the inbound path is disabled.
+// *Worker implements dispatch.WorkerSubmitter via this method, so the dispatch
+// handler can hand it accepted tasks directly (no adapter needed).
+//
+// The non-blocking contract is deliberate: HandleDispatch runs on an HTTP
+// request goroutine and must not block on a full pool.  A full buffer surfaces
+// as a 409 the owner retries, rather than holding the dispatch RPC open.
+func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
+	if w.inbound == nil {
+		return ErrWorkerNotAccepting
+	}
+	if d.Task == nil {
+		return errors.New("worker: dispatched task is nil")
+	}
+	// The completion bearer token is the internal wakeup token the worker holds
+	// (from WithInboundDispatch); it is NOT carried in the dispatch envelope so
+	// it never travels owner→worker on the wire needlessly.
+	meta := dispatchMeta{
+		OwnerBaseURL:    d.OwnerBaseURL,
+		Token:           w.completionToken,
+		WorkerNode:      d.WorkerNode,
+		OwnerGeneration: d.OwnerGeneration,
+		Attempt:         d.Attempt,
+	}
+	select {
+	case w.inbound <- inboundTask{task: d.Task, meta: meta}:
+		// Poke the wake signal (non-blocking; a full notify buffer means the
+		// loop is already about to drain).
+		select {
+		case w.inboundNotify <- struct{}{}:
+		default:
+		}
+		return nil
+	default:
+		return ErrInboundFull
+	}
+}
+
 // batchLeaseRenewInterval derives the per-node batched renewal interval.
 // If override > 0 it is used directly; otherwise leaseTTL/4 is used (minimum 1s).
 func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {
@@ -195,6 +291,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		default:
 		}
 
+		// Drain any dispatched (push-path) tasks first so the run-owner path
+		// shares the same pool and backpressure as ClaimNext'd (pull-path) tasks.
+		if err := w.drainInbound(ctx); err != nil {
+			w.pool.Wait()
+			return nil
+		}
+
 		w.reclaimIfDue(ctx)
 
 		task, err := w.claimer.ClaimNext(ctx)
@@ -207,23 +310,19 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 
 		if err != nil || task == nil {
-			if sleepErr := waitForWork(ctx, w.wakeups, w.pollInterval); sleepErr != nil {
+			// No pull-path work: wait for a wakeup, a dispatched-task arrival, or
+			// the poll interval — whichever comes first.  The inboundNotify wake
+			// means a dispatched task is picked up promptly instead of after a
+			// full poll interval.
+			if sleepErr := waitForWork(ctx, w.wakeups, w.inboundNotify, w.pollInterval); sleepErr != nil {
 				w.pool.Wait()
 				return nil
 			}
 			continue
 		}
 
-		// Register the claim before submitting so the renewal ticker can see it
-		// as soon as the goroutine is alive, even before execution starts.
-		w.trackInFlight(task)
-
-		if err := w.pool.Submit(ctx, func() {
-			defer w.untrackInFlight(task.ID)
-			w.executor(ctx, task)
-		}); err != nil {
-			// Submit failed (context cancelled); undo the registration.
-			w.untrackInFlight(task.ID)
+		// ClaimNext'd task: execute with the plain context (local sink path).
+		if err := w.submitToPool(ctx, ctx, task); err != nil {
 			if ctx.Err() != nil {
 				w.pool.Wait()
 				return nil
@@ -231,6 +330,52 @@ func (w *Worker) Run(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+// drainInbound submits every currently-buffered dispatched task onto the shared
+// pool.  It pulls non-blocking until the channel is momentarily empty so a
+// burst of dispatches is absorbed in one pass.  Each dispatched task executes
+// with a context carrying its owner metadata so the executor selects the
+// owner-routed completion sink.  Returns a non-nil error only when the context
+// was cancelled mid-submit (pool.Submit blocks on a full pool until a slot
+// frees or ctx is done).
+func (w *Worker) drainInbound(ctx context.Context) error {
+	if w.inbound == nil {
+		return nil
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case in := <-w.inbound:
+			execCtx := withDispatchMeta(ctx, in.meta)
+			if err := w.submitToPool(execCtx, ctx, in.task); err != nil {
+				return err
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+// submitToPool registers a task as in-flight and submits its execution onto the
+// pool.  execCtx is the context passed to the executor (carries dispatch
+// metadata for push-path tasks); submitCtx governs the pool.Submit blocking
+// (the worker's lifecycle context).  On a failed submit the in-flight
+// registration is undone so the lease-renewal ticker doesn't track a task that
+// never ran.
+func (w *Worker) submitToPool(execCtx, submitCtx context.Context, task *models.TaskRun) error {
+	// Register the claim before submitting so the renewal ticker can see it as
+	// soon as the goroutine is alive, even before execution starts.
+	w.trackInFlight(task)
+	if err := w.pool.Submit(submitCtx, func() {
+		defer w.untrackInFlight(task.ID)
+		w.executor(execCtx, task)
+	}); err != nil {
+		w.untrackInFlight(task.ID)
+		return err
+	}
+	return nil
 }
 
 // trackInFlight registers a task run as in-flight for lease renewal purposes.
@@ -426,8 +571,15 @@ func randomReclaimOffset(interval time.Duration) time.Duration {
 	return time.Duration(rand.Int64N(int64(interval)))
 }
 
-func waitForWork(ctx context.Context, wakeups <-chan struct{}, d time.Duration) error {
-	if wakeups == nil {
+// waitForWork blocks until there is plausibly work to do: a pull-path wakeup
+// signal, a dispatched-task arrival notification, or the poll interval
+// elapsing.  notify is a wake-only signal (buffered size 1, poked by
+// SubmitDispatched); consuming it is harmless because the actual task sits
+// safely in the inbound buffer and is drained by the next loop iteration.  A
+// nil wakeups and nil notify (owner mode off, no wakeups) collapses to the
+// pre-Phase-2 sleep behavior.
+func waitForWork(ctx context.Context, wakeups <-chan struct{}, notify <-chan struct{}, d time.Duration) error {
+	if wakeups == nil && notify == nil {
 		return sleepWithContext(ctx, d)
 	}
 
@@ -438,6 +590,8 @@ func waitForWork(ctx context.Context, wakeups <-chan struct{}, d time.Duration) 
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-wakeups:
+		return nil
+	case <-notify:
 		return nil
 	case <-timer.C:
 		return nil
