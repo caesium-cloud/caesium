@@ -1714,6 +1714,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 // CacheHitTaskClaimed path); the owner routes only succeeded/failed through this.
 func (s *Store) CompleteTaskOwner(
 	runID, taskID uuid.UUID,
+	status TaskStatus,
 	result, claimedBy string,
 	output map[string]string,
 	branchSelections []string,
@@ -1728,7 +1729,6 @@ func (s *Store) CompleteTaskOwner(
 
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
-			status := taskStatusFromResult(result)
 
 			// Metrics for the completed task (mirrors completeTask).
 			var taskRun models.TaskRun
@@ -1749,15 +1749,12 @@ func (s *Store) CompleteTaskOwner(
 			}
 
 			updates := map[string]interface{}{
-				"status":              string(status),
-				"completed_at":        now,
-				"result":              result,
-				"terminal_sequence":   completedSeq,
-				"owner_generation":    ownerGen,
-				"cache_hit":           false,
-				"cache_origin_run_id": nil,
-				"cache_created_at":    nil,
-				"cache_expires_at":    nil,
+				"status":            string(status),
+				"completed_at":      now,
+				"result":            result,
+				"terminal_sequence": completedSeq,
+				"owner_generation":  ownerGen,
+				"cache_hit":         status == TaskStatusCached,
 			}
 			if len(output) > 0 {
 				encoded, mErr := json.Marshal(output)
