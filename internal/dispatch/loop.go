@@ -88,8 +88,13 @@ type DispatchLoopConfig struct {
 	// as the identity for OwnedRuns and included in the round-robin peer list.
 	NodeID string
 	// APIPort is the HTTP API port (CAESIUM_PORT).  Used to build the dispatch
-	// URL from peer node addresses.
+	// URL from peer node addresses when InternalPort is unset (tests / non-mTLS).
 	APIPort int
+	// InternalPort is the dedicated internal mTLS listener port
+	// (CAESIUM_INTERNAL_PORT).  When > 0, peer and owner base URLs are built as
+	// https://host:InternalPort so dispatch/complete traffic flows over the
+	// mutually-authenticated internal listener instead of the public API port.
+	InternalPort int
 	// Token is the CAESIUM_INTERNAL_WAKEUP_TOKEN bearer token.
 	Token string
 	// Interval is the polling tick interval (CAESIUM_RUN_OWNER_DISPATCH_INTERVAL).
@@ -351,8 +356,12 @@ func (l *DispatchLoop) nodeAddrToBaseURL(nodeAddr string) string {
 	if host == "" || strings.HasPrefix(host, "@") {
 		return ""
 	}
+	scheme, port := "http", l.cfg.APIPort
+	if l.cfg.InternalPort > 0 {
+		scheme, port = "https", l.cfg.InternalPort
+	}
 	return (&url.URL{
-		Scheme: "http",
-		Host:   net.JoinHostPort(host, strconv.Itoa(l.cfg.APIPort)),
+		Scheme: scheme,
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 	}).String()
 }

@@ -163,4 +163,20 @@ type Environment struct {
 	// to time.Now() in each DispatchRequest.  Workers use this to bound how long
 	// they hold the claim before returning it.  Default 5m.
 	RunOwnerDispatchDeadline time.Duration `envconfig:"RUN_OWNER_DISPATCH_DEADLINE" default:"5m"`
+
+	// CAESIUM_INTERNAL_PORT is the port for the dedicated internal mTLS listener
+	// that hosts the run-owner endpoints (/internal/dispatch, /internal/complete).
+	// It is separate from the public API port so the public server can remain
+	// plain HTTP while node-to-node coordination traffic is mutually
+	// authenticated.  Only bound when owner mode is enabled.  Default 8443.
+	InternalPort int `envconfig:"INTERNAL_PORT" default:"8443"`
+	// CAESIUM_INTERNAL_MTLS_CA/CERT/KEY are PEM file paths configuring mutual TLS
+	// on the internal listener.  CA validates peer (client) certificates;
+	// CERT/KEY are this node's own identity — presented both as the listener's
+	// server certificate and as the client certificate when this node POSTs to a
+	// peer's internal endpoints.  All three are required when owner mode is
+	// enabled (enforced at startup).
+	InternalMTLSCA   string `envconfig:"INTERNAL_MTLS_CA" default:""`
+	InternalMTLSCert string `envconfig:"INTERNAL_MTLS_CERT" default:""`
+	InternalMTLSKey  string `envconfig:"INTERNAL_MTLS_KEY" default:""`
 }

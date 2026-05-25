@@ -2,6 +2,7 @@ package start
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 	"os/signal"
@@ -159,10 +160,29 @@ func start(cmd *cobra.Command, args []string) error {
 	// When the flag is false (default), this block is a no-op and the system
 	// behaves byte-identically to Phase 1.
 	var ownerDispatchHandler *dispatch.Handler
+	var ownerInternalServerTLS *tls.Config
 	if vars.RunOwnerEnabled {
-		// Warn if mTLS is not configured — Phase B will make this a hard error.
-		// We check for the Phase B env vars to future-proof the warning.
-		dispatch.WarnIfNoMTLS()
+		// Run-owner mode requires mutual TLS on the internal endpoints.  Fail
+		// fast (rather than the earlier Phase-A warning) when any material is
+		// missing, so a misconfigured cluster never silently runs unauthenticated
+		// node-to-node dispatch.
+		mtls := dispatch.MTLSConfig{
+			CAFile:   vars.InternalMTLSCA,
+			CertFile: vars.InternalMTLSCert,
+			KeyFile:  vars.InternalMTLSKey,
+		}
+		if !mtls.Configured() {
+			return fmt.Errorf("run-owner mode (CAESIUM_RUN_OWNER_ENABLED=true) requires mutual TLS: set CAESIUM_INTERNAL_MTLS_CA, CAESIUM_INTERNAL_MTLS_CERT, and CAESIUM_INTERNAL_MTLS_KEY")
+		}
+		clientTLS, err := dispatch.ClientTLSConfig(mtls)
+		if err != nil {
+			return fmt.Errorf("run-owner mode: build internal client TLS: %w", err)
+		}
+		dispatch.ConfigureInternalMTLS(clientTLS)
+		ownerInternalServerTLS, err = dispatch.ServerTLSConfig(mtls)
+		if err != nil {
+			return fmt.Errorf("run-owner mode: build internal server TLS: %w", err)
+		}
 
 		// Warn if the bearer token is missing — dispatch endpoints reject every
 		// request without it, making run-owner mode silently inert.
@@ -189,15 +209,16 @@ func start(cmd *cobra.Command, args []string) error {
 		// PostDispatch.  If PostDispatch returns false (worker rejected or network
 		// error), the task is left unclaimed and ClaimNext recovery picks it up.
 		dispatchLoop := dispatch.NewDispatchLoop(dispatch.DispatchLoopConfig{
-			NodeID:     vars.NodeAddress,
-			APIPort:    vars.Port,
-			Token:      token,
-			Interval:   vars.RunOwnerDispatchInterval,
-			BatchSize:  vars.RunOwnerDispatchBatch,
-			Deadline:   vars.RunOwnerDispatchDeadline,
-			LeaseStore: leaseStore,
-			Store:      runStore,
-			Peers:      dqliteDispatchPeerResolver(),
+			NodeID:       vars.NodeAddress,
+			APIPort:      vars.Port,
+			InternalPort: vars.InternalPort,
+			Token:        token,
+			Interval:     vars.RunOwnerDispatchInterval,
+			BatchSize:    vars.RunOwnerDispatchBatch,
+			Deadline:     vars.RunOwnerDispatchDeadline,
+			LeaseStore:   leaseStore,
+			Store:        runStore,
+			Peers:        dqliteDispatchPeerResolver(),
 		})
 		go func() {
 			log.Info("launching owner dispatch loop",
@@ -392,9 +413,24 @@ func start(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// Run-owner coordination endpoints live on a dedicated mutually
+	// authenticated TLS listener, separate from the public API.  Start it after
+	// the worker submitter is wired into the handler (above) so a dispatch can
+	// never arrive at a handler with no worker attached.
+	if ownerDispatchHandler != nil && ownerInternalServerTLS != nil {
+		internalAddr := fmt.Sprintf(":%d", vars.InternalPort)
+		internalSrv := dispatch.NewInternalServer(ownerDispatchHandler, internalAddr, ownerInternalServerTLS)
+		go func() {
+			log.Info("spinning up internal mTLS listener", "addr", internalAddr)
+			if err := internalSrv.Run(ctx); err != nil && ctx.Err() == nil {
+				errs <- err
+			}
+		}()
+	}
+
 	go func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler, ownerDispatchHandler)
+		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler)
 	}()
 
 	go func() {
