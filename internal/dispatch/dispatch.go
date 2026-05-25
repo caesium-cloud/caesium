@@ -284,6 +284,14 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, req.TaskID, h.nodeID)
 	if err != nil {
 		h.rollbackClaim(req)
+		// Surface the underlying error rather than dropping it: a missing row is
+		// the expected reclaim race, but a transient DB/connection failure here
+		// looks identical from the fixed 409 body otherwise.
+		log.Warn("dispatch: could not load claimed task row; rolled back claim",
+			"run_id", req.RunID,
+			"task_id", req.TaskID,
+			"error", err,
+		)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonTaskNotRunning,
 			Message: "claimed task row not found",

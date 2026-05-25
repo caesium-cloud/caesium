@@ -191,10 +191,14 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 		// identical request once its leader frees up.  Back off and retry until
 		// the schedule (or the context) is exhausted.
 		if errors.Is(err, dispatch.ErrOwnerBusy) && attempt < len(ownerBusyBackoffs) {
-			if sleepErr := sleepOwnerBusy(ctx, ownerBusyBackoffs[attempt]); sleepErr == nil {
-				continue
+			if sleepErr := sleepOwnerBusy(ctx, ownerBusyBackoffs[attempt]); sleepErr != nil {
+				// Context cancelled/expired while backing off. Surface the
+				// cancellation — not ErrOwnerBusy — so the executor's
+				// context.Canceled branch fires: the container already ran to
+				// completion, so it must not be marked failed or re-executed.
+				return fmt.Errorf("owner sink: report completion aborted: %w", sleepErr)
 			}
-			// ctx cancelled while waiting — fall through and treat as terminal.
+			continue
 		}
 
 		reason := "post_error"

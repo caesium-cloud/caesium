@@ -95,8 +95,8 @@ func TestRetryOnContention_ContextCancelStops(t *testing.T) {
 		calls++
 		return errors.New("database is locked")
 	})
-	if err == nil {
-		t.Fatal("expected error when context is cancelled")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled on cancellation, got %v", err)
 	}
 	if calls != 1 {
 		t.Fatalf("a pre-cancelled context must stop after the first attempt; got %d calls", calls)

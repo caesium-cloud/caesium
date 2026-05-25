@@ -216,7 +216,9 @@ func TestOwnerSink_TerminalErrorNotRetried(t *testing.T) {
 }
 
 // TestOwnerSink_OwnerBusyContextCancelStops asserts a cancelled context aborts
-// the retry loop promptly and surfaces the busy error rather than spinning.
+// the retry loop promptly and surfaces the cancellation (not ErrOwnerBusy), so
+// the executor's context.Canceled branch fires and a succeeded task is neither
+// marked failed nor re-executed.
 func TestOwnerSink_OwnerBusyContextCancelStops(t *testing.T) {
 	withFastOwnerBusyBackoffs(t, 5)
 	p := &busyPoster{alwaysBusy: true}
@@ -227,7 +229,8 @@ func TestOwnerSink_OwnerBusyContextCancelStops(t *testing.T) {
 
 	err := sink.Succeeded(ctx, sampleTaskRun(), "success", nil, nil)
 	require.Error(t, err)
-	require.ErrorIs(t, err, dispatch.ErrOwnerBusy)
+	require.ErrorIs(t, err, context.Canceled)
+	require.NotErrorIs(t, err, dispatch.ErrOwnerBusy)
 	require.Equal(t, 1, p.calls, "a pre-cancelled context must stop after the first attempt")
 }
 

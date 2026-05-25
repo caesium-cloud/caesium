@@ -77,7 +77,10 @@ func retryOnContention(ctx context.Context, fn func() error) error {
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return err
+			// Return the cancellation, not the dqlite error, so the run's
+			// failure reason is a clear cancellation rather than a misleading
+			// "checkpoint in progress".
+			return ctx.Err()
 		case <-timer.C:
 		}
 	}
