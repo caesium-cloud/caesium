@@ -229,6 +229,7 @@ func start(cmd *cobra.Command, args []string) error {
 			Interval:     vars.RunOwnerDispatchInterval,
 			BatchSize:    vars.RunOwnerDispatchBatch,
 			Deadline:     vars.RunOwnerDispatchDeadline,
+			LeaseTTL:     vars.RunLeaseTTL,
 			LeaseStore:   leaseStore,
 			Store:        runStore,
 			Peers:        dqliteDispatchPeerResolver(),

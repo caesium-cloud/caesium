@@ -63,6 +63,39 @@ func (ls *LeaseStore) AcquireLease(ctx context.Context, runID uuid.UUID, ownerNo
 	return lease.Generation, nil
 }
 
+// AcquireExpiredLeases takes over every run lease whose holder let it expire
+// (lease_expires_at <= now), reassigning it to newOwner with an incremented
+// generation and a fresh expiry — in a single atomic UPDATE.  The expiry
+// predicate is the compare-and-swap: if two nodes sweep concurrently, the first
+// commit moves those rows out of the expired set, so the second updates nothing
+// (no double takeover).  Returns the number of leases taken over; the caller's
+// dispatch loop then sees them via OwnedRunsWithGenerations and recovers their
+// in-memory state from the latest checkpoint + terminal tail.
+//
+// This is the run-owner failover mechanism: in in-memory mode the DB's
+// per-task predecessor counters are stale (the owner advanced the DAG in
+// memory), so ClaimNext recovery does not apply — a peer must take ownership
+// and replay.
+func (ls *LeaseStore) AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error) {
+	if ls == nil || ls.db == nil {
+		return 0, nil
+	}
+	now := time.Now().UTC()
+	result := ls.db.WithContext(ctx).
+		Model(&models.RunLease{}).
+		Where("lease_expires_at <= ? AND owner_node <> ?", now, newOwner).
+		Updates(map[string]interface{}{
+			"owner_node":       newOwner,
+			"acquired_at":      now,
+			"lease_expires_at": now.Add(ttl),
+			"generation":       gorm.Expr("generation + 1"),
+		})
+	if result.Error != nil {
+		return 0, result.Error
+	}
+	return result.RowsAffected, nil
+}
+
 // RenewRunLeases performs a single batched UPDATE extending lease_expires_at
 // for every run in runIDs that is still owned by ownerNode.  The WHERE
 // clause on owner_node is the safety net that prevents renewing a lease that

@@ -66,6 +66,10 @@ func (f PeerListerFunc) DispatchPeers(ctx context.Context) ([]string, error) {
 // GetLease pattern as the owned set grows.
 type OwnerReader interface {
 	OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error)
+	// AcquireExpiredLeases takes over leases whose owner let them expire,
+	// reassigning them to ownerNode with an incremented generation.  Used by the
+	// in-memory failover sweep so a peer recovers a dead owner's runs.
+	AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error)
 }
 
 // peer pairs a peer's canonical node identity (host:dqlitePort — matches the
@@ -106,6 +110,9 @@ type DispatchLoopConfig struct {
 	// Deadline is added to time.Now() to produce the DispatchRequest.Deadline
 	// (CAESIUM_RUN_OWNER_DISPATCH_DEADLINE).
 	Deadline time.Duration
+	// LeaseTTL is the run-lease TTL (CAESIUM_RUN_LEASE_TTL), used as the new
+	// expiry when this node takes over an expired lease in the failover sweep.
+	LeaseTTL time.Duration
 	// LeaseStore provides ownership queries.
 	LeaseStore OwnerReader
 	// Store provides pending-task queries.
@@ -192,6 +199,19 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 	if len(peers) == 0 {
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
+	}
+
+	// 1b. Failover sweep (in-memory mode only): take over any lease whose owner
+	//     let it expire, so a dead owner's runs get a live owner that recovers
+	//     and resumes them.  In SQL mode, ClaimNext recovery handles this instead.
+	if l.cfg.OwnerManager != nil {
+		if n, takeErr := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL); takeErr != nil {
+			if ctx.Err() == nil {
+				log.Warn("dispatch loop: expired-lease takeover failed", "error", takeErr)
+			}
+		} else if n > 0 {
+			log.Info("dispatch loop: took over expired run leases", "count", n, "new_owner", l.cfg.NodeID)
+		}
 	}
 
 	// 2. Find runs this node owns AND their current generation in one query
