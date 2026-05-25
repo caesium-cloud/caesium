@@ -88,6 +88,25 @@ func (s *Store) PruneCheckpoints(runID uuid.UUID, keepFulls int) error {
 	})
 }
 
+// TerminalTaskRunsSince returns the run's terminal task_runs rows with a
+// terminal_sequence strictly greater than afterSeq, ordered by terminal_sequence
+// ascending — the "post-checkpoint tail" a recovering owner replays on top of
+// the latest checkpoint.  Uses the (job_run_id, terminal_sequence) index.
+func (s *Store) TerminalTaskRunsSince(runID uuid.UUID, afterSeq int64) ([]models.TaskRun, error) {
+	var rows []models.TaskRun
+	err := s.db.
+		Where("job_run_id = ? AND terminal_sequence > ? AND status IN ?",
+			runID, afterSeq, []string{
+				string(TaskStatusSucceeded),
+				string(TaskStatusFailed),
+				string(TaskStatusSkipped),
+				string(TaskStatusCached),
+			}).
+		Order("terminal_sequence ASC").
+		Find(&rows).Error
+	return rows, err
+}
+
 // DeleteCheckpoints removes all checkpoints for a run, called when a terminal
 // run is archived (the durable task_runs rows remain the system of record).
 func (s *Store) DeleteCheckpoints(runID uuid.UUID) error {

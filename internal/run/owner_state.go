@@ -232,6 +232,74 @@ func (rs *RunState) advanceSuccessors(seeds []uuid.UUID) (ready []uuid.UUID, ski
 	return ready, skipped
 }
 
+// ApplyTerminalRow applies a terminal task_runs row observed during recovery
+// replay.  Unlike ApplyCompletion it does NOT allocate a new sequence (it adopts
+// the row's stored sequence) and does NOT auto-skip unsatisfied successors —
+// every skip was itself persisted as a terminal row and arrives in sequence
+// order, so re-deriving skips here would double-handle them.  It sets the task's
+// terminal status, advances the cursor, and pushes any successor whose trigger
+// rule is now satisfied.  Returns the newly-ready successors.  Idempotent for a
+// task already terminal in the restored snapshot.
+func (rs *RunState) ApplyTerminalRow(taskID uuid.UUID, status TaskStatus, storedSeq int64) []uuid.UUID {
+	if storedSeq > rs.seq {
+		rs.seq = storedSeq
+	}
+	ts := rs.tasks[taskID]
+	if ts == nil {
+		return nil
+	}
+	wasTerminal := IsTerminal(ts.Status)
+	ts.Status = status
+	ts.ClaimedBy = ""
+	ts.LeaseExpiresAtMs = 0
+	rs.outcomes[taskID] = status
+	rs.removeReady(taskID)
+	if !wasTerminal {
+		rs.terminalCount++
+	} else {
+		// Already counted in the snapshot; nothing new to advance.
+		return nil
+	}
+
+	var ready []uuid.UUID
+	for _, succ := range rs.topo.Adjacency[taskID] {
+		st := rs.tasks[succ]
+		if st == nil || IsTerminal(st.Status) {
+			continue
+		}
+		if rs.indegree[succ] > 0 {
+			rs.indegree[succ]--
+		}
+		if rs.indegree[succ] != 0 {
+			continue
+		}
+		predStatuses := CollectPredecessorStatuses(rs.topo.Predecessors[succ], rs.outcomes)
+		if SatisfiesTriggerRule(rs.topo.TriggerRule[succ], predStatuses) {
+			rs.pushReady(succ)
+			ready = append(ready, succ)
+		}
+		// Unsatisfied trigger: leave pending — its own skipped terminal row will
+		// arrive later in sequence order and be applied here.
+	}
+	return ready
+}
+
+// RunningTasks returns the IDs of tasks currently in the running state — used
+// during recovery to identify in-flight work a dead owner had dispatched, which
+// the new owner must re-dispatch.
+func (rs *RunState) RunningTasks() []uuid.UUID {
+	var out []uuid.UUID
+	for id, ts := range rs.tasks {
+		if ts.Status == TaskStatusRunning {
+			out = append(out, id)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return rs.topo.Order[out[i]] < rs.topo.Order[out[j]]
+	})
+	return out
+}
+
 // MarkDispatched records that a ready task was pushed to a worker: it leaves the
 // ready queue and becomes running with the given claim metadata.
 func (rs *RunState) MarkDispatched(taskID uuid.UUID, claimedBy string, attempt int, leaseExpiresAtMs int64) {
