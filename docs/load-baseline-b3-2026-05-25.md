@@ -4,9 +4,12 @@
 > the internal-endpoint mTLS work, on the 3-node k8s deployment with
 > `CAESIUM_RUN_OWNER_IN_MEMORY=true`. **Headline: the in-memory advancement path
 > is verified — the 100-task stress workload completes 10/10 on both single-node
-> and 3-node. Failover takeover + checkpoint replay are mechanically proven;
-> end-to-end completion through a force-killed dqlite voter is sandbox-flaky and
-> is the remaining hardening item.**
+> and 3-node. Owner-crash failover is now verified end-to-end: killing the run
+> owner mid-run, a survivor takes over the lease, replays from checkpoint, and
+> drives the run to completion (all tasks succeed). Two further failover bugs
+> were found and fixed — takeover was gated behind peer discovery, and the claim
+> fence rejected the new owner's generation — on branch
+> `phase2-failover-hardening`.**
 
 ## Environment
 
@@ -51,32 +54,57 @@ in-memory state, stamps a monotonic `terminal_sequence`, readies successors, and
 finalizes the run when the DAG completes — with terminal-only DB writes (no
 per-transition predecessor UPDATEs) and periodic `run_checkpoints`.
 
-## Failover — mechanism proven, end-to-end flaky in sandbox
+## Failover — verified end-to-end
 
-Killing the run owner mid-run, a surviving node's dispatch loop took over the
-expired leases (`AcquireExpiredLeases`, generation incremented to 2) and
-reconstructed each run's state from the latest checkpoint + post-checkpoint
-terminal rows (`recovered run … ready=N`). Two real bugs were fixed here: a
-dead peer in the round-robin hung dispatches for the 30s client timeout (added a
-4s per-dispatch timeout to fail fast), and `ResetInFlightTasks` did not clear
-`claimed_by`, so a new owner could not re-claim the rows (now cleared).
+Killing the run owner mid-run, a surviving node's dispatch loop takes over the
+expired lease (`AcquireExpiredLeases`, generation incremented to 2), reconstructs
+the run's state from the latest checkpoint + post-checkpoint terminal rows
+(`recovered run … ready=N`), re-dispatches the task that was in-flight when the
+owner died, and drives the DAG to completion.
 
-However, **force-killing a dqlite voter disrupts catalog quorum briefly**, which
-sometimes prevents the takeover sweep from acquiring the expired leases at all —
-so end-to-end completion through an owner crash did not reproduce reliably in
-this single-machine sandbox. The takeover + replay machinery is correct (proven
-on the runs where takeover did fire); making owner-crash failover robust under
-voter loss is the remaining item.
+Four bugs were found and fixed to get here:
+
+1. **Dead-peer dispatch hang** — a dead peer in the round-robin hung dispatches
+   for the 30s client timeout; added a 4s per-dispatch timeout to fail fast.
+2. **`ResetInFlightTasks` left the claim** — it didn't clear `claimed_by`, so a
+   new owner could not re-claim the reset rows; now cleared.
+3. **Takeover gated behind peer discovery** (`phase2-failover-hardening`) — the
+   expired-lease sweep ran *after* peer discovery, which is exactly what fails
+   during the dqlite quorum disruption an owner crash causes, so the event that
+   needed failover also blocked it. Moved the sweep to the top of the tick,
+   independent of cluster membership.
+4. **Claim fence rejected the new owner's generation** (`phase2-failover-hardening`)
+   — after takeover the new owner re-queued the in-flight task but could never
+   re-dispatch it: `ClaimTaskForDispatch` fenced on `(owner_generation = ? OR = 0)`,
+   but an in-flight task carries the dead owner's generation N while the new owner
+   claims at N+1, so the claim returned `task claim mismatch` (409) every tick and
+   the run wedged behind that one task. Changed the fence to `owner_generation <= ?`
+   (monotonic-generation invariant: claim tasks touched by this generation or any
+   older one; reject only a row stamped by a *newer* generation). Guarded by
+   `TestFailover_TakeoverAndResume`, which fails on the old fence and passes on the new.
+
+**End-to-end run (3-node, hardened image):** owner killed mid-flight with 1 task
+in-flight and 6 pending. The survivor took the lease ~10s later (= lease TTL),
+recovered at generation 2, re-dispatched the in-flight task with zero rejections,
+and completed all 8 tasks. No pod crashes; 2/3 quorum held throughout.
 
 ## Recommendation
 
-Ship the in-memory path **default-off** (`CAESIUM_RUN_OWNER_IN_MEMORY=false`):
-steady-state advancement is verified (10/10), but owner-crash failover needs more
-hardening before it is on by default. mTLS and the B2 path are unaffected by the
-flag.
+Steady-state advancement (10/10) and owner-crash failover are both now verified,
+with a deterministic unit test guarding the failover claim path.
+`CAESIUM_RUN_OWNER_IN_MEMORY=true` is now a viable default-on candidate. One
+robustness follow-up remains before flipping the default: after the owner pod
+restarts with a new IP, peer discovery still lists the dead node's old IP and
+lacks the replacement's, so some dispatch attempts waste ~4s on a dead peer (no
+stall — the round-robin still reaches live workers, but failover is slower than
+it needs to be). mTLS and the B2 path are unaffected by the flag.
 
 ## Sandbox caveats
 
-Single physical node, 3 dqlite voters, ephemeral storage. The voter-kill quorum
-disruption is largely a sandbox artifact; real multi-node hardware tolerates a
-single voter loss far better.
+Single physical node, 3 dqlite voters, ephemeral storage. A **single** voter kill
+keeps 2/3 quorum and now resumes cleanly end-to-end. Killing **multiple** different
+voters across one session leaves several dead members referenced in the cluster,
+dropping below quorum and stalling all writes (including takeover) — the earlier
+"flaky" behavior was this cumulative-churn artifact compounded by the now-fixed
+claim fence, not a failover-logic fault. Real multi-node hardware with stable
+addressing tolerates single voter loss far better.
