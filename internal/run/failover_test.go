@@ -74,9 +74,19 @@ func TestFailover_TakeoverAndResume(t *testing.T) {
 	// to claimable by ResetInFlightTasks).
 	require.Contains(t, append(res.Ready, res.ReDispatch...), b, "b must be queued for re-dispatch")
 
-	// Re-claim b as node-B (HandleDispatch's claim) and complete it.
+	// Re-dispatch b the way the dispatch loop does: read the recovered owner's
+	// ready set (which carries each task's execution attempt), claim it through
+	// the store (the worker's HandleDispatch claim), then mark it dispatched with
+	// that forwarded attempt rather than a hardcoded one.
+	var bAttempt int
+	for _, dt := range mgrB.ReadyForDispatch(runID) {
+		if dt.TaskID == b {
+			bAttempt = dt.Attempt
+		}
+	}
+	require.NotZero(t, bAttempt, "b must be in the recovered owner's ready-for-dispatch set")
 	require.NoError(t, store.ClaimTaskForDispatch(runID, b, "node-B", genB, time.Minute, true))
-	mgrB.MarkDispatched(runID, b, "node-B", 1, 0)
+	mgrB.MarkDispatched(runID, b, "node-B", bAttempt, 0)
 	resB, err := mgrB.Complete(runID, b, TaskStatusSucceeded, "success", "", "node-B", nil, nil)
 	require.NoError(t, err)
 	require.True(t, resB.Complete, "run completes after b finishes on the new owner")
