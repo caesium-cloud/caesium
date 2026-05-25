@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -128,14 +129,18 @@ func TestInternalMTLS_Handshake(t *testing.T) {
 			}
 			// Force the handshake so client-cert verification runs, then close.
 			if tc, ok := c.(*tls.Conn); ok {
-				_ = tc.Handshake()
+				_ = tc.HandshakeContext(context.Background())
 			}
 			_ = c.Close()
 		}
 	}()
 
 	addr := ln.Addr().String()
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
+	ctx := context.Background()
+	dial := func(cfg *tls.Config) (net.Conn, error) {
+		d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: cfg}
+		return d.DialContext(ctx, "tcp", addr)
+	}
 
 	// Pin TLS 1.2 on the dialing side: under TLS 1.3 a client-cert rejection is
 	// delivered as a post-handshake alert (surfacing on first I/O, not at Dial),
@@ -145,13 +150,13 @@ func TestInternalMTLS_Handshake(t *testing.T) {
 	clientTLS.MaxVersion = tls.VersionTLS12
 
 	// Valid client certificate → handshake succeeds.
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, clientTLS)
+	conn, err := dial(clientTLS)
 	require.NoError(t, err, "valid client cert should be accepted")
 	_ = conn.Close()
 
 	// No client certificate → server requires one, handshake fails.
 	noCert := &tls.Config{RootCAs: clientTLS.RootCAs, MinVersion: tls.VersionTLS12, MaxVersion: tls.VersionTLS12}
-	_, err = tls.DialWithDialer(dialer, "tcp", addr, noCert)
+	_, err = dial(noCert)
 	require.Error(t, err, "absent client cert must be rejected")
 
 	// Client certificate signed by a DIFFERENT CA → verification fails.
@@ -161,7 +166,7 @@ func TestInternalMTLS_Handshake(t *testing.T) {
 	intruderTLS, err := ClientTLSConfig(otherMat)
 	require.NoError(t, err)
 	intruderTLS.MaxVersion = tls.VersionTLS12
-	_, err = tls.DialWithDialer(dialer, "tcp", addr, intruderTLS)
+	_, err = dial(intruderTLS)
 	require.Error(t, err, "client cert from an untrusted CA must be rejected")
 
 	_ = caPEM // (CA PEM is written via materialFromCA; retained for clarity)

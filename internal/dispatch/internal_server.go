@@ -40,7 +40,8 @@ func NewInternalServer(handler *Handler, addr string, tlsConfig *tls.Config) *In
 // it in a goroutine.  The certificate comes from srv.TLSConfig.Certificates, so
 // ServeTLS is called with empty file arguments.
 func (s *InternalServer) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.srv.Addr)
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
 	if err != nil {
 		return err
 	}
