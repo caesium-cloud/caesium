@@ -97,13 +97,14 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	if err != nil {
 		return RecoveryResult{}, err
 	}
-	// Reset the DB rows of tasks left in-flight by the dead owner to pending so
-	// the re-dispatch (RecoveryResult.ReDispatch, already re-queued in RunState)
-	// can re-claim them.  Best-effort: a failure just delays the re-claim.
-	if len(res.ReDispatch) > 0 {
-		if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
-			log.Warn("owner manager: reset in-flight tasks failed", "run_id", runID, "error", rErr)
-		}
+	// Reset every DB row the dead owner left running back to pending (clearing
+	// the stale claim) so the new owner can re-dispatch+claim them.  Always run
+	// this, not just when RunState re-queued tasks: the checkpoint can lag the
+	// DB (the dead owner dispatched a task after its last checkpoint), so a row
+	// may be "running" in the DB while the recovered in-memory state shows it
+	// "ready".  Best-effort: a failure just delays the re-claim.
+	if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
+		log.Warn("owner manager: reset in-flight tasks failed", "run_id", runID, "error", rErr)
 	}
 	or := &ownedRun{
 		state:  rs,
@@ -113,6 +114,8 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	m.runs[runID] = or
 	// Persist a checkpoint stamped with the new generation immediately.
 	_ = or.writer.Force(rs, generation)
+	log.Info("run owner: recovered run on takeover", "run_id", runID, "generation", generation,
+		"ready", len(res.Ready), "redispatch", len(res.ReDispatch), "complete", res.Complete)
 	return res, nil
 }
 

@@ -726,7 +726,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 // (already claimed, wrong status, wrong run, stale generation).  The caller
 // should fall back to writing the task with claimed_by="" and letting
 // ClaimNext pick it up.
-func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration) error {
+func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration, trustOwnerReadiness bool) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
@@ -736,9 +736,18 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			now := time.Now().UTC()
 			leaseExpiry := now.Add(leaseTTL)
 
+			// The owner is authoritative for readiness.  In SQL mode the owner
+			// dispatches only outstanding_predecessors=0 tasks, so the check is a
+			// redundant safety net.  In in-memory mode the owner advanced the DAG
+			// in memory and did NOT decrement the DB counter, so the dispatched
+			// successor still shows outstanding>0 here — trustOwnerReadiness drops
+			// the predecessor check so the claim reflects the owner's decision.
+			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)"
+			if trustOwnerReadiness {
+				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND (owner_generation = ? OR owner_generation = 0)"
+			}
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)",
-					runID, taskID, string(TaskStatusPending), ownerGeneration).
+				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration).
 				Updates(map[string]interface{}{
 					"status":           string(TaskStatusRunning),
 					"claimed_by":       workerNode,
@@ -2319,7 +2328,12 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
 		Updates(map[string]interface{}{
-			"status":              string(TaskStatusPending),
+			"status": string(TaskStatusPending),
+			// Clear the claim too, so a new owner taking over a run can re-claim
+			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
+			// owner's worker that held the claim is gone (its lease expired).
+			"claimed_by":          "",
+			"claim_expires_at":    nil,
 			"runtime_id":          "",
 			"started_at":          nil,
 			"cache_hit":           false,

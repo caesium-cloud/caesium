@@ -79,6 +79,46 @@ func TestOwnerManager_AdoptCompleteAdvancesAndCheckpoints(t *testing.T) {
 	require.True(t, res.Complete, "run should be complete after b")
 }
 
+// TestOwnerManager_RecoverThenLoopFlow mimics the live wiring exactly: the
+// dispatch loop Recovers an owned run (not Adopt), pulls ReadyForDispatch,
+// MarkDispatched, then a completion arrives via Complete.  This reproduces the
+// production path to catch wiring/persistence bugs the Adopt-based test misses.
+func TestOwnerManager_RecoverThenLoopFlow(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+
+	// Loop tick 1: not owned yet → Recover, then dispatch the ready root.
+	require.False(t, mgr.Owns(runID))
+	_, err := mgr.Recover(runID, 1)
+	require.NoError(t, err)
+	require.True(t, mgr.Owns(runID), "Recover must persist the run in the manager")
+
+	ready := mgr.ReadyForDispatch(runID)
+	require.Len(t, ready, 1)
+	require.Equal(t, taskA, ready[0].TaskID, "root a should be ready after recover")
+
+	mgr.MarkDispatched(runID, taskA, "node-1", 1, 0)
+	require.Empty(t, mgr.ReadyForDispatch(runID), "dispatched root must leave the ready queue")
+
+	// Loop tick 2: still owned → must NOT re-Recover (which would discard state).
+	require.True(t, mgr.Owns(runID), "run must stay owned across ticks")
+
+	// Completion arrives at HandleComplete → Complete.
+	res, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+	require.True(t, res.Owned, "the run is owned, completion must take the in-memory path")
+	require.Equal(t, []uuid.UUID{taskB}, res.Ready, "completing a must advance and ready b")
+
+	var aRow models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&aRow).Error)
+	require.Equal(t, string(TaskStatusSucceeded), aRow.Status)
+	require.Greater(t, aRow.TerminalSequence, int64(0), "owner completion must stamp a terminal_sequence > 0")
+}
+
 func TestOwnerManager_CompleteUnownedRunFallsBack(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

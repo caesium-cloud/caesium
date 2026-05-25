@@ -67,6 +67,11 @@ var internalClient = &http.Client{
 	Timeout: 30 * time.Second,
 }
 
+// dispatchPostTimeout bounds a single /internal/dispatch POST so an unreachable
+// peer fails fast instead of stalling the dispatch loop (the task is simply
+// retried next tick against another peer).
+const dispatchPostTimeout = 4 * time.Second
+
 // ConfigureInternalMTLS replaces the shared internal client with one that
 // presents this node's client certificate and verifies peers against the
 // configured CA.  Called once at startup when run-owner mode is enabled, before
@@ -285,7 +290,11 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// ClaimTaskForDispatch transitions pending→running with claimed_by=nodeID
 	// in one UPDATE (equivalent to ClaimNext but targeting a specific task),
 	// stamping owner_generation so subsequent writes fence against takeover.
-	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl); err != nil {
+	// In in-memory mode the owner advanced the DAG in memory (the DB's
+	// outstanding_predecessors counter is intentionally stale), so trust the
+	// owner's readiness decision rather than re-checking it here.
+	trustOwnerReadiness := h.ownerManager != nil
+	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
 		if err == run.ErrTaskClaimMismatch {
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonTaskNotRunning,
@@ -586,7 +595,14 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 		return false, fmt.Errorf("dispatch: marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	// Fail fast on an unreachable peer: a dispatch is cheap to retry on the next
+	// tick (to a different peer), so a dead node in the round-robin must not hang
+	// the loop for the client's full 30s timeout — critical during failover, when
+	// the just-crashed owner can still be in the peer list.
+	dialCtx, cancel := context.WithTimeout(ctx, dispatchPostTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(dialCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return false, fmt.Errorf("dispatch: new request: %w", err)
 	}
