@@ -95,6 +95,70 @@ func materialFromCA(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey,
 	}
 }
 
+// leafDER signs a leaf certificate with the given CA and returns its DER bytes.
+func leafDER(t *testing.T, ca *x509.Certificate, caKey *ecdsa.PrivateKey) []byte {
+	t.Helper()
+	certPEM, _ := genLeaf(t, ca, caKey, "leaf", nil)
+	block, _ := pem.Decode(certPEM)
+	require.NotNil(t, block)
+	return block.Bytes
+}
+
+// TestVerifyChainAgainst checks the client's CA-chain verification (used in place
+// of the default verification that InsecureSkipVerify disables): a CA-signed
+// cert is accepted, an untrusted-CA cert and an empty chain are rejected.
+func TestVerifyChainAgainst(t *testing.T) {
+	ca1, ca1Key, _ := genCA(t)
+	ca2, ca2Key, _ := genCA(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca1)
+	verify := verifyChainAgainst(pool)
+
+	require.NoError(t, verify([][]byte{leafDER(t, ca1, ca1Key)}, nil),
+		"a cert signed by the trusted CA must verify")
+	require.Error(t, verify([][]byte{leafDER(t, ca2, ca2Key)}, nil),
+		"a cert signed by an untrusted CA must be rejected")
+	require.Error(t, verify(nil, nil), "an empty chain must be rejected")
+}
+
+// TestClientTLSConfig_SkipsHostname proves the client accepts a CA-signed server
+// certificate even when the dialed address is absent from the cert's SANs — the
+// behavior dynamic pod IPs require.
+func TestClientTLSConfig_SkipsHostname(t *testing.T) {
+	ca, caKey, _ := genCA(t)
+	// Server cert deliberately has NO 127.0.0.1 SAN (loopback=false).
+	serverMat := materialFromCA(t, ca, caKey, "server-no-san", false)
+	clientMat := materialFromCA(t, ca, caKey, "client", false)
+	clientMat.CAFile = serverMat.CAFile
+
+	serverTLS, err := ServerTLSConfig(serverMat)
+	require.NoError(t, err)
+	clientTLS, err := ClientTLSConfig(clientMat)
+	require.NoError(t, err)
+	clientTLS.MaxVersion = tls.VersionTLS12
+
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", serverTLS)
+	require.NoError(t, err)
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			if tc, ok := c.(*tls.Conn); ok {
+				_ = tc.HandshakeContext(context.Background())
+			}
+			_ = c.Close()
+		}
+	}()
+
+	d := tls.Dialer{NetDialer: &net.Dialer{Timeout: 3 * time.Second}, Config: clientTLS}
+	conn, err := d.DialContext(context.Background(), "tcp", ln.Addr().String())
+	require.NoError(t, err, "client must accept a CA-signed server cert despite the dialed host being absent from its SANs")
+	_ = conn.Close()
+}
+
 func TestServerTLSConfig_MissingFiles(t *testing.T) {
 	_, err := ServerTLSConfig(MTLSConfig{CAFile: "/nope/ca", CertFile: "/nope/c", KeyFile: "/nope/k"})
 	require.Error(t, err)

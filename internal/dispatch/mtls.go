@@ -59,7 +59,16 @@ func ServerTLSConfig(c MTLSConfig) (*tls.Config, error) {
 
 // ClientTLSConfig builds the *tls.Config used when this node POSTs to a peer's
 // internal endpoints (PostDispatch / PostComplete): it presents this node's
-// certificate and verifies the peer's server certificate against the CA.
+// certificate and verifies the peer's server certificate was signed by the CA.
+//
+// Hostname verification is deliberately disabled: cluster peers are reached by
+// dynamic pod IPs / node addresses that a long-lived certificate can't enumerate
+// in its SANs, so the built-in name check would reject valid peers.  Peer
+// identity instead rests on (a) the certificate being signed by the shared
+// internal CA, verified here against the chain, and (b) the application-layer
+// owner-generation + worker-node fence on every dispatch/complete.  We therefore
+// set InsecureSkipVerify (which only disables the name/standard verification)
+// and re-implement chain verification in VerifyPeerCertificate.
 func ClientTLSConfig(c MTLSConfig) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
 	if err != nil {
@@ -70,8 +79,38 @@ func ClientTLSConfig(c MTLSConfig) (*tls.Config, error) {
 		return nil, err
 	}
 	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		RootCAs:      pool,
-		MinVersion:   tls.VersionTLS12,
+		Certificates:          []tls.Certificate{cert},
+		RootCAs:               pool,
+		MinVersion:            tls.VersionTLS12,
+		InsecureSkipVerify:    true, //nolint:gosec // chain verified below; hostname intentionally skipped for dynamic pod IPs
+		VerifyPeerCertificate: verifyChainAgainst(pool),
 	}, nil
+}
+
+// verifyChainAgainst returns a VerifyPeerCertificate callback that validates the
+// peer's presented certificate chains to the trusted CA pool, without any
+// hostname/DNS check.  Used by ClientTLSConfig in place of the default
+// verification that InsecureSkipVerify disables.
+func verifyChainAgainst(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("mtls: peer presented no certificate")
+		}
+		certs := make([]*x509.Certificate, 0, len(rawCerts))
+		for _, raw := range rawCerts {
+			crt, err := x509.ParseCertificate(raw)
+			if err != nil {
+				return fmt.Errorf("mtls: parse peer certificate: %w", err)
+			}
+			certs = append(certs, crt)
+		}
+		intermediates := x509.NewCertPool()
+		for _, crt := range certs[1:] {
+			intermediates.AddCert(crt)
+		}
+		if _, err := certs[0].Verify(x509.VerifyOptions{Roots: pool, Intermediates: intermediates}); err != nil {
+			return fmt.Errorf("mtls: peer certificate not signed by trusted CA: %w", err)
+		}
+		return nil
+	}
 }
