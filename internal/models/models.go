@@ -22,4 +22,8 @@ var All = []interface{}{
 	&NotificationPolicy{},
 	// Phase 2 run-owner coordination tables (catalog DB, cross-run, low-volume).
 	&RunLease{},
+	// run_checkpoints is per-run and lives with task_runs (catalog when
+	// unsharded, hot shard when sharded — see hotPathModels), so it is listed
+	// here for the unsharded case and in hotPathModels for the sharded case.
+	&RunCheckpoint{},
 }

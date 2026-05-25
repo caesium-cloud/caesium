@@ -53,6 +53,19 @@ func IsTerminalSuccess(status TaskStatus) bool {
 	return status == TaskStatusSucceeded || status == TaskStatusCached
 }
 
+// IsTerminal reports whether a task status is terminal — the task will not
+// transition again.  This is the single definition of the terminal vocabulary
+// (succeeded, failed, skipped, cached), reused by owner replay, the recovery
+// scan, and archival so the set lives in exactly one place.
+func IsTerminal(status TaskStatus) bool {
+	switch status {
+	case TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached:
+		return true
+	default:
+		return false
+	}
+}
+
 type CallbackStatus string
 
 const (

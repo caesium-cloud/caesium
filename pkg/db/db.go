@@ -253,5 +253,8 @@ func hotPathModels() []interface{} {
 		&models.TaskRun{},
 		&models.CallbackRun{},
 		&models.ExecutionEvent{},
+		// run_checkpoints is per-run and transactionally local to task_runs, so
+		// when sharding is enabled it must be migrated onto every hot shard.
+		&models.RunCheckpoint{},
 	}
 }
