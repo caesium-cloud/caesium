@@ -1,8 +1,10 @@
 package run
 
 import (
+	"fmt"
 	"sync"
 
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
 
@@ -95,6 +97,14 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	if err != nil {
 		return RecoveryResult{}, err
 	}
+	// Reset the DB rows of tasks left in-flight by the dead owner to pending so
+	// the re-dispatch (RecoveryResult.ReDispatch, already re-queued in RunState)
+	// can re-claim them.  Best-effort: a failure just delays the re-claim.
+	if len(res.ReDispatch) > 0 {
+		if rErr := m.store.ResetInFlightTasks(runID); rErr != nil {
+			log.Warn("owner manager: reset in-flight tasks failed", "run_id", runID, "error", rErr)
+		}
+	}
 	or := &ownedRun{
 		state:  rs,
 		writer: NewCheckpointWriter(m.store, runID, m.cfg),
@@ -126,6 +136,34 @@ func (m *OwnerManager) Ready(runID uuid.UUID) []uuid.UUID {
 	return or.state.ReadyTasks()
 }
 
+// DispatchableTask is a ready task plus the attempt number to stamp on its
+// dispatch (1 for a first run, incremented for a re-dispatch after recovery).
+type DispatchableTask struct {
+	TaskID  uuid.UUID
+	Attempt int
+}
+
+// ReadyForDispatch returns the run's ready tasks paired with their current
+// attempt, for the dispatch loop to push.  Nil if the run is not owned here.
+func (m *OwnerManager) ReadyForDispatch(runID uuid.UUID) []DispatchableTask {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	or, ok := m.runs[runID]
+	if !ok {
+		return nil
+	}
+	ready := or.state.ReadyTasks()
+	out := make([]DispatchableTask, 0, len(ready))
+	for _, id := range ready {
+		attempt := 1
+		if st, ok := or.state.TaskState(id); ok && st.Attempt > 0 {
+			attempt = st.Attempt
+		}
+		out = append(out, DispatchableTask{TaskID: id, Attempt: attempt})
+	}
+	return out
+}
+
 // MarkDispatched records that a ready task was pushed to a worker.
 func (m *OwnerManager) MarkDispatched(runID, taskID uuid.UUID, worker string, attempt int, leaseExpiresAtMs int64) {
 	m.mu.Lock()
@@ -148,7 +186,7 @@ type CompleteResult struct {
 // on cadence.  Returns the newly-ready tasks and whether the run is complete.
 // Owned is false when this node does not own the run, signalling the caller to
 // fall back to the SQL path.
-func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, result, claimedBy string, output map[string]string, branchSelections []string) (CompleteResult, error) {
+func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, result, errMsg, claimedBy string, output map[string]string, branchSelections []string) (CompleteResult, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -173,13 +211,31 @@ func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, resu
 		ownerSkips[i] = OwnerSkip{TaskID: sk.TaskID, TerminalSequence: sk.TerminalSequence, Reason: sk.Reason}
 	}
 
-	if err := m.store.CompleteTaskOwner(runID, taskID, status, result, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, ownerSkips); err != nil {
+	if err := m.store.CompleteTaskOwner(runID, taskID, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, ownerSkips); err != nil {
 		return CompleteResult{Owned: true}, err
 	}
 
 	// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable from
 	// the durable terminal rows, so it must not fail the completion).
 	_ = or.writer.Maybe(or.state, or.gen)
+
+	// When the DAG is complete, finalize the run here.  This makes the owner the
+	// authoritative finalizer, which is essential after a takeover (the original
+	// node's waitForRunCompletion is gone); in the normal case the triggering
+	// node's waitForRunCompletion also calls store.Complete, which is an
+	// idempotent no-op once we have set the terminal status.
+	if res.Complete {
+		var runErr error
+		if or.state.HasFailures() {
+			runErr = fmt.Errorf("run %s completed with failed task(s)", runID)
+		}
+		if cErr := m.store.Complete(runID, runErr); cErr != nil {
+			// Don't fail the completion on a finalize error — the terminal rows
+			// are durable and waitForRunCompletion / a later sweep will retry.
+			log.Error("owner manager: run finalize failed", "run_id", runID, "error", cErr)
+		}
+		m.dropLocked(runID)
+	}
 
 	return CompleteResult{Ready: res.Ready, Complete: res.Complete, Owned: true}, nil
 }
@@ -189,6 +245,11 @@ func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, resu
 func (m *OwnerManager) Drop(runID uuid.UUID) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.dropLocked(runID)
+}
+
+// dropLocked releases a run; the caller must hold m.mu.
+func (m *OwnerManager) dropLocked(runID uuid.UUID) {
 	if or, ok := m.runs[runID]; ok {
 		_ = or.writer.Force(or.state, or.gen)
 		delete(m.runs, runID)

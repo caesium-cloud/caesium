@@ -56,7 +56,7 @@ func TestOwnerManager_AdoptCompleteAdvancesAndCheckpoints(t *testing.T) {
 	ready := mgr.Ready(runID)
 	require.Equal(t, []uuid.UUID{taskA}, ready, "root task a should be ready after adopt")
 
-	res, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "node-1", nil, nil)
+	res, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-1", nil, nil)
 	require.NoError(t, err)
 	require.True(t, res.Owned)
 	require.False(t, res.Complete)
@@ -74,7 +74,7 @@ func TestOwnerManager_AdoptCompleteAdvancesAndCheckpoints(t *testing.T) {
 	require.NotNil(t, cp, "a checkpoint should have been written")
 
 	// Completing b finishes the run.
-	res, err = mgr.Complete(runID, taskB, TaskStatusSucceeded, "success", "", nil, nil)
+	res, err = mgr.Complete(runID, taskB, TaskStatusSucceeded, "success", "", "", nil, nil)
 	require.NoError(t, err)
 	require.True(t, res.Complete, "run should be complete after b")
 }
@@ -85,7 +85,7 @@ func TestOwnerManager_CompleteUnownedRunFallsBack(t *testing.T) {
 	store := NewStore(db)
 	mgr := NewOwnerManager(store, CheckpointConfig{})
 
-	res, err := mgr.Complete(uuid.New(), uuid.New(), TaskStatusSucceeded, "success", "n", nil, nil)
+	res, err := mgr.Complete(uuid.New(), uuid.New(), TaskStatusSucceeded, "success", "", "n", nil, nil)
 	require.NoError(t, err)
 	require.False(t, res.Owned, "an unowned run must report Owned=false so the caller falls back")
 }

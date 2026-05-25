@@ -194,9 +194,22 @@ func start(cmd *cobra.Command, args []string) error {
 		token := strings.TrimSpace(vars.InternalWakeupToken)
 		ownerDispatchHandler = dispatch.NewHandler(runStore, leaseStore, vars.NodeAddress, token)
 
+		// B3: when the in-memory advancement flag is on, build the OwnerManager
+		// and route both completion application (handler) and dispatch (loop)
+		// through it.  Off by default — completions take the proven SQL path.
+		var ownerManager *run.OwnerManager
+		if vars.RunOwnerInMemory {
+			ownerManager = run.NewOwnerManager(runStore, run.CheckpointConfig{
+				Events:   vars.RunCheckpointEvents,
+				Interval: vars.RunCheckpointInterval,
+			})
+			ownerDispatchHandler = ownerDispatchHandler.WithOwnerManager(ownerManager)
+		}
+
 		log.Info(
-			"run-owner mode enabled (Phase 2A substrate)",
+			"run-owner mode enabled",
 			"node_address", vars.NodeAddress,
+			"in_memory", vars.RunOwnerInMemory,
 			"run_lease_ttl", vars.RunLeaseTTL,
 			"dispatch_interval", vars.RunOwnerDispatchInterval,
 			"dispatch_batch", vars.RunOwnerDispatchBatch,
@@ -219,6 +232,7 @@ func start(cmd *cobra.Command, args []string) error {
 			LeaseStore:   leaseStore,
 			Store:        runStore,
 			Peers:        dqliteDispatchPeerResolver(),
+			OwnerManager: ownerManager,
 		})
 		go func() {
 			log.Info("launching owner dispatch loop",

@@ -1715,7 +1715,7 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 func (s *Store) CompleteTaskOwner(
 	runID, taskID uuid.UUID,
 	status TaskStatus,
-	result, claimedBy string,
+	result, errMsg, claimedBy string,
 	output map[string]string,
 	branchSelections []string,
 	completedSeq, ownerGen int64,
@@ -1771,7 +1771,11 @@ func (s *Store) CompleteTaskOwner(
 				updates["branch_selections"] = encoded
 			}
 			if status == TaskStatusFailed {
-				updates["error"] = failureMessage(result)
+				if errMsg != "" {
+					updates["error"] = errMsg
+				} else {
+					updates["error"] = failureMessage(result)
+				}
 			}
 
 			res := tx.Model(&models.TaskRun{}).
@@ -2178,6 +2182,11 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 	return err
 }
 
+// errRunAlreadyTerminal is an internal sentinel: Complete's idempotency guard
+// returns it when the run is already in a terminal status, so the caller treats
+// the call as a successful no-op rather than re-emitting completion events.
+var errRunAlreadyTerminal = errors.New("run already terminal")
+
 func (s *Store) Complete(runID uuid.UUID, result error) error {
 	now := time.Now().UTC()
 	status := StatusSucceeded
@@ -2207,14 +2216,23 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			attemptStartedAt time.Time
 		)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&models.JobRun{}).
-				Where("id = ?", runID).
+			// Idempotency guard: skip if the run is already terminal.  Run-owner
+			// in-memory mode can finalize a run from the owner (on takeover) and
+			// from the triggering node's waitForRunCompletion; this keeps the
+			// second call a no-op so run_completed/run_failed events fire once.
+			res := tx.Model(&models.JobRun{}).
+				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed)}).
 				Updates(map[string]interface{}{
 					"status":       string(status),
 					"completed_at": now,
 					"error":        errMsg,
-				}).Error; err != nil {
-				return err
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				// Already finalized by another path; nothing more to do.
+				return errRunAlreadyTerminal
 			}
 
 			// Read jobID + startedAt inside the same retried transaction so the
@@ -2275,6 +2293,11 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		}
 		return txErr
 	})
+	if errors.Is(err, errRunAlreadyTerminal) {
+		// Run was already finalized by another path (idempotent no-op): no
+		// events, metrics, or gauge bookkeeping to repeat.
+		return nil
+	}
 	if err != nil {
 		return err
 	}

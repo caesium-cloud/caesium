@@ -177,6 +177,10 @@ type Handler struct {
 	// (worker disabled on this node), HandleDispatch cannot execute the task and
 	// rolls back the claim so the owner re-dispatches elsewhere.
 	submitter WorkerSubmitter
+	// ownerManager, when set (CAESIUM_RUN_OWNER_IN_MEMORY=true), routes
+	// completions through the in-memory DAG state instead of the SQL-advancement
+	// path.  Nil keeps the proven B2 path.
+	ownerManager *run.OwnerManager
 }
 
 // NewHandler constructs a Handler.  store is the run.Store; leaseStore is the
@@ -196,6 +200,14 @@ func NewHandler(store *run.Store, leaseStore *run.LeaseStore, nodeID, token stri
 // the handler for chaining at construction time.
 func (h *Handler) WithWorkerSubmitter(s WorkerSubmitter) *Handler {
 	h.submitter = s
+	return h
+}
+
+// WithOwnerManager enables the in-memory advancement path: completions are
+// applied to the owner's RunState and persisted as terminal-only rows, instead
+// of the SQL-advancement path.  Returns the handler for chaining.
+func (h *Handler) WithOwnerManager(m *run.OwnerManager) *Handler {
+	h.ownerManager = m
 	return h
 }
 
@@ -429,6 +441,43 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			Message: fmt.Sprintf("owner generation mismatch: expected %d, got %d", lease.Generation, req.OwnerGeneration),
 		})
 		return
+	}
+
+	// Run-owner in-memory path: when enabled and this node holds the run's
+	// in-memory state, advance the DAG in memory and persist terminal-only rows
+	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
+	// falls through to the SQL path below as a safety net.
+	if h.ownerManager != nil {
+		res, omErr := h.ownerManager.Complete(
+			req.RunID, req.TaskID, run.TaskStatus(req.Status),
+			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections,
+		)
+		if omErr != nil {
+			if dqlite.IsContentionError(omErr) {
+				h.rejectRetryable(w, req, omErr)
+				return
+			}
+			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
+				metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonWrongWorker,
+					Message: "task claimed_by mismatch or task not in running state",
+				})
+				return
+			}
+			log.Error("complete: owner-manager apply failed",
+				"run_id", req.RunID, "task_id", req.TaskID, "status", req.Status, "error", omErr)
+			writeJSON(w, http.StatusConflict, ErrorResponse{
+				Code:    ReasonTaskNotRunning,
+				Message: "failed to apply task completion",
+			})
+			return
+		}
+		if res.Owned {
+			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
+			return
+		}
+		// Not tracked in memory here — fall through to the SQL path.
 	}
 
 	// Rules 3 & 4 are enforced by the ClaimNext-path functions via

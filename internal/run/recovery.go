@@ -76,10 +76,11 @@ func RecoverRunState(topo RunTopology, checkpoint *models.RunCheckpoint, termina
 	}
 
 	res.MaxSequence = rs.Sequence()
-	res.ReDispatch = rs.RunningTasks()
-	// The reconstructed ready queue is authoritative: it holds every pending task
-	// whose predecessors are satisfied (roots of a from-scratch replay plus
-	// successors freed by the replayed tail).
+	// Re-queue tasks the previous owner left running (no terminal row): they move
+	// back onto the ready queue with attempt+1 so the new owner re-dispatches
+	// them.  After this, the ready queue is authoritative — it holds every
+	// dispatchable task (roots, tail-freed successors, and re-dispatches).
+	res.ReDispatch = rs.requeueRunning()
 	res.Ready = rs.ReadyTasks()
 	res.Complete = rs.IsComplete()
 	return rs, res, nil

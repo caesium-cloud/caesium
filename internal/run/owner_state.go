@@ -300,6 +300,23 @@ func (rs *RunState) RunningTasks() []uuid.UUID {
 	return out
 }
 
+// requeueRunning moves every task left running (in-flight when the previous
+// owner died, with no terminal row) back to pending and onto the ready queue
+// with an incremented attempt, returning their IDs in dispatch order.  Recovery
+// calls this so lost in-flight work is re-dispatched fresh.
+func (rs *RunState) requeueRunning() []uuid.UUID {
+	out := rs.RunningTasks()
+	for _, id := range out {
+		ts := rs.tasks[id]
+		ts.Status = TaskStatusPending
+		ts.Attempt++
+		ts.ClaimedBy = ""
+		ts.LeaseExpiresAtMs = 0
+		rs.pushReady(id)
+	}
+	return out
+}
+
 // MarkDispatched records that a ready task was pushed to a worker: it leaves the
 // ready queue and becomes running with the given claim metadata.
 func (rs *RunState) MarkDispatched(taskID uuid.UUID, claimedBy string, attempt int, leaseExpiresAtMs int64) {
@@ -332,6 +349,17 @@ func (rs *RunState) TaskState(id uuid.UUID) (OwnerTaskState, bool) {
 
 // IsComplete reports whether every task in the run has reached a terminal state.
 func (rs *RunState) IsComplete() bool { return rs.terminalCount >= rs.total }
+
+// HasFailures reports whether any task reached the failed terminal state — used
+// to decide the run's final status when the DAG completes.
+func (rs *RunState) HasFailures() bool {
+	for _, status := range rs.outcomes {
+		if status == TaskStatusFailed {
+			return true
+		}
+	}
+	return false
+}
 
 // Sequence returns the current terminal_sequence cursor (the highest stamped).
 func (rs *RunState) Sequence() int64 { return rs.seq }

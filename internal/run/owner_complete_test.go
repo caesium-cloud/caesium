@@ -47,7 +47,7 @@ func TestCompleteTaskOwner_WritesTerminalRowsWithoutAdvancing(t *testing.T) {
 	mkRun(taskC, string(TaskStatusPending), "", 1)       // successor; must NOT be decremented
 
 	err = store.CompleteTaskOwner(
-		runRecord.ID, taskA.ID, TaskStatusSucceeded, "success", "node-1",
+		runRecord.ID, taskA.ID, TaskStatusSucceeded, "success", "", "node-1",
 		map[string]string{"k": "v"}, nil,
 		5, 7,
 		[]OwnerSkip{{TaskID: taskB.ID, TerminalSequence: 6, Reason: "branch not selected"}},
@@ -100,6 +100,6 @@ func TestCompleteTaskOwner_ClaimMismatch(t *testing.T) {
 	}).Error)
 
 	// A completion from a node that does not hold the claim is rejected.
-	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "wrong-node", nil, nil, 1, 1, nil)
+	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
 }

@@ -31,6 +31,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
@@ -117,6 +118,11 @@ type DispatchLoopConfig struct {
 	// mux server. Production leaves it nil and the loop falls back to the
 	// default (build URL from APIPort).
 	PeerBaseURL func(nodeAddr string) string
+	// OwnerManager, when set (CAESIUM_RUN_OWNER_IN_MEMORY=true), is the source of
+	// truth for ready tasks: the loop dispatches from the in-memory ready queue
+	// and records dispatches/recoveries on it, instead of polling the DB for
+	// pending tasks.  Nil keeps the proven B2 DB-poll path.
+	OwnerManager *run.OwnerManager
 }
 
 // DispatchLoop is the per-node push-dispatch goroutine for Phase A2.
@@ -215,6 +221,13 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 // Each task's PostDispatch fires in a worker goroutine bounded by BatchSize/4
 // (capped at 16) so slow or unreachable workers don't serialise the tick.
 func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+	// In-memory mode: dispatch from the owner's RunState ready queue rather than
+	// polling the DB.  Adopt-or-recover the run lazily on first sight.
+	if l.cfg.OwnerManager != nil {
+		l.dispatchRunInMemory(ctx, runID, generation, peers)
+		return
+	}
+
 	tasks, err := l.cfg.Store.PendingTasksForDispatch(ctx, runID, l.cfg.BatchSize)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -276,6 +289,64 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 	wg.Wait()
 }
 
+// dispatchRunInMemory dispatches a run's ready tasks from the owner's in-memory
+// RunState.  It lazily adopts/recovers the run on first sight (Recover handles
+// both a freshly-created run — no checkpoint, fresh state — and a takeover —
+// replay from checkpoint + terminal tail, re-queuing lost in-flight work).
+func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+	mgr := l.cfg.OwnerManager
+	if !mgr.Owns(runID) {
+		if _, err := mgr.Recover(runID, generation); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("dispatch loop: owner recover failed", "run_id", runID, "error", err)
+			return
+		}
+	}
+
+	ready := mgr.ReadyForDispatch(runID)
+	if len(ready) == 0 {
+		return
+	}
+	if len(ready) > l.cfg.BatchSize {
+		ready = ready[:l.cfg.BatchSize]
+	}
+
+	const maxConcurrent = 16
+	concurrency := len(ready)
+	if concurrency > maxConcurrent {
+		concurrency = maxConcurrent
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for _, dt := range ready {
+		if ctx.Err() != nil {
+			break
+		}
+		idx := l.counter.Add(1) - 1
+		p := peers[idx%uint64(len(peers))]
+		req := DispatchRequest{
+			RunID:           runID,
+			TaskID:          dt.TaskID,
+			OwnerGeneration: generation,
+			Attempt:         dt.Attempt,
+			WorkerNode:      p.nodeID,
+			OwnerBaseURL:    l.ownerBaseURL,
+			Deadline:        time.Now().UTC().Add(l.cfg.Deadline),
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p peer, req DispatchRequest) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			l.postOne(ctx, runID, p, req)
+		}(p, req)
+	}
+	wg.Wait()
+}
+
 // postOne does the actual HTTP call + metric/log accounting for one dispatch.
 func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest) {
 	dispatchURL := p.baseURL + "/internal/dispatch"
@@ -303,6 +374,12 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		return
 	}
 	metrics.DispatchSentTotal.Inc()
+	// In-memory mode: record the dispatch in the owner's RunState so the task
+	// leaves the ready queue and becomes running (re-dispatched on lease expiry).
+	if l.cfg.OwnerManager != nil {
+		leaseMs := time.Now().Add(l.cfg.Deadline).UnixMilli()
+		l.cfg.OwnerManager.MarkDispatched(runID, req.TaskID, p.nodeID, req.Attempt, leaseMs)
+	}
 	log.Debug("dispatch loop: task dispatched",
 		"run_id", runID,
 		"task_id", req.TaskID,
