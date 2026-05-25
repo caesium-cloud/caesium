@@ -45,6 +45,7 @@ These files are useful context, but each should be treated according to its stat
 - [load-baseline-phase2a-2026-05-24.md](load-baseline-phase2a-2026-05-24.md): First measurement of Phase 2 Phase A; surfaces the missing executor-side dispatch loop.
 - [load-baseline-phase2a2-2026-05-24.md](load-baseline-phase2a2-2026-05-24.md): Phase A2 dispatch loop measured; finds it races ClaimNext and loses — redirects strategy to Phase B.
 - [load-baseline-b1-2026-05-25.md](load-baseline-b1-2026-05-25.md): B0+B1 measured; deferral works but exposes the push path never executes dispatched tasks — reshapes Phase B around the execution cycle.
+- [load-baseline-b2-2026-05-24.md](load-baseline-b2-2026-05-24.md): Phase B2 dispatch→execute→complete cycle; 0/10 → stable 10/10 after hardening the completion and run-start paths against transient dqlite contention.
 
 ## Historical Notes
 

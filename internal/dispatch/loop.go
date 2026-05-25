@@ -119,6 +119,10 @@ type DispatchLoopConfig struct {
 type DispatchLoop struct {
 	cfg     DispatchLoopConfig
 	counter atomic.Uint64 // round-robin counter; used modulo peer count
+	// ownerBaseURL is this node's own API base URL, stamped onto every
+	// DispatchRequest.OwnerBaseURL so the receiving worker knows where to POST
+	// its completion.  Computed once from NodeID + APIPort.
+	ownerBaseURL string
 }
 
 // NewDispatchLoop constructs a DispatchLoop from cfg.
@@ -135,7 +139,11 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.APIPort <= 0 {
 		cfg.APIPort = 8080
 	}
-	return &DispatchLoop{cfg: cfg}
+	l := &DispatchLoop{cfg: cfg}
+	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
+	// own base URL is built identically (and honors the PeerBaseURL test hook).
+	l.ownerBaseURL = l.nodeAddrToBaseURL(cfg.NodeID)
+	return l
 }
 
 // Run starts the polling loop.  It blocks until ctx is cancelled.
@@ -245,7 +253,11 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 			// nodeID matches the recipient's CAESIUM_NODE_ADDRESS so the
 			// handler's `req.WorkerNode == h.nodeID` check passes.
 			WorkerNode: p.nodeID,
-			Deadline:   time.Now().UTC().Add(l.cfg.Deadline),
+			// OwnerBaseURL is this node's (the owner's) own API base URL; the
+			// receiving worker POSTs its completion back here so the owner stays
+			// the single writer for its run's hot rows.
+			OwnerBaseURL: l.ownerBaseURL,
+			Deadline:     time.Now().UTC().Add(l.cfg.Deadline),
 		}
 
 		wg.Add(1)

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,6 +28,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -34,6 +36,55 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+// runStartReadBackoffs bounds retries for transient dqlite contention (e.g.
+// "checkpoint in progress") on the idempotent reads the run-start /
+// DAG-materialization path issues. A contention blip on any of these reads
+// would otherwise fail the entire run before a single task row is created.
+// ~630ms total across 6 retries — deliberately longer than the per-statement
+// connection-pool retry because a WAL checkpoint can outlast a single
+// statement's budget, and a stalled run start is far worse than a brief wait.
+var runStartReadBackoffs = []time.Duration{
+	10 * time.Millisecond,
+	20 * time.Millisecond,
+	40 * time.Millisecond,
+	80 * time.Millisecond,
+	160 * time.Millisecond,
+	320 * time.Millisecond,
+}
+
+// retryOnContention runs fn, retrying only on transient dqlite contention.
+//
+// The global connection-pool retry (pkg/db) covers a contended statement at
+// call time, but dqlite can surface a "checkpoint in progress" error during
+// row iteration — after QueryContext has already returned cleanly — which
+// escapes that layer and would propagate up as a fatal run-start error. The
+// run-start reads guarded here are side-effect-free (or abort without
+// committing on contention), so re-running the whole call is safe. A cancelled
+// context stops the loop and returns the last error.
+func retryOnContention(ctx context.Context, fn func() error) error {
+	for attempt := 0; ; attempt++ {
+		err := fn()
+		if err == nil || !dqlite.IsContentionError(err) || attempt >= len(runStartReadBackoffs) {
+			return err
+		}
+		base := runStartReadBackoffs[attempt]
+		d := base
+		if maxJitter := int64(base / 5); maxJitter > 0 {
+			d = base - time.Duration(rand.Int64N(maxJitter+1))
+		}
+		timer := time.NewTimer(d)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			// Return the cancellation, not the dqlite error, so the run's
+			// failure reason is a clear cancellation rather than a misleading
+			// "checkpoint in progress".
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
 
 // Job
 type Job interface {
@@ -311,8 +362,12 @@ func (j *job) Run(ctx context.Context) error {
 		return store.Start(j.id, j.triggerID, j.params)
 	}
 
-	snapshot, err := resolveRun()
-	if err != nil {
+	var snapshot *run.JobRun
+	if err := retryOnContention(ctx, func() error {
+		var e error
+		snapshot, e = resolveRun()
+		return e
+	}); err != nil {
 		return err
 	}
 
@@ -330,11 +385,15 @@ func (j *job) Run(ctx context.Context) error {
 		}
 	}()
 
-	tasks, err := j.taskServiceFactory(ctx).List(&task.ListRequest{
-		JobID:   j.id.String(),
-		OrderBy: []string{"position", "created_at"},
-	})
-	if err != nil {
+	var tasks models.Tasks
+	if err := retryOnContention(ctx, func() error {
+		var e error
+		tasks, e = j.taskServiceFactory(ctx).List(&task.ListRequest{
+			JobID:   j.id.String(),
+			OrderBy: []string{"position", "created_at"},
+		})
+		return e
+	}); err != nil {
 		runErr = err
 		return err
 	}
@@ -364,8 +423,12 @@ func (j *job) Run(ctx context.Context) error {
 		}
 		triggerRuleByTask[t.ID] = rule
 
-		modelAtom, err := svc.Get(t.AtomID)
-		if err != nil {
+		var modelAtom *models.Atom
+		if err := retryOnContention(ctx, func() error {
+			var e error
+			modelAtom, e = svc.Get(t.AtomID)
+			return e
+		}); err != nil {
 			runErr = err
 			return err
 		}
@@ -399,11 +462,15 @@ func (j *job) Run(ctx context.Context) error {
 		runners[t.ID] = runner
 	}
 
-	edges, err := j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
-		JobID:   j.id.String(),
-		OrderBy: []string{"created_at"},
-	})
-	if err != nil {
+	var edges models.TaskEdges
+	if err := retryOnContention(ctx, func() error {
+		var e error
+		edges, e = j.taskEdgeServiceFactory(ctx).List(&taskedge.ListRequest{
+			JobID:   j.id.String(),
+			OrderBy: []string{"created_at"},
+		})
+		return e
+	}); err != nil {
 		runErr = err
 		return err
 	}
@@ -467,8 +534,12 @@ func (j *job) Run(ctx context.Context) error {
 		return err
 	}
 
-	currentRun, err := store.Get(runID)
-	if err != nil {
+	var currentRun *run.JobRun
+	if err := retryOnContention(ctx, func() error {
+		var e error
+		currentRun, e = store.Get(runID)
+		return e
+	}); err != nil {
 		runErr = err
 		return err
 	}
@@ -1000,7 +1071,7 @@ func (j *job) Run(ctx context.Context) error {
 					processed[id] = true
 					terminalTasks++
 					delete(inQueue, id)
-					if err == nil && !halt {
+					if !halt {
 						if propErr := propagateSkipped(id); propErr != nil {
 							log.Error("failed to propagate skipped task", "run_id", runID, "task_id", id, "error", propErr)
 							if runErr == nil {

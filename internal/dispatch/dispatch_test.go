@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -337,3 +338,171 @@ func TestHandleComplete_ExpiredLease(t *testing.T) {
 	// Skipped status is checked first, before ownership.
 	require.Equal(t, http.StatusConflict, w.Code)
 }
+
+// --- Phase 2 B2: HandleDispatch accept/reject + worker submit seam ---
+
+// fakeSubmitter is a test WorkerSubmitter that records accepted dispatches and
+// can be told to reject (simulating a full inbound buffer).
+type fakeSubmitter struct {
+	accepted []InboundDispatch
+	err      error
+}
+
+func (f *fakeSubmitter) SubmitDispatched(d InboundDispatch) error {
+	if f.err != nil {
+		return f.err
+	}
+	f.accepted = append(f.accepted, d)
+	return nil
+}
+
+// seedPendingTaskRun inserts a dispatchable (pending, unclaimed, no outstanding
+// predecessors) task_runs row, plus the trigger/job/atom/task/job_run chain it
+// needs so the event-recording path inside ClaimTaskForDispatch can resolve the
+// owning job_run.  Returns the job-run ID (== run ID) and the task ID.
+func seedPendingTaskRun(t *testing.T, store *run.Store) (uuid.UUID, uuid.UUID) {
+	t.Helper()
+	db := store.DB()
+	now := time.Now().UTC()
+
+	trigger := &models.Trigger{ID: uuid.New(), Alias: "disp-trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{ID: uuid.New(), Alias: "disp-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(job).Error)
+
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: `["sh","-c","echo hi"]`, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(atom).Error)
+
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "step1", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(task).Error)
+
+	jobRun := &models.JobRun{ID: uuid.New(), JobID: job.ID, TriggerID: trigger.ID, TriggerType: string(trigger.Type), Status: string(run.StatusRunning), StartedAt: now, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(jobRun).Error)
+
+	tr := &models.TaskRun{
+		ID:                      uuid.New(),
+		JobRunID:                jobRun.ID,
+		TaskID:                  task.ID,
+		AtomID:                  atom.ID,
+		Engine:                  models.AtomEngineDocker,
+		Image:                   "busybox:1.36.1",
+		Command:                 `["sh","-c","echo hi"]`,
+		Status:                  string(run.TaskStatusPending),
+		ClaimedBy:               "",
+		Attempt:                 1,
+		MaxAttempts:             1,
+		OutstandingPredecessors: 0,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+	require.NoError(t, db.Create(tr).Error)
+	return jobRun.ID, task.ID
+}
+
+// taskStatus reads back the current status + claimed_by for assertions.
+func taskStatus(t *testing.T, store *run.Store, runID, taskID uuid.UUID) (string, string) {
+	t.Helper()
+	var tr models.TaskRun
+	require.NoError(t, store.DB().Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&tr).Error)
+	return tr.Status, tr.ClaimedBy
+}
+
+// TestHandleDispatch_AcceptsAndSubmits verifies the happy path: a dispatch
+// addressed to this node claims the task, hands it to the worker, and returns
+// 202 with the owner metadata threaded into the InboundDispatch.
+func TestHandleDispatch_AcceptsAndSubmits(t *testing.T) {
+	store, _, h := setupHandler(t)
+	sub := &fakeSubmitter{}
+	h = h.WithWorkerSubmitter(sub)
+
+	runID, taskID := seedPendingTaskRun(t, store)
+
+	req := DispatchRequest{
+		RunID:           runID,
+		TaskID:          taskID,
+		OwnerGeneration: 1,
+		Attempt:         1,
+		WorkerNode:      ownerNodeAddr,
+		OwnerBaseURL:    "http://10.0.0.1:8080",
+		Deadline:        time.Now().Add(5 * time.Minute),
+	}
+	w := postJSON(t, h.HandleDispatch, req)
+	require.Equal(t, http.StatusAccepted, w.Code, "dispatch should be accepted")
+
+	require.Len(t, sub.accepted, 1, "task should be handed to the worker")
+	got := sub.accepted[0]
+	require.Equal(t, runID, got.Task.JobRunID)
+	require.Equal(t, taskID, got.Task.TaskID)
+	require.Equal(t, "http://10.0.0.1:8080", got.OwnerBaseURL)
+	require.Equal(t, int64(1), got.OwnerGeneration)
+	require.Equal(t, ownerNodeAddr, got.WorkerNode)
+
+	// Task is now claimed/running on this node.
+	status, claimedBy := taskStatus(t, store, runID, taskID)
+	require.Equal(t, string(run.TaskStatusRunning), status)
+	require.Equal(t, ownerNodeAddr, claimedBy)
+}
+
+// TestHandleDispatch_RejectsAndRollsBackWhenWorkerFull verifies that when the
+// worker cannot accept (buffer full), the handler rolls the claim back to
+// pending/unclaimed so the owner re-dispatches, and returns 409.
+func TestHandleDispatch_RejectsAndRollsBackWhenWorkerFull(t *testing.T) {
+	store, _, h := setupHandler(t)
+	sub := &fakeSubmitter{err: ErrInboundFullSentinel}
+	h = h.WithWorkerSubmitter(sub)
+
+	runID, taskID := seedPendingTaskRun(t, store)
+
+	req := DispatchRequest{
+		RunID:           runID,
+		TaskID:          taskID,
+		OwnerGeneration: 1,
+		Attempt:         1,
+		WorkerNode:      ownerNodeAddr,
+		OwnerBaseURL:    "http://10.0.0.1:8080",
+		Deadline:        time.Now().Add(5 * time.Minute),
+	}
+	w := postJSON(t, h.HandleDispatch, req)
+	require.Equal(t, http.StatusConflict, w.Code, "a full worker must reject the dispatch")
+
+	// Claim must have been rolled back so the next dispatch tick picks it up.
+	status, claimedBy := taskStatus(t, store, runID, taskID)
+	require.Equal(t, string(run.TaskStatusPending), status, "task must be returned to pending")
+	require.Equal(t, "", claimedBy, "claim must be released on rollback")
+}
+
+// TestHandleDispatch_RejectsWhenNoWorker verifies that a node without a worker
+// submitter rejects the dispatch (and does NOT claim the task) so the owner
+// re-dispatches to a node that can actually run it.
+func TestHandleDispatch_RejectsWhenNoWorker(t *testing.T) {
+	store, _, h := setupHandler(t) // no WithWorkerSubmitter
+
+	runID, taskID := seedPendingTaskRun(t, store)
+
+	req := DispatchRequest{
+		RunID:           runID,
+		TaskID:          taskID,
+		OwnerGeneration: 1,
+		Attempt:         1,
+		WorkerNode:      ownerNodeAddr,
+		Deadline:        time.Now().Add(5 * time.Minute),
+	}
+	w := postJSON(t, h.HandleDispatch, req)
+	require.Equal(t, http.StatusConflict, w.Code)
+
+	// Task must remain pending and unclaimed (never claimed in the first place).
+	status, claimedBy := taskStatus(t, store, runID, taskID)
+	require.Equal(t, string(run.TaskStatusPending), status)
+	require.Equal(t, "", claimedBy)
+}
+
+// ErrInboundFullSentinel mirrors the worker's full-buffer error for the
+// dispatch-package test without importing the worker package (which would
+// create an import cycle). Its identity is irrelevant to the handler — any
+// non-nil error triggers the rollback path.
+var ErrInboundFullSentinel = &sentinelError{"inbound buffer full"}
+
+type sentinelError struct{ msg string }
+
+func (e *sentinelError) Error() string { return e.msg }

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 )
@@ -381,5 +382,129 @@ func TestBatchedRenewal_ZeroRowsAffectedNoLocalUpdate(t *testing.T) {
 	w.inFlightMu.Unlock()
 	if !claim.claimExpiresAt.Equal(imminent) {
 		t.Fatalf("expected in-memory expiry unchanged when rows_affected=0, got %v want %v", claim.claimExpiresAt, imminent)
+	}
+}
+
+// --- Phase 2 B2: inbound dispatched-task channel ---
+
+// TestSubmitDispatched_NotAccepting verifies that a worker without the inbound
+// path enabled rejects dispatched tasks (owner mode off → byte-identical Phase 1).
+func TestSubmitDispatched_NotAccepting(t *testing.T) {
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil)
+	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
+	if !errors.Is(err, ErrWorkerNotAccepting) {
+		t.Fatalf("expected ErrWorkerNotAccepting, got %v", err)
+	}
+}
+
+// TestSubmitDispatched_NilTask guards against a nil task panicking downstream.
+func TestSubmitDispatched_NilTask(t *testing.T) {
+	w := NewWorker(&sequenceClaimer{}, NewPool(1), time.Millisecond, nil).
+		WithInboundDispatch("tok")
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: nil}); err == nil {
+		t.Fatal("expected error for nil dispatched task")
+	}
+}
+
+// TestSubmitDispatched_BufferFull verifies that once the inbound buffer is full
+// (pool-size-bounded), further submits are rejected with ErrInboundFull so the
+// owner can re-dispatch — backpressure is unified with the pool.
+func TestSubmitDispatched_BufferFull(t *testing.T) {
+	// Pool size 2 → inbound buffer cap 2. Don't run the worker so nothing drains.
+	w := NewWorker(&sequenceClaimer{}, NewPool(2), time.Millisecond, nil).
+		WithInboundDispatch("tok")
+
+	for i := 0; i < 2; i++ {
+		if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
+			t.Fatalf("submit %d should succeed (buffer not full yet), got %v", i, err)
+		}
+	}
+	// Third submit overflows the size-2 buffer.
+	err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}})
+	if !errors.Is(err, ErrInboundFull) {
+		t.Fatalf("expected ErrInboundFull on overflow, got %v", err)
+	}
+}
+
+// TestWorkerRunDrainsInboundDispatch verifies the Run loop drains a dispatched
+// task onto the shared pool and executes it with the owner metadata threaded
+// through the execution context (so the executor would select the owner sink).
+func TestWorkerRunDrainsInboundDispatch(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var gotMeta dispatchMeta
+	var sawMeta bool
+	executed := make(chan struct{}, 1)
+
+	// Claimer returns no pull-path work, so the only execution is the dispatched
+	// task drained from the inbound channel.
+	w := NewWorker(&sequenceClaimer{}, NewPool(2), 50*time.Millisecond,
+		func(ec context.Context, task *models.TaskRun) {
+			gotMeta, sawMeta = dispatchMetaFrom(ec)
+			executed <- struct{}{}
+			cancel()
+		}).WithInboundDispatch("tok")
+
+	meta := dispatch.InboundDispatch{
+		Task:            &models.TaskRun{ID: uuid.New(), TaskID: uuid.New(), JobRunID: uuid.New()},
+		OwnerBaseURL:    "http://10.0.0.1:8080",
+		OwnerGeneration: 9,
+		Attempt:         2,
+		WorkerNode:      "10.0.0.5:9001",
+	}
+	if err := w.SubmitDispatched(meta); err != nil {
+		t.Fatalf("SubmitDispatched failed: %v", err)
+	}
+
+	if err := w.Run(ctx); err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+
+	select {
+	case <-executed:
+	default:
+		t.Fatal("dispatched task was never executed")
+	}
+	if !sawMeta {
+		t.Fatal("executor did not receive dispatch metadata via context")
+	}
+	if gotMeta.OwnerBaseURL != "http://10.0.0.1:8080" || gotMeta.OwnerGeneration != 9 || gotMeta.Attempt != 2 || gotMeta.WorkerNode != "10.0.0.5:9001" {
+		t.Fatalf("dispatch metadata mismatch in executor context: %+v", gotMeta)
+	}
+	if gotMeta.Token != "tok" {
+		t.Fatalf("expected completion token 'tok' threaded onto meta, got %q", gotMeta.Token)
+	}
+}
+
+// TestWorkerRunDrainsInboundAndClaimNext verifies both paths share the pool:
+// a dispatched task and a ClaimNext'd task both execute.
+func TestWorkerRunDrainsInboundAndClaimNext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	var executed int32
+	claimer := &sequenceClaimer{
+		responses: []claimerResponse{
+			{task: &models.TaskRun{ID: uuid.New()}}, // pull-path task
+		},
+	}
+	w := NewWorker(claimer, NewPool(2), 50*time.Millisecond,
+		func(_ context.Context, _ *models.TaskRun) {
+			if atomic.AddInt32(&executed, 1) == 2 {
+				cancel()
+			}
+		}).WithInboundDispatch("tok")
+
+	// Enqueue one dispatched task; ClaimNext yields one pull-path task.
+	if err := w.SubmitDispatched(dispatch.InboundDispatch{Task: &models.TaskRun{ID: uuid.New()}}); err != nil {
+		t.Fatalf("SubmitDispatched failed: %v", err)
+	}
+
+	if err := w.Run(ctx); err != nil {
+		t.Fatalf("worker run failed: %v", err)
+	}
+	if got := atomic.LoadInt32(&executed); got != 2 {
+		t.Fatalf("expected 2 executed tasks (1 dispatched + 1 ClaimNext'd), got %d", got)
 	}
 }
