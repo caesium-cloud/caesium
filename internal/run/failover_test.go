@@ -25,9 +25,9 @@ func TestFailover_TakeoverAndResume(t *testing.T) {
 	ls := NewLeaseStore(db)
 	store := NewStore(db).WithLeaseStore(ls)
 
+	// seedTwoTaskRun leaves root a claimed by node-A and successor b unclaimed,
+	// matching the real pre-dispatch state (b is only claimed once a completes).
 	runID, a, b := seedTwoTaskRun(t, db, store, "node-A")
-	// Both rows start claimed by node-A (HandleDispatch would set this on dispatch).
-	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ?", runID).Update("claimed_by", "node-A").Error)
 
 	cfg := CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3}
 
@@ -42,11 +42,13 @@ func TestFailover_TakeoverAndResume(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uuid.UUID{b}, resA.Ready, "completing a readies b (and writes a checkpoint at Events=1)")
 
-	// b is dispatched and in-flight on A when A crashes: mark its DB row running.
+	// b is dispatched and in-flight on A when A crashes.  Claim it through the
+	// real dispatch path (not a raw UPDATE) so its row carries owner_generation=1.
+	// That is the realistic state that stalled failover before the generation
+	// fence was fixed: a new owner at generation 2 could not re-claim a row a dead
+	// predecessor had stamped at generation 1.
 	mgrA.MarkDispatched(runID, b, "node-A", 1, 0)
-	require.NoError(t, db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, b).
-		Updates(map[string]interface{}{"status": string(TaskStatusRunning), "claimed_by": "node-A"}).Error)
+	require.NoError(t, store.ClaimTaskForDispatch(runID, b, "node-A", 1, time.Minute, true))
 
 	// --- Owner A dies: expire its lease ---
 	require.NoError(t, db.Model(&models.RunLease{}).

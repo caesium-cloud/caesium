@@ -717,10 +717,13 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 //
 // The ownerGeneration argument is stamped onto owner_generation so subsequent
 // coordination writes can fence against a stale owner.  The WHERE clause
-// includes `AND (owner_generation = ? OR owner_generation = 0)` so the
-// migration-safe path holds: pre-Phase-2A rows with implicit generation 0 are
-// claimable by any owner; rows already stamped by a prior owner are only
-// re-claimable when the generation matches the current lease.
+// includes `AND owner_generation <= ?` to encode the monotonic-generation
+// invariant: a row last touched by the current owner or any *older* generation
+// is claimable (this covers pre-Phase-2A rows at implicit generation 0, normal
+// re-claims at the same generation, and — critically — failover, where a new
+// owner at generation N+1 must re-claim an in-flight task its predecessor
+// stamped at generation N).  A row stamped by a *newer* generation means the
+// claimer is itself stale, so the claim is rejected.
 //
 // Returns ErrTaskClaimMismatch if the task was not in the expected state
 // (already claimed, wrong status, wrong run, stale generation).  The caller
@@ -742,9 +745,9 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			// in memory and did NOT decrement the DB counter, so the dispatched
 			// successor still shows outstanding>0 here — trustOwnerReadiness drops
 			// the predecessor check so the claim reflects the owner's decision.
-			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)"
+			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ?"
 			if trustOwnerReadiness {
-				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND (owner_generation = ? OR owner_generation = 0)"
+				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ?"
 			}
 			result := tx.Model(&models.TaskRun{}).
 				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration).
