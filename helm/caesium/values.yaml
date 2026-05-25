@@ -59,6 +59,19 @@ ingress:
           pathType: Prefix
   tls: []
 
+# Extra volumes / mounts on the caesium container. Used, for example, to mount
+# the internal mTLS material (CA/cert/key) from a Secret for run-owner mode:
+#   extraVolumes:
+#     - name: internal-mtls
+#       secret:
+#         secretName: caesium-internal-mtls
+#   extraVolumeMounts:
+#     - name: internal-mtls
+#       mountPath: /etc/caesium/mtls
+#       readOnly: true
+extraVolumes: []
+extraVolumeMounts: []
+
 resources: {}
   # requests:
   #   cpu: 100m

@@ -31,6 +31,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
@@ -65,6 +66,10 @@ func (f PeerListerFunc) DispatchPeers(ctx context.Context) ([]string, error) {
 // GetLease pattern as the owned set grows.
 type OwnerReader interface {
 	OwnedRunsWithGenerations(ctx context.Context, ownerNode string) (map[uuid.UUID]int64, error)
+	// AcquireExpiredLeases takes over leases whose owner let them expire,
+	// reassigning them to ownerNode with an incremented generation.  Used by the
+	// in-memory failover sweep so a peer recovers a dead owner's runs.
+	AcquireExpiredLeases(ctx context.Context, newOwner string, ttl time.Duration) (int64, error)
 }
 
 // peer pairs a peer's canonical node identity (host:dqlitePort — matches the
@@ -88,8 +93,13 @@ type DispatchLoopConfig struct {
 	// as the identity for OwnedRuns and included in the round-robin peer list.
 	NodeID string
 	// APIPort is the HTTP API port (CAESIUM_PORT).  Used to build the dispatch
-	// URL from peer node addresses.
+	// URL from peer node addresses when InternalPort is unset (tests / non-mTLS).
 	APIPort int
+	// InternalPort is the dedicated internal mTLS listener port
+	// (CAESIUM_INTERNAL_PORT).  When > 0, peer and owner base URLs are built as
+	// https://host:InternalPort so dispatch/complete traffic flows over the
+	// mutually-authenticated internal listener instead of the public API port.
+	InternalPort int
 	// Token is the CAESIUM_INTERNAL_WAKEUP_TOKEN bearer token.
 	Token string
 	// Interval is the polling tick interval (CAESIUM_RUN_OWNER_DISPATCH_INTERVAL).
@@ -100,6 +110,9 @@ type DispatchLoopConfig struct {
 	// Deadline is added to time.Now() to produce the DispatchRequest.Deadline
 	// (CAESIUM_RUN_OWNER_DISPATCH_DEADLINE).
 	Deadline time.Duration
+	// LeaseTTL is the run-lease TTL (CAESIUM_RUN_LEASE_TTL), used as the new
+	// expiry when this node takes over an expired lease in the failover sweep.
+	LeaseTTL time.Duration
 	// LeaseStore provides ownership queries.
 	LeaseStore OwnerReader
 	// Store provides pending-task queries.
@@ -112,6 +125,11 @@ type DispatchLoopConfig struct {
 	// mux server. Production leaves it nil and the loop falls back to the
 	// default (build URL from APIPort).
 	PeerBaseURL func(nodeAddr string) string
+	// OwnerManager, when set (CAESIUM_RUN_OWNER_IN_MEMORY=true), is the source of
+	// truth for ready tasks: the loop dispatches from the in-memory ready queue
+	// and records dispatches/recoveries on it, instead of polling the DB for
+	// pending tasks.  Nil keeps the proven B2 DB-poll path.
+	OwnerManager *run.OwnerManager
 }
 
 // DispatchLoop is the per-node push-dispatch goroutine for Phase A2.
@@ -183,6 +201,19 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		return
 	}
 
+	// 1b. Failover sweep (in-memory mode only): take over any lease whose owner
+	//     let it expire, so a dead owner's runs get a live owner that recovers
+	//     and resumes them.  In SQL mode, ClaimNext recovery handles this instead.
+	if l.cfg.OwnerManager != nil {
+		if n, takeErr := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL); takeErr != nil {
+			if ctx.Err() == nil {
+				log.Warn("dispatch loop: expired-lease takeover failed", "error", takeErr)
+			}
+		} else if n > 0 {
+			log.Info("dispatch loop: took over expired run leases", "count", n, "new_owner", l.cfg.NodeID)
+		}
+	}
+
 	// 2. Find runs this node owns AND their current generation in one query
 	//    (avoids the N+1 GetLease pattern as the owned set grows).
 	ownedRuns, err := l.cfg.LeaseStore.OwnedRunsWithGenerations(ctx, l.cfg.NodeID)
@@ -210,6 +241,13 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 // Each task's PostDispatch fires in a worker goroutine bounded by BatchSize/4
 // (capped at 16) so slow or unreachable workers don't serialise the tick.
 func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+	// In-memory mode: dispatch from the owner's RunState ready queue rather than
+	// polling the DB.  Adopt-or-recover the run lazily on first sight.
+	if l.cfg.OwnerManager != nil {
+		l.dispatchRunInMemory(ctx, runID, generation, peers)
+		return
+	}
+
 	tasks, err := l.cfg.Store.PendingTasksForDispatch(ctx, runID, l.cfg.BatchSize)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -271,6 +309,64 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 	wg.Wait()
 }
 
+// dispatchRunInMemory dispatches a run's ready tasks from the owner's in-memory
+// RunState.  It lazily adopts/recovers the run on first sight (Recover handles
+// both a freshly-created run — no checkpoint, fresh state — and a takeover —
+// replay from checkpoint + terminal tail, re-queuing lost in-flight work).
+func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID, generation int64, peers []peer) {
+	mgr := l.cfg.OwnerManager
+	if !mgr.Owns(runID) {
+		if _, err := mgr.Recover(runID, generation); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Warn("dispatch loop: owner recover failed", "run_id", runID, "error", err)
+			return
+		}
+	}
+
+	ready := mgr.ReadyForDispatch(runID)
+	if len(ready) == 0 {
+		return
+	}
+	if len(ready) > l.cfg.BatchSize {
+		ready = ready[:l.cfg.BatchSize]
+	}
+
+	const maxConcurrent = 16
+	concurrency := len(ready)
+	if concurrency > maxConcurrent {
+		concurrency = maxConcurrent
+	}
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for _, dt := range ready {
+		if ctx.Err() != nil {
+			break
+		}
+		idx := l.counter.Add(1) - 1
+		p := peers[idx%uint64(len(peers))]
+		req := DispatchRequest{
+			RunID:           runID,
+			TaskID:          dt.TaskID,
+			OwnerGeneration: generation,
+			Attempt:         dt.Attempt,
+			WorkerNode:      p.nodeID,
+			OwnerBaseURL:    l.ownerBaseURL,
+			Deadline:        time.Now().UTC().Add(l.cfg.Deadline),
+		}
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(p peer, req DispatchRequest) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			l.postOne(ctx, runID, p, req)
+		}(p, req)
+	}
+	wg.Wait()
+}
+
 // postOne does the actual HTTP call + metric/log accounting for one dispatch.
 func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest) {
 	dispatchURL := p.baseURL + "/internal/dispatch"
@@ -298,6 +394,12 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		return
 	}
 	metrics.DispatchSentTotal.Inc()
+	// In-memory mode: record the dispatch in the owner's RunState so the task
+	// leaves the ready queue and becomes running (re-dispatched on lease expiry).
+	if l.cfg.OwnerManager != nil {
+		leaseMs := time.Now().Add(l.cfg.Deadline).UnixMilli()
+		l.cfg.OwnerManager.MarkDispatched(runID, req.TaskID, p.nodeID, req.Attempt, leaseMs)
+	}
 	log.Debug("dispatch loop: task dispatched",
 		"run_id", runID,
 		"task_id", req.TaskID,
@@ -351,8 +453,12 @@ func (l *DispatchLoop) nodeAddrToBaseURL(nodeAddr string) string {
 	if host == "" || strings.HasPrefix(host, "@") {
 		return ""
 	}
+	scheme, port := "http", l.cfg.APIPort
+	if l.cfg.InternalPort > 0 {
+		scheme, port = "https", l.cfg.InternalPort
+	}
 	return (&url.URL{
-		Scheme: "http",
-		Host:   net.JoinHostPort(host, strconv.Itoa(l.cfg.APIPort)),
+		Scheme: scheme,
+		Host:   net.JoinHostPort(host, strconv.Itoa(port)),
 	}).String()
 }

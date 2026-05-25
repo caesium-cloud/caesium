@@ -53,6 +53,19 @@ func IsTerminalSuccess(status TaskStatus) bool {
 	return status == TaskStatusSucceeded || status == TaskStatusCached
 }
 
+// IsTerminal reports whether a task status is terminal — the task will not
+// transition again.  This is the single definition of the terminal vocabulary
+// (succeeded, failed, skipped, cached), reused by owner replay, the recovery
+// scan, and archival so the set lives in exactly one place.
+func IsTerminal(status TaskStatus) bool {
+	switch status {
+	case TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached:
+		return true
+	default:
+		return false
+	}
+}
+
 type CallbackStatus string
 
 const (
@@ -713,7 +726,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 // (already claimed, wrong status, wrong run, stale generation).  The caller
 // should fall back to writing the task with claimed_by="" and letting
 // ClaimNext pick it up.
-func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration) error {
+func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string, ownerGeneration int64, leaseTTL time.Duration, trustOwnerReadiness bool) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
@@ -723,9 +736,18 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			now := time.Now().UTC()
 			leaseExpiry := now.Add(leaseTTL)
 
+			// The owner is authoritative for readiness.  In SQL mode the owner
+			// dispatches only outstanding_predecessors=0 tasks, so the check is a
+			// redundant safety net.  In in-memory mode the owner advanced the DAG
+			// in memory and did NOT decrement the DB counter, so the dispatched
+			// successor still shows outstanding>0 here — trustOwnerReadiness drops
+			// the predecessor check so the claim reflects the owner's decision.
+			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)"
+			if trustOwnerReadiness {
+				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND (owner_generation = ? OR owner_generation = 0)"
+			}
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (owner_generation = ? OR owner_generation = 0)",
-					runID, taskID, string(TaskStatusPending), ownerGeneration).
+				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration).
 				Updates(map[string]interface{}{
 					"status":           string(TaskStatusRunning),
 					"claimed_by":       workerNode,
@@ -1691,6 +1713,177 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 	return skippedTaskIDs, err
 }
 
+// CompleteTaskOwner is the run-owner in-memory path's durable terminal write.
+// The owner has already advanced the DAG in memory (run.RunState), so this only
+// persists terminal rows — it does NOT decrement predecessors, evaluate trigger
+// rules, or resolve branches in SQL.  It writes the completed task's terminal
+// row (succeeded/failed) plus each owner-decided skip, stamping terminal_sequence
+// and owner_generation so a recovering owner can replay in order.  Claim-fenced
+// by claimedBy.  Cache-hit completions are not handled here (they remain on the
+// CacheHitTaskClaimed path); the owner routes only succeeded/failed through this.
+func (s *Store) CompleteTaskOwner(
+	runID, taskID uuid.UUID,
+	status TaskStatus,
+	result, errMsg, claimedBy string,
+	output map[string]string,
+	branchSelections []string,
+	completedSeq, ownerGen int64,
+	skips []SkippedTask,
+) error {
+	var pendingEvents []event.Event
+	var counts dbWriteCounts
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		attemptEvents := make([]event.Event, 0, 8+len(skips))
+
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			now := time.Now().UTC()
+
+			// Metrics for the completed task (mirrors completeTask).
+			var taskRun models.TaskRun
+			tq := tx.Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy)
+			if err := tq.First(&taskRun).Error; err == nil {
+				var jobRun models.JobRun
+				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
+					jobID := jobRun.JobID.String()
+					engine := string(taskRun.Engine)
+					metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
+					if taskRun.StartedAt != nil {
+						metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).
+							Observe(now.Sub(*taskRun.StartedAt).Seconds())
+					}
+				}
+			} else if errors.Is(err, gorm.ErrRecordNotFound) {
+				return ErrTaskClaimMismatch
+			}
+
+			updates := map[string]interface{}{
+				"status":            string(status),
+				"completed_at":      now,
+				"result":            result,
+				"terminal_sequence": completedSeq,
+				"owner_generation":  ownerGen,
+				"cache_hit":         status == TaskStatusCached,
+			}
+			if len(output) > 0 {
+				encoded, mErr := json.Marshal(output)
+				if mErr != nil {
+					return fmt.Errorf("marshalling task output: %w", mErr)
+				}
+				updates["output"] = encoded
+			}
+			if len(branchSelections) > 0 {
+				encoded, mErr := json.Marshal(branchSelections)
+				if mErr != nil {
+					return fmt.Errorf("marshalling branch selections: %w", mErr)
+				}
+				updates["branch_selections"] = encoded
+			}
+			if status == TaskStatusFailed {
+				if errMsg != "" {
+					updates["error"] = errMsg
+				} else {
+					updates["error"] = failureMessage(result)
+				}
+			}
+
+			res := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy).
+				Updates(updates)
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				return ErrTaskClaimMismatch
+			}
+			counts.addTaskRunStatus(1)
+
+			if s.eventStore != nil {
+				evtType := event.TypeTaskSucceeded
+				if status == TaskStatusFailed {
+					evtType = event.TypeTaskFailed
+				}
+				evt, err := s.recordTaskEventTx(tx, evtType, runID, taskID, &counts)
+				if err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, *evt)
+			}
+
+			// Persist owner-decided skips (branch + trigger-rule), each stamped
+			// with its own terminal_sequence.  RunState already enumerated the
+			// full transitive skip set, so this writes them directly without
+			// re-walking descendants.
+			for _, sk := range skips {
+				skRes := tx.Model(&models.TaskRun{}).
+					Where("job_run_id = ? AND task_id = ?", runID, sk.TaskID).
+					Where("status NOT IN ?", terminalStatusStrings()).
+					Updates(map[string]interface{}{
+						"status":            string(TaskStatusSkipped),
+						"completed_at":      now,
+						"error":             sk.Reason,
+						"terminal_sequence": sk.TerminalSequence,
+						"owner_generation":  ownerGen,
+					})
+				if skRes.Error != nil {
+					return skRes.Error
+				}
+				if skRes.RowsAffected == 0 {
+					continue // already terminal; nothing to emit
+				}
+				counts.addTaskRunStatus(1)
+				if s.eventStore != nil {
+					evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, sk.TaskID, &counts)
+					if err != nil {
+						return err
+					}
+					attemptEvents = append(attemptEvents, *evt)
+				}
+			}
+			return nil
+		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
+		}
+		return txErr
+	})
+	if err == nil {
+		counts.commit()
+		s.publishEvents(pendingEvents...)
+	}
+	return err
+}
+
+// failureMessage maps a failure result string to a human-readable error, matching
+// the messages completeTask writes.
+func failureMessage(result string) string {
+	switch Result(result) {
+	case "failure":
+		return "command exited with non-zero status"
+	case "startup_failure":
+		return "atom failed to start (check image/command)"
+	case "resource_failure":
+		return "atom exhausted resources (e.g. OOM)"
+	case "killed":
+		return "atom was forcefully killed"
+	case "terminated":
+		return "atom was gracefully terminated"
+	default:
+		return result
+	}
+}
+
+// terminalStatusStrings returns the terminal task statuses as strings for SQL IN
+// clauses.
+func terminalStatusStrings() []string {
+	return []string{
+		string(TaskStatusSucceeded),
+		string(TaskStatusFailed),
+		string(TaskStatusSkipped),
+		string(TaskStatusCached),
+	}
+}
+
 // skipTaskAndDescendantsTx marks a task and all its transitive descendants as
 // skipped within the given transaction. Descendants are only skipped once all
 // of their predecessors are terminal and their trigger rules remain
@@ -1990,6 +2183,11 @@ func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
 	return err
 }
 
+// errRunAlreadyTerminal is an internal sentinel: Complete's idempotency guard
+// returns it when the run is already in a terminal status, so the caller treats
+// the call as a successful no-op rather than re-emitting completion events.
+var errRunAlreadyTerminal = errors.New("run already terminal")
+
 func (s *Store) Complete(runID uuid.UUID, result error) error {
 	now := time.Now().UTC()
 	status := StatusSucceeded
@@ -2019,14 +2217,23 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			attemptStartedAt time.Time
 		)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
-			if err := tx.Model(&models.JobRun{}).
-				Where("id = ?", runID).
+			// Idempotency guard: skip if the run is already terminal.  Run-owner
+			// in-memory mode can finalize a run from the owner (on takeover) and
+			// from the triggering node's waitForRunCompletion; this keeps the
+			// second call a no-op so run_completed/run_failed events fire once.
+			res := tx.Model(&models.JobRun{}).
+				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed)}).
 				Updates(map[string]interface{}{
 					"status":       string(status),
 					"completed_at": now,
 					"error":        errMsg,
-				}).Error; err != nil {
-				return err
+				})
+			if res.Error != nil {
+				return res.Error
+			}
+			if res.RowsAffected == 0 {
+				// Already finalized by another path; nothing more to do.
+				return errRunAlreadyTerminal
 			}
 
 			// Read jobID + startedAt inside the same retried transaction so the
@@ -2087,6 +2294,11 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		}
 		return txErr
 	})
+	if errors.Is(err, errRunAlreadyTerminal) {
+		// Run was already finalized by another path (idempotent no-op): no
+		// events, metrics, or gauge bookkeeping to repeat.
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -2116,7 +2328,12 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
 		Updates(map[string]interface{}{
-			"status":              string(TaskStatusPending),
+			"status": string(TaskStatusPending),
+			// Clear the claim too, so a new owner taking over a run can re-claim
+			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
+			// owner's worker that held the claim is gone (its lease expired).
+			"claimed_by":          "",
+			"claim_expires_at":    nil,
 			"runtime_id":          "",
 			"started_at":          nil,
 			"cache_hit":           false,

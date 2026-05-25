@@ -17,12 +17,14 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -60,10 +62,38 @@ var ErrOwnerBusy = errors.New("owner busy: retryable")
 // across requests so we don't pay connection setup on every dispatch.
 // The per-call timeout is enforced via context.WithTimeout, not on the
 // client itself, so callers can extend it if their workload needs it.
-// Phase B will swap the Transport for one configured with mTLS material
-// (CAESIUM_INTERNAL_MTLS_*); the rest of the call sites stay the same.
+// ConfigureInternalMTLS swaps in a TLS-enabled transport at startup when
+// run-owner mode is on; the call sites stay the same.
 var internalClient = &http.Client{
 	Timeout: 30 * time.Second,
+}
+
+// dispatchPostTimeout bounds a single /internal/dispatch POST so an unreachable
+// peer fails fast instead of stalling the dispatch loop (the task is simply
+// retried next tick against another peer).
+const dispatchPostTimeout = 4 * time.Second
+
+// configureMTLSOnce ensures the shared internal client is swapped for its
+// TLS-enabled form exactly once, even if ConfigureInternalMTLS is called from
+// multiple goroutines (e.g. concurrent tests) — avoiding a data race on the
+// package-level internalClient.
+var configureMTLSOnce sync.Once
+
+// ConfigureInternalMTLS replaces the shared internal client with one that
+// presents this node's client certificate and verifies peers against the
+// configured CA.  Called once at startup when run-owner mode is enabled, before
+// any dispatch or completion POST is issued.  Subsequent calls are no-ops.  Peer
+// internal endpoints are reached over https on the internal port (see
+// DispatchLoopConfig.InternalPort).
+func ConfigureInternalMTLS(clientTLS *tls.Config) {
+	configureMTLSOnce.Do(func() {
+		internalClient = &http.Client{
+			Timeout: 30 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: clientTLS,
+			},
+		}
+	})
 }
 
 // ValidCompleteStatuses are the only task statuses workers may report.
@@ -162,6 +192,10 @@ type Handler struct {
 	// (worker disabled on this node), HandleDispatch cannot execute the task and
 	// rolls back the claim so the owner re-dispatches elsewhere.
 	submitter WorkerSubmitter
+	// ownerManager, when set (CAESIUM_RUN_OWNER_IN_MEMORY=true), routes
+	// completions through the in-memory DAG state instead of the SQL-advancement
+	// path.  Nil keeps the proven B2 path.
+	ownerManager *run.OwnerManager
 }
 
 // NewHandler constructs a Handler.  store is the run.Store; leaseStore is the
@@ -181,6 +215,14 @@ func NewHandler(store *run.Store, leaseStore *run.LeaseStore, nodeID, token stri
 // the handler for chaining at construction time.
 func (h *Handler) WithWorkerSubmitter(s WorkerSubmitter) *Handler {
 	h.submitter = s
+	return h
+}
+
+// WithOwnerManager enables the in-memory advancement path: completions are
+// applied to the owner's RunState and persisted as terminal-only rows, instead
+// of the SQL-advancement path.  Returns the handler for chaining.
+func (h *Handler) WithOwnerManager(m *run.OwnerManager) *Handler {
+	h.ownerManager = m
 	return h
 }
 
@@ -258,7 +300,11 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// ClaimTaskForDispatch transitions pending→running with claimed_by=nodeID
 	// in one UPDATE (equivalent to ClaimNext but targeting a specific task),
 	// stamping owner_generation so subsequent writes fence against takeover.
-	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl); err != nil {
+	// In in-memory mode the owner advanced the DAG in memory (the DB's
+	// outstanding_predecessors counter is intentionally stale), so trust the
+	// owner's readiness decision rather than re-checking it here.
+	trustOwnerReadiness := h.ownerManager != nil
+	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
 		if err == run.ErrTaskClaimMismatch {
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonTaskNotRunning,
@@ -416,6 +462,43 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Run-owner in-memory path: when enabled and this node holds the run's
+	// in-memory state, advance the DAG in memory and persist terminal-only rows
+	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
+	// falls through to the SQL path below as a safety net.
+	if h.ownerManager != nil {
+		res, omErr := h.ownerManager.Complete(
+			req.RunID, req.TaskID, run.TaskStatus(req.Status),
+			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections,
+		)
+		if omErr != nil {
+			if dqlite.IsContentionError(omErr) {
+				h.rejectRetryable(w, req, omErr)
+				return
+			}
+			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
+				metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
+				writeJSON(w, http.StatusConflict, ErrorResponse{
+					Code:    ReasonWrongWorker,
+					Message: "task claimed_by mismatch or task not in running state",
+				})
+				return
+			}
+			log.Error("complete: owner-manager apply failed",
+				"run_id", req.RunID, "task_id", req.TaskID, "status", req.Status, "error", omErr)
+			writeJSON(w, http.StatusConflict, ErrorResponse{
+				Code:    ReasonTaskNotRunning,
+				Message: "failed to apply task completion",
+			})
+			return
+		}
+		if res.Owned {
+			writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
+			return
+		}
+		// Not tracked in memory here — fall through to the SQL path.
+	}
+
 	// Rules 3 & 4 are enforced by the ClaimNext-path functions via
 	// claimed_by check (ErrTaskClaimMismatch) and status == "running"
 	// implicit in the update query.  We pass workerNode as the claimedBy
@@ -522,7 +605,14 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 		return false, fmt.Errorf("dispatch: marshal: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+	// Fail fast on an unreachable peer: a dispatch is cheap to retry on the next
+	// tick (to a different peer), so a dead node in the round-robin must not hang
+	// the loop for the client's full 30s timeout — critical during failover, when
+	// the just-crashed owner can still be in the peer list.
+	dialCtx, cancel := context.WithTimeout(ctx, dispatchPostTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(dialCtx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
 		return false, fmt.Errorf("dispatch: new request: %w", err)
 	}
@@ -578,24 +668,12 @@ func PostComplete(ctx context.Context, ownerURL, token string, req CompleteReque
 	return nil, fmt.Errorf("complete: owner returned status %d", resp.StatusCode)
 }
 
-// WarnIfNoMTLS emits a startup warning when owner mode is on but no mTLS
-// material is configured.  Phase B will turn this into a hard error.
-func WarnIfNoMTLS() {
-	// Phase A: mTLS is recommended, not required.  Log a warning so operators
-	// know they should configure it before Phase B ships.
-	log.Warn(
-		"run-owner mode is enabled without mTLS material configured; " +
-			"this is not a supported configuration for production use. " +
-			"Phase B will require CAESIUM_INTERNAL_MTLS_CA, " +
-			"CAESIUM_INTERNAL_MTLS_CERT, and CAESIUM_INTERNAL_MTLS_KEY.",
-	)
-}
-
 // WarnIfNoToken emits a startup warning when owner mode is on but the
 // internal wakeup token is not set.  Without the token, the dispatch and
 // complete endpoints reject every request (bearer-token check fails closed),
 // so run-owner dispatch is silently inert — adding lease overhead with zero
-// benefit.  Mirrors WarnIfNoMTLS in tone and intent; warn-only for now.
+// benefit.  Warn-only: unlike the mTLS material (a hard startup error), a
+// missing token is recoverable by setting it without regenerating certs.
 func WarnIfNoToken(token string) {
 	if strings.TrimSpace(token) != "" {
 		return

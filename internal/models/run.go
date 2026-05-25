@@ -31,7 +31,7 @@ type JobRun struct {
 
 type TaskRun struct {
 	ID               uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
-	JobRunID         uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"job_run_id"`
+	JobRunID         uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
 	JobRun           JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	TaskID           uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
 	Task             Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
@@ -73,8 +73,16 @@ type TaskRun struct {
 	// includes AND (owner_generation = ? OR owner_generation = 0) in its WHERE
 	// clause — the OR = 0 keeps legacy rows (and flag-off rows) mutable by any
 	// node so the migration path stays gradual.  Defaults to 0.
-	OwnerGeneration int64      `gorm:"not null;default:0" json:"owner_generation,omitempty"`
-	StartedAt       *time.Time `json:"started_at,omitempty"`
+	OwnerGeneration int64 `gorm:"not null;default:0" json:"owner_generation,omitempty"`
+	// TerminalSequence is the per-run monotonic, dense sequence number stamped on
+	// a task_runs row when it reaches a terminal status under run-owner mode.  It
+	// shares a number space with run_checkpoints.sequence_high so failure
+	// recovery can replay "terminal rows since the last checkpoint" in a
+	// deterministic order (NOT wall-clock, which is skew-prone).  0 means
+	// "never stamped" (non-owner mode, or not yet terminal).  The composite index
+	// (job_run_id, terminal_sequence) makes the post-checkpoint tail scan cheap.
+	TerminalSequence int64      `gorm:"not null;default:0;index:idx_taskrun_terminal_seq,priority:2" json:"terminal_sequence,omitempty"`
+	StartedAt        *time.Time `json:"started_at,omitempty"`
 	CompletedAt     *time.Time `json:"completed_at,omitempty"`
 	CreatedAt       time.Time  `gorm:"not null" json:"created_at"`
 	UpdatedAt       time.Time  `gorm:"not null" json:"updated_at"`

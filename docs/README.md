@@ -46,6 +46,7 @@ These files are useful context, but each should be treated according to its stat
 - [load-baseline-phase2a2-2026-05-24.md](load-baseline-phase2a2-2026-05-24.md): Phase A2 dispatch loop measured; finds it races ClaimNext and loses — redirects strategy to Phase B.
 - [load-baseline-b1-2026-05-25.md](load-baseline-b1-2026-05-25.md): B0+B1 measured; deferral works but exposes the push path never executes dispatched tasks — reshapes Phase B around the execution cycle.
 - [load-baseline-b2-2026-05-24.md](load-baseline-b2-2026-05-24.md): Phase B2 dispatch→execute→complete cycle; 0/10 → stable 10/10 after hardening the completion and run-start paths against transient dqlite contention.
+- [load-baseline-b3-2026-05-25.md](load-baseline-b3-2026-05-25.md): Phase B3 in-memory owner state + checkpoint/replay + internal mTLS; in-memory advancement verified 10/10 (single + 3-node) after fixing the claim/predecessor stall; failover mechanism proven, owner-crash end-to-end still flaky under sandbox voter loss.
 
 ## Historical Notes
 

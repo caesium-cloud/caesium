@@ -14,7 +14,6 @@ import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
 	"github.com/caesium-cloud/caesium/internal/auth"
-	"github.com/caesium-cloud/caesium/internal/dispatch"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -26,7 +25,12 @@ import (
 type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
 
 // Start launches Caesium's API.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, wakeupHandler InternalWakeupHandler, dispatchHandler ...*dispatch.Handler) error {
+//
+// The run-owner coordination endpoints (/internal/dispatch, /internal/complete)
+// are deliberately NOT served here — they live on a dedicated mutually
+// authenticated TLS listener (see dispatch.InternalServer) so the public API
+// can remain plain HTTP behind the operator's proxy.
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, wakeupHandler InternalWakeupHandler) error {
 	e := echo.New()
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
@@ -35,21 +39,6 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	e.GET("/health", Health)
 	e.GET("/auth/status", authStatus(vars))
 	registerInternalWakeup(e, vars, wakeupHandler)
-
-	// Phase 2: run-owner dispatch and complete endpoints.
-	// These are registered only when a dispatch.Handler is provided
-	// (i.e., CAESIUM_RUN_OWNER_ENABLED=true).
-	if len(dispatchHandler) > 0 && dispatchHandler[0] != nil {
-		dh := dispatchHandler[0]
-		e.POST("/internal/dispatch", func(c *echo.Context) error {
-			dh.HandleDispatch(c.Response(), c.Request())
-			return nil
-		})
-		e.POST("/internal/complete", func(c *echo.Context) error {
-			dh.HandleComplete(c.Response(), c.Request())
-			return nil
-		})
-	}
 
 	// metrics
 	e.Use(echoprometheus.NewMiddleware("caesium"))

@@ -159,11 +159,17 @@ spec:
               mountPath: /etc/caesium
             - name: data
               mountPath: /var/lib/caesium/dqlite
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
         - name: peer-config
           emptyDir: {}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         - name: peer-discovery-script
           configMap:
             name: {{ include "caesium.peerConfigName" . }}
