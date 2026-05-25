@@ -179,4 +179,13 @@ type Environment struct {
 	InternalMTLSCA   string `envconfig:"INTERNAL_MTLS_CA" default:""`
 	InternalMTLSCert string `envconfig:"INTERNAL_MTLS_CERT" default:""`
 	InternalMTLSKey  string `envconfig:"INTERNAL_MTLS_KEY" default:""`
+
+	// Run-owner checkpointing (Phase 2 B3).  The owner persists an in-memory
+	// state checkpoint whichever comes first of RUN_CHECKPOINT_EVENTS terminal
+	// transitions or RUN_CHECKPOINT_INTERVAL elapsed.  RUN_CHECKPOINT_FULL_EVERY
+	// is the number of checkpoints between full snapshots (intervening ones are
+	// deltas); v1 writes full snapshots only, so it is currently advisory.
+	RunCheckpointEvents    int           `envconfig:"RUN_CHECKPOINT_EVENTS" default:"100"`
+	RunCheckpointInterval  time.Duration `envconfig:"RUN_CHECKPOINT_INTERVAL" default:"2s"`
+	RunCheckpointFullEvery int           `envconfig:"RUN_CHECKPOINT_FULL_EVERY" default:"10"`
 }
