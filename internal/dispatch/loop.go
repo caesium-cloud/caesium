@@ -182,6 +182,24 @@ func (l *DispatchLoop) Run(ctx context.Context) {
 // tick executes one dispatch sweep: discover peers, find owned runs with ready
 // tasks, and POST a DispatchRequest for each task up to BatchSize.
 func (l *DispatchLoop) tick(ctx context.Context) {
+	// 0. Failover sweep (in-memory mode only): take over any lease whose owner
+	//    let it expire, so a dead owner's runs get a live owner that recovers and
+	//    resumes them.  This runs FIRST, before peer discovery — taking over a
+	//    lease is a catalog write independent of cluster membership, and peer
+	//    discovery is exactly what fails during the dqlite quorum disruption an
+	//    owner crash causes.  Gating takeover behind it would mean the very event
+	//    that needs failover also blocks it.  In SQL mode, ClaimNext recovery
+	//    handles this instead.
+	if l.cfg.OwnerManager != nil {
+		if n, takeErr := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL); takeErr != nil {
+			if ctx.Err() == nil {
+				log.Warn("dispatch loop: expired-lease takeover failed", "error", takeErr)
+			}
+		} else if n > 0 {
+			log.Info("dispatch loop: took over expired run leases", "count", n, "new_owner", l.cfg.NodeID)
+		}
+	}
+
 	// 1. Discover peers (includes self).
 	rawPeers, err := l.cfg.Peers.DispatchPeers(ctx)
 	if err != nil {
@@ -199,19 +217,6 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 	if len(peers) == 0 {
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
-	}
-
-	// 1b. Failover sweep (in-memory mode only): take over any lease whose owner
-	//     let it expire, so a dead owner's runs get a live owner that recovers
-	//     and resumes them.  In SQL mode, ClaimNext recovery handles this instead.
-	if l.cfg.OwnerManager != nil {
-		if n, takeErr := l.cfg.LeaseStore.AcquireExpiredLeases(ctx, l.cfg.NodeID, l.cfg.LeaseTTL); takeErr != nil {
-			if ctx.Err() == nil {
-				log.Warn("dispatch loop: expired-lease takeover failed", "error", takeErr)
-			}
-		} else if n > 0 {
-			log.Info("dispatch loop: took over expired run leases", "count", n, "new_owner", l.cfg.NodeID)
-		}
 	}
 
 	// 2. Find runs this node owns AND their current generation in one query
