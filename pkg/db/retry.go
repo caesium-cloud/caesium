@@ -12,15 +12,20 @@ import (
 )
 
 // retryBusyBackoffs schedules retries for transient dqlite/SQLite contention on
-// single autocommit statements. Total max wait ~310ms across 5 retries, the
-// same schedule the per-transaction busy-retry helpers use so the layers
-// compose predictably under load.
+// single autocommit statements. Total max wait ~2.27s across 8 retries: the
+// budget must outlast worst-case transient write-lock windows, which under
+// burst catalog contention exceed a few hundred ms. Kept in step with the
+// per-transaction busy-retry helpers (internal/run, internal/backfill) so the
+// layers compose predictably under load.
 var retryBusyBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	20 * time.Millisecond,
 	40 * time.Millisecond,
 	80 * time.Millisecond,
 	160 * time.Millisecond,
+	320 * time.Millisecond,
+	640 * time.Millisecond,
+	1000 * time.Millisecond,
 }
 
 // retryConnPool is a gorm.ConnPool decorator that transparently retries a

@@ -26,15 +26,18 @@ var (
 )
 
 // busyRetryBackoffs schedules retries for transient dqlite/SQLite contention
-// errors. Total max wait ≈ 310ms across 5 retries — same schedule as
-// internal/run/store.go's withStoreBusyRetry, kept consistent so the two
-// retry loops compose predictably under load.
+// errors. Total max wait ≈ 2.27s across 8 retries — same schedule as
+// internal/run/store.go's withStoreBusyRetry and pkg/db/retry.go, kept
+// consistent so the retry loops compose predictably under load.
 var busyRetryBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	20 * time.Millisecond,
 	40 * time.Millisecond,
 	80 * time.Millisecond,
 	160 * time.Millisecond,
+	320 * time.Millisecond,
+	640 * time.Millisecond,
+	1000 * time.Millisecond,
 }
 
 func NewStore(conn *gorm.DB) *Store {
