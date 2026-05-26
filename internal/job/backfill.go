@@ -172,7 +172,45 @@ func RunBackfill(
 	sem := semaphore.NewWeighted(int64(maxConcurrent))
 	var wg sync.WaitGroup
 	var failCount atomic.Int64
+	var completed atomic.Int64
 	cancelled := false
+
+	// Coalesce per-run progress into periodic batched writes. One UPDATE per run
+	// on the same backfills row serializes through dqlite's single writer and can
+	// starve concurrent control-plane writes (e.g. cancellation) past the
+	// busy-retry budget. The flusher persists accumulated deltas ~once a second,
+	// with a final flush below, so the counters lag at most one interval during
+	// the run and are exact once it drains.
+	flushStop := make(chan struct{})
+	flusherDone := make(chan struct{})
+	go func() {
+		defer close(flusherDone)
+		const flushInterval = time.Second
+		ticker := time.NewTicker(flushInterval)
+		defer ticker.Stop()
+		var lastCompleted, lastFailed int64
+		flush := func() {
+			c, f := completed.Load(), failCount.Load()
+			dc, df := int(c-lastCompleted), int(f-lastFailed)
+			if dc == 0 && df == 0 {
+				return
+			}
+			if err := bStore.AddProgress(b.ID, dc, df); err != nil {
+				log.Error("backfill: failed to flush progress", "backfill_id", b.ID, "error", err)
+				return // keep last* so the delta retries on the next flush
+			}
+			lastCompleted, lastFailed = c, f
+		}
+		for {
+			select {
+			case <-flushStop:
+				flush()
+				return
+			case <-ticker.C:
+				flush()
+			}
+		}
+	}()
 
 	for _, d := range filtered {
 		if shouldStopBackfill(ctx, bStore, b.ID) {
@@ -201,9 +239,6 @@ func RunBackfill(
 			sem.Release(1)
 			log.Error("backfill: failed to create run", "backfill_id", b.ID, "logical_date", logicalDate, "error", err)
 			failCount.Add(1)
-			if incErr := bStore.IncrementFailed(b.ID); incErr != nil {
-				log.Error("backfill: failed to increment failed_runs", "backfill_id", b.ID, "error", incErr)
-			}
 			continue
 		}
 
@@ -221,19 +256,20 @@ func RunBackfill(
 				log.Error("backfill: run failed", "backfill_id", b.ID, "logical_date", ld, "run_id", id, "error", runErr)
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "failed").Inc()
 				failCount.Add(1)
-				if incErr := bStore.IncrementFailed(b.ID); incErr != nil {
-					log.Error("backfill: failed to increment failed_runs", "backfill_id", b.ID, "error", incErr)
-				}
 			} else {
 				metrics.BackfillRunsTotal.WithLabelValues(j.Alias, "succeeded").Inc()
-				if incErr := bStore.IncrementCompleted(b.ID); incErr != nil {
-					log.Error("backfill: failed to increment completed_runs", "backfill_id", b.ID, "error", incErr)
-				}
+				completed.Add(1)
 			}
 		}(runID, logicalDate)
 	}
 
 	wg.Wait()
+
+	// Stop the flusher and persist any remaining counts before the terminal
+	// status write, so completed_runs/failed_runs are exact once the backfill
+	// finishes.
+	close(flushStop)
+	<-flusherDone
 
 	if cancelled {
 		// Mark terminal cancellation only after the backfill has stopped

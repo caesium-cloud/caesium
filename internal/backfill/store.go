@@ -110,19 +110,27 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 	})
 }
 
-func (s *Store) IncrementCompleted(id uuid.UUID) error {
+// AddProgress applies accumulated run-completion counts to a backfill in a
+// single UPDATE. The executor batches per-run increments and flushes them
+// periodically: a large backfill otherwise issues one completed_runs/
+// failed_runs write per run, all on the same backfills row, which serialize
+// through dqlite's single writer and starve concurrent control-plane writes
+// (e.g. cancellation) past the busy-retry budget.
+func (s *Store) AddProgress(id uuid.UUID, completedDelta, failedDelta int) error {
+	if completedDelta == 0 && failedDelta == 0 {
+		return nil
+	}
+	updates := make(map[string]interface{}, 2)
+	if completedDelta != 0 {
+		updates["completed_runs"] = gorm.Expr("completed_runs + ?", completedDelta)
+	}
+	if failedDelta != 0 {
+		updates["failed_runs"] = gorm.Expr("failed_runs + ?", failedDelta)
+	}
 	return s.withBusyRetry(func() error {
 		return s.db.Model(&models.Backfill{}).
 			Where("id = ?", id).
-			UpdateColumn("completed_runs", gorm.Expr("completed_runs + 1")).Error
-	})
-}
-
-func (s *Store) IncrementFailed(id uuid.UUID) error {
-	return s.withBusyRetry(func() error {
-		return s.db.Model(&models.Backfill{}).
-			Where("id = ?", id).
-			UpdateColumn("failed_runs", gorm.Expr("failed_runs + 1")).Error
+			UpdateColumns(updates).Error
 	})
 }
 
