@@ -127,14 +127,38 @@ func (p *retryConnPool) QueryRowContext(ctx context.Context, query string, args 
 	return p.pool.QueryRowContext(ctx, query, args...)
 }
 
-// BeginTx delegates to the underlying pool and returns the raw transaction so
-// that statements executed inside the transaction bypass this decorator. See
-// the type doc for the safety rationale.
+// BeginTx returns the raw *sql.Tx from the underlying pool (unwrapped) so that
+// statements executed inside the transaction bypass this decorator — see the
+// type doc for why in-tx statements must never be individually retried.
+//
+// The BEGIN itself, however, IS retried on transient contention. dqlite can
+// hand out a pooled connection left with a still-active transaction after a
+// checkpoint blip interrupted a prior rollback; the next BEGIN on it then fails
+// with "cannot start a transaction within a transaction", which previously
+// surfaced as a 500 (e.g. the job-apply path). Retrying BEGIN is safe precisely
+// because no transaction statements have run yet, so re-running it cannot
+// double-apply anything. On the poisoned-connection case we first issue a
+// best-effort ROLLBACK to clear the leftover BEGIN so the retry can draw a
+// usable connection. This makes every gorm transaction path — including bare
+// db.Transaction(fn) call sites with no closure-level retry — recover from a
+// poisoned/contended BEGIN uniformly.
 func (p *retryConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
-	if beginner, ok := p.pool.(gorm.TxBeginner); ok {
-		return beginner.BeginTx(ctx, opts)
+	beginner, ok := p.pool.(gorm.TxBeginner)
+	if !ok {
+		return nil, gorm.ErrInvalidTransaction
 	}
-	return nil, gorm.ErrInvalidTransaction
+	var tx *sql.Tx
+	err := p.retry(ctx, func() error {
+		var beginErr error
+		tx, beginErr = beginner.BeginTx(ctx, opts)
+		if beginErr != nil && dqlite.IsConnPoolPoisonedError(beginErr) {
+			// Best-effort: clear the leftover BEGIN on the poisoned pooled
+			// connection. Harmless ("no transaction is active") on a clean one.
+			_, _ = p.pool.ExecContext(ctx, "ROLLBACK")
+		}
+		return beginErr
+	})
+	return tx, err
 }
 
 // GetDBConn lets gorm's db.DB() reach the underlying *sql.DB for pool
