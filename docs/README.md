@@ -37,6 +37,7 @@ These files are useful context, but each should be treated according to its stat
 - [design-task-templates.md](design-task-templates.md)
 - [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md)
 - [design-incremental-execution.md](design-incremental-execution.md)
+- [design-internal-mtls-auto-provisioning.md](design-internal-mtls-auto-provisioning.md)
 - [design-parallel-job-execution.md](design-parallel-job-execution.md)
 - [design-scaling-job-execution.md](design-scaling-job-execution.md)
 - [brainstorm-differentiators.md](brainstorm-differentiators.md)
