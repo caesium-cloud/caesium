@@ -228,6 +228,15 @@ func NewProvisioner(cfg Config) (*Provisioner, error) {
 			caRenewBefore = caTTL / 3
 		}
 	}
+	// Reject a renew-before window that is not shorter than its lifetime: it
+	// would make ShouldRenewLeaf / ShouldRollCA return true on every tick,
+	// spinning the node into perpetual re-enrollment / CA rolls.
+	if leafRenewBefore >= leafTTL {
+		return nil, fmt.Errorf("pki: leaf renew-before (%s) must be less than leaf TTL (%s)", leafRenewBefore, leafTTL)
+	}
+	if caRenewBefore >= caTTL {
+		return nil, fmt.Errorf("pki: CA renew-before (%s) must be less than CA TTL (%s)", caRenewBefore, caTTL)
+	}
 	enrollmentTimeout := cfg.EnrollmentTimeout
 	if enrollmentTimeout <= 0 {
 		enrollmentTimeout = DefaultEnrollmentTimeout
@@ -498,8 +507,15 @@ func (p *Provisioner) RollCAIfNeeded(ctx context.Context) error {
 	if gen != nil && !ShouldRollCA(gen, p.clock.Now(), p.caRenewBefore) {
 		return nil
 	}
-	if latest, err := p.store.NewestActiveCAGeneration(ctx, p.clock.Now()); err != nil || latest != nil && !ShouldRollCA(latest, p.clock.Now(), p.caRenewBefore) {
+	// Re-read under (potentially) changed state before issuing a new generation,
+	// so a concurrent roll by another leader isn't duplicated. Keep the DB-error
+	// and the no-roll-needed exits separate so each is explicit.
+	latest, err := p.store.NewestActiveCAGeneration(ctx, p.clock.Now())
+	if err != nil {
 		return err
+	}
+	if latest != nil && !ShouldRollCA(latest, p.clock.Now(), p.caRenewBefore) {
+		return nil
 	}
 	next, err := p.store.MaxCAGeneration(ctx)
 	if err != nil {

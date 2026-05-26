@@ -16,7 +16,8 @@ package dispatch
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -233,7 +234,14 @@ func (h *Handler) authorized(r *http.Request) bool {
 	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.EqualFold(auth[:min(len(auth), 7)], "bearer ") {
-		return hmac.Equal([]byte(strings.TrimSpace(auth[7:])), []byte(h.token))
+		// Hash both sides to a fixed 32-byte digest before the constant-time
+		// compare. A direct ConstantTimeCompare/hmac.Equal short-circuits when the
+		// lengths differ, which would leak the token's byte-length via a timing
+		// oracle (an attacker submits 1-, 2-, 3-byte tokens until the comparison
+		// stops short-circuiting). Comparing equal-length digests removes that.
+		got := sha256.Sum256([]byte(strings.TrimSpace(auth[7:])))
+		want := sha256.Sum256([]byte(h.token))
+		return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 	}
 	return false
 }
