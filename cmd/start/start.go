@@ -16,6 +16,7 @@ import (
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
+	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
@@ -162,24 +163,72 @@ func start(cmd *cobra.Command, args []string) error {
 	var ownerDispatchHandler *dispatch.Handler
 	var ownerInternalServerTLS *tls.Config
 	if vars.RunOwnerEnabled {
-		// Run-owner mode requires mutual TLS on the internal endpoints.  Fail
-		// fast (rather than the earlier Phase-A warning) when any material is
-		// missing, so a misconfigured cluster never silently runs unauthenticated
-		// node-to-node dispatch.
 		mtls := dispatch.MTLSConfig{
 			CAFile:   vars.InternalMTLSCA,
 			CertFile: vars.InternalMTLSCert,
 			KeyFile:  vars.InternalMTLSKey,
 		}
-		if !mtls.Configured() {
-			return fmt.Errorf("run-owner mode (CAESIUM_RUN_OWNER_ENABLED=true) requires mutual TLS: set CAESIUM_INTERNAL_MTLS_CA, CAESIUM_INTERNAL_MTLS_CERT, and CAESIUM_INTERNAL_MTLS_KEY")
+		configuredFields := 0
+		for _, value := range []string{mtls.CAFile, mtls.CertFile, mtls.KeyFile} {
+			if strings.TrimSpace(value) != "" {
+				configuredFields++
+			}
 		}
-		clientTLS, err := dispatch.ClientTLSConfig(mtls)
+		if configuredFields > 0 && !mtls.Configured() {
+			return fmt.Errorf("run-owner mode: set all explicit mTLS material paths (CAESIUM_INTERNAL_MTLS_CA/CERT/KEY) or leave all three unset for automatic provisioning")
+		}
+
+		var holder *dispatchpki.MaterialHolder
+		if mtls.Configured() {
+			var err error
+			holder, err = dispatchpki.NewStaticMaterialHolder(mtls.CAFile, mtls.CertFile, mtls.KeyFile)
+			if err != nil {
+				return fmt.Errorf("run-owner mode: load explicit internal mTLS material: %w", err)
+			}
+		} else {
+			mtlsToken := strings.TrimSpace(vars.InternalMTLSToken)
+			if mtlsToken == "" {
+				mtlsToken = strings.TrimSpace(vars.InternalWakeupToken)
+			}
+			if mtlsToken == "" {
+				return fmt.Errorf("run-owner mode requires either explicit mTLS material (CAESIUM_INTERNAL_MTLS_CA/CERT/KEY) or a shared token (CAESIUM_INTERNAL_WAKEUP_TOKEN) for automatic provisioning")
+			}
+			if len(mtlsToken) < 32 {
+				log.Warn("CAESIUM_INTERNAL_WAKEUP_TOKEN/CAESIUM_INTERNAL_MTLS_TOKEN is shorter than 32 bytes; use a high-entropy random token for internal mTLS auto-provisioning")
+			}
+			provisioner, err := dispatchpki.NewProvisioner(dispatchpki.Config{
+				Store:             dispatchpki.NewStore(db.Connection()),
+				NodeID:            vars.NodeAddress,
+				Token:             mtlsToken,
+				CATTL:             vars.InternalMTLSCATTL,
+				LeafTTL:           vars.InternalMTLSLeafTTL,
+				LeafRenewBefore:   vars.InternalMTLSLeafRenewBefore,
+				CARenewBefore:     vars.InternalMTLSCARenewBefore,
+				EnrollmentTimeout: vars.InternalMTLSEnrollmentTimeout,
+				LeaderCheck:       dqlite.IsLocalLeader,
+			})
+			if err != nil {
+				return fmt.Errorf("run-owner mode: configure internal mTLS auto-provisioning: %w", err)
+			}
+			log.Info("provisioning internal mTLS material", "node_address", vars.NodeAddress)
+			if err := provisioner.Bootstrap(ctx); err != nil {
+				return fmt.Errorf("run-owner mode: auto-provision internal mTLS: %w", err)
+			}
+			holder = provisioner.Holder()
+			go func() {
+				log.Info("launching internal mTLS auto-provisioner")
+				if err := provisioner.Run(ctx); err != nil && ctx.Err() == nil {
+					errs <- err
+				}
+			}()
+		}
+
+		clientTLS, err := dispatch.ClientTLSConfigFromHolder(holder)
 		if err != nil {
 			return fmt.Errorf("run-owner mode: build internal client TLS: %w", err)
 		}
 		dispatch.ConfigureInternalMTLS(clientTLS)
-		ownerInternalServerTLS, err = dispatch.ServerTLSConfig(mtls)
+		ownerInternalServerTLS, err = dispatch.ServerTLSConfigFromHolder(holder)
 		if err != nil {
 			return fmt.Errorf("run-owner mode: build internal server TLS: %w", err)
 		}

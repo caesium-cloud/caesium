@@ -179,6 +179,17 @@ type Environment struct {
 	InternalMTLSCA   string `envconfig:"INTERNAL_MTLS_CA" default:""`
 	InternalMTLSCert string `envconfig:"INTERNAL_MTLS_CERT" default:""`
 	InternalMTLSKey  string `envconfig:"INTERNAL_MTLS_KEY" default:""`
+	// CAESIUM_INTERNAL_MTLS_TOKEN optionally separates the auto-provisioning
+	// PKI token from CAESIUM_INTERNAL_WAKEUP_TOKEN. When empty, the wakeup token
+	// is used for HKDF key derivation.
+	InternalMTLSToken string `envconfig:"INTERNAL_MTLS_TOKEN" default:""`
+	// Auto-provisioned internal mTLS rotation settings. These apply only when
+	// owner mode is on and explicit mTLS files are not provided.
+	InternalMTLSCATTL             time.Duration `envconfig:"INTERNAL_MTLS_CA_TTL" default:"43800h"`
+	InternalMTLSLeafTTL           time.Duration `envconfig:"INTERNAL_MTLS_LEAF_TTL" default:"720h"`
+	InternalMTLSLeafRenewBefore   time.Duration `envconfig:"INTERNAL_MTLS_LEAF_RENEW_BEFORE" default:"240h"`
+	InternalMTLSCARenewBefore     time.Duration `envconfig:"INTERNAL_MTLS_CA_RENEW_BEFORE" default:"720h"`
+	InternalMTLSEnrollmentTimeout time.Duration `envconfig:"INTERNAL_MTLS_ENROLLMENT_TIMEOUT" default:"2m"`
 
 	// Run-owner checkpointing (Phase 2 B3).  The owner persists an in-memory
 	// state checkpoint whichever comes first of RUN_CHECKPOINT_EVENTS terminal
