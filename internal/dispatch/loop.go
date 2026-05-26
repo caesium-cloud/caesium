@@ -460,16 +460,29 @@ func (l *DispatchLoop) healthyPeers(peers []peer) []peer {
 	now := time.Now()
 	l.benchMu.Lock()
 	defer l.benchMu.Unlock()
+
+	// Drop every expired bench entry (not just ones in `peers`), so a peer that
+	// was benched and then permanently removed from cluster membership doesn't
+	// leak its entry forever.  Sweeping the whole map here is what bounds it: a
+	// peer that left the cluster stops appearing in `peers`, so the per-peer loop
+	// below would never reach its (now-expired) entry to delete it.
+	for nodeID, until := range l.benchedPeers {
+		if !now.Before(until) {
+			delete(l.benchedPeers, nodeID)
+		}
+	}
+
 	out := make([]peer, 0, len(peers))
 	for _, p := range peers {
-		if until, benched := l.benchedPeers[p.nodeID]; benched {
-			if now.Before(until) {
-				continue
-			}
-			delete(l.benchedPeers, p.nodeID) // cooldown lapsed; give it another chance
+		if _, benched := l.benchedPeers[p.nodeID]; benched {
+			continue
 		}
 		out = append(out, p)
 	}
+	// Fallback: only triggers when healthyPeers is called with a peer list that
+	// excludes self (e.g. in unit tests).  Via tick(), buildPeers always appends
+	// self and benchPeer never benches self, so out is never empty in production
+	// and this branch does not fire there.  Kept as harmless defense-in-depth.
 	if len(out) == 0 {
 		return peers
 	}
