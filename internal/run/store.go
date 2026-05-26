@@ -183,19 +183,10 @@ var (
 
 var ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
 
-// storeBusyRetryBackoffs gives whole-transaction store ops the same ~2.27s
-// across 8 retries contention-retry budget as the autocommit pool retry in
-// pkg/db/retry.go, kept consistent so the layers compose predictably.
-var storeBusyRetryBackoffs = []time.Duration{
-	10 * time.Millisecond,
-	20 * time.Millisecond,
-	40 * time.Millisecond,
-	80 * time.Millisecond,
-	160 * time.Millisecond,
-	320 * time.Millisecond,
-	640 * time.Millisecond,
-	1000 * time.Millisecond,
-}
+// storeBusyRetryBackoffs aliases the shared contention-retry schedule so
+// whole-transaction store ops back off on the same budget as the autocommit
+// pool retry; see db.BusyRetryBackoffs.
+var storeBusyRetryBackoffs = db.BusyRetryBackoffs
 
 func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {

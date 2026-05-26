@@ -11,13 +11,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// retryBusyBackoffs schedules retries for transient dqlite/SQLite contention on
-// single autocommit statements. Total max wait ~2.27s across 8 retries: the
-// budget must outlast worst-case transient write-lock windows, which under
-// burst catalog contention exceed a few hundred ms. Kept in step with the
-// per-transaction busy-retry helpers (internal/run, internal/backfill) so the
-// layers compose predictably under load.
-var retryBusyBackoffs = []time.Duration{
+// BusyRetryBackoffs is the shared retry schedule for transient dqlite/SQLite
+// contention. Total max wait ~2.27s across 8 retries: the budget must outlast
+// worst-case transient write-lock windows, which under burst catalog contention
+// exceed a few hundred ms. It is the single source of truth for the autocommit
+// pool retry here and the per-transaction busy-retry helpers in internal/run and
+// internal/backfill, so the layers compose predictably and cannot drift.
+var BusyRetryBackoffs = []time.Duration{
 	10 * time.Millisecond,
 	20 * time.Millisecond,
 	40 * time.Millisecond,
@@ -62,7 +62,7 @@ var (
 )
 
 func newRetryConnPool(pool gorm.ConnPool) *retryConnPool {
-	return &retryConnPool{pool: pool, backoffs: retryBusyBackoffs}
+	return &retryConnPool{pool: pool, backoffs: BusyRetryBackoffs}
 }
 
 // retry runs fn, retrying on transient contention with bounded backoff+jitter.
