@@ -154,6 +154,13 @@ func (p *retryConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.
 		if beginErr != nil && dqlite.IsConnPoolPoisonedError(beginErr) {
 			// Best-effort: clear the leftover BEGIN on the poisoned pooled
 			// connection. Harmless ("no transaction is active") on a clean one.
+			// Caveat: database/sql hands out idle connections FIFO, so with
+			// several pooled connections this ROLLBACK may land on a clean
+			// connection rather than the poisoned one just returned. That is
+			// acceptable — the poisoned connection clears once it reaches the
+			// front of the idle queue on a later attempt/request, and meanwhile
+			// the retry below draws a different (likely clean) connection for the
+			// next BEGIN.
 			_, _ = p.pool.ExecContext(ctx, "ROLLBACK")
 		}
 		return beginErr
