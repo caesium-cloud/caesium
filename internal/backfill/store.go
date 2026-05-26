@@ -116,7 +116,10 @@ func (s *Store) Complete(id uuid.UUID, failed bool) error {
 // failed_runs write per run, all on the same backfills row, which serialize
 // through dqlite's single writer and starve concurrent control-plane writes
 // (e.g. cancellation) past the busy-retry budget.
-func (s *Store) AddProgress(id uuid.UUID, completedDelta, failedDelta int) error {
+//
+// completedDelta and failedDelta are the counts to add and must be
+// non-negative; the executor's source counters are increment-only.
+func (s *Store) AddProgress(id uuid.UUID, completedDelta, failedDelta int64) error {
 	if completedDelta == 0 && failedDelta == 0 {
 		return nil
 	}

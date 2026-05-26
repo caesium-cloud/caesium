@@ -191,7 +191,7 @@ func RunBackfill(
 		var lastCompleted, lastFailed int64
 		flush := func() {
 			c, f := completed.Load(), failCount.Load()
-			dc, df := int(c-lastCompleted), int(f-lastFailed)
+			dc, df := c-lastCompleted, f-lastFailed
 			if dc == 0 && df == 0 {
 				return
 			}
