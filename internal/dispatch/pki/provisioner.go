@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
 
@@ -140,8 +141,7 @@ func (h *MaterialHolder) Certificate() (*tls.Certificate, error) {
 	if !ok {
 		return nil, fmt.Errorf("mtls: TLS material not initialized")
 	}
-	cert := mat.Certificate
-	return &cert, nil
+	return &mat.Certificate, nil
 }
 
 func (h *MaterialHolder) CertPool() (*x509.CertPool, error) {
@@ -314,11 +314,11 @@ func (p *Provisioner) Run(ctx context.Context) error {
 			return nil
 		case <-rotationTicker.C:
 			if err := p.rotationTick(ctx); err != nil {
-				return err
+				log.Error("pki: rotation tick failed", "error", err)
 			}
 		case <-trustTicker.C:
 			if err := p.RefreshTrust(ctx); err != nil {
-				return err
+				log.Error("pki: trust refresh failed", "error", err)
 			}
 		}
 	}
@@ -375,6 +375,14 @@ func (p *Provisioner) Enroll(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("pki: create node enrollment: %w", err)
 	}
+	// The enrollment row is a short-lived signing request. Delete it on every
+	// exit path (success, rejection, timeout, error) using a fresh background
+	// context, since the method's ctx may already be cancelled on timeout.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = p.store.DeleteEnrollment(cleanupCtx, id)
+	}()
 
 	for {
 		if _, err := p.SignPending(ctx, p.signBatchSize); err != nil {
@@ -398,9 +406,6 @@ func (p *Provisioner) Enroll(ctx context.Context) error {
 				return err
 			}
 			p.holder.Set(cert, pool, caCerts)
-			if err := p.store.DeleteEnrollment(ctx, id); err != nil {
-				return err
-			}
 			return nil
 		case EnrollmentStatusRejected:
 			return fmt.Errorf("pki: internal mTLS enrollment rejected; token mismatch or invalid CSR")
