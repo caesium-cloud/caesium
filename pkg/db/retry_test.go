@@ -126,8 +126,8 @@ func TestRetryConnPoolBeginTxRetriesPoisonedConnection(t *testing.T) {
 	require.IsType(t, &sql.Tx{}, tx, "BeginTx must still return a raw *sql.Tx")
 	require.Equal(t, int32(3), atomic.LoadInt32(&pool.beginAttempt),
 		"BEGIN should be retried past 2 poisoned failures and succeed on attempt 3")
-	require.GreaterOrEqual(t, atomic.LoadInt32(&pool.execAttempt), int32(2),
-		"each poisoned BEGIN should trigger a best-effort ROLLBACK clear")
+	require.Equal(t, int32(2), atomic.LoadInt32(&pool.execAttempt),
+		"each of the 2 poisoned BEGINs should trigger exactly one best-effort ROLLBACK clear")
 }
 
 // TestRetryConnPoolBeginTxDoesNotRetryNonContention proves a non-contention
