@@ -141,7 +141,26 @@ type DispatchLoop struct {
 	// DispatchRequest.OwnerBaseURL so the receiving worker knows where to POST
 	// its completion.  Computed once from NodeID + APIPort.
 	ownerBaseURL string
+
+	// benchedPeers circuit-breaks peers that fail a dispatch with a network
+	// error (connection refused / timeout), keyed by nodeID → bench-expiry time.
+	// Peer discovery returns the raw dqlite cluster membership, which keeps
+	// listing a crashed node (with its old IP) until the cluster reconciles —
+	// with ephemeral storage and dynamic pod IPs that can linger indefinitely.
+	// Benching such a peer keeps the round-robin from burning a full
+	// dispatchPostTimeout on it every tick; the bench lapses after a cooldown so
+	// a transiently-blipped peer recovers and a genuinely dead one costs only one
+	// timeout per cooldown.  A 409 (worker_rejected) does NOT bench: that peer is
+	// alive and merely declined.
+	benchMu      sync.Mutex
+	benchedPeers map[string]time.Time
 }
+
+// peerBenchCooldown is how long a peer stays benched after a network-error
+// dispatch failure.  Comfortably larger than the dispatch tick interval (so a
+// dead peer is skipped across many ticks) but short enough that a recovered or
+// transiently-unreachable peer rejoins the rotation quickly.
+const peerBenchCooldown = 10 * time.Second
 
 // NewDispatchLoop constructs a DispatchLoop from cfg.
 func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
@@ -157,7 +176,7 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.APIPort <= 0 {
 		cfg.APIPort = 8080
 	}
-	l := &DispatchLoop{cfg: cfg}
+	l := &DispatchLoop{cfg: cfg, benchedPeers: make(map[string]time.Time)}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
 	// own base URL is built identically (and honors the PeerBaseURL test hook).
 	l.ownerBaseURL = l.nodeAddrToBaseURL(cfg.NodeID)
@@ -218,6 +237,11 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
 	}
+	// Drop peers currently benched for repeated network failures so the
+	// round-robin doesn't keep selecting a node that has left the cluster but
+	// still lingers in dqlite membership.  Falls back to the full list if every
+	// peer is benched, so a cluster-wide blip never starves dispatch entirely.
+	peers = l.healthyPeers(peers)
 
 	// 2. Find runs this node owns AND their current generation in one query
 	//    (avoids the N+1 GetLease pattern as the owned set grows).
@@ -380,10 +404,14 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		if ctx.Err() != nil {
 			return
 		}
-		log.Warn("dispatch loop: PostDispatch network error",
+		// Network error = peer unreachable. Bench it so the next ticks skip it
+		// rather than spending dispatchPostTimeout on it again.
+		l.benchPeer(p.nodeID)
+		log.Warn("dispatch loop: PostDispatch network error; benching peer",
 			"run_id", runID,
 			"task_id", req.TaskID,
 			"peer", p.nodeID,
+			"cooldown", peerBenchCooldown,
 			"error", postErr,
 		)
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNetworkError).Inc()
@@ -410,6 +438,42 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 		"task_id", req.TaskID,
 		"peer", p.nodeID,
 	)
+}
+
+// benchPeer marks a peer unreachable for peerBenchCooldown.  Self is never
+// benched: the local node is presumed reachable, and benching it would only
+// push work onto the all-benched fallback for no benefit.
+func (l *DispatchLoop) benchPeer(nodeID string) {
+	if nodeID == l.cfg.NodeID {
+		return
+	}
+	l.benchMu.Lock()
+	l.benchedPeers[nodeID] = time.Now().Add(peerBenchCooldown)
+	l.benchMu.Unlock()
+}
+
+// healthyPeers returns peers not currently benched, dropping bench entries whose
+// cooldown has lapsed so the peer is retried.  If filtering would leave no peers
+// (every candidate benched), it returns the input unchanged so dispatch never
+// starves on a transient cluster-wide blip.
+func (l *DispatchLoop) healthyPeers(peers []peer) []peer {
+	now := time.Now()
+	l.benchMu.Lock()
+	defer l.benchMu.Unlock()
+	out := make([]peer, 0, len(peers))
+	for _, p := range peers {
+		if until, benched := l.benchedPeers[p.nodeID]; benched {
+			if now.Before(until) {
+				continue
+			}
+			delete(l.benchedPeers, p.nodeID) // cooldown lapsed; give it another chance
+		}
+		out = append(out, p)
+	}
+	if len(out) == 0 {
+		return peers
+	}
+	return out
 }
 
 // buildPeers normalises raw peer addresses (host:dqlitePort) into peer pairs

@@ -504,3 +504,114 @@ func TestDispatchLoop_RoundRobin(t *testing.T) {
 			peerID, numTasks/len(peerNodeIDs), counts[peerID])
 	}
 }
+
+// peerIDs extracts the nodeID of each peer (test helper).
+func peerIDs(peers []peer) []string {
+	out := make([]string, len(peers))
+	for i, p := range peers {
+		out[i] = p.nodeID
+	}
+	return out
+}
+
+// TestDispatchLoop_PeerCircuitBreaker unit-tests the bench/healthy-peer logic: a
+// network-error bench filters a peer out, self is never benched, an expired bench
+// is cleared so the peer is retried, and an all-benched set falls back to the full
+// list so dispatch never starves.
+func TestDispatchLoop_PeerCircuitBreaker(t *testing.T) {
+	loop := NewDispatchLoop(DispatchLoopConfig{
+		NodeID: "self:9001",
+		Peers:  &testPeerLister{},
+	})
+	ps := []peer{{nodeID: "dead:9001"}, {nodeID: "live:9001"}, {nodeID: "self:9001"}}
+
+	require.Len(t, loop.healthyPeers(ps), 3, "all peers healthy initially")
+
+	loop.benchPeer("dead:9001")
+	got := loop.healthyPeers(ps)
+	require.NotContains(t, peerIDs(got), "dead:9001", "benched peer is filtered out")
+	require.Len(t, got, 2)
+
+	loop.benchPeer("self:9001")
+	require.Contains(t, peerIDs(loop.healthyPeers(ps)), "self:9001", "self is never benched")
+
+	// An expired bench is cleared and the peer rejoins the rotation.
+	loop.benchMu.Lock()
+	loop.benchedPeers["dead:9001"] = time.Now().Add(-time.Second)
+	loop.benchMu.Unlock()
+	require.Contains(t, peerIDs(loop.healthyPeers(ps)), "dead:9001", "expired bench lets the peer back in")
+	loop.benchMu.Lock()
+	_, stillBenched := loop.benchedPeers["dead:9001"]
+	loop.benchMu.Unlock()
+	require.False(t, stillBenched, "expired bench entry is deleted")
+
+	// All peers benched → fall back to the full list (never starve).
+	ext := []peer{{nodeID: "a:9001"}, {nodeID: "b:9001"}}
+	loop.benchPeer("a:9001")
+	loop.benchPeer("b:9001")
+	require.Len(t, loop.healthyPeers(ext), 2, "all-benched falls back to the full list")
+}
+
+// TestDispatchLoop_BenchesUnreachablePeer verifies the breaker end-to-end through
+// the loop: a peer that fails with a network error is benched after the first
+// failure, so subsequent ticks route to the reachable peer instead of repeatedly
+// timing out on the dead one.
+func TestDispatchLoop_BenchesUnreachablePeer(t *testing.T) {
+	metrics.Register()
+
+	// Reachable peer (self): rejects with 409 so the task stays pending and the
+	// loop keeps dispatching every tick, exercising the round-robin repeatedly.
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+	}))
+	t.Cleanup(live.Close)
+
+	// Dead peer: start a server to get a real address, then close it so dials are
+	// refused — a network error, distinct from a 409 rejection.
+	dead := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	deadURL := dead.URL
+	dead.Close()
+
+	const liveID, deadID = "live:9001", "dead:9001"
+
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ls := run.NewLeaseStore(db)
+	store := run.NewStore(db).WithLeaseStore(ls)
+
+	runID := uuid.New()
+	_, err := ls.AcquireLease(context.Background(), runID, liveID, 30*time.Second)
+	require.NoError(t, err)
+	insertPendingTask(t, store, runID, uuid.New())
+
+	beforeNet := counterVecValue(t, metrics.DispatchRejectedTotal, DispatchReasonNetworkError)
+	beforeRej := counterVecValue(t, metrics.DispatchRejectedTotal, DispatchReasonWorkerRejected)
+
+	loop := NewDispatchLoop(DispatchLoopConfig{
+		NodeID:     liveID, // self == the reachable (409) peer
+		APIPort:    8080,
+		Token:      loopToken,
+		Interval:   20 * time.Millisecond,
+		BatchSize:  64,
+		Deadline:   5 * time.Minute,
+		LeaseStore: &testOwnerReader{ls},
+		Store:      &testTaskReader{store},
+		Peers:      &testPeerLister{peers: []string{deadID}}, // dead peer is first in the rotation
+		PeerBaseURL: func(nodeAddr string) string {
+			if nodeAddr == deadID {
+				return deadURL
+			}
+			return live.URL
+		},
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	t.Cleanup(cancel)
+	loop.Run(ctx)
+
+	netDelta := counterVecValue(t, metrics.DispatchRejectedTotal, DispatchReasonNetworkError) - beforeNet
+	rejDelta := counterVecValue(t, metrics.DispatchRejectedTotal, DispatchReasonWorkerRejected) - beforeRej
+
+	require.Equal(t, float64(1), netDelta, "dead peer is hit once, then benched for the rest of the run")
+	require.GreaterOrEqual(t, rejDelta, float64(2), "reachable peer keeps receiving dispatches after the dead one is benched")
+}
