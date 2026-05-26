@@ -8,6 +8,11 @@ config:
   extraEnv:
     - name: CAESIUM_MANUAL_TRIGGER_API_KEY
       value: integration-test-key
+    # Shard hot-path models off the catalog, matching the docker/podman CI
+    # integration paths (#184). Without this the k8s deploy runs unsharded and
+    # task_runs writes contend on the single catalog DB under the suite's load.
+    - name: CAESIUM_DATABASE_SHARDS
+      value: "4"
 
 kubernetes:
   engine:
