@@ -20,6 +20,11 @@ type countingConnPool struct {
 	execAttempt int32
 	failBefore  int32
 	failErr     error
+
+	// BeginTx fails its first beginFailBefore calls with beginErr, then succeeds.
+	beginAttempt    int32
+	beginFailBefore int32
+	beginErr        error
 }
 
 func (c *countingConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
@@ -45,6 +50,9 @@ func (c *countingConnPool) QueryRowContext(ctx context.Context, query string, ar
 }
 
 func (c *countingConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	if n := atomic.AddInt32(&c.beginAttempt, 1); n <= c.beginFailBefore {
+		return nil, c.beginErr
+	}
 	return c.db.BeginTx(ctx, opts)
 }
 
@@ -97,6 +105,45 @@ func TestRetryConnPoolBeginTxReturnsRawTx(t *testing.T) {
 	require.IsType(t, &sql.Tx{}, tx)
 	_, isRetry := interface{}(tx).(*retryConnPool)
 	require.False(t, isRetry, "BeginTx must not return a retry-wrapped pool")
+}
+
+// TestRetryConnPoolBeginTxRetriesPoisonedConnection proves a BEGIN that fails on
+// a poisoned pooled connection ("cannot start a transaction within a
+// transaction") is retried — with a best-effort ROLLBACK to clear the leftover
+// BEGIN — and then succeeds, returning a raw *sql.Tx. This is what makes bare
+// db.Transaction(fn) call sites (e.g. the job-apply path) recover from a
+// poisoned BEGIN instead of surfacing a 500.
+func TestRetryConnPoolBeginTxRetriesPoisonedConnection(t *testing.T) {
+	pool := newCountingPool(t, 0, nil)
+	pool.beginFailBefore = 2
+	pool.beginErr = errors.New("cannot start a transaction within a transaction")
+	rp := newRetryConnPool(pool)
+
+	tx, err := rp.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+
+	require.IsType(t, &sql.Tx{}, tx, "BeginTx must still return a raw *sql.Tx")
+	require.Equal(t, int32(3), atomic.LoadInt32(&pool.beginAttempt),
+		"BEGIN should be retried past 2 poisoned failures and succeed on attempt 3")
+	require.GreaterOrEqual(t, atomic.LoadInt32(&pool.execAttempt), int32(2),
+		"each poisoned BEGIN should trigger a best-effort ROLLBACK clear")
+}
+
+// TestRetryConnPoolBeginTxDoesNotRetryNonContention proves a non-contention
+// BEGIN error returns immediately without retry.
+func TestRetryConnPoolBeginTxDoesNotRetryNonContention(t *testing.T) {
+	pool := newCountingPool(t, 0, nil)
+	pool.beginFailBefore = 1
+	pool.beginErr = errors.New("disk I/O error")
+	rp := newRetryConnPool(pool)
+
+	_, err := rp.BeginTx(context.Background(), nil)
+	require.Error(t, err)
+	require.Equal(t, int32(1), atomic.LoadInt32(&pool.beginAttempt),
+		"a non-contention BEGIN error must not be retried")
+	require.Equal(t, int32(0), atomic.LoadInt32(&pool.execAttempt),
+		"no ROLLBACK clear on a non-poisoned error")
 }
 
 // TestPluginInstallsRetryPool proves the plugin wraps the gorm connection pool
