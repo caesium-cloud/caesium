@@ -25,20 +25,10 @@ var (
 	defaultStoreOnce sync.Once
 )
 
-// busyRetryBackoffs schedules retries for transient dqlite/SQLite contention
-// errors. Total max wait ≈ 2.27s across 8 retries — same schedule as
-// internal/run/store.go's withStoreBusyRetry and pkg/db/retry.go, kept
-// consistent so the retry loops compose predictably under load.
-var busyRetryBackoffs = []time.Duration{
-	10 * time.Millisecond,
-	20 * time.Millisecond,
-	40 * time.Millisecond,
-	80 * time.Millisecond,
-	160 * time.Millisecond,
-	320 * time.Millisecond,
-	640 * time.Millisecond,
-	1000 * time.Millisecond,
-}
+// busyRetryBackoffs aliases the shared contention-retry schedule so backfill
+// store ops back off on the same budget as the other retry layers; see
+// db.BusyRetryBackoffs.
+var busyRetryBackoffs = db.BusyRetryBackoffs
 
 func NewStore(conn *gorm.DB) *Store {
 	if conn == nil {
