@@ -92,12 +92,16 @@ and completed all 8 tasks. No pod crashes; 2/3 quorum held throughout.
 
 Steady-state advancement (10/10) and owner-crash failover are both now verified,
 with a deterministic unit test guarding the failover claim path.
-`CAESIUM_RUN_OWNER_IN_MEMORY=true` is now a viable default-on candidate. One
-robustness follow-up remains before flipping the default: after the owner pod
-restarts with a new IP, peer discovery still lists the dead node's old IP and
-lacks the replacement's, so some dispatch attempts waste ~4s on a dead peer (no
-stall — the round-robin still reaches live workers, but failover is slower than
-it needs to be). mTLS and the B2 path are unaffected by the flag.
+`CAESIUM_RUN_OWNER_IN_MEMORY=true` is now a viable default-on candidate.
+
+The one robustness follow-up — after the owner pod restarts with a new IP, peer
+discovery still lists the dead node's old IP, so dispatch attempts wasted ~4s on
+a dead peer (no stall; the round-robin still reached live workers, but failover
+was slower than it needs to be) — is **addressed on `phase2-dispatch-peer-liveness`**:
+the dispatch loop now circuit-breaks a peer that fails with a network error,
+benching it for a cooldown so the round-robin skips it until it recovers. That is
+unit-verified; a 3-node k8s confirmation of the breaker is the last step before
+flipping the default on. mTLS and the B2 path are unaffected by the flag.
 
 ## Sandbox caveats
 
