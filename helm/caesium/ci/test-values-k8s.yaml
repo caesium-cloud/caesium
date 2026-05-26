@@ -22,12 +22,18 @@ persistence:
   enabled: false
 
 resources:
+  # Low requests keep scheduling trivial on the kind node; generous limits let
+  # the single dqlite node burst instead of being CPU-throttled. At 250m the
+  # node was throttled enough that catalog write-locks (backfills/triggers)
+  # outlasted the busy-retry budget and flaked the suite, while the unthrottled
+  # docker/podman CI servers passed. A CPU limit only caps throttling, it does
+  # not reserve cores, so this is safe on the 4-vCPU public runner.
   requests:
-    cpu: 50m
-    memory: 64Mi
-  limits:
     cpu: 250m
     memory: 256Mi
+  limits:
+    cpu: "2"
+    memory: 1Gi
 
 podDisruptionBudget:
   enabled: false
