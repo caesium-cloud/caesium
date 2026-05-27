@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"github.com/stretchr/testify/require"
 )
@@ -121,6 +122,46 @@ func TestRegisterMetricsProtectedWhenAuthEnabled(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "caesium_")
+}
+
+func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := iauth.NewService(db)
+	auditor := iauth.NewAuditLogger(db)
+	limiter := iauth.NewRateLimiter(5, time.Minute)
+	sessions := iauth.NewSessionStore(db)
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+	token, sess, err := sessions.Create(t.Context(), iauth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+
+	e := echo.New()
+	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	req.Header.Set("X-CSRF-Token", sess.CSRFToken)
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	_, _, err = sessions.Validate(t.Context(), token)
+	require.ErrorIs(t, err, iauth.ErrSessionRevoked)
 }
 
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {

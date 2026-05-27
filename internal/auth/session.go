@@ -20,6 +20,8 @@ var (
 	ErrUserDisabled   = errors.New("user disabled")
 )
 
+const sessionFlushBatchSize = 900
+
 // SessionStore manages server-side login sessions in the catalog DB. Tokens
 // are hashed at rest and last-seen updates are coalesced.
 type SessionStore struct {
@@ -182,10 +184,10 @@ func (s *SessionStore) RunLastSeenFlusher(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			s.flushSeen()
+			s.flushSeen(context.Background())
 			return
 		case <-ticker.C:
-			s.flushSeen()
+			s.flushSeen(ctx)
 		}
 	}
 }
@@ -223,7 +225,7 @@ func (s *SessionStore) RunReaper(ctx context.Context) {
 	}
 }
 
-func (s *SessionStore) flushSeen() {
+func (s *SessionStore) flushSeen(ctx context.Context) {
 	s.seenMu.Lock()
 	pending := s.seen
 	s.seen = make(map[uuid.UUID]time.Time, len(pending))
@@ -237,11 +239,17 @@ func (s *SessionStore) flushSeen() {
 		ids = append(ids, id)
 	}
 	now := s.nowUTC()
-	if err := s.db.Model(&models.Session{}).Where("id IN ?", ids).Updates(map[string]any{
-		"last_seen_at":    now,
-		"idle_expires_at": now.Add(s.idleTTL),
-	}).Error; err != nil {
-		log.Warn("failed to flush session last_seen", "error", err)
+	for start := 0; start < len(ids); start += sessionFlushBatchSize {
+		end := start + sessionFlushBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := s.db.WithContext(ctx).Model(&models.Session{}).Where("id IN ?", ids[start:end]).Updates(map[string]any{
+			"last_seen_at":    now,
+			"idle_expires_at": now.Add(s.idleTTL),
+		}).Error; err != nil {
+			log.Warn("failed to flush session last_seen batch", "error", err)
+		}
 	}
 }
 
