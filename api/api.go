@@ -39,7 +39,7 @@ var apiServer struct {
 // are deliberately NOT served here — they live on a dedicated mutually
 // authenticated TLS listener (see dispatch.InternalServer) so the public API
 // can remain plain HTTP behind the operator's proxy.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, wakeupHandler InternalWakeupHandler) error {
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, wakeupHandler InternalWakeupHandler) error {
 	e := echo.New()
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
@@ -47,7 +47,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// health
 	e.GET("/health", Health)
 	e.GET("/auth/status", authStatus(vars))
-	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions)
+	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions, sso)
 	registerInternalWakeup(e, vars, wakeupHandler)
 
 	// metrics
@@ -173,19 +173,20 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 	}
 }
 
-func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {
+func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService) {
 	if sessions == nil {
 		return
 	}
-	controller := authctrl.NewSSO(sessions, vars.AuthSessionCookieName)
-	e.GET("/auth/whoami", controller.Whoami, authmw.Auth(authmw.AuthDeps{
+	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName)
+	authMiddleware := authmw.Auth(authmw.AuthDeps{
 		Service:    authSvc,
 		Auditor:    auditor,
 		Limiter:    limiter,
 		Sessions:   sessions,
 		CookieName: vars.AuthSessionCookieName,
-	}))
-	e.POST("/auth/logout", controller.Logout)
+	})
+	e.GET("/auth/whoami", controller.Whoami, authMiddleware)
+	e.POST("/auth/logout", controller.Logout, authMiddleware)
 }
 
 func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {

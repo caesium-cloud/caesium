@@ -2,6 +2,7 @@ package auth
 
 import (
 	"net/http"
+	"strings"
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
@@ -12,12 +13,18 @@ import (
 // callback handlers are added by the OIDC/SAML/LDAP plans.
 type SSOController struct {
 	sessions   *iauth.SessionStore
+	sso        *iauth.SSOService
 	cookieName string
 }
 
 // NewSSO constructs a controller for cookie-session endpoints.
-func NewSSO(sessions *iauth.SessionStore, cookieName string) *SSOController {
-	return &SSOController{sessions: sessions, cookieName: cookieName}
+func NewSSO(sessions *iauth.SessionStore, sso *iauth.SSOService, cookieName string) *SSOController {
+	return &SSOController{sessions: sessions, sso: sso, cookieName: cookieName}
+}
+
+// SSOService returns the shared login completion service for provider handlers.
+func (s *SSOController) SSOService() *iauth.SSOService {
+	return s.sso
 }
 
 func (s *SSOController) Whoami(c *echo.Context) error {
@@ -55,8 +62,15 @@ func (s *SSOController) Logout(c *echo.Context) error {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   requestIsSecure(c.Request()),
 		SameSite: http.SameSiteLaxMode,
 	})
 	return c.NoContent(http.StatusNoContent)
+}
+
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }

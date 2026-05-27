@@ -324,7 +324,7 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 
 	// --- Authentication & Authorization ---
-	authSvc, auditor, limiter, sessions := initAuth(ctx, vars, runAsync)
+	authSvc, auditor, limiter, sessions, sso := initAuth(ctx, vars, runAsync)
 
 	log.Info(
 		"execution configuration",
@@ -524,7 +524,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	runAsync(func() {
 		log.Info("spinning up api")
-		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, internalWakeupHandler); err != nil && ctx.Err() == nil {
+		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, sso, internalWakeupHandler); err != nil && ctx.Err() == nil {
 			reportErr(err)
 		}
 	})
@@ -588,12 +588,13 @@ func dqliteWakeupPeerResolver(localNodeAddress string, apiPort int) worker.Wakeu
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
 // Returns nil services when auth is disabled so callers can pass them through safely.
-func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore) {
+func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter, *auth.SessionStore, *auth.SSOService) {
 	conn := db.Connection()
 	authSvc := auth.NewService(conn, auth.WithKeyHashSecret(vars.AuthKeyHashSecret))
 	auditor := auth.NewAuditLogger(conn)
 	limiter := auth.NewRateLimiter(vars.AuthRateLimitPerMinute, time.Minute)
 	var sessions *auth.SessionStore
+	var sso *auth.SSOService
 
 	switch vars.AuthMode {
 	case "none", "":
@@ -601,7 +602,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			log.Fatal("SSO providers require authentication to be enabled (set CAESIUM_AUTH_MODE=api-key)")
 		}
 		log.Warn("authentication is disabled — all endpoints are publicly accessible")
-		return authSvc, auditor, limiter, nil
+		return authSvc, auditor, limiter, nil, nil
 
 	case "api-key":
 		log.Info("authentication enabled", "mode", vars.AuthMode)
@@ -663,7 +664,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			if err != nil {
 				log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
 			}
-			_ = auth.NewSSOService(auth.NewUserStore(conn), sessions, mapper)
+			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, mapper)
 			runAsync(func() {
 				sessions.RunLastSeenFlusher(ctx)
 			})
@@ -678,10 +679,10 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 		runAsync(func() {
 			limiter.RunCleanup(ctx.Done())
 		})
-		return authSvc, auditor, limiter, sessions
+		return authSvc, auditor, limiter, sessions, sso
 
 	default:
 		log.Fatal("unknown CAESIUM_AUTH_MODE value", "mode", vars.AuthMode)
-		return nil, nil, nil, nil // unreachable
+		return nil, nil, nil, nil, nil // unreachable
 	}
 }

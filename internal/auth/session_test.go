@@ -98,12 +98,43 @@ func TestSessionFlushSeen(t *testing.T) {
 	before := sess.IdleExpiresAt
 
 	store.recordSeen(sess.ID)
-	store.flushSeen()
+	store.flushSeen(context.Background())
 
 	var got models.Session
 	require.NoError(t, db.First(&got, "id = ?", sess.ID).Error)
 	require.NotNil(t, got.LastSeenAt)
 	require.False(t, got.IdleExpiresAt.Before(before))
+}
+
+func TestSessionFlushSeenBatchesLargeUpdates(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	u := &models.User{ID: uuid.New(), Issuer: "oidc", Subject: "s", Email: "a@b.com", Role: models.RoleViewer}
+	require.NoError(t, db.Create(u).Error)
+
+	now := time.Now().UTC()
+	sessions := make([]models.Session, 0, sessionFlushBatchSize+5)
+	store := NewSessionStore(db, WithSessionTTLs(time.Hour, 24*time.Hour))
+	for i := 0; i < sessionFlushBatchSize+5; i++ {
+		id := uuid.New()
+		sessions = append(sessions, models.Session{
+			ID:                id,
+			UserID:            u.ID,
+			TokenHash:         id.String(),
+			CSRFToken:         "csrf-" + id.String(),
+			CreatedAt:         now,
+			IdleExpiresAt:     now.Add(time.Hour),
+			AbsoluteExpiresAt: now.Add(24 * time.Hour),
+		})
+		store.recordSeen(id)
+	}
+	require.NoError(t, db.Create(&sessions).Error)
+
+	store.flushSeen(context.Background())
+
+	var count int64
+	require.NoError(t, db.Model(&models.Session{}).Where("last_seen_at IS NOT NULL").Count(&count).Error)
+	require.Equal(t, int64(len(sessions)), count)
 }
 
 func TestSessionReap(t *testing.T) {

@@ -17,8 +17,8 @@ import (
 )
 
 func TestWhoamiRequiresPrincipal(t *testing.T) {
-	ctrl := NewSSO(nil, "caesium_session")
-	c, _ := newAuthContext(t, http.MethodGet, "/v1/auth/whoami", "")
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	c, _ := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
 
 	err := ctrl.Whoami(c)
 	require.Error(t, err)
@@ -29,8 +29,8 @@ func TestWhoamiRequiresPrincipal(t *testing.T) {
 }
 
 func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
-	ctrl := NewSSO(nil, "caesium_session")
-	c, rec := newAuthContext(t, http.MethodGet, "/v1/auth/whoami", "")
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/whoami", "")
 	c.Set(authmw.ContextKeyPrincipal, &iauth.Principal{
 		Kind:    iauth.PrincipalUser,
 		Subject: "viewer@example.com",
@@ -49,6 +49,13 @@ func TestWhoamiReturnsPrincipalAndCSRF(t *testing.T) {
 	require.Equal(t, "viewer@example.com", body["email"])
 	require.Equal(t, string(models.RoleViewer), body["role"])
 	require.Equal(t, "csrf-token", body["csrf_token"])
+}
+
+func TestNewSSORetainsCompletionService(t *testing.T) {
+	sso := iauth.NewSSOService(nil, nil, nil)
+	ctrl := NewSSO(nil, sso, "caesium_session")
+
+	require.Equal(t, sso, ctrl.SSOService())
 }
 
 func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
@@ -72,7 +79,7 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl := NewSSO(sessions, "caesium_session")
+	ctrl := NewSSO(sessions, nil, "caesium_session")
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
@@ -91,6 +98,21 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	require.Equal(t, "caesium_session", cookies[0].Name)
 	require.LessOrEqual(t, cookies[0].MaxAge, 0)
 	require.True(t, cookies[0].HttpOnly)
-	require.True(t, cookies[0].Secure)
+	require.False(t, cookies[0].Secure)
 	require.Equal(t, http.SameSiteLaxMode, cookies[0].SameSite)
+}
+
+func TestLogoutClearsSecureCookieBehindHTTPSProxy(t *testing.T) {
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	require.NoError(t, ctrl.Logout(c))
+
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 1)
+	require.True(t, cookies[0].Secure)
 }

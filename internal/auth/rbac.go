@@ -34,6 +34,7 @@ var endpointPolicy = map[string]models.Role{
 	// Viewer
 	"GET /metrics":                   models.RoleViewer,
 	"GET /auth/whoami":               models.RoleViewer,
+	"POST /auth/logout":              models.RoleViewer,
 	"GET /v1/jobs":                   models.RoleViewer,
 	"GET /v1/jobs/:id":               models.RoleViewer,
 	"GET /v1/jobs/:id/tasks":         models.RoleViewer,
@@ -51,8 +52,6 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/atoms":                  models.RoleViewer,
 	"GET /v1/atoms/:id":              models.RoleViewer,
 	"GET /v1/nodes/:id/workers":      models.RoleViewer,
-	"GET /v1/auth/whoami":            models.RoleViewer,
-	"POST /v1/auth/logout":           models.RoleViewer,
 
 	// Runner
 	"POST /v1/jobs/:id/run":                      models.RoleRunner,

@@ -41,9 +41,6 @@ func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *
 		if authSvc != nil {
 			bindAuth(protected, authctrl.New(authSvc, auditor))
 		}
-		if sessions != nil {
-			bindSSO(protected, authctrl.NewSSO(sessions, vars.AuthSessionCookieName))
-		}
 	}
 
 	Protected(protected, bus)
@@ -175,9 +172,4 @@ func bindAuth(g *echo.Group, controller *authctrl.Controller) {
 	g.POST("/auth/keys/:id/revoke", controller.RevokeKey)
 	g.POST("/auth/keys/:id/rotate", controller.RotateKey)
 	g.GET("/auth/audit", controller.QueryAudit)
-}
-
-func bindSSO(g *echo.Group, controller *authctrl.SSOController) {
-	g.GET("/auth/whoami", controller.Whoami)
-	g.POST("/auth/logout", controller.Logout)
 }
