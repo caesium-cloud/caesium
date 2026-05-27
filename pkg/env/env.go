@@ -134,14 +134,23 @@ type Environment struct {
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
 
 	// Authentication & Authorization
-	AuthMode                string `envconfig:"AUTH_MODE" default:"none"` // none, api-key
-	AuthKeyHashSecret       string `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
-	AuthRequireTLS          bool   `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
-	TLSCert                 string `envconfig:"TLS_CERT" default:""`
-	TLSKey                  string `envconfig:"TLS_KEY" default:""`
-	TrustedProxies          string `envconfig:"TRUSTED_PROXIES" default:""`
-	AuthRateLimitPerMinute  int    `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
-	AuthRateLimitBurstAlert int    `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
+	AuthMode                string        `envconfig:"AUTH_MODE" default:"none"` // none, api-key
+	AuthKeyHashSecret       string        `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
+	AuthRequireTLS          bool          `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
+	TLSCert                 string        `envconfig:"TLS_CERT" default:""`
+	TLSKey                  string        `envconfig:"TLS_KEY" default:""`
+	TrustedProxies          string        `envconfig:"TRUSTED_PROXIES" default:""`
+	AuthRateLimitPerMinute  int           `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
+	AuthRateLimitBurstAlert int           `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
+	AuthPublicBaseURL       string        `envconfig:"AUTH_PUBLIC_BASE_URL" default:""`
+	AuthSessionIdleTTL      time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
+	AuthSessionAbsoluteTTL  time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
+	AuthSessionCookieName   string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
+	AuthRoleMapping         string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
+	AuthDefaultRole         string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
+	AuthOIDCEnabled         bool          `envconfig:"AUTH_OIDC_ENABLED" default:"false"`
+	AuthSAMLEnabled         bool          `envconfig:"AUTH_SAML_ENABLED" default:"false"`
+	AuthLDAPEnabled         bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
 
 	// Run-owner coordination (Phase 2).
 	// CAESIUM_RUN_OWNER_ENABLED enables the run-owner coordination mode.
@@ -207,4 +216,9 @@ type Environment struct {
 	// fast failover.  Default false — when off, completions take the proven
 	// SQL-advancement path (B2), byte-identical.  Requires RUN_OWNER_ENABLED.
 	RunOwnerInMemory bool `envconfig:"RUN_OWNER_IN_MEMORY" default:"false"`
+}
+
+// SSOEnabled reports whether any SSO provider is configured.
+func (e Environment) SSOEnabled() bool {
+	return e.AuthOIDCEnabled || e.AuthSAMLEnabled || e.AuthLDAPEnabled
 }

@@ -17,6 +17,9 @@ import (
 // ContextKeyAuth is the key used to store the authenticated API key in the Echo context.
 const ContextKeyAuth = "auth"
 
+// ContextKeyPrincipal stores the unified authenticated identity for the request.
+const ContextKeyPrincipal = "auth.principal"
+
 // uuidPattern matches UUID path segments for route normalisation.
 var uuidPattern = regexp.MustCompile(`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`)
 var namedParamPattern = regexp.MustCompile(`:[^/]+`)
@@ -26,8 +29,18 @@ var skipPaths = map[string]bool{
 	"/health": true,
 }
 
-// Auth returns Echo middleware that enforces API key authentication and RBAC.
-func Auth(svc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) echo.MiddlewareFunc {
+// AuthDeps bundles the dependencies the auth middleware needs.
+type AuthDeps struct {
+	Service    *auth.Service
+	Auditor    *auth.AuditLogger
+	Limiter    *auth.RateLimiter
+	Sessions   *auth.SessionStore
+	CookieName string
+}
+
+// Auth returns Echo middleware that enforces API-key or session-cookie
+// authentication and RBAC.
+func Auth(d AuthDeps) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c *echo.Context) error {
 			path := c.Request().URL.Path
@@ -40,77 +53,98 @@ func Auth(svc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimite
 			ip := c.RealIP()
 
 			// Rate limit check before doing any work.
-			if limiter.IsLimited(ip) {
+			if d.Limiter.IsLimited(ip) {
 				metrics.AuthFailuresTotal.WithLabelValues("rate_limited").Inc()
-				retryAfter := limiter.RetryAfter(ip)
+				retryAfter := d.Limiter.RetryAfter(ip)
 				c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
 				return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
 			}
 
-			// Extract bearer token.
-			token := extractBearerToken(c)
-			if token == "" {
-				metrics.AuthFailuresTotal.WithLabelValues("missing").Inc()
-				return echo.NewHTTPError(http.StatusUnauthorized, "missing authorization header")
-			}
+			var key *models.APIKey
+			var principal *auth.Principal
 
-			// Validate the API key.
-			key, err := svc.ValidateKey(token)
-			if err != nil {
-				reason := classifyAuthError(err)
-				metrics.AuthFailuresTotal.WithLabelValues(reason).Inc()
+			if token := extractBearerToken(c); token != "" {
+				validKey, err := d.Service.ValidateKey(token)
+				if err != nil {
+					reason := classifyAuthError(err)
+					metrics.AuthFailuresTotal.WithLabelValues(reason).Inc()
 
-				limited := limiter.RecordFailure(ip)
-				logAuditFailure(auditor.Log(auth.AuditEntry{
-					Actor:    tokenPrefix(token),
-					Action:   auth.ActionAuthDenied,
-					SourceIP: ip,
-					Outcome:  auth.OutcomeDenied,
-					Metadata: map[string]interface{}{
-						"reason": reason,
-						"method": c.Request().Method,
-						"path":   path,
-					},
-				}))
+					limited := d.Limiter.RecordFailure(ip)
+					logAuditFailure(d.Auditor.Log(auth.AuditEntry{
+						Actor:    tokenPrefix(token),
+						Action:   auth.ActionAuthDenied,
+						SourceIP: ip,
+						Outcome:  auth.OutcomeDenied,
+						Metadata: map[string]interface{}{
+							"reason": reason,
+							"method": c.Request().Method,
+							"path":   path,
+						},
+					}))
 
-				if limited {
-					retryAfter := limiter.RetryAfter(ip)
-					c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
-					return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
+					if limited {
+						retryAfter := d.Limiter.RetryAfter(ip)
+						c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+						return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
+					}
+
+					return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired api key")
 				}
 
-				return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired api key")
+				key = validKey
+				principal = auth.PrincipalFromKey(validKey)
+			} else if d.Sessions != nil {
+				if cookie, err := c.Request().Cookie(d.CookieName); err == nil && cookie.Value != "" {
+					sess, user, verr := d.Sessions.Validate(c.Request().Context(), cookie.Value)
+					if verr != nil {
+						metrics.AuthFailuresTotal.WithLabelValues("session_invalid").Inc()
+						return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired session")
+					}
+					if err := EnforceSessionCSRF(c, sess.CSRFToken); err != nil {
+						return err
+					}
+					principal = auth.PrincipalFromUser(user)
+					c.Set(ContextKeyCSRFToken, sess.CSRFToken)
+				}
+			}
+
+			if principal == nil {
+				metrics.AuthFailuresTotal.WithLabelValues("missing").Inc()
+				return echo.NewHTTPError(http.StatusUnauthorized, "missing credentials")
 			}
 
 			// Determine the required role for this endpoint.
 			routePath := normalisePath(c)
 			required, ok := auth.RequiredRole(c.Request().Method, routePath)
 			if !ok {
-				return denyAccess(c, auditor, key.KeyPrefix, key.Role, routePath, "unknown_route", "")
+				return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "unknown_route", "")
 			}
 
-			if !auth.HasRole(key.Role, required) {
-				return denyAccess(c, auditor, key.KeyPrefix, key.Role, routePath, "insufficient_role", required)
+			if !auth.HasRole(principal.Role, required) {
+				return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_role", required)
 			}
 
 			// Store authenticated identity in context for downstream handlers.
-			scopeContext, err := authorizeScope(c, svc, key, routePath)
+			scopeContext, err := authorizeScope(c, d.Service, principal.Scope, routePath)
 			if err != nil {
 				if he, ok := err.(*echo.HTTPError); ok && he.Code == http.StatusForbidden {
-					return denyAccess(c, auditor, key.KeyPrefix, key.Role, routePath, "insufficient_scope", required)
+					return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_scope", required)
 				}
 				return err
 			}
 
-			c.Set(ContextKeyAuth, key)
-			metrics.AuthKeyAgeSeconds.Observe(time.Since(key.CreatedAt).Seconds())
+			if key != nil {
+				c.Set(ContextKeyAuth, key)
+				metrics.AuthKeyAgeSeconds.Observe(time.Since(key.CreatedAt).Seconds())
+			}
+			c.Set(ContextKeyPrincipal, principal)
 
 			if err := next(c); err != nil {
 				return err
 			}
 
-			metrics.AuthRequestsTotal.WithLabelValues("success", string(key.Role), c.Request().Method, routePath).Inc()
-			logSuccessfulAction(auditor, c, key, routePath, scopeContext)
+			metrics.AuthRequestsTotal.WithLabelValues("success", string(principal.Role), c.Request().Method, routePath).Inc()
+			logSuccessfulAction(d.Auditor, c, principal, routePath, scopeContext)
 			return nil
 		}
 	}
@@ -199,7 +233,7 @@ func denyAccess(
 func logSuccessfulAction(
 	auditor *auth.AuditLogger,
 	c *echo.Context,
-	key *models.APIKey,
+	principal *auth.Principal,
 	routePath string,
 	scopeContext *scopeAuditContext,
 ) {
@@ -213,7 +247,7 @@ func logSuccessfulAction(
 	}
 
 	entry := auth.AuditEntry{
-		Actor:    key.KeyPrefix,
+		Actor:    principal.Subject,
 		Action:   action,
 		SourceIP: c.RealIP(),
 		Outcome:  auth.OutcomeSuccess,
@@ -290,4 +324,17 @@ func GetAuthKey(c *echo.Context) *models.APIKey {
 		return nil
 	}
 	return key
+}
+
+// GetPrincipal returns the unified authenticated identity, or nil if unauthenticated.
+func GetPrincipal(c *echo.Context) *auth.Principal {
+	v := c.Get(ContextKeyPrincipal)
+	if v == nil {
+		return nil
+	}
+	principal, ok := v.(*auth.Principal)
+	if !ok {
+		return nil
+	}
+	return principal
 }

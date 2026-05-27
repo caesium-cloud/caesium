@@ -10,6 +10,9 @@ const (
 	// KeyPrefixLive is the scannable prefix for production API keys.
 	KeyPrefixLive = "csk_live_"
 
+	// SessionTokenPrefix marks opaque session tokens.
+	SessionTokenPrefix = "css_"
+
 	// randomBytes is the number of random bytes used in key generation (32 bytes = 256 bits).
 	randomBytes = 32
 
@@ -32,6 +35,16 @@ func GenerateKey() (plaintext, prefix string, err error) {
 	plaintext = KeyPrefixLive + random
 	prefix = plaintext[:displayPrefixLen]
 	return plaintext, prefix, nil
+}
+
+// GenerateToken produces a new opaque session token. The plaintext is shown to
+// the client once in the cookie; only its hash is stored.
+func GenerateToken() (string, error) {
+	random, err := base62Encode(randomBytes)
+	if err != nil {
+		return "", fmt.Errorf("generate token: %w", err)
+	}
+	return SessionTokenPrefix + random, nil
 }
 
 // base62Encode generates n random bytes and encodes them in base62.

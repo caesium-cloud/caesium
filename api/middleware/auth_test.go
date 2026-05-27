@@ -123,7 +123,7 @@ func callMiddleware(
 		c.InitializeRoute(route, &pv)
 	}
 
-	handler := authmw.Auth(svc, auditor, limiter)(next)
+	handler := authmw.Auth(authmw.AuthDeps{Service: svc, Auditor: auditor, Limiter: limiter})(next)
 	err := handler(c)
 	return rec, err
 }
@@ -179,6 +179,7 @@ func TestMiddlewareStoresAuthInContext(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+key)
 
 	var capturedKey *models.APIKey
+	var capturedPrincipal *auth.Principal
 	rec, err := callMiddleware(
 		t,
 		svc,
@@ -189,6 +190,7 @@ func TestMiddlewareStoresAuthInContext(t *testing.T) {
 		nil,
 		func(c *echo.Context) error {
 			capturedKey = authmw.GetAuthKey(c)
+			capturedPrincipal = authmw.GetPrincipal(c)
 			return c.String(http.StatusOK, "ok")
 		},
 	)
@@ -196,6 +198,67 @@ func TestMiddlewareStoresAuthInContext(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, capturedKey)
 	require.Equal(t, models.RoleAdmin, capturedKey.Role)
+	require.NotNil(t, capturedPrincipal)
+	require.Equal(t, auth.PrincipalAPIKey, capturedPrincipal.Kind)
+	require.Equal(t, capturedKey.KeyPrefix, capturedPrincipal.Subject)
+	require.Equal(t, models.RoleAdmin, capturedPrincipal.Role)
+}
+
+func TestAuthAcceptsSessionCookie(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := auth.NewService(db)
+	auditor := auth.NewAuditLogger(db)
+	limiter := auth.NewRateLimiter(10, time.Minute)
+	sessions := auth.NewSessionStore(db)
+
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+
+	token, _, err := sessions.Create(t.Context(), auth.CreateSessionRequest{
+		UserID:     user.ID,
+		AuthMethod: "oidc",
+		SourceIP:   "198.51.100.8",
+		UserAgent:  "test",
+	})
+	require.NoError(t, err)
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	pv := echo.PathValues(nil)
+	c.InitializeRoute(&echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, &pv)
+
+	var capturedPrincipal *auth.Principal
+	handler := authmw.Auth(authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: "caesium_session",
+	})(func(c *echo.Context) error {
+		capturedPrincipal = authmw.GetPrincipal(c)
+		return c.String(http.StatusOK, "ok")
+	})
+
+	err = handler(c)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotNil(t, capturedPrincipal)
+	require.Equal(t, auth.PrincipalUser, capturedPrincipal.Kind)
+	require.Equal(t, "viewer@example.com", capturedPrincipal.Subject)
+	require.Equal(t, models.RoleViewer, capturedPrincipal.Role)
+	require.Nil(t, authmw.GetAuthKey(c))
 }
 
 func TestMiddlewareRejectsExpiredKey(t *testing.T) {
@@ -497,4 +560,17 @@ func TestGetAuthKeyReturnsNilWhenNotSet(t *testing.T) {
 
 	key := authmw.GetAuthKey(c)
 	require.Nil(t, key)
+}
+
+func TestGetPrincipal(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	require.Nil(t, authmw.GetPrincipal(c))
+
+	p := &auth.Principal{Kind: auth.PrincipalUser, Subject: "a@b.com"}
+	c.Set(authmw.ContextKeyPrincipal, p)
+	require.Equal(t, p, authmw.GetPrincipal(c))
 }

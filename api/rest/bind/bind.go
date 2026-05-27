@@ -12,8 +12,8 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
-	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
+	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/system"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
@@ -25,14 +25,24 @@ import (
 )
 
 // All binds all routes to the given group, optionally with auth middleware.
-func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) {
+func All(g *echo.Group, bus internal_event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {
 	bindWebhooks(g, auditor)
 
 	protected := g.Group("")
-	if env.Variables().AuthMode == "api-key" {
-		protected.Use(authmw.Auth(authSvc, auditor, limiter))
+	vars := env.Variables()
+	if vars.AuthMode == "api-key" || vars.SSOEnabled() {
+		protected.Use(authmw.Auth(authmw.AuthDeps{
+			Service:    authSvc,
+			Auditor:    auditor,
+			Limiter:    limiter,
+			Sessions:   sessions,
+			CookieName: vars.AuthSessionCookieName,
+		}))
 		if authSvc != nil {
 			bindAuth(protected, authctrl.New(authSvc, auditor))
+		}
+		if sessions != nil {
+			bindSSO(protected, authctrl.NewSSO(sessions, vars.AuthSessionCookieName))
 		}
 	}
 
@@ -165,4 +175,9 @@ func bindAuth(g *echo.Group, controller *authctrl.Controller) {
 	g.POST("/auth/keys/:id/revoke", controller.RevokeKey)
 	g.POST("/auth/keys/:id/rotate", controller.RotateKey)
 	g.GET("/auth/audit", controller.QueryAudit)
+}
+
+func bindSSO(g *echo.Group, controller *authctrl.SSOController) {
+	g.GET("/auth/whoami", controller.Whoami)
+	g.POST("/auth/logout", controller.Logout)
 }

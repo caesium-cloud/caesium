@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { isAuthenticated, onAuthChange } from "@/lib/auth";
+import { checkSession, isAuthenticated, onAuthChange } from "@/lib/auth";
 import { LoginPage } from "./LoginPage";
 
 interface AuthGateProps {
@@ -31,8 +31,13 @@ export function AuthGate({ children }: AuthGateProps) {
         }
 
         const body = (await resp.json()) as { enabled?: boolean };
+        const enabled = Boolean(body.enabled);
+        const hasSession = enabled && !isAuthenticated() ? await checkSession() : false;
         if (!cancelled) {
-          setAuthRequired(Boolean(body.enabled));
+          setAuthRequired(enabled);
+          if (hasSession) {
+            setAuthed(true);
+          }
         }
       } catch {
         // Network error — assume auth not required, let real errors surface later.

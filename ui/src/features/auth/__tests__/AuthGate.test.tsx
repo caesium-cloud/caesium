@@ -13,10 +13,15 @@ describe("AuthGate", () => {
   });
 
   it("renders the login page when the auth status endpoint says auth is enabled", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ enabled: true }),
-    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ enabled: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({}),
+      });
 
     render(
       <AuthGate>
@@ -27,7 +32,8 @@ describe("AuthGate", () => {
     await waitFor(() => {
       expect(screen.getByText("Enter your API key to continue")).toBeInTheDocument();
     });
-    expect(mockFetch).toHaveBeenCalledWith("/auth/status");
+    expect(mockFetch).toHaveBeenNthCalledWith(1, "/auth/status");
+    expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
   });
 
   it("renders children when auth is not required", async () => {
@@ -48,10 +54,15 @@ describe("AuthGate", () => {
   });
 
   it("reacts to auth state changes after an enabled auth probe", async () => {
-    mockFetch.mockResolvedValue({
-      ok: true,
-      json: async () => ({ enabled: true }),
-    });
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ enabled: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({}),
+      });
 
     render(
       <AuthGate>
@@ -70,5 +81,29 @@ describe("AuthGate", () => {
     await waitFor(() => {
       expect(screen.getByText("protected")).toBeInTheDocument();
     });
+  });
+
+  it("renders children when an existing cookie session is valid", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ enabled: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ kind: "user", email: "ops@example.com", csrf_token: "csrf-secret" }),
+      });
+
+    render(
+      <AuthGate>
+        <div>protected</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("protected")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("Enter your API key to continue")).not.toBeInTheDocument();
+    expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
   });
 });

@@ -32,6 +32,17 @@ func TestGenerateKeyUniqueness(t *testing.T) {
 	}
 }
 
+func TestGenerateToken(t *testing.T) {
+	a, err := GenerateToken()
+	require.NoError(t, err)
+	b, err := GenerateToken()
+	require.NoError(t, err)
+
+	require.NotEqual(t, a, b)
+	require.True(t, strings.HasPrefix(a, SessionTokenPrefix))
+	require.Greater(t, len(a), len(SessionTokenPrefix)+20)
+}
+
 func TestHashKeyDeterministicWithoutSecret(t *testing.T) {
 	key := "csk_live_testkey123"
 	h1, err := HashKey(key, "")
@@ -47,4 +58,3 @@ func TestHashKeyUsesHMACWhenSecretConfigured(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "hmac-sha256:99620ba47041b7576ac9c72874fc81913345ce1f3aa2cbeec28c5aa65d79e20c", h)
 }
-

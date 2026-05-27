@@ -24,6 +24,20 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), 3, Variables().DatabaseStandbys)
 	assert.Equal(s.T(), 15*time.Second, Variables().WorkerPollInterval)
 	assert.Equal(s.T(), "full", Variables().WakeupFanoutMode)
+	assert.Equal(s.T(), 8*time.Hour, Variables().AuthSessionIdleTTL)
+	assert.Equal(s.T(), 24*time.Hour, Variables().AuthSessionAbsoluteTTL)
+	assert.Equal(s.T(), "caesium_session", Variables().AuthSessionCookieName)
+	assert.False(s.T(), Variables().SSOEnabled())
+}
+
+func (s *EnvTestSuite) TestSSOEnabled() {
+	env := Environment{AuthOIDCEnabled: true}
+	assert.True(s.T(), env.SSOEnabled())
+	env = Environment{AuthSAMLEnabled: true}
+	assert.True(s.T(), env.SSOEnabled())
+	env = Environment{AuthLDAPEnabled: true}
+	assert.True(s.T(), env.SSOEnabled())
+	assert.False(s.T(), Environment{}.SSOEnabled())
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {

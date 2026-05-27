@@ -378,6 +378,7 @@ async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
   });
 
   const response = await fetch(url, {
+    credentials: "include",
     ...options,
     headers,
   });
@@ -479,7 +480,7 @@ export const api = {
    */
   getHealthStatus: async (): Promise<HealthResponse> => {
     const headers = withAuthHeaders({ "Content-Type": "application/json" });
-    const response = await fetch("/health", { headers });
+    const response = await fetch("/health", { credentials: "include", headers });
     if (response.status === 401) {
       clearApiKey();
       throw new ApiError(401, "Authentication required");
