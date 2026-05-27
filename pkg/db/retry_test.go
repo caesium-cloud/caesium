@@ -251,3 +251,30 @@ func TestTransactionSurfacesContextCancellation(t *testing.T) {
 	require.ErrorIs(t, err, context.Canceled)
 	require.Equal(t, 1, calls, "a cancelled context must stop the retry loop")
 }
+
+// TestRWSplitRoutesReadsAndWrites proves the splitter sends writes and
+// transactions to the write pool and autocommit reads to the read pool — the
+// routing that lets writes serialize on one connection while reads run
+// concurrently on another.
+func TestRWSplitRoutesReadsAndWrites(t *testing.T) {
+	writePool := newCountingPool(t, 0, nil)
+	readPool := newCountingPool(t, 0, nil)
+	sp := newRWSplitConnPool(writePool, readPool)
+
+	_, err := sp.ExecContext(context.Background(), "CREATE TABLE IF NOT EXISTS t (id INTEGER)")
+	require.NoError(t, err)
+	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.execAttempt), "write must hit the write pool")
+	require.Equal(t, int32(0), atomic.LoadInt32(&readPool.execAttempt), "write must not hit the read pool")
+
+	rows, err := sp.QueryContext(context.Background(), "SELECT 1")
+	require.NoError(t, err)
+	require.NoError(t, rows.Close())
+	require.Equal(t, int32(1), atomic.LoadInt32(&readPool.execAttempt), "read must hit the read pool")
+	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.execAttempt), "read must not touch the write pool")
+
+	tx, err := sp.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	require.NoError(t, tx.Rollback())
+	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.beginAttempt), "transactions must begin on the write pool")
+	require.Equal(t, int32(0), atomic.LoadInt32(&readPool.beginAttempt), "transactions must not begin on the read pool")
+}
