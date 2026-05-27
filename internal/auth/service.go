@@ -98,23 +98,21 @@ func NewService(db *gorm.DB, opts ...ServiceOption) *Service {
 	return s
 }
 
-// StartLastUsedFlusher runs a background goroutine that periodically flushes
-// buffered last_used_at timestamps to the database. This keeps the hot auth
-// path free of writes.
-func (s *Service) StartLastUsedFlusher(ctx context.Context) {
-	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				s.flushLastUsed()
-				return
-			case <-ticker.C:
-				s.flushLastUsed()
-			}
+// RunLastUsedFlusher periodically flushes buffered last_used_at timestamps to
+// the database until ctx is cancelled. This keeps the hot auth path free of
+// writes while allowing the caller to own goroutine lifecycle.
+func (s *Service) RunLastUsedFlusher(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			s.flushLastUsed()
+			return
+		case <-ticker.C:
+			s.flushLastUsed()
 		}
-	}()
+	}
 }
 
 func (s *Service) flushLastUsed() {

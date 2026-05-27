@@ -78,38 +78,69 @@ var (
 	}
 )
 
-var cancel context.CancelFunc
-
 func start(cmd *cobra.Command, args []string) error {
 	if err := log.CaptureStderr(); err != nil {
 		log.Warn("failed to capture stderr for unified logging", "error", err)
 	}
 
-	signalChan := make(chan os.Signal, 1)
+	ctx, cancelFunc := context.WithCancel(context.Background())
+	vars := env.Variables()
+	var internalSrv *dispatch.InternalServer
+	shutdownCoordinator := newShutdownCoordinator(shutdownConfig{
+		cancel:      cancelFunc,
+		gracePeriod: vars.ShutdownGracePeriod,
+		internalShutdown: func(ctx context.Context) error {
+			if internalSrv == nil {
+				return nil
+			}
+			return internalSrv.Shutdown(ctx)
+		},
+	})
+	deactivateShutdown := activateShutdownCoordinator(shutdownCoordinator)
+	defer deactivateShutdown()
+	defer func() {
+		if err := shutdown(); err != nil {
+			log.Error("graceful shutdown failed", "error", err)
+		}
+	}()
 
-	go func() {
-		for s := range signalChan {
-			switch s {
-			case syscall.SIGUSR1:
+	runAsync := shutdownCoordinator.runAsync
+	errs := make(chan error, 1)
+	reportErr := func(err error) {
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		select {
+		case errs <- err:
+		default:
+			log.Error("background routine exited after an error was already reported", "error", err)
+		}
+	}
+
+	signalCtx, stopSignals := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGUSR1)
+	defer signal.Stop(signalChan)
+	runAsync(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case s := <-signalChan:
+				if s != syscall.SIGUSR1 {
+					continue
+				}
 				log.Info("dumping stack traces due to SIGUSR1 signal")
 				if profile := pprof.Lookup("goroutine"); profile != nil {
 					if err := profile.WriteTo(os.Stdout, 1); err != nil {
 						log.Error("write goroutine profile", "error", err)
 					}
 				}
-			case syscall.SIGINT:
-				log.Info("gracefully shutting down due to SIGINT signal")
-				shutdown()
-				os.Exit(0)
 			}
 		}
-	}()
-
-	signal.Notify(signalChan, syscall.SIGUSR1, syscall.SIGINT)
-
-	var errs = make(chan error)
-	ctx, cancelFunc := context.WithCancel(context.Background())
-	cancel = cancelFunc
+	})
 
 	log.Info("migrating database")
 	if err := db.Migrate(); err != nil {
@@ -122,7 +153,6 @@ func start(cmd *cobra.Command, args []string) error {
 	jsvc.Service(ctx).SetBus(bus)
 	runsvc.New(ctx).SetBus(bus)
 
-	vars := env.Variables()
 	distributedMode := strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
 	wakeupSignaler := worker.NewWakeupSignaler()
 	var distributedWakeups *worker.DistributedWakeups
@@ -141,12 +171,12 @@ func start(cmd *cobra.Command, args []string) error {
 			internalWakeupHandler = func(ctx context.Context, id string, ttl int) {
 				distributedWakeups.HandleRemote(ctx, worker.WakeupMessage{ID: id, TTL: ttl})
 			}
-			go func() {
+			runAsync(func() {
 				log.Info("launching distributed wakeup fanout", "mode", vars.WakeupFanoutMode)
 				if err := distributedWakeups.Start(ctx, bus); err != nil && ctx.Err() == nil {
 					log.Error("distributed wakeup fanout exited", "error", err)
 				}
-			}()
+			})
 		} else {
 			log.Warn("distributed wakeups disabled; set CAESIUM_INTERNAL_WAKEUP_TOKEN to enable cross-node wakeups")
 		}
@@ -215,12 +245,12 @@ func start(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("run-owner mode: auto-provision internal mTLS: %w", err)
 			}
 			holder = provisioner.Holder()
-			go func() {
+			runAsync(func() {
 				log.Info("launching internal mTLS auto-provisioner")
 				if err := provisioner.Run(ctx); err != nil && ctx.Err() == nil {
-					errs <- err
+					reportErr(err)
 				}
-			}()
+			})
 		}
 
 		clientTLS, err := dispatch.ClientTLSConfigFromHolder(holder)
@@ -284,17 +314,17 @@ func start(cmd *cobra.Command, args []string) error {
 			Peers:        dqliteDispatchPeerResolver(),
 			OwnerManager: ownerManager,
 		})
-		go func() {
+		runAsync(func() {
 			log.Info("launching owner dispatch loop",
 				"node_address", vars.NodeAddress,
 				"interval", vars.RunOwnerDispatchInterval,
 			)
 			dispatchLoop.Run(ctx)
-		}()
+		})
 	}
 
 	// --- Authentication & Authorization ---
-	authSvc, auditor, limiter := initAuth(ctx, vars)
+	authSvc, auditor, limiter := initAuth(ctx, vars, runAsync)
 
 	log.Info(
 		"execution configuration",
@@ -342,7 +372,7 @@ func start(cmd *cobra.Command, args []string) error {
 			lineage.RegisterMetrics()
 			sub := lineage.NewSubscriber(bus, transport, vars.OpenLineageNamespace, db.Connection())
 			sub.SetTransportName(vars.OpenLineageTransport)
-			go func() {
+			runAsync(func() {
 				log.Info("launching openlineage subscriber",
 					"transport", vars.OpenLineageTransport,
 					"namespace", vars.OpenLineageNamespace,
@@ -350,7 +380,7 @@ func start(cmd *cobra.Command, args []string) error {
 				if err := sub.Start(ctx); err != nil && ctx.Err() == nil {
 					log.Error("openlineage subscriber exited", "error", err)
 				}
-			}()
+			})
 		}
 	}
 
@@ -363,28 +393,28 @@ func start(cmd *cobra.Command, args []string) error {
 		notifSub.RegisterSender(models.ChannelTypeSlack, notification.NewSlackSender())
 		notifSub.RegisterSender(models.ChannelTypeEmail, notification.NewEmailSender())
 		notifSub.RegisterSender(models.ChannelTypePagerDuty, notification.NewPagerDutySender())
-		go func() {
+		runAsync(func() {
 			log.Info("launching notification subscriber")
 			if err := notifSub.Start(ctx); err != nil && ctx.Err() == nil {
 				log.Error("notification subscriber exited", "error", err)
 			}
-		}()
+		})
 
 		watcher := notification.NewWatcher(conn, bus, event.NewStore(conn), vars.NotificationWatcherInterval)
-		go func() {
+		runAsync(func() {
 			log.Info("launching notification watcher (timeout/SLA)")
 			if err := watcher.Start(ctx); err != nil && ctx.Err() == nil {
 				log.Error("notification watcher exited", "error", err)
 			}
-		}()
+		})
 	}
 
-	go func() {
+	runAsync(func() {
 		log.Info("launching event bus dispatcher")
 		if err := event.NewBusDispatcher(event.NewStore(db.Connection()), bus).Start(ctx); err != nil && ctx.Err() == nil {
 			log.Error("event bus dispatcher exited", "error", err)
 		}
-	}()
+	})
 
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
@@ -400,14 +430,14 @@ func start(cmd *cobra.Command, args []string) error {
 
 	for _, watch := range watches {
 		watch := watch
-		go func() {
+		runAsync(func() {
 			log.Info("starting job definition git sync", "url", watch.Source.URL, "ref", watch.Source.Ref, "once", watch.Once, "interval", watch.Interval)
 			opts := git.WatchOptions{Source: watch.Source, Interval: watch.Interval, Once: watch.Once}
 			if err := git.Watch(ctx, importer, opts); err != nil && ctx.Err() == nil {
 				log.Error("job definition git sync exited", "url", watch.Source.URL, "error", err)
-				errs <- err
+				reportErr(err)
 			}
-		}()
+		})
 	}
 
 	// Construct the distributed worker synchronously (cheap, no I/O) so that,
@@ -483,34 +513,45 @@ func start(cmd *cobra.Command, args []string) error {
 	// never arrive at a handler with no worker attached.
 	if ownerDispatchHandler != nil && ownerInternalServerTLS != nil {
 		internalAddr := fmt.Sprintf(":%d", vars.InternalPort)
-		internalSrv := dispatch.NewInternalServer(ownerDispatchHandler, internalAddr, ownerInternalServerTLS)
-		go func() {
+		internalSrv = dispatch.NewInternalServer(ownerDispatchHandler, internalAddr, ownerInternalServerTLS)
+		runAsync(func() {
 			log.Info("spinning up internal mTLS listener", "addr", internalAddr)
 			if err := internalSrv.Run(ctx); err != nil && ctx.Err() == nil {
-				errs <- err
+				reportErr(err)
 			}
-		}()
+		})
 	}
 
-	go func() {
+	runAsync(func() {
 		log.Info("spinning up api")
-		errs <- api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler)
-	}()
+		if err := api.Start(ctx, bus, authSvc, auditor, limiter, internalWakeupHandler); err != nil && ctx.Err() == nil {
+			reportErr(err)
+		}
+	})
 
-	go func() {
+	runAsync(func() {
 		log.Info("launching execution routine")
-		errs <- executor.Start(ctx)
-	}()
+		if err := executor.Start(ctx); err != nil && ctx.Err() == nil {
+			reportErr(err)
+		}
+	})
 
 	if distributedWorker != nil {
-		go func() {
-			errs <- distributedWorker.Run(ctx)
-		}()
+		runAsync(func() {
+			if err := distributedWorker.Run(ctx); err != nil && ctx.Err() == nil {
+				reportErr(err)
+			}
+		})
 	}
 
-	defer shutdown()
-
-	return <-errs
+	select {
+	case err := <-errs:
+		_ = shutdown()
+		return err
+	case <-signalCtx.Done():
+		log.Info("gracefully shutting down due to OS signal")
+		return shutdown()
+	}
 }
 
 func usesInternalDqlite(databaseType string) bool {
@@ -547,7 +588,7 @@ func dqliteWakeupPeerResolver(localNodeAddress string, apiPort int) worker.Wakeu
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.
 // Returns nil services when auth is disabled so callers can pass them through safely.
-func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter) {
+func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) (*auth.Service, *auth.AuditLogger, *auth.RateLimiter) {
 	conn := db.Connection()
 	authSvc := auth.NewService(conn, auth.WithKeyHashSecret(vars.AuthKeyHashSecret))
 	auditor := auth.NewAuditLogger(conn)
@@ -609,18 +650,16 @@ func initAuth(ctx context.Context, vars env.Environment) (*auth.Service, *auth.A
 			}
 		}
 
-		authSvc.StartLastUsedFlusher(ctx)
-		limiter.StartCleanup(ctx.Done())
+		runAsync(func() {
+			authSvc.RunLastUsedFlusher(ctx)
+		})
+		runAsync(func() {
+			limiter.RunCleanup(ctx.Done())
+		})
 		return authSvc, auditor, limiter
 
 	default:
 		log.Fatal("unknown CAESIUM_AUTH_MODE value", "mode", vars.AuthMode)
 		return nil, nil, nil // unreachable
-	}
-}
-
-func shutdown() {
-	if cancel != nil {
-		cancel()
 	}
 }

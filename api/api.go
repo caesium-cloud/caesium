@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/caesium-cloud/caesium/api/gql"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
@@ -23,6 +26,11 @@ import (
 )
 
 type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
+
+var apiServer struct {
+	sync.Mutex
+	srv *http.Server
+}
 
 // Start launches Caesium's API.
 //
@@ -52,10 +60,35 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// Embedded web UI
 	RegisterUI(e)
 
-	sc := echo.StartConfig{
-		Address: fmt.Sprintf(":%v", vars.Port),
+	srv := &http.Server{
+		Addr:              fmt.Sprintf(":%v", vars.Port),
+		Handler:           e,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
-	return sc.Start(ctx, e)
+	apiServer.Lock()
+	apiServer.srv = srv
+	apiServer.Unlock()
+	defer func() {
+		apiServer.Lock()
+		if apiServer.srv == srv {
+			apiServer.srv = nil
+		}
+		apiServer.Unlock()
+	}()
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+
+	log.Info("api listener started", "addr", ln.Addr().String())
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 type internalWakeupRequest struct {
@@ -191,6 +224,12 @@ func parseTrustedProxyRanges(raw string) []*net.IPNet {
 	return ranges
 }
 
-func Shutdown() error {
-	return nil
+func Shutdown(ctx context.Context) error {
+	apiServer.Lock()
+	srv := apiServer.srv
+	apiServer.Unlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
