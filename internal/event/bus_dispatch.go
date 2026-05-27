@@ -99,6 +99,14 @@ func PublishAndMarkBusDispatched(ctx context.Context, bus Bus, store *Store, eve
 		return
 	}
 
+	if busDispatchDeferred(ctx) {
+		// Inside a transaction (see WithDeferredBusDispatch): skip the immediate
+		// publish. The event row is written transactionally and the BusDispatcher
+		// delivers it after the transaction commits — and never if it rolls back
+		// — keeping bus delivery consistent with the commit.
+		return
+	}
+
 	for _, evt := range events {
 		bus.Publish(evt)
 	}

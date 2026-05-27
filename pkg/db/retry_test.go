@@ -199,3 +199,55 @@ func TestInTransactionStatementNotIndividuallyRetried(t *testing.T) {
 	_, isCommitter := connPoolInsideTx.(gorm.TxCommitter)
 	require.True(t, isCommitter, "in-transaction ConnPool should be a TxCommitter (*sql.Tx)")
 }
+
+// TestTransactionRetriesContentionThenCommits proves the whole-transaction
+// helper re-runs the entire closure on transient contention and commits once it
+// succeeds — the path the per-statement pool retry deliberately does not cover.
+func TestTransactionRetriesContentionThenCommits(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{SkipDefaultTransaction: true})
+	require.NoError(t, err)
+
+	calls := 0
+	err = transaction(context.Background(), gdb, func(tx *gorm.DB) error {
+		calls++
+		if calls < 3 {
+			return errors.New("database is locked")
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 3, calls, "expected two contention retries before the closure committed")
+}
+
+// TestTransactionDoesNotRetryNonContention proves a non-contention error from
+// the closure is returned immediately without re-running the transaction.
+func TestTransactionDoesNotRetryNonContention(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{SkipDefaultTransaction: true})
+	require.NoError(t, err)
+
+	calls := 0
+	err = transaction(context.Background(), gdb, func(tx *gorm.DB) error {
+		calls++
+		return errors.New("not retryable")
+	})
+	require.Error(t, err)
+	require.Equal(t, 1, calls, "non-contention errors must not be retried")
+}
+
+// TestTransactionSurfacesContextCancellation proves that when the context is
+// cancelled during the retry backoff, the helper returns the context error
+// rather than masking it as a DB contention error.
+func TestTransactionSurfacesContextCancellation(t *testing.T) {
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{SkipDefaultTransaction: true})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	err = transaction(ctx, gdb, func(tx *gorm.DB) error {
+		calls++
+		cancel() // cancel before the backoff sleep on this contention error
+		return errors.New("database is locked")
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	require.Equal(t, 1, calls, "a cancelled context must stop the retry loop")
+}
