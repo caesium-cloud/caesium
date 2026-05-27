@@ -200,7 +200,7 @@ security-sensitive primitives are reused, not re-implemented.
 
 - Protocol adapters + deps: `coreos/go-oidc/v3`, `crewjam/saml`, `go-ldap/ldap/v3`.
 - `users` + `sessions` models/tables and the session store (mint/validate/revoke/expire/reap).
-- Cookie + CSRF (double-submit) handling.
+- Cookie + session-bound CSRF (synchronizer token) handling.
 - Login/logout/callback/whoami endpoints + the `RedirectAuthenticator`/`CredentialAuthenticator`
   interface and the shared provision→map→mint tail.
 - Group→role resolver and JIT user provisioning.
@@ -238,6 +238,7 @@ role, `last_login_at`) on each subsequent login.
 | `id`                  | uuid PK    | |
 | `user_id`             | uuid FK    | indexed |
 | `token_hash`          | text       | HMAC-SHA256 of the opaque token; **unique index**. Plaintext never stored. |
+| `csrf_token`          | text       | per-session CSRF token (synchronizer pattern, §11.1); surfaced via `/auth/whoami` |
 | `auth_method`         | text       | `oidc`/`saml`/`ldap` |
 | `created_at`          | timestamp  | |
 | `idle_expires_at`     | timestamp  | bumped on activity (coalesced) |
@@ -263,7 +264,7 @@ CAESIUM_AUTH_SESSION_ABSOLUTE_TTL    default 24h
 CAESIUM_AUTH_SESSION_COOKIE_NAME     default "caesium_session"
 
 # Role mapping (declarative; see §9)
-CAESIUM_AUTH_ROLE_MAPPING            e.g. "caesium-admins=admin,data-eng=operator"
+CAESIUM_AUTH_ROLE_MAPPING            ';'-separated group=role (split on last '='); e.g. "caesium-admins=admin;data-eng=operator;*=viewer"
 CAESIUM_AUTH_DEFAULT_ROLE            default "" (empty == deny if no group matches)
 
 # OIDC
@@ -312,30 +313,45 @@ A new `AuthRequireTLS`-style guard: SSO providers require either `AUTH_REQUIRE_T
 
 ### 8.2 SAML 2.0 (`github.com/crewjam/saml`)
 
-- **Flow:** SP-initiated. IdP metadata loaded from URL or file. SP exposes its metadata for
-  IdP configuration.
+- **Flow:** SP-initiated. IdP metadata loaded from a file or an **HTTPS URL with full TLS
+  certificate verification** — a MITM of the metadata fetch could swap the IdP signing key
+  and forge assertions, so plain HTTP and unverified TLS are rejected. SP exposes its own
+  metadata for IdP configuration.
 - **Validation:** **XML digital signature** verification on the assertion/response;
   enforce `Audience`, `Recipient`, `NotBefore`/`NotOnOrAfter` (with bounded clock skew);
-  **replay protection** via an assertion-ID cache (in dqlite or in-memory with TTL).
-  RelayState carries the validated `returnTo`.
+  **replay protection** via a **dqlite-backed** assertion-ID cache (a short-TTL
+  `saml_assertion_ids` catalog table). A per-node in-memory cache is insufficient — an
+  attacker could replay a captured assertion against a different node in the cluster — so it
+  is not used. RelayState carries the validated `returnTo`.
 - **Endpoints:** `GET /auth/sso/saml/login`, `POST /auth/sso/saml/acs`,
   `GET /auth/sso/saml/metadata`.
 
 ### 8.3 LDAP (`github.com/go-ldap/ldap/v3`)
 
 - **Flow:** search-then-bind. Connect over **LDAPS** or **StartTLS** (anonymous bind
-  rejected); bind as the service account; search `USER_BASE_DN` with `USER_FILTER`; rebind
-  as the found user DN with the supplied password to verify; query group membership with
-  `GROUP_FILTER`.
-- **Validation:** TLS verification on by default; empty password rejected pre-bind (LDAP
-  treats empty-password bind as anonymous success); connection pooling/timeouts.
+  rejected); bind as the service account; search `USER_BASE_DN` with `USER_FILTER` (its `%s`
+  placeholder = the supplied username); rebind as the found user DN with the supplied password
+  to verify; query group membership with `GROUP_FILTER` (its `%s` placeholder = the
+  authenticated user's **full DN**, e.g. `(member=%s)`; for `memberUid`-style schemas use the
+  uid form, e.g. `(memberUid=%s)`). Groups are matched in role mapping by their **CN** by
+  default (see §9).
+- **Validation:** **all user-supplied input (username, DN) is escaped with `ldap.EscapeFilter`
+  before substitution into any filter** — prevents LDAP filter injection (`*`, `(`, `)`, `\`).
+  TLS verification on by default; empty password rejected pre-bind (LDAP treats
+  empty-password bind as anonymous success); connection pooling/timeouts.
 - **Endpoint:** `POST /auth/sso/ldap/login` (form: username + password). Reuses the per-IP
   rate limiter, since this endpoint accepts credentials.
 
 ## 9. Authorization: group/claim → role (+scope)
 
-**Declarative config mapping (v1).** `CAESIUM_AUTH_ROLE_MAPPING` is a comma-separated list
-of `group=role` entries; `role` ∈ {`admin`,`operator`,`runner`,`viewer`}. Resolution:
+**Declarative config mapping (v1).** `CAESIUM_AUTH_ROLE_MAPPING` is a **semicolon-separated**
+list of `group=role` entries, each split on its **last** `=`; `role` ∈
+{`admin`,`operator`,`runner`,`viewer`}. The split-on-last-`=` rule lets a group key contain
+`=` and `,`, which is required because LDAP/AD groups are often Distinguished Names
+(`CN=Caesium Admins,OU=Groups,DC=example,DC=com`). Example:
+`CN=Caesium Admins,OU=Groups,DC=example,DC=com=admin;data-eng=operator;*=viewer`. For LDAP,
+the provider matches on the group **CN** by default (short keys); full-DN keys also work via
+the last-`=` rule. A literal `;` inside a group name is unsupported. Resolution:
 
 1. Collect the user's groups from the `ExternalIdentity`.
 2. For each mapping entry whose group matches, take its role.
@@ -360,18 +376,24 @@ explicitly **future work**.
   never reads it; it makes same-origin credentialed requests.
 - **Validation (hot path):** middleware hashes the cookie token, looks up the session via
   `db.Connection()` (catalog tier), checks `revoked_at`, `idle_expires_at`,
-  `absolute_expires_at`, loads the user, builds a `Principal`. The dqlite read/write splitter
-  (`installDqliteReadWriteSplit`, #188) routes the lookup to the read pool automatically — no
-  manual connection selection.
+  `absolute_expires_at`, loads the user and **rejects if `users.disabled_at` is set** (a
+  disabled user is locked out immediately, not only at session expiry), then builds a
+  `Principal`. The dqlite read/write splitter (`installDqliteReadWriteSplit`, #188) routes the
+  lookup to the read pool automatically — no manual connection selection.
 - **Activity / last-seen:** `last_seen_at` and `idle_expires_at` bumps are **buffered and
   flushed** by a background flusher modeled on `Service.RunLastUsedFlusher`, so the hot path
   issues no per-request write. Coalescing matters because writes traverse Raft; the
   read/write split alone does not remove write-contention cost.
 - **Lifecycle:** idle timeout (`AUTH_SESSION_IDLE_TTL`) and absolute timeout
   (`AUTH_SESSION_ABSOLUTE_TTL`, never extended). Logout deletes the session row;
-  "log out everywhere" deletes all sessions for a user. Session-fixation safe: a fresh token
-  is always minted after successful authentication. Expired/revoked rows are reaped by a
-  periodic sweep.
+  "log out everywhere" deletes all sessions for a user. Session-fixation safe: a fresh session
+  token **and CSRF token** are always minted after successful authentication. Expired/revoked
+  rows are reaped by a periodic sweep.
+- **Role staleness:** the effective role is resolved at login and cached (`users.role`). A
+  change to `CAESIUM_AUTH_ROLE_MAPPING` takes effect for an existing session only at its next
+  login, or within at most `AUTH_SESSION_ABSOLUTE_TTL`. To drop elevated access sooner, use
+  admin session revocation / "log out everywhere". (Per-request re-resolution is deferred —
+  the user's groups are themselves a login-time snapshot.)
 
 ## 11. Middleware, endpoints, and UI
 
@@ -385,10 +407,16 @@ Principal resolution order:
 3. Else → 401.
 
 RBAC (`RequiredRole`/`HasRole`) and scope checks then run against the `Principal`
-unchanged. **CSRF:** for **cookie-authenticated** unsafe methods (POST/PUT/PATCH/DELETE),
-require a double-submit CSRF token (a readable, non-httpOnly CSRF cookie issued at login,
-echoed in an `X-CSRF-Token` header). Bearer/API-key requests are **exempt** (no ambient
-cookie → not forgeable cross-site). `SameSite=Lax` is defense-in-depth.
+unchanged. **CSRF (session-bound synchronizer token):** each session row carries a random
+`csrf_token` minted at login. For **cookie-authenticated** unsafe methods
+(POST/PUT/PATCH/DELETE), the request must send an `X-CSRF-Token` header that matches
+(constant-time) the resolved session's `csrf_token`; the check runs in the middleware *after*
+the session is resolved, so it validates against server-side state rather than a second
+cookie. The SPA reads the token from `/auth/whoami` (which itself requires the httpOnly
+session cookie and same origin) and keeps it in memory. This avoids the subdomain
+cookie-injection weakness of a plain double-submit cookie. Bearer/API-key requests are
+**exempt** (no ambient cookie → not forgeable cross-site). `SameSite=Lax` on the session
+cookie is defense-in-depth.
 
 ### 11.2 Endpoints
 
@@ -396,7 +424,8 @@ cookie → not forgeable cross-site). `SameSite=Lax` is defense-in-depth.
   affordances: `{ enabled, methods: [ {type:"api-key"}, {type:"oidc", loginUrl}, {type:"saml", loginUrl}, {type:"ldap"} ] }`.
 - `GET /auth/sso/{oidc,saml}/login`, `GET /auth/sso/oidc/callback`,
   `POST /auth/sso/saml/acs`, `GET /auth/sso/saml/metadata`, `POST /auth/sso/ldap/login`.
-- `GET /auth/whoami` — returns the current principal (kind, email, role) for the SPA.
+- `GET /auth/whoami` — returns the current principal (kind, email, role) and, for a session
+  principal, its `csrf_token`, for the SPA.
 - `POST /auth/logout` — revokes the current session, clears cookies.
 
 All `returnTo`/RelayState values are validated **same-origin only** (open-redirect guard).
@@ -407,8 +436,9 @@ All `returnTo`/RelayState values are validated **same-origin only** (open-redire
   endpoint) and, when LDAP is enabled, a username/password form. The existing API-key box is
   retained for power users. Method list comes from `/auth/status`.
 - `lib/auth.ts` gains a **session mode**: when authenticated via cookie, it relies on the
-  httpOnly cookie + `/auth/whoami` (rather than the in-memory Bearer key), and attaches the
-  CSRF header for unsafe requests. The existing in-memory API-key mode is preserved.
+  httpOnly cookie + `/auth/whoami` (rather than the in-memory Bearer key), caches the
+  `csrf_token` returned by `/auth/whoami`, and sends it as `X-CSRF-Token` on unsafe requests.
+  The existing in-memory API-key mode is preserved.
 - `AuthGate.tsx` consults `/auth/whoami` to detect an established session in addition to the
   in-memory key.
 
@@ -421,11 +451,16 @@ it through the `Principal` middleware is noted as follow-up, out of v1 scope.
 
 - OIDC: PKCE + `state` + `nonce`; JWKS signature, `iss`/`aud`/`exp` validation.
 - SAML: XML-dsig verification; audience/recipient/time-window checks with bounded clock
-  skew; assertion replay cache.
-- LDAP: LDAPS/StartTLS required; reject anonymous/empty-password bind; TLS cert verification.
+  skew; **dqlite-backed** assertion replay cache (not per-node in-memory); IdP metadata
+  fetched only over **HTTPS with full TLS certificate verification**.
+- LDAP: LDAPS/StartTLS required; reject anonymous/empty-password bind; TLS cert verification;
+  **all user-supplied input escaped with `ldap.EscapeFilter` before filter substitution**.
 - Sessions: opaque token hashed at rest; `HttpOnly`+`Secure`+`SameSite=Lax` cookie;
-  session-fixation safe; idle + absolute expiry; revocation.
-- CSRF double-submit token for cookie-authenticated unsafe methods.
+  session-fixation safe; idle + absolute expiry; revocation; **validation rejects sessions
+  whose user is disabled (`users.disabled_at`)**.
+- CSRF: **session-bound synchronizer token** (per-session `csrf_token` checked in-middleware
+  against `X-CSRF-Token`) for cookie-authenticated unsafe methods — not a plain double-submit
+  cookie (which is exposed to subdomain cookie injection).
 - Open-redirect guard on all `returnTo`/RelayState.
 - Reuse the existing per-IP **rate limiter** on credential/login endpoints and the **audit
   logger** (Actor becomes the user email/id).
@@ -495,7 +530,8 @@ priority ordering.
   (tampered/expired/replayed assertions).
 - **Trusting IdP groups** for privilege escalation: deny-by-default, validate role-mapping
   config at startup, log denied logins with the unmatched groups.
-- **Cookie/CSRF gaps in a SPA**: httpOnly session cookie + double-submit CSRF + SameSite;
+- **Cookie/CSRF gaps in a SPA**: httpOnly session cookie + **session-bound synchronizer CSRF
+  token** (validated server-side; immune to subdomain cookie injection) + `SameSite=Lax`;
   Bearer path exempt and unchanged.
 - **dqlite write contention from session activity**: coalesced last-seen flusher + read/write
   split, mirroring the proven API-key `last_used_at` approach.
@@ -507,3 +543,8 @@ priority ordering.
 - CLI SSO (device-code / PKCE) issuing a session-scoped token.
 - GraphQL under the `Principal` middleware.
 - RP-initiated logout / SAML SLO (v1 does local logout only).
+- **Cross-provider identity linking.** Identities are keyed on `(issuer, subject)`, so one
+  person authenticating via two providers (e.g. OIDC *and* SAML) gets two `users` rows. v1
+  does **not** auto-merge on `email`: email is not a trustworthy cross-provider join key
+  (providers differ on email verification, and auto-merging would risk account takeover).
+  Most deployments enable a single provider; operator-driven account linking is future work.

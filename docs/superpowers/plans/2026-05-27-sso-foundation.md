@@ -35,7 +35,7 @@
 - `internal/auth/rolemap.go` — `RoleMapper` (parse `group=role` config, resolve highest, deny-by-default).
 - `internal/auth/users.go` — `UserStore.Upsert` (JIT provisioning).
 - `internal/auth/provider.go` — `ExternalIdentity`, `RedirectAuthenticator`, `CredentialAuthenticator`, `SSOService.Complete` (shared login tail).
-- `api/middleware/csrf.go` — double-submit CSRF middleware.
+- `api/middleware/csrf.go` — session-bound CSRF check (synchronizer token).
 - `api/rest/controller/auth/sso.go` — `Whoami`, `Logout` handlers + session-cookie helpers.
 
 **Modified:**
@@ -290,7 +290,6 @@ func GetPrincipal(c *echo.Context) *auth.Principal {
 	AuthSessionIdleTTL    time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
 	AuthSessionAbsoluteTTL time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
 	AuthSessionCookieName string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
-	AuthCSRFCookieName    string        `envconfig:"AUTH_CSRF_COOKIE_NAME" default:"caesium_csrf"`
 	AuthRoleMapping       string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
 	AuthDefaultRole       string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
 	// Provider enable flags are read here; provider-specific config lands in P2-P4.
@@ -370,6 +369,7 @@ type Session struct {
 	ID                uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
 	UserID            uuid.UUID  `gorm:"type:uuid;not null;index" json:"user_id"`
 	TokenHash         string     `gorm:"type:text;not null;uniqueIndex" json:"-"`
+	CSRFToken         string     `gorm:"type:text;not null" json:"-"`
 	AuthMethod        string     `gorm:"type:text" json:"auth_method"`
 	CreatedAt         time.Time  `gorm:"not null" json:"created_at"`
 	IdleExpiresAt     time.Time  `gorm:"not null" json:"idle_expires_at"`
@@ -636,11 +636,16 @@ func (s *SessionStore) Create(ctx context.Context, req CreateSessionRequest) (st
 	if err != nil {
 		return "", nil, err
 	}
+	csrf, err := base62Encode(randomBytes) // per-session synchronizer CSRF token (kept server-side)
+	if err != nil {
+		return "", nil, err
+	}
 	now := s.nowUTC()
 	sess := &models.Session{
 		ID:                uuid.New(),
 		UserID:            req.UserID,
 		TokenHash:         hash,
+		CSRFToken:         csrf,
 		AuthMethod:        req.AuthMethod,
 		CreatedAt:         now,
 		IdleExpiresAt:     now.Add(s.idleTTL),
@@ -839,7 +844,7 @@ func (s *SessionStore) RunReaper(ctx context.Context) {
 
 ```go
 func TestRoleMapperResolve(t *testing.T) {
-	m, err := NewRoleMapper("caesium-admins=admin,data-eng=operator,*=viewer", "")
+	m, err := NewRoleMapper("caesium-admins=admin;data-eng=operator;*=viewer", "")
 	require.NoError(t, err)
 
 	r, ok := m.Resolve([]string{"data-eng"})
@@ -892,21 +897,22 @@ type RoleMapper struct {
 	defaultRole *models.Role
 }
 
-// NewRoleMapper parses "group=role,group2=role2[,*=role]" plus an optional
-// default role. Unknown roles are rejected.
+// NewRoleMapper parses "group=role;group2=role2[;*=role]" plus an optional
+// default role. Entries are ';'-separated and split on the LAST '=', so a group
+// key may itself contain '=' and ',' (LDAP/AD DNs). Unknown roles are rejected.
 func NewRoleMapper(mapping, defaultRole string) (*RoleMapper, error) {
 	m := &RoleMapper{byGroup: map[string]models.Role{}}
-	for _, entry := range strings.Split(mapping, ",") {
+	for _, entry := range strings.Split(mapping, ";") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
 		}
-		parts := strings.SplitN(entry, "=", 2)
-		if len(parts) != 2 {
+		eq := strings.LastIndex(entry, "=")
+		if eq <= 0 || eq == len(entry)-1 {
 			return nil, fmt.Errorf("invalid role mapping entry %q (want group=role)", entry)
 		}
-		group := strings.TrimSpace(parts[0])
-		role := models.Role(strings.TrimSpace(parts[1]))
+		group := strings.TrimSpace(entry[:eq])
+		role := models.Role(strings.TrimSpace(entry[eq+1:]))
 		if !models.ValidRole(string(role)) {
 			return nil, fmt.Errorf("invalid role %q in mapping", role)
 		}
@@ -1148,52 +1154,47 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 
 - [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add provider interfaces and shared SSO login pipeline"
 
-### Task 1.9: Cookie helpers + CSRF middleware
+### Task 1.9: Session-bound CSRF (synchronizer token)
 
 **Files:**
 - Create: `api/middleware/csrf.go`
 - Test: `api/middleware/csrf_test.go`
 
+CSRF is bound to the server-side session (synchronizer-token pattern): each session carries a
+`csrf_token` (Tasks 1.2/1.4), and for cookie-authenticated unsafe methods the request must echo
+it in `X-CSRF-Token`. The check runs *inside* the auth middleware (Task 1.10) once the session is
+resolved, comparing against server-side state — there is **no readable CSRF cookie**, so subdomain
+cookie injection cannot forge it. This file provides the check helper, method classification, and
+the context plumbing that `/auth/whoami` uses to surface the token.
+
 - [ ] **Step 1: Failing test**
 
 ```go
-func TestCSRFAllowsSafeAndBearer(t *testing.T) {
-	mw := CSRF("caesium_csrf")
-	h := mw(func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
+func TestEnforceSessionCSRF(t *testing.T) {
+	// safe method: allowed regardless of header
+	c, _ := newCtx(http.MethodGet, "/v1/jobs", nil)
+	assert.NoError(t, EnforceSessionCSRF(c, "tok123"))
 
-	// safe method: allowed
-	c, rec := newCtx(http.MethodGet, "/v1/jobs", nil)
-	assert.NoError(t, h(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	// unsafe + matching header: allowed
+	c, _ = newCtx(http.MethodPost, "/v1/jobs", map[string]string{"X-CSRF-Token": "tok123"})
+	assert.NoError(t, EnforceSessionCSRF(c, "tok123"))
 
-	// bearer-authenticated unsafe: allowed (no ambient cookie)
-	c, rec = newCtx(http.MethodPost, "/v1/jobs", map[string]string{"Authorization": "Bearer csk_live_x"})
-	assert.NoError(t, h(c))
-}
+	// unsafe + missing header: 403
+	c, _ = newCtx(http.MethodPost, "/v1/jobs", nil)
+	assert.Error(t, EnforceSessionCSRF(c, "tok123"))
 
-func TestCSRFRejectsCookieWithoutToken(t *testing.T) {
-	mw := CSRF("caesium_csrf")
-	h := mw(func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
-	c, _ := newCtx(http.MethodPost, "/v1/jobs", map[string]string{"Cookie": "caesium_session=abc"})
-	err := h(c)
+	// unsafe + mismatched header: 403
+	c, _ = newCtx(http.MethodPost, "/v1/jobs", map[string]string{"X-CSRF-Token": "wrong"})
+	err := EnforceSessionCSRF(c, "tok123")
 	he, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	assert.Equal(t, http.StatusForbidden, he.Code)
-}
-
-func TestCSRFAcceptsMatchingDoubleSubmit(t *testing.T) {
-	mw := CSRF("caesium_csrf")
-	h := mw(func(c *echo.Context) error { return c.NoContent(http.StatusOK) })
-	c, _ := newCtx(http.MethodPost, "/v1/jobs", map[string]string{
-		"Cookie": "caesium_csrf=tok123", "X-CSRF-Token": "tok123",
-	})
-	assert.NoError(t, h(c))
 }
 ```
 
 > `newCtx` helper: build an Echo context from method/path/headers (mirror the setup already used in `api/middleware/auth_test.go`; extract a shared helper if convenient).
 
-- [ ] **Step 2: Run → FAIL.** `go test ./api/middleware/ -run TestCSRF -v`
+- [ ] **Step 2: Run → FAIL.** `go test ./api/middleware/ -run TestEnforceSessionCSRF -v`
 
 - [ ] **Step 3: Implement `api/middleware/csrf.go`**
 
@@ -1208,24 +1209,31 @@ import (
 	"github.com/labstack/echo/v5"
 )
 
-// CSRF enforces a double-submit token for cookie-authenticated unsafe requests.
-// Safe methods and Bearer (API-key) requests are exempt — an API key carries no
-// ambient cookie, so it cannot be driven cross-site.
-func CSRF(csrfCookieName string) echo.MiddlewareFunc {
-	return func(next echo.HandlerFunc) echo.HandlerFunc {
-		return func(c *echo.Context) error {
-			if isSafeMethod(c.Request().Method) || hasBearer(c) {
-				return next(c)
-			}
-			cookie, err := c.Request().Cookie(csrfCookieName)
-			header := c.Request().Header.Get("X-CSRF-Token")
-			if err != nil || cookie.Value == "" || header == "" ||
-				subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(header)) != 1 {
-				return echo.NewHTTPError(http.StatusForbidden, "invalid csrf token")
-			}
-			return next(c)
-		}
+// ContextKeyCSRFToken stores the resolved session's CSRF token for handlers (e.g. whoami).
+const ContextKeyCSRFToken = "auth.csrf_token"
+
+// EnforceSessionCSRF validates the synchronizer CSRF token for cookie-authenticated unsafe
+// requests. `expected` is the resolved session's csrf_token. Safe methods always pass. The auth
+// middleware calls this only for session principals; Bearer/API-key requests are exempt at the
+// call site (no ambient cookie → not forgeable cross-site).
+func EnforceSessionCSRF(c *echo.Context, expected string) error {
+	if isSafeMethod(c.Request().Method) {
+		return nil
 	}
+	header := c.Request().Header.Get("X-CSRF-Token")
+	if expected == "" || header == "" ||
+		subtle.ConstantTimeCompare([]byte(header), []byte(expected)) != 1 {
+		return echo.NewHTTPError(http.StatusForbidden, "invalid csrf token")
+	}
+	return nil
+}
+
+// GetCSRFToken returns the session CSRF token stashed by the auth middleware, or "".
+func GetCSRFToken(c *echo.Context) string {
+	if v, ok := c.Get(ContextKeyCSRFToken).(string); ok {
+		return v
+	}
+	return ""
 }
 
 func isSafeMethod(m string) bool {
@@ -1242,7 +1250,9 @@ func hasBearer(c *echo.Context) bool {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add double-submit CSRF middleware"
+(`hasBearer` is used by the Task 1.10 auth middleware to take the API-key branch.)
+
+- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session-bound CSRF synchronizer check"
 
 ### Task 1.10: Resolve session-cookie principals in the auth middleware
 
@@ -1299,12 +1309,17 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				principal = auth.PrincipalFromKey(k)
 			} else if d.Sessions != nil {
 				if cookie, err := c.Request().Cookie(d.CookieName); err == nil && cookie.Value != "" {
-					_, user, verr := d.Sessions.Validate(c.Request().Context(), cookie.Value)
+					sess, user, verr := d.Sessions.Validate(c.Request().Context(), cookie.Value)
 					if verr != nil {
 						metrics.AuthFailuresTotal.WithLabelValues("session_invalid").Inc()
 						return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired session")
 					}
+					// Session-bound CSRF for cookie auth (Bearer path is exempt — no cookie).
+					if cerr := EnforceSessionCSRF(c, sess.CSRFToken); cerr != nil {
+						return cerr
+					}
 					principal = auth.PrincipalFromUser(user)
+					c.Set(ContextKeyCSRFToken, sess.CSRFToken) // surfaced via /auth/whoami
 				}
 			}
 
@@ -1329,8 +1344,7 @@ Keep the existing rate-limit, failure-audit, RBAC, and scope blocks — only the
 ```go
 	if env.Variables().AuthMode == "api-key" || env.Variables().SSOEnabled() {
 		deps := authmw.AuthDeps{Service: authSvc, Auditor: auditor, Limiter: limiter, Sessions: sessions, CookieName: env.Variables().AuthSessionCookieName}
-		protected.Use(authmw.Auth(deps))
-		protected.Use(authmw.CSRF(env.Variables().AuthCSRFCookieName))
+		protected.Use(authmw.Auth(deps)) // session-bound CSRF is enforced inside Auth
 		if authSvc != nil {
 			bindAuth(protected, authctrl.New(authSvc, auditor))
 		}
@@ -1392,12 +1406,16 @@ func (s *SSOController) Whoami(c *echo.Context) error {
 	if p == nil {
 		return echo.NewHTTPError(http.StatusUnauthorized, "not authenticated")
 	}
-	return c.JSON(http.StatusOK, map[string]any{"kind": p.Kind, "subject": p.Subject, "role": p.Role})
+	body := map[string]any{"kind": p.Kind, "subject": p.Subject, "role": p.Role}
+	if csrf := authmw.GetCSRFToken(c); csrf != "" { // session principals carry a CSRF token
+		body["csrf_token"] = csrf
+	}
+	return c.JSON(http.StatusOK, body)
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {
 	if cookie, err := c.Request().Cookie(s.cookieName); err == nil && cookie.Value != "" {
-		if _, sess, verr := s.sessions.Validate(c.Request().Context(), cookie.Value); verr == nil {
+		if sess, _, verr := s.sessions.Validate(c.Request().Context(), cookie.Value); verr == nil {
 			_ = s.sessions.Revoke(c.Request().Context(), sess.ID)
 		}
 	}
@@ -1485,23 +1503,28 @@ CAESIUM_AUTH_ROLE_MAPPING='*=viewer' just run   # expect: boots, /auth/status li
 - Modify: `ui/src/lib/auth.ts`, `ui/src/features/auth/AuthGate.tsx`
 - Test: `ui/src/lib/__tests__/auth.test.ts`, `ui/src/features/auth/__tests__/AuthGate.test.tsx`
 
-- [ ] **Step 1: Failing test** — `AuthGate` treats an established session (`/auth/whoami` 200) as authed without the API-key box; `withAuthHeaders` adds `X-CSRF-Token` from the CSRF cookie when present.
+- [ ] **Step 1: Failing test** — `AuthGate` treats an established session (`/auth/whoami` 200) as authed without the API-key box; `withAuthHeaders` adds `X-CSRF-Token` from the token cached from `/auth/whoami`.
 
 - [ ] **Step 2: Run → FAIL.** `cd ui && npx vitest run src/lib/__tests__/auth.test.ts`
 
-- [ ] **Step 3: Implement.** In `auth.ts`, add session detection + CSRF header (read the readable `caesium_csrf` cookie) and a `checkSession()` that calls `/auth/whoami` with `credentials: "include"`. In `AuthGate.tsx`, after the `/auth/status` probe, also call `/auth/whoami`; if it returns 200, render children (cookie session active). Keep the in-memory API-key path intact. SSO "Sign in with…" buttons + LDAP form are added in the provider plans (they need login URLs from `/auth/status.methods`).
+- [ ] **Step 3: Implement.** In `auth.ts`, add session detection + CSRF header (from the in-memory token `checkSession()` captures from `/auth/whoami`, not a cookie) and a `checkSession()` that calls `/auth/whoami` with `credentials: "include"`. In `AuthGate.tsx`, after the `/auth/status` probe, also call `/auth/whoami`; if it returns 200, render children (cookie session active). Keep the in-memory API-key path intact. SSO "Sign in with…" buttons + LDAP form are added in the provider plans (they need login URLs from `/auth/status.methods`).
 
 ```ts
-// auth.ts additions
+// auth.ts additions — CSRF token cached from /auth/whoami (synchronizer pattern; never a cookie)
+let csrfToken: string | null = null;
+
 export function csrfHeader(): Record<string, string> {
-  const m = document.cookie.match(/(?:^|;\s*)caesium_csrf=([^;]+)/);
-  return m ? { "X-CSRF-Token": decodeURIComponent(m[1]) } : {};
+  return csrfToken ? { "X-CSRF-Token": csrfToken } : {};
 }
 
+// checkSession reports whether a cookie session is active and captures its CSRF token.
 export async function checkSession(): Promise<boolean> {
   try {
     const r = await fetch("/auth/whoami", { credentials: "include" });
-    return r.ok;
+    if (!r.ok) return false;
+    const body = (await r.json()) as { csrf_token?: string };
+    csrfToken = body.csrf_token ?? null;
+    return true;
   } catch {
     return false;
   }
@@ -1530,17 +1553,17 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 
 ### P2 — OIDC provider (`coreos/go-oidc/v3` + `golang.org/x/oauth2`)
 - **Files:** `internal/auth/oidc/provider.go` (implements `RedirectAuthenticator`), provider config in `pkg/env/env.go` (`AUTH_OIDC_*`), login/callback handlers in `api/rest/controller/auth/sso.go`, route mounts in `api.Start`, UI "Sign in with OIDC" button.
-- **Key work:** discovery; Authorization Code + PKCE; `state`/`nonce` in a short-lived signed pre-login cookie; ID-token signature + `iss`/`aud`/`exp`/`nonce` verification; groups from `AUTH_OIDC_GROUPS_CLAIM` → `ExternalIdentity` → `SSOService.Complete` → set session cookie + CSRF cookie → redirect to validated `returnTo`.
+- **Key work:** discovery; Authorization Code + PKCE; `state`/`nonce` in a short-lived signed pre-login cookie; ID-token signature + `iss`/`aud`/`exp`/`nonce` verification; groups from `AUTH_OIDC_GROUPS_CLAIM` → `ExternalIdentity` → `SSOService.Complete` (mints session + per-session CSRF token) → set session cookie → redirect to validated `returnTo`.
 - **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).
 
 ### P3 — SAML provider (`crewjam/saml`)  *(highest risk)*
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
-- **Key work:** SP metadata; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; assertion replay cache; RelayState = validated `returnTo`; groups from attribute → shared tail.
+- **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
 - **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
 
 ### P4 — LDAP provider (`go-ldap/ldap/v3`)
 - **Files:** `internal/auth/ldap/provider.go` (implements `CredentialAuthenticator`), `AUTH_LDAP_*` config, `POST /auth/sso/ldap/login` handler (rate-limited), UI username/password form.
-- **Key work:** LDAPS/StartTLS; service bind → user search (`USER_FILTER`) → rebind to verify; group query (`GROUP_FILTER`); reject empty-password/anonymous bind.
+- **Key work:** LDAPS/StartTLS; service bind → user search (`USER_FILTER`) → rebind to verify; group query (`GROUP_FILTER`); **escape all user-supplied input with `ldap.EscapeFilter` before substitution** (LDAP-injection guard); reject empty-password/anonymous bind.
 - **Tests:** containerized OpenLDAP with seeded users/groups (integration, `-tags=integration`).
 
 ### P5 — Docs + hardening
