@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -26,14 +27,19 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(fmt.Errorf("trigger is required"))
 	}
 
-	ctx := c.Request().Context()
-
 	// Apply the whole job — trigger, job, atoms, tasks, edges — in one
 	// transaction so it commits atomically in a single dqlite/Raft round-trip
 	// (instead of ~6-8 autocommit writes) and never leaves a partial job behind
-	// if a later step fails.
+	// if a later step fails. Defer event publishing (job.Create emits
+	// TypeJobCreated) until the transaction commits, so a rolled-back or retried
+	// attempt never leaks an event onto the bus.
+	ctx, flushEvents := event.WithDeferredPublish(c.Request().Context())
+
 	var created *models.Job
 	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+		// Drop any events accumulated by a prior (rolled-back) attempt.
+		event.ResetDeferred(ctx)
+
 		var (
 			tsvc          = task.Service(ctx).WithDatabase(tx)
 			asvc          = atom.Service(ctx).WithDatabase(tx)
@@ -55,8 +61,6 @@ func Post(c *echo.Context) error {
 		if err != nil {
 			return err
 		}
-		created = j
-
 		for _, t := range req.Tasks {
 			a, err := asvc.Create(&atom.CreateRequest{
 				Engine:  t.Atom.Engine,
@@ -110,12 +114,16 @@ func Post(c *echo.Context) error {
 			}
 		}
 
+		created = j
 		return nil
 	})
 	if err != nil {
 		log.Error("failed to apply job", "alias", req.Alias, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
+
+	// The transaction committed — now publish the accumulated events.
+	flushEvents()
 
 	return c.JSON(http.StatusCreated, created)
 }

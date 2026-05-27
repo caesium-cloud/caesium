@@ -38,7 +38,11 @@ var BusyRetryBackoffs = []time.Duration{
 // BusyRetryBackoffs budget. A rolled-back transaction leaves no state, so
 // re-running fn from the top is safe.
 func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
-	conn := Connection().WithContext(ctx)
+	return transaction(ctx, Connection(), fn)
+}
+
+func transaction(ctx context.Context, conn *gorm.DB, fn func(tx *gorm.DB) error) error {
+	conn = conn.WithContext(ctx)
 	var err error
 	for attempt := 0; ; attempt++ {
 		err = conn.Transaction(fn)
@@ -50,7 +54,10 @@ func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
 		}
 		metrics.DBBusyRetriesTotal.Inc()
 		if sleepErr := sleepRetry(ctx, BusyRetryBackoffs[attempt]); sleepErr != nil {
-			return err
+			// Context cancelled/timed out during backoff: surface that, not the
+			// contention error, so callers see context.Canceled/DeadlineExceeded
+			// rather than a misleading DB failure.
+			return sleepErr
 		}
 	}
 }

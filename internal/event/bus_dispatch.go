@@ -99,6 +99,14 @@ func PublishAndMarkBusDispatched(ctx context.Context, bus Bus, store *Store, eve
 		return
 	}
 
+	if d := deferredFrom(ctx); d != nil {
+		// Inside a deferred-publish scope (an enclosing transaction): accumulate
+		// and let the caller flush after commit, so events for writes that roll
+		// back or get retried never reach the bus.
+		d.record(bus, store, events...)
+		return
+	}
+
 	for _, evt := range events {
 		bus.Publish(evt)
 	}
