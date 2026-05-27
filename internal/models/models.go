@@ -18,6 +18,8 @@ var All = []interface{}{
 	&ExecutionEvent{},
 	&APIKey{},
 	&AuditLog{},
+	&User{},
+	&Session{},
 	&NotificationChannel{},
 	&NotificationPolicy{},
 	// Phase 2 run-owner coordination tables (catalog DB, cross-run, low-volume).

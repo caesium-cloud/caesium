@@ -40,7 +40,7 @@ func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 	}
 
 	e := echo.New()
-	All(e.Group("/v1"), nil, svc, auditor, limiter)
+	All(e.Group("/v1"), nil, svc, auditor, limiter, nil)
 
 	protectedReq := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
 	protectedRec := httptest.NewRecorder()

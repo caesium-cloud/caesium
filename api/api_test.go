@@ -37,24 +37,53 @@ func TestAuthStatusReflectsAuthMode(t *testing.T) {
 		rec := performRequest(t, authStatus(env.Environment{AuthMode: "api-key"}), http.MethodGet, "/auth/status")
 
 		require.Equal(t, http.StatusOK, rec.Code)
-		var body map[string]bool
+		var body struct {
+			Enabled bool                `json:"enabled"`
+			Methods []map[string]string `json:"methods"`
+		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		require.True(t, body["enabled"])
+		require.True(t, body.Enabled)
+		require.Contains(t, body.Methods, map[string]string{"type": "api-key"})
 	})
 
 	t.Run("disabled", func(t *testing.T) {
 		rec := performRequest(t, authStatus(env.Environment{AuthMode: "none"}), http.MethodGet, "/auth/status")
 
 		require.Equal(t, http.StatusOK, rec.Code)
-		var body map[string]bool
+		var body struct {
+			Enabled bool                `json:"enabled"`
+			Methods []map[string]string `json:"methods"`
+		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		require.False(t, body["enabled"])
+		require.False(t, body.Enabled)
+		require.Empty(t, body.Methods)
 	})
+}
+
+func TestAuthStatusListsSSOMethods(t *testing.T) {
+	rec := performRequest(t, authStatus(env.Environment{
+		AuthMode:        "api-key",
+		AuthOIDCEnabled: true,
+		AuthSAMLEnabled: true,
+		AuthLDAPEnabled: true,
+	}), http.MethodGet, "/auth/status")
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body struct {
+		Enabled bool                `json:"enabled"`
+		Methods []map[string]string `json:"methods"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.True(t, body.Enabled)
+	require.Contains(t, body.Methods, map[string]string{"type": "api-key"})
+	require.Contains(t, body.Methods, map[string]string{"type": "oidc", "loginUrl": "/auth/sso/oidc/login"})
+	require.Contains(t, body.Methods, map[string]string{"type": "saml", "loginUrl": "/auth/sso/saml/login"})
+	require.Contains(t, body.Methods, map[string]string{"type": "ldap"})
 }
 
 func TestRegisterMetricsPublicWhenAuthDisabled(t *testing.T) {
 	e := echo.New()
-	registerMetrics(e, env.Environment{AuthMode: "none"}, nil, nil, nil)
+	registerMetrics(e, env.Environment{AuthMode: "none"}, nil, nil, nil, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()
@@ -79,7 +108,7 @@ func TestRegisterMetricsProtectedWhenAuthEnabled(t *testing.T) {
 	require.NoError(t, err)
 
 	e := echo.New()
-	registerMetrics(e, env.Environment{AuthMode: "api-key"}, svc, auditor, limiter)
+	registerMetrics(e, env.Environment{AuthMode: "api-key"}, svc, auditor, limiter, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
 	rec := httptest.NewRecorder()

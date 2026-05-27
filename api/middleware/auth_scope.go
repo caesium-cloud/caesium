@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/auth"
-	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -35,8 +34,8 @@ func GetAllowedJobAliases(c *echo.Context) []string {
 	return append([]string(nil), aliases...)
 }
 
-func authorizeScope(c *echo.Context, svc *auth.Service, key *models.APIKey, routePath string) (*scopeAuditContext, error) {
-	scopeJobs, err := auth.ScopeJobs(key.Scope)
+func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routePath string) (*scopeAuditContext, error) {
+	scopeJobs, err := auth.ScopeJobs(scopeJSON)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 	}
@@ -57,7 +56,7 @@ func authorizeScope(c *echo.Context, svc *auth.Service, key *models.APIKey, rout
 			if err != nil {
 				return nil, echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 			}
-			if len(aliases) != 1 || !auth.CheckScope(key.Scope, aliases[0]) {
+			if len(aliases) != 1 || !auth.CheckScope(scopeJSON, aliases[0]) {
 				return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 			}
 			state.jobAliases = aliases
@@ -72,7 +71,7 @@ func authorizeScope(c *echo.Context, svc *auth.Service, key *models.APIKey, rout
 			return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 		}
 		for _, alias := range aliases {
-			if !auth.CheckScope(key.Scope, alias) {
+			if !auth.CheckScope(scopeJSON, alias) {
 				return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 			}
 		}
@@ -88,7 +87,7 @@ func authorizeScope(c *echo.Context, svc *auth.Service, key *models.APIKey, rout
 			}
 			return nil, echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 		}
-		if !auth.CheckScope(key.Scope, jobAlias) {
+		if !auth.CheckScope(scopeJSON, jobAlias) {
 			return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
 		}
 		state.jobAliases = []string{jobAlias}

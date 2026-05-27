@@ -9,7 +9,13 @@
 type AuthChangeListener = () => void;
 
 let apiKey: string | null = null;
+let cookieSession = false;
+let csrfToken: string | null = null;
 const listeners: Set<AuthChangeListener> = new Set();
+
+function notifyAuthChange(): void {
+  listeners.forEach((fn) => fn());
+}
 
 function cloneHeaders(headers?: HeadersInit): Record<string, string> {
   if (!headers) {
@@ -27,18 +33,58 @@ function cloneHeaders(headers?: HeadersInit): Record<string, string> {
 /** Store the API key in memory (never persisted to disk). */
 export function setApiKey(key: string): void {
   apiKey = key;
-  listeners.forEach((fn) => fn());
+  notifyAuthChange();
 }
 
 /** Clear the API key (logout). */
 export function clearApiKey(): void {
   apiKey = null;
-  listeners.forEach((fn) => fn());
+  cookieSession = false;
+  csrfToken = null;
+  notifyAuthChange();
 }
 
 /** Returns true if an API key is currently set. */
 export function isAuthenticated(): boolean {
-  return apiKey !== null;
+  return apiKey !== null || cookieSession;
+}
+
+/** Return the cached CSRF header for cookie-session requests. */
+export function csrfHeader(): Record<string, string> {
+  return csrfToken ? { "X-CSRF-Token": csrfToken } : {};
+}
+
+/**
+ * Checks whether the browser has a valid cookie session and caches the
+ * session-bound CSRF token returned by the server.
+ */
+export async function checkSession(): Promise<boolean> {
+  try {
+    const response = await fetch("/auth/whoami", { credentials: "include" });
+    if (!response.ok) {
+      if (cookieSession || csrfToken) {
+        cookieSession = false;
+        csrfToken = null;
+        notifyAuthChange();
+      }
+      return false;
+    }
+
+    const body = (await response.json()) as { csrf_token?: string };
+    csrfToken = body.csrf_token ?? null;
+    if (!cookieSession) {
+      cookieSession = true;
+      notifyAuthChange();
+    }
+    return true;
+  } catch {
+    if (cookieSession || csrfToken) {
+      cookieSession = false;
+      csrfToken = null;
+      notifyAuthChange();
+    }
+    return false;
+  }
 }
 
 /**
@@ -49,6 +95,8 @@ export function withAuthHeaders(headers?: HeadersInit): Record<string, string> {
   const nextHeaders = cloneHeaders(headers);
   if (apiKey) {
     nextHeaders.Authorization = `Bearer ${apiKey}`;
+  } else {
+    Object.assign(nextHeaders, csrfHeader());
   }
   return nextHeaders;
 }

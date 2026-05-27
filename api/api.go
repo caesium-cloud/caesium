@@ -16,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/gql"
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/bind"
+	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -38,7 +39,7 @@ var apiServer struct {
 // are deliberately NOT served here — they live on a dedicated mutually
 // authenticated TLS listener (see dispatch.InternalServer) so the public API
 // can remain plain HTTP behind the operator's proxy.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, wakeupHandler InternalWakeupHandler) error {
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, wakeupHandler InternalWakeupHandler) error {
 	e := echo.New()
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
@@ -46,14 +47,15 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// health
 	e.GET("/health", Health)
 	e.GET("/auth/status", authStatus(vars))
+	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions)
 	registerInternalWakeup(e, vars, wakeupHandler)
 
 	// metrics
 	e.Use(echoprometheus.NewMiddleware("caesium"))
-	registerMetrics(e, vars, authSvc, auditor, limiter)
+	registerMetrics(e, vars, authSvc, auditor, limiter, sessions)
 
 	// REST
-	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter)
+	bind.All(e.Group("/v1"), bus, authSvc, auditor, limiter, sessions)
 
 	registerGraphQL(e, vars)
 
@@ -151,18 +153,53 @@ func constantTimeEqual(a, b string) bool {
 
 func authStatus(vars env.Environment) echo.HandlerFunc {
 	return func(c *echo.Context) error {
-		return c.JSON(http.StatusOK, map[string]bool{
-			"enabled": vars.AuthMode == "api-key",
+		methods := make([]map[string]string, 0, 4)
+		if vars.AuthMode == "api-key" {
+			methods = append(methods, map[string]string{"type": "api-key"})
+		}
+		if vars.AuthOIDCEnabled {
+			methods = append(methods, map[string]string{"type": "oidc", "loginUrl": "/auth/sso/oidc/login"})
+		}
+		if vars.AuthSAMLEnabled {
+			methods = append(methods, map[string]string{"type": "saml", "loginUrl": "/auth/sso/saml/login"})
+		}
+		if vars.AuthLDAPEnabled {
+			methods = append(methods, map[string]string{"type": "ldap"})
+		}
+		return c.JSON(http.StatusOK, map[string]any{
+			"enabled": vars.AuthMode == "api-key" || vars.SSOEnabled(),
+			"methods": methods,
 		})
 	}
 }
 
-func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter) {
+func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {
+	if sessions == nil {
+		return
+	}
+	controller := authctrl.NewSSO(sessions, vars.AuthSessionCookieName)
+	e.GET("/auth/whoami", controller.Whoami, authmw.Auth(authmw.AuthDeps{
+		Service:    authSvc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: vars.AuthSessionCookieName,
+	}))
+	e.POST("/auth/logout", controller.Logout)
+}
+
+func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {
 	metrics.Register()
 
 	handler := echoprometheus.NewHandler()
-	if vars.AuthMode == "api-key" && authSvc != nil {
-		e.GET("/metrics", handler, authmw.Auth(authSvc, auditor, limiter))
+	if (vars.AuthMode == "api-key" || vars.SSOEnabled()) && authSvc != nil {
+		e.GET("/metrics", handler, authmw.Auth(authmw.AuthDeps{
+			Service:    authSvc,
+			Auditor:    auditor,
+			Limiter:    limiter,
+			Sessions:   sessions,
+			CookieName: vars.AuthSessionCookieName,
+		}))
 		return
 	}
 
