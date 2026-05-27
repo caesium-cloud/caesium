@@ -4,7 +4,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"os"
+
+	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 )
 
 // MTLSConfig holds the file paths for the internal mutual-TLS material
@@ -23,38 +24,45 @@ func (c MTLSConfig) Configured() bool {
 	return c.CAFile != "" && c.CertFile != "" && c.KeyFile != ""
 }
 
-// loadCertPool reads a PEM CA bundle into an x509 pool.
-func loadCertPool(caFile string) (*x509.CertPool, error) {
-	pem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("mtls: read CA %q: %w", caFile, err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pem) {
-		return nil, fmt.Errorf("mtls: no certificates found in CA %q", caFile)
-	}
-	return pool, nil
-}
-
 // ServerTLSConfig builds the *tls.Config for the internal listener: it presents
 // this node's certificate and requires + verifies a client certificate signed
 // by the configured CA on every connection.  A peer with no certificate, or one
 // signed by an unknown CA, fails the TLS handshake before reaching a handler.
 func ServerTLSConfig(c MTLSConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
-	if err != nil {
-		return nil, fmt.Errorf("mtls: load server keypair: %w", err)
-	}
-	pool, err := loadCertPool(c.CAFile)
+	holder, err := dispatchpki.NewStaticMaterialHolder(c.CAFile, c.CertFile, c.KeyFile)
 	if err != nil {
 		return nil, err
 	}
-	return &tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientCAs:    pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		MinVersion:   tls.VersionTLS12,
-	}, nil
+	return ServerTLSConfigFromHolder(holder)
+}
+
+func ServerTLSConfigFromHolder(holder *dispatchpki.MaterialHolder) (*tls.Config, error) {
+	if _, ok := holder.Material(); !ok {
+		return nil, fmt.Errorf("mtls: TLS material not initialized")
+	}
+	pool, err := holder.CertPool()
+	if err != nil {
+		return nil, err
+	}
+	cfg := &tls.Config{
+		ClientCAs:  pool,
+		ClientAuth: tls.RequireAndVerifyClientCert,
+		MinVersion: tls.VersionTLS12,
+	}
+	cfg.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		return holder.Certificate()
+	}
+	cfg.GetConfigForClient = func(*tls.ClientHelloInfo) (*tls.Config, error) {
+		pool, err := holder.CertPool()
+		if err != nil {
+			return nil, err
+		}
+		next := cfg.Clone()
+		next.ClientCAs = pool
+		next.GetConfigForClient = nil
+		return next, nil
+	}
+	return cfg, nil
 }
 
 // ClientTLSConfig builds the *tls.Config used when this node POSTs to a peer's
@@ -70,21 +78,40 @@ func ServerTLSConfig(c MTLSConfig) (*tls.Config, error) {
 // set InsecureSkipVerify (which only disables the name/standard verification)
 // and re-implement chain verification in VerifyPeerCertificate.
 func ClientTLSConfig(c MTLSConfig) (*tls.Config, error) {
-	cert, err := tls.LoadX509KeyPair(c.CertFile, c.KeyFile)
+	holder, err := dispatchpki.NewStaticMaterialHolder(c.CAFile, c.CertFile, c.KeyFile)
 	if err != nil {
-		return nil, fmt.Errorf("mtls: load client keypair: %w", err)
+		return nil, err
 	}
-	pool, err := loadCertPool(c.CAFile)
+	return ClientTLSConfigFromHolder(holder)
+}
+
+func ClientTLSConfigFromHolder(holder *dispatchpki.MaterialHolder) (*tls.Config, error) {
+	if _, ok := holder.Material(); !ok {
+		return nil, fmt.Errorf("mtls: TLS material not initialized")
+	}
+	pool, err := holder.CertPool()
 	if err != nil {
 		return nil, err
 	}
 	return &tls.Config{
-		Certificates:          []tls.Certificate{cert},
-		RootCAs:               pool,
-		MinVersion:            tls.VersionTLS12,
-		InsecureSkipVerify:    true, //nolint:gosec // chain verified below; hostname intentionally skipped for dynamic pod IPs
-		VerifyPeerCertificate: verifyChainAgainst(pool),
+		RootCAs:            pool,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: true, //nolint:gosec // chain verified below; hostname intentionally skipped for dynamic pod IPs
+		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return holder.Certificate()
+		},
+		VerifyPeerCertificate: verifyChainAgainstHolder(holder),
 	}, nil
+}
+
+func verifyChainAgainstHolder(holder *dispatchpki.MaterialHolder) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		pool, err := holder.CertPool()
+		if err != nil {
+			return err
+		}
+		return verifyChainAgainst(pool)(rawCerts, verifiedChains)
+	}
 }
 
 // verifyChainAgainst returns a VerifyPeerCertificate callback that validates the

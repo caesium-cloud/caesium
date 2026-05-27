@@ -6,9 +6,8 @@
 //	POST /internal/complete  – worker → owner: report task outcome back to owner.
 //
 // Both endpoints are guarded by the existing CAESIUM_INTERNAL_WAKEUP_TOKEN
-// bearer-token check.  mTLS is recommended but not yet enforced in Phase A
-// (Phase B will require it).  A startup log.Warn is emitted when owner mode
-// is on without mTLS material configured.
+// bearer-token check and run on the dedicated internal mTLS listener when owner
+// mode is enabled.
 //
 // When CAESIUM_RUN_OWNER_ENABLED=false (default), these handlers are never
 // registered and the system behaves byte-identically to Phase 1.
@@ -17,6 +16,8 @@ package dispatch
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -233,7 +234,14 @@ func (h *Handler) authorized(r *http.Request) bool {
 	}
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.EqualFold(auth[:min(len(auth), 7)], "bearer ") {
-		return strings.TrimSpace(auth[7:]) == h.token
+		// Hash both sides to a fixed 32-byte digest before the constant-time
+		// compare. A direct ConstantTimeCompare/hmac.Equal short-circuits when the
+		// lengths differ, which would leak the token's byte-length via a timing
+		// oracle (an attacker submits 1-, 2-, 3-byte tokens until the comparison
+		// stops short-circuiting). Comparing equal-length digests removes that.
+		got := sha256.Sum256([]byte(strings.TrimSpace(auth[7:])))
+		want := sha256.Sum256([]byte(h.token))
+		return subtle.ConstantTimeCompare(got[:], want[:]) == 1
 	}
 	return false
 }
