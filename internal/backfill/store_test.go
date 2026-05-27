@@ -180,6 +180,22 @@ func TestCompleteDoesNotOverwriteCancelledBackfill(t *testing.T) {
 	require.NotNil(t, backfill.CompletedAt)
 }
 
+func TestAddProgressAccumulatesBatchedCounts(t *testing.T) {
+	store, db, backfillID := newBackfillTestStore(t)
+
+	// A zero delta is a no-op — the flusher calls AddProgress on every tick,
+	// including ticks where no run finished.
+	require.NoError(t, store.AddProgress(backfillID, 0, 0))
+
+	require.NoError(t, store.AddProgress(backfillID, 3, 0))
+	require.NoError(t, store.AddProgress(backfillID, 2, 1))
+
+	var backfill models.Backfill
+	require.NoError(t, db.First(&backfill, "id = ?", backfillID).Error)
+	require.Equal(t, 5, backfill.CompletedRuns)
+	require.Equal(t, 1, backfill.FailedRuns)
+}
+
 func newBackfillTestStore(t *testing.T) (*Store, *gorm.DB, uuid.UUID) {
 	t.Helper()
 
