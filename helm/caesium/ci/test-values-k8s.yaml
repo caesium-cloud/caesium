@@ -8,11 +8,6 @@ config:
   extraEnv:
     - name: CAESIUM_MANUAL_TRIGGER_API_KEY
       value: integration-test-key
-    # Shard hot-path models off the catalog, matching the docker/podman CI
-    # integration paths (#184). Without this the k8s deploy runs unsharded and
-    # task_runs writes contend on the single catalog DB under the suite's load.
-    - name: CAESIUM_DATABASE_SHARDS
-      value: "4"
 
 kubernetes:
   engine:
@@ -22,18 +17,12 @@ persistence:
   enabled: false
 
 resources:
-  # Low requests keep scheduling trivial on the kind node; generous limits let
-  # the single dqlite node burst instead of being CPU-throttled. At 250m the
-  # node was throttled enough that catalog write-locks (backfills/triggers)
-  # outlasted the busy-retry budget and flaked the suite, while the unthrottled
-  # docker/podman CI servers passed. A CPU limit only caps throttling, it does
-  # not reserve cores, so this is safe on the 4-vCPU public runner.
   requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
     cpu: 250m
     memory: 256Mi
-  limits:
-    cpu: "2"
-    memory: 1Gi
 
 podDisruptionBudget:
   enabled: false

@@ -190,7 +190,6 @@ integration-test-podman: build
         -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
-        -e CAESIUM_DATABASE_SHARDS=4 \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
@@ -217,6 +216,7 @@ hydrate:
 
 integration-up: build-test
     {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
+    # Keep this CI path sharded to exercise the multi-shard database router.
     {{ container_cli }} run -d --platform {{ platform }} \
         --name {{ it_container }} \
         --privileged \
