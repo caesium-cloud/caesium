@@ -8,8 +8,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 )
 
-// ErrLoginDenied is returned when an external identity maps to no role.
-var ErrLoginDenied = errors.New("login denied: no role mapping")
+// ErrLoginDenied is returned when an external identity is not allowed to log in.
+var ErrLoginDenied = errors.New("login denied")
 
 // ExternalIdentity is the normalized identity every provider produces.
 type ExternalIdentity struct {
@@ -54,6 +54,9 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 	user, err := s.users.Upsert(ctx, ext, role)
 	if err != nil {
 		return "", nil, err
+	}
+	if user.IsDisabled() {
+		return "", nil, ErrLoginDenied
 	}
 	return s.sessions.Create(ctx, CreateSessionRequest{
 		UserID:     user.ID,

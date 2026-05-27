@@ -177,7 +177,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	if sessions == nil {
 		return
 	}
-	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName)
+	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName, authmw.ParseTrustedProxyRanges(vars.TrustedProxies)...)
 	authMiddleware := authmw.Auth(authmw.AuthDeps{
 		Service:    authSvc,
 		Auditor:    auditor,
@@ -217,7 +217,7 @@ func registerGraphQL(e *echo.Echo, vars env.Environment) {
 }
 
 func configureIPExtractor(e *echo.Echo, vars env.Environment) {
-	trusted := parseTrustedProxyRanges(vars.TrustedProxies)
+	trusted := authmw.ParseTrustedProxyRanges(vars.TrustedProxies)
 	if len(trusted) == 0 {
 		e.IPExtractor = echo.ExtractIPDirect()
 		return
@@ -232,34 +232,6 @@ func configureIPExtractor(e *echo.Echo, vars env.Environment) {
 		options = append(options, echo.TrustIPRange(ipNet))
 	}
 	e.IPExtractor = echo.ExtractIPFromXFFHeader(options...)
-}
-
-func parseTrustedProxyRanges(raw string) []*net.IPNet {
-	parts := strings.Split(raw, ",")
-	ranges := make([]*net.IPNet, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-
-		if _, ipNet, err := net.ParseCIDR(part); err == nil {
-			ranges = append(ranges, ipNet)
-			continue
-		}
-
-		if ip := net.ParseIP(part); ip != nil {
-			bits := 32
-			if ip.To4() == nil {
-				bits = 128
-			}
-			ranges = append(ranges, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
-			continue
-		}
-
-		log.Warn("ignoring invalid trusted proxy entry", "value", part)
-	}
-	return ranges
 }
 
 func Shutdown(ctx context.Context) error {

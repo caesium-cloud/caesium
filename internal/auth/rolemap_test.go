@@ -39,6 +39,14 @@ func TestRoleMapperDefaultRole(t *testing.T) {
 	require.Equal(t, models.RoleViewer, r)
 }
 
+func TestRoleMapperWildcardParticipatesInHighestRole(t *testing.T) {
+	m, err := NewRoleMapper("admins=viewer;*=operator", "")
+	require.NoError(t, err)
+	r, ok := m.Resolve([]string{"admins"})
+	require.True(t, ok)
+	require.Equal(t, models.RoleOperator, r)
+}
+
 func TestRoleMapperDNWithEquals(t *testing.T) {
 	m, err := NewRoleMapper("CN=Caesium Admins,OU=Groups,DC=example,DC=com=admin", "")
 	require.NoError(t, err)
