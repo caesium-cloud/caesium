@@ -93,18 +93,17 @@ func (r *RateLimiter) Cleanup() {
 	}
 }
 
-// StartCleanup runs a periodic cleanup goroutine.
-func (r *RateLimiter) StartCleanup(done <-chan struct{}) {
-	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				r.Cleanup()
-			}
+// RunCleanup periodically removes expired windows until done is closed. The
+// caller owns the goroutine lifecycle so shutdown can wait for the loop.
+func (r *RateLimiter) RunCleanup(done <-chan struct{}) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+			r.Cleanup()
 		}
-	}()
+	}
 }

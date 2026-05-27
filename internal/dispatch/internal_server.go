@@ -41,9 +41,9 @@ func NewInternalServer(handler *Handler, addr string, tlsConfig *tls.Config) *In
 	}
 }
 
-// Run serves until ctx is cancelled, then shuts down gracefully.  It blocks; run
-// it in a goroutine.  The certificate comes from srv.TLSConfig.Certificates, so
-// ServeTLS is called with empty file arguments.
+// Run serves until Shutdown is called. It blocks; run it in a goroutine. The
+// certificate comes from srv.TLSConfig.Certificates, so ServeTLS is called with
+// empty file arguments.
 func (s *InternalServer) Run(ctx context.Context) error {
 	var lc net.ListenConfig
 	ln, err := lc.Listen(ctx, "tcp", s.srv.Addr)
@@ -51,16 +51,17 @@ func (s *InternalServer) Run(ctx context.Context) error {
 		return err
 	}
 
-	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.srv.Shutdown(shutdownCtx)
-	}()
-
 	log.Info("internal mTLS listener started", "addr", s.srv.Addr)
 	if err := s.srv.ServeTLS(ln, "", ""); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
+}
+
+// Shutdown gracefully drains the internal mTLS listener.
+func (s *InternalServer) Shutdown(ctx context.Context) error {
+	if s == nil || s.srv == nil {
+		return nil
+	}
+	return s.srv.Shutdown(ctx)
 }
