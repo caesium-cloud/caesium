@@ -114,8 +114,17 @@ func (s *shutdownCoordinator) shutdown() error {
 	graceCtx, cancel := context.WithTimeout(context.Background(), s.gracePeriod)
 	defer cancel()
 
+	// Cap HTTP drain at a fraction of the grace period so a slow drain cannot
+	// starve the goroutine-wait phase. Background loops (e.g. the auth
+	// last-used flusher) do a final DB write when their context is cancelled,
+	// and that write must land before closeDB() runs. Both contexts start now,
+	// so total shutdown time stays bounded by the grace period while wait() is
+	// guaranteed the remainder.
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), s.gracePeriod/3)
+	defer cancelDrain()
+
 	var shutdownErrs []error
-	if err := s.drainHTTP(graceCtx); err != nil {
+	if err := s.drainHTTP(drainCtx); err != nil {
 		shutdownErrs = append(shutdownErrs, err)
 	}
 

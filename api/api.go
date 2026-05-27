@@ -61,10 +61,11 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	RegisterUI(e)
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%v", vars.Port),
-		Handler:      e,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
+		Addr:              fmt.Sprintf(":%v", vars.Port),
+		Handler:           e,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
 	}
 	apiServer.Lock()
 	apiServer.srv = srv

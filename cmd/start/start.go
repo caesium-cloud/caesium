@@ -98,7 +98,11 @@ func start(cmd *cobra.Command, args []string) error {
 	})
 	deactivateShutdown := activateShutdownCoordinator(shutdownCoordinator)
 	defer deactivateShutdown()
-	defer shutdown()
+	defer func() {
+		if err := shutdown(); err != nil {
+			log.Error("graceful shutdown failed", "error", err)
+		}
+	}()
 
 	runAsync := shutdownCoordinator.runAsync
 	errs := make(chan error, 1)
