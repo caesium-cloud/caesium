@@ -99,11 +99,11 @@ func PublishAndMarkBusDispatched(ctx context.Context, bus Bus, store *Store, eve
 		return
 	}
 
-	if d := deferredFrom(ctx); d != nil {
-		// Inside a deferred-publish scope (an enclosing transaction): accumulate
-		// and let the caller flush after commit, so events for writes that roll
-		// back or get retried never reach the bus.
-		d.record(bus, store, events...)
+	if busDispatchDeferred(ctx) {
+		// Inside a transaction (see WithDeferredBusDispatch): skip the immediate
+		// publish. The event row is written transactionally and the BusDispatcher
+		// delivers it after the transaction commits — and never if it rolls back
+		// — keeping bus delivery consistent with the commit.
 		return
 	}
 

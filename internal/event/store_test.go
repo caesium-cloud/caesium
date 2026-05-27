@@ -106,6 +106,43 @@ func TestPublishAndMarkBusDispatchedPublishesAndMarksEvent(t *testing.T) {
 	require.NotNil(t, row.BusDispatchedAt)
 }
 
+// TestPublishAndMarkBusDispatchedDefersWhenScoped proves that inside a
+// WithDeferredBusDispatch scope the immediate publish is skipped: the bus
+// receives nothing and the event stays pending so the BusDispatcher delivers it
+// after the enclosing transaction commits. This is what keeps transactional
+// callers from leaking orphan/duplicate events.
+func TestPublishAndMarkBusDispatchedDefersWhenScoped(t *testing.T) {
+	s := openStore(t)
+	bus := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ch, err := bus.Subscribe(ctx, Filter{})
+	require.NoError(t, err)
+
+	evt := &Event{Type: TypeRunStarted, JobID: uuid.New()}
+	tx := s.db.Begin()
+	require.NoError(t, s.AppendTx(tx, evt))
+	require.NoError(t, tx.Commit().Error)
+
+	PublishAndMarkBusDispatched(WithDeferredBusDispatch(ctx), bus, s, *evt)
+
+	select {
+	case got := <-ch:
+		t.Fatalf("expected no immediate publish in a deferred scope, got event %d", got.Sequence)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	pending, err := s.ListPendingBusDispatch(ctx, 10)
+	require.NoError(t, err)
+	require.Len(t, pending, 1, "deferred event must stay pending for the dispatcher")
+
+	var row models.ExecutionEvent
+	require.NoError(t, s.db.First(&row, "sequence = ?", evt.Sequence).Error)
+	require.True(t, row.BusDispatchPending)
+	require.Nil(t, row.BusDispatchedAt)
+}
+
 func TestBusDispatcherDispatchOncePublishesPendingEvent(t *testing.T) {
 	s := openStore(t)
 	bus := New()

@@ -30,16 +30,13 @@ func Post(c *echo.Context) error {
 	// Apply the whole job — trigger, job, atoms, tasks, edges — in one
 	// transaction so it commits atomically in a single dqlite/Raft round-trip
 	// (instead of ~6-8 autocommit writes) and never leaves a partial job behind
-	// if a later step fails. Defer event publishing (job.Create emits
-	// TypeJobCreated) until the transaction commits, so a rolled-back or retried
-	// attempt never leaks an event onto the bus.
-	ctx, flushEvents := event.WithDeferredPublish(c.Request().Context())
+	// if a later step fails. Defer bus dispatch of the TypeJobCreated event
+	// (emitted by job.Create) so the BusDispatcher delivers it only after the
+	// transaction commits — never for a rolled-back or retried attempt.
+	ctx := event.WithDeferredBusDispatch(c.Request().Context())
 
 	var created *models.Job
 	err := db.Transaction(ctx, func(tx *gorm.DB) error {
-		// Drop any events accumulated by a prior (rolled-back) attempt.
-		event.ResetDeferred(ctx)
-
 		var (
 			tsvc          = task.Service(ctx).WithDatabase(tx)
 			asvc          = atom.Service(ctx).WithDatabase(tx)
@@ -121,9 +118,6 @@ func Post(c *echo.Context) error {
 		log.Error("failed to apply job", "alias", req.Alias, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
-
-	// The transaction committed — now publish the accumulated events.
-	flushEvents()
 
 	return c.JSON(http.StatusCreated, created)
 }
