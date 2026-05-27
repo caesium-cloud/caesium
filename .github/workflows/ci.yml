@@ -378,6 +378,7 @@ jobs:
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
             -e CAESIUM_LOG_LEVEL=debug \
             -e CAESIUM_DATABASE_SHARDS=4 \
+            -e CAESIUM_DATABASE_MAX_OPEN_CONNS=1 \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
       - name: Extract caesium CLI

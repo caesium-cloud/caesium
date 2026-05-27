@@ -191,6 +191,7 @@ integration-test-podman: build
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_DATABASE_MAX_OPEN_CONNS=1 \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
@@ -226,6 +227,7 @@ integration-up: build-test
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_DATABASE_MAX_OPEN_CONNS=1 \
         {{ local_image_ref }}:{{ tag }}-test start
 
 lint: builder-full
