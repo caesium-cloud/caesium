@@ -28,6 +28,33 @@ var BusyRetryBackoffs = []time.Duration{
 	1000 * time.Millisecond,
 }
 
+// Transaction runs fn inside a single transaction against the default
+// connection, retrying the whole transaction on transient dqlite contention.
+//
+// Use this for multi-statement units that must commit atomically. Statements
+// issued inside a transaction bypass the connection pool's per-statement retry
+// (re-running one statement of a partially-applied transaction would be
+// unsafe), so the entire BEGIN..COMMIT is retried here on the shared
+// BusyRetryBackoffs budget. A rolled-back transaction leaves no state, so
+// re-running fn from the top is safe.
+func Transaction(ctx context.Context, fn func(tx *gorm.DB) error) error {
+	conn := Connection().WithContext(ctx)
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = conn.Transaction(fn)
+		if err == nil || !dqlite.IsContentionError(err) {
+			return err
+		}
+		if attempt >= len(BusyRetryBackoffs) {
+			return err
+		}
+		metrics.DBBusyRetriesTotal.Inc()
+		if sleepErr := sleepRetry(ctx, BusyRetryBackoffs[attempt]); sleepErr != nil {
+			return err
+		}
+	}
+}
+
 // retryConnPool is a gorm.ConnPool decorator that transparently retries a
 // single autocommit statement when it fails with a transient contention error
 // (e.g. "database is locked", "checkpoint in progress").

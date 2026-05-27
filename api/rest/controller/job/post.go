@@ -9,19 +9,15 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/task"
 	"github.com/caesium-cloud/caesium/api/rest/service/taskedge"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
 )
 
 func Post(c *echo.Context) error {
-	var (
-		req           = &PostRequest{}
-		tsvc          = task.Service(c.Request().Context())
-		asvc          = atom.Service(c.Request().Context())
-		createdTasks  []string
-		explicitEdges []edgeSpec
-	)
-
+	req := &PostRequest{}
 	if err := c.Bind(req); err != nil {
 		return err
 	}
@@ -30,102 +26,98 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(fmt.Errorf("trigger is required"))
 	}
 
-	log.Info(
-		"creating trigger",
-		"type", req.Trigger.Type,
-		"config", req.Trigger.Configuration)
+	ctx := c.Request().Context()
 
-	trig, err := trigger.Service(c.Request().Context()).Create(req.Trigger)
-	if err != nil {
-		log.Error("failed to create trigger", "error", err)
-		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-	}
+	// Apply the whole job — trigger, job, atoms, tasks, edges — in one
+	// transaction so it commits atomically in a single dqlite/Raft round-trip
+	// (instead of ~6-8 autocommit writes) and never leaves a partial job behind
+	// if a later step fails.
+	var created *models.Job
+	err := db.Transaction(ctx, func(tx *gorm.DB) error {
+		var (
+			tsvc          = task.Service(ctx).WithDatabase(tx)
+			asvc          = atom.Service(ctx).WithDatabase(tx)
+			createdTasks  []string
+			explicitEdges []edgeSpec
+		)
 
-	log.Info("creating job", "alias", req.Alias)
+		trig, err := trigger.Service(ctx).WithDatabase(tx).Create(req.Trigger)
+		if err != nil {
+			return err
+		}
 
-	j, err := job.Service(c.Request().Context()).Create(&job.CreateRequest{
-		TriggerID:   trig.ID,
-		Alias:       req.Alias,
-		Labels:      metadataLabels(req.Metadata),
-		Annotations: metadataAnnotations(req.Metadata),
+		j, err := job.Service(ctx).WithDatabase(tx).Create(&job.CreateRequest{
+			TriggerID:   trig.ID,
+			Alias:       req.Alias,
+			Labels:      metadataLabels(req.Metadata),
+			Annotations: metadataAnnotations(req.Metadata),
+		})
+		if err != nil {
+			return err
+		}
+		created = j
+
+		for _, t := range req.Tasks {
+			a, err := asvc.Create(&atom.CreateRequest{
+				Engine:  t.Atom.Engine,
+				Image:   t.Atom.Image,
+				Command: t.Atom.Command,
+				Spec:    t.Atom.Spec,
+			})
+			if err != nil {
+				return err
+			}
+
+			taskModel, err := tsvc.Create(&task.CreateRequest{
+				JobID:        j.ID.String(),
+				AtomID:       a.ID.String(),
+				NodeSelector: t.NodeSelector,
+			})
+			if err != nil {
+				return err
+			}
+
+			createdTasks = append(createdTasks, taskModel.ID.String())
+			for _, dep := range t.DependsOn {
+				explicitEdges = append(explicitEdges, edgeSpec{
+					from: dep,
+					to:   taskModel.ID.String(),
+				})
+			}
+		}
+
+		edgeSvc := taskedge.Service(ctx).WithDatabase(tx)
+		switch {
+		case len(explicitEdges) > 0:
+			for _, edge := range explicitEdges {
+				if _, err := edgeSvc.Create(&taskedge.CreateRequest{
+					JobID:      j.ID.String(),
+					FromTaskID: edge.from,
+					ToTaskID:   edge.to,
+				}); err != nil {
+					return err
+				}
+			}
+		case len(createdTasks) > 1:
+			for idx := 0; idx < len(createdTasks)-1; idx++ {
+				if _, err := edgeSvc.Create(&taskedge.CreateRequest{
+					JobID:      j.ID.String(),
+					FromTaskID: createdTasks[idx],
+					ToTaskID:   createdTasks[idx+1],
+				}); err != nil {
+					return err
+				}
+			}
+		}
+
+		return nil
 	})
 	if err != nil {
-		log.Error("failed to create job", "error", err)
+		log.Error("failed to apply job", "alias", req.Alias, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	for _, t := range req.Tasks {
-		log.Info(
-			"creating atom",
-			"job_id", j.ID,
-			"engine", t.Atom.Engine,
-			"image", t.Atom.Image,
-			"cmd", t.Atom.Command,
-		)
-
-		a, err := asvc.Create(&atom.CreateRequest{
-			Engine:  t.Atom.Engine,
-			Image:   t.Atom.Image,
-			Command: t.Atom.Command,
-			Spec:    t.Atom.Spec,
-		})
-		if err != nil {
-			log.Error("failed to create atom", "error", err)
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-		}
-
-		log.Info(
-			"creating task",
-			"job_id", j.ID,
-			"atom_id", a.ID,
-		)
-
-		taskModel, err := tsvc.Create(&task.CreateRequest{
-			JobID:        j.ID.String(),
-			AtomID:       a.ID.String(),
-			NodeSelector: t.NodeSelector,
-		})
-		if err != nil {
-			log.Error("failed to create task", "error", err)
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-		}
-
-		createdTasks = append(createdTasks, taskModel.ID.String())
-		for _, dep := range t.DependsOn {
-			explicitEdges = append(explicitEdges, edgeSpec{
-				from: dep,
-				to:   taskModel.ID.String(),
-			})
-		}
-	}
-
-	edgeSvc := taskedge.Service(c.Request().Context())
-	switch {
-	case len(explicitEdges) > 0:
-		for _, edge := range explicitEdges {
-			if _, err := edgeSvc.Create(&taskedge.CreateRequest{
-				JobID:      j.ID.String(),
-				FromTaskID: edge.from,
-				ToTaskID:   edge.to,
-			}); err != nil {
-				log.Error("failed to create task edge", "error", err)
-				return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-			}
-		}
-	case len(createdTasks) > 1:
-		for idx := 0; idx < len(createdTasks)-1; idx++ {
-			if _, err := edgeSvc.Create(&taskedge.CreateRequest{
-				JobID:      j.ID.String(),
-				FromTaskID: createdTasks[idx],
-				ToTaskID:   createdTasks[idx+1],
-			}); err != nil {
-				log.Error("failed to create task edge", "error", err)
-				return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-			}
-		}
-	}
-
-	return c.JSON(http.StatusCreated, j)
+	return c.JSON(http.StatusCreated, created)
 }
 
 func metadataLabels(md *MetadataRequest) map[string]string {
