@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"io"
 	"math/rand/v2"
 	"time"
 
@@ -265,4 +266,89 @@ func (retryPlugin) Initialize(db *gorm.DB) error {
 	}
 	db.ConnPool = newRetryConnPool(db.ConnPool)
 	return nil
+}
+
+// rwSplitConnPool routes reads and writes to separate underlying pools, each
+// wrapped in contention retry. For internal dqlite this keeps reads concurrent
+// (multi-connection read pool) while serializing writes on a single-connection
+// write pool: concurrent writers QUEUE for the one write connection at the
+// database/sql layer instead of colliding with SQLITE_BUSY. dqlite serializes
+// writes through Raft and its busy_timeout is effectively a no-op, so a
+// multi-connection pool turns transient write collisions into immediate
+// "database is locked" errors; one writer makes them wait instead.
+//
+// Autocommit reads (QueryContext/QueryRowContext) go to the read pool;
+// ExecContext, transactions (BeginTx), and prepared statements go to the write
+// pool. A transaction may write, so it must hold the single write connection;
+// reads issued inside that transaction run on its own connection, and other
+// goroutines' reads use the read pool — so no goroutine needs two connections
+// from one pool, avoiding the single-connection deadlock.
+type rwSplitConnPool struct {
+	write *retryConnPool
+	read  *retryConnPool
+}
+
+var (
+	_ gorm.ConnPool       = (*rwSplitConnPool)(nil)
+	_ gorm.TxBeginner     = (*rwSplitConnPool)(nil)
+	_ gorm.GetDBConnector = (*rwSplitConnPool)(nil)
+	_ io.Closer           = (*rwSplitConnPool)(nil)
+)
+
+func newRWSplitConnPool(writePool, readPool gorm.ConnPool) *rwSplitConnPool {
+	return &rwSplitConnPool{
+		write: newRetryConnPool(writePool),
+		read:  newRetryConnPool(readPool),
+	}
+}
+
+func (p *rwSplitConnPool) ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error) {
+	return p.write.ExecContext(ctx, query, args...)
+}
+
+func (p *rwSplitConnPool) QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error) {
+	return p.read.QueryContext(ctx, query, args...)
+}
+
+func (p *rwSplitConnPool) QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row {
+	return p.read.QueryRowContext(ctx, query, args...)
+}
+
+func (p *rwSplitConnPool) PrepareContext(ctx context.Context, query string) (*sql.Stmt, error) {
+	return p.write.PrepareContext(ctx, query)
+}
+
+func (p *rwSplitConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	return p.write.BeginTx(ctx, opts)
+}
+
+func (p *rwSplitConnPool) GetDBConn() (*sql.DB, error) {
+	return p.write.GetDBConn()
+}
+
+func (p *rwSplitConnPool) Ping() error {
+	if err := p.write.Ping(); err != nil {
+		return err
+	}
+	return p.read.Ping()
+}
+
+// Close closes both underlying pools. The read pool is otherwise unreachable
+// via GetDBConn (which returns the write pool for gorm's db.DB()), so a
+// shutdown path must go through here to release it.
+func (p *rwSplitConnPool) Close() error {
+	writeErr := closeRetryPool(p.write)
+	readErr := closeRetryPool(p.read)
+	if writeErr != nil {
+		return writeErr
+	}
+	return readErr
+}
+
+func closeRetryPool(p *retryConnPool) error {
+	sqlDB, err := p.GetDBConn()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }

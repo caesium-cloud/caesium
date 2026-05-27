@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -154,18 +155,25 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 		return nil, err
 	}
 
-	// Wrap the connection pool with transparent busy-retry for single
-	// autocommit statements (reads and single-row writes outside an explicit
-	// transaction). This is the global backstop that covers every call site
-	// uniformly, including bare reads in the DAG-execution path that no
-	// per-call-site wrapper guards. In-transaction statements bypass it by
-	// construction; see retryConnPool for the safety rationale.
-	if err := conn.Use(retryPlugin{}); err != nil {
-		return nil, err
-	}
-
-	if sqlDB, err := conn.DB(); err == nil {
-		configureConnectionPool(sqlDB, vars.DatabaseMaxOpenConns, vars.DatabaseMaxIdleConns)
+	if isInternalDqlite(dbType) {
+		// Internal dqlite: split reads and writes across two pools so writes
+		// serialize on a single connection — concurrent writers queue at the
+		// database/sql layer instead of colliding with SQLITE_BUSY, which dqlite
+		// returns immediately (writes serialize through Raft and busy_timeout is
+		// a no-op there) — while reads stay concurrent. Contention retry is
+		// layered on inside the split for the rare checkpoint/poison cases.
+		if err := installDqliteReadWriteSplit(conn, databaseName, vars.DatabaseMaxOpenConns, vars.DatabaseMaxIdleConns); err != nil {
+			return nil, err
+		}
+	} else {
+		// Postgres handles concurrent writes natively; wrap the single pool with
+		// transparent busy-retry as the global backstop for transient contention.
+		if err := conn.Use(retryPlugin{}); err != nil {
+			return nil, err
+		}
+		if sqlDB, err := conn.DB(); err == nil {
+			configureConnectionPool(sqlDB, vars.DatabaseMaxOpenConns, vars.DatabaseMaxIdleConns)
+		}
 	}
 
 	if isInternalDqlite(dbType) && enforceForeignKeys {
@@ -173,6 +181,29 @@ func openConnection(databaseName string, enforceForeignKeys bool) (*gorm.DB, err
 		conn.Exec("PRAGMA foreign_keys = ON")
 	}
 	return conn, nil
+}
+
+// installDqliteReadWriteSplit replaces conn's pool with a read/write splitter:
+// the gorm-managed connection becomes the single-writer pool (writes queue on
+// one connection, so no SQLITE_BUSY collisions), and a second pool opened on
+// the same dqlite database serves concurrent reads. Contention retry wraps each
+// underlying pool.
+func installDqliteReadWriteSplit(conn *gorm.DB, databaseName string, readMaxOpen, readMaxIdle int) error {
+	writeDB, err := conn.DB()
+	if err != nil {
+		return err
+	}
+	writeDB.SetMaxOpenConns(1)
+	writeDB.SetMaxIdleConns(1)
+
+	readDB, err := dqlite.OpenSQLDB(context.Background(), databaseName)
+	if err != nil {
+		return fmt.Errorf("open dqlite read pool for %q: %w", databaseName, err)
+	}
+	configureConnectionPool(readDB, readMaxOpen, readMaxIdle)
+
+	conn.ConnPool = newRWSplitConnPool(writeDB, readDB)
+	return nil
 }
 
 func isInternalDqlite(dbType string) bool {

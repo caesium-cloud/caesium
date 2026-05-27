@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"strings"
 
 	"github.com/google/uuid"
@@ -92,6 +93,45 @@ func (r *Router) ShardCount() int {
 		return 0
 	}
 	return len(r.hot)
+}
+
+// Close releases every distinct database the router owns (catalog, hot shards,
+// cold). For internal dqlite the pool is a read/write splitter, so this closes
+// both its write and read pools; otherwise it closes the single pool. Handles
+// can alias (single-shard mode points hot/cold at the catalog), so each
+// distinct handle is closed once.
+func (r *Router) Close() error {
+	if r == nil {
+		return nil
+	}
+	handles := append([]*gorm.DB{r.catalog}, r.hot...)
+	handles = append(handles, r.cold)
+
+	seen := make(map[*gorm.DB]struct{}, len(handles))
+	var firstErr error
+	for _, gdb := range handles {
+		if gdb == nil {
+			continue
+		}
+		if _, ok := seen[gdb]; ok {
+			continue
+		}
+		seen[gdb] = struct{}{}
+		if err := closeGormDB(gdb); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func closeGormDB(gdb *gorm.DB) error {
+	if closer, ok := gdb.ConnPool.(io.Closer); ok {
+		return closer.Close()
+	}
+	if sqlDB, err := gdb.DB(); err == nil {
+		return sqlDB.Close()
+	}
+	return nil
 }
 
 // HotShard returns a hot shard by index.

@@ -2,6 +2,7 @@ package dqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -47,6 +48,19 @@ type Dialector struct {
 
 func Open(dsn string) gorm.Dialector {
 	return &Dialector{DSN: dsn}
+}
+
+// OpenSQLDB opens an additional *sql.DB pool to the named database on the
+// already-running native dqlite app. It backs a separate read pool alongside
+// the gorm-managed (write) connection, so reads stay concurrent while writes
+// serialize on a single-connection write pool. The native app must already be
+// initialized — it is, once the first (write) connection has been opened.
+func OpenSQLDB(ctx context.Context, name string) (*sql.DB, error) {
+	dqApp := currentApp.Load()
+	if dqApp == nil {
+		return nil, ErrNoNativeApp
+	}
+	return dqApp.Open(ctx, name)
 }
 
 func (dialector Dialector) Name() string {
