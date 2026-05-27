@@ -8,6 +8,8 @@ import (
 )
 
 // RoleMapper resolves IdP groups to Caesium roles. Highest matched role wins.
+// The wildcard entry "*" matches every login; defaultRole is only a fallback
+// when no explicit or wildcard mapping applies.
 type RoleMapper struct {
 	byGroup     map[string]models.Role
 	wildcard    *models.Role
@@ -64,11 +66,12 @@ func (m *RoleMapper) Resolve(groups []string) (models.Role, bool) {
 			matched = true
 		}
 	}
+	if m.wildcard != nil && (!matched || models.RoleLevel(*m.wildcard) > models.RoleLevel(best)) {
+		best = *m.wildcard
+		matched = true
+	}
 	if matched {
 		return best, true
-	}
-	if m.wildcard != nil {
-		return *m.wildcard, true
 	}
 	if m.defaultRole != nil {
 		return *m.defaultRole, true

@@ -67,27 +67,9 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				validKey, err := d.Service.ValidateKey(token)
 				if err != nil {
 					reason := classifyAuthError(err)
-					metrics.AuthFailuresTotal.WithLabelValues(reason).Inc()
-
-					limited := d.Limiter.RecordFailure(ip)
-					logAuditFailure(d.Auditor.Log(auth.AuditEntry{
-						Actor:    tokenPrefix(token),
-						Action:   auth.ActionAuthDenied,
-						SourceIP: ip,
-						Outcome:  auth.OutcomeDenied,
-						Metadata: map[string]interface{}{
-							"reason": reason,
-							"method": c.Request().Method,
-							"path":   path,
-						},
-					}))
-
-					if limited {
-						retryAfter := d.Limiter.RetryAfter(ip)
-						c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
-						return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
+					if recordCredentialFailure(c, d, ip, tokenPrefix(token), reason) {
+						return rateLimitError(c, d.Limiter, ip)
 					}
-
 					return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired api key")
 				}
 
@@ -97,10 +79,15 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 				if cookie, err := c.Request().Cookie(d.CookieName); err == nil && cookie.Value != "" {
 					sess, user, verr := d.Sessions.Validate(c.Request().Context(), cookie.Value)
 					if verr != nil {
-						metrics.AuthFailuresTotal.WithLabelValues("session_invalid").Inc()
+						if recordCredentialFailure(c, d, ip, tokenPrefix(cookie.Value), classifySessionAuthError(verr)) {
+							return rateLimitError(c, d.Limiter, ip)
+						}
 						return echo.NewHTTPError(http.StatusUnauthorized, "invalid or expired session")
 					}
 					if err := EnforceSessionCSRF(c, sess.CSRFToken); err != nil {
+						if recordCredentialFailure(c, d, ip, tokenPrefix(cookie.Value), "csrf") {
+							return rateLimitError(c, d.Limiter, ip)
+						}
 						return err
 					}
 					principal = auth.PrincipalFromUser(user)
@@ -196,6 +183,45 @@ func classifyAuthError(err error) string {
 		log.Error("unexpected auth validation error", "error", err)
 		return "error"
 	}
+}
+
+func classifySessionAuthError(err error) string {
+	switch err {
+	case auth.ErrSessionInvalid:
+		return "session_invalid"
+	case auth.ErrSessionExpired:
+		return "session_expired"
+	case auth.ErrSessionRevoked:
+		return "session_revoked"
+	case auth.ErrUserDisabled:
+		return "user_disabled"
+	default:
+		log.Error("unexpected session validation error", "error", err)
+		return "session_error"
+	}
+}
+
+func recordCredentialFailure(c *echo.Context, d AuthDeps, ip, actor, reason string) bool {
+	metrics.AuthFailuresTotal.WithLabelValues(reason).Inc()
+	limited := d.Limiter.RecordFailure(ip)
+	logAuditFailure(d.Auditor.Log(auth.AuditEntry{
+		Actor:    actor,
+		Action:   auth.ActionAuthDenied,
+		SourceIP: ip,
+		Outcome:  auth.OutcomeDenied,
+		Metadata: map[string]interface{}{
+			"reason": reason,
+			"method": c.Request().Method,
+			"path":   c.Request().URL.Path,
+		},
+	}))
+	return limited
+}
+
+func rateLimitError(c *echo.Context, limiter *auth.RateLimiter, ip string) error {
+	retryAfter := limiter.RetryAfter(ip)
+	c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+	return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
 }
 
 func denyAccess(

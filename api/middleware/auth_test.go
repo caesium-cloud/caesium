@@ -1,6 +1,7 @@
 package middleware_test
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -106,6 +107,17 @@ func callMiddleware(
 	pathValues echo.PathValues,
 	next echo.HandlerFunc,
 ) (*httptest.ResponseRecorder, error) {
+	return callMiddlewareWithDeps(t, authmw.AuthDeps{Service: svc, Auditor: auditor, Limiter: limiter}, req, route, pathValues, next)
+}
+
+func callMiddlewareWithDeps(
+	t *testing.T,
+	deps authmw.AuthDeps,
+	req *http.Request,
+	route *echo.RouteInfo,
+	pathValues echo.PathValues,
+	next echo.HandlerFunc,
+) (*httptest.ResponseRecorder, error) {
 	t.Helper()
 
 	if next == nil {
@@ -123,7 +135,7 @@ func callMiddleware(
 		c.InitializeRoute(route, &pv)
 	}
 
-	handler := authmw.Auth(authmw.AuthDeps{Service: svc, Auditor: auditor, Limiter: limiter})(next)
+	handler := authmw.Auth(deps)(next)
 	err := handler(c)
 	return rec, err
 }
@@ -259,6 +271,87 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 	require.Equal(t, "viewer@example.com", capturedPrincipal.Subject)
 	require.Equal(t, models.RoleViewer, capturedPrincipal.Role)
 	require.Nil(t, authmw.GetAuthKey(c))
+}
+
+func TestAuthRejectsInvalidSessionCookieRecordsFailureAndAudit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := auth.NewService(db)
+	auditor := auth.NewAuditLogger(db)
+	limiter := auth.NewRateLimiter(1, time.Minute)
+	sessions := auth.NewSessionStore(db)
+	deps := authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: "caesium_session",
+	}
+
+	for i := 0; i < 2; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+		req.RemoteAddr = "203.0.113.10:1234"
+		req.AddCookie(&http.Cookie{Name: "caesium_session", Value: "bad-session-token"})
+		_, err := callMiddlewareWithDeps(t, deps, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, nil)
+		require.Error(t, err)
+	}
+
+	require.True(t, limiter.IsLimited("203.0.113.10"))
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	require.Equal(t, "bad-session-t", entries[0].Actor)
+	requireAuditReason(t, entries[0], "session_invalid")
+}
+
+func TestAuthRejectsBadSessionCSRFRecordsFailureAndAudit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := auth.NewService(db)
+	auditor := auth.NewAuditLogger(db)
+	limiter := auth.NewRateLimiter(10, time.Minute)
+	sessions := auth.NewSessionStore(db)
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+	token, _, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.RemoteAddr = "203.0.113.11:1234"
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	_, err = callMiddlewareWithDeps(t, authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: "caesium_session",
+	}, req, &echo.RouteInfo{Path: "/auth/logout", Method: http.MethodPost}, nil, nil)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditReason(t, entries[0], "csrf")
+}
+
+func requireAuditReason(t *testing.T, entry models.AuditLog, want string) {
+	t.Helper()
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(entry.Metadata, &metadata))
+	require.Equal(t, want, metadata["reason"])
 }
 
 func TestMiddlewareRejectsExpiredKey(t *testing.T) {
