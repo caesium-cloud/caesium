@@ -59,7 +59,7 @@
 - Create: `internal/auth/principal.go`
 - Test: `internal/auth/principal_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 package auth
@@ -98,12 +98,12 @@ func TestPrincipalFromUser(t *testing.T) {
 
 (`TestPrincipalFromUser` won't compile until `models.User` exists — Task 1.2. To keep P0 self-contained, write only `TestPrincipalFromKey` now and add `TestPrincipalFromUser` plus `PrincipalFromUser` in Task 1.2. The `principal.go` file below already includes `PrincipalFromUser` referencing `models.User`, so introduce `models.User` first if compiling P0 standalone, **or** temporarily omit `PrincipalFromUser` and add it in Task 1.2. Recommended: omit `PrincipalFromUser` here; add in 1.2.)
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `go test ./internal/auth/ -run TestPrincipalFromKey -v`
 Expected: FAIL — `undefined: PrincipalFromKey`.
 
-- [ ] **Step 3: Write minimal implementation** (`internal/auth/principal.go`)
+- [x] **Step 3: Write minimal implementation** (`internal/auth/principal.go`)
 
 ```go
 package auth
@@ -145,12 +145,12 @@ func PrincipalFromKey(k *models.APIKey) *Principal {
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `go test ./internal/auth/ -run TestPrincipalFromKey -v`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add internal/auth/principal.go internal/auth/principal_test.go
@@ -164,7 +164,7 @@ git commit   # "Add Principal abstraction to auth package"
 - Modify: `api/middleware/auth_scope.go` (`authorizeScope` signature)
 - Test: `api/middleware/auth_test.go` (existing — must stay green)
 
-- [ ] **Step 1: Change `authorizeScope` to take scope bytes (not the key)**
+- [x] **Step 1: Change `authorizeScope` to take scope bytes (not the key)**
 
 In `api/middleware/auth_scope.go`, change the signature and the one field access:
 
@@ -177,7 +177,7 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 
 Replace the three `key.Scope` references in that function with `scopeJSON`.
 
-- [ ] **Step 2: Build a `Principal` in `Auth` and use it for RBAC/scope**
+- [x] **Step 2: Build a `Principal` in `Auth` and use it for RBAC/scope**
 
 In `api/middleware/auth.go`, after `key, err := svc.ValidateKey(token)` succeeds, replace the role/scope/context block (currently lines ~85–106) with:
 
@@ -213,17 +213,17 @@ Add the new context key constant near `ContextKeyAuth`:
 const ContextKeyPrincipal = "auth.principal"
 ```
 
-- [ ] **Step 3: Run the existing middleware suite to verify no behavior change**
+- [x] **Step 3: Run the existing middleware suite to verify no behavior change**
 
 Run: `go test ./api/middleware/ -v`
 Expected: PASS (all existing tests). If any reference `authorizeScope(... key ...)` directly, update them to pass `key.Scope`.
 
-- [ ] **Step 4: Run the auth package + full gate**
+- [x] **Step 4: Run the auth package + full gate**
 
 Run: `go test ./api/middleware/ ./internal/auth/ -v` then `just unit-test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add api/middleware/auth.go api/middleware/auth_scope.go api/middleware/auth_test.go
@@ -236,7 +236,7 @@ git commit   # "Resolve API-key auth through Principal (no behavior change)"
 - Modify: `api/middleware/auth.go` (add helper near `GetAuthKey`)
 - Test: `api/middleware/auth_test.go`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```go
 func TestGetPrincipal(t *testing.T) {
@@ -249,9 +249,9 @@ func TestGetPrincipal(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL** (`undefined: GetPrincipal`). `go test ./api/middleware/ -run TestGetPrincipal -v`
+- [x] **Step 2: Run → FAIL** (`undefined: GetPrincipal`). `go test ./api/middleware/ -run TestGetPrincipal -v`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```go
 // GetPrincipal returns the unified authenticated identity, or nil if unauthenticated.
@@ -268,9 +268,9 @@ func GetPrincipal(c *echo.Context) *auth.Principal {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** `go test ./api/middleware/ -run TestGetPrincipal -v`
+- [x] **Step 4: Run → PASS.** `go test ./api/middleware/ -run TestGetPrincipal -v`
 
-- [ ] **Step 5: Commit** — `git commit` "Add GetPrincipal context helper"
+- [x] **Step 5: Commit** — `git commit` "Add GetPrincipal context helper"
 
 ---
 
@@ -282,7 +282,7 @@ func GetPrincipal(c *echo.Context) *auth.Principal {
 - Modify: `pkg/env/env.go` (Authentication & Authorization block, ~line 136)
 - Test: `pkg/env/env_test.go` (add a case if the file tests parsing; otherwise skip the test step)
 
-- [ ] **Step 1: Add fields** to the `Environment` struct after the existing `Auth*` fields:
+- [x] **Step 1: Add fields** to the `Environment` struct after the existing `Auth*` fields:
 
 ```go
 	// SSO / sessions (additive on top of AUTH_MODE)
@@ -298,7 +298,7 @@ func GetPrincipal(c *echo.Context) *auth.Principal {
 	AuthLDAPEnabled bool `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
 ```
 
-- [ ] **Step 2: Helper to report whether any SSO provider is enabled** (same file):
+- [x] **Step 2: Helper to report whether any SSO provider is enabled** (same file):
 
 ```go
 // SSOEnabled reports whether any SSO provider is configured.
@@ -307,12 +307,12 @@ func (e Environment) SSOEnabled() bool {
 }
 ```
 
-- [ ] **Step 3: Verify it compiles & parses**
+- [x] **Step 3: Verify it compiles & parses**
 
 Run: `go build ./pkg/env/ && go test ./pkg/env/ -v`
 Expected: PASS (no behavior change to existing vars).
 
-- [ ] **Step 4: Commit** — "Add SSO/session environment configuration"
+- [x] **Step 4: Commit** — "Add SSO/session environment configuration"
 
 ### Task 1.2: `User` and `Session` models + migration registration
 
@@ -322,7 +322,7 @@ Expected: PASS (no behavior change to existing vars).
 - Modify: `internal/auth/principal.go` (add `PrincipalFromUser`), `internal/auth/principal_test.go` (add `TestPrincipalFromUser` from Task 0.1)
 - Test: `internal/models/user_test.go`
 
-- [ ] **Step 1: Write `internal/models/user.go`**
+- [x] **Step 1: Write `internal/models/user.go`**
 
 ```go
 package models
@@ -352,7 +352,7 @@ type User struct {
 func (u *User) IsDisabled() bool { return u.DisabledAt != nil }
 ```
 
-- [ ] **Step 2: Write `internal/models/session.go`**
+- [x] **Step 2: Write `internal/models/session.go`**
 
 ```go
 package models
@@ -384,7 +384,7 @@ type Session struct {
 func (s *Session) IsRevoked() bool { return s.RevokedAt != nil }
 ```
 
-- [ ] **Step 3: Register in `internal/models/models.go`** — add after `&AuditLog{}` (User before Session for FK ordering):
+- [x] **Step 3: Register in `internal/models/models.go`** — add after `&AuditLog{}` (User before Session for FK ordering):
 
 ```go
 	&AuditLog{},
@@ -392,7 +392,7 @@ func (s *Session) IsRevoked() bool { return s.RevokedAt != nil }
 	&Session{},
 ```
 
-- [ ] **Step 4: Add `PrincipalFromUser`** to `internal/auth/principal.go`:
+- [x] **Step 4: Add `PrincipalFromUser`** to `internal/auth/principal.go`:
 
 ```go
 // PrincipalFromUser builds a Principal from an authenticated user. SSO users are
@@ -410,7 +410,7 @@ func PrincipalFromUser(u *models.User) *Principal {
 
 Add `TestPrincipalFromUser` (from Task 0.1 Step 1) to `internal/auth/principal_test.go`.
 
-- [ ] **Step 5: Write `internal/models/user_test.go`** (round-trip + AutoMigrate smoke):
+- [x] **Step 5: Write `internal/models/user_test.go`** (round-trip + AutoMigrate smoke):
 
 ```go
 package models
@@ -444,12 +444,12 @@ func TestUserSessionMigrate(t *testing.T) {
 
 > Note: if `gorm.io/driver/sqlite` is not already a dependency, use the project's existing in-memory test DB helper instead (grep `service_test.go` for how `internal/auth` opens its test DB) and mirror that. Do not add a new driver dependency just for tests.
 
-- [ ] **Step 6: Run → PASS, then gate**
+- [x] **Step 6: Run → PASS, then gate**
 
 Run: `go test ./internal/models/ ./internal/auth/ -run 'User|Principal' -v` then `just unit-test`
 Expected: PASS.
 
-- [ ] **Step 7: Commit** — "Add User and Session models with migration registration"
+- [x] **Step 7: Commit** — "Add User and Session models with migration registration"
 
 ### Task 1.3: Session token generation
 
@@ -457,7 +457,7 @@ Expected: PASS.
 - Modify: `internal/auth/keygen.go`
 - Test: `internal/auth/keygen_test.go`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```go
 func TestGenerateToken(t *testing.T) {
@@ -471,9 +471,9 @@ func TestGenerateToken(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestGenerateToken -v`
+- [x] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestGenerateToken -v`
 
-- [ ] **Step 3: Implement** (append to `internal/auth/keygen.go`):
+- [x] **Step 3: Implement** (append to `internal/auth/keygen.go`):
 
 ```go
 // SessionTokenPrefix marks opaque session tokens (distinct from API keys).
@@ -490,7 +490,7 @@ func GenerateToken() (string, error) {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session token generator"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session token generator"
 
 ### Task 1.4: `SessionStore` — create / validate / revoke
 
@@ -498,7 +498,7 @@ func GenerateToken() (string, error) {
 - Create: `internal/auth/session.go`
 - Test: `internal/auth/session_test.go`
 
-- [ ] **Step 1: Failing test** (introduce `newTestDB` helper reused by later tasks):
+- [x] **Step 1: Failing test** (introduce `newTestDB` helper reused by later tasks):
 
 ```go
 package auth
@@ -550,9 +550,9 @@ func TestSessionStoreRevoke(t *testing.T) {
 
 > `newTestDB(t)`: grep `internal/auth/service_test.go` for the existing helper that opens the in-memory test DB and reuse/extract it into a shared `testhelpers_test.go` so both files use one helper (DRY). Match whatever driver the existing auth tests already use.
 
-- [ ] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestSessionStore -v`
+- [x] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestSessionStore -v`
 
-- [ ] **Step 3: Implement `internal/auth/session.go`**
+- [x] **Step 3: Implement `internal/auth/session.go`**
 
 ```go
 package auth
@@ -717,8 +717,8 @@ func (s *SessionStore) recordSeen(id uuid.UUID) {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** `go test ./internal/auth/ -run TestSessionStore -v`
-- [ ] **Step 5: Commit** — "Add SessionStore create/validate/revoke"
+- [x] **Step 4: Run → PASS.** `go test ./internal/auth/ -run TestSessionStore -v`
+- [x] **Step 5: Commit** — "Add SessionStore create/validate/revoke"
 
 ### Task 1.5: Session reaper + coalesced last-seen flusher
 
@@ -726,7 +726,7 @@ func (s *SessionStore) recordSeen(id uuid.UUID) {
 - Modify: `internal/auth/session.go`
 - Test: `internal/auth/session_test.go`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```go
 func TestSessionFlushSeen(t *testing.T) {
@@ -763,9 +763,9 @@ func TestSessionReap(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run 'TestSessionFlushSeen|TestSessionReap' -v`
+- [x] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run 'TestSessionFlushSeen|TestSessionReap' -v`
 
-- [ ] **Step 3: Implement** (append to `internal/auth/session.go`)
+- [x] **Step 3: Implement** (append to `internal/auth/session.go`)
 
 ```go
 // flushSeen writes buffered last-seen timestamps and bumps idle expiry. Mirrors
@@ -832,7 +832,7 @@ func (s *SessionStore) RunReaper(ctx context.Context) {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session reaper and coalesced last-seen flusher"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session reaper and coalesced last-seen flusher"
 
 ### Task 1.6: `RoleMapper` — group→role resolution
 
@@ -840,7 +840,7 @@ func (s *SessionStore) RunReaper(ctx context.Context) {
 - Create: `internal/auth/rolemap.go`
 - Test: `internal/auth/rolemap_test.go`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```go
 func TestRoleMapperResolve(t *testing.T) {
@@ -875,9 +875,9 @@ func TestRoleMapperRejectsBadRole(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestRoleMapper -v`
+- [x] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestRoleMapper -v`
 
-- [ ] **Step 3: Implement `internal/auth/rolemap.go`**
+- [x] **Step 3: Implement `internal/auth/rolemap.go`**
 
 ```go
 package auth
@@ -957,7 +957,7 @@ func (m *RoleMapper) Resolve(groups []string) (models.Role, bool) {
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add group-to-role mapper"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add group-to-role mapper"
 
 ### Task 1.7: `UserStore.Upsert` — JIT provisioning
 
@@ -965,7 +965,7 @@ func (m *RoleMapper) Resolve(groups []string) (models.Role, bool) {
 - Create: `internal/auth/users.go`
 - Test: `internal/auth/users_test.go`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```go
 func TestUserStoreUpsert(t *testing.T) {
@@ -991,9 +991,9 @@ func TestUserStoreUpsert(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.** (`ExternalIdentity` is defined in Task 1.8; if writing 1.7 first, add the struct stub now and the interfaces in 1.8 — recommended order: do Task 1.8 Step 3's `ExternalIdentity` definition first, then this task.)
+- [x] **Step 2: Run → FAIL.** (`ExternalIdentity` is defined in Task 1.8; if writing 1.7 first, add the struct stub now and the interfaces in 1.8 — recommended order: do Task 1.8 Step 3's `ExternalIdentity` definition first, then this task.)
 
-- [ ] **Step 3: Implement `internal/auth/users.go`**
+- [x] **Step 3: Implement `internal/auth/users.go`**
 
 ```go
 package auth
@@ -1054,7 +1054,7 @@ func (us *UserStore) Upsert(ctx context.Context, ext *ExternalIdentity, role mod
 
 > Add `import "time"` to the block. Place `ExternalIdentity` (Task 1.8) before this file compiles.
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add JIT user provisioning"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add JIT user provisioning"
 
 ### Task 1.8: Provider interfaces + shared login pipeline
 
@@ -1062,7 +1062,7 @@ func (us *UserStore) Upsert(ctx context.Context, ext *ExternalIdentity, role mod
 - Create: `internal/auth/provider.go`
 - Test: `internal/auth/provider_test.go`
 
-- [ ] **Step 1: Failing test** (a fake identity exercises the full provision→map→mint tail)
+- [x] **Step 1: Failing test** (a fake identity exercises the full provision→map→mint tail)
 
 ```go
 func TestSSOServiceComplete(t *testing.T) {
@@ -1084,9 +1084,9 @@ func TestSSOServiceComplete(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestSSOServiceComplete -v`
+- [x] **Step 2: Run → FAIL.** `go test ./internal/auth/ -run TestSSOServiceComplete -v`
 
-- [ ] **Step 3: Implement `internal/auth/provider.go`**
+- [x] **Step 3: Implement `internal/auth/provider.go`**
 
 ```go
 package auth
@@ -1152,7 +1152,7 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 }
 ```
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add provider interfaces and shared SSO login pipeline"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add provider interfaces and shared SSO login pipeline"
 
 ### Task 1.9: Session-bound CSRF (synchronizer token)
 
@@ -1167,7 +1167,7 @@ resolved, comparing against server-side state — there is **no readable CSRF co
 cookie injection cannot forge it. This file provides the check helper, method classification, and
 the context plumbing that `/auth/whoami` uses to surface the token.
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```go
 func TestEnforceSessionCSRF(t *testing.T) {
@@ -1194,9 +1194,9 @@ func TestEnforceSessionCSRF(t *testing.T) {
 
 > `newCtx` helper: build an Echo context from method/path/headers (mirror the setup already used in `api/middleware/auth_test.go`; extract a shared helper if convenient).
 
-- [ ] **Step 2: Run → FAIL.** `go test ./api/middleware/ -run TestEnforceSessionCSRF -v`
+- [x] **Step 2: Run → FAIL.** `go test ./api/middleware/ -run TestEnforceSessionCSRF -v`
 
-- [ ] **Step 3: Implement `api/middleware/csrf.go`**
+- [x] **Step 3: Implement `api/middleware/csrf.go`**
 
 ```go
 package middleware
@@ -1252,7 +1252,7 @@ func hasBearer(c *echo.Context) bool {
 
 (`hasBearer` is used by the Task 1.10 auth middleware to take the API-key branch.)
 
-- [ ] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session-bound CSRF synchronizer check"
+- [x] **Step 4: Run → PASS.** **Step 5: Commit** — "Add session-bound CSRF synchronizer check"
 
 ### Task 1.10: Resolve session-cookie principals in the auth middleware
 
@@ -1261,7 +1261,7 @@ func hasBearer(c *echo.Context) bool {
 - Modify: `api/rest/bind/bind.go` (pass new deps; gate on auth-enabled)
 - Test: `api/middleware/auth_test.go`
 
-- [ ] **Step 1: Failing test** — a valid session cookie authenticates a `GET /v1/jobs` as its user's role
+- [x] **Step 1: Failing test** — a valid session cookie authenticates a `GET /v1/jobs` as its user's role
 
 ```go
 func TestAuthAcceptsSessionCookie(t *testing.T) {
@@ -1275,9 +1275,9 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 
 Flesh this out following the existing API-key test's harness in the same file (reuse its DB/echo setup; add a session via `SessionStore.Create`).
 
-- [ ] **Step 2: Run → FAIL.**
+- [x] **Step 2: Run → FAIL.**
 
-- [ ] **Step 3: Implement.** Introduce a deps struct so the signature doesn't grow unbounded:
+- [x] **Step 3: Implement.** Introduce a deps struct so the signature doesn't grow unbounded:
 
 ```go
 // AuthDeps bundles the dependencies the auth middleware needs.
@@ -1353,9 +1353,9 @@ Keep the existing rate-limit, failure-audit, RBAC, and scope blocks — only the
 
 This requires `All(...)` to receive `sessions *auth.SessionStore`. Add it to the `bind.All` signature and thread it from `api.Start`.
 
-- [ ] **Step 4: Run the full middleware + auth suites + gate.** Update every existing `authmw.Auth(svc, auditor, limiter)` call site (tests + `api.go` metrics) to the new `AuthDeps` form. `go test ./api/... ./internal/auth/ -v && just unit-test`.
+- [x] **Step 4: Run the full middleware + auth suites + gate.** Update every existing `authmw.Auth(svc, auditor, limiter)` call site (tests + `api.go` metrics) to the new `AuthDeps` form. `go test ./api/... ./internal/auth/ -v && just unit-test`.
 
-- [ ] **Step 5: Commit** — "Resolve session-cookie principals in auth middleware"
+- [x] **Step 5: Commit** — "Resolve session-cookie principals in auth middleware"
 
 ### Task 1.11: `/auth/whoami`, `/auth/logout`, extended `/auth/status`
 
@@ -1364,7 +1364,7 @@ This requires `All(...)` to receive `sessions *auth.SessionStore`. Add it to the
 - Modify: `api/api.go` (`authStatus`; mount public SSO routes), `api/rest/bind/bind.go` (`bindAuth` adds whoami/logout)
 - Test: `api/rest/controller/auth/sso_test.go`
 
-- [ ] **Step 1: Failing test** — whoami returns 401 without a session and the principal's identity with one; logout revokes.
+- [x] **Step 1: Failing test** — whoami returns 401 without a session and the principal's identity with one; logout revokes.
 
 ```go
 func TestWhoamiLogout(t *testing.T) {
@@ -1374,9 +1374,9 @@ func TestWhoamiLogout(t *testing.T) {
 }
 ```
 
-- [ ] **Step 2: Run → FAIL.**
+- [x] **Step 2: Run → FAIL.**
 
-- [ ] **Step 3: Implement `api/rest/controller/auth/sso.go`**
+- [x] **Step 3: Implement `api/rest/controller/auth/sso.go`**
 
 ```go
 package auth
@@ -1426,7 +1426,7 @@ func (s *SSOController) Logout(c *echo.Context) error {
 
 (`Whoami` is mounted behind the protected group so `GetPrincipal` is populated; `Logout` does its own cookie read so it works regardless.)
 
-- [ ] **Step 4: Extend `authStatus` in `api/api.go`:**
+- [x] **Step 4: Extend `authStatus` in `api/api.go`:**
 
 ```go
 func authStatus(vars env.Environment) echo.HandlerFunc {
@@ -1454,7 +1454,7 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 
 Add `g.GET("/auth/whoami", ssoCtrl.Whoami)` to `bindAuth` (protected) and `e.POST("/auth/logout", ssoCtrl.Logout)` near `/auth/status` in `api.Start` (public — reads cookie directly).
 
-- [ ] **Step 5: Run → PASS, gate, commit** — "Add whoami/logout endpoints and method-aware auth status"
+- [x] **Step 5: Run → PASS, gate, commit** — "Add whoami/logout endpoints and method-aware auth status"
 
 ### Task 1.12: Wire session services into startup
 
@@ -1462,7 +1462,7 @@ Add `g.GET("/auth/whoami", ssoCtrl.Whoami)` to `bindAuth` (protected) and `e.POS
 - Modify: `cmd/start/start.go` (`initAuth` + its return/threading), `api/api.go` (`Start` signature), `api/rest/bind/bind.go` (`All` signature)
 - Test: covered by an integration smoke (server boots with SSO env) — add to `test/` if a server-boot harness exists; otherwise verify via `just unit-test` compile + a manual boot.
 
-- [ ] **Step 1:** In `initAuth`, after building `authSvc/auditor/limiter`, when `vars.AuthMode == "api-key" || vars.SSOEnabled()` build the session stack and return it (extend the return tuple or, preferably, return an `auth.Deps`-style bundle):
+- [x] **Step 1:** In `initAuth`, after building `authSvc/auditor/limiter`, when `vars.AuthMode == "api-key" || vars.SSOEnabled()` build the session stack and return it (extend the return tuple or, preferably, return an `auth.Deps`-style bundle):
 
 ```go
 	sessions := auth.NewSessionStore(conn,
@@ -1483,11 +1483,11 @@ Add `g.GET("/auth/whoami", ssoCtrl.Whoami)` to `bindAuth` (protected) and `e.POS
 	}
 ```
 
-- [ ] **Step 2:** Thread `sessions` (and later the SSO service + providers) through `api.Start(...)` → `bind.All(...)`. Update both signatures and the call site at `cmd/start/start.go:527`.
+- [x] **Step 2:** Thread `sessions` (and later the SSO service + providers) through `api.Start(...)` → `bind.All(...)`. Update both signatures and the call site at `cmd/start/start.go:527`.
 
-- [ ] **Step 3:** `go build ./... ` (via the project toolchain) and `just unit-test`.
+- [x] **Step 3:** `go build ./... ` (via the project toolchain) and `just unit-test`.
 
-- [ ] **Step 4: Manual boot smoke** (document the command in the PR):
+- [x] **Step 4: Manual boot smoke** (document the command in the PR):
 
 ```bash
 CAESIUM_AUTH_MODE=api-key CAESIUM_AUTH_KEY_HASH_SECRET=$(openssl rand -hex 32) \
@@ -1495,7 +1495,7 @@ CAESIUM_AUTH_REQUIRE_TLS=false CAESIUM_AUTH_OIDC_ENABLED=true \
 CAESIUM_AUTH_ROLE_MAPPING='*=viewer' just run   # expect: boots, /auth/status lists oidc
 ```
 
-- [ ] **Step 5: Commit** — "Wire session store, reaper, and flusher into startup"
+- [x] **Step 5: Commit** — "Wire session store, reaper, and flusher into startup"
 
 ### Task 1.13: UI session (cookie) mode
 
@@ -1503,11 +1503,11 @@ CAESIUM_AUTH_ROLE_MAPPING='*=viewer' just run   # expect: boots, /auth/status li
 - Modify: `ui/src/lib/auth.ts`, `ui/src/features/auth/AuthGate.tsx`
 - Test: `ui/src/lib/__tests__/auth.test.ts`, `ui/src/features/auth/__tests__/AuthGate.test.tsx`
 
-- [ ] **Step 1: Failing test** — `AuthGate` treats an established session (`/auth/whoami` 200) as authed without the API-key box; `withAuthHeaders` adds `X-CSRF-Token` from the token cached from `/auth/whoami`.
+- [x] **Step 1: Failing test** — `AuthGate` treats an established session (`/auth/whoami` 200) as authed without the API-key box; `withAuthHeaders` adds `X-CSRF-Token` from the token cached from `/auth/whoami`.
 
-- [ ] **Step 2: Run → FAIL.** `cd ui && npx vitest run src/lib/__tests__/auth.test.ts`
+- [x] **Step 2: Run → FAIL.** `cd ui && npx vitest run src/lib/__tests__/auth.test.ts`
 
-- [ ] **Step 3: Implement.** In `auth.ts`, add session detection + CSRF header (from the in-memory token `checkSession()` captures from `/auth/whoami`, not a cookie) and a `checkSession()` that calls `/auth/whoami` with `credentials: "include"`. In `AuthGate.tsx`, after the `/auth/status` probe, also call `/auth/whoami`; if it returns 200, render children (cookie session active). Keep the in-memory API-key path intact. SSO "Sign in with…" buttons + LDAP form are added in the provider plans (they need login URLs from `/auth/status.methods`).
+- [x] **Step 3: Implement.** In `auth.ts`, add session detection + CSRF header (from the in-memory token `checkSession()` captures from `/auth/whoami`, not a cookie) and a `checkSession()` that calls `/auth/whoami` with `credentials: "include"`. In `AuthGate.tsx`, after the `/auth/status` probe, also call `/auth/whoami`; if it returns 200, render children (cookie session active). Keep the in-memory API-key path intact. SSO "Sign in with…" buttons + LDAP form are added in the provider plans (they need login URLs from `/auth/status.methods`).
 
 ```ts
 // auth.ts additions — CSRF token cached from /auth/whoami (synchronizer pattern; never a cookie)
@@ -1533,8 +1533,8 @@ export async function checkSession(): Promise<boolean> {
 
 Merge `csrfHeader()` into `withAuthHeaders` for unsafe requests, and include `credentials: "include"` on same-origin fetches in the API client.
 
-- [ ] **Step 4: Run → PASS.** `cd ui && npx vitest run`
-- [ ] **Step 5: Commit** — "Add UI cookie-session mode and CSRF header"
+- [x] **Step 4: Run → PASS.** `cd ui && npx vitest run`
+- [x] **Step 5: Commit** — "Add UI cookie-session mode and CSRF header"
 
 ---
 
