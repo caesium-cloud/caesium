@@ -56,6 +56,10 @@ func (c *countingConnPool) BeginTx(ctx context.Context, opts *sql.TxOptions) (*s
 	return c.db.BeginTx(ctx, opts)
 }
 
+func (c *countingConnPool) GetDBConn() (*sql.DB, error) {
+	return c.db, nil
+}
+
 func newCountingPool(t *testing.T, failBefore int, failErr error) *countingConnPool {
 	t.Helper()
 	sqlDB, err := sql.Open("sqlite3", ":memory:")
@@ -277,4 +281,20 @@ func TestRWSplitRoutesReadsAndWrites(t *testing.T) {
 	require.NoError(t, tx.Rollback())
 	require.Equal(t, int32(1), atomic.LoadInt32(&writePool.beginAttempt), "transactions must begin on the write pool")
 	require.Equal(t, int32(0), atomic.LoadInt32(&readPool.beginAttempt), "transactions must not begin on the read pool")
+}
+
+// TestRWSplitCloseClosesBothPools proves Close releases both pools — the read
+// pool is otherwise unreachable via GetDBConn (which returns only the write
+// pool), so without this it would leak on shutdown.
+func TestRWSplitCloseClosesBothPools(t *testing.T) {
+	writePool := newCountingPool(t, 0, nil)
+	readPool := newCountingPool(t, 0, nil)
+	sp := newRWSplitConnPool(writePool, readPool)
+
+	require.NoError(t, sp.Close())
+
+	_, werr := writePool.db.ExecContext(context.Background(), "SELECT 1")
+	require.Error(t, werr, "write pool should be closed")
+	_, rerr := readPool.db.ExecContext(context.Background(), "SELECT 1")
+	require.Error(t, rerr, "read pool should be closed")
 }

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"io"
 	"math/rand/v2"
 	"time"
 
@@ -291,6 +292,7 @@ var (
 	_ gorm.ConnPool       = (*rwSplitConnPool)(nil)
 	_ gorm.TxBeginner     = (*rwSplitConnPool)(nil)
 	_ gorm.GetDBConnector = (*rwSplitConnPool)(nil)
+	_ io.Closer           = (*rwSplitConnPool)(nil)
 )
 
 func newRWSplitConnPool(writePool, readPool gorm.ConnPool) *rwSplitConnPool {
@@ -325,5 +327,28 @@ func (p *rwSplitConnPool) GetDBConn() (*sql.DB, error) {
 }
 
 func (p *rwSplitConnPool) Ping() error {
-	return p.write.Ping()
+	if err := p.write.Ping(); err != nil {
+		return err
+	}
+	return p.read.Ping()
+}
+
+// Close closes both underlying pools. The read pool is otherwise unreachable
+// via GetDBConn (which returns the write pool for gorm's db.DB()), so a
+// shutdown path must go through here to release it.
+func (p *rwSplitConnPool) Close() error {
+	writeErr := closeRetryPool(p.write)
+	readErr := closeRetryPool(p.read)
+	if writeErr != nil {
+		return writeErr
+	}
+	return readErr
+}
+
+func closeRetryPool(p *retryConnPool) error {
+	sqlDB, err := p.GetDBConn()
+	if err != nil {
+		return err
+	}
+	return sqlDB.Close()
 }
