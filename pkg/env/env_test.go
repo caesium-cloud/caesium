@@ -1,7 +1,6 @@
 package env
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -29,6 +28,7 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), "caesium_session", Variables().AuthSessionCookieName)
 	assert.Equal(s.T(), "openid profile email groups", Variables().AuthOIDCScopes)
 	assert.Equal(s.T(), "groups", Variables().AuthOIDCGroupsClaim)
+	assert.Equal(s.T(), "groups", Variables().AuthSAMLGroupsAttribute)
 	assert.False(s.T(), Variables().SSOEnabled())
 }
 
@@ -62,13 +62,39 @@ func (s *EnvTestSuite) TestOIDCEnvironmentOverrides() {
 	assert.Equal(s.T(), "https://app.example.com/auth/sso/oidc/callback", Variables().AuthOIDCRedirectURL)
 }
 
+func (s *EnvTestSuite) TestSAMLEnvironmentOverrides() {
+	s.T().Setenv("CAESIUM_AUTH_SAML_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_SAML_IDP_METADATA_URL", "https://idp.example.com/metadata")
+	s.T().Setenv("CAESIUM_AUTH_SAML_IDP_METADATA_XML", "<EntityDescriptor/>")
+	s.T().Setenv("CAESIUM_AUTH_SAML_IDP_METADATA_FILE", "/etc/caesium/idp.xml")
+	s.T().Setenv("CAESIUM_AUTH_SAML_SP_ENTITY_ID", "https://app.example.com/saml/metadata")
+	s.T().Setenv("CAESIUM_AUTH_SAML_SP_CERT", "/etc/caesium/sp.crt")
+	s.T().Setenv("CAESIUM_AUTH_SAML_SP_KEY", "/etc/caesium/sp.key")
+	s.T().Setenv("CAESIUM_AUTH_SAML_ACS_URL", "https://app.example.com/auth/sso/saml/acs")
+	s.T().Setenv("CAESIUM_AUTH_SAML_METADATA_URL", "https://app.example.com/auth/sso/saml/metadata")
+	s.T().Setenv("CAESIUM_AUTH_SAML_GROUPS_ATTRIBUTE", "memberOf")
+
+	s.Require().NoError(Process())
+	assert.True(s.T(), Variables().AuthSAMLEnabled)
+	assert.True(s.T(), Variables().SSOEnabled())
+	assert.Equal(s.T(), "https://idp.example.com/metadata", Variables().AuthSAMLIDPMetadataURL)
+	assert.Equal(s.T(), "<EntityDescriptor/>", Variables().AuthSAMLIDPMetadataXML)
+	assert.Equal(s.T(), "/etc/caesium/idp.xml", Variables().AuthSAMLIDPMetadataFile)
+	assert.Equal(s.T(), "https://app.example.com/saml/metadata", Variables().AuthSAMLSPEntityID)
+	assert.Equal(s.T(), "/etc/caesium/sp.crt", Variables().AuthSAMLSPCert)
+	assert.Equal(s.T(), "/etc/caesium/sp.key", Variables().AuthSAMLSPKey)
+	assert.Equal(s.T(), "https://app.example.com/auth/sso/saml/acs", Variables().AuthSAMLACSURL)
+	assert.Equal(s.T(), "https://app.example.com/auth/sso/saml/metadata", Variables().AuthSAMLMetadataURL)
+	assert.Equal(s.T(), "memberOf", Variables().AuthSAMLGroupsAttribute)
+}
+
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
-	s.Require().NoError(os.Setenv("CAESIUM_PORT", "not_a_port"))
+	s.T().Setenv("CAESIUM_PORT", "not_a_port")
 	assert.NotNil(s.T(), Process())
 }
 
 func (s *EnvTestSuite) TestProcessInvalidLogLevelFailure() {
-	s.Require().NoError(os.Setenv("CAESIUM_LOG_LEVEL", "bogus"))
+	s.T().Setenv("CAESIUM_LOG_LEVEL", "bogus")
 	assert.NotNil(s.T(), Process())
 }
 
