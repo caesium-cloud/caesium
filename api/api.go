@@ -170,6 +170,7 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 				"id":       "oidc",
 				"label":    "Sign in with OIDC",
 				"loginUrl": "/auth/sso/oidc/login",
+				"mode":     "redirect",
 			})
 		}
 		if vars.AuthSAMLEnabled {
@@ -178,6 +179,7 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 				"id":       "saml",
 				"label":    "Sign in with SAML",
 				"loginUrl": "/auth/sso/saml/login",
+				"mode":     "redirect",
 			})
 		}
 		if vars.AuthLDAPEnabled {
@@ -258,10 +260,11 @@ func credentialLoginRateLimit(limiter *auth.RateLimiter) echo.MiddlewareFunc {
 
 func credentialLoginFailed(err error, status int) bool {
 	if err != nil {
-		if he, ok := err.(*echo.HTTPError); ok {
+		var he *echo.HTTPError
+		if errors.As(err, &he) {
 			return he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden
 		}
-		return true
+		return false
 	}
 	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }

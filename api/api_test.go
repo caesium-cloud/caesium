@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -82,12 +83,14 @@ func TestAuthStatusListsSSOMethods(t *testing.T) {
 		"id":       "oidc",
 		"label":    "Sign in with OIDC",
 		"loginUrl": "/auth/sso/oidc/login",
+		"mode":     "redirect",
 	})
 	require.Contains(t, body.Methods, map[string]string{
 		"type":     "saml",
 		"id":       "saml",
 		"label":    "Sign in with SAML",
 		"loginUrl": "/auth/sso/saml/login",
+		"mode":     "redirect",
 	})
 	require.Contains(t, body.Methods, map[string]string{
 		"type":     "ldap",
@@ -291,6 +294,16 @@ func TestRegisterSSORoutesRateLimitsLDAPCredentialFailures(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusTooManyRequests, rec.Code)
 	require.NotEmpty(t, rec.Header().Get("Retry-After"))
+}
+
+func TestCredentialLoginFailedClassifiesOnlyAuthFailures(t *testing.T) {
+	require.True(t, credentialLoginFailed(echo.NewHTTPError(http.StatusUnauthorized, "invalid"), 0))
+	require.True(t, credentialLoginFailed(fmt.Errorf("wrapped: %w", echo.NewHTTPError(http.StatusForbidden, "denied")), 0))
+	require.False(t, credentialLoginFailed(echo.NewHTTPError(http.StatusInternalServerError, "failed"), 0))
+	require.False(t, credentialLoginFailed(fmt.Errorf("raw server error"), 0))
+	require.True(t, credentialLoginFailed(nil, http.StatusUnauthorized))
+	require.True(t, credentialLoginFailed(nil, http.StatusForbidden))
+	require.False(t, credentialLoginFailed(nil, http.StatusInternalServerError))
 }
 
 func TestRegisterSSORoutesSkipsLDAPCredentialProviderRouteWithoutProvider(t *testing.T) {

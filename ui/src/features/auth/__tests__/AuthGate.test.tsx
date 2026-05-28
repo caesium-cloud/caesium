@@ -49,11 +49,13 @@ describe("AuthGate", () => {
               id: "corp-oidc",
               label: "Sign in with Corp SSO",
               loginUrl: "/auth/sso/oidc/login",
+              mode: "redirect",
             },
             {
               type: "saml",
               id: "corp-saml",
               loginUrl: "/auth/sso/saml/login",
+              mode: "redirect",
             },
           ],
         }),

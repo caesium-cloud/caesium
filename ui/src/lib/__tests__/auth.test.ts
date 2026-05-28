@@ -91,10 +91,12 @@ describe("auth", () => {
       id: "corp-oidc",
       label: "  Sign in with Corp SSO  ",
       loginUrl: "/auth/sso/oidc/login",
+      mode: "redirect",
     };
     const saml: RedirectAuthMethod = {
       type: "saml",
       loginUrl: "/auth/sso/saml/login",
+      mode: "redirect",
     };
     const ldap = {
       type: "ldap",
@@ -106,6 +108,7 @@ describe("auth", () => {
     expect(isRedirectAuthMethod(saml)).toBe(true);
     expect(isRedirectAuthMethod(ldap)).toBe(false);
     expect(isCredentialAuthMethod(ldap)).toBe(true);
+    expect(isCredentialAuthMethod({ type: "ldap", loginUrl: "/auth/sso/ldap/login" })).toBe(false);
     expect(isRedirectAuthMethod({ type: "api-key" })).toBe(false);
     expect(authMethodKey(oidc)).toBe("corp-oidc");
     expect(authMethodKey(saml)).toBe("saml:/auth/sso/saml/login:");

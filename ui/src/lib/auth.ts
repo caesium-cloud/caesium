@@ -21,8 +21,8 @@ export interface AuthStatus {
   methods?: AuthMethod[];
 }
 
-export type RedirectAuthMethod = AuthMethod & { loginUrl: string };
-export type CredentialAuthMethod = AuthMethod & { loginUrl: string };
+export type RedirectAuthMethod = AuthMethod & { loginUrl: string; mode: "redirect" };
+export type CredentialAuthMethod = AuthMethod & { loginUrl: string; mode: "credential" };
 export type CredentialLoginResult =
   | "success"
   | "invalid"
@@ -97,18 +97,21 @@ export function ssoLoginUrl(loginUrl: string, returnTo = currentReturnTo()): str
 
 /** Returns true for auth methods that should launch a browser redirect. */
 export function isRedirectAuthMethod(method: AuthMethod): method is RedirectAuthMethod {
-  return typeof method.loginUrl === "string" && method.loginUrl.length > 0 && !isCredentialAuthMethod(method);
+  return authMethodMode(method) === "redirect" && hasLoginUrl(method);
 }
 
 /** Returns true for auth methods that should submit credentials in-place. */
 export function isCredentialAuthMethod(method: AuthMethod): method is CredentialAuthMethod {
+  return authMethodMode(method) === "credential" && hasLoginUrl(method);
+}
+
+function authMethodMode(method: AuthMethod): string {
   const mode = typeof method.mode === "string" ? method.mode.trim().toLowerCase() : "";
-  const type = typeof method.type === "string" ? method.type.trim().toLowerCase() : "";
-  return (
-    (mode === "credential" || type === "ldap") &&
-    typeof method.loginUrl === "string" &&
-    method.loginUrl.length > 0
-  );
+  return mode;
+}
+
+function hasLoginUrl(method: AuthMethod): method is AuthMethod & { loginUrl: string } {
+  return typeof method.loginUrl === "string" && method.loginUrl.length > 0;
 }
 
 /** Stable React key for advertised browser-redirect auth methods. */

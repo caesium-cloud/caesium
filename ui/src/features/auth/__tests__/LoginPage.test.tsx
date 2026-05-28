@@ -50,12 +50,14 @@ describe("LoginPage", () => {
             id: "corp-oidc",
             label: "Sign in with Corp SSO",
             loginUrl: "/auth/sso/oidc/login",
+            mode: "redirect",
           },
           {
             type: "saml",
             id: "corp-saml",
             label: "Sign in with Corp SAML",
             loginUrl: "/auth/sso/saml/login",
+            mode: "redirect",
           },
           {
             type: "ldap",
@@ -73,7 +75,7 @@ describe("LoginPage", () => {
 
     expect(screen.getByRole("button", { name: "Sign in with Corp SSO" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in with Corp SAML" })).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Username")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Username")).toHaveFocus();
     expect(screen.getByPlaceholderText("Password")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign in with Corp SAML" }));
@@ -139,6 +141,7 @@ describe("LoginPage", () => {
           {
             type: "ldap",
             mode: "credential",
+            label: "Corporate Directory",
             loginUrl: "/auth/sso/ldap/login",
           },
         ]}
@@ -152,9 +155,38 @@ describe("LoginPage", () => {
     fireEvent.change(screen.getByPlaceholderText("Password"), {
       target: { value: "secret" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "Sign in with LDAP" }));
+    fireEvent.click(screen.getByRole("button", { name: "Corporate Directory" }));
 
-    expect(await screen.findByText("LDAP login is not allowed for this account")).toBeInTheDocument();
+    expect(await screen.findByText("Corporate Directory login is not allowed for this account")).toBeInTheDocument();
+    expect(isAuthenticated()).toBe(false);
+  });
+
+  it("uses the credential method label in generic login errors", async () => {
+    mockFetch.mockResolvedValueOnce({ status: 500, ok: false });
+
+    render(
+      <LoginPage
+        methods={[
+          {
+            type: "ldap",
+            mode: "credential",
+            label: "Corporate Directory",
+            loginUrl: "/auth/sso/ldap/login",
+          },
+        ]}
+        onLogin={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Username"), {
+      target: { value: "ada" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Corporate Directory" }));
+
+    expect(await screen.findByText("Unable to sign in with Corporate Directory")).toBeInTheDocument();
     expect(isAuthenticated()).toBe(false);
   });
 

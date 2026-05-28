@@ -22,6 +22,12 @@ const defaultNavigate = (url: string) => {
   window.location.assign(url);
 };
 
+function credentialProviderName(method: AuthMethod): string {
+  const label = authMethodLabel(method).trim();
+  const provider = label.replace(/^sign in with\s+/i, "").trim();
+  return provider || label || "credential provider";
+}
+
 export function LoginPage({
   methods = [],
   navigate = defaultNavigate,
@@ -109,6 +115,7 @@ export function LoginPage({
       setCredentialLoading(true);
 
       const result = await credentialLogin(credentialMethod.loginUrl, trimmedUsername, password);
+      const providerName = credentialProviderName(credentialMethod);
       switch (result) {
         case "success":
           onLogin();
@@ -117,13 +124,13 @@ export function LoginPage({
           setCredentialError("Invalid username or password");
           break;
         case "denied":
-          setCredentialError("LDAP login is not allowed for this account");
+          setCredentialError(`${providerName} login is not allowed for this account`);
           break;
         case "network":
           setCredentialError("Unable to reach the server");
           break;
         default:
-          setCredentialError("Unable to sign in with LDAP");
+          setCredentialError(`Unable to sign in with ${providerName}`);
       }
 
       setCredentialLoading(false);
@@ -164,6 +171,7 @@ export function LoginPage({
               value={username}
               onChange={(e) => setUsername(e.target.value)}
               placeholder="Username"
+              autoFocus
               autoComplete="username"
               className="rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground outline-none transition focus:border-primary"
             />
