@@ -1,5 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
-import { checkSession, isAuthenticated, onAuthChange } from "@/lib/auth";
+import {
+  type AuthMethod,
+  type AuthStatus,
+  checkSession,
+  isAuthenticated,
+  onAuthChange,
+} from "@/lib/auth";
 import { LoginPage } from "./LoginPage";
 
 interface AuthGateProps {
@@ -13,6 +19,7 @@ interface AuthGateProps {
  */
 export function AuthGate({ children }: AuthGateProps) {
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
+  const [authMethods, setAuthMethods] = useState<AuthMethod[]>([]);
   const [authed, setAuthed] = useState(isAuthenticated);
 
   // Subscribe to auth state changes.
@@ -30,11 +37,13 @@ export function AuthGate({ children }: AuthGateProps) {
           return;
         }
 
-        const body = (await resp.json()) as { enabled?: boolean };
+        const body = (await resp.json()) as AuthStatus;
         const enabled = Boolean(body.enabled);
+        const methods = Array.isArray(body.methods) ? body.methods : [];
         const hasSession = enabled && !isAuthenticated() ? await checkSession() : false;
         if (!cancelled) {
           setAuthRequired(enabled);
+          setAuthMethods(methods);
           if (hasSession) {
             setAuthed(true);
           }
@@ -60,7 +69,7 @@ export function AuthGate({ children }: AuthGateProps) {
 
   // Auth is required but user hasn't authenticated yet.
   if (authRequired && !authed) {
-    return <LoginPage onLogin={handleLogin} />;
+    return <LoginPage methods={authMethods} onLogin={handleLogin} />;
   }
 
   return <>{children}</>;

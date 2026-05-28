@@ -1,14 +1,38 @@
 import { useState, useCallback } from "react";
-import { setApiKey } from "@/lib/auth";
+import { LogIn } from "lucide-react";
+import { type AuthMethod, setApiKey, ssoLoginUrl } from "@/lib/auth";
 
 interface LoginPageProps {
+  methods?: AuthMethod[];
+  navigate?: (url: string) => void;
   onLogin: () => void;
+  returnTo?: () => string;
 }
 
-export function LoginPage({ onLogin }: LoginPageProps) {
+const defaultNavigate = (url: string) => {
+  window.location.assign(url);
+};
+
+export function LoginPage({
+  methods = [],
+  navigate = defaultNavigate,
+  onLogin,
+  returnTo,
+}: LoginPageProps) {
   const [key, setKey] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const oidcMethods = methods.filter(
+    (method): method is AuthMethod & { loginUrl: string } =>
+      method.type === "oidc" && Boolean(method.loginUrl),
+  );
+
+  const handleSSOLogin = useCallback(
+    (loginUrl: string) => {
+      navigate(ssoLoginUrl(loginUrl, returnTo?.()));
+    },
+    [navigate, returnTo],
+  );
 
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
@@ -63,6 +87,22 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         className="flex w-full max-w-[400px] flex-col gap-4 rounded-lg border border-border bg-card p-8"
       >
         <h1 className="mb-2 text-center text-xl font-semibold">Caesium</h1>
+
+        {oidcMethods.length > 0 && (
+          <div className="flex flex-col gap-2">
+            {oidcMethods.map((method, index) => (
+              <button
+                key={`${method.loginUrl}-${index}`}
+                type="button"
+                onClick={() => handleSSOLogin(method.loginUrl)}
+                className="inline-flex items-center justify-center gap-2 rounded-md border border-input bg-background px-4 py-2 font-medium text-foreground transition hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
+              >
+                <LogIn className="h-4 w-4" aria-hidden="true" />
+                <span>Sign in with OIDC</span>
+              </button>
+            ))}
+          </div>
+        )}
 
         <p className="text-center text-sm text-muted-foreground">
           Enter your API key to continue

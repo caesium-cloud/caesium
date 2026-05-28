@@ -2,9 +2,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   checkSession,
   clearApiKey,
+  currentReturnTo,
   isAuthenticated,
   onAuthChange,
   setApiKey,
+  ssoLoginUrl,
   withAuthHeaders,
 } from "@/lib/auth";
 
@@ -59,6 +61,22 @@ describe("auth", () => {
       "X-CSRF-Token": "csrf-secret",
     });
     expect(withAuthHeaders()).not.toHaveProperty("Authorization");
+  });
+
+  it("builds a same-page return target for SSO callbacks", () => {
+    expect(
+      currentReturnTo({
+        pathname: "/runs",
+        search: "?status=failed",
+        hash: "#latest",
+      }),
+    ).toBe("/runs?status=failed#latest");
+  });
+
+  it("adds returnTo to SSO login URLs", () => {
+    expect(ssoLoginUrl("/auth/sso/oidc/login?prompt=login", "/jobs#new")).toBe(
+      "/auth/sso/oidc/login?prompt=login&returnTo=%2Fjobs%23new",
+    );
   });
 
   it("does not mark failed cookie session checks as authenticated", async () => {

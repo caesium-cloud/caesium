@@ -36,6 +36,34 @@ describe("AuthGate", () => {
     expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
   });
 
+  it("renders advertised OIDC methods on the login page", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          enabled: true,
+          methods: [
+            { type: "api-key" },
+            { type: "oidc", loginUrl: "/auth/sso/oidc/login" },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({}),
+      });
+
+    render(
+      <AuthGate>
+        <div>protected</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Sign in with OIDC" })).toBeInTheDocument();
+    });
+  });
+
   it("renders children when auth is not required", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
