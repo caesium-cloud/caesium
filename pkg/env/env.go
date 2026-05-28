@@ -156,6 +156,15 @@ type Environment struct {
 	AuthOIDCGroupsClaim     string        `envconfig:"AUTH_OIDC_GROUPS_CLAIM" default:"groups"`
 	AuthOIDCRedirectURL     string        `envconfig:"AUTH_OIDC_REDIRECT_URL" default:""`
 	AuthSAMLEnabled         bool          `envconfig:"AUTH_SAML_ENABLED" default:"false"`
+	AuthSAMLIDPMetadataURL  string        `envconfig:"AUTH_SAML_IDP_METADATA_URL" default:""`
+	AuthSAMLIDPMetadataXML  string        `envconfig:"AUTH_SAML_IDP_METADATA_XML" default:""`
+	AuthSAMLIDPMetadataFile string        `envconfig:"AUTH_SAML_IDP_METADATA_FILE" default:""`
+	AuthSAMLSPEntityID      string        `envconfig:"AUTH_SAML_SP_ENTITY_ID" default:""`
+	AuthSAMLSPCert          string        `envconfig:"AUTH_SAML_SP_CERT" default:""`
+	AuthSAMLSPKey           string        `envconfig:"AUTH_SAML_SP_KEY" default:""`
+	AuthSAMLACSURL          string        `envconfig:"AUTH_SAML_ACS_URL" default:""`
+	AuthSAMLMetadataURL     string        `envconfig:"AUTH_SAML_METADATA_URL" default:""`
+	AuthSAMLGroupsAttribute string        `envconfig:"AUTH_SAML_GROUPS_ATTRIBUTE" default:"groups"`
 	AuthLDAPEnabled         bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
 
 	// Run-owner coordination (Phase 2).

@@ -20,6 +20,7 @@ var All = []interface{}{
 	&AuditLog{},
 	&User{},
 	&Session{},
+	&SAMLAssertionReplay{},
 	&NotificationChannel{},
 	&NotificationPolicy{},
 	// Phase 2 run-owner coordination tables (catalog DB, cross-run, low-volume).
