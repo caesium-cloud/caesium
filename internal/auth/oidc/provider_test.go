@@ -307,6 +307,9 @@ func cloneCookieWithValue(cookie *http.Cookie, value string) *http.Cookie {
 }
 
 func tamperCookieValue(value string) string {
+	if len(value) == 0 {
+		return "tampered"
+	}
 	replacement := byte('A')
 	if value[len(value)-1] == replacement {
 		replacement = 'B'

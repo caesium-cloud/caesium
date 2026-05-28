@@ -104,7 +104,9 @@ func TestCompleteRejectsTamperedStateCookieBeforeParsingResponse(t *testing.T) {
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
-	cookie := rec.Result().Cookies()[0]
+	cookies := rec.Result().Cookies()
+	require.NotEmpty(t, cookies)
+	cookie := cookies[0]
 	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
 	stateReq.AddCookie(cookie)
 	state, err := provider.readStateCookie(stateReq)
@@ -118,6 +120,7 @@ func TestCompleteRejectsTamperedStateCookieBeforeParsingResponse(t *testing.T) {
 
 	_, _, err = provider.CompleteWithReturnTo(acsReq)
 	require.ErrorIs(t, err, ErrInvalidState)
+	require.Contains(t, err.Error(), "signature mismatch")
 	require.NotContains(t, err.Error(), "validate saml response")
 }
 
@@ -138,7 +141,9 @@ func TestCompleteRejectsExpiredStateCookieBeforeParsingResponse(t *testing.T) {
 	_, err = provider.Begin(rec, req, "/")
 	require.NoError(t, err)
 
-	cookie := rec.Result().Cookies()[0]
+	cookies := rec.Result().Cookies()
+	require.NotEmpty(t, cookies)
+	cookie := cookies[0]
 	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
 	stateReq.AddCookie(cookie)
 	state, err := provider.readStateCookie(stateReq)
@@ -152,6 +157,7 @@ func TestCompleteRejectsExpiredStateCookieBeforeParsingResponse(t *testing.T) {
 
 	_, _, err = provider.CompleteWithReturnTo(acsReq)
 	require.ErrorIs(t, err, ErrInvalidState)
+	require.Contains(t, err.Error(), "expired state")
 	require.NotContains(t, err.Error(), "validate saml response")
 }
 
