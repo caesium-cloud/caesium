@@ -57,7 +57,13 @@ describe("LoginPage", () => {
             label: "Sign in with Corp SAML",
             loginUrl: "/auth/sso/saml/login",
           },
-          { type: "ldap" },
+          {
+            type: "ldap",
+            mode: "credential",
+            id: "corp-ldap",
+            label: "Sign in with LDAP",
+            loginUrl: "/auth/sso/ldap/login",
+          },
         ]}
         navigate={navigate}
         onLogin={vi.fn()}
@@ -67,7 +73,8 @@ describe("LoginPage", () => {
 
     expect(screen.getByRole("button", { name: "Sign in with Corp SSO" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Sign in with Corp SAML" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Sign in with LDAP" })).not.toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Username")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Password")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign in with Corp SAML" }));
 
@@ -75,6 +82,80 @@ describe("LoginPage", () => {
       "/auth/sso/saml/login?returnTo=%2Fruns%3Fstatus%3Dfailed%23latest",
     );
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it("posts LDAP credentials with cookies and calls onLogin after the session is visible", async () => {
+    const onLogin = vi.fn();
+    mockFetch
+      .mockResolvedValueOnce({ status: 204, ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ csrf_token: "csrf-secret" }),
+      });
+
+    render(
+      <LoginPage
+        methods={[
+          {
+            type: "ldap",
+            mode: "credential",
+            id: "corp-ldap",
+            label: "Sign in with LDAP",
+            loginUrl: "/auth/sso/ldap/login",
+          },
+        ]}
+        onLogin={onLogin}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Username"), {
+      target: { value: " ada " },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with LDAP" }));
+
+    await waitFor(() => {
+      expect(onLogin).toHaveBeenCalledTimes(1);
+    });
+
+    expect(mockFetch).toHaveBeenNthCalledWith(1, "/auth/sso/ldap/login", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "ada", password: "secret" }),
+    });
+    expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
+    expect(isAuthenticated()).toBe(true);
+  });
+
+  it("shows an LDAP denial without authenticating", async () => {
+    mockFetch.mockResolvedValueOnce({ status: 403, ok: false });
+
+    render(
+      <LoginPage
+        methods={[
+          {
+            type: "ldap",
+            mode: "credential",
+            loginUrl: "/auth/sso/ldap/login",
+          },
+        ]}
+        onLogin={vi.fn()}
+      />,
+    );
+
+    fireEvent.change(screen.getByPlaceholderText("Username"), {
+      target: { value: "ada" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with LDAP" }));
+
+    expect(await screen.findByText("LDAP login is not allowed for this account")).toBeInTheDocument();
+    expect(isAuthenticated()).toBe(false);
   });
 
   it("stores the api key and calls onLogin on success", async () => {

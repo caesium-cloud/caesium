@@ -226,12 +226,14 @@ The embedded UI exposes a few optional power-user surfaces:
 
 ## API Reference
 
-The server exposes REST on port `8080`. GraphQL is available at `GET /gql` only when `CAESIUM_AUTH_MODE=none`; when API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources.
+The server exposes REST on port `8080`. GraphQL is available at `GET /gql` only when `CAESIUM_AUTH_MODE=none`; when API-key auth is enabled, authentication in this release applies to the REST API, `/metrics`, and embedded UI only, and webhook delivery continues to use per-trigger webhook signature configuration rather than bearer tokens. The UI determines whether login is required through the explicit `GET /auth/status` endpoint rather than probing protected resources. Native OIDC, SAML, and LDAP SSO can be enabled alongside API keys; see [docs/sso-authentication.md](docs/sso-authentication.md).
 
 | Endpoint | Purpose |
 |---|---|
 | `GET /health` | Health check |
-| `GET /auth/status` | Report whether API-key auth is enabled for the UI |
+| `GET /auth/status` | Report available API-key and SSO auth methods for the UI |
+| `GET /auth/whoami` | Return the current authenticated API-key or session principal |
+| `POST /auth/logout` | Revoke the current browser session |
 | `GET /metrics` | Prometheus metrics (viewer auth required when `CAESIUM_AUTH_MODE=api-key`) |
 | `GET /gql` | GraphQL endpoint when `CAESIUM_AUTH_MODE=none` |
 | `GET /v1/jobs` | List jobs |

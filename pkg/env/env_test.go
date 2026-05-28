@@ -29,6 +29,13 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), "openid profile email groups", Variables().AuthOIDCScopes)
 	assert.Equal(s.T(), "groups", Variables().AuthOIDCGroupsClaim)
 	assert.Equal(s.T(), "groups", Variables().AuthSAMLGroupsAttribute)
+	assert.Equal(s.T(), "(uid={username})", Variables().AuthLDAPUserFilter)
+	assert.Empty(s.T(), Variables().AuthLDAPGroupFilter)
+	assert.Equal(s.T(), "cn", Variables().AuthLDAPGroupAttribute)
+	assert.Equal(s.T(), "uid", Variables().AuthLDAPUsernameAttribute)
+	assert.Equal(s.T(), "mail", Variables().AuthLDAPEmailAttribute)
+	assert.Equal(s.T(), "displayName", Variables().AuthLDAPDisplayNameAttribute)
+	assert.Equal(s.T(), 10*time.Second, Variables().AuthLDAPTimeout)
 	assert.False(s.T(), Variables().SSOEnabled())
 }
 
@@ -86,6 +93,40 @@ func (s *EnvTestSuite) TestSAMLEnvironmentOverrides() {
 	assert.Equal(s.T(), "https://app.example.com/auth/sso/saml/acs", Variables().AuthSAMLACSURL)
 	assert.Equal(s.T(), "https://app.example.com/auth/sso/saml/metadata", Variables().AuthSAMLMetadataURL)
 	assert.Equal(s.T(), "memberOf", Variables().AuthSAMLGroupsAttribute)
+}
+
+func (s *EnvTestSuite) TestLDAPEnvironmentOverrides() {
+	s.T().Setenv("CAESIUM_AUTH_LDAP_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_URL", "ldap://ldap.example.com:389")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_START_TLS", "true")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_BIND_DN", "cn=caesium,ou=svc,dc=example,dc=com")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_BIND_PASSWORD", "secret")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_USER_BASE_DN", "ou=users,dc=example,dc=com")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_USER_FILTER", "(sAMAccountName={username})")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_GROUP_BASE_DN", "ou=groups,dc=example,dc=com")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_GROUP_FILTER", "(member={dn})")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_GROUP_ATTRIBUTE", "dn")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_USERNAME_ATTRIBUTE", "sAMAccountName")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_EMAIL_ATTRIBUTE", "userPrincipalName")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE", "cn")
+	s.T().Setenv("CAESIUM_AUTH_LDAP_TIMEOUT", "15s")
+
+	s.Require().NoError(Process())
+	assert.True(s.T(), Variables().AuthLDAPEnabled)
+	assert.True(s.T(), Variables().SSOEnabled())
+	assert.Equal(s.T(), "ldap://ldap.example.com:389", Variables().AuthLDAPURL)
+	assert.True(s.T(), Variables().AuthLDAPStartTLS)
+	assert.Equal(s.T(), "cn=caesium,ou=svc,dc=example,dc=com", Variables().AuthLDAPBindDN)
+	assert.Equal(s.T(), "secret", Variables().AuthLDAPBindPassword)
+	assert.Equal(s.T(), "ou=users,dc=example,dc=com", Variables().AuthLDAPUserBaseDN)
+	assert.Equal(s.T(), "(sAMAccountName={username})", Variables().AuthLDAPUserFilter)
+	assert.Equal(s.T(), "ou=groups,dc=example,dc=com", Variables().AuthLDAPGroupBaseDN)
+	assert.Equal(s.T(), "(member={dn})", Variables().AuthLDAPGroupFilter)
+	assert.Equal(s.T(), "dn", Variables().AuthLDAPGroupAttribute)
+	assert.Equal(s.T(), "sAMAccountName", Variables().AuthLDAPUsernameAttribute)
+	assert.Equal(s.T(), "userPrincipalName", Variables().AuthLDAPEmailAttribute)
+	assert.Equal(s.T(), "cn", Variables().AuthLDAPDisplayNameAttribute)
+	assert.Equal(s.T(), 15*time.Second, Variables().AuthLDAPTimeout)
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {

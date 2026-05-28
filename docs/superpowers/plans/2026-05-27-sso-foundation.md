@@ -24,9 +24,12 @@
 - **Authoritative gate before every commit that touches Go:** `just unit-test` (race + coverage) must pass. Do not rely on CI for compile errors.
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
-  `sso-oidc-provider` (PR #193). On `sso-saml-provider` (PR #194), this UI
-  slice renders advertised browser-redirect methods with `loginUrl` values,
-  including SAML. SAML provider backend work remains in P3.
+  `sso-oidc-provider` (PR #193). SAML continued on `sso-saml-provider`
+  (PR #194). The current `codex/ldap-sso-provider` wave implements the LDAP
+  credential provider, `AUTH_LDAP_*` environment/startup wiring,
+  `/auth/sso/ldap/login`, LDAP username/password UI, and the first operator SSO
+  setup guide. Live OpenLDAP fixtures and the final hardening/audit pass remain
+  reserved for P5.
 
 ## File structure
 
@@ -1574,11 +1577,26 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
 
 ### P4 — LDAP provider (`go-ldap/ldap/v3`)
+- [x] **Wave 4 status:** Implemented the LDAP `CredentialAuthenticator`,
+  `AUTH_LDAP_*` config, startup provider initialization, `/auth/sso/ldap/login`
+  with shared session-cookie completion and per-IP failed-login limiting, and
+  the LDAP username/password UI. Unit coverage exercises config validation,
+  LDAP filter escaping, search-then-bind flow, group mapping, route mounting,
+  and credential-form behavior.
+- [ ] **Hardening still required:** containerized OpenLDAP integration coverage,
+  role-mapping edge cases against real directory schemas, and the dedicated P5
+  security pass remain outstanding.
 - **Files:** `internal/auth/ldap/provider.go` (implements `CredentialAuthenticator`), `AUTH_LDAP_*` config, `POST /auth/sso/ldap/login` handler (rate-limited), UI username/password form.
 - **Key work:** LDAPS/StartTLS; service bind → user search (`USER_FILTER`) → rebind to verify; group query (`GROUP_FILTER`); **escape all user-supplied input with `ldap.EscapeFilter` before substitution** (LDAP-injection guard); reject empty-password/anonymous bind.
 - **Tests:** containerized OpenLDAP with seeded users/groups (integration, `-tags=integration`).
 
 ### P5 — Docs + hardening
+- [x] **Docs draft status:** Created `docs/sso-authentication.md` for LDAP
+  operator setup, role mapping, session TTL/cookie tuning, TLS prerequisites,
+  LDAP filter placeholders, and OIDC/SAML/LDAP setup.
+- [ ] **Hardening status:** Not complete in this wave. Cookie/CSRF/open-redirect
+  review, provider-specific negative fixtures, metrics, and audit finalization
+  still need the dedicated P5 pass.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 
