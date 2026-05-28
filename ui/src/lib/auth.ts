@@ -97,8 +97,13 @@ export function authMethodKey(method: RedirectAuthMethod): string {
   return method.id ?? `${method.type}:${method.loginUrl}:${method.label ?? ""}`;
 }
 
-function authMethodTypeLabel(type: string): string {
-  switch (type.trim().toLowerCase()) {
+function authMethodTypeLabel(type: unknown): string {
+  if (typeof type !== "string") {
+    return "SSO";
+  }
+
+  const normalizedType = type.trim();
+  switch (normalizedType.toLowerCase()) {
     case "oidc":
       return "OIDC";
     case "saml":
@@ -107,8 +112,7 @@ function authMethodTypeLabel(type: string): string {
       return "LDAP";
     default:
       return (
-        type
-          .trim()
+        normalizedType
           .split(/[-_\s]+/)
           .filter(Boolean)
           .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
@@ -119,7 +123,8 @@ function authMethodTypeLabel(type: string): string {
 
 /** User-facing label for an advertised auth method, preserving server labels. */
 export function authMethodLabel(method: AuthMethod): string {
-  return method.label?.trim() || `Sign in with ${authMethodTypeLabel(method.type)}`;
+  const label = typeof method.label === "string" ? method.label.trim() : "";
+  return label || `Sign in with ${authMethodTypeLabel(method.type)}`;
 }
 
 /**

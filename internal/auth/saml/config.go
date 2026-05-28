@@ -30,7 +30,11 @@ const (
 
 	DefaultStateCookieName = "caesium_saml_state"
 	DefaultStateTTL        = 10 * time.Minute
+
+	DefaultMetadataFetchTimeout = 30 * time.Second
 )
+
+var defaultMetadataHTTPClient = &http.Client{Timeout: DefaultMetadataFetchTimeout}
 
 // Config configures the SAML redirect provider.
 type Config struct {
@@ -165,7 +169,7 @@ func loadIDPMetadata(ctx context.Context, cfg Config) (*crewsaml.EntityDescripto
 		}
 		client := cfg.HTTPClient
 		if client == nil {
-			client = http.DefaultClient
+			client = defaultMetadataHTTPClient
 		}
 		metadata, err := samlsp.FetchMetadata(ctx, client, *metadataURL)
 		if err != nil {
