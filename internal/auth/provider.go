@@ -74,12 +74,6 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		metrics.SSOLoginDurationSeconds.WithLabelValues(provider).Observe(time.Since(start).Seconds())
 	}()
 
-	if ext == nil {
-		outcome = OutcomeDenied
-		s.auditLoginDenied(nil, method, ip, "missing_identity")
-		return "", nil, ErrLoginDenied
-	}
-
 	role, ok := s.roles.Resolve(ext.Groups)
 	if !ok {
 		outcome = OutcomeDenied

@@ -117,17 +117,17 @@ func (s *SSOController) LDAPLogin(c *echo.Context) error {
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {
-	outcome := iauth.OutcomeSuccess
 	var sess *models.Session
 	var user *models.User
+	recordLogout := false
 	if s.sessions != nil {
 		if cookie, err := c.Request().Cookie(s.cookieName); err == nil && cookie.Value != "" {
 			if validSession, validUser, err := s.sessions.Validate(c.Request().Context(), cookie.Value); err == nil {
 				sess = validSession
 				user = validUser
+				recordLogout = true
 				if err := s.sessions.Revoke(c.Request().Context(), sess.ID); err != nil {
-					outcome = iauth.OutcomeError
-					s.recordLogout(c, outcome, sess, user)
+					s.recordLogout(c, iauth.OutcomeError, sess, user)
 					log.Warn("failed to revoke session during logout", "error", err)
 					return echo.NewHTTPError(http.StatusInternalServerError, "logout failed").Wrap(err)
 				}
@@ -145,7 +145,9 @@ func (s *SSOController) Logout(c *echo.Context) error {
 		Secure:   requestIsSecure(c.Request(), s.trustedProxies),
 		SameSite: http.SameSiteLaxMode,
 	})
-	s.recordLogout(c, outcome, sess, user)
+	if recordLogout {
+		s.recordLogout(c, iauth.OutcomeSuccess, sess, user)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -177,7 +179,7 @@ func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.Re
 	ext, returnTo, err := completeRedirectProvider(provider, c.Request())
 	providerName := providerMethod(provider, fallbackName)
 	if err != nil {
-		s.recordProviderLoginFailure(c, providerName, "unknown", "callback_failed", iauth.OutcomeDenied)
+		s.recordProviderLoginFailure(c, providerName, "unknown", "callback_failed", iauth.OutcomeError)
 		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" callback failed").Wrap(err)
 	}
 	if ext == nil {
@@ -435,6 +437,11 @@ func safeReturnTo(r *http.Request, raw string, trustedProxies []*net.IPNet) stri
 func unsafeLocalReturnPath(path string) bool {
 	if !strings.HasPrefix(path, "/") {
 		return true
+	}
+	for i := 0; i < len(path); i++ {
+		if path[i] < 32 || path[i] == 127 {
+			return true
+		}
 	}
 	normalized := strings.ReplaceAll(path, `\`, "/")
 	return strings.HasPrefix(normalized, "//")
