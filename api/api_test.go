@@ -214,6 +214,26 @@ func TestRegisterSSORoutesMountsSAMLRedirectProviderRoutes(t *testing.T) {
 	require.True(t, hasRoute(e, http.MethodPost, "/auth/sso/saml/acs"))
 }
 
+func TestRegisterSSORoutesSkipsSAMLRedirectProviderRoutesWithoutProvider(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthSAMLEnabled: true},
+		nil,
+		nil,
+		nil,
+		iauth.NewSessionStore(db),
+		nil,
+		SSOProviders{},
+	)
+
+	require.False(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/login"))
+	require.False(t, hasRoute(e, http.MethodPost, "/auth/sso/saml/acs"))
+}
+
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
 	e := echo.New()
 	var called atomic.Bool
