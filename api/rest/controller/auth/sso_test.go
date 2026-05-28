@@ -158,6 +158,22 @@ func TestRedirectCallbacksSanitizeUnsafeReturnTo(t *testing.T) {
 			returnTo: "/%5c%5cevil.example/steal",
 			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
 		},
+		{
+			name:     "oidc encoded tab scheme relative",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			returnTo: "/%09/evil.example/steal",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml encoded newline scheme relative",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			returnTo: "/%0a/evil.example/steal",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
 	}
 
 	for _, tt := range tests {
@@ -487,6 +503,43 @@ func TestLDAPLoginReturnsUnauthorizedWhenProviderErrors(t *testing.T) {
 	require.Equal(t, errorBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", iauth.OutcomeError))
 }
 
+func TestOIDCCallbackRecordsProviderErrorsAsErrors(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	auditor := iauth.NewAuditLogger(db)
+	errorBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", iauth.OutcomeError)
+	deniedBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", iauth.OutcomeDenied)
+	provider := &fakeRedirectAuthenticator{
+		name:        "oidc",
+		completeErr: errors.New("idp unavailable"),
+	}
+	ctrl := NewSSO(nil, iauth.NewSSOService(nil, nil, nil), "caesium_session")
+	ctrl.SetAuditLogger(auditor)
+	ctrl.SetOIDCProvider(provider)
+	c, _ := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
+
+	err := ctrl.OIDCCallback(c)
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.True(t, provider.completeCalled)
+	require.Equal(t, errorBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", iauth.OutcomeError))
+	require.Equal(t, deniedBefore, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", iauth.OutcomeDenied))
+
+	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLogin, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, iauth.OutcomeError, entries[0].Outcome)
+	metadata := auditMetadata(t, entries[0])
+	require.Equal(t, "oidc", metadata["provider"])
+	require.Equal(t, "callback_failed", metadata["reason"])
+
+	deniedEntries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLoginDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, deniedEntries)
+}
+
 func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -575,6 +628,50 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	require.Len(t, revokedEntries, 1)
 	require.Equal(t, "viewer@example.com", revokedEntries[0].Actor)
 	require.Equal(t, iauth.OutcomeSuccess, revokedEntries[0].Outcome)
+}
+
+func TestLogoutWithoutValidSessionOnlyClearsCookie(t *testing.T) {
+	tests := []struct {
+		name  string
+		token string
+	}{
+		{name: "missing cookie"},
+		{name: "unknown cookie", token: "unknown-session-token"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testutil.OpenTestDB(t)
+			t.Cleanup(func() { testutil.CloseDB(db) })
+			sessions := iauth.NewSessionStore(db)
+			auditor := iauth.NewAuditLogger(db)
+			successBefore := metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeSuccess)
+			errorBefore := metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeError)
+
+			ctrl := NewSSO(sessions, nil, "caesium_session")
+			ctrl.SetAuditLogger(auditor)
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+			if tt.token != "" {
+				req.AddCookie(&http.Cookie{Name: "caesium_session", Value: tt.token})
+			}
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+
+			err := ctrl.Logout(c)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			require.Equal(t, successBefore, metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeSuccess))
+			require.Equal(t, errorBefore, metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeError))
+
+			cookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+			require.LessOrEqual(t, cookie.MaxAge, 0)
+
+			entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLogout, Limit: 10})
+			require.NoError(t, err)
+			require.Empty(t, entries)
+		})
+	}
 }
 
 func TestLogoutReturnsErrorWhenSessionRevokeFails(t *testing.T) {
