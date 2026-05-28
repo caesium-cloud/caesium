@@ -145,7 +145,7 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 	require.NoError(t, err)
 
 	e := echo.New()
-	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil)
+	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
@@ -162,6 +162,26 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 
 	_, _, err = sessions.Validate(t.Context(), token)
 	require.ErrorIs(t, err, iauth.ErrSessionRevoked)
+}
+
+func TestRegisterSSORoutesMountsOIDCRedirectProviderRoutes(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthOIDCEnabled: true},
+		nil,
+		nil,
+		nil,
+		iauth.NewSessionStore(db),
+		nil,
+		SSOProviders{OIDC: noopRedirectAuthenticator{}},
+	)
+
+	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/oidc/login"))
+	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/oidc/callback"))
 }
 
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
@@ -220,4 +240,18 @@ func hasRoute(e *echo.Echo, method, path string) bool {
 		}
 	}
 	return false
+}
+
+type noopRedirectAuthenticator struct{}
+
+func (noopRedirectAuthenticator) Name() string {
+	return "oidc"
+}
+
+func (noopRedirectAuthenticator) Begin(http.ResponseWriter, *http.Request, string) (string, error) {
+	return "https://idp.example/authorize", nil
+}
+
+func (noopRedirectAuthenticator) Complete(*http.Request) (*iauth.ExternalIdentity, error) {
+	return nil, nil
 }

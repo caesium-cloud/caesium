@@ -23,7 +23,8 @@
 - **Test command (focused loop):** `go test ./internal/auth/ -run <TestName> -v`. If you hit CGO/dqlite linker errors on the host, run inside the project's build toolchain (`just unit-test` uses it). Tests that need a DB use an in-memory GORM handle — see the `newTestDB` helper introduced in Task 1.4 and reuse it.
 - **Authoritative gate before every commit that touches Go:** `just unit-test` (race + coverage) must pass. Do not rely on CI for compile errors.
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
-- **Branch:** work continues on `sso-auth-design` (PR #191).
+- **Progress:** Foundation P0/P1 merged in PR #192. The next OIDC wave continues on
+  `sso-oidc-provider` (PR #193).
 
 ## File structure
 
@@ -1552,6 +1553,9 @@ Merge `csrfHeader()` into `withAuthHeaders` for unsafe requests, and include `cr
 Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written just-in-time against the real library APIs once this foundation merges. Summary of scope so reviewers see the whole arc:
 
 ### P2 — OIDC provider (`coreos/go-oidc/v3` + `golang.org/x/oauth2`)
+- [x] **Wave 2 status (PR #193):** Implemented the OIDC redirect provider, `AUTH_OIDC_*`
+  config, login/callback route wiring, session-cookie completion, UI "Sign in with OIDC"
+  affordance, and focused mock-provider tests.
 - **Files:** `internal/auth/oidc/provider.go` (implements `RedirectAuthenticator`), provider config in `pkg/env/env.go` (`AUTH_OIDC_*`), login/callback handlers in `api/rest/controller/auth/sso.go`, route mounts in `api.Start`, UI "Sign in with OIDC" button.
 - **Key work:** discovery; Authorization Code + PKCE; `state`/`nonce` in a short-lived signed pre-login cookie; ID-token signature + `iss`/`aud`/`exp`/`nonce` verification; groups from `AUTH_OIDC_GROUPS_CLAIM` → `ExternalIdentity` → `SSOService.Complete` (mints session + per-session CSRF token) → set session cookie → redirect to validated `returnTo`.
 - **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).

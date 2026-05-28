@@ -61,6 +61,116 @@ func TestNewSSORetainsCompletionService(t *testing.T) {
 	require.Equal(t, sso, ctrl.SSOService())
 }
 
+func TestOIDCLoginRedirectsThroughProvider(t *testing.T) {
+	provider := &fakeRedirectAuthenticator{
+		name:     "oidc",
+		beginURL: "https://idp.example/authorize",
+	}
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	ctrl.SetOIDCProvider(provider)
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/login?returnTo=%2Fjobs%3Fstatus%3Drunning", "")
+
+	err := ctrl.OIDCLogin(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.beginCalled)
+	require.Equal(t, "/jobs?status=running", provider.beginReturnTo)
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "https://idp.example/authorize", rec.Header().Get("Location"))
+}
+
+func TestOIDCLoginSanitizesExternalReturnTo(t *testing.T) {
+	provider := &fakeRedirectAuthenticator{
+		name:     "oidc",
+		beginURL: "https://idp.example/authorize",
+	}
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	ctrl.SetOIDCProvider(provider)
+	c, _ := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/login?returnTo=https%3A%2F%2Fevil.example%2Fsteal", "")
+
+	err := ctrl.OIDCLogin(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.beginCalled)
+	require.Equal(t, "/", provider.beginReturnTo)
+}
+
+func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+	provider := &fakeRedirectAuthenticator{
+		name:     "oidc",
+		returnTo: "/runs?status=mine",
+		identity: &iauth.ExternalIdentity{
+			Issuer:      "oidc",
+			Subject:     "sub-1",
+			Email:       "viewer@example.com",
+			DisplayName: "Viewer One",
+			Groups:      []string{"eng"},
+		},
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session")
+	ctrl.SetOIDCProvider(provider)
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
+	c.Request().Header.Set("User-Agent", "sso-test-agent")
+
+	err = ctrl.OIDCCallback(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.completeCalled)
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "/runs?status=mine", rec.Header().Get("Location"))
+
+	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+	require.NotEmpty(t, sessionCookie.Value)
+	require.True(t, sessionCookie.HttpOnly)
+	require.False(t, sessionCookie.Secure)
+	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
+	require.False(t, sessionCookie.Expires.IsZero())
+
+	sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
+	require.NoError(t, err)
+	require.Equal(t, "oidc", sess.AuthMethod)
+	require.Equal(t, "198.51.100.8", sess.SourceIP)
+	require.Equal(t, "sso-test-agent", sess.UserAgent)
+	require.Equal(t, "viewer@example.com", user.Email)
+	require.Equal(t, models.RoleOperator, user.Role)
+}
+
+func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("", "")
+	require.NoError(t, err)
+	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+	provider := &fakeRedirectAuthenticator{
+		name:     "oidc",
+		returnTo: "/jobs",
+		identity: &iauth.ExternalIdentity{
+			Issuer:  "oidc",
+			Subject: "sub-denied",
+			Groups:  []string{"unknown"},
+		},
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session")
+	ctrl.SetOIDCProvider(provider)
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/callback?code=abc&state=xyz", "")
+
+	err = ctrl.OIDCCallback(c)
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+	require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+}
+
 func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -180,4 +290,55 @@ func TestLogoutIgnoresForwardedProtoFromUntrustedPeer(t *testing.T) {
 	cookies := rec.Result().Cookies()
 	require.Len(t, cookies, 1)
 	require.False(t, cookies[0].Secure)
+}
+
+type fakeRedirectAuthenticator struct {
+	name           string
+	beginURL       string
+	beginErr       error
+	returnTo       string
+	identity       *iauth.ExternalIdentity
+	completeErr    error
+	beginCalled    bool
+	beginReturnTo  string
+	completeCalled bool
+}
+
+func (f *fakeRedirectAuthenticator) Name() string {
+	return f.name
+}
+
+func (f *fakeRedirectAuthenticator) Begin(_ http.ResponseWriter, _ *http.Request, returnTo string) (string, error) {
+	f.beginCalled = true
+	f.beginReturnTo = returnTo
+	return f.beginURL, f.beginErr
+}
+
+func (f *fakeRedirectAuthenticator) Complete(_ *http.Request) (*iauth.ExternalIdentity, error) {
+	f.completeCalled = true
+	return f.identity, f.completeErr
+}
+
+func (f *fakeRedirectAuthenticator) CompleteWithReturnTo(_ *http.Request) (*iauth.ExternalIdentity, string, error) {
+	f.completeCalled = true
+	return f.identity, f.returnTo, f.completeErr
+}
+
+func requireResponseCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
+	t.Helper()
+
+	if cookie := responseCookie(cookies, name); cookie != nil {
+		return cookie
+	}
+	t.Fatalf("missing response cookie %q", name)
+	return nil
+}
+
+func responseCookie(cookies []*http.Cookie, name string) *http.Cookie {
+	for _, cookie := range cookies {
+		if cookie.Name == name {
+			return cookie
+		}
+	}
+	return nil
 }
