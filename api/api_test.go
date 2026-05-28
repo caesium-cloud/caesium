@@ -77,8 +77,18 @@ func TestAuthStatusListsSSOMethods(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.True(t, body.Enabled)
 	require.Contains(t, body.Methods, map[string]string{"type": "api-key"})
-	require.Contains(t, body.Methods, map[string]string{"type": "oidc", "loginUrl": "/auth/sso/oidc/login"})
-	require.Contains(t, body.Methods, map[string]string{"type": "saml", "loginUrl": "/auth/sso/saml/login"})
+	require.Contains(t, body.Methods, map[string]string{
+		"type":     "oidc",
+		"id":       "oidc",
+		"label":    "Sign in with OIDC",
+		"loginUrl": "/auth/sso/oidc/login",
+	})
+	require.Contains(t, body.Methods, map[string]string{
+		"type":     "saml",
+		"id":       "saml",
+		"label":    "Sign in with SAML",
+		"loginUrl": "/auth/sso/saml/login",
+	})
 	require.Contains(t, body.Methods, map[string]string{"type": "ldap"})
 }
 

@@ -119,7 +119,7 @@ func (c Config) normalize() (Config, error) {
 		return c, err
 	}
 	if len(c.CookieSecret) == 0 {
-		c.CookieSecret = []byte(c.ClientSecret)
+		return c, fmt.Errorf("oidc cookie secret is required; set AUTH_KEY_HASH_SECRET")
 	}
 	return c, nil
 }

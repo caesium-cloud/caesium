@@ -43,14 +43,22 @@ describe("LoginPage", () => {
 
     render(
       <LoginPage
-        methods={[{ type: "api-key" }, { type: "oidc", loginUrl: "/auth/sso/oidc/login" }]}
+        methods={[
+          { type: "api-key" },
+          {
+            type: "oidc",
+            id: "corp-oidc",
+            label: "Sign in with Corp SSO",
+            loginUrl: "/auth/sso/oidc/login",
+          },
+        ]}
         navigate={navigate}
         onLogin={vi.fn()}
         returnTo={() => "/runs?status=failed#latest"}
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Sign in with OIDC" }));
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Corp SSO" }));
 
     expect(navigate).toHaveBeenCalledWith(
       "/auth/sso/oidc/login?returnTo=%2Fruns%3Fstatus%3Dfailed%23latest",

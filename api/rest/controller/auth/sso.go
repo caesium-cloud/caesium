@@ -226,5 +226,8 @@ func pathAndQuery(target *url.URL) string {
 	if target.RawQuery != "" {
 		path += "?" + target.RawQuery
 	}
+	if target.Fragment != "" {
+		path += "#" + target.EscapedFragment()
+	}
 	return path
 }

@@ -10,6 +10,8 @@ type AuthChangeListener = () => void;
 
 export interface AuthMethod {
   type: string;
+  id?: string;
+  label?: string;
   loginUrl?: string;
 }
 
