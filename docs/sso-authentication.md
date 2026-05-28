@@ -29,6 +29,11 @@ catch-all login policy is intended.
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
 
+If Caesium is served behind a TLS-terminating proxy, set
+`CAESIUM_TRUSTED_PROXIES` so session cookies are marked `Secure` when the
+trusted proxy forwards `X-Forwarded-Proto: https`. Leave
+`CAESIUM_AUTH_REQUIRE_TLS=true` in production.
+
 ## OIDC
 
 ```sh
@@ -97,3 +102,43 @@ CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE=cn
 
 Empty passwords are rejected before any LDAP bind so directories that permit
 anonymous binds cannot accidentally authenticate a user.
+
+The LDAP integration test can be pointed at a seeded OpenLDAP or Active
+Directory-compatible test directory. It is behind the `integration` build tag,
+is skipped unless `CAESIUM_TEST_LDAP_*` variables are set, and should be run in
+the repo builder image:
+
+```sh
+docker run --rm --platform linux/arm64 \
+  -v "$PWD":/bld/caesium -w /bld/caesium \
+  caesiumcloud/caesium-builder:latest-full \
+  sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./internal/auth/ldap -tags=integration -run TestProviderAuthenticateIntegration -v'
+```
+
+Set `CAESIUM_TEST_LDAP_EXPECTED_GROUPS`, `CAESIUM_TEST_LDAP_ROLE_MAPPING`, and
+`CAESIUM_TEST_LDAP_EXPECTED_ROLE` to make the test assert group extraction and
+role resolution against the seeded directory.
+
+## Security Checks
+
+All redirect `returnTo` and SAML RelayState values are constrained to same-origin
+paths before Caesium redirects the browser. Encoded scheme-relative paths such
+as `/%2f%2fevil.example/...` are treated as unsafe and fall back to `/`.
+
+Cookie-session requests use a synchronizer CSRF token stored server-side with
+the session. Caesium accepts the token only from the `X-CSRF-Token` header; a
+readable cookie with the same name is ignored. Bearer API-key requests do not
+need a CSRF header because they are not ambient browser credentials.
+
+## Audit and Metrics
+
+SSO login and logout lifecycle events are written to the audit log with actions
+`auth.login`, `auth.login_denied`, `auth.logout`, and
+`auth.session_revoked`. Audit metadata includes the provider and denial reason
+where applicable.
+
+Prometheus exposes SSO counters and timing:
+
+- `caesium_sso_logins_total{provider,outcome}`
+- `caesium_sso_login_duration_seconds{provider}`
+- `caesium_sso_logouts_total{outcome}`

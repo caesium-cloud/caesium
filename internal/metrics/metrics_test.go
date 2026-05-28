@@ -36,6 +36,9 @@ func (s *MetricsSuite) SetupTest() {
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
 		WebhookAuthFailuresTotal,
+		SSOLoginsTotal,
+		SSOLoginDurationSeconds,
+		SSOLogoutsTotal,
 	)
 }
 
@@ -195,6 +198,50 @@ func (s *MetricsSuite) TestWebhookAuthFailuresTotalIncrements() {
 	s.GreaterOrEqual(val, float64(1))
 
 	val = metrictestutil.CounterValue(s.T(), WebhookAuthFailuresTotal, "github/push", "replayed_request")
+	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestSSOLoginsTotalIncrements() {
+	SSOLoginsTotal.WithLabelValues("oidc", "success").Inc()
+	SSOLoginsTotal.WithLabelValues("oidc", "denied").Inc()
+	SSOLoginsTotal.WithLabelValues("oidc", "denied").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), SSOLoginsTotal, "oidc", "success")
+	s.GreaterOrEqual(val, float64(1))
+
+	val = metrictestutil.CounterValue(s.T(), SSOLoginsTotal, "oidc", "denied")
+	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestSSOLoginDurationObserves() {
+	SSOLoginDurationSeconds.WithLabelValues("saml").Observe(0.25)
+
+	families, err := s.registry.Gather()
+	s.Require().NoError(err)
+
+	found := false
+	for _, fam := range families {
+		if fam.GetName() == "caesium_sso_login_duration_seconds" {
+			for _, m := range fam.GetMetric() {
+				h := m.GetHistogram()
+				if h != nil && h.GetSampleCount() > 0 {
+					found = true
+				}
+			}
+		}
+	}
+	s.True(found, "expected SSO login duration histogram sample")
+}
+
+func (s *MetricsSuite) TestSSOLogoutsTotalIncrements() {
+	SSOLogoutsTotal.WithLabelValues("success").Inc()
+	SSOLogoutsTotal.WithLabelValues("error").Inc()
+	SSOLogoutsTotal.WithLabelValues("error").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), SSOLogoutsTotal, "success")
+	s.GreaterOrEqual(val, float64(1))
+
+	val = metrictestutil.CounterValue(s.T(), SSOLogoutsTotal, "error")
 	s.GreaterOrEqual(val, float64(2))
 }
 

@@ -702,7 +702,7 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 			if err != nil {
 				log.Fatal("invalid CAESIUM_AUTH_ROLE_MAPPING", "error", err)
 			}
-			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, mapper)
+			sso = auth.NewSSOService(auth.NewUserStore(conn), sessions, mapper, auth.WithSSOAuditLogger(auditor))
 			runAsync(func() {
 				sessions.RunLastSeenFlusher(ctx)
 			})

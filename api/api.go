@@ -203,6 +203,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 		return
 	}
 	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName, authmw.ParseTrustedProxyRanges(vars.TrustedProxies)...)
+	controller.SetAuditLogger(auditor)
 	controller.SetOIDCProvider(providers.OIDC)
 	controller.SetSAMLProvider(providers.SAML)
 	controller.SetLDAPProvider(providers.LDAP)
