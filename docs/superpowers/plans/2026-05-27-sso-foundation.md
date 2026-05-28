@@ -24,9 +24,9 @@
 - **Authoritative gate before every commit that touches Go:** `just unit-test` (race + coverage) must pass. Do not rely on CI for compile errors.
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
-  `sso-oidc-provider` (PR #193). The `sso-saml-provider` wave (PR #194) is
-  UI-only: the login page renders advertised browser-redirect methods with
-  `loginUrl` values, including SAML. SAML provider backend work remains in P3.
+  `sso-oidc-provider` (PR #193). On `sso-saml-provider` (PR #194), this UI
+  slice renders advertised browser-redirect methods with `loginUrl` values,
+  including SAML. SAML provider backend work remains in P3.
 
 ## File structure
 
@@ -1566,8 +1566,8 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - [x] **UI redirect-method wave (PR #194):** Generalized the login page to render every
   browser-redirect method advertised by `/auth/status.methods` with a
   `loginUrl`, so SAML appears alongside OIDC when the server advertises it.
-  This does not implement SAML ACS, metadata, assertion validation, or replay
-  storage.
+  Provider implementation, assertion validation, metadata, and replay storage
+  remain in the P3 backend work.
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
 - **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
 - **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
