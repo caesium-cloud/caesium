@@ -27,10 +27,15 @@ func NewUserStore(db *gorm.DB) *UserStore {
 // Upsert provisions a user on first login and refreshes profile, role, and
 // last-login fields on subsequent logins, keyed on (issuer, subject).
 func (us *UserStore) Upsert(ctx context.Context, ext *ExternalIdentity, role models.Role) (*models.User, error) {
+	user, _, err := us.upsert(ctx, ext, role)
+	return user, err
+}
+
+func (us *UserStore) upsert(ctx context.Context, ext *ExternalIdentity, role models.Role) (*models.User, bool, error) {
 	now := us.now().UTC()
 	groupsJSON, err := json.Marshal(ext.Groups)
 	if err != nil {
-		return nil, fmt.Errorf("marshal groups: %w", err)
+		return nil, false, fmt.Errorf("marshal groups: %w", err)
 	}
 
 	var user models.User
@@ -51,18 +56,20 @@ func (us *UserStore) Upsert(ctx context.Context, ext *ExternalIdentity, role mod
 		if err := us.db.WithContext(ctx).Create(&user).Error; err != nil {
 			if isUniqueConstraintError(err) {
 				if existing, lookupErr := us.lookupByIdentity(ctx, ext); lookupErr == nil {
-					return us.updateExisting(ctx, &existing, ext, role, groupsJSON, now)
+					updated, err := us.updateExisting(ctx, &existing, ext, role, groupsJSON, now)
+					return updated, false, err
 				}
 			}
-			return nil, fmt.Errorf("create user: %w", err)
+			return nil, false, fmt.Errorf("create user: %w", err)
 		}
 	case err != nil:
-		return nil, fmt.Errorf("lookup user: %w", err)
+		return nil, false, fmt.Errorf("lookup user: %w", err)
 	default:
-		return us.updateExisting(ctx, &user, ext, role, groupsJSON, now)
+		updated, err := us.updateExisting(ctx, &user, ext, role, groupsJSON, now)
+		return updated, false, err
 	}
 
-	return &user, nil
+	return &user, true, nil
 }
 
 func (us *UserStore) lookupByIdentity(ctx context.Context, ext *ExternalIdentity) (models.User, error) {

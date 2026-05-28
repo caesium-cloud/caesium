@@ -80,10 +80,13 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		s.auditLoginDenied(ext, method, ip, "no_role_mapping")
 		return "", nil, ErrLoginDenied
 	}
-	user, err := s.users.Upsert(ctx, ext, role)
+	user, created, err := s.users.upsert(ctx, ext, role)
 	if err != nil {
 		s.auditLoginError(ext, method, ip, "user_upsert_failed")
 		return "", nil, err
+	}
+	if created {
+		s.auditUserProvisioned(ext, method, ip, user)
 	}
 	if user.IsDisabled() {
 		outcome = OutcomeDenied
@@ -115,6 +118,25 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		},
 	})
 	return cookie, sess, nil
+}
+
+func (s *SSOService) auditUserProvisioned(ext *ExternalIdentity, method, ip string, user *models.User) {
+	if user == nil {
+		return
+	}
+	s.audit(AuditEntry{
+		Actor:        auditActor(ext),
+		Action:       ActionUserProvisioned,
+		ResourceType: "user",
+		ResourceID:   user.ID.String(),
+		SourceIP:     ip,
+		Outcome:      OutcomeSuccess,
+		Metadata: map[string]interface{}{
+			"provider": method,
+			"issuer":   ext.Issuer,
+			"role":     string(user.Role),
+		},
+	})
 }
 
 func (s *SSOService) auditLoginDenied(ext *ExternalIdentity, method, ip, reason string) {

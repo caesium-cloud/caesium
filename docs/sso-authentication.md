@@ -119,6 +119,19 @@ Set `CAESIUM_TEST_LDAP_EXPECTED_GROUPS`, `CAESIUM_TEST_LDAP_ROLE_MAPPING`, and
 `CAESIUM_TEST_LDAP_EXPECTED_ROLE` to make the test assert group extraction and
 role resolution against the seeded directory.
 
+The same package also includes a self-contained OpenLDAP fixture. It starts an
+`osixia/openldap:1.5.0` container seeded from
+`internal/auth/ldap/testdata/openldap/bootstrap.ldif`, skips cleanly when Docker
+is unavailable, and can be run with Docker socket access:
+
+```sh
+docker run --rm --platform linux/arm64 \
+  -v "$PWD":/bld/caesium \
+  -v "$HOME/.docker/run/docker.sock":/var/run/docker.sock \
+  -w /bld/caesium caesiumcloud/caesium-builder:latest-full \
+  sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./internal/auth/ldap -tags=integration -run TestProviderAuthenticateOpenLDAPFixture -v'
+```
+
 ## Security Checks
 
 All redirect `returnTo` and SAML RelayState values are constrained to same-origin
@@ -134,8 +147,9 @@ need a CSRF header because they are not ambient browser credentials.
 
 SSO login and logout lifecycle events are written to the audit log with actions
 `auth.login`, `auth.login_denied`, `auth.logout`, and
-`auth.session_revoked`. Audit metadata includes the provider and denial reason
-where applicable.
+`auth.session_revoked`. New SSO users also emit `user.provisioned` once when the
+shared login tail creates the local user record. Audit metadata includes the
+provider and denial reason where applicable.
 
 Prometheus exposes SSO counters and timing:
 

@@ -26,10 +26,10 @@
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
   `sso-oidc-provider` (PR #193). SAML continued on `sso-saml-provider`
   (PR #194). LDAP continued on `codex/ldap-sso-provider` (PR #195). The current
-  `codex/sso-hardening-wave` branch starts P5 with LDAP real-directory assertion
-  hooks, cookie/CSRF/open-redirect regression coverage, and SSO login/logout
-  audit + metrics hooks. Self-contained OpenLDAP fixtures, static signed SAML
-  fixtures, and the remaining full hardening pass are still outstanding.
+  `codex/sso-fixtures-wave` branch continues P5 after `codex/sso-hardening-wave`
+  (PR #196) with signed SAML response fixtures, a self-contained
+  containerized OpenLDAP fixture, and `user.provisioned` audit events. The
+  remaining full hardening pass is still outstanding.
 
 ## File structure
 
@@ -1570,11 +1570,14 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   `AUTH_SAML_*` config, HTTPS-only IdP metadata loading, SP metadata, login/ACS
   route wiring, RelayState return targets, dqlite-backed assertion replay
   storage, group-attribute mapping into the shared SSO tail, and UI rendering
-  for advertised redirect methods. Static signed-assertion fixture coverage
-  remains for the P5 hardening pass.
+  for advertised redirect methods.
+- [x] **Wave 6 status:** Added self-contained signed SAMLResponse fixture
+  coverage through `Provider.CompleteWithReturnTo`, including accepted signed
+  assertions, tampered response rejection, replay rejection, and expired
+  assertion rejection.
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
 - **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
-- **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
+- **Tests:** signed assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
 
 ### P4 — LDAP provider (`go-ldap/ldap/v3`)
 - [x] **Wave 4 status:** Implemented the LDAP `CredentialAuthenticator`,
@@ -1587,14 +1590,17 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   seeded real directory can assert profile fields, groups, and role resolution;
   added hermetic coverage for full-DN role mapping from LDAP group search
   results.
-- [ ] **Hardening still required:** self-contained containerized OpenLDAP
-  fixtures, the broader dedicated P5 security pass, and non-LDAP provider
-  fixture coverage remain outstanding.
+- [x] **Wave 6 status:** Added a self-contained OpenLDAP integration fixture
+  seeded from checked-in LDIF. It starts `osixia/openldap:1.5.0`, authenticates
+  through the real LDAP provider, and asserts profile fields, full-DN groups,
+  and role mapping; it skips cleanly when Docker is unavailable.
+- [ ] **Hardening still required:** the broader dedicated P5 security pass and
+  deeper provider-specific negative fixtures remain outstanding.
 - **Files:** `internal/auth/ldap/provider.go` (implements `CredentialAuthenticator`), `AUTH_LDAP_*` config, `POST /auth/sso/ldap/login` handler (rate-limited), UI username/password form.
 - **Key work:** LDAPS/StartTLS; service bind → user search (`USER_FILTER`) → rebind to verify; group query (`GROUP_FILTER`); **escape all user-supplied input with `ldap.EscapeFilter` before substitution** (LDAP-injection guard); reject empty-password/anonymous bind.
 - **Tests:** real-directory LDAP integration assertions (skipped unless
   `CAESIUM_TEST_LDAP_*` is set) plus hermetic group/role edge-case coverage;
-  self-contained OpenLDAP fixtures remain outstanding.
+  self-contained OpenLDAP fixture coverage.
 
 ### P5 — Docs + hardening
 - [x] **Docs draft status:** Created `docs/sso-authentication.md` for LDAP
@@ -1606,9 +1612,12 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   session cookies, `/auth/whoami` session CSRF surfacing, SSO audit actions
   (`auth.login`, `auth.login_denied`, `auth.logout`, `auth.session_revoked`),
   and Prometheus SSO login/logout metrics.
-- [ ] **Hardening status:** Not complete in this wave. Static signed SAML
-  fixtures, deeper provider-specific negative fixtures, and any follow-up
-  audit events such as `user.provisioned` still need the remaining P5 pass.
+- [x] **Wave 6 status:** Added signed SAML fixture coverage, a
+  self-contained OpenLDAP fixture, and the `user.provisioned` audit event for
+  first-time SSO user creation.
+- [ ] **Hardening status:** Not complete in this wave. Deeper
+  provider-specific negative fixtures and the remaining full P5 pass are still
+  outstanding.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 

@@ -1,0 +1,26 @@
+dn: ou=people,dc=example,dc=org
+objectClass: organizationalUnit
+ou: people
+
+dn: ou=groups,dc=example,dc=org
+objectClass: organizationalUnit
+ou: groups
+
+dn: uid=alice,ou=people,dc=example,dc=org
+objectClass: inetOrgPerson
+cn: Alice Fixture
+sn: Fixture
+uid: alice
+displayName: Alice Fixture
+mail: alice@example.org
+userPassword: alice-secret
+
+dn: cn=caesium-viewers,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: caesium-viewers
+member: uid=alice,ou=people,dc=example,dc=org
+
+dn: cn=caesium-operators,ou=groups,dc=example,dc=org
+objectClass: groupOfNames
+cn: caesium-operators
+member: uid=alice,ou=people,dc=example,dc=org

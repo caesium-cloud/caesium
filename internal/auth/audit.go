@@ -26,6 +26,7 @@ const (
 	ActionAuthLogout         = "auth.logout"
 	ActionAuthLoginDenied    = "auth.login_denied"
 	ActionAuthSessionRevoked = "auth.session_revoked"
+	ActionUserProvisioned    = "user.provisioned"
 	ActionKeyCreate          = "api_key.create"
 	ActionKeyRevoke          = "api_key.revoke"
 	ActionKeyRotate          = "api_key.rotate"

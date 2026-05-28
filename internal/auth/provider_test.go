@@ -129,3 +129,57 @@ func TestSSOServiceCompleteAuditsAndRecordsMetrics(t *testing.T) {
 	require.Equal(t, "no_role_mapping", metadata["reason"])
 	require.Equal(t, "oidc", metadata["provider"])
 }
+
+func TestSSOServiceCompleteAuditsUserProvisionedOnce(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	auditor := NewAuditLogger(db)
+	mapper, err := NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), mapper, WithSSOAuditLogger(auditor))
+
+	identity := &ExternalIdentity{
+		Issuer:      "oidc",
+		Subject:     "sub-provisioned",
+		Email:       "first@example.com",
+		DisplayName: "First Login",
+		Groups:      []string{"eng"},
+	}
+	_, _, err = sso.Complete(context.Background(), identity, "oidc", "203.0.113.20", "agent")
+	require.NoError(t, err)
+
+	provisionedEntries, err := auditor.Query(&AuditQueryRequest{Action: ActionUserProvisioned, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, provisionedEntries, 1)
+	require.Equal(t, "first@example.com", provisionedEntries[0].Actor)
+	require.Equal(t, OutcomeSuccess, provisionedEntries[0].Outcome)
+	require.Equal(t, "user", provisionedEntries[0].ResourceType)
+	require.NotEmpty(t, provisionedEntries[0].ResourceID)
+
+	loginEntries, err := auditor.Query(&AuditQueryRequest{Action: ActionAuthLogin, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, loginEntries, 1)
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(provisionedEntries[0].Metadata, &metadata))
+	require.Equal(t, "oidc", metadata["provider"])
+	require.Equal(t, "oidc", metadata["issuer"])
+	require.Equal(t, string(models.RoleOperator), metadata["role"])
+
+	_, _, err = sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer:      identity.Issuer,
+		Subject:     identity.Subject,
+		Email:       "second@example.com",
+		DisplayName: "Second Login",
+		Groups:      []string{"eng"},
+	}, "oidc", "203.0.113.21", "agent")
+	require.NoError(t, err)
+
+	provisionedEntries, err = auditor.Query(&AuditQueryRequest{Action: ActionUserProvisioned, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, provisionedEntries, 1)
+
+	loginEntries, err = auditor.Query(&AuditQueryRequest{Action: ActionAuthLogin, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, loginEntries, 2)
+}
