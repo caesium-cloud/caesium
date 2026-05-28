@@ -128,6 +128,39 @@ func TestAuthenticateGroupDNsCanResolveRoleMappings(t *testing.T) {
 	require.Equal(t, []string{"dn"}, fake.searches[1].Attributes)
 }
 
+func TestAuthenticateFailsClosedWhenGroupSearchFails(t *testing.T) {
+	groupSearchErr := errors.New("directory unavailable")
+	fake := &fakeConn{
+		userResult: &gldap.SearchResult{Entries: []*gldap.Entry{
+			gldap.NewEntry("uid=alice,ou=People,dc=example,dc=com", map[string][]string{
+				"uid":  {"alice"},
+				"mail": {"alice@example.com"},
+			}),
+		}},
+		groupSearchErr: groupSearchErr,
+	}
+	cfg := baseConfig()
+	cfg.GroupBaseDN = "ou=Groups,dc=example,dc=com"
+	cfg.GroupFilter = "(member={dn})"
+	cfg.Dial = func(context.Context, Config) (Conn, error) { return fake, nil }
+	provider, err := New(cfg)
+	require.NoError(t, err)
+
+	identity, err := provider.Authenticate(context.Background(), "alice", "user-secret")
+	require.Nil(t, identity)
+	require.ErrorContains(t, err, "search ldap groups")
+	require.ErrorIs(t, err, groupSearchErr)
+	require.Len(t, fake.searches, 2)
+	require.Equal(t, "ou=Groups,dc=example,dc=com", fake.searches[1].BaseDN)
+	require.Equal(t, `(member=uid=alice,ou=People,dc=example,dc=com)`, fake.searches[1].Filter)
+	require.Equal(t, []bindCall{
+		{dn: cfg.BindDN, password: cfg.BindPassword},
+		{dn: "uid=alice,ou=People,dc=example,dc=com", password: "user-secret"},
+		{dn: cfg.BindDN, password: cfg.BindPassword},
+	}, fake.binds)
+	require.True(t, fake.closed)
+}
+
 func TestAuthenticateRejectsEmptyPasswordBeforeDial(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Dial = func(context.Context, Config) (Conn, error) {
@@ -179,13 +212,14 @@ type bindCall struct {
 }
 
 type fakeConn struct {
-	binds       []bindCall
-	searches    []*gldap.SearchRequest
-	timeout     time.Duration
-	closed      bool
-	userResult  *gldap.SearchResult
-	groupResult *gldap.SearchResult
-	userBindErr error
+	binds          []bindCall
+	searches       []*gldap.SearchRequest
+	timeout        time.Duration
+	closed         bool
+	userResult     *gldap.SearchResult
+	groupResult    *gldap.SearchResult
+	userBindErr    error
+	groupSearchErr error
 }
 
 func (f *fakeConn) Bind(username, password string) error {
@@ -204,6 +238,9 @@ func (f *fakeConn) Search(req *gldap.SearchRequest) (*gldap.SearchResult, error)
 			return f.userResult, nil
 		}
 	case "ou=Groups,dc=example,dc=com":
+		if f.groupSearchErr != nil {
+			return nil, f.groupSearchErr
+		}
 		if f.groupResult != nil {
 			return f.groupResult, nil
 		}

@@ -78,6 +78,17 @@ func TestCompleteWithReturnToRejectsExpiredSignedAssertionFixture(t *testing.T) 
 	require.Zero(t, fixture.replay.recordCount())
 }
 
+func TestCompleteWithReturnToRejectsWrongAudienceSignedAssertionFixture(t *testing.T) {
+	fixture := newSignedSAMLFixture(t, func(assertion *crewsaml.Assertion) {
+		assertion.Conditions.AudienceRestrictions[0].Audience.Value = "https://other-sp.example.com/metadata"
+	})
+
+	_, _, err := fixture.provider.CompleteWithReturnTo(fixture.acsRequest(t, fixture.samlResponse))
+	require.Error(t, err)
+	require.ErrorContains(t, err, "validate saml response")
+	require.Zero(t, fixture.replay.recordCount())
+}
+
 type signedSAMLFixture struct {
 	provider     *Provider
 	replay       *memoryReplayCache

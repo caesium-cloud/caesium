@@ -26,10 +26,12 @@
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
   `sso-oidc-provider` (PR #193). SAML continued on `sso-saml-provider`
   (PR #194). LDAP continued on `codex/ldap-sso-provider` (PR #195). The current
-  `codex/sso-fixtures-wave` branch continues P5 after `codex/sso-hardening-wave`
-  (PR #196) with signed SAML response fixtures, a self-contained
-  containerized OpenLDAP fixture, and `user.provisioned` audit events. The
-  remaining full hardening pass is still outstanding.
+  `codex/sso-fixtures-wave` branch continued P5 after
+  `codex/sso-hardening-wave` (PR #196) with signed SAML response fixtures, a
+  self-contained containerized OpenLDAP fixture, and `user.provisioned` audit
+  events. The current `codex/sso-negative-fixtures-wave` branch adds deeper
+  provider-specific negative fixtures for OIDC, SAML, and LDAP. The remaining
+  full hardening pass is still outstanding.
 
 ## File structure
 
@@ -1561,9 +1563,12 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - [x] **Wave 2 status (PR #193):** Implemented the OIDC redirect provider, `AUTH_OIDC_*`
   config, login/callback route wiring, session-cookie completion, UI "Sign in with OIDC"
   affordance, and focused mock-provider tests.
+- [x] **Wave 7 status:** Added OIDC ID-token audience mismatch coverage,
+  asserting callbacks fail with `ErrInvalidIDToken`.
 - **Files:** `internal/auth/oidc/provider.go` (implements `RedirectAuthenticator`), provider config in `pkg/env/env.go` (`AUTH_OIDC_*`), login/callback handlers in `api/rest/controller/auth/sso.go`, route mounts in `api.Start`, UI "Sign in with OIDC" button.
 - **Key work:** discovery; Authorization Code + PKCE; `state`/`nonce` in a short-lived signed pre-login cookie; ID-token signature + `iss`/`aud`/`exp`/`nonce` verification; groups from `AUTH_OIDC_GROUPS_CLAIM` → `ExternalIdentity` → `SSOService.Complete` (mints session + per-session CSRF token) → set session cookie → redirect to validated `returnTo`.
-- **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).
+- **Tests:** against a mock OIDC provider (in-process JWKS); negative cases
+  (bad state, bad nonce, expired token, audience mismatch).
 
 ### P3 — SAML provider (`crewjam/saml`)  *(highest risk)*
 - [x] **Wave 3 status (PR #194):** Implemented the SAML redirect provider foundation:
@@ -1575,9 +1580,13 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   coverage through `Provider.CompleteWithReturnTo`, including accepted signed
   assertions, tampered response rejection, replay rejection, and expired
   assertion rejection.
+- [x] **Wave 7 status:** Added signed SAMLResponse negative fixture coverage
+  for wrong audience restrictions, asserting the response is rejected before
+  replay state is recorded.
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
 - **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
-- **Tests:** signed assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
+- **Tests:** signed assertion fixtures incl. tampered/expired/replayed/wrong
+  audience; SP metadata round-trip.
 
 ### P4 — LDAP provider (`go-ldap/ldap/v3`)
 - [x] **Wave 4 status:** Implemented the LDAP `CredentialAuthenticator`,
@@ -1594,8 +1603,10 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   seeded from checked-in LDIF. It starts `osixia/openldap:1.5.0`, authenticates
   through the real LDAP provider, and asserts profile fields, full-DN groups,
   and role mapping; it skips cleanly when Docker is unavailable.
+- [x] **Wave 7 status:** Added fail-closed LDAP negative coverage for group
+  search failures after successful user credential verification.
 - [ ] **Hardening still required:** the broader dedicated P5 security pass and
-  deeper provider-specific negative fixtures remain outstanding.
+  remaining provider edge-case expansion are still outstanding.
 - **Files:** `internal/auth/ldap/provider.go` (implements `CredentialAuthenticator`), `AUTH_LDAP_*` config, `POST /auth/sso/ldap/login` handler (rate-limited), UI username/password form.
 - **Key work:** LDAPS/StartTLS; service bind → user search (`USER_FILTER`) → rebind to verify; group query (`GROUP_FILTER`); **escape all user-supplied input with `ldap.EscapeFilter` before substitution** (LDAP-injection guard); reject empty-password/anonymous bind.
 - **Tests:** real-directory LDAP integration assertions (skipped unless
@@ -1615,9 +1626,11 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - [x] **Wave 6 status:** Added signed SAML fixture coverage, a
   self-contained OpenLDAP fixture, and the `user.provisioned` audit event for
   first-time SSO user creation.
-- [ ] **Hardening status:** Not complete in this wave. Deeper
-  provider-specific negative fixtures and the remaining full P5 pass are still
-  outstanding.
+- [x] **Wave 7 status:** Added provider-specific negative fixtures for OIDC
+  audience mismatch, SAML wrong audience restrictions, and LDAP group-search
+  fail-closed behavior.
+- [ ] **Hardening status:** Not complete in this wave. The remaining full P5
+  pass and any additional provider edge-case expansion are still outstanding.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 
