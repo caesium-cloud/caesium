@@ -1563,11 +1563,12 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).
 
 ### P3 — SAML provider (`crewjam/saml`)  *(highest risk)*
-- [x] **UI redirect-method wave (PR #194):** Generalized the login page to render every
-  browser-redirect method advertised by `/auth/status.methods` with a
-  `loginUrl`, so SAML appears alongside OIDC when the server advertises it.
-  Provider implementation, assertion validation, metadata, and replay storage
-  remain in the P3 backend work.
+- [x] **Wave 3 status (PR #194):** Implemented the SAML redirect provider foundation:
+  `AUTH_SAML_*` config, HTTPS-only IdP metadata loading, SP metadata, login/ACS
+  route wiring, RelayState return targets, dqlite-backed assertion replay
+  storage, group-attribute mapping into the shared SSO tail, and UI rendering
+  for advertised redirect methods. Static signed-assertion fixture coverage
+  remains for the P5 hardening pass.
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
 - **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
 - **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.

@@ -86,6 +86,19 @@ func (s *SSOController) SAMLACS(c *echo.Context) error {
 	return s.completeRedirectLogin(c, s.saml, "saml")
 }
 
+func (s *SSOController) SAMLMetadata(c *echo.Context) error {
+	provider, ok := s.saml.(interface {
+		Metadata(http.ResponseWriter, *http.Request) error
+	})
+	if !ok || provider == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "saml provider unavailable")
+	}
+	if err := provider.Metadata(c.Response(), c.Request()); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "saml metadata failed").Wrap(err)
+	}
+	return nil
+}
+
 func (s *SSOController) Logout(c *echo.Context) error {
 	if s.sessions != nil {
 		if cookie, err := c.Request().Cookie(s.cookieName); err == nil && cookie.Value != "" {

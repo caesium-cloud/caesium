@@ -212,6 +212,7 @@ func TestRegisterSSORoutesMountsSAMLRedirectProviderRoutes(t *testing.T) {
 
 	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/login"))
 	require.True(t, hasRoute(e, http.MethodPost, "/auth/sso/saml/acs"))
+	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/metadata"))
 }
 
 func TestRegisterSSORoutesSkipsSAMLRedirectProviderRoutesWithoutProvider(t *testing.T) {
@@ -232,6 +233,7 @@ func TestRegisterSSORoutesSkipsSAMLRedirectProviderRoutesWithoutProvider(t *test
 
 	require.False(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/login"))
 	require.False(t, hasRoute(e, http.MethodPost, "/auth/sso/saml/acs"))
+	require.False(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/metadata"))
 }
 
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
