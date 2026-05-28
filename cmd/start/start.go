@@ -16,6 +16,7 @@ import (
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
+	authsaml "github.com/caesium-cloud/caesium/internal/auth/saml"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -605,11 +606,14 @@ func initSSOProviders(ctx context.Context, vars env.Environment) api.SSOProvider
 	return providers
 }
 
-func initSAMLProvider(_ context.Context, _ env.Environment) auth.RedirectAuthenticator {
-	// TODO(sso-saml): wire the internal/auth/saml provider once its config and
-	// constructor land in this branch.
-	log.Warn("SAML SSO is enabled but SAML provider integration is not available in this build")
-	return nil
+func initSAMLProvider(ctx context.Context, vars env.Environment) auth.RedirectAuthenticator {
+	cfg := authsaml.ConfigFromEnv(vars)
+	cfg.ReplayCache = authsaml.NewReplayStore(db.Connection())
+	provider, err := authsaml.New(ctx, cfg)
+	if err != nil {
+		log.Fatal("failed to initialize SAML provider", "error", err)
+	}
+	return provider
 }
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.

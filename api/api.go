@@ -212,6 +212,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	if vars.AuthSAMLEnabled && providers.SAML != nil {
 		e.GET("/auth/sso/saml/login", controller.SAMLLogin)
 		e.POST("/auth/sso/saml/acs", controller.SAMLACS)
+		e.GET("/auth/sso/saml/metadata", controller.SAMLMetadata)
 	}
 }
 

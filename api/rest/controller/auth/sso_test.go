@@ -113,6 +113,22 @@ func TestSAMLLoginRedirectsThroughProvider(t *testing.T) {
 	require.Equal(t, "https://idp.example/sso", rec.Header().Get("Location"))
 }
 
+func TestSAMLMetadataServesProviderMetadata(t *testing.T) {
+	provider := &fakeRedirectAuthenticator{
+		name:         "saml",
+		metadataBody: "<EntityDescriptor/>",
+	}
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	ctrl.SetSAMLProvider(provider)
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/saml/metadata", "")
+
+	err := ctrl.SAMLMetadata(c)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "<EntityDescriptor/>", rec.Body.String())
+}
+
 func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -367,6 +383,7 @@ type fakeRedirectAuthenticator struct {
 	beginCalled    bool
 	beginReturnTo  string
 	completeCalled bool
+	metadataBody   string
 }
 
 func (f *fakeRedirectAuthenticator) Name() string {
@@ -387,6 +404,12 @@ func (f *fakeRedirectAuthenticator) Complete(_ *http.Request) (*iauth.ExternalId
 func (f *fakeRedirectAuthenticator) CompleteWithReturnTo(_ *http.Request) (*iauth.ExternalIdentity, string, error) {
 	f.completeCalled = true
 	return f.identity, f.returnTo, f.completeErr
+}
+
+func (f *fakeRedirectAuthenticator) Metadata(w http.ResponseWriter, _ *http.Request) error {
+	w.WriteHeader(http.StatusOK)
+	_, err := w.Write([]byte(f.metadataBody))
+	return err
 }
 
 func requireResponseCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
