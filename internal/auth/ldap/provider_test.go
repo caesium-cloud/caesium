@@ -111,7 +111,7 @@ func TestAuthenticateGroupDNsCanResolveRoleMappings(t *testing.T) {
 	cfg.GroupBaseDN = "ou=Groups,dc=example,dc=com"
 	cfg.GroupFilter = "(memberUid={username})"
 	cfg.GroupAttribute = "dn"
-	cfg.Dial = func(context.Context, Config) (Conn, error) { return fake, nil }
+	cfg.Dial = func(_ context.Context, _ Config) (Conn, error) { return fake, nil }
 	provider, err := New(cfg)
 	require.NoError(t, err)
 
@@ -142,7 +142,7 @@ func TestAuthenticateFailsClosedWhenGroupSearchFails(t *testing.T) {
 	cfg := baseConfig()
 	cfg.GroupBaseDN = "ou=Groups,dc=example,dc=com"
 	cfg.GroupFilter = "(member={dn})"
-	cfg.Dial = func(context.Context, Config) (Conn, error) { return fake, nil }
+	cfg.Dial = func(_ context.Context, _ Config) (Conn, error) { return fake, nil }
 	provider, err := New(cfg)
 	require.NoError(t, err)
 
@@ -153,6 +153,7 @@ func TestAuthenticateFailsClosedWhenGroupSearchFails(t *testing.T) {
 	require.Len(t, fake.searches, 2)
 	require.Equal(t, "ou=Groups,dc=example,dc=com", fake.searches[1].BaseDN)
 	require.Equal(t, `(member=uid=alice,ou=People,dc=example,dc=com)`, fake.searches[1].Filter)
+	require.Equal(t, []string{"cn"}, fake.searches[1].Attributes)
 	require.Equal(t, []bindCall{
 		{dn: cfg.BindDN, password: cfg.BindPassword},
 		{dn: "uid=alice,ou=People,dc=example,dc=com", password: "user-secret"},
