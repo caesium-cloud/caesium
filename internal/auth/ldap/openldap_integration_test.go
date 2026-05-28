@@ -23,6 +23,7 @@ import (
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 	"github.com/stretchr/testify/require"
 )
@@ -231,7 +232,15 @@ func waitForOpenLDAPIdentity(t *testing.T, ctx context.Context, cli *client.Clie
 
 	deadline := time.Now().Add(45 * time.Second)
 	var lastErr error
+OuterLoop:
 	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			break OuterLoop
+		default:
+		}
+
 		for _, endpoint := range endpoints {
 			if err := probeTCP(ctx, endpoint); err != nil {
 				lastErr = err
@@ -247,7 +256,13 @@ func waitForOpenLDAPIdentity(t *testing.T, ctx context.Context, cli *client.Clie
 			}
 			lastErr = err
 		}
-		time.Sleep(500 * time.Millisecond)
+
+		select {
+		case <-ctx.Done():
+			lastErr = ctx.Err()
+			break OuterLoop
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 
 	logs := openLDAPLogs(t, ctx, cli, containerID)
@@ -299,11 +314,11 @@ func openLDAPLogs(t *testing.T, ctx context.Context, cli *client.Client, contain
 	defer func() {
 		_ = logs.Close()
 	}()
-	out, err := io.ReadAll(logs)
-	if err != nil {
-		return "failed to read logs: " + err.Error()
+	var stdout, stderr bytes.Buffer
+	if _, err := stdcopy.StdCopy(&stdout, &stderr, logs); err != nil {
+		return "failed to demultiplex logs: " + err.Error()
 	}
-	return string(out)
+	return stdout.String() + stderr.String()
 }
 
 func compactStrings(values []string) []string {

@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,7 +50,7 @@ func TestCompleteWithReturnToRejectsTamperedSignedSAMLResponseFixture(t *testing
 	_, _, err := fixture.provider.CompleteWithReturnTo(fixture.acsRequest(t, tamperedResponse))
 	require.Error(t, err)
 	require.ErrorContains(t, err, "validate saml response")
-	require.Empty(t, fixture.replay.records)
+	require.Zero(t, fixture.replay.recordCount())
 }
 
 func TestCompleteWithReturnToRejectsReplayOfSignedSAMLResponseFixture(t *testing.T) {
@@ -74,7 +75,7 @@ func TestCompleteWithReturnToRejectsExpiredSignedAssertionFixture(t *testing.T) 
 	_, _, err := fixture.provider.CompleteWithReturnTo(fixture.acsRequest(t, fixture.samlResponse))
 	require.Error(t, err)
 	require.ErrorContains(t, err, "validate saml response")
-	require.Empty(t, fixture.replay.records)
+	require.Zero(t, fixture.replay.recordCount())
 }
 
 type signedSAMLFixture struct {
@@ -333,16 +334,26 @@ func (r *samlFixtureRandReader) Read(p []byte) (int, error) {
 }
 
 type memoryReplayCache struct {
+	mu      sync.Mutex
 	records map[string]time.Time
 }
 
 func (m *memoryReplayCache) Record(_ context.Context, issuer, assertionID string, expiresAt time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	key := fmt.Sprintf("%s\x00%s", issuer, assertionID)
 	if _, ok := m.records[key]; ok {
 		return ErrAssertionReplay
 	}
 	m.records[key] = expiresAt
 	return nil
+}
+
+func (m *memoryReplayCache) recordCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.records)
 }
 
 var _ AssertionReplayCache = (*memoryReplayCache)(nil)
