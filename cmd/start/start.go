@@ -15,6 +15,7 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -325,6 +326,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	// --- Authentication & Authorization ---
 	authSvc, auditor, limiter, sessions, sso := initAuth(ctx, vars, runAsync)
+	ssoProviders := initSSOProviders(ctx, vars)
 
 	log.Info(
 		"execution configuration",
@@ -524,7 +526,7 @@ func start(cmd *cobra.Command, args []string) error {
 
 	runAsync(func() {
 		log.Info("spinning up api")
-		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, sso, internalWakeupHandler); err != nil && ctx.Err() == nil {
+		if err := api.Start(ctx, bus, authSvc, auditor, limiter, sessions, sso, ssoProviders, internalWakeupHandler); err != nil && ctx.Err() == nil {
 			reportErr(err)
 		}
 	})
@@ -584,6 +586,20 @@ func dqliteWakeupPeerResolver(localNodeAddress string, apiPort int) worker.Wakeu
 		}
 		return peers, nil
 	})
+}
+
+func initSSOProviders(ctx context.Context, vars env.Environment) api.SSOProviders {
+	var providers api.SSOProviders
+	if !vars.AuthOIDCEnabled {
+		return providers
+	}
+
+	provider, err := authoidc.New(ctx, authoidc.ConfigFromEnv(vars))
+	if err != nil {
+		log.Fatal("failed to initialize OIDC provider", "error", err)
+	}
+	providers.OIDC = provider
+	return providers
 }
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.

@@ -27,6 +27,8 @@ func (s *EnvTestSuite) TestProcess() {
 	assert.Equal(s.T(), 8*time.Hour, Variables().AuthSessionIdleTTL)
 	assert.Equal(s.T(), 24*time.Hour, Variables().AuthSessionAbsoluteTTL)
 	assert.Equal(s.T(), "caesium_session", Variables().AuthSessionCookieName)
+	assert.Equal(s.T(), "openid profile email groups", Variables().AuthOIDCScopes)
+	assert.Equal(s.T(), "groups", Variables().AuthOIDCGroupsClaim)
 	assert.False(s.T(), Variables().SSOEnabled())
 }
 
@@ -38,6 +40,26 @@ func (s *EnvTestSuite) TestSSOEnabled() {
 	env = Environment{AuthLDAPEnabled: true}
 	assert.True(s.T(), env.SSOEnabled())
 	assert.False(s.T(), Environment{}.SSOEnabled())
+}
+
+func (s *EnvTestSuite) TestOIDCEnvironmentOverrides() {
+	s.T().Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_ISSUER_URL", "https://idp.example.com")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_CLIENT_ID", "caesium")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_CLIENT_SECRET", "secret")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_SCOPES", "openid email")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_GROUPS_CLAIM", "roles")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_REDIRECT_URL", "https://app.example.com/auth/sso/oidc/callback")
+
+	s.Require().NoError(Process())
+	assert.True(s.T(), Variables().AuthOIDCEnabled)
+	assert.True(s.T(), Variables().SSOEnabled())
+	assert.Equal(s.T(), "https://idp.example.com", Variables().AuthOIDCIssuerURL)
+	assert.Equal(s.T(), "caesium", Variables().AuthOIDCClientID)
+	assert.Equal(s.T(), "secret", Variables().AuthOIDCClientSecret)
+	assert.Equal(s.T(), "openid email", Variables().AuthOIDCScopes)
+	assert.Equal(s.T(), "roles", Variables().AuthOIDCGroupsClaim)
+	assert.Equal(s.T(), "https://app.example.com/auth/sso/oidc/callback", Variables().AuthOIDCRedirectURL)
 }
 
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {

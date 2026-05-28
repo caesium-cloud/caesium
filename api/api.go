@@ -28,6 +28,11 @@ import (
 
 type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
 
+// SSOProviders holds browser-redirect SSO providers that are mounted by the API.
+type SSOProviders struct {
+	OIDC auth.RedirectAuthenticator
+}
+
 var apiServer struct {
 	sync.Mutex
 	srv *http.Server
@@ -39,7 +44,7 @@ var apiServer struct {
 // are deliberately NOT served here — they live on a dedicated mutually
 // authenticated TLS listener (see dispatch.InternalServer) so the public API
 // can remain plain HTTP behind the operator's proxy.
-func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, wakeupHandler InternalWakeupHandler) error {
+func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, providers SSOProviders, wakeupHandler InternalWakeupHandler) error {
 	e := echo.New()
 	vars := env.Variables()
 	configureIPExtractor(e, vars)
@@ -47,7 +52,7 @@ func Start(ctx context.Context, bus event.Bus, authSvc *auth.Service, auditor *a
 	// health
 	e.GET("/health", Health)
 	e.GET("/auth/status", authStatus(vars))
-	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions, sso)
+	registerSSORoutes(e, vars, authSvc, auditor, limiter, sessions, sso, providers)
 	registerInternalWakeup(e, vars, wakeupHandler)
 
 	// metrics
@@ -173,11 +178,12 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 	}
 }
 
-func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService) {
+func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore, sso *auth.SSOService, providers SSOProviders) {
 	if sessions == nil {
 		return
 	}
 	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName, authmw.ParseTrustedProxyRanges(vars.TrustedProxies)...)
+	controller.SetOIDCProvider(providers.OIDC)
 	authMiddleware := authmw.Auth(authmw.AuthDeps{
 		Service:    authSvc,
 		Auditor:    auditor,
@@ -187,6 +193,10 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	})
 	e.GET("/auth/whoami", controller.Whoami, authMiddleware)
 	e.POST("/auth/logout", controller.Logout, authMiddleware)
+	if vars.AuthOIDCEnabled && providers.OIDC != nil {
+		e.GET("/auth/sso/oidc/login", controller.OIDCLogin)
+		e.GET("/auth/sso/oidc/callback", controller.OIDCCallback)
+	}
 }
 
 func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {

@@ -149,6 +149,12 @@ type Environment struct {
 	AuthRoleMapping         string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
 	AuthDefaultRole         string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
 	AuthOIDCEnabled         bool          `envconfig:"AUTH_OIDC_ENABLED" default:"false"`
+	AuthOIDCIssuerURL       string        `envconfig:"AUTH_OIDC_ISSUER_URL" default:""`
+	AuthOIDCClientID        string        `envconfig:"AUTH_OIDC_CLIENT_ID" default:""`
+	AuthOIDCClientSecret    string        `envconfig:"AUTH_OIDC_CLIENT_SECRET" default:""`
+	AuthOIDCScopes          string        `envconfig:"AUTH_OIDC_SCOPES" default:"openid profile email groups"`
+	AuthOIDCGroupsClaim     string        `envconfig:"AUTH_OIDC_GROUPS_CLAIM" default:"groups"`
+	AuthOIDCRedirectURL     string        `envconfig:"AUTH_OIDC_REDIRECT_URL" default:""`
 	AuthSAMLEnabled         bool          `envconfig:"AUTH_SAML_ENABLED" default:"false"`
 	AuthLDAPEnabled         bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
 
