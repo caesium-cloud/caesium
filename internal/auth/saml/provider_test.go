@@ -90,6 +90,71 @@ func TestCompleteRejectsRelayStateMismatchBeforeParsingResponse(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidState)
 }
 
+func TestCompleteRejectsTamperedStateCookieBeforeParsingResponse(t *testing.T) {
+	provider, err := New(t.Context(), Config{
+		IDPMetadataXML: minimalIDPMetadata,
+		PublicBaseURL:  "https://app.example.com",
+		CookieSecret:   []byte(strings.Repeat("x", 32)),
+		ReplayCache:    fakeReplayCache{},
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	_, err = provider.Begin(rec, req, "/")
+	require.NoError(t, err)
+
+	cookie := rec.Result().Cookies()[0]
+	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
+	stateReq.AddCookie(cookie)
+	state, err := provider.readStateCookie(stateReq)
+	require.NoError(t, err)
+
+	cookie.Value += "tampered"
+	body := "RelayState=" + state.RelayState + "&SAMLResponse=not-a-real-response"
+	acsReq := httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
+	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	acsReq.AddCookie(cookie)
+
+	_, _, err = provider.CompleteWithReturnTo(acsReq)
+	require.ErrorIs(t, err, ErrInvalidState)
+	require.NotContains(t, err.Error(), "validate saml response")
+}
+
+func TestCompleteRejectsExpiredStateCookieBeforeParsingResponse(t *testing.T) {
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	provider, err := New(t.Context(), Config{
+		IDPMetadataXML: minimalIDPMetadata,
+		PublicBaseURL:  "https://app.example.com",
+		StateTTL:       time.Minute,
+		CookieSecret:   []byte(strings.Repeat("x", 32)),
+		ReplayCache:    fakeReplayCache{},
+	})
+	require.NoError(t, err)
+	provider.now = func() time.Time { return now }
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	_, err = provider.Begin(rec, req, "/")
+	require.NoError(t, err)
+
+	cookie := rec.Result().Cookies()[0]
+	stateReq := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/acs", nil)
+	stateReq.AddCookie(cookie)
+	state, err := provider.readStateCookie(stateReq)
+	require.NoError(t, err)
+
+	provider.now = func() time.Time { return now.Add(time.Minute + time.Second) }
+	body := "RelayState=" + state.RelayState + "&SAMLResponse=not-a-real-response"
+	acsReq := httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", strings.NewReader(body))
+	acsReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	acsReq.AddCookie(cookie)
+
+	_, _, err = provider.CompleteWithReturnTo(acsReq)
+	require.ErrorIs(t, err, ErrInvalidState)
+	require.NotContains(t, err.Error(), "validate saml response")
+}
+
 func TestIdentityFromAssertion(t *testing.T) {
 	assertion := &crewsaml.Assertion{
 		ID:     "assertion-1",
