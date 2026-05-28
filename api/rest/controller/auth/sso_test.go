@@ -95,6 +95,24 @@ func TestOIDCLoginSanitizesExternalReturnTo(t *testing.T) {
 	require.Equal(t, "/", provider.beginReturnTo)
 }
 
+func TestSAMLLoginRedirectsThroughProvider(t *testing.T) {
+	provider := &fakeRedirectAuthenticator{
+		name:     "saml",
+		beginURL: "https://idp.example/sso",
+	}
+	ctrl := NewSSO(nil, nil, "caesium_session")
+	ctrl.SetSAMLProvider(provider)
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/saml/login?returnTo=%2Fruns%3Fstatus%3Dfailed", "")
+
+	err := ctrl.SAMLLogin(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.beginCalled)
+	require.Equal(t, "/runs?status=failed", provider.beginReturnTo)
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "https://idp.example/sso", rec.Header().Get("Location"))
+}
+
 func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -138,6 +156,53 @@ func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	require.Equal(t, "oidc", sess.AuthMethod)
 	require.Equal(t, "198.51.100.8", sess.SourceIP)
 	require.Equal(t, "sso-test-agent", sess.UserAgent)
+	require.Equal(t, "viewer@example.com", user.Email)
+	require.Equal(t, models.RoleOperator, user.Role)
+}
+
+func TestSAMLACSCompletesSSOAndSetsSessionCookie(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+	provider := &fakeRedirectAuthenticator{
+		name:     "saml",
+		returnTo: "/runs?status=mine",
+		identity: &iauth.ExternalIdentity{
+			Issuer:      "saml",
+			Subject:     "nameid-1",
+			Email:       "viewer@example.com",
+			DisplayName: "Viewer One",
+			Groups:      []string{"eng"},
+		},
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session")
+	ctrl.SetSAMLProvider(provider)
+	c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/saml/acs", "")
+	c.Request().Header.Set("User-Agent", "saml-test-agent")
+
+	err = ctrl.SAMLACS(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.completeCalled)
+	require.Equal(t, http.StatusFound, rec.Code)
+	require.Equal(t, "/runs?status=mine", rec.Header().Get("Location"))
+
+	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+	require.NotEmpty(t, sessionCookie.Value)
+	require.True(t, sessionCookie.HttpOnly)
+	require.False(t, sessionCookie.Secure)
+	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
+	require.False(t, sessionCookie.Expires.IsZero())
+
+	sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
+	require.NoError(t, err)
+	require.Equal(t, "saml", sess.AuthMethod)
+	require.Equal(t, "198.51.100.8", sess.SourceIP)
+	require.Equal(t, "saml-test-agent", sess.UserAgent)
 	require.Equal(t, "viewer@example.com", user.Email)
 	require.Equal(t, models.RoleOperator, user.Role)
 }

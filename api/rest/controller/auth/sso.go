@@ -20,6 +20,7 @@ type SSOController struct {
 	sessions       *iauth.SessionStore
 	sso            *iauth.SSOService
 	oidc           iauth.RedirectAuthenticator
+	saml           iauth.RedirectAuthenticator
 	cookieName     string
 	trustedProxies []*net.IPNet
 }
@@ -37,6 +38,11 @@ func NewSSO(sessions *iauth.SessionStore, sso *iauth.SSOService, cookieName stri
 // SetOIDCProvider wires the OIDC redirect provider into the controller.
 func (s *SSOController) SetOIDCProvider(provider iauth.RedirectAuthenticator) {
 	s.oidc = provider
+}
+
+// SetSAMLProvider wires the SAML redirect provider into the controller.
+func (s *SSOController) SetSAMLProvider(provider iauth.RedirectAuthenticator) {
+	s.saml = provider
 }
 
 // SSOService returns the shared login completion service for provider handlers.
@@ -70,6 +76,14 @@ func (s *SSOController) OIDCLogin(c *echo.Context) error {
 
 func (s *SSOController) OIDCCallback(c *echo.Context) error {
 	return s.completeRedirectLogin(c, s.oidc, "oidc")
+}
+
+func (s *SSOController) SAMLLogin(c *echo.Context) error {
+	return s.beginRedirectLogin(c, s.saml, "saml")
+}
+
+func (s *SSOController) SAMLACS(c *echo.Context) error {
+	return s.completeRedirectLogin(c, s.saml, "saml")
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {

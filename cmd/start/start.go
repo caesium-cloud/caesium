@@ -590,16 +590,26 @@ func dqliteWakeupPeerResolver(localNodeAddress string, apiPort int) worker.Wakeu
 
 func initSSOProviders(ctx context.Context, vars env.Environment) api.SSOProviders {
 	var providers api.SSOProviders
-	if !vars.AuthOIDCEnabled {
-		return providers
+
+	if vars.AuthOIDCEnabled {
+		provider, err := authoidc.New(ctx, authoidc.ConfigFromEnv(vars))
+		if err != nil {
+			log.Fatal("failed to initialize OIDC provider", "error", err)
+		}
+		providers.OIDC = provider
+	}
+	if vars.AuthSAMLEnabled {
+		providers.SAML = initSAMLProvider(ctx, vars)
 	}
 
-	provider, err := authoidc.New(ctx, authoidc.ConfigFromEnv(vars))
-	if err != nil {
-		log.Fatal("failed to initialize OIDC provider", "error", err)
-	}
-	providers.OIDC = provider
 	return providers
+}
+
+func initSAMLProvider(_ context.Context, _ env.Environment) auth.RedirectAuthenticator {
+	// TODO(sso-saml): wire the internal/auth/saml provider once its config and
+	// constructor land in this branch.
+	log.Warn("SAML SSO is enabled but SAML provider integration is not available in this build")
+	return nil
 }
 
 // initAuth sets up authentication services based on CAESIUM_AUTH_MODE.

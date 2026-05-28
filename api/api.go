@@ -31,6 +31,7 @@ type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
 // SSOProviders holds browser-redirect SSO providers that are mounted by the API.
 type SSOProviders struct {
 	OIDC auth.RedirectAuthenticator
+	SAML auth.RedirectAuthenticator
 }
 
 var apiServer struct {
@@ -194,6 +195,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	}
 	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName, authmw.ParseTrustedProxyRanges(vars.TrustedProxies)...)
 	controller.SetOIDCProvider(providers.OIDC)
+	controller.SetSAMLProvider(providers.SAML)
 	authMiddleware := authmw.Auth(authmw.AuthDeps{
 		Service:    authSvc,
 		Auditor:    auditor,
@@ -206,6 +208,10 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	if vars.AuthOIDCEnabled && providers.OIDC != nil {
 		e.GET("/auth/sso/oidc/login", controller.OIDCLogin)
 		e.GET("/auth/sso/oidc/callback", controller.OIDCCallback)
+	}
+	if vars.AuthSAMLEnabled && providers.SAML != nil {
+		e.GET("/auth/sso/saml/login", controller.SAMLLogin)
+		e.POST("/auth/sso/saml/acs", controller.SAMLACS)
 	}
 }
 

@@ -194,6 +194,26 @@ func TestRegisterSSORoutesMountsOIDCRedirectProviderRoutes(t *testing.T) {
 	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/oidc/callback"))
 }
 
+func TestRegisterSSORoutesMountsSAMLRedirectProviderRoutes(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthSAMLEnabled: true},
+		nil,
+		nil,
+		nil,
+		iauth.NewSessionStore(db),
+		nil,
+		SSOProviders{SAML: noopRedirectAuthenticator{}},
+	)
+
+	require.True(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/login"))
+	require.True(t, hasRoute(e, http.MethodPost, "/auth/sso/saml/acs"))
+}
+
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
 	e := echo.New()
 	var called atomic.Bool
