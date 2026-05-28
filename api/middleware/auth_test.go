@@ -273,6 +273,67 @@ func TestAuthAcceptsSessionCookie(t *testing.T) {
 	require.Nil(t, authmw.GetAuthKey(c))
 }
 
+func TestAuthAcceptsSessionCookieWithCSRFOnUnsafeMethod(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := auth.NewService(db)
+	auditor := auth.NewAuditLogger(db)
+	limiter := auth.NewRateLimiter(10, time.Minute)
+	sessions := auth.NewSessionStore(db)
+
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "operator@example.com",
+		Role:      models.RoleOperator,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+
+	token, sess, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	req.Header.Set("X-CSRF-Token", sess.CSRFToken)
+
+	var capturedCSRF string
+	rec, err := callMiddlewareWithDeps(t, authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: "caesium_session",
+	}, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodPost}, nil, func(c *echo.Context) error {
+		capturedCSRF = authmw.GetCSRFToken(c)
+		return c.String(http.StatusOK, "ok")
+	})
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, sess.CSRFToken, capturedCSRF)
+}
+
+func TestAuthBearerPrecedenceExemptsSessionCSRF(t *testing.T) {
+	db, svc, auditor, limiter, _ := setupAuth(t)
+	key := createKey(t, svc, models.RoleOperator, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/jobs", strings.NewReader(`{"alias":"alpha"}`))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: "bad-session-token"})
+
+	rec, err := callMiddlewareWithDeps(t, authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   auth.NewSessionStore(db),
+		CookieName: "caesium_session",
+	}, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodPost}, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
 func TestAuthRejectsInvalidSessionCookieRecordsFailureAndAudit(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

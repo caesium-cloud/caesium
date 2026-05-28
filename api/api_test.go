@@ -183,6 +183,43 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 	require.ErrorIs(t, err, iauth.ErrSessionRevoked)
 }
 
+func TestRegisterSSORoutesWhoamiReturnsSessionCSRF(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := iauth.NewService(db)
+	auditor := iauth.NewAuditLogger(db)
+	limiter := iauth.NewRateLimiter(5, time.Minute)
+	sessions := iauth.NewSessionStore(db)
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+	token, sess, err := sessions.Create(t.Context(), iauth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+
+	e := echo.New()
+	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
+
+	req := httptest.NewRequest(http.MethodGet, "/auth/whoami", nil)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, string(iauth.PrincipalUser), body["kind"])
+	require.Equal(t, "viewer@example.com", body["subject"])
+	require.Equal(t, string(models.RoleViewer), body["role"])
+	require.Equal(t, sess.CSRFToken, body["csrf_token"])
+}
+
 func TestRegisterSSORoutesMountsOIDCRedirectProviderRoutes(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

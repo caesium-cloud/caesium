@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	authpkg "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/models"
 	gldap "github.com/go-ldap/ldap/v3"
 	"github.com/stretchr/testify/require"
 )
@@ -90,6 +92,40 @@ func TestAuthenticateSearchBindAndGroupFlow(t *testing.T) {
 	require.Equal(t, []string{"cn"}, fake.searches[1].Attributes)
 	require.Equal(t, DefaultTimeout, fake.timeout)
 	require.True(t, fake.closed)
+}
+
+func TestAuthenticateGroupDNsCanResolveRoleMappings(t *testing.T) {
+	groupDN := "cn=caesium-operators,ou=Groups,dc=example,dc=com"
+	fake := &fakeConn{
+		userResult: &gldap.SearchResult{Entries: []*gldap.Entry{
+			gldap.NewEntry("uid=pat,ou=People,dc=example,dc=com", map[string][]string{
+				"uid":  {"pat"},
+				"mail": {"pat@example.com"},
+			}),
+		}},
+		groupResult: &gldap.SearchResult{Entries: []*gldap.Entry{
+			gldap.NewEntry(groupDN, map[string][]string{"cn": {"caesium-operators"}}),
+		}},
+	}
+	cfg := baseConfig()
+	cfg.GroupBaseDN = "ou=Groups,dc=example,dc=com"
+	cfg.GroupFilter = "(memberUid={username})"
+	cfg.GroupAttribute = "dn"
+	cfg.Dial = func(context.Context, Config) (Conn, error) { return fake, nil }
+	provider, err := New(cfg)
+	require.NoError(t, err)
+
+	identity, err := provider.Authenticate(context.Background(), "pat", "user-secret")
+	require.NoError(t, err)
+	require.Equal(t, []string{groupDN}, identity.Groups)
+
+	mapper, err := authpkg.NewRoleMapper(groupDN+"=operator", "")
+	require.NoError(t, err)
+	role, ok := mapper.Resolve(identity.Groups)
+	require.True(t, ok)
+	require.Equal(t, models.RoleOperator, role)
+	require.Equal(t, `(memberUid=pat)`, fake.searches[1].Filter)
+	require.Equal(t, []string{"dn"}, fake.searches[1].Attributes)
 }
 
 func TestAuthenticateRejectsEmptyPasswordBeforeDial(t *testing.T) {

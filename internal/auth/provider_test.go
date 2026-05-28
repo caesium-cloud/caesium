@@ -2,10 +2,13 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -76,4 +79,53 @@ func TestSSOServiceCompleteRejectsDisabledUser(t *testing.T) {
 	var sessions int64
 	require.NoError(t, db.Model(&models.Session{}).Where("user_id = ?", user.ID).Count(&sessions).Error)
 	require.Zero(t, sessions)
+}
+
+func TestSSOServiceCompleteAuditsAndRecordsMetrics(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	auditor := NewAuditLogger(db)
+	mapper, err := NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	sso := NewSSOService(NewUserStore(db), NewSessionStore(db), mapper, WithSSOAuditLogger(auditor))
+
+	successBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", OutcomeSuccess)
+	deniedBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", OutcomeDenied)
+
+	_, _, err = sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer:  "oidc",
+		Subject: "sub-success",
+		Email:   "viewer@example.com",
+		Groups:  []string{"eng"},
+	}, "oidc", "203.0.113.10", "agent")
+	require.NoError(t, err)
+
+	_, _, err = sso.Complete(context.Background(), &ExternalIdentity{
+		Issuer:  "oidc",
+		Subject: "sub-denied",
+		Email:   "denied@example.com",
+		Groups:  []string{"unknown"},
+	}, "oidc", "203.0.113.11", "agent")
+	require.ErrorIs(t, err, ErrLoginDenied)
+
+	require.Equal(t, successBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", OutcomeSuccess))
+	require.Equal(t, deniedBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "oidc", OutcomeDenied))
+
+	loginEntries, err := auditor.Query(&AuditQueryRequest{Action: ActionAuthLogin, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, loginEntries, 1)
+	require.Equal(t, "viewer@example.com", loginEntries[0].Actor)
+	require.Equal(t, OutcomeSuccess, loginEntries[0].Outcome)
+	require.Equal(t, "session", loginEntries[0].ResourceType)
+
+	deniedEntries, err := auditor.Query(&AuditQueryRequest{Action: ActionAuthLoginDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, deniedEntries, 1)
+	require.Equal(t, "denied@example.com", deniedEntries[0].Actor)
+	require.Equal(t, OutcomeDenied, deniedEntries[0].Outcome)
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(deniedEntries[0].Metadata, &metadata))
+	require.Equal(t, "no_role_mapping", metadata["reason"])
+	require.Equal(t, "oidc", metadata["provider"])
 }

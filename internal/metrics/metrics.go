@@ -206,6 +206,31 @@ var (
 		[]string{"action", "outcome"},
 	)
 
+	SSOLoginsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_sso_logins_total",
+			Help: "Total SSO login attempts by provider and outcome.",
+		},
+		[]string{"provider", "outcome"},
+	)
+
+	SSOLoginDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "caesium_sso_login_duration_seconds",
+			Help:    "Duration of shared SSO login completion attempts in seconds.",
+			Buckets: []float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"provider"},
+	)
+
+	SSOLogoutsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_sso_logouts_total",
+			Help: "Total SSO logout attempts by outcome.",
+		},
+		[]string{"outcome"},
+	)
+
 	WebhookAuthFailuresTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_webhook_auth_failures_total",
@@ -374,6 +399,9 @@ func Register() {
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,
 			AuditLogEntriesTotal,
+			SSOLoginsTotal,
+			SSOLoginDurationSeconds,
+			SSOLogoutsTotal,
 			WebhookAuthFailuresTotal,
 			DBWritesTotal,
 			DBStatementsTotal,

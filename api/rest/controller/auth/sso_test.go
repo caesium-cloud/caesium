@@ -14,6 +14,8 @@ import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
@@ -129,6 +131,109 @@ func TestSAMLMetadataServesProviderMetadata(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Equal(t, "<EntityDescriptor/>", rec.Body.String())
+}
+
+func TestRedirectCallbacksSanitizeUnsafeReturnTo(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		method   string
+		target   string
+		returnTo string
+		call     func(*SSOController, *echo.Context) error
+	}{
+		{
+			name:     "oidc encoded scheme relative",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			returnTo: "/%2f%2fevil.example/steal",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml encoded scheme relative",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			returnTo: "/%5c%5cevil.example/steal",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, sso := newTestSSOService(t)
+			provider := &fakeRedirectAuthenticator{
+				name:     tt.provider,
+				returnTo: tt.returnTo,
+				identity: testExternalIdentity(tt.provider),
+			}
+			ctrl := NewSSO(sessions, sso, "caesium_session")
+			if tt.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tt.method, tt.target, "")
+
+			err := tt.call(ctrl, c)
+			require.NoError(t, err)
+
+			require.True(t, provider.completeCalled)
+			require.Equal(t, http.StatusFound, rec.Code)
+			require.Equal(t, "/", rec.Header().Get("Location"))
+			require.NotNil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+		})
+	}
+}
+
+func TestRedirectCallbacksAllowSameOriginAbsoluteReturnTo(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		method   string
+		target   string
+		call     func(*SSOController, *echo.Context) error
+	}{
+		{
+			name:     "oidc",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, sso := newTestSSOService(t)
+			provider := &fakeRedirectAuthenticator{
+				name:     tt.provider,
+				returnTo: "http://example.com/runs?status=mine#latest",
+				identity: testExternalIdentity(tt.provider),
+			}
+			ctrl := NewSSO(sessions, sso, "caesium_session")
+			if tt.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tt.method, tt.target, "")
+
+			err := tt.call(ctrl, c)
+			require.NoError(t, err)
+
+			require.Equal(t, http.StatusFound, rec.Code)
+			require.Equal(t, "/runs?status=mine#latest", rec.Header().Get("Location"))
+		})
+	}
 }
 
 func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
@@ -284,6 +389,24 @@ func TestLDAPLoginCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	require.Equal(t, models.RoleOperator, user.Role)
 }
 
+func TestLDAPLoginIgnoresReturnToAndDoesNotRedirect(t *testing.T) {
+	sessions, sso := newTestSSOService(t)
+	provider := &fakeCredentialAuthenticator{
+		name:     "ldap",
+		identity: testExternalIdentity("ldap"),
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session")
+	ctrl.SetLDAPProvider(provider)
+	c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login?returnTo=https%3A%2F%2Fevil.example%2Fsteal", `{"username":"viewer","password":"secret"}`)
+
+	err := ctrl.LDAPLogin(c)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Empty(t, rec.Header().Get("Location"))
+	require.NotNil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+}
+
 func TestLDAPLoginRejectsDeniedLogin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -314,11 +437,16 @@ func TestLDAPLoginRejectsDeniedLogin(t *testing.T) {
 }
 
 func TestLDAPLoginRejectsInvalidCredentials(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	auditor := iauth.NewAuditLogger(db)
+	deniedBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", iauth.OutcomeDenied)
 	provider := &fakeCredentialAuthenticator{
 		name: "ldap",
 		err:  iauth.ErrLoginDenied,
 	}
 	ctrl := NewSSO(nil, iauth.NewSSOService(nil, nil, nil), "caesium_session")
+	ctrl.SetAuditLogger(auditor)
 	ctrl.SetLDAPProvider(provider)
 	c, _ := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"viewer","password":"bad"}`)
 
@@ -328,9 +456,20 @@ func TestLDAPLoginRejectsInvalidCredentials(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, http.StatusUnauthorized, he.Code)
 	require.True(t, provider.authenticateCalled)
+	require.Equal(t, deniedBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", iauth.OutcomeDenied))
+
+	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLoginDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "viewer", entries[0].Actor)
+	require.Equal(t, iauth.OutcomeDenied, entries[0].Outcome)
+	metadata := auditMetadata(t, entries[0])
+	require.Equal(t, "ldap", metadata["provider"])
+	require.Equal(t, "invalid_credentials", metadata["reason"])
 }
 
 func TestLDAPLoginReturnsUnauthorizedWhenProviderErrors(t *testing.T) {
+	errorBefore := metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", iauth.OutcomeError)
 	provider := &fakeCredentialAuthenticator{
 		name: "ldap",
 		err:  errors.New("directory unavailable"),
@@ -345,6 +484,7 @@ func TestLDAPLoginReturnsUnauthorizedWhenProviderErrors(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, http.StatusUnauthorized, he.Code)
 	require.True(t, provider.authenticateCalled)
+	require.Equal(t, errorBefore+1, metrictestutil.CounterValue(t, metrics.SSOLoginsTotal, "ldap", iauth.OutcomeError))
 }
 
 func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
@@ -381,6 +521,7 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
 	sessions := iauth.NewSessionStore(db)
+	auditor := iauth.NewAuditLogger(db)
 	user := &models.User{
 		ID:        uuid.New(),
 		Issuer:    "oidc",
@@ -397,7 +538,9 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	})
 	require.NoError(t, err)
 
+	logoutBefore := metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeSuccess)
 	ctrl := NewSSO(sessions, nil, "caesium_session")
+	ctrl.SetAuditLogger(auditor)
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
 	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
@@ -418,6 +561,20 @@ func TestLogoutRevokesSessionAndClearsCookie(t *testing.T) {
 	require.True(t, cookies[0].HttpOnly)
 	require.False(t, cookies[0].Secure)
 	require.Equal(t, http.SameSiteLaxMode, cookies[0].SameSite)
+	require.Equal(t, logoutBefore+1, metrictestutil.CounterValue(t, metrics.SSOLogoutsTotal, iauth.OutcomeSuccess))
+
+	logoutEntries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLogout, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, logoutEntries, 1)
+	require.Equal(t, "viewer@example.com", logoutEntries[0].Actor)
+	require.Equal(t, iauth.OutcomeSuccess, logoutEntries[0].Outcome)
+	require.Equal(t, "session", logoutEntries[0].ResourceType)
+
+	revokedEntries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthSessionRevoked, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, revokedEntries, 1)
+	require.Equal(t, "viewer@example.com", revokedEntries[0].Actor)
+	require.Equal(t, iauth.OutcomeSuccess, revokedEntries[0].Outcome)
 }
 
 func TestLogoutReturnsErrorWhenSessionRevokeFails(t *testing.T) {
@@ -556,6 +713,27 @@ func (f *fakeCredentialAuthenticator) Authenticate(_ context.Context, username, 
 	return f.identity, f.err
 }
 
+func newTestSSOService(t *testing.T) (*iauth.SessionStore, *iauth.SSOService) {
+	t.Helper()
+
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	return sessions, iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+}
+
+func testExternalIdentity(issuer string) *iauth.ExternalIdentity {
+	return &iauth.ExternalIdentity{
+		Issuer:      issuer,
+		Subject:     issuer + "-subject",
+		Email:       "viewer@example.com",
+		DisplayName: "Viewer One",
+		Groups:      []string{"eng"},
+	}
+}
+
 func requireResponseCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {
 	t.Helper()
 
@@ -573,4 +751,12 @@ func responseCookie(cookies []*http.Cookie, name string) *http.Cookie {
 		}
 	}
 	return nil
+}
+
+func auditMetadata(t *testing.T, entry models.AuditLog) map[string]any {
+	t.Helper()
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(entry.Metadata, &metadata))
+	return metadata
 }

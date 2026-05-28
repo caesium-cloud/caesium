@@ -9,6 +9,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/labstack/echo/v5"
@@ -19,6 +20,7 @@ import (
 type SSOController struct {
 	sessions       *iauth.SessionStore
 	sso            *iauth.SSOService
+	auditor        *iauth.AuditLogger
 	oidc           iauth.RedirectAuthenticator
 	saml           iauth.RedirectAuthenticator
 	ldap           iauth.CredentialAuthenticator
@@ -49,6 +51,11 @@ func (s *SSOController) SetSAMLProvider(provider iauth.RedirectAuthenticator) {
 // SetLDAPProvider wires the LDAP credential provider into the controller.
 func (s *SSOController) SetLDAPProvider(provider iauth.CredentialAuthenticator) {
 	s.ldap = provider
+}
+
+// SetAuditLogger wires audit logging for provider-level login/logout events.
+func (s *SSOController) SetAuditLogger(auditor *iauth.AuditLogger) {
+	s.auditor = auditor
 }
 
 // SSOService returns the shared login completion service for provider handlers.
@@ -110,13 +117,21 @@ func (s *SSOController) LDAPLogin(c *echo.Context) error {
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {
+	outcome := iauth.OutcomeSuccess
+	var sess *models.Session
+	var user *models.User
 	if s.sessions != nil {
 		if cookie, err := c.Request().Cookie(s.cookieName); err == nil && cookie.Value != "" {
-			if sess, _, err := s.sessions.Validate(c.Request().Context(), cookie.Value); err == nil {
+			if validSession, validUser, err := s.sessions.Validate(c.Request().Context(), cookie.Value); err == nil {
+				sess = validSession
+				user = validUser
 				if err := s.sessions.Revoke(c.Request().Context(), sess.ID); err != nil {
+					outcome = iauth.OutcomeError
+					s.recordLogout(c, outcome, sess, user)
 					log.Warn("failed to revoke session during logout", "error", err)
 					return echo.NewHTTPError(http.StatusInternalServerError, "logout failed").Wrap(err)
 				}
+				s.recordSessionRevoked(c, sess, user)
 			}
 		}
 	}
@@ -130,6 +145,7 @@ func (s *SSOController) Logout(c *echo.Context) error {
 		Secure:   requestIsSecure(c.Request(), s.trustedProxies),
 		SameSite: http.SameSiteLaxMode,
 	})
+	s.recordLogout(c, outcome, sess, user)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -159,17 +175,20 @@ func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.Re
 	}
 
 	ext, returnTo, err := completeRedirectProvider(provider, c.Request())
+	providerName := providerMethod(provider, fallbackName)
 	if err != nil {
+		s.recordProviderLoginFailure(c, providerName, "unknown", "callback_failed", iauth.OutcomeDenied)
 		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" callback failed").Wrap(err)
 	}
 	if ext == nil {
+		s.recordProviderLoginFailure(c, providerName, "unknown", "missing_identity", iauth.OutcomeDenied)
 		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" callback failed")
 	}
 
 	cookieValue, sess, err := s.sso.Complete(
 		c.Request().Context(),
 		ext,
-		providerMethod(provider, fallbackName),
+		providerName,
 		c.RealIP(),
 		c.Request().UserAgent(),
 	)
@@ -208,17 +227,21 @@ func (s *SSOController) completeCredentialLogin(c *echo.Context, provider iauth.
 	}
 
 	ext, err := provider.Authenticate(c.Request().Context(), username, req.Password)
+	providerName := credentialProviderMethod(provider, fallbackName)
 	if err != nil {
+		outcome, reason := credentialProviderFailure(err)
+		s.recordProviderLoginFailure(c, providerName, username, reason, outcome)
 		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" login failed").Wrap(err)
 	}
 	if ext == nil {
+		s.recordProviderLoginFailure(c, providerName, username, "missing_identity", iauth.OutcomeDenied)
 		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" login failed")
 	}
 
 	cookieValue, sess, err := s.sso.Complete(
 		c.Request().Context(),
 		ext,
-		credentialProviderMethod(provider, fallbackName),
+		providerName,
 		c.RealIP(),
 		c.Request().UserAgent(),
 	)
@@ -231,6 +254,112 @@ func (s *SSOController) completeCredentialLogin(c *echo.Context, provider iauth.
 
 	s.setSessionCookie(c, cookieValue, sess)
 	return c.NoContent(http.StatusNoContent)
+}
+
+func (s *SSOController) recordProviderLoginFailure(c *echo.Context, provider, actor, reason, outcome string) {
+	if outcome == "" {
+		outcome = iauth.OutcomeError
+	}
+	metrics.SSOLoginsTotal.WithLabelValues(metricProvider(provider), outcome).Inc()
+	if s.auditor == nil {
+		return
+	}
+	action := iauth.ActionAuthLogin
+	if outcome == iauth.OutcomeDenied {
+		action = iauth.ActionAuthLoginDenied
+	}
+	logAuditFailure(s.auditor.Log(iauth.AuditEntry{
+		Actor:    auditActor(actor),
+		Action:   action,
+		SourceIP: c.RealIP(),
+		Outcome:  outcome,
+		Metadata: map[string]interface{}{
+			"provider": provider,
+			"reason":   reason,
+			"method":   c.Request().Method,
+			"path":     c.Request().URL.Path,
+		},
+	}))
+}
+
+func (s *SSOController) recordLogout(c *echo.Context, outcome string, sess *models.Session, user *models.User) {
+	if outcome == "" {
+		outcome = iauth.OutcomeSuccess
+	}
+	metrics.SSOLogoutsTotal.WithLabelValues(outcome).Inc()
+	if s.auditor == nil {
+		return
+	}
+
+	entry := iauth.AuditEntry{
+		Actor:    logoutActor(c, user),
+		Action:   iauth.ActionAuthLogout,
+		SourceIP: c.RealIP(),
+		Outcome:  outcome,
+		Metadata: map[string]interface{}{
+			"method": c.Request().Method,
+			"path":   c.Request().URL.Path,
+		},
+	}
+	if sess != nil {
+		entry.ResourceType = "session"
+		entry.ResourceID = sess.ID.String()
+		entry.Metadata["provider"] = sess.AuthMethod
+	}
+	logAuditFailure(s.auditor.Log(entry))
+}
+
+func (s *SSOController) recordSessionRevoked(c *echo.Context, sess *models.Session, user *models.User) {
+	if s.auditor == nil || sess == nil {
+		return
+	}
+	logAuditFailure(s.auditor.Log(iauth.AuditEntry{
+		Actor:        logoutActor(c, user),
+		Action:       iauth.ActionAuthSessionRevoked,
+		ResourceType: "session",
+		ResourceID:   sess.ID.String(),
+		SourceIP:     c.RealIP(),
+		Outcome:      iauth.OutcomeSuccess,
+		Metadata: map[string]interface{}{
+			"provider": sess.AuthMethod,
+			"method":   c.Request().Method,
+			"path":     c.Request().URL.Path,
+		},
+	}))
+}
+
+func credentialProviderFailure(err error) (string, string) {
+	if errors.Is(err, iauth.ErrLoginDenied) {
+		return iauth.OutcomeDenied, "invalid_credentials"
+	}
+	return iauth.OutcomeError, "provider_error"
+}
+
+func logoutActor(c *echo.Context, user *models.User) string {
+	if principal := authmw.GetPrincipal(c); principal != nil {
+		return auditActor(principal.Subject)
+	}
+	if user != nil {
+		if user.Email != "" {
+			return auditActor(user.Email)
+		}
+		return auditActor(user.Subject)
+	}
+	return "unknown"
+}
+
+func auditActor(actor string) string {
+	if actor = strings.TrimSpace(actor); actor != "" {
+		return actor
+	}
+	return "unknown"
+}
+
+func metricProvider(provider string) string {
+	if provider = strings.TrimSpace(provider); provider != "" {
+		return provider
+	}
+	return "unknown"
 }
 
 func (s *SSOController) setSessionCookie(c *echo.Context, value string, sess *models.Session) {
@@ -292,12 +421,23 @@ func safeReturnTo(r *http.Request, raw string, trustedProxies []*net.IPNet) stri
 		if !sameOrigin(r, target, trustedProxies) {
 			return "/"
 		}
+		if unsafeLocalReturnPath(target.Path) {
+			return "/"
+		}
 		return pathAndQuery(target)
 	}
-	if !strings.HasPrefix(target.Path, "/") {
+	if unsafeLocalReturnPath(target.Path) {
 		return "/"
 	}
 	return pathAndQuery(target)
+}
+
+func unsafeLocalReturnPath(path string) bool {
+	if !strings.HasPrefix(path, "/") {
+		return true
+	}
+	normalized := strings.ReplaceAll(path, `\`, "/")
+	return strings.HasPrefix(normalized, "//")
 }
 
 func sameOrigin(r *http.Request, target *url.URL, trustedProxies []*net.IPNet) bool {
