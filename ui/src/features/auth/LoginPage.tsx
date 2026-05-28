@@ -13,6 +13,16 @@ const defaultNavigate = (url: string) => {
   window.location.assign(url);
 };
 
+const defaultOIDCLabel = "Sign in with OIDC";
+
+function oidcMethodKey(method: AuthMethod & { loginUrl: string }): string {
+  return method.id ?? `${method.type}:${method.loginUrl}:${method.label ?? ""}`;
+}
+
+function oidcMethodLabel(method: AuthMethod): string {
+  return method.label?.trim() || defaultOIDCLabel;
+}
+
 export function LoginPage({
   methods = [],
   navigate = defaultNavigate,
@@ -90,15 +100,15 @@ export function LoginPage({
 
         {oidcMethods.length > 0 && (
           <div className="flex flex-col gap-2">
-            {oidcMethods.map((method, index) => (
+            {oidcMethods.map((method) => (
               <button
-                key={`${method.loginUrl}-${index}`}
+                key={oidcMethodKey(method)}
                 type="button"
                 onClick={() => handleSSOLogin(method.loginUrl)}
                 className="inline-flex items-center justify-center gap-2 rounded-md border border-input bg-background px-4 py-2 font-medium text-foreground transition hover:bg-muted focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background"
               >
                 <LogIn className="h-4 w-4" aria-hidden="true" />
-                <span>Sign in with OIDC</span>
+                <span>{oidcMethodLabel(method)}</span>
               </button>
             ))}
           </div>

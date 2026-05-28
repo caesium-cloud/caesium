@@ -44,7 +44,12 @@ describe("AuthGate", () => {
           enabled: true,
           methods: [
             { type: "api-key" },
-            { type: "oidc", loginUrl: "/auth/sso/oidc/login" },
+            {
+              type: "oidc",
+              id: "corp-oidc",
+              label: "Sign in with Corp SSO",
+              loginUrl: "/auth/sso/oidc/login",
+            },
           ],
         }),
       })
@@ -60,7 +65,7 @@ describe("AuthGate", () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Sign in with OIDC" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in with Corp SSO" })).toBeInTheDocument();
     });
   });
 

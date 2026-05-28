@@ -68,13 +68,13 @@ func TestOIDCLoginRedirectsThroughProvider(t *testing.T) {
 	}
 	ctrl := NewSSO(nil, nil, "caesium_session")
 	ctrl.SetOIDCProvider(provider)
-	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/login?returnTo=%2Fjobs%3Fstatus%3Drunning", "")
+	c, rec := newAuthContext(t, http.MethodGet, "/auth/sso/oidc/login?returnTo=%2Fjobs%3Fstatus%3Drunning%23stage-1", "")
 
 	err := ctrl.OIDCLogin(c)
 	require.NoError(t, err)
 
 	require.True(t, provider.beginCalled)
-	require.Equal(t, "/jobs?status=running", provider.beginReturnTo)
+	require.Equal(t, "/jobs?status=running#stage-1", provider.beginReturnTo)
 	require.Equal(t, http.StatusFound, rec.Code)
 	require.Equal(t, "https://idp.example/authorize", rec.Header().Get("Location"))
 }
@@ -105,7 +105,7 @@ func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
 	provider := &fakeRedirectAuthenticator{
 		name:     "oidc",
-		returnTo: "/runs?status=mine",
+		returnTo: "/runs?status=mine#latest",
 		identity: &iauth.ExternalIdentity{
 			Issuer:      "oidc",
 			Subject:     "sub-1",
@@ -124,7 +124,7 @@ func TestOIDCCallbackCompletesSSOAndSetsSessionCookie(t *testing.T) {
 
 	require.True(t, provider.completeCalled)
 	require.Equal(t, http.StatusFound, rec.Code)
-	require.Equal(t, "/runs?status=mine", rec.Header().Get("Location"))
+	require.Equal(t, "/runs?status=mine#latest", rec.Header().Get("Location"))
 
 	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
 	require.NotEmpty(t, sessionCookie.Value)

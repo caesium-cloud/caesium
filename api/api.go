@@ -163,10 +163,20 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 			methods = append(methods, map[string]string{"type": "api-key"})
 		}
 		if vars.AuthOIDCEnabled {
-			methods = append(methods, map[string]string{"type": "oidc", "loginUrl": "/auth/sso/oidc/login"})
+			methods = append(methods, map[string]string{
+				"type":     "oidc",
+				"id":       "oidc",
+				"label":    "Sign in with OIDC",
+				"loginUrl": "/auth/sso/oidc/login",
+			})
 		}
 		if vars.AuthSAMLEnabled {
-			methods = append(methods, map[string]string{"type": "saml", "loginUrl": "/auth/sso/saml/login"})
+			methods = append(methods, map[string]string{
+				"type":     "saml",
+				"id":       "saml",
+				"label":    "Sign in with SAML",
+				"loginUrl": "/auth/sso/saml/login",
+			})
 		}
 		if vars.AuthLDAPEnabled {
 			methods = append(methods, map[string]string{"type": "ldap"})
