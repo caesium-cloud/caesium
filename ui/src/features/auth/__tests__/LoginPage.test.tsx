@@ -38,7 +38,7 @@ describe("LoginPage", () => {
     expect(isAuthenticated()).toBe(false);
   });
 
-  it("renders an advertised OIDC method and navigates with returnTo", () => {
+  it("renders advertised browser redirect methods and navigates with returnTo", () => {
     const navigate = vi.fn();
 
     render(
@@ -51,6 +51,13 @@ describe("LoginPage", () => {
             label: "Sign in with Corp SSO",
             loginUrl: "/auth/sso/oidc/login",
           },
+          {
+            type: "saml",
+            id: "corp-saml",
+            label: "Sign in with Corp SAML",
+            loginUrl: "/auth/sso/saml/login",
+          },
+          { type: "ldap" },
         ]}
         navigate={navigate}
         onLogin={vi.fn()}
@@ -58,10 +65,14 @@ describe("LoginPage", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Sign in with Corp SSO" }));
+    expect(screen.getByRole("button", { name: "Sign in with Corp SSO" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Sign in with Corp SAML" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Sign in with LDAP" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with Corp SAML" }));
 
     expect(navigate).toHaveBeenCalledWith(
-      "/auth/sso/oidc/login?returnTo=%2Fruns%3Fstatus%3Dfailed%23latest",
+      "/auth/sso/saml/login?returnTo=%2Fruns%3Fstatus%3Dfailed%23latest",
     );
     expect(mockFetch).not.toHaveBeenCalled();
   });

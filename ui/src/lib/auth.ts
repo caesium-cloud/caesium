@@ -20,6 +20,8 @@ export interface AuthStatus {
   methods?: AuthMethod[];
 }
 
+export type RedirectAuthMethod = AuthMethod & { loginUrl: string };
+
 let apiKey: string | null = null;
 let cookieSession = false;
 let csrfToken: string | null = null;
@@ -83,6 +85,41 @@ export function ssoLoginUrl(loginUrl: string, returnTo = currentReturnTo()): str
   }
 
   return url.toString();
+}
+
+/** Returns true for auth methods that should launch a browser redirect. */
+export function isRedirectAuthMethod(method: AuthMethod): method is RedirectAuthMethod {
+  return typeof method.loginUrl === "string" && method.loginUrl.length > 0;
+}
+
+/** Stable React key for advertised browser-redirect auth methods. */
+export function authMethodKey(method: RedirectAuthMethod): string {
+  return method.id ?? `${method.type}:${method.loginUrl}:${method.label ?? ""}`;
+}
+
+function authMethodTypeLabel(type: string): string {
+  switch (type.trim().toLowerCase()) {
+    case "oidc":
+      return "OIDC";
+    case "saml":
+      return "SAML";
+    case "ldap":
+      return "LDAP";
+    default:
+      return (
+        type
+          .trim()
+          .split(/[-_\s]+/)
+          .filter(Boolean)
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(" ") || "SSO"
+      );
+  }
+}
+
+/** User-facing label for an advertised auth method, preserving server labels. */
+export function authMethodLabel(method: AuthMethod): string {
+  return method.label?.trim() || `Sign in with ${authMethodTypeLabel(method.type)}`;
 }
 
 /**

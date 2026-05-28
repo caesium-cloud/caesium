@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  authMethodKey,
+  authMethodLabel,
   checkSession,
   clearApiKey,
   currentReturnTo,
+  isRedirectAuthMethod,
   isAuthenticated,
   onAuthChange,
+  type RedirectAuthMethod,
   setApiKey,
   ssoLoginUrl,
   withAuthHeaders,
@@ -77,6 +81,27 @@ describe("auth", () => {
     expect(ssoLoginUrl("/auth/sso/oidc/login?prompt=login", "/jobs#new")).toBe(
       "/auth/sso/oidc/login?prompt=login&returnTo=%2Fjobs%23new",
     );
+  });
+
+  it("identifies browser redirect auth methods and labels OIDC and SAML", () => {
+    const oidc: RedirectAuthMethod = {
+      type: "oidc",
+      id: "corp-oidc",
+      label: "  Sign in with Corp SSO  ",
+      loginUrl: "/auth/sso/oidc/login",
+    };
+    const saml: RedirectAuthMethod = {
+      type: "saml",
+      loginUrl: "/auth/sso/saml/login",
+    };
+
+    expect(isRedirectAuthMethod(oidc)).toBe(true);
+    expect(isRedirectAuthMethod(saml)).toBe(true);
+    expect(isRedirectAuthMethod({ type: "api-key" })).toBe(false);
+    expect(authMethodKey(oidc)).toBe("corp-oidc");
+    expect(authMethodKey(saml)).toBe("saml:/auth/sso/saml/login:");
+    expect(authMethodLabel(oidc)).toBe("Sign in with Corp SSO");
+    expect(authMethodLabel(saml)).toBe("Sign in with SAML");
   });
 
   it("does not mark failed cookie session checks as authenticated", async () => {
