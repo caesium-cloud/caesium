@@ -24,7 +24,7 @@
 - **Authoritative gate before every commit that touches Go:** `just unit-test` (race + coverage) must pass. Do not rely on CI for compile errors.
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
-  `sso-oidc-provider` (PR #193). The current `sso-saml-provider` wave is
+  `sso-oidc-provider` (PR #193). The `sso-saml-provider` wave (PR #194) is
   UI-only: the login page renders advertised browser-redirect methods with
   `loginUrl` values, including SAML. SAML provider backend work remains in P3.
 
@@ -1563,7 +1563,7 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).
 
 ### P3 — SAML provider (`crewjam/saml`)  *(highest risk)*
-- [x] **UI redirect-method wave:** Generalized the login page to render every
+- [x] **UI redirect-method wave (PR #194):** Generalized the login page to render every
   browser-redirect method advertised by `/auth/status.methods` with a
   `loginUrl`, so SAML appears alongside OIDC when the server advertises it.
   This does not implement SAML ACS, metadata, assertion validation, or replay
