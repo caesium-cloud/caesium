@@ -1,11 +1,13 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +225,128 @@ func TestSAMLACSCompletesSSOAndSetsSessionCookie(t *testing.T) {
 	require.Equal(t, models.RoleOperator, user.Role)
 }
 
+func TestLDAPLoginCompletesSSOAndSetsSessionCookie(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	_, trustedProxy, err := net.ParseCIDR("127.0.0.1/32")
+	require.NoError(t, err)
+
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("eng=operator", "")
+	require.NoError(t, err)
+	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+	provider := &fakeCredentialAuthenticator{
+		name: "ldap",
+		identity: &iauth.ExternalIdentity{
+			Issuer:      "ldap",
+			Subject:     "uid=viewer,ou=people,dc=example,dc=com",
+			Email:       "viewer@example.com",
+			DisplayName: "Viewer One",
+			Groups:      []string{"eng"},
+		},
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session", trustedProxy)
+	ctrl.SetLDAPProvider(provider)
+
+	e := echo.New()
+	e.IPExtractor = echo.ExtractIPFromXFFHeader(echo.TrustIPRange(trustedProxy))
+	req := httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":" viewer ","password":"secret"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set("User-Agent", "ldap-test-agent")
+	req.Header.Set("X-Forwarded-For", "203.0.113.55")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.RemoteAddr = "127.0.0.1:1234"
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+
+	err = ctrl.LDAPLogin(c)
+	require.NoError(t, err)
+
+	require.True(t, provider.authenticateCalled)
+	require.Equal(t, "viewer", provider.username)
+	require.Equal(t, "secret", provider.password)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+	require.NotEmpty(t, sessionCookie.Value)
+	require.True(t, sessionCookie.HttpOnly)
+	require.True(t, sessionCookie.Secure)
+	require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
+	require.False(t, sessionCookie.Expires.IsZero())
+
+	sess, user, err := sessions.Validate(t.Context(), sessionCookie.Value)
+	require.NoError(t, err)
+	require.Equal(t, "ldap", sess.AuthMethod)
+	require.Equal(t, "203.0.113.55", sess.SourceIP)
+	require.Equal(t, "ldap-test-agent", sess.UserAgent)
+	require.Equal(t, "viewer@example.com", user.Email)
+	require.Equal(t, models.RoleOperator, user.Role)
+}
+
+func TestLDAPLoginRejectsDeniedLogin(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	sessions := iauth.NewSessionStore(db)
+	mapper, err := iauth.NewRoleMapper("", "")
+	require.NoError(t, err)
+	sso := iauth.NewSSOService(iauth.NewUserStore(db), sessions, mapper)
+	provider := &fakeCredentialAuthenticator{
+		name: "ldap",
+		identity: &iauth.ExternalIdentity{
+			Issuer:  "ldap",
+			Subject: "uid=denied,ou=people,dc=example,dc=com",
+			Groups:  []string{"unknown"},
+		},
+	}
+	ctrl := NewSSO(sessions, sso, "caesium_session")
+	ctrl.SetLDAPProvider(provider)
+	c, rec := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"denied","password":"secret"}`)
+
+	err = ctrl.LDAPLogin(c)
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+	require.True(t, provider.authenticateCalled)
+	require.Nil(t, responseCookie(rec.Result().Cookies(), "caesium_session"))
+}
+
+func TestLDAPLoginRejectsInvalidCredentials(t *testing.T) {
+	provider := &fakeCredentialAuthenticator{
+		name: "ldap",
+		err:  iauth.ErrLoginDenied,
+	}
+	ctrl := NewSSO(nil, iauth.NewSSOService(nil, nil, nil), "caesium_session")
+	ctrl.SetLDAPProvider(provider)
+	c, _ := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"viewer","password":"bad"}`)
+
+	err := ctrl.LDAPLogin(c)
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.True(t, provider.authenticateCalled)
+}
+
+func TestLDAPLoginReturnsUnauthorizedWhenProviderErrors(t *testing.T) {
+	provider := &fakeCredentialAuthenticator{
+		name: "ldap",
+		err:  errors.New("directory unavailable"),
+	}
+	ctrl := NewSSO(nil, iauth.NewSSOService(nil, nil, nil), "caesium_session")
+	ctrl.SetLDAPProvider(provider)
+	c, _ := newAuthContext(t, http.MethodPost, "/auth/sso/ldap/login", `{"username":"viewer","password":"secret"}`)
+
+	err := ctrl.LDAPLogin(c)
+	require.Error(t, err)
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+	require.True(t, provider.authenticateCalled)
+}
+
 func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -410,6 +534,26 @@ func (f *fakeRedirectAuthenticator) Metadata(w http.ResponseWriter, _ *http.Requ
 	w.WriteHeader(http.StatusOK)
 	_, err := w.Write([]byte(f.metadataBody))
 	return err
+}
+
+type fakeCredentialAuthenticator struct {
+	name               string
+	identity           *iauth.ExternalIdentity
+	err                error
+	authenticateCalled bool
+	username           string
+	password           string
+}
+
+func (f *fakeCredentialAuthenticator) Name() string {
+	return f.name
+}
+
+func (f *fakeCredentialAuthenticator) Authenticate(_ context.Context, username, password string) (*iauth.ExternalIdentity, error) {
+	f.authenticateCalled = true
+	f.username = username
+	f.password = password
+	return f.identity, f.err
 }
 
 func requireResponseCookie(t *testing.T, cookies []*http.Cookie, name string) *http.Cookie {

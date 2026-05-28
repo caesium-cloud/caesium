@@ -28,10 +28,11 @@ import (
 
 type InternalWakeupHandler func(ctx context.Context, id string, ttl int)
 
-// SSOProviders holds browser-redirect SSO providers that are mounted by the API.
+// SSOProviders holds SSO providers that are mounted by the API.
 type SSOProviders struct {
 	OIDC auth.RedirectAuthenticator
 	SAML auth.RedirectAuthenticator
+	LDAP auth.CredentialAuthenticator
 }
 
 var apiServer struct {
@@ -180,7 +181,13 @@ func authStatus(vars env.Environment) echo.HandlerFunc {
 			})
 		}
 		if vars.AuthLDAPEnabled {
-			methods = append(methods, map[string]string{"type": "ldap"})
+			methods = append(methods, map[string]string{
+				"type":     "ldap",
+				"id":       "ldap",
+				"label":    "Sign in with LDAP",
+				"loginUrl": "/auth/sso/ldap/login",
+				"mode":     "credential",
+			})
 		}
 		return c.JSON(http.StatusOK, map[string]any{
 			"enabled": vars.AuthMode == "api-key" || vars.SSOEnabled(),
@@ -196,6 +203,7 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 	controller := authctrl.NewSSO(sessions, sso, vars.AuthSessionCookieName, authmw.ParseTrustedProxyRanges(vars.TrustedProxies)...)
 	controller.SetOIDCProvider(providers.OIDC)
 	controller.SetSAMLProvider(providers.SAML)
+	controller.SetLDAPProvider(providers.LDAP)
 	authMiddleware := authmw.Auth(authmw.AuthDeps{
 		Service:    authSvc,
 		Auditor:    auditor,
@@ -214,6 +222,48 @@ func registerSSORoutes(e *echo.Echo, vars env.Environment, authSvc *auth.Service
 		e.POST("/auth/sso/saml/acs", controller.SAMLACS)
 		e.GET("/auth/sso/saml/metadata", controller.SAMLMetadata)
 	}
+	if vars.AuthLDAPEnabled && providers.LDAP != nil {
+		middleware := []echo.MiddlewareFunc(nil)
+		if limiter != nil {
+			middleware = append(middleware, credentialLoginRateLimit(limiter))
+		}
+		e.POST("/auth/sso/ldap/login", controller.LDAPLogin, middleware...)
+	}
+}
+
+func credentialLoginRateLimit(limiter *auth.RateLimiter) echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c *echo.Context) error {
+			ip := c.RealIP()
+			if limiter.IsLimited(ip) {
+				retryAfter := limiter.RetryAfter(ip)
+				c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+				return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
+			}
+
+			err := next(c)
+			status := 0
+			if resp, unwrapErr := echo.UnwrapResponse(c.Response()); unwrapErr == nil {
+				status = resp.Status
+			}
+			if credentialLoginFailed(err, status) && limiter.RecordFailure(ip) {
+				retryAfter := limiter.RetryAfter(ip)
+				c.Response().Header().Set("Retry-After", fmt.Sprintf("%d", retryAfter))
+				return echo.NewHTTPError(http.StatusTooManyRequests, "too many failed authentication attempts")
+			}
+			return err
+		}
+	}
+}
+
+func credentialLoginFailed(err error, status int) bool {
+	if err != nil {
+		if he, ok := err.(*echo.HTTPError); ok {
+			return he.Code == http.StatusUnauthorized || he.Code == http.StatusForbidden
+		}
+		return true
+	}
+	return status == http.StatusUnauthorized || status == http.StatusForbidden
 }
 
 func registerMetrics(e *echo.Echo, vars env.Environment, authSvc *auth.Service, auditor *auth.AuditLogger, limiter *auth.RateLimiter, sessions *auth.SessionStore) {

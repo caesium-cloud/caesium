@@ -4,7 +4,9 @@ import {
   authMethodLabel,
   checkSession,
   clearApiKey,
+  credentialLogin,
   currentReturnTo,
+  isCredentialAuthMethod,
   isRedirectAuthMethod,
   isAuthenticated,
   onAuthChange,
@@ -83,7 +85,7 @@ describe("auth", () => {
     );
   });
 
-  it("identifies browser redirect auth methods and labels OIDC and SAML", () => {
+  it("identifies browser redirect auth methods and labels OIDC, SAML, and LDAP", () => {
     const oidc: RedirectAuthMethod = {
       type: "oidc",
       id: "corp-oidc",
@@ -94,14 +96,54 @@ describe("auth", () => {
       type: "saml",
       loginUrl: "/auth/sso/saml/login",
     };
+    const ldap = {
+      type: "ldap",
+      mode: "credential",
+      loginUrl: "/auth/sso/ldap/login",
+    };
 
     expect(isRedirectAuthMethod(oidc)).toBe(true);
     expect(isRedirectAuthMethod(saml)).toBe(true);
+    expect(isRedirectAuthMethod(ldap)).toBe(false);
+    expect(isCredentialAuthMethod(ldap)).toBe(true);
     expect(isRedirectAuthMethod({ type: "api-key" })).toBe(false);
     expect(authMethodKey(oidc)).toBe("corp-oidc");
     expect(authMethodKey(saml)).toBe("saml:/auth/sso/saml/login:");
     expect(authMethodLabel(oidc)).toBe("Sign in with Corp SSO");
     expect(authMethodLabel(saml)).toBe("Sign in with SAML");
+    expect(authMethodLabel(ldap)).toBe("Sign in with LDAP");
+  });
+
+  it("posts credential logins with cookies and caches the resulting session", async () => {
+    mockFetch
+      .mockResolvedValueOnce({ status: 204, ok: true })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ csrf_token: "csrf-secret" }),
+      });
+
+    await expect(credentialLogin("/auth/sso/ldap/login", "ada", "secret")).resolves.toBe("success");
+
+    expect(mockFetch).toHaveBeenNthCalledWith(1, "/auth/sso/ldap/login", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username: "ada", password: "secret" }),
+    });
+    expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
+    expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      "X-CSRF-Token": "csrf-secret",
+    });
+  });
+
+  it("maps credential login denial statuses without caching a session", async () => {
+    mockFetch.mockResolvedValueOnce({ status: 403, ok: false });
+
+    await expect(credentialLogin("/auth/sso/ldap/login", "ada", "secret")).resolves.toBe("denied");
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(isAuthenticated()).toBe(false);
   });
 
   it("falls back to SSO labels for malformed auth methods", () => {

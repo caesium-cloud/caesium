@@ -14,11 +14,12 @@ var variables = new(Environment)
 
 // Process the environment variables set for caesium.
 func Process() error {
-	variables.MaxParallelTasks = runtime.NumCPU()
+	next := &Environment{MaxParallelTasks: runtime.NumCPU()}
 
-	if err := envconfig.Process("caesium", variables); err != nil {
+	if err := envconfig.Process("caesium", next); err != nil {
 		return fmt.Errorf("failed to process environment variables: %w", err)
 	}
+	variables = next
 	if err := validate(); err != nil {
 		return err
 	}
@@ -134,38 +135,51 @@ type Environment struct {
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
 
 	// Authentication & Authorization
-	AuthMode                string        `envconfig:"AUTH_MODE" default:"none"` // none, api-key
-	AuthKeyHashSecret       string        `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
-	AuthRequireTLS          bool          `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
-	TLSCert                 string        `envconfig:"TLS_CERT" default:""`
-	TLSKey                  string        `envconfig:"TLS_KEY" default:""`
-	TrustedProxies          string        `envconfig:"TRUSTED_PROXIES" default:""`
-	AuthRateLimitPerMinute  int           `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
-	AuthRateLimitBurstAlert int           `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
-	AuthPublicBaseURL       string        `envconfig:"AUTH_PUBLIC_BASE_URL" default:""`
-	AuthSessionIdleTTL      time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
-	AuthSessionAbsoluteTTL  time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
-	AuthSessionCookieName   string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
-	AuthRoleMapping         string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
-	AuthDefaultRole         string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
-	AuthOIDCEnabled         bool          `envconfig:"AUTH_OIDC_ENABLED" default:"false"`
-	AuthOIDCIssuerURL       string        `envconfig:"AUTH_OIDC_ISSUER_URL" default:""`
-	AuthOIDCClientID        string        `envconfig:"AUTH_OIDC_CLIENT_ID" default:""`
-	AuthOIDCClientSecret    string        `envconfig:"AUTH_OIDC_CLIENT_SECRET" default:""`
-	AuthOIDCScopes          string        `envconfig:"AUTH_OIDC_SCOPES" default:"openid profile email groups"`
-	AuthOIDCGroupsClaim     string        `envconfig:"AUTH_OIDC_GROUPS_CLAIM" default:"groups"`
-	AuthOIDCRedirectURL     string        `envconfig:"AUTH_OIDC_REDIRECT_URL" default:""`
-	AuthSAMLEnabled         bool          `envconfig:"AUTH_SAML_ENABLED" default:"false"`
-	AuthSAMLIDPMetadataURL  string        `envconfig:"AUTH_SAML_IDP_METADATA_URL" default:""`
-	AuthSAMLIDPMetadataXML  string        `envconfig:"AUTH_SAML_IDP_METADATA_XML" default:""`
-	AuthSAMLIDPMetadataFile string        `envconfig:"AUTH_SAML_IDP_METADATA_FILE" default:""`
-	AuthSAMLSPEntityID      string        `envconfig:"AUTH_SAML_SP_ENTITY_ID" default:""`
-	AuthSAMLSPCert          string        `envconfig:"AUTH_SAML_SP_CERT" default:""`
-	AuthSAMLSPKey           string        `envconfig:"AUTH_SAML_SP_KEY" default:""`
-	AuthSAMLACSURL          string        `envconfig:"AUTH_SAML_ACS_URL" default:""`
-	AuthSAMLMetadataURL     string        `envconfig:"AUTH_SAML_METADATA_URL" default:""`
-	AuthSAMLGroupsAttribute string        `envconfig:"AUTH_SAML_GROUPS_ATTRIBUTE" default:"groups"`
-	AuthLDAPEnabled         bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
+	AuthMode                     string        `envconfig:"AUTH_MODE" default:"none"` // none, api-key
+	AuthKeyHashSecret            string        `envconfig:"AUTH_KEY_HASH_SECRET" default:""`
+	AuthRequireTLS               bool          `envconfig:"AUTH_REQUIRE_TLS" default:"true"`
+	TLSCert                      string        `envconfig:"TLS_CERT" default:""`
+	TLSKey                       string        `envconfig:"TLS_KEY" default:""`
+	TrustedProxies               string        `envconfig:"TRUSTED_PROXIES" default:""`
+	AuthRateLimitPerMinute       int           `envconfig:"AUTH_RATE_LIMIT_PER_MINUTE" default:"10"`
+	AuthRateLimitBurstAlert      int           `envconfig:"AUTH_RATE_LIMIT_BURST_ALERT" default:"100"`
+	AuthPublicBaseURL            string        `envconfig:"AUTH_PUBLIC_BASE_URL" default:""`
+	AuthSessionIdleTTL           time.Duration `envconfig:"AUTH_SESSION_IDLE_TTL" default:"8h"`
+	AuthSessionAbsoluteTTL       time.Duration `envconfig:"AUTH_SESSION_ABSOLUTE_TTL" default:"24h"`
+	AuthSessionCookieName        string        `envconfig:"AUTH_SESSION_COOKIE_NAME" default:"caesium_session"`
+	AuthRoleMapping              string        `envconfig:"AUTH_ROLE_MAPPING" default:""`
+	AuthDefaultRole              string        `envconfig:"AUTH_DEFAULT_ROLE" default:""`
+	AuthOIDCEnabled              bool          `envconfig:"AUTH_OIDC_ENABLED" default:"false"`
+	AuthOIDCIssuerURL            string        `envconfig:"AUTH_OIDC_ISSUER_URL" default:""`
+	AuthOIDCClientID             string        `envconfig:"AUTH_OIDC_CLIENT_ID" default:""`
+	AuthOIDCClientSecret         string        `envconfig:"AUTH_OIDC_CLIENT_SECRET" default:""`
+	AuthOIDCScopes               string        `envconfig:"AUTH_OIDC_SCOPES" default:"openid profile email groups"`
+	AuthOIDCGroupsClaim          string        `envconfig:"AUTH_OIDC_GROUPS_CLAIM" default:"groups"`
+	AuthOIDCRedirectURL          string        `envconfig:"AUTH_OIDC_REDIRECT_URL" default:""`
+	AuthSAMLEnabled              bool          `envconfig:"AUTH_SAML_ENABLED" default:"false"`
+	AuthSAMLIDPMetadataURL       string        `envconfig:"AUTH_SAML_IDP_METADATA_URL" default:""`
+	AuthSAMLIDPMetadataXML       string        `envconfig:"AUTH_SAML_IDP_METADATA_XML" default:""`
+	AuthSAMLIDPMetadataFile      string        `envconfig:"AUTH_SAML_IDP_METADATA_FILE" default:""`
+	AuthSAMLSPEntityID           string        `envconfig:"AUTH_SAML_SP_ENTITY_ID" default:""`
+	AuthSAMLSPCert               string        `envconfig:"AUTH_SAML_SP_CERT" default:""`
+	AuthSAMLSPKey                string        `envconfig:"AUTH_SAML_SP_KEY" default:""`
+	AuthSAMLACSURL               string        `envconfig:"AUTH_SAML_ACS_URL" default:""`
+	AuthSAMLMetadataURL          string        `envconfig:"AUTH_SAML_METADATA_URL" default:""`
+	AuthSAMLGroupsAttribute      string        `envconfig:"AUTH_SAML_GROUPS_ATTRIBUTE" default:"groups"`
+	AuthLDAPEnabled              bool          `envconfig:"AUTH_LDAP_ENABLED" default:"false"`
+	AuthLDAPURL                  string        `envconfig:"AUTH_LDAP_URL" default:""`
+	AuthLDAPStartTLS             bool          `envconfig:"AUTH_LDAP_START_TLS" default:"false"`
+	AuthLDAPBindDN               string        `envconfig:"AUTH_LDAP_BIND_DN" default:""`
+	AuthLDAPBindPassword         string        `envconfig:"AUTH_LDAP_BIND_PASSWORD" default:""`
+	AuthLDAPUserBaseDN           string        `envconfig:"AUTH_LDAP_USER_BASE_DN" default:""`
+	AuthLDAPUserFilter           string        `envconfig:"AUTH_LDAP_USER_FILTER" default:"(uid={username})"`
+	AuthLDAPGroupBaseDN          string        `envconfig:"AUTH_LDAP_GROUP_BASE_DN" default:""`
+	AuthLDAPGroupFilter          string        `envconfig:"AUTH_LDAP_GROUP_FILTER" default:""`
+	AuthLDAPGroupAttribute       string        `envconfig:"AUTH_LDAP_GROUP_ATTRIBUTE" default:"cn"`
+	AuthLDAPUsernameAttribute    string        `envconfig:"AUTH_LDAP_USERNAME_ATTRIBUTE" default:"uid"`
+	AuthLDAPEmailAttribute       string        `envconfig:"AUTH_LDAP_EMAIL_ATTRIBUTE" default:"mail"`
+	AuthLDAPDisplayNameAttribute string        `envconfig:"AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE" default:"displayName"`
+	AuthLDAPTimeout              time.Duration `envconfig:"AUTH_LDAP_TIMEOUT" default:"10s"`
 
 	// Run-owner coordination (Phase 2).
 	// CAESIUM_RUN_OWNER_ENABLED enables the run-owner coordination mode.

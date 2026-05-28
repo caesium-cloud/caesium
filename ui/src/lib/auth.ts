@@ -13,6 +13,7 @@ export interface AuthMethod {
   id?: string;
   label?: string;
   loginUrl?: string;
+  mode?: string;
 }
 
 export interface AuthStatus {
@@ -21,6 +22,13 @@ export interface AuthStatus {
 }
 
 export type RedirectAuthMethod = AuthMethod & { loginUrl: string };
+export type CredentialAuthMethod = AuthMethod & { loginUrl: string };
+export type CredentialLoginResult =
+  | "success"
+  | "invalid"
+  | "denied"
+  | "error"
+  | "network";
 
 let apiKey: string | null = null;
 let cookieSession = false;
@@ -89,7 +97,18 @@ export function ssoLoginUrl(loginUrl: string, returnTo = currentReturnTo()): str
 
 /** Returns true for auth methods that should launch a browser redirect. */
 export function isRedirectAuthMethod(method: AuthMethod): method is RedirectAuthMethod {
-  return typeof method.loginUrl === "string" && method.loginUrl.length > 0;
+  return typeof method.loginUrl === "string" && method.loginUrl.length > 0 && !isCredentialAuthMethod(method);
+}
+
+/** Returns true for auth methods that should submit credentials in-place. */
+export function isCredentialAuthMethod(method: AuthMethod): method is CredentialAuthMethod {
+  const mode = typeof method.mode === "string" ? method.mode.trim().toLowerCase() : "";
+  const type = typeof method.type === "string" ? method.type.trim().toLowerCase() : "";
+  return (
+    (mode === "credential" || type === "ldap") &&
+    typeof method.loginUrl === "string" &&
+    method.loginUrl.length > 0
+  );
 }
 
 /** Stable React key for advertised browser-redirect auth methods. */
@@ -157,6 +176,36 @@ export async function checkSession(): Promise<boolean> {
       notifyAuthChange();
     }
     return false;
+  }
+}
+
+/** Submit username/password credentials and cache the resulting cookie session. */
+export async function credentialLogin(
+  loginUrl: string,
+  username: string,
+  password: string,
+): Promise<CredentialLoginResult> {
+  try {
+    const response = await fetch(loginUrl, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (response.status === 401) {
+      return "invalid";
+    }
+    if (response.status === 403) {
+      return "denied";
+    }
+    if (!response.ok) {
+      return "error";
+    }
+
+    return (await checkSession()) ? "success" : "error";
+  } catch {
+    return "network";
   }
 }
 

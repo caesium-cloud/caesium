@@ -89,7 +89,13 @@ func TestAuthStatusListsSSOMethods(t *testing.T) {
 		"label":    "Sign in with SAML",
 		"loginUrl": "/auth/sso/saml/login",
 	})
-	require.Contains(t, body.Methods, map[string]string{"type": "ldap"})
+	require.Contains(t, body.Methods, map[string]string{
+		"type":     "ldap",
+		"id":       "ldap",
+		"label":    "Sign in with LDAP",
+		"loginUrl": "/auth/sso/ldap/login",
+		"mode":     "credential",
+	})
 }
 
 func TestRegisterMetricsPublicWhenAuthDisabled(t *testing.T) {
@@ -236,6 +242,76 @@ func TestRegisterSSORoutesSkipsSAMLRedirectProviderRoutesWithoutProvider(t *test
 	require.False(t, hasRoute(e, http.MethodGet, "/auth/sso/saml/metadata"))
 }
 
+func TestRegisterSSORoutesMountsLDAPCredentialProviderRoute(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthLDAPEnabled: true},
+		nil,
+		nil,
+		nil,
+		iauth.NewSessionStore(db),
+		nil,
+		SSOProviders{LDAP: noopCredentialAuthenticator{}},
+	)
+
+	require.True(t, hasRoute(e, http.MethodPost, "/auth/sso/ldap/login"))
+}
+
+func TestRegisterSSORoutesRateLimitsLDAPCredentialFailures(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthLDAPEnabled: true},
+		nil,
+		nil,
+		iauth.NewRateLimiter(1, time.Minute),
+		iauth.NewSessionStore(db),
+		iauth.NewSSOService(nil, nil, nil),
+		SSOProviders{LDAP: noopCredentialAuthenticator{}},
+	)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.RemoteAddr = "198.51.100.10:1234"
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/sso/ldap/login", strings.NewReader(`{"username":"ada","password":"bad"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.RemoteAddr = "198.51.100.10:1234"
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.NotEmpty(t, rec.Header().Get("Retry-After"))
+}
+
+func TestRegisterSSORoutesSkipsLDAPCredentialProviderRouteWithoutProvider(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	e := echo.New()
+	registerSSORoutes(
+		e,
+		env.Environment{AuthSessionCookieName: "caesium_session", AuthLDAPEnabled: true},
+		nil,
+		nil,
+		nil,
+		iauth.NewSessionStore(db),
+		nil,
+		SSOProviders{},
+	)
+
+	require.False(t, hasRoute(e, http.MethodPost, "/auth/sso/ldap/login"))
+}
+
 func TestRegisterInternalWakeupRequiresToken(t *testing.T) {
 	e := echo.New()
 	var called atomic.Bool
@@ -305,5 +381,15 @@ func (noopRedirectAuthenticator) Begin(http.ResponseWriter, *http.Request, strin
 }
 
 func (noopRedirectAuthenticator) Complete(*http.Request) (*iauth.ExternalIdentity, error) {
+	return nil, nil
+}
+
+type noopCredentialAuthenticator struct{}
+
+func (noopCredentialAuthenticator) Name() string {
+	return "ldap"
+}
+
+func (noopCredentialAuthenticator) Authenticate(context.Context, string, string) (*iauth.ExternalIdentity, error) {
 	return nil, nil
 }

@@ -21,6 +21,7 @@ type SSOController struct {
 	sso            *iauth.SSOService
 	oidc           iauth.RedirectAuthenticator
 	saml           iauth.RedirectAuthenticator
+	ldap           iauth.CredentialAuthenticator
 	cookieName     string
 	trustedProxies []*net.IPNet
 }
@@ -43,6 +44,11 @@ func (s *SSOController) SetOIDCProvider(provider iauth.RedirectAuthenticator) {
 // SetSAMLProvider wires the SAML redirect provider into the controller.
 func (s *SSOController) SetSAMLProvider(provider iauth.RedirectAuthenticator) {
 	s.saml = provider
+}
+
+// SetLDAPProvider wires the LDAP credential provider into the controller.
+func (s *SSOController) SetLDAPProvider(provider iauth.CredentialAuthenticator) {
+	s.ldap = provider
 }
 
 // SSOService returns the shared login completion service for provider handlers.
@@ -97,6 +103,10 @@ func (s *SSOController) SAMLMetadata(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "saml metadata failed").Wrap(err)
 	}
 	return nil
+}
+
+func (s *SSOController) LDAPLogin(c *echo.Context) error {
+	return s.completeCredentialLogin(c, s.ldap, "ldap")
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {
@@ -174,6 +184,55 @@ func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.Re
 	return c.Redirect(http.StatusFound, safeReturnTo(c.Request(), returnTo, s.trustedProxies))
 }
 
+type credentialLoginRequest struct {
+	Username string `json:"username" form:"username"`
+	Password string `json:"password" form:"password"`
+}
+
+func (s *SSOController) completeCredentialLogin(c *echo.Context, provider iauth.CredentialAuthenticator, fallbackName string) error {
+	if provider == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, fallbackName+" provider unavailable")
+	}
+	if s.sso == nil {
+		return echo.NewHTTPError(http.StatusServiceUnavailable, "sso service unavailable")
+	}
+
+	var req credentialLoginRequest
+	if err := c.Bind(&req); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
+
+	username := strings.TrimSpace(req.Username)
+	if username == "" || req.Password == "" {
+		return echo.NewHTTPError(http.StatusBadRequest, "username and password are required")
+	}
+
+	ext, err := provider.Authenticate(c.Request().Context(), username, req.Password)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" login failed").Wrap(err)
+	}
+	if ext == nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, fallbackName+" login failed")
+	}
+
+	cookieValue, sess, err := s.sso.Complete(
+		c.Request().Context(),
+		ext,
+		credentialProviderMethod(provider, fallbackName),
+		c.RealIP(),
+		c.Request().UserAgent(),
+	)
+	if err != nil {
+		if errors.Is(err, iauth.ErrLoginDenied) {
+			return echo.NewHTTPError(http.StatusForbidden, "login denied").Wrap(err)
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "login failed").Wrap(err)
+	}
+
+	s.setSessionCookie(c, cookieValue, sess)
+	return c.NoContent(http.StatusNoContent)
+}
+
 func (s *SSOController) setSessionCookie(c *echo.Context, value string, sess *models.Session) {
 	cookie := &http.Cookie{
 		Name:     s.cookieName,
@@ -194,6 +253,13 @@ func requestIsSecure(r *http.Request, trustedProxies []*net.IPNet) bool {
 }
 
 func providerMethod(provider iauth.RedirectAuthenticator, fallbackName string) string {
+	if name := strings.TrimSpace(provider.Name()); name != "" {
+		return name
+	}
+	return fallbackName
+}
+
+func credentialProviderMethod(provider iauth.CredentialAuthenticator, fallbackName string) string {
 	if name := strings.TrimSpace(provider.Name()); name != "" {
 		return name
 	}

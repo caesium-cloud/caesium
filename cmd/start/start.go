@@ -15,6 +15,7 @@ import (
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	authldap "github.com/caesium-cloud/caesium/internal/auth/ldap"
 	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
 	authsaml "github.com/caesium-cloud/caesium/internal/auth/saml"
 	"github.com/caesium-cloud/caesium/internal/dispatch"
@@ -601,6 +602,13 @@ func initSSOProviders(ctx context.Context, vars env.Environment) api.SSOProvider
 	}
 	if vars.AuthSAMLEnabled {
 		providers.SAML = initSAMLProvider(ctx, vars)
+	}
+	if vars.AuthLDAPEnabled {
+		provider, err := authldap.New(authldap.ConfigFromEnv(vars))
+		if err != nil {
+			log.Fatal("failed to initialize LDAP provider", "error", err)
+		}
+		providers.LDAP = provider
 	}
 
 	return providers
