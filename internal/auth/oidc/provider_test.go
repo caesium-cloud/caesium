@@ -144,6 +144,25 @@ func TestCompleteRejectsExpiredIDToken(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidIDToken)
 }
 
+func TestCompleteRejectsAudienceMismatch(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+
+	stateCookie, state := beginForCallback(t, provider, "/")
+	issuer.nextNonce = state.Nonce
+	issuer.nextAudience = "different-client"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+		nil,
+	)
+	req.AddCookie(stateCookie)
+
+	_, _, err := provider.CompleteWithReturnTo(req)
+	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.NotNil(t, issuer.lastTokenForm)
+}
+
 func TestExtractGroupsClaim(t *testing.T) {
 	groups, err := extractGroups(json.RawMessage(`"one"`))
 	require.NoError(t, err)
@@ -203,6 +222,7 @@ type mockIssuer struct {
 	key           *rsa.PrivateKey
 	groupsClaim   string
 	nextNonce     string
+	nextAudience  string
 	nextExpiry    time.Time
 	lastTokenForm url.Values
 }
@@ -257,6 +277,10 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 	if nonce == "" {
 		nonce = "nonce"
 	}
+	audience := m.nextAudience
+	if audience == "" {
+		audience = "caesium"
+	}
 	expiresAt := m.nextExpiry
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(time.Hour)
@@ -264,7 +288,7 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 	idToken := m.signIDToken(map[string]any{
 		"iss":         m.URL(),
 		"sub":         "subject-123",
-		"aud":         "caesium",
+		"aud":         audience,
 		"exp":         expiresAt.Unix(),
 		"iat":         time.Now().Add(-time.Minute).Unix(),
 		"nonce":       nonce,
