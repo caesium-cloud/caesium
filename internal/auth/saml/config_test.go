@@ -84,6 +84,10 @@ func TestNewFetchesHTTPSMetadata(t *testing.T) {
 	require.Equal(t, "https://idp.example.com/metadata", provider.serviceProvider.IDPMetadata.EntityID)
 }
 
+func TestDefaultMetadataHTTPClientHasTimeout(t *testing.T) {
+	require.Equal(t, DefaultMetadataFetchTimeout, defaultMetadataHTTPClient.Timeout)
+}
+
 type fakeReplayCache struct{}
 
 func (fakeReplayCache) Record(_ context.Context, _, _ string, _ time.Time) error {

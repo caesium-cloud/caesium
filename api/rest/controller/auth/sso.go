@@ -90,7 +90,7 @@ func (s *SSOController) SAMLMetadata(c *echo.Context) error {
 	provider, ok := s.saml.(interface {
 		Metadata(http.ResponseWriter, *http.Request) error
 	})
-	if !ok || provider == nil {
+	if !ok {
 		return echo.NewHTTPError(http.StatusServiceUnavailable, "saml provider unavailable")
 	}
 	if err := provider.Metadata(c.Response(), c.Request()); err != nil {

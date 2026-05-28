@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/mattn/go-sqlite3"
 	"gorm.io/gorm"
 )
 
@@ -104,8 +105,16 @@ func isUniqueConstraintError(err error) bool {
 	if err == nil {
 		return false
 	}
+
+	var sqliteErr sqlite3.Error
+	if errors.As(err, &sqliteErr) {
+		return sqliteErr.ExtendedCode == sqlite3.ErrConstraintUnique ||
+			sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey
+	}
+
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "unique constraint") ||
-		strings.Contains(msg, "constraint failed") ||
-		strings.Contains(msg, "duplicate")
+		(strings.Contains(msg, "constraint failed") && strings.Contains(msg, "unique")) ||
+		strings.Contains(msg, "duplicate key") ||
+		strings.Contains(msg, "duplicate entry")
 }

@@ -41,9 +41,6 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.ReplayCache == nil {
-		return nil, fmt.Errorf("saml replay cache is required")
-	}
 
 	idpMetadata, err := loadIDPMetadata(ctx, cfg)
 	if err != nil {

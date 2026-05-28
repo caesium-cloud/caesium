@@ -104,6 +104,18 @@ describe("auth", () => {
     expect(authMethodLabel(saml)).toBe("Sign in with SAML");
   });
 
+  it("falls back to SSO labels for malformed auth methods", () => {
+    const missingType = { loginUrl: "/auth/sso/custom/login" } as unknown as RedirectAuthMethod;
+    const objectType = {
+      type: { nested: "bad" },
+      label: 123,
+      loginUrl: "/auth/sso/custom/login",
+    } as unknown as RedirectAuthMethod;
+
+    expect(authMethodLabel(missingType)).toBe("Sign in with SSO");
+    expect(authMethodLabel(objectType)).toBe("Sign in with SSO");
+  });
+
   it("does not mark failed cookie session checks as authenticated", async () => {
     mockFetch.mockResolvedValue({
       ok: false,
