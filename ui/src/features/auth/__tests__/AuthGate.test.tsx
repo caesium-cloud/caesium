@@ -36,7 +36,7 @@ describe("AuthGate", () => {
     expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
   });
 
-  it("renders advertised OIDC methods on the login page", async () => {
+  it("renders advertised browser redirect methods on the login page", async () => {
     mockFetch
       .mockResolvedValueOnce({
         ok: true,
@@ -49,6 +49,11 @@ describe("AuthGate", () => {
               id: "corp-oidc",
               label: "Sign in with Corp SSO",
               loginUrl: "/auth/sso/oidc/login",
+            },
+            {
+              type: "saml",
+              id: "corp-saml",
+              loginUrl: "/auth/sso/saml/login",
             },
           ],
         }),
@@ -66,6 +71,7 @@ describe("AuthGate", () => {
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: "Sign in with Corp SSO" })).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Sign in with SAML" })).toBeInTheDocument();
     });
   });
 

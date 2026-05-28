@@ -23,8 +23,10 @@
 - **Test command (focused loop):** `go test ./internal/auth/ -run <TestName> -v`. If you hit CGO/dqlite linker errors on the host, run inside the project's build toolchain (`just unit-test` uses it). Tests that need a DB use an in-memory GORM handle — see the `newTestDB` helper introduced in Task 1.4 and reuse it.
 - **Authoritative gate before every commit that touches Go:** `just unit-test` (race + coverage) must pass. Do not rely on CI for compile errors.
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
-- **Progress:** Foundation P0/P1 merged in PR #192. The next OIDC wave continues on
-  `sso-oidc-provider` (PR #193).
+- **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
+  `sso-oidc-provider` (PR #193). The current `sso-saml-provider` wave is
+  UI-only: the login page renders advertised browser-redirect methods with
+  `loginUrl` values, including SAML. SAML provider backend work remains in P3.
 
 ## File structure
 
@@ -1561,6 +1563,11 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 - **Tests:** against a mock OIDC provider (in-process JWKS); negative cases (bad state, bad nonce, expired token).
 
 ### P3 — SAML provider (`crewjam/saml`)  *(highest risk)*
+- [x] **UI redirect-method wave:** Generalized the login page to render every
+  browser-redirect method advertised by `/auth/status.methods` with a
+  `loginUrl`, so SAML appears alongside OIDC when the server advertises it.
+  This does not implement SAML ACS, metadata, assertion validation, or replay
+  storage.
 - **Files:** `internal/auth/saml/provider.go`, `AUTH_SAML_*` config, ACS + metadata routes.
 - **Key work:** SP metadata; IdP metadata fetched **HTTPS-only with TLS certificate verification**; XML-dsig verification; `Audience`/`Recipient`/`NotOnOrAfter` with clock-skew leeway; **dqlite-backed** assertion replay cache (`saml_assertion_ids`, not per-node in-memory); RelayState = validated `returnTo`; groups from attribute → shared tail.
 - **Tests:** static signed-assertion fixtures incl. tampered/expired/replayed; SP metadata round-trip.
