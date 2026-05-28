@@ -99,6 +99,49 @@ func TestOIDCLoginSanitizesExternalReturnTo(t *testing.T) {
 	require.Equal(t, "/", provider.beginReturnTo)
 }
 
+func TestRedirectLoginReturnToHonorsTrustedProxyOrigin(t *testing.T) {
+	_, trustedProxy, err := net.ParseCIDR("127.0.0.1/32")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name       string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name:       "trusted proxy allows forwarded https same origin",
+			remoteAddr: "127.0.0.1:1234",
+			want:       "/runs?status=mine#latest",
+		},
+		{
+			name:       "untrusted peer cannot upgrade origin with forwarded proto",
+			remoteAddr: "203.0.113.10:1234",
+			want:       "/",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &fakeRedirectAuthenticator{
+				name:     "oidc",
+				beginURL: "https://idp.example/authorize",
+			}
+			ctrl := NewSSO(nil, nil, "caesium_session", trustedProxy)
+			ctrl.SetOIDCProvider(provider)
+			target := "/auth/sso/oidc/login?returnTo=https%3A%2F%2Fexample.com%2Fruns%3Fstatus%3Dmine%23latest"
+			c, _ := newAuthContext(t, http.MethodGet, target, "")
+			c.Request().RemoteAddr = tt.remoteAddr
+			c.Request().Header.Set("X-Forwarded-Proto", "https")
+
+			err := ctrl.OIDCLogin(c)
+			require.NoError(t, err)
+
+			require.True(t, provider.beginCalled)
+			require.Equal(t, tt.want, provider.beginReturnTo)
+		})
+	}
+}
+
 func TestSAMLLoginRedirectsThroughProvider(t *testing.T) {
 	provider := &fakeRedirectAuthenticator{
 		name:     "saml",
@@ -248,6 +291,62 @@ func TestRedirectCallbacksAllowSameOriginAbsoluteReturnTo(t *testing.T) {
 
 			require.Equal(t, http.StatusFound, rec.Code)
 			require.Equal(t, "/runs?status=mine#latest", rec.Header().Get("Location"))
+		})
+	}
+}
+
+func TestRedirectCallbacksSetSecureSessionCookieBehindTrustedHTTPSProxy(t *testing.T) {
+	_, trustedProxy, err := net.ParseCIDR("127.0.0.1/32")
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		provider string
+		method   string
+		target   string
+		call     func(*SSOController, *echo.Context) error
+	}{
+		{
+			name:     "oidc",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, sso := newTestSSOService(t)
+			provider := &fakeRedirectAuthenticator{
+				name:     tt.provider,
+				returnTo: "/runs",
+				identity: testExternalIdentity(tt.provider),
+			}
+			ctrl := NewSSO(sessions, sso, "caesium_session", trustedProxy)
+			if tt.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tt.method, tt.target, "")
+			c.Request().RemoteAddr = "127.0.0.1:1234"
+			c.Request().Header.Set("X-Forwarded-Proto", "https")
+
+			err := tt.call(ctrl, c)
+			require.NoError(t, err)
+
+			sessionCookie := requireResponseCookie(t, rec.Result().Cookies(), "caesium_session")
+			require.True(t, sessionCookie.HttpOnly)
+			require.True(t, sessionCookie.Secure)
+			require.Equal(t, http.SameSiteLaxMode, sessionCookie.SameSite)
 		})
 	}
 }

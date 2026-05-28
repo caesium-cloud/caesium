@@ -175,6 +175,43 @@ func TestAuthenticateRejectsEmptyPasswordBeforeDial(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvalidCredentials)
 }
 
+func TestAuthenticateFailsClosedWhenUserSearchReturnsNilResult(t *testing.T) {
+	fake := &fakeConn{nilUserResult: true}
+	cfg := baseConfig()
+	cfg.Dial = func(_ context.Context, _ Config) (Conn, error) { return fake, nil }
+	provider, err := New(cfg)
+	require.NoError(t, err)
+
+	identity, err := provider.Authenticate(context.Background(), "alice", "secret")
+	require.Nil(t, identity)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.ErrorContains(t, err, "user search returned nil result")
+	require.Equal(t, []bindCall{{dn: cfg.BindDN, password: cfg.BindPassword}}, fake.binds)
+	require.Len(t, fake.searches, 1)
+	require.Equal(t, "ou=People,dc=example,dc=com", fake.searches[0].BaseDN)
+	require.True(t, fake.closed)
+}
+
+func TestAuthenticateFailsClosedWhenUserEntryMissingDN(t *testing.T) {
+	fake := &fakeConn{
+		userResult: &gldap.SearchResult{Entries: []*gldap.Entry{
+			{DN: "   "},
+		}},
+	}
+	cfg := baseConfig()
+	cfg.Dial = func(_ context.Context, _ Config) (Conn, error) { return fake, nil }
+	provider, err := New(cfg)
+	require.NoError(t, err)
+
+	identity, err := provider.Authenticate(context.Background(), "alice", "secret")
+	require.Nil(t, identity)
+	require.ErrorIs(t, err, ErrInvalidConfig)
+	require.ErrorContains(t, err, "user entry is missing DN")
+	require.Equal(t, []bindCall{{dn: cfg.BindDN, password: cfg.BindPassword}}, fake.binds)
+	require.Len(t, fake.searches, 1)
+	require.True(t, fake.closed)
+}
+
 func TestAuthenticateRejectsDuplicateUserSearchResults(t *testing.T) {
 	fake := &fakeConn{
 		userResult: &gldap.SearchResult{Entries: []*gldap.Entry{
@@ -218,6 +255,7 @@ type fakeConn struct {
 	timeout        time.Duration
 	closed         bool
 	userResult     *gldap.SearchResult
+	nilUserResult  bool
 	groupResult    *gldap.SearchResult
 	userBindErr    error
 	groupSearchErr error
@@ -235,6 +273,9 @@ func (f *fakeConn) Search(req *gldap.SearchRequest) (*gldap.SearchResult, error)
 	f.searches = append(f.searches, req)
 	switch req.BaseDN {
 	case baseConfig().UserBaseDN:
+		if f.nilUserResult {
+			return nil, nil
+		}
 		if f.userResult != nil {
 			return f.userResult, nil
 		}

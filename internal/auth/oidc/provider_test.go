@@ -109,6 +109,89 @@ func TestCompleteRejectsStateMismatch(t *testing.T) {
 	assert.Nil(t, issuer.lastTokenForm)
 }
 
+func TestCompleteRejectsInvalidStateCookieBeforeExchange(t *testing.T) {
+	tests := []struct {
+		name       string
+		prepare    func(*Provider, *http.Cookie, loginState) *http.Cookie
+		wantErr    error
+		wantErrMsg string
+	}{
+		{
+			name: "tampered cookie",
+			prepare: func(_ *Provider, cookie *http.Cookie, _ loginState) *http.Cookie {
+				return cloneCookieWithValue(cookie, tamperCookieValue(cookie.Value))
+			},
+			wantErr:    ErrInvalidState,
+			wantErrMsg: "signature mismatch",
+		},
+		{
+			name: "expired cookie",
+			prepare: func(provider *Provider, cookie *http.Cookie, state loginState) *http.Cookie {
+				provider.now = func() time.Time {
+					return time.Unix(state.ExpiresAt, 0).Add(time.Second)
+				}
+				return cookie
+			},
+			wantErr:    ErrInvalidState,
+			wantErrMsg: "expired state",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			provider := newTestProvider(t, issuer, "groups")
+
+			stateCookie, state := beginForCallback(t, provider, "/")
+			stateCookie = tt.prepare(provider, stateCookie, state)
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+				nil,
+			)
+			req.AddCookie(stateCookie)
+
+			_, _, err := provider.CompleteWithReturnTo(req)
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.Contains(t, err.Error(), tt.wantErrMsg)
+			assert.Nil(t, issuer.lastTokenForm)
+		})
+	}
+}
+
+func TestCompleteRejectsEarlyCallbackErrorsBeforeStateCookie(t *testing.T) {
+	tests := []struct {
+		name    string
+		rawURL  string
+		wantErr error
+	}{
+		{
+			name:    "authorization error",
+			rawURL:  "https://app.example.com/auth/sso/oidc/callback?error=access_denied&error_description=user+canceled",
+			wantErr: ErrAuthorizationFailed,
+		},
+		{
+			name:    "missing code",
+			rawURL:  "https://app.example.com/auth/sso/oidc/callback?state=ignored",
+			wantErr: ErrMissingCode,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			provider := newTestProvider(t, issuer, "groups")
+
+			req := httptest.NewRequest(http.MethodGet, tt.rawURL, nil)
+			req.AddCookie(&http.Cookie{Name: DefaultStateCookieName, Value: "not-a-valid-state-cookie"})
+
+			_, _, err := provider.CompleteWithReturnTo(req)
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.Nil(t, issuer.lastTokenForm)
+		})
+	}
+}
+
 func TestCompleteRejectsNonceMismatch(t *testing.T) {
 	issuer := newMockIssuer(t, "groups")
 	provider := newTestProvider(t, issuer, "groups")
@@ -215,6 +298,20 @@ func requireCookie(t *testing.T, res *http.Response, name string) *http.Cookie {
 	}
 	t.Fatalf("cookie %q not found", name)
 	return nil
+}
+
+func cloneCookieWithValue(cookie *http.Cookie, value string) *http.Cookie {
+	clone := *cookie
+	clone.Value = value
+	return &clone
+}
+
+func tamperCookieValue(value string) string {
+	replacement := byte('A')
+	if value[len(value)-1] == replacement {
+		replacement = 'B'
+	}
+	return value[:len(value)-1] + string(replacement)
 }
 
 type mockIssuer struct {
