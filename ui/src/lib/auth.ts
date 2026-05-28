@@ -8,6 +8,16 @@
 
 type AuthChangeListener = () => void;
 
+export interface AuthMethod {
+  type: string;
+  loginUrl?: string;
+}
+
+export interface AuthStatus {
+  enabled?: boolean;
+  methods?: AuthMethod[];
+}
+
 let apiKey: string | null = null;
 let cookieSession = false;
 let csrfToken: string | null = null;
@@ -52,6 +62,25 @@ export function isAuthenticated(): boolean {
 /** Return the cached CSRF header for cookie-session requests. */
 export function csrfHeader(): Record<string, string> {
   return csrfToken ? { "X-CSRF-Token": csrfToken } : {};
+}
+
+/** Return the same-origin path the SSO callback should send the user back to. */
+export function currentReturnTo(
+  location: Pick<Location, "pathname" | "search" | "hash"> = window.location,
+): string {
+  return `${location.pathname || "/"}${location.search}${location.hash}`;
+}
+
+/** Add the SPA return target to a provider login URL. */
+export function ssoLoginUrl(loginUrl: string, returnTo = currentReturnTo()): string {
+  const url = new URL(loginUrl, window.location.origin);
+  url.searchParams.set("returnTo", returnTo || "/");
+
+  if (url.origin === window.location.origin) {
+    return `${url.pathname}${url.search}${url.hash}`;
+  }
+
+  return url.toString();
 }
 
 /**

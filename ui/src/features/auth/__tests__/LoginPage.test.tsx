@@ -38,6 +38,26 @@ describe("LoginPage", () => {
     expect(isAuthenticated()).toBe(false);
   });
 
+  it("renders an advertised OIDC method and navigates with returnTo", () => {
+    const navigate = vi.fn();
+
+    render(
+      <LoginPage
+        methods={[{ type: "api-key" }, { type: "oidc", loginUrl: "/auth/sso/oidc/login" }]}
+        navigate={navigate}
+        onLogin={vi.fn()}
+        returnTo={() => "/runs?status=failed#latest"}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with OIDC" }));
+
+    expect(navigate).toHaveBeenCalledWith(
+      "/auth/sso/oidc/login?returnTo=%2Fruns%3Fstatus%3Dfailed%23latest",
+    );
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
   it("stores the api key and calls onLogin on success", async () => {
     const onLogin = vi.fn();
     mockFetch.mockResolvedValue({ status: 200 });
