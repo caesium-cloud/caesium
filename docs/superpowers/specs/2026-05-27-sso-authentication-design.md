@@ -1,6 +1,6 @@
 # Design: Native SSO Authentication (OIDC, SAML, LDAP)
 
-**Status:** Proposed
+**Status:** Shipped (merged PRs #192–#203)
 **Date:** 2026-05-27
 **Author:** Christopher Ryan
 **Topic:** User login / identity federation for the Caesium Web UI
@@ -48,7 +48,7 @@ What is missing (the gap this design fills):
 5. The middleware understands only Bearer API keys.
 
 There is also **no auth/SSO documentation** today; the only security design doc is
-`docs/design-internal-mtls-auto-provisioning.md` (node mTLS). No IdP libraries are
+`docs/archive/design-internal-mtls-auto-provisioning.md` (node mTLS). No IdP libraries are
 present (`golang.org/x/oauth2` is only an indirect dependency).
 
 ## 3. Goals / Non-goals

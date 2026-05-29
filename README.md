@@ -274,7 +274,7 @@ When `CAESIUM_AUTH_MODE=api-key`, you must also set `CAESIUM_AUTH_KEY_HASH_SECRE
 | [docs/parallel-execution-operations.md](docs/parallel-execution-operations.md) | Distributed execution configuration and troubleshooting |
 | [docs/open_lineage.md](docs/open_lineage.md) | OpenLineage transport and configuration |
 | [docs/kubernetes-deployment.md](docs/kubernetes-deployment.md) | Helm-based Kubernetes deployment |
-| [docs/ui_implementation_plan.md](docs/ui_implementation_plan.md) | Embedded UI implementation status and remaining gaps |
+| [docs/load-testing-history.md](docs/load-testing-history.md) | Distributed-execution scaling load-test history (Phase 0 → 2B) |
 
 ## Contributing
 
