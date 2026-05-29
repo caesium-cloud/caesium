@@ -33,28 +33,15 @@ steps:
 
 ## Schema Reference
 
-### Top-Level Fields
+> The complete, authoritative field-by-field schema is generated from `pkg/jobdef` in **[job-schema-reference.md](job-schema-reference.md)** and kept in sync by CI. This section is a quick-reference of the fields you reach for most — consult the generated reference for the full set (including `$schema`, job- and step-level `cache`, `type: branch`, `nodeSelector`, and every mount/callback option).
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `apiVersion` | string | yes | Must be `v1` |
-| `kind` | string | yes | Must be `Job` |
-| `metadata` | object | yes | See Metadata table |
-| `trigger` | object | yes | See Trigger section |
-| `callbacks` | array | no | Webhook notifications |
-| `steps` | array | yes | At least one step |
+### Structure at a glance
 
-### Metadata
-
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `alias` | string | yes | Unique job identifier |
-| `labels` | map | no | Key-value pairs for filtering |
-| `annotations` | map | no | Free-form metadata |
-| `maxParallelTasks` | int | no | Max concurrent tasks per run |
-| `taskTimeout` | duration | no | Per-task timeout (e.g. `5m`, `1h`) |
-| `runTimeout` | duration | no | Whole-run wall-clock limit |
-| `schemaValidation` | string | no | `""` (disabled), `"warn"`, or `"fail"` |
+- `apiVersion: v1` and `kind: Job` (both required)
+- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `cache`
+- `trigger` (required): `type` (`cron` | `http`) + `configuration` + optional `defaultParams` — see the snippets below
+- `steps` (required, ≥1): see the step quick-reference below
+- `callbacks` (optional): post-run notification hooks
 
 ### Trigger — Cron
 
@@ -83,34 +70,22 @@ trigger:
       commit: "$.after"
 ```
 
-### Steps
+### Steps (most-used fields)
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `name` | string | yes | Unique within the job |
-| `engine` | string | no | `docker` (default), `podman`, `kubernetes` |
 | `image` | string | yes | Container image reference |
+| `engine` | string | no | `docker` (default), `podman`, `kubernetes` |
 | `command` | array[string] | no | Container command |
-| `env` | map | no | Environment variables |
-| `workdir` | string | no | Container working directory |
-| `mounts` | array[Mount] | no | Bind mounts |
-| `next` | string or array | no | Successor step name(s) — fan-out |
-| `dependsOn` | string or array | no | Predecessor step name(s) — fan-in/join |
-| `retries` | int | no | Retry attempts after failure |
-| `retryDelay` | duration | no | Delay between retries |
-| `retryBackoff` | bool | no | Exponential backoff |
+| `env` | map | no | Environment variables (values may be `secret://` URIs) |
+| `next` / `dependsOn` | string or array | no | DAG edges — fan-out / fan-in (see [DAG Wiring](#dag-wiring-rules)) |
+| `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
-| `outputSchema` | object | no | JSON Schema for structured output |
-| `inputSchema` | map | no | Maps predecessor names to required schemas |
-
-### Mount
-
-| Field | Type | Required |
-|---|---|---|
-| `type` | string | no (default: `bind`) |
-| `source` | string | yes — host path |
-| `target` | string | yes — container path |
-| `readOnly` | bool | no |
+| `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
+| `cache` | bool or object | no | Task caching — `true` or `{ttl: "12h", version: 2}` |
+| `type` | string | no | `task` (default) or `branch` for conditional fan-out |
+| `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
 
 ### Callbacks
 
