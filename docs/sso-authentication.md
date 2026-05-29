@@ -56,6 +56,52 @@ IP addresses or CIDR ranges; invalid entries fail the auth startup TLS guard.
 | `CAESIUM_AUTH_SESSION_ABSOLUTE_TTL` | `24h` | Hard session expiry. |
 | `CAESIUM_TRUSTED_PROXIES` | empty | Comma-separated trusted proxy IPs/CIDRs for forwarded-proto handling. |
 
+## Browser Auth Endpoint Contract
+
+Browser clients discover available auth paths with `GET /auth/status`. The
+response is:
+
+```json
+{
+  "enabled": true,
+  "methods": [
+    { "type": "api-key" },
+    {
+      "type": "oidc",
+      "id": "oidc",
+      "label": "Sign in with OIDC",
+      "loginUrl": "/auth/sso/oidc/login",
+      "mode": "redirect"
+    }
+  ]
+}
+```
+
+SSO method objects include `type`, stable `id`, display `label`, same-origin
+`loginUrl`, and `mode`. `mode` is `redirect` for OIDC and SAML, and
+`credential` for LDAP. API-key auth is advertised as `{ "type": "api-key" }`
+when `CAESIUM_AUTH_MODE=api-key` is enabled.
+
+`GET /auth/whoami` requires a valid API key or session cookie. Cookie-session
+responses include `csrf_token` alongside the principal fields (`kind`,
+`subject`, `email`, and `role`). Browser clients should keep that token in
+memory and send it as `X-CSRF-Token` on unsafe cookie-session requests.
+
+`POST /auth/logout` revokes the current cookie session and clears the session
+cookie. Because logout is an unsafe cookie-session request, browser callers
+must include `X-CSRF-Token` with the value returned by `/auth/whoami`.
+Bearer API-key requests do not require CSRF, and logout does not revoke API
+keys; use the API-key revoke endpoints for key lifecycle.
+
+The operator console sign-out control uses this endpoint and clears local
+in-memory auth state even if the server cannot be reached.
+
+API keys and browser SSO can coexist. When both are enabled, `/auth/status`
+lists both the API-key method and the configured SSO methods. Requests with an
+`Authorization: Bearer ...` header are evaluated as API-key requests before any
+session cookie; an invalid or malformed bearer header fails instead of falling
+back to the cookie session.
+
 ## OIDC
 
 ```sh
