@@ -25,16 +25,16 @@
 - **Commit messages:** concise imperative subject (repo style, e.g. "Add Principal abstraction to auth middleware"); end every commit message with the trailer `Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>`.
 - **Progress:** Foundation P0/P1 merged in PR #192. OIDC continued on
   `sso-oidc-provider` (PR #193). SAML continued on `sso-saml-provider`
-  (PR #194). LDAP continued on `codex/ldap-sso-provider` (PR #195). The current
-  `codex/sso-fixtures-wave` branch continued P5 after
-  `codex/sso-hardening-wave` (PR #196) with signed SAML response fixtures, a
-  self-contained containerized OpenLDAP fixture, and `user.provisioned` audit
-  events. `codex/sso-negative-fixtures-wave` (PR #198) added deeper
-  provider-specific negative fixtures for OIDC, SAML, and LDAP. The current
-  `codex/sso-p5-hardening-wave` branch closes the remaining P5 provider and
-  security coverage with fail-closed state-cookie callbacks, LDAP malformed
-  search results, trusted-proxy same-origin redirects, and secure-cookie checks
-  for redirect callbacks.
+  (PR #194). LDAP continued on `codex/ldap-sso-provider` (PR #195).
+  `codex/sso-hardening-wave` (PR #196) and `codex/sso-fixtures-wave` added P5
+  hardening with signed SAML response fixtures, a self-contained containerized
+  OpenLDAP fixture, and `user.provisioned` audit events.
+  `codex/sso-negative-fixtures-wave` (PR #198) added deeper provider-specific
+  negative fixtures for OIDC, SAML, and LDAP. `codex/sso-p5-hardening-wave`
+  then covered fail-closed state-cookie callbacks, LDAP malformed search
+  results, trusted-proxy same-origin redirects, and secure-cookie checks for
+  redirect callbacks. Wave 9 on `codex/sso-remaining-foundation-wave` is scoped
+  to remaining foundation hardening and docs cleanup.
 
 ## File structure
 
@@ -1644,6 +1644,11 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   trusted-proxy same-origin return targets, and secure session-cookie flags for
   redirect-provider callbacks. Prior P5 waves covered CSRF, audit, metrics, and
   operator docs.
+- [x] **Wave 9 status:** Covered remaining foundation hardening: fail-closed
+  shared identity validation, session idle-refresh correctness, malformed
+  `Authorization` header rejection before cookie-session fallback, OIDC/SAML
+  provider identity and state-cookie checks, UI cookie-session fail-closed/logout
+  handling, and operator docs/roadmap cleanup.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 

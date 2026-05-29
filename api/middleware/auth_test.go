@@ -334,6 +334,55 @@ func TestAuthBearerPrecedenceExemptsSessionCSRF(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 }
 
+func TestAuthRejectsMalformedAuthorizationEvenWithSessionCookie(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := auth.NewService(db)
+	auditor := auth.NewAuditLogger(db)
+	limiter := auth.NewRateLimiter(10, time.Minute)
+	sessions := auth.NewSessionStore(db)
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+	token, _, err := sessions.Create(t.Context(), auth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/jobs", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: token})
+
+	called := false
+	_, err = callMiddlewareWithDeps(t, authmw.AuthDeps{
+		Service:    svc,
+		Auditor:    auditor,
+		Limiter:    limiter,
+		Sessions:   sessions,
+		CookieName: "caesium_session",
+	}, req, &echo.RouteInfo{Path: "/v1/jobs", Method: http.MethodGet}, nil, func(c *echo.Context) error {
+		called = true
+		return c.NoContent(http.StatusOK)
+	})
+	require.Error(t, err)
+	require.False(t, called)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusUnauthorized, he.Code)
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, "authorization", entries[0].Actor)
+	requireAuditReason(t, entries[0], "malformed_authorization")
+}
+
 func TestAuthRejectsInvalidSessionCookieRecordsFailureAndAudit(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

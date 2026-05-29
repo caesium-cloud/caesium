@@ -31,7 +31,7 @@ type SessionStore struct {
 	absoluteTTL     time.Duration
 	now             func() time.Time
 
-	seenMu sync.Mutex
+	seenMu sync.RWMutex
 	seen   map[uuid.UUID]time.Time
 }
 
@@ -137,7 +137,18 @@ func (s *SessionStore) Validate(ctx context.Context, plaintext string) (*models.
 		return nil, nil, ErrSessionRevoked
 	}
 	now := s.nowUTC()
-	if now.After(sess.AbsoluteExpiresAt) || now.After(sess.IdleExpiresAt) {
+	if now.After(sess.AbsoluteExpiresAt) {
+		return nil, nil, ErrSessionExpired
+	}
+	idleExpiresAt := sess.IdleExpiresAt
+	if seenAt, ok := s.pendingSeen(sess.ID); ok {
+		pendingIdleExpiresAt := seenAt.Add(s.idleTTL)
+		if pendingIdleExpiresAt.After(idleExpiresAt) {
+			idleExpiresAt = pendingIdleExpiresAt
+			sess.IdleExpiresAt = idleExpiresAt
+		}
+	}
+	if now.After(idleExpiresAt) {
 		return nil, nil, ErrSessionExpired
 	}
 
@@ -194,6 +205,8 @@ func (s *SessionStore) RunLastSeenFlusher(ctx context.Context) {
 
 // Reap deletes expired sessions and sessions revoked more than an hour ago.
 func (s *SessionStore) Reap(ctx context.Context) (int64, error) {
+	s.flushSeen(ctx)
+
 	now := s.nowUTC()
 	res := s.db.WithContext(ctx).
 		Where(
@@ -257,6 +270,13 @@ func (s *SessionStore) recordSeen(id uuid.UUID) {
 	s.seenMu.Lock()
 	s.seen[id] = s.nowUTC()
 	s.seenMu.Unlock()
+}
+
+func (s *SessionStore) pendingSeen(id uuid.UUID) (time.Time, bool) {
+	s.seenMu.RLock()
+	seenAt, ok := s.seen[id]
+	s.seenMu.RUnlock()
+	return seenAt, ok
 }
 
 func (s *SessionStore) nowUTC() time.Time {

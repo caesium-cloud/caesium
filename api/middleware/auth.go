@@ -63,7 +63,15 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			var key *models.APIKey
 			var principal *auth.Principal
 
-			if token := extractBearerToken(c); token != "" {
+			token, malformedAuthorization := extractBearerToken(c)
+			if malformedAuthorization {
+				if recordCredentialFailure(c, d, ip, "authorization", "malformed_authorization") {
+					return rateLimitError(c, d.Limiter, ip)
+				}
+				return echo.NewHTTPError(http.StatusUnauthorized, "invalid authorization header")
+			}
+
+			if token != "" {
 				validKey, err := d.Service.ValidateKey(token)
 				if err != nil {
 					reason := classifyAuthError(err)
@@ -137,17 +145,22 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 	}
 }
 
-// extractBearerToken extracts the token from the Authorization header.
-func extractBearerToken(c *echo.Context) string {
+// extractBearerToken extracts a Bearer token and reports malformed
+// Authorization headers so cookie auth cannot silently mask them.
+func extractBearerToken(c *echo.Context) (string, bool) {
 	header := c.Request().Header.Get("Authorization")
 	if header == "" {
-		return ""
+		return "", false
 	}
 	parts := strings.SplitN(header, " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-		return ""
+		return "", true
 	}
-	return strings.TrimSpace(parts[1])
+	token := strings.TrimSpace(parts[1])
+	if token == "" {
+		return "", true
+	}
+	return token, false
 }
 
 // normalisePath returns the Echo route pattern (with :param placeholders)

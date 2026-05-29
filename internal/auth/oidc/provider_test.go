@@ -246,6 +246,87 @@ func TestCompleteRejectsAudienceMismatch(t *testing.T) {
 	require.NotNil(t, issuer.lastTokenForm)
 }
 
+func TestCompleteRejectsMissingOrBlankSubject(t *testing.T) {
+	tests := []struct {
+		name    string
+		prepare func(*mockIssuer)
+	}{
+		{
+			name: "missing subject",
+			prepare: func(issuer *mockIssuer) {
+				issuer.omitSubject = true
+			},
+		},
+		{
+			name: "blank subject",
+			prepare: func(issuer *mockIssuer) {
+				subject := " \t "
+				issuer.nextSubject = &subject
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newMockIssuer(t, "groups")
+			provider := newTestProvider(t, issuer, "groups")
+
+			stateCookie, state := beginForCallback(t, provider, "/")
+			issuer.nextNonce = state.Nonce
+			tt.prepare(issuer)
+			req := httptest.NewRequest(
+				http.MethodGet,
+				"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+				nil,
+			)
+			req.AddCookie(stateCookie)
+
+			_, _, err := provider.CompleteWithReturnTo(req)
+			require.ErrorIs(t, err, ErrInvalidIDToken)
+			require.NotNil(t, issuer.lastTokenForm)
+		})
+	}
+}
+
+func TestCompleteRejectsAuthorizedPartyMismatchForMultipleAudiences(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+
+	stateCookie, state := beginForCallback(t, provider, "/")
+	issuer.nextNonce = state.Nonce
+	issuer.nextAudiences = []string{"caesium", "api-client"}
+	issuer.nextAuthorizedParty = "different-client"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+		nil,
+	)
+	req.AddCookie(stateCookie)
+
+	_, _, err := provider.CompleteWithReturnTo(req)
+	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.NotNil(t, issuer.lastTokenForm)
+}
+
+func TestCompleteRejectsAuthorizedPartyMismatchForSingleAudience(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+
+	stateCookie, state := beginForCallback(t, provider, "/")
+	issuer.nextNonce = state.Nonce
+	issuer.nextAuthorizedParty = "different-client"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+		nil,
+	)
+	req.AddCookie(stateCookie)
+
+	_, _, err := provider.CompleteWithReturnTo(req)
+	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.NotNil(t, issuer.lastTokenForm)
+}
+
 func TestExtractGroupsClaim(t *testing.T) {
 	groups, err := extractGroups(json.RawMessage(`"one"`))
 	require.NoError(t, err)
@@ -318,13 +399,17 @@ func tamperCookieValue(value string) string {
 }
 
 type mockIssuer struct {
-	server        *httptest.Server
-	key           *rsa.PrivateKey
-	groupsClaim   string
-	nextNonce     string
-	nextAudience  string
-	nextExpiry    time.Time
-	lastTokenForm url.Values
+	server              *httptest.Server
+	key                 *rsa.PrivateKey
+	groupsClaim         string
+	nextNonce           string
+	nextSubject         *string
+	omitSubject         bool
+	nextAudience        string
+	nextAudiences       []string
+	nextAuthorizedParty string
+	nextExpiry          time.Time
+	lastTokenForm       url.Values
 }
 
 func newMockIssuer(t *testing.T, groupsClaim string) *mockIssuer {
@@ -381,21 +466,35 @@ func (m *mockIssuer) token(w http.ResponseWriter, r *http.Request) {
 	if audience == "" {
 		audience = "caesium"
 	}
+	var audienceClaim any = audience
+	if len(m.nextAudiences) > 0 {
+		audienceClaim = append([]string(nil), m.nextAudiences...)
+	}
 	expiresAt := m.nextExpiry
 	if expiresAt.IsZero() {
 		expiresAt = time.Now().Add(time.Hour)
 	}
-	idToken := m.signIDToken(map[string]any{
+	claims := map[string]any{
 		"iss":         m.URL(),
-		"sub":         "subject-123",
-		"aud":         audience,
+		"aud":         audienceClaim,
 		"exp":         expiresAt.Unix(),
 		"iat":         time.Now().Add(-time.Minute).Unix(),
 		"nonce":       nonce,
 		"email":       "ada@example.com",
 		"name":        "Ada Lovelace",
 		m.groupsClaim: []string{"caesium-admins", "data-eng"},
-	})
+	}
+	if !m.omitSubject {
+		subject := "subject-123"
+		if m.nextSubject != nil {
+			subject = *m.nextSubject
+		}
+		claims["sub"] = subject
+	}
+	if m.nextAuthorizedParty != "" {
+		claims["azp"] = m.nextAuthorizedParty
+	}
+	idToken := m.signIDToken(claims)
 	writeJSON(w, map[string]any{
 		"access_token": "access-token",
 		"token_type":   "Bearer",

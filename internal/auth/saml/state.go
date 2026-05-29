@@ -46,6 +46,10 @@ func (p *Provider) setStateCookie(w http.ResponseWriter, state loginState) error
 		return err
 	}
 	expires := time.Unix(state.ExpiresAt, 0).UTC()
+	sameSite := http.SameSiteLaxMode
+	if p.cookieSecure {
+		sameSite = http.SameSiteNoneMode
+	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     p.stateCookieName,
 		Value:    value,
@@ -54,7 +58,7 @@ func (p *Provider) setStateCookie(w http.ResponseWriter, state loginState) error
 		MaxAge:   int(p.stateTTL.Seconds()),
 		HttpOnly: true,
 		Secure:   p.cookieSecure,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 	})
 	return nil
 }

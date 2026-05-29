@@ -66,6 +66,70 @@ func TestSessionStoreValidateExpired(t *testing.T) {
 	require.ErrorIs(t, err, ErrSessionExpired)
 }
 
+func TestSessionStoreValidateHonorsPendingIdleRefresh(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	u := &models.User{ID: uuid.New(), Issuer: "oidc", Subject: "s", Email: "a@b.com", Role: models.RoleViewer}
+	require.NoError(t, db.Create(u).Error)
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := base
+	store := NewSessionStore(
+		db,
+		WithSessionNow(func() time.Time { return now }),
+		WithSessionTTLs(10*time.Second, time.Minute),
+	)
+	plaintext, sess, err := store.Create(context.Background(), CreateSessionRequest{UserID: u.ID})
+	require.NoError(t, err)
+	require.WithinDuration(t, base.Add(10*time.Second), sess.IdleExpiresAt, time.Millisecond)
+
+	now = base.Add(9 * time.Second)
+	_, _, err = store.Validate(context.Background(), plaintext)
+	require.NoError(t, err)
+
+	var stale models.Session
+	require.NoError(t, db.First(&stale, "id = ?", sess.ID).Error)
+	require.WithinDuration(t, base.Add(10*time.Second), stale.IdleExpiresAt, time.Millisecond)
+
+	now = base.Add(11 * time.Second)
+	gotSess, _, err := store.Validate(context.Background(), plaintext)
+	require.NoError(t, err)
+	require.WithinDuration(t, base.Add(19*time.Second), gotSess.IdleExpiresAt, time.Millisecond)
+
+	store.flushSeen(context.Background())
+
+	var flushed models.Session
+	require.NoError(t, db.First(&flushed, "id = ?", sess.ID).Error)
+	require.NotNil(t, flushed.LastSeenAt)
+	require.WithinDuration(t, base.Add(11*time.Second), *flushed.LastSeenAt, time.Millisecond)
+	require.WithinDuration(t, base.Add(21*time.Second), flushed.IdleExpiresAt, time.Millisecond)
+}
+
+func TestSessionStoreValidatePendingIdleRefreshDoesNotExtendAbsoluteExpiry(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	u := &models.User{ID: uuid.New(), Issuer: "oidc", Subject: "s", Email: "a@b.com", Role: models.RoleViewer}
+	require.NoError(t, db.Create(u).Error)
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := base
+	store := NewSessionStore(
+		db,
+		WithSessionNow(func() time.Time { return now }),
+		WithSessionTTLs(10*time.Second, 10*time.Second),
+	)
+	plaintext, _, err := store.Create(context.Background(), CreateSessionRequest{UserID: u.ID})
+	require.NoError(t, err)
+
+	now = base.Add(9 * time.Second)
+	_, _, err = store.Validate(context.Background(), plaintext)
+	require.NoError(t, err)
+
+	now = base.Add(11 * time.Second)
+	_, _, err = store.Validate(context.Background(), plaintext)
+	require.ErrorIs(t, err, ErrSessionExpired)
+}
+
 func TestSessionStoreValidateDisabledUser(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	defer testutil.CloseDB(db)
@@ -158,4 +222,36 @@ func TestSessionReap(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&models.Session{}).Where("id = ?", sess.ID).Count(&count).Error)
 	require.Equal(t, int64(0), count)
+}
+
+func TestSessionReapFlushesPendingIdleRefreshBeforeDeleting(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	defer testutil.CloseDB(db)
+	u := &models.User{ID: uuid.New(), Issuer: "oidc", Subject: "s", Email: "a@b.com", Role: models.RoleViewer}
+	require.NoError(t, db.Create(u).Error)
+
+	base := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := base
+	store := NewSessionStore(
+		db,
+		WithSessionNow(func() time.Time { return now }),
+		WithSessionTTLs(10*time.Second, time.Minute),
+	)
+	plaintext, sess, err := store.Create(context.Background(), CreateSessionRequest{UserID: u.ID})
+	require.NoError(t, err)
+
+	now = base.Add(9 * time.Second)
+	_, _, err = store.Validate(context.Background(), plaintext)
+	require.NoError(t, err)
+
+	now = base.Add(11 * time.Second)
+	n, err := store.Reap(context.Background())
+	require.NoError(t, err)
+	require.Zero(t, n)
+
+	var got models.Session
+	require.NoError(t, db.First(&got, "id = ?", sess.ID).Error)
+	require.NotNil(t, got.LastSeenAt)
+	require.WithinDuration(t, base.Add(11*time.Second), *got.LastSeenAt, time.Millisecond)
+	require.WithinDuration(t, base.Add(21*time.Second), got.IdleExpiresAt, time.Millisecond)
 }

@@ -15,6 +15,9 @@ import (
 // ErrLoginDenied is returned when an external identity is not allowed to log in.
 var ErrLoginDenied = errors.New("login denied")
 
+// ErrInvalidExternalIdentity is returned when a provider returns an unusable identity.
+var ErrInvalidExternalIdentity = errors.New("invalid external identity")
+
 // ExternalIdentity is the normalized identity every provider produces.
 type ExternalIdentity struct {
 	Issuer      string
@@ -73,6 +76,11 @@ func (s *SSOService) Complete(ctx context.Context, ext *ExternalIdentity, method
 		metrics.SSOLoginsTotal.WithLabelValues(provider, outcome).Inc()
 		metrics.SSOLoginDurationSeconds.WithLabelValues(provider).Observe(time.Since(start).Seconds())
 	}()
+
+	if ext == nil || strings.TrimSpace(ext.Issuer) == "" || strings.TrimSpace(ext.Subject) == "" {
+		s.auditLoginError(ext, method, ip, "invalid_external_identity")
+		return "", nil, ErrInvalidExternalIdentity
+	}
 
 	role, ok := s.roles.Resolve(ext.Groups)
 	if !ok {
