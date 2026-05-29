@@ -639,6 +639,110 @@ func TestOIDCCallbackRecordsProviderErrorsAsErrors(t *testing.T) {
 	require.Empty(t, deniedEntries)
 }
 
+func TestRedirectCallbacksClearProviderStateCookieOnSuccess(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		method   string
+		target   string
+		call     func(*SSOController, *echo.Context) error
+	}{
+		{
+			name:     "oidc",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sessions, sso := newTestSSOService(t)
+			provider := &fakeRedirectAuthenticator{
+				name:     tt.provider,
+				returnTo: "/runs",
+				identity: testExternalIdentity(tt.provider),
+			}
+			ctrl := NewSSO(sessions, sso, "caesium_session")
+			if tt.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tt.method, tt.target, "")
+
+			err := tt.call(ctrl, c)
+			require.NoError(t, err)
+
+			require.True(t, provider.clearStateCalled)
+			clearCookie := requireResponseCookie(t, rec.Result().Cookies(), provider.stateCookieName())
+			require.Empty(t, clearCookie.Value)
+			require.Equal(t, "/auth/sso/"+tt.provider, clearCookie.Path)
+			require.LessOrEqual(t, clearCookie.MaxAge, 0)
+			require.Equal(t, time.Unix(0, 0).UTC(), clearCookie.Expires)
+		})
+	}
+}
+
+func TestRedirectCallbacksClearProviderStateCookieOnProviderError(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		method   string
+		target   string
+		call     func(*SSOController, *echo.Context) error
+	}{
+		{
+			name:     "oidc",
+			provider: "oidc",
+			method:   http.MethodGet,
+			target:   "/auth/sso/oidc/callback?code=abc&state=xyz",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.OIDCCallback(c) },
+		},
+		{
+			name:     "saml",
+			provider: "saml",
+			method:   http.MethodPost,
+			target:   "/auth/sso/saml/acs",
+			call:     func(ctrl *SSOController, c *echo.Context) error { return ctrl.SAMLACS(c) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := NewSSO(nil, iauth.NewSSOService(nil, nil, nil), "caesium_session")
+			provider := &fakeRedirectAuthenticator{
+				name:        tt.provider,
+				completeErr: errors.New("provider callback failed"),
+			}
+			if tt.provider == "oidc" {
+				ctrl.SetOIDCProvider(provider)
+			} else {
+				ctrl.SetSAMLProvider(provider)
+			}
+			c, rec := newAuthContext(t, tt.method, tt.target, "")
+
+			err := tt.call(ctrl, c)
+			require.Error(t, err)
+
+			require.True(t, provider.clearStateCalled)
+			clearCookie := requireResponseCookie(t, rec.Result().Cookies(), provider.stateCookieName())
+			require.Empty(t, clearCookie.Value)
+			require.Equal(t, "/auth/sso/"+tt.provider, clearCookie.Path)
+			require.LessOrEqual(t, clearCookie.MaxAge, 0)
+			require.Equal(t, time.Unix(0, 0).UTC(), clearCookie.Expires)
+		})
+	}
+}
+
 func TestOIDCCallbackRejectsDeniedLogin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -851,16 +955,17 @@ func TestLogoutIgnoresForwardedProtoFromUntrustedPeer(t *testing.T) {
 }
 
 type fakeRedirectAuthenticator struct {
-	name           string
-	beginURL       string
-	beginErr       error
-	returnTo       string
-	identity       *iauth.ExternalIdentity
-	completeErr    error
-	beginCalled    bool
-	beginReturnTo  string
-	completeCalled bool
-	metadataBody   string
+	name             string
+	beginURL         string
+	beginErr         error
+	returnTo         string
+	identity         *iauth.ExternalIdentity
+	completeErr      error
+	beginCalled      bool
+	beginReturnTo    string
+	completeCalled   bool
+	clearStateCalled bool
+	metadataBody     string
 }
 
 func (f *fakeRedirectAuthenticator) Name() string {
@@ -881,6 +986,23 @@ func (f *fakeRedirectAuthenticator) Complete(_ *http.Request) (*iauth.ExternalId
 func (f *fakeRedirectAuthenticator) CompleteWithReturnTo(_ *http.Request) (*iauth.ExternalIdentity, string, error) {
 	f.completeCalled = true
 	return f.identity, f.returnTo, f.completeErr
+}
+
+func (f *fakeRedirectAuthenticator) ClearStateCookie(w http.ResponseWriter, _ *http.Request) {
+	f.clearStateCalled = true
+	http.SetCookie(w, &http.Cookie{
+		Name:     f.stateCookieName(),
+		Value:    "",
+		Path:     "/auth/sso/" + f.name,
+		MaxAge:   -1,
+		Expires:  time.Unix(0, 0).UTC(),
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+func (f *fakeRedirectAuthenticator) stateCookieName() string {
+	return "caesium_" + f.name + "_state"
 }
 
 func (f *fakeRedirectAuthenticator) Metadata(w http.ResponseWriter, _ *http.Request) error {

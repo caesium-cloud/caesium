@@ -20,6 +20,8 @@ var (
 	ErrInvalidState    = errors.New("invalid oidc state")
 )
 
+const stateCookiePath = "/auth/sso/oidc"
+
 type loginState struct {
 	State        string `json:"state"`
 	Nonce        string `json:"nonce"`
@@ -51,17 +53,26 @@ func (p *Provider) setStateCookie(w http.ResponseWriter, state loginState) error
 		return err
 	}
 	expires := time.Unix(state.ExpiresAt, 0).UTC()
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, p.stateCookie(value, expires, int(time.Until(expires).Seconds())))
+	return nil
+}
+
+// ClearStateCookie expires the one-time pre-login state cookie.
+func (p *Provider) ClearStateCookie(w http.ResponseWriter, _ *http.Request) {
+	http.SetCookie(w, p.stateCookie("", time.Unix(0, 0).UTC(), -1))
+}
+
+func (p *Provider) stateCookie(value string, expires time.Time, maxAge int) *http.Cookie {
+	return &http.Cookie{
 		Name:     p.stateCookieName,
 		Value:    value,
-		Path:     "/auth/sso/oidc",
+		Path:     stateCookiePath,
 		Expires:  expires,
-		MaxAge:   int(time.Until(expires).Seconds()),
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   p.cookieSecure,
 		SameSite: http.SameSiteLaxMode,
-	})
-	return nil
+	}
 }
 
 func (p *Provider) readStateCookie(r *http.Request) (loginState, error) {

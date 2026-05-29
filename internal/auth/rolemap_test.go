@@ -39,6 +39,19 @@ func TestRoleMapperDefaultRole(t *testing.T) {
 	require.Equal(t, models.RoleViewer, r)
 }
 
+func TestRoleMapperAcceptsRunnerRole(t *testing.T) {
+	m, err := NewRoleMapper("job-runners=runner", "runner")
+	require.NoError(t, err)
+
+	r, ok := m.Resolve([]string{"job-runners"})
+	require.True(t, ok)
+	require.Equal(t, models.RoleRunner, r)
+
+	r, ok = m.Resolve([]string{"nobody"})
+	require.True(t, ok)
+	require.Equal(t, models.RoleRunner, r)
+}
+
 func TestRoleMapperWildcardParticipatesInHighestRole(t *testing.T) {
 	m, err := NewRoleMapper("admins=viewer;*=operator", "")
 	require.NoError(t, err)

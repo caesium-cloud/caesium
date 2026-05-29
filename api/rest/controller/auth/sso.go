@@ -177,6 +177,8 @@ func (s *SSOController) completeRedirectLogin(c *echo.Context, provider iauth.Re
 	}
 
 	ext, returnTo, err := completeRedirectProvider(provider, c.Request())
+	clearRedirectStateCookie(provider, c.Response(), c.Request())
+
 	providerName := providerMethod(provider, fallbackName)
 	if err != nil {
 		s.recordProviderLoginFailure(c, providerName, "unknown", "callback_failed", iauth.OutcomeError)
@@ -401,12 +403,22 @@ type redirectAuthenticatorWithReturnTo interface {
 	CompleteWithReturnTo(r *http.Request) (*iauth.ExternalIdentity, string, error)
 }
 
+type redirectAuthenticatorStateClearer interface {
+	ClearStateCookie(w http.ResponseWriter, r *http.Request)
+}
+
 func completeRedirectProvider(provider iauth.RedirectAuthenticator, r *http.Request) (*iauth.ExternalIdentity, string, error) {
 	if withReturnTo, ok := provider.(redirectAuthenticatorWithReturnTo); ok {
 		return withReturnTo.CompleteWithReturnTo(r)
 	}
 	ext, err := provider.Complete(r)
 	return ext, "/", err
+}
+
+func clearRedirectStateCookie(provider iauth.RedirectAuthenticator, w http.ResponseWriter, r *http.Request) {
+	if clearer, ok := provider.(redirectAuthenticatorStateClearer); ok {
+		clearer.ClearStateCookie(w, r)
+	}
 }
 
 func safeReturnTo(r *http.Request, raw string, trustedProxies []*net.IPNet) string {
