@@ -183,6 +183,65 @@ func TestRegisterSSORoutesProtectsLogoutWithCSRF(t *testing.T) {
 	require.ErrorIs(t, err, iauth.ErrSessionRevoked)
 }
 
+func TestRegisterSSORoutesBearerLogoutSkipsCSRFAndKeepsCredentials(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	svc := iauth.NewService(db)
+	auditor := iauth.NewAuditLogger(db)
+	limiter := iauth.NewRateLimiter(5, time.Minute)
+	sessions := iauth.NewSessionStore(db)
+	user := &models.User{
+		ID:        uuid.New(),
+		Issuer:    "oidc",
+		Subject:   "sub-1",
+		Email:     "viewer@example.com",
+		Role:      models.RoleViewer,
+		CreatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create(user).Error)
+	sessionToken, sess, err := sessions.Create(t.Context(), iauth.CreateSessionRequest{UserID: user.ID})
+	require.NoError(t, err)
+	apiKey, err := svc.CreateKey(&iauth.CreateKeyRequest{
+		Role:      models.RoleViewer,
+		CreatedBy: "seed",
+	})
+	require.NoError(t, err)
+
+	e := echo.New()
+	registerSSORoutes(e, env.Environment{AuthSessionCookieName: "caesium_session"}, svc, auditor, limiter, sessions, nil, SSOProviders{})
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Header.Set("Authorization", "Bearer "+apiKey.Plaintext)
+	req.AddCookie(&http.Cookie{Name: "caesium_session", Value: sessionToken})
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Empty(t, rec.Result().Cookies())
+
+	storedKey, err := svc.ValidateKey(apiKey.Plaintext)
+	require.NoError(t, err)
+	require.Equal(t, apiKey.Key.ID, storedKey.ID)
+	require.Nil(t, storedKey.RevokedAt)
+
+	storedSession, _, err := sessions.Validate(t.Context(), sessionToken)
+	require.NoError(t, err)
+	require.Equal(t, sess.ID, storedSession.ID)
+	require.Nil(t, storedSession.RevokedAt)
+
+	entries, err := auditor.Query(&iauth.AuditQueryRequest{Action: iauth.ActionAuthLogout, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, apiKey.Key.KeyPrefix, entries[0].Actor)
+	require.Equal(t, "api_key", entries[0].ResourceType)
+	require.Equal(t, apiKey.Key.ID.String(), entries[0].ResourceID)
+	require.Equal(t, iauth.OutcomeSuccess, entries[0].Outcome)
+
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal(entries[0].Metadata, &metadata))
+	require.Equal(t, true, metadata["noop"])
+}
+
 func TestRegisterSSORoutesWhoamiReturnsSessionCSRF(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
