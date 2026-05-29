@@ -223,6 +223,9 @@ func validateIdentityShape(idToken *gooidc.IDToken, claims map[string]json.RawMe
 
 	rawAuthorizedParty, ok := claims["azp"]
 	if !ok {
+		if len(idToken.Audience) > 1 {
+			return fmt.Errorf("%w: missing authorized party", ErrInvalidIDToken)
+		}
 		return nil
 	}
 	var authorizedParty string

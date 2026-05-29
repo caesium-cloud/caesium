@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -11,8 +12,27 @@ import (
 // ParseTrustedProxyRanges parses a comma-separated proxy allowlist into IP
 // ranges. Entries may be CIDR ranges or individual IP addresses.
 func ParseTrustedProxyRanges(raw string) []*net.IPNet {
+	ranges, invalid := parseTrustedProxyRanges(raw)
+	for _, entry := range invalid {
+		log.Warn("ignoring invalid trusted proxy entry", "value", entry)
+	}
+	return ranges
+}
+
+// ParseTrustedProxyRangesStrict parses a proxy allowlist and rejects invalid
+// entries. Use it when a proxy list is part of startup security validation.
+func ParseTrustedProxyRangesStrict(raw string) ([]*net.IPNet, error) {
+	ranges, invalid := parseTrustedProxyRanges(raw)
+	if len(invalid) > 0 {
+		return nil, fmt.Errorf("invalid trusted proxy entry %q", invalid[0])
+	}
+	return ranges, nil
+}
+
+func parseTrustedProxyRanges(raw string) ([]*net.IPNet, []string) {
 	parts := strings.Split(raw, ",")
 	ranges := make([]*net.IPNet, 0, len(parts))
+	invalid := make([]string, 0)
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
@@ -33,9 +53,9 @@ func ParseTrustedProxyRanges(raw string) []*net.IPNet {
 			continue
 		}
 
-		log.Warn("ignoring invalid trusted proxy entry", "value", part)
+		invalid = append(invalid, part)
 	}
-	return ranges
+	return ranges, invalid
 }
 
 // RequestIsSecure reports whether the original request is HTTPS. Forwarded

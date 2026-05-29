@@ -34,7 +34,10 @@
   then covered fail-closed state-cookie callbacks, LDAP malformed search
   results, trusted-proxy same-origin redirects, and secure-cookie checks for
   redirect callbacks. Wave 9 on `codex/sso-remaining-foundation-wave` is scoped
-  to remaining foundation hardening and docs cleanup.
+  to remaining foundation hardening and docs cleanup. Wave 10 on
+  `codex/sso-post-foundation-hardening` clears one-time OIDC/SAML state cookies
+  after redirect callbacks, tightens OIDC multi-audience `azp` checks, validates
+  trusted-proxy TLS-guard config, and corrects role-mapping docs/tests.
 
 ## File structure
 
@@ -1649,6 +1652,11 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   `Authorization` header rejection before cookie-session fallback, OIDC/SAML
   provider identity and state-cookie checks, UI cookie-session fail-closed/logout
   handling, and operator docs/roadmap cleanup.
+- [x] **Wave 10 status:** Added one-time cleanup for OIDC/SAML pre-login state
+  cookies after redirect callbacks, preserving provider cookie policy on expiry,
+  required OIDC `azp` for multi-audience ID tokens, rejected invalid trusted
+  proxy entries in the auth TLS startup guard, and corrected SSO role-mapping
+  docs/tests to include the supported `runner` role.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 

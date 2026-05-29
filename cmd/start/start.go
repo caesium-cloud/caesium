@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/api"
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
 	"github.com/caesium-cloud/caesium/internal/auth"
@@ -661,7 +662,10 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 		// TLS requirement check.
 		if vars.AuthRequireTLS {
 			hasTLS := vars.TLSCert != "" && vars.TLSKey != ""
-			hasProxy := vars.TrustedProxies != ""
+			hasProxy, err := hasTrustedProxyTLSPath(vars.TrustedProxies)
+			if err != nil {
+				log.Fatal("invalid CAESIUM_TRUSTED_PROXIES", "error", err)
+			}
 			if !hasTLS && !hasProxy {
 				log.Fatal(
 					"TLS is required when authentication is enabled. " +
@@ -723,4 +727,15 @@ func initAuth(ctx context.Context, vars env.Environment, runAsync func(func())) 
 		log.Fatal("unknown CAESIUM_AUTH_MODE value", "mode", vars.AuthMode)
 		return nil, nil, nil, nil, nil // unreachable
 	}
+}
+
+func hasTrustedProxyTLSPath(raw string) (bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return false, nil
+	}
+	ranges, err := authmw.ParseTrustedProxyRangesStrict(raw)
+	if err != nil {
+		return false, err
+	}
+	return len(ranges) > 0, nil
 }

@@ -79,6 +79,52 @@ func TestBeginSetsSecurePostStateCookieSameSiteNone(t *testing.T) {
 	require.Equal(t, http.SameSiteNoneMode, cookies[0].SameSite)
 }
 
+func TestClearStateCookiePreservesCookiePolicy(t *testing.T) {
+	tests := []struct {
+		name     string
+		secure   bool
+		sameSite http.SameSite
+	}{
+		{name: "insecure lax", secure: false, sameSite: http.SameSiteLaxMode},
+		{name: "secure none", secure: true, sameSite: http.SameSiteNoneMode},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider, err := New(t.Context(), Config{
+				IDPMetadataXML: minimalIDPMetadata,
+				PublicBaseURL:  "https://app.example.com",
+				CookieSecure:   tt.secure,
+				CookieSecret:   []byte(strings.Repeat("x", 32)),
+				ReplayCache:    fakeReplayCache{},
+			})
+			require.NoError(t, err)
+
+			setRec := httptest.NewRecorder()
+			_, err = provider.Begin(setRec, httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil), "/")
+			require.NoError(t, err)
+			setCookies := setRec.Result().Cookies()
+			require.Len(t, setCookies, 1)
+			require.Equal(t, tt.sameSite, setCookies[0].SameSite)
+
+			clearRec := httptest.NewRecorder()
+			provider.ClearStateCookie(clearRec, httptest.NewRequest(http.MethodPost, "/auth/sso/saml/acs", nil))
+			clearCookies := clearRec.Result().Cookies()
+			require.Len(t, clearCookies, 1)
+
+			clearCookie := clearCookies[0]
+			require.Equal(t, setCookies[0].Name, clearCookie.Name)
+			require.Empty(t, clearCookie.Value)
+			require.Equal(t, setCookies[0].Path, clearCookie.Path)
+			require.Equal(t, setCookies[0].HttpOnly, clearCookie.HttpOnly)
+			require.Equal(t, setCookies[0].Secure, clearCookie.Secure)
+			require.Equal(t, setCookies[0].SameSite, clearCookie.SameSite)
+			require.LessOrEqual(t, clearCookie.MaxAge, 0)
+			require.Equal(t, time.Unix(0, 0).UTC(), clearCookie.Expires)
+		})
+	}
+}
+
 func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 	provider, err := New(t.Context(), Config{
 		IDPMetadataXML: minimalIDPMetadata,

@@ -20,6 +20,8 @@ var (
 	ErrInvalidState    = errors.New("invalid saml state")
 )
 
+const stateCookiePath = "/auth/sso/saml"
+
 type loginState struct {
 	RelayState string `json:"relay_state"`
 	RequestID  string `json:"request_id"`
@@ -46,21 +48,33 @@ func (p *Provider) setStateCookie(w http.ResponseWriter, state loginState) error
 		return err
 	}
 	expires := time.Unix(state.ExpiresAt, 0).UTC()
-	sameSite := http.SameSiteLaxMode
-	if p.cookieSecure {
-		sameSite = http.SameSiteNoneMode
-	}
-	http.SetCookie(w, &http.Cookie{
+	http.SetCookie(w, p.stateCookie(value, expires, int(p.stateTTL.Seconds())))
+	return nil
+}
+
+// ClearStateCookie expires the one-time pre-login state cookie.
+func (p *Provider) ClearStateCookie(w http.ResponseWriter, _ *http.Request) {
+	http.SetCookie(w, p.stateCookie("", time.Unix(0, 0).UTC(), -1))
+}
+
+func (p *Provider) stateCookie(value string, expires time.Time, maxAge int) *http.Cookie {
+	return &http.Cookie{
 		Name:     p.stateCookieName,
 		Value:    value,
-		Path:     "/auth/sso/saml",
+		Path:     stateCookiePath,
 		Expires:  expires,
-		MaxAge:   int(p.stateTTL.Seconds()),
+		MaxAge:   maxAge,
 		HttpOnly: true,
 		Secure:   p.cookieSecure,
-		SameSite: sameSite,
-	})
-	return nil
+		SameSite: p.stateCookieSameSite(),
+	}
+}
+
+func (p *Provider) stateCookieSameSite() http.SameSite {
+	if p.cookieSecure {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
 }
 
 func (p *Provider) readStateCookie(r *http.Request) (loginState, error) {

@@ -57,6 +57,30 @@ func TestBeginBuildsAuthURLAndStateCookie(t *testing.T) {
 	assert.NotEmpty(t, state.CodeVerifier)
 }
 
+func TestClearStateCookiePreservesCookiePolicy(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+	provider.cookieSecure = true
+
+	setRec := httptest.NewRecorder()
+	_, err := provider.Begin(setRec, httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/login", nil), "/")
+	require.NoError(t, err)
+	setCookie := requireCookie(t, setRec.Result(), DefaultStateCookieName)
+
+	clearRec := httptest.NewRecorder()
+	provider.ClearStateCookie(clearRec, httptest.NewRequest(http.MethodGet, "https://app.example.com/auth/sso/oidc/callback", nil))
+	clearCookie := requireCookie(t, clearRec.Result(), DefaultStateCookieName)
+
+	assert.Equal(t, setCookie.Name, clearCookie.Name)
+	assert.Empty(t, clearCookie.Value)
+	assert.Equal(t, setCookie.Path, clearCookie.Path)
+	assert.Equal(t, setCookie.HttpOnly, clearCookie.HttpOnly)
+	assert.Equal(t, setCookie.Secure, clearCookie.Secure)
+	assert.Equal(t, setCookie.SameSite, clearCookie.SameSite)
+	assert.LessOrEqual(t, clearCookie.MaxAge, 0)
+	assert.Equal(t, time.Unix(0, 0).UTC(), clearCookie.Expires)
+}
+
 func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 	issuer := newMockIssuer(t, "groups")
 	provider := newTestProvider(t, issuer, "groups")
@@ -305,6 +329,26 @@ func TestCompleteRejectsAuthorizedPartyMismatchForMultipleAudiences(t *testing.T
 
 	_, _, err := provider.CompleteWithReturnTo(req)
 	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.NotNil(t, issuer.lastTokenForm)
+}
+
+func TestCompleteRejectsMissingAuthorizedPartyForMultipleAudiences(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+
+	stateCookie, state := beginForCallback(t, provider, "/")
+	issuer.nextNonce = state.Nonce
+	issuer.nextAudiences = []string{"caesium", "api-client"}
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+		nil,
+	)
+	req.AddCookie(stateCookie)
+
+	_, _, err := provider.CompleteWithReturnTo(req)
+	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.ErrorContains(t, err, "missing authorized party")
 	require.NotNil(t, issuer.lastTokenForm)
 }
 

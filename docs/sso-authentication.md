@@ -16,7 +16,7 @@ CAESIUM_AUTH_MODE=api-key
 CAESIUM_AUTH_KEY_HASH_SECRET=<32+ byte random secret>
 CAESIUM_AUTH_REQUIRE_TLS=true
 CAESIUM_AUTH_PUBLIC_BASE_URL=https://caesium.example.com
-CAESIUM_AUTH_ROLE_MAPPING='CN=Caesium Admins,OU=Groups,DC=example,DC=com=admin;data-eng=operator;*=viewer'
+CAESIUM_AUTH_ROLE_MAPPING='CN=Caesium Admins,OU=Groups,DC=example,DC=com=admin;data-eng=operator;job-runners=runner;*=viewer'
 CAESIUM_AUTH_SESSION_IDLE_TTL=8h
 CAESIUM_AUTH_SESSION_ABSOLUTE_TTL=24h
 CAESIUM_AUTH_SESSION_COOKIE_NAME=caesium_session
@@ -25,12 +25,12 @@ CAESIUM_AUTH_DEFAULT_ROLE=
 
 `CAESIUM_AUTH_ROLE_MAPPING` is a semicolon-separated list of `group=role`
 entries. Caesium chooses the highest mapped role when a user belongs to several
-groups. Valid roles are `viewer`, `operator`, and `admin`. Use `*` only when a
-catch-all login policy is intended.
+groups. Valid roles are `viewer`, `runner`, `operator`, and `admin`. Use `*`
+only when a catch-all login policy is intended.
 
 If no group mapping matches, an empty `CAESIUM_AUTH_DEFAULT_ROLE` denies login.
-Set it to `viewer`, `operator`, or `admin` only when unmapped SSO users should
-receive that fallback role.
+Set it to `viewer`, `runner`, `operator`, or `admin` only when unmapped SSO
+users should receive that fallback role.
 
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
@@ -42,7 +42,8 @@ If Caesium is served behind a TLS-terminating proxy, set
 CIDRs. Caesium trusts `X-Forwarded-Proto: https` only from those peers; that
 controls both `Secure` session cookies and same-origin redirect checks. Leave
 `CAESIUM_AUTH_REQUIRE_TLS=true` in production so auth startup requires either
-direct TLS certs or a trusted proxy path.
+direct TLS certs or a trusted proxy path. Trusted proxy entries must be valid
+IP addresses or CIDR ranges; invalid entries fail the auth startup TLS guard.
 
 ### Common Operator Reference
 
