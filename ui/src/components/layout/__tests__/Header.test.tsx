@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { AnchorHTMLAttributes, ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { Header } from "../Header";
@@ -42,7 +42,8 @@ vi.mock("../../mode-toggle", () => ({
 
 describe("Header", () => {
   beforeEach(() => {
-    logoutMock.mockClear();
+    logoutMock.mockReset();
+    logoutMock.mockResolvedValue(undefined);
   });
 
   it("calls logout from the sign-out control", () => {
@@ -54,5 +55,31 @@ describe("Header", () => {
     fireEvent.click(signOut);
 
     expect(logoutMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("disables sign-out while logout is pending", async () => {
+    let resolveLogout!: () => void;
+    logoutMock.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveLogout = resolve;
+      }),
+    );
+    render(<Header />);
+
+    const signOut = screen.getByRole("button", { name: "Sign out" });
+
+    fireEvent.click(signOut);
+
+    expect(signOut).toBeDisabled();
+    expect(signOut).toHaveAttribute("aria-busy", "true");
+
+    fireEvent.click(signOut);
+    expect(logoutMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveLogout();
+    });
+
+    await waitFor(() => expect(signOut).not.toBeDisabled());
   });
 });

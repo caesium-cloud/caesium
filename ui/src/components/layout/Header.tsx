@@ -1,5 +1,6 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Bell, ChevronRight, LogOut } from "lucide-react";
+import { useState } from "react";
 import { ModeToggle } from "../mode-toggle";
 import { CommandMenu } from "../command-menu";
 import { Button } from "@/components/ui/button";
@@ -75,6 +76,21 @@ function Breadcrumb() {
 }
 
 export function Header() {
+  const [isSigningOut, setIsSigningOut] = useState(false);
+
+  const handleSignOut = async () => {
+    if (isSigningOut) {
+      return;
+    }
+
+    setIsSigningOut(true);
+    try {
+      await logout();
+    } finally {
+      setIsSigningOut(false);
+    }
+  };
+
   return (
     <header className="sticky top-0 z-30 flex h-14 items-center justify-between border-b border-border/70 bg-background/70 px-6 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex items-center gap-4">
@@ -101,8 +117,10 @@ export function Header() {
           variant="ghost"
           size="icon"
           aria-label="Sign out"
+          aria-busy={isSigningOut}
           className="text-text-2 hover:text-text-1"
-          onClick={() => void logout()}
+          disabled={isSigningOut}
+          onClick={() => void handleSignOut()}
         >
           <LogOut className="h-4 w-4" />
         </Button>
