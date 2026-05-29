@@ -103,7 +103,7 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 ### 2.4 UI Refresh (Caesium Console v2) ✅ Shipped 2026-04-28
 
-Design system, status semantics, and full page refreshes shipped across PRs [#146](https://github.com/caesium-cloud/caesium/pull/146), [#147](https://github.com/caesium-cloud/caesium/pull/147), and [#148](https://github.com/caesium-cloud/caesium/pull/148). Phases 0–4 complete. See [`ui_implementation_plan.md`](ui_implementation_plan.md) for the shipped feature record.
+Design system, status semantics, and full page refreshes shipped across PRs [#146](https://github.com/caesium-cloud/caesium/pull/146), [#147](https://github.com/caesium-cloud/caesium/pull/147), and [#148](https://github.com/caesium-cloud/caesium/pull/148). Phases 0–4 complete. See [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) for the shipped feature record.
 
 ### 2.5 Cost Tracking & Resource Awareness
 
@@ -222,8 +222,8 @@ Features that were previously on the roadmap and are now shipped:
 | Feature | Design Doc | Status |
 |---------|-----------|--------|
 | Smart incremental execution & task caching | [`design-incremental-execution.md`](design-incremental-execution.md) | Shipped (Phase 1) |
-| Data contracts / schema validation | [`brainstorm-differentiators.md`](brainstorm-differentiators.md) §2 | Shipped |
-| Local dev experience (`caesium dev`, `caesium test`) | [`brainstorm-differentiators.md`](brainstorm-differentiators.md) §4 | Shipped |
+| Data contracts / schema validation | [`brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) §2 | Shipped |
+| Local dev experience (`caesium dev`, `caesium test`) | [`brainstorm-differentiators.md`](archive/brainstorm-differentiators.md) §4 | Shipped |
 | Backfill with reprocess modes | [`backfill.md`](backfill.md) | Shipped |
 | OpenLineage integration | [`open_lineage.md`](open_lineage.md) | Shipped |
 | Git-based job synchronization | — | Shipped |
@@ -231,14 +231,14 @@ Features that were previously on the roadmap and are now shipped:
 | Full-featured HTTP triggers & webhook ingestion | [`design-event-triggers.md`](design-event-triggers.md) WS1 | Shipped |
 | Task retries with exponential backoff | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
-| Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](ui_implementation_plan.md) | Shipped |
+| Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
 | Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
 
 ---
 
 ## Related Documents
 
-- [Brainstorm: Killer Features Beyond Airflow Parity](brainstorm-differentiators.md) — original idea backlog
+- [Brainstorm: Killer Features Beyond Airflow Parity](archive/brainstorm-differentiators.md) — original idea backlog
 - [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system
 - [Design: Event-Driven Triggers](design-event-triggers.md) — P0 trigger overhaul
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls

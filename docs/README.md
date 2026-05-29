@@ -1,6 +1,6 @@
 # Caesium Documentation
 
-This directory mixes current-source operator documentation with design records and historical planning notes. Use the sections below to distinguish what describes the product today versus what is future-looking context.
+This directory separates current-source operator documentation from forward-looking design records. Completed, shipped, superseded, and historical records have been moved out of the active set into [`archive/`](archive/README.md).
 
 ## Current Source of Truth
 
@@ -16,40 +16,27 @@ This directory mixes current-source operator documentation with design records a
 - [airflow-parity.md](airflow-parity.md): Implemented Airflow-style authoring and operator semantics.
 - [examples/](examples/): Example job manifests used by docs and conformance tests.
 
-## UI and Operator Surface
+## Strategy & Roadmap
 
-- [ui_implementation_plan.md](ui_implementation_plan.md): Historical record of shipped UI feature scope (v1 plan + 2026-04 refresh).
-- [backfill.md](backfill.md): Jobs view backfill behavior and cancellation semantics.
-- [parallel-execution-operations.md](parallel-execution-operations.md): Worker inspection and DAG attribution surfaces.
+- [roadmap.md](roadmap.md): Strategic vision, design principles, and the prioritized feature plan.
 
-## Design Records and Roadmaps
+## Active Design Records
 
-These files are useful context, but each should be treated according to its status banner. CI enforces that these docs keep an explicit `> Status:` banner near the top.
+Forward-looking or partially-shipped designs with open work. Each carries a `> Status:` banner near the top; CI enforces banners on the planning/historical records it tracks.
 
-- [roadmap.md](roadmap.md): Strategic vision and feature priorities.
-- [job-definition-plan.md](job-definition-plan.md)
-- [design-airflow-parity.md](design-airflow-parity.md)
-- [design-arm64-support.md](design-arm64-support.md)
-- [design-event-triggers.md](design-event-triggers.md)
-- [design-concurrency-priority.md](design-concurrency-priority.md)
-- [design-database-locking-fix.md](design-database-locking-fix.md)
-- [design-scaling-job-execution.md](design-scaling-job-execution.md)
-- [design-sla-management.md](design-sla-management.md)
-- [design-task-templates.md](design-task-templates.md)
-- [design-helm-kubernetes-deployment.md](design-helm-kubernetes-deployment.md)
-- [design-incremental-execution.md](design-incremental-execution.md)
-- [design-internal-mtls-auto-provisioning.md](design-internal-mtls-auto-provisioning.md)
-- [design-parallel-job-execution.md](design-parallel-job-execution.md)
-- [design-scaling-job-execution.md](design-scaling-job-execution.md)
-- [brainstorm-differentiators.md](brainstorm-differentiators.md)
-- [load-baseline-2026-05-23.md](load-baseline-2026-05-23.md): Phase 0 load harness baseline measurement output.
-- [load-baseline-distributed-2026-05-24.md](load-baseline-distributed-2026-05-24.md): First distributed-mode (3-node k8s) baseline; validates the Phase 2 gate.
-- [load-baseline-phase2a-2026-05-24.md](load-baseline-phase2a-2026-05-24.md): First measurement of Phase 2 Phase A; surfaces the missing executor-side dispatch loop.
-- [load-baseline-phase2a2-2026-05-24.md](load-baseline-phase2a2-2026-05-24.md): Phase A2 dispatch loop measured; finds it races ClaimNext and loses — redirects strategy to Phase B.
-- [load-baseline-b1-2026-05-25.md](load-baseline-b1-2026-05-25.md): B0+B1 measured; deferral works but exposes the push path never executes dispatched tasks — reshapes Phase B around the execution cycle.
-- [load-baseline-b2-2026-05-24.md](load-baseline-b2-2026-05-24.md): Phase B2 dispatch→execute→complete cycle; 0/10 → stable 10/10 after hardening the completion and run-start paths against transient dqlite contention.
-- [load-baseline-b3-2026-05-25.md](load-baseline-b3-2026-05-25.md): Phase B3 in-memory owner state + checkpoint/replay + internal mTLS; in-memory advancement verified 10/10 (single + 3-node) after fixing the claim/predecessor stall; failover mechanism proven, owner-crash end-to-end still flaky under sandbox voter loss.
+- [design-airflow-parity.md](design-airflow-parity.md): Airflow-parity workstreams — current shipped subset in `airflow-parity.md`; this tracks the remaining workstreams.
+- [design-event-triggers.md](design-event-triggers.md): HTTP webhook triggers (shipped, WS1) plus event-based routing and trigger chaining (proposed, WS2–WS3).
+- [design-concurrency-priority.md](design-concurrency-priority.md): Concurrency strategies, rate limiting, and priority-based scheduling (proposed).
+- [design-database-locking-fix.md](design-database-locking-fix.md): dqlite contention remediation (Phases 0–3 shipped) and the scale-out path.
+- [design-scaling-job-execution.md](design-scaling-job-execution.md): Cluster-wide task-start throughput frontier on sharded dqlite.
+- [design-incremental-execution.md](design-incremental-execution.md): Smart incremental execution and task caching (Phase 1 shipped; follow-on phases planned).
+- [design-sla-management.md](design-sla-management.md): SLA deadline tracking, predictive completion estimates, and escalation chains (proposed).
+- [design-task-templates.md](design-task-templates.md): Reusable, parameterized step templates (proposed).
 
-## Historical Notes
+## Load Testing
 
-- [architecture-history.md](architecture-history.md): Early architectural intent and tradeoffs.
+- [load-testing-history.md](load-testing-history.md): Consolidated Phase 0 → Phase 2B distributed-execution load-test history (replaces the former per-run `load-baseline-*` series).
+
+## Archive
+
+Completed, shipped, or historical records that are no longer the active source of truth live under [`archive/`](archive/README.md): shipped design docs (ARM64 build support, Helm/Kubernetes deployment, internal mTLS auto-provisioning, parallel job execution), completed plans (job-definition reconciliation, UI implementation), the original feature brainstorm, and early architecture history.

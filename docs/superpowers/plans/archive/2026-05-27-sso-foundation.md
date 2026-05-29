@@ -1,5 +1,9 @@
 # SSO Authentication — Foundation (P0 + P1) Implementation Plan
 
+> **Archived:** Completed and archived on 2026-05-29. P0/P1 and the follow-on
+> P2-P5 SSO roadmap items in this plan are complete; future SSO work should
+> start from a new plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build the identity/session foundation for native SSO — a `Principal` abstraction that unifies API keys and user sessions, plus server-side sessions in dqlite, group→role mapping, cookie/CSRF handling, and the shared login pipeline — so the OIDC/SAML/LDAP providers (separate plans) only have to produce an `ExternalIdentity`.

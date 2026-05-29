@@ -26,5 +26,5 @@ Phase 1 focused on task execution semantics and operator controls needed to expr
 
 - [Job definitions](job-definitions.md)
 - [Job schema reference](job-schema-reference.md)
-- [Embedded UI plan](ui_implementation_plan.md)
-- [Job definition plan](job-definition-plan.md)
+- [Embedded UI plan](archive/ui_implementation_plan.md)
+- [Job definition plan](archive/job-definition-plan.md)

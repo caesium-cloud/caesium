@@ -336,15 +336,14 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	root := repoRoot(t)
 
 	files := []string{
-		"docs/architecture-history.md",
-		"docs/brainstorm-differentiators.md",
 		"docs/design-airflow-parity.md",
-		"docs/design-arm64-support.md",
-		"docs/design-helm-kubernetes-deployment.md",
+		"docs/design-concurrency-priority.md",
+		"docs/design-database-locking-fix.md",
+		"docs/design-event-triggers.md",
 		"docs/design-incremental-execution.md",
-		"docs/design-parallel-job-execution.md",
-		"docs/job-definition-plan.md",
-		"docs/ui_implementation_plan.md",
+		"docs/design-scaling-job-execution.md",
+		"docs/design-sla-management.md",
+		"docs/design-task-templates.md",
 	}
 
 	for _, rel := range files {
