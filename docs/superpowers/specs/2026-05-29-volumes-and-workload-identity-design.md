@@ -133,7 +133,8 @@ Job definition (YAML)
          │ apply / git-sync
          ▼
   Validation (pkg/jobdef): volumes resolvable, mounts reference declared volumes,
-  exactly one source kind, access-mode sanity, engine compatibility.
+  one source kind per engine, a source for every engine a step uses,
+  access-mode sanity, engine compatibility.
 
          │ stored as Atom.Spec (JSON) + Job/Trigger models
          ▼
@@ -198,19 +199,24 @@ such in docs.
 ```yaml
 volumes:
   - name: work                       # referenced by steps
-    source:                          # exactly one kind
-      # Kubernetes:
-      pvc: ci-shared-rwx             #   pre-existing PersistentVolumeClaim (mount only)
-      # claimTemplate:               #   ephemeral, CSI-provisioned, Caesium owns claim lifecycle
-      #   storageClass: nfs-csi
-      #   size: 5Gi
-      #   accessMode: ReadWriteMany
-      # source:                      #   generic k8s VolumeSource pass-through (nfs, csi, …)
-      #   nfs: { server: 10.0.0.5, path: /export/caesium }
-      # Docker / Podman:
-      # bind: /mnt/nfs/caesium-work  #   host path (e.g. an NFS mount)
-      # volume: caesium-work         #   named docker/podman volume
-      # tmpfs: { sizeBytes: 536870912 }
+    # PORTABLE form — per-engine sources so the SAME definition runs under
+    # `caesium dev` (docker) and in production (kubernetes) without edits.
+    # The executor selects the source matching the executing step's engine.
+    sources:
+      kubernetes:
+        pvc: ci-shared-rwx           # pre-existing PVC (mount only)
+        # claimTemplate:             #   ephemeral, CSI-provisioned (Caesium owns the claim)
+        #   storageClass: nfs-csi
+        #   size: 5Gi
+        #   accessMode: ReadWriteMany
+        # volumeSource:              #   generic k8s VolumeSource pass-through (nfs, csi, …)
+        #   nfs: { server: 10.0.0.5, path: /export/caesium }
+      docker:
+        bind: /mnt/nfs/caesium-work  # host path — must be an NFS/shared mount on every worker
+      podman:
+        bind: /mnt/nfs/caesium-work
+    # SHORTHAND — single-engine jobs may use one `source:` with exactly one kind:
+    #   source: { pvc: ci-shared-rwx }
 
 steps:
   - name: plan
@@ -236,11 +242,19 @@ steps:
   (step-level `Step.VolumeMounts []VolumeMount`).
 - Update **both** `Step.UnmarshalYAML` (line ~134) and `Step.UnmarshalJSON` (line ~197) —
   the codebase has two unmarshalers that must stay in sync.
+- A volume declares **either** a single `source` (one source kind) **or** a `sources` map
+  keyed by engine (`kubernetes`/`docker`/`podman`), each entry holding exactly one source
+  kind. The `sources` map is what makes a definition portable across `caesium dev` (docker)
+  and production (kubernetes).
 - Validation in `Validate()` / `validateSteps`:
   - every `volumeMounts[].volume` references a declared job volume;
-  - exactly one `source` kind is set per volume;
-  - `pvc`/`claimTemplate`/generic-source are k8s-only; `bind`/`volume`/`tmpfs` are
-    docker/podman-only — reject cross-engine use against a step's `engine`;
+  - exactly one of `source` / `sources` is set; within it, exactly one source **kind** per
+    engine entry;
+  - `pvc`/`claimTemplate`/`volumeSource` are k8s-only; `bind`/`volume`/`tmpfs` are
+    docker/podman-only — reject a source kind that doesn't match its engine key (or, for the
+    `source` shorthand, the step's `engine`);
+  - every engine a step actually uses has a resolvable source for each volume it mounts —
+    fail fast at lint/apply if a step runs on an engine the volume has no source for;
   - mount paths are absolute and unique per step; `accessMode` is a known value.
 
 ### 6.3 Container spec & engines
@@ -259,12 +273,22 @@ steps:
 
 - **External** sources (`pvc`, `bind`, named `volume`, generic source): mount only; Caesium
   never creates or deletes them.
-- **Ephemeral** (`claimTemplate` / a per-run named docker volume): Caesium creates the claim
-  object / volume at **run start** and deletes it at **run terminal state**. Backing storage
-  is still BYO (the StorageClass/CSI/volume driver). Cleanup must be **crash-safe**: tie
-  deletion to run completion in the run-owner state machine and add an orphan-reaper that
+- **Ephemeral** (k8s `claimTemplate` / a per-run named docker/podman volume): Caesium creates
+  the claim object / volume at **run start** and deletes it at **run terminal state**. Backing
+  storage is still BYO (the StorageClass/CSI/volume driver). Cleanup must be **crash-safe**:
+  tie deletion to run completion in the run-owner state machine and add an orphan-reaper that
   GCs ephemeral volumes whose run is terminal/absent (mirrors the existing cache pruner
   pattern). Name ephemeral resources deterministically by run id for reliable GC.
+- **Distributed-mode constraint on ephemeral docker/podman volumes (important):** a named
+  docker/podman volume lives on a single daemon's local host. With no node-affinity (§7), a
+  run-owner that creates a per-run named volume cannot share it with a co-mounting step
+  dispatched to a *different* worker — that worker would silently auto-create an empty
+  local volume of the same name, losing data. Therefore **ephemeral named docker/podman
+  volumes are single-node-only**; validation rejects them when execution mode is distributed.
+  Cross-node sharing on docker/podman requires an **external** `bind` source pointing at a
+  shared network filesystem (NFS/CephFS) mounted on every worker (which Caesium mounts but
+  does not manage). Ephemeral cross-node scratch on k8s works only with an **RWX**
+  `claimTemplate` storage class (RWO has the same single-mounter limitation — see §7).
 
 ### 6.5 File handoff via existing contracts (no new subsystem)
 
@@ -290,6 +314,12 @@ step. Because the dispatcher has **no node-affinity primitive** (§2.2.5):
   limitation**: RWO volumes are safe only when the DAG segment sharing them is effectively
   serial on one node, which Caesium cannot currently guarantee in distributed mode.
   Single-node (Docker/Podman, or a single-worker cluster) is unaffected.
+- **Docker/Podman named (and ephemeral) volumes are node-local — never shareable across
+  workers.** Unlike a k8s RWX PVC, there is no cross-node docker/podman volume. In a
+  multi-worker docker/podman deployment, the only way to share a volume between steps that
+  may land on different workers is an **external `bind` source backed by a shared network
+  filesystem** (NFS/CephFS) mounted at the same path on every worker. Named/ephemeral
+  docker/podman volumes are therefore validated as **single-node-only** (§6.4).
 
 A node-affinity primitive (to make RWO co-location safe) and an object-storage handoff path
 (node-agnostic, no co-location needed) are the two roadmap items that lift this limitation
@@ -373,7 +403,9 @@ Each is dual-purpose — framed data-engineering-first, with CI/CD as the bonus:
 ## 11. Risks & open items
 
 - **RWO/distributed limitation (§7)** is a real ergonomic boundary; mitigated by clear docs
-  + the RWX recommendation, lifted later by node-affinity / object-storage handoff.
+  + the RWX recommendation, lifted later by node-affinity / object-storage handoff. The
+  docker/podman analogue is sharper — named/ephemeral volumes are node-local and validated
+  single-node-only; distributed docker/podman sharing requires a shared-network-FS `bind`.
 - **Ephemeral-volume leak risk** if cleanup is not crash-safe → the orphan reaper is
   mandatory, not optional.
 - **Cache correctness for file outputs (§6.5)** — files are not content-addressed; documented,
