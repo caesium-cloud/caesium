@@ -356,13 +356,33 @@ the standard way: set `AWS_ROLE_ARN` + `AWS_WEB_IDENTITY_TOKEN_FILE` (or `GOOGLE
 CREDENTIALS`) via `env`, mount the token file / `~/.aws` via `mounts`, or rely on the host
 instance profile. Documented as a usage pattern, not a feature.
 
-### 8.3 Why no threat model
+### 8.3 Security posture
 
-Caesium does not issue tokens or hold a signing key, so there is no cross-job subject
-spoofing, audience confusion, or key-rotation surface to model. The trust relationship lives
-entirely in the user's cloud IAM and platform service accounts. The only authorization
-question is *which steps may name which service account* — handled by existing
-job-definition review (GitOps PR) and RBAC on apply, not by a new mechanism.
+**No token-issuance threat model.** Caesium does not issue tokens or hold a signing key, so
+there is no cross-job subject spoofing, audience confusion, or key-rotation surface to model.
+The cloud trust relationship lives entirely in the user's IAM and platform service accounts.
+
+**Operational note — service-account *selection* (the one residual vector).** Letting a step
+name a `serviceAccountName` introduces a confused-deputy risk distinct from token issuance:
+if the Caesium controller may launch pods under *any* service account in its namespace, then
+anyone who can apply or trigger a job could name a privileged SA (e.g. one with cloud-admin
+access) and inherit it. GitOps PR review covers this only where apply access is strictly
+gated — not necessarily in dev/staging. This is not a Caesium-side mechanism to build; it is
+deployment guidance to document, with three layered mitigations operators should apply:
+
+1. **Scope the controller's RBAC** — grant the Caesium controller/worker permission to use
+   only a bounded set of service accounts (RoleBinding to specific SAs, not cluster-wide),
+   so it physically cannot launch pods under privileged accounts it shouldn't.
+2. **Optional Caesium-side allowlist** — an operator-configured allowlist of permitted
+   `serviceAccountName` values (and/or namespaces); a job naming an SA outside it is rejected
+   at apply. Cheap defense-in-depth that does not depend on cluster RBAC being perfect.
+3. **Admission control** — document that operators should enforce SA assignment with a policy
+   engine (OPA Gatekeeper / Kyverno) as the authoritative guardrail, independent of Caesium.
+
+The same principle applies to the Docker/Podman path: the host's mounted credentials /
+instance profile are whatever the operator exposes to the engine, so the blast radius is the
+operator's to bound. Caesium's job is to attach identity, not to police the platform's IAM —
+but the docs must make this selection risk explicit so administrators configure 1–3.
 
 ## 9. Roadmap sketch (documented, designed in later specs)
 
