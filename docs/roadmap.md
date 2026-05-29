@@ -232,6 +232,7 @@ Features that were previously on the roadmap and are now shipped:
 | Task retries with exponential backoff | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](ui_implementation_plan.md) | Shipped |
+| Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
 
 ---
 

@@ -19,6 +19,8 @@ CAESIUM_AUTH_PUBLIC_BASE_URL=https://caesium.example.com
 CAESIUM_AUTH_ROLE_MAPPING='CN=Caesium Admins,OU=Groups,DC=example,DC=com=admin;data-eng=operator;*=viewer'
 CAESIUM_AUTH_SESSION_IDLE_TTL=8h
 CAESIUM_AUTH_SESSION_ABSOLUTE_TTL=24h
+CAESIUM_AUTH_SESSION_COOKIE_NAME=caesium_session
+CAESIUM_AUTH_DEFAULT_ROLE=
 ```
 
 `CAESIUM_AUTH_ROLE_MAPPING` is a semicolon-separated list of `group=role`
@@ -26,13 +28,32 @@ entries. Caesium chooses the highest mapped role when a user belongs to several
 groups. Valid roles are `viewer`, `operator`, and `admin`. Use `*` only when a
 catch-all login policy is intended.
 
+If no group mapping matches, an empty `CAESIUM_AUTH_DEFAULT_ROLE` denies login.
+Set it to `viewer`, `operator`, or `admin` only when unmapped SSO users should
+receive that fallback role.
+
 The browser session cookie is HTTP-only and `SameSite=Lax`. Unsafe requests from
 cookie sessions must include the CSRF token surfaced by `GET /auth/whoami`.
+`CAESIUM_AUTH_SESSION_COOKIE_NAME` changes the cookie name; use it when multiple
+Caesium deployments share a parent domain.
 
 If Caesium is served behind a TLS-terminating proxy, set
-`CAESIUM_TRUSTED_PROXIES` so session cookies are marked `Secure` when the
-trusted proxy forwards `X-Forwarded-Proto: https`. Leave
-`CAESIUM_AUTH_REQUIRE_TLS=true` in production.
+`CAESIUM_TRUSTED_PROXIES` to a comma-separated list of immediate proxy IPs or
+CIDRs. Caesium trusts `X-Forwarded-Proto: https` only from those peers; that
+controls both `Secure` session cookies and same-origin redirect checks. Leave
+`CAESIUM_AUTH_REQUIRE_TLS=true` in production so auth startup requires either
+direct TLS certs or a trusted proxy path.
+
+### Common Operator Reference
+
+| Env | Default | Operator note |
+| --- | --- | --- |
+| `CAESIUM_AUTH_PUBLIC_BASE_URL` | unset | External base URL used to derive OIDC redirect and SAML ACS/metadata URLs. |
+| `CAESIUM_AUTH_DEFAULT_ROLE` | empty | Fallback role when no group mapping matches; empty denies login. |
+| `CAESIUM_AUTH_SESSION_COOKIE_NAME` | `caesium_session` | Browser session cookie name for SSO callbacks, `/auth/whoami`, and logout. |
+| `CAESIUM_AUTH_SESSION_IDLE_TTL` | `8h` | Sliding idle timeout refreshed by valid session use. |
+| `CAESIUM_AUTH_SESSION_ABSOLUTE_TTL` | `24h` | Hard session expiry. |
+| `CAESIUM_TRUSTED_PROXIES` | empty | Comma-separated trusted proxy IPs/CIDRs for forwarded-proto handling. |
 
 ## OIDC
 
@@ -55,12 +76,21 @@ CAESIUM_AUTH_SAML_ENABLED=true
 CAESIUM_AUTH_SAML_IDP_METADATA_URL=https://idp.example.com/metadata
 CAESIUM_AUTH_SAML_SP_CERT=/etc/caesium/saml/sp.crt
 CAESIUM_AUTH_SAML_SP_KEY=/etc/caesium/saml/sp.key
+CAESIUM_AUTH_SAML_SP_ENTITY_ID=https://caesium.example.com/auth/sso/saml/metadata
+CAESIUM_AUTH_SAML_ACS_URL=https://caesium.example.com/auth/sso/saml/acs
+CAESIUM_AUTH_SAML_METADATA_URL=https://caesium.example.com/auth/sso/saml/metadata
 CAESIUM_AUTH_SAML_GROUPS_ATTRIBUTE=groups
 ```
 
 Configure exactly one IdP metadata source:
 `CAESIUM_AUTH_SAML_IDP_METADATA_URL`, `CAESIUM_AUTH_SAML_IDP_METADATA_XML`, or
 `CAESIUM_AUTH_SAML_IDP_METADATA_FILE`. Metadata URLs must use HTTPS.
+
+If `CAESIUM_AUTH_SAML_ACS_URL` or `CAESIUM_AUTH_SAML_METADATA_URL` is unset,
+Caesium derives `/auth/sso/saml/acs` and `/auth/sso/saml/metadata` from
+`CAESIUM_AUTH_PUBLIC_BASE_URL`. If `CAESIUM_AUTH_SAML_SP_ENTITY_ID` is unset,
+it defaults to the metadata URL. Configure those same SP values in the IdP so
+audience, recipient, and metadata checks match.
 
 ## LDAP
 
@@ -78,6 +108,10 @@ CAESIUM_AUTH_LDAP_USER_FILTER='(uid={username})'
 CAESIUM_AUTH_LDAP_GROUP_BASE_DN='ou=groups,dc=example,dc=com'
 CAESIUM_AUTH_LDAP_GROUP_FILTER='(member={dn})'
 CAESIUM_AUTH_LDAP_GROUP_ATTRIBUTE=cn
+CAESIUM_AUTH_LDAP_TIMEOUT=10s
+CAESIUM_AUTH_LDAP_USERNAME_ATTRIBUTE=uid
+CAESIUM_AUTH_LDAP_EMAIL_ATTRIBUTE=mail
+CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE=displayName
 ```
 
 Use `ldaps://` where possible. To use StartTLS on `ldap://`, set
@@ -99,6 +133,16 @@ CAESIUM_AUTH_LDAP_USERNAME_ATTRIBUTE=sAMAccountName
 CAESIUM_AUTH_LDAP_EMAIL_ATTRIBUTE=userPrincipalName
 CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE=cn
 ```
+
+LDAP attribute and timeout reference:
+
+| Env | Default | Operator note |
+| --- | --- | --- |
+| `CAESIUM_AUTH_LDAP_TIMEOUT` | `10s` | Dial, bind, and search timeout; keep below your load balancer timeout. |
+| `CAESIUM_AUTH_LDAP_USERNAME_ATTRIBUTE` | `uid` | Attribute used as the external username when present. |
+| `CAESIUM_AUTH_LDAP_EMAIL_ATTRIBUTE` | `mail` | Attribute used for the Caesium user email. |
+| `CAESIUM_AUTH_LDAP_DISPLAY_NAME_ATTRIBUTE` | `displayName` | Attribute used for the display name. |
+| `CAESIUM_AUTH_LDAP_GROUP_ATTRIBUTE` | `cn` | Values mapped through `CAESIUM_AUTH_ROLE_MAPPING`; use `dn` for full-DN mappings. |
 
 Empty passwords are rejected before any LDAP bind so directories that permit
 anonymous binds cannot accidentally authenticate a user.

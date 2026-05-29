@@ -19,6 +19,13 @@ const minimalIDPMetadata = `
   </IDPSSODescriptor>
 </EntityDescriptor>`
 
+const postOnlyIDPMetadata = `
+<EntityDescriptor xmlns="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://idp.example.com/metadata">
+  <IDPSSODescriptor protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://idp.example.com/sso"/>
+  </IDPSSODescriptor>
+</EntityDescriptor>`
+
 func TestBeginCreatesTrackedRedirect(t *testing.T) {
 	provider, err := New(t.Context(), Config{
 		IDPMetadataXML: minimalIDPMetadata,
@@ -50,6 +57,28 @@ func TestBeginCreatesTrackedRedirect(t *testing.T) {
 	require.Equal(t, "/runs?status=failed#latest", state.ReturnTo)
 }
 
+func TestBeginSetsSecurePostStateCookieSameSiteNone(t *testing.T) {
+	provider, err := New(t.Context(), Config{
+		IDPMetadataXML: minimalIDPMetadata,
+		PublicBaseURL:  "https://app.example.com",
+		CookieSecure:   true,
+		CookieSecret:   []byte(strings.Repeat("x", 32)),
+		ReplayCache:    fakeReplayCache{},
+	})
+	require.NoError(t, err)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/auth/sso/saml/login", nil)
+	_, err = provider.Begin(rec, req, "/")
+	require.NoError(t, err)
+
+	cookies := rec.Result().Cookies()
+	require.Len(t, cookies, 1)
+	require.True(t, cookies[0].HttpOnly)
+	require.True(t, cookies[0].Secure)
+	require.Equal(t, http.SameSiteNoneMode, cookies[0].SameSite)
+}
+
 func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 	provider, err := New(t.Context(), Config{
 		IDPMetadataXML: minimalIDPMetadata,
@@ -65,6 +94,17 @@ func TestBeginRejectsCrossOriginReturnTo(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrInvalidReturnTo)
 	require.Empty(t, rec.Result().Cookies())
+}
+
+func TestNewRejectsMetadataWithoutRedirectSSOBinding(t *testing.T) {
+	_, err := New(t.Context(), Config{
+		IDPMetadataXML: postOnlyIDPMetadata,
+		PublicBaseURL:  "https://app.example.com",
+		CookieSecret:   []byte(strings.Repeat("x", 32)),
+		ReplayCache:    fakeReplayCache{},
+	})
+
+	require.ErrorIs(t, err, ErrNoRedirectBinding)
 }
 
 func TestCompleteRejectsRelayStateMismatchBeforeParsingResponse(t *testing.T) {

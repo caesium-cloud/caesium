@@ -9,6 +9,7 @@ import {
   isCredentialAuthMethod,
   isRedirectAuthMethod,
   isAuthenticated,
+  logout,
   onAuthChange,
   type RedirectAuthMethod,
   setApiKey,
@@ -67,6 +68,24 @@ describe("auth", () => {
       "X-CSRF-Token": "csrf-secret",
     });
     expect(withAuthHeaders()).not.toHaveProperty("Authorization");
+  });
+
+  it("fails closed when a cookie session response omits the csrf token", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ csrf_token: "csrf-secret" }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ kind: "user", email: "ops@example.com" }),
+      });
+
+    await expect(checkSession()).resolves.toBe(true);
+    await expect(checkSession()).resolves.toBe(false);
+
+    expect(isAuthenticated()).toBe(false);
+    expect(withAuthHeaders()).not.toHaveProperty("X-CSRF-Token");
   });
 
   it("builds a same-page return target for SSO callbacks", () => {
@@ -138,6 +157,54 @@ describe("auth", () => {
     expect(withAuthHeaders()).toMatchObject({
       "X-CSRF-Token": "csrf-secret",
     });
+  });
+
+  it("posts logout with the csrf header and clears local state on 401", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ csrf_token: "csrf-secret" }),
+    });
+
+    await expect(checkSession()).resolves.toBe(true);
+
+    const listener = vi.fn();
+    const unsubscribe = onAuthChange(listener);
+    mockFetch.mockClear();
+    mockFetch.mockResolvedValueOnce({ status: 401, ok: false });
+
+    await expect(logout()).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledWith("/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: { "X-CSRF-Token": "csrf-secret" },
+    });
+    expect(isAuthenticated()).toBe(false);
+    expect(withAuthHeaders()).not.toHaveProperty("X-CSRF-Token");
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
+  });
+
+  it("clears local auth state when logout cannot reach the server", async () => {
+    setApiKey("csk_live_secret");
+
+    const listener = vi.fn();
+    const unsubscribe = onAuthChange(listener);
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    await expect(logout()).resolves.toBeUndefined();
+
+    expect(mockFetch).toHaveBeenCalledWith("/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: {},
+    });
+    expect(isAuthenticated()).toBe(false);
+    expect(withAuthHeaders()).not.toHaveProperty("Authorization");
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsubscribe();
   });
 
   it("maps credential login denial statuses without caching a session", async () => {

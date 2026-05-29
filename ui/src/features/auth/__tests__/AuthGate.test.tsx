@@ -36,6 +36,65 @@ describe("AuthGate", () => {
     expect(mockFetch).toHaveBeenNthCalledWith(2, "/auth/whoami", { credentials: "include" });
   });
 
+  it("renders the login page when whoami omits csrf for an enabled cookie session", async () => {
+    mockFetch
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ enabled: true }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ kind: "user", email: "ops@example.com" }),
+      });
+
+    render(
+      <AuthGate>
+        <div>protected</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Enter your API key to continue")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("protected")).not.toBeInTheDocument();
+  });
+
+  it("does not render protected children when auth status is non-OK", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+
+    render(
+      <AuthGate>
+        <div>protected</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Authentication unavailable");
+    });
+    expect(screen.queryByText("protected")).not.toBeInTheDocument();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render protected children when auth status is unreachable", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+
+    render(
+      <AuthGate>
+        <div>protected</div>
+      </AuthGate>,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("alert")).toHaveTextContent("Authentication unavailable");
+    });
+    expect(screen.queryByText("protected")).not.toBeInTheDocument();
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
   it("renders advertised browser redirect methods on the login page", async () => {
     mockFetch
       .mockResolvedValueOnce({

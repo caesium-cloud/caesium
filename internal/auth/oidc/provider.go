@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	authpkg "github.com/caesium-cloud/caesium/internal/auth"
@@ -190,6 +191,9 @@ func (p *Provider) identityFromIDToken(idToken *gooidc.IDToken) (*authpkg.Extern
 	if err := idToken.Claims(&allClaims); err != nil {
 		return nil, fmt.Errorf("%w: decode claims: %v", ErrInvalidIDToken, err)
 	}
+	if err := validateIdentityShape(idToken, allClaims, p.oauth2Config.ClientID); err != nil {
+		return nil, err
+	}
 	groups, err := extractGroups(allClaims[p.groupsClaim])
 	if err != nil {
 		return nil, err
@@ -210,6 +214,28 @@ func (p *Provider) identityFromIDToken(idToken *gooidc.IDToken) (*authpkg.Extern
 		DisplayName: displayName,
 		Groups:      groups,
 	}, nil
+}
+
+func validateIdentityShape(idToken *gooidc.IDToken, claims map[string]json.RawMessage, clientID string) error {
+	if strings.TrimSpace(idToken.Subject) == "" {
+		return fmt.Errorf("%w: missing subject", ErrInvalidIDToken)
+	}
+	if len(idToken.Audience) <= 1 {
+		return nil
+	}
+
+	rawAuthorizedParty, ok := claims["azp"]
+	if !ok {
+		return nil
+	}
+	var authorizedParty string
+	if err := json.Unmarshal(rawAuthorizedParty, &authorizedParty); err != nil {
+		return fmt.Errorf("%w: decode authorized party: %v", ErrInvalidIDToken, err)
+	}
+	if authorizedParty != clientID {
+		return fmt.Errorf("%w: authorized party mismatch", ErrInvalidIDToken)
+	}
+	return nil
 }
 
 func extractGroups(raw json.RawMessage) ([]string, error) {

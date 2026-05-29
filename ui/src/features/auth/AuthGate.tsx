@@ -20,6 +20,7 @@ interface AuthGateProps {
 export function AuthGate({ children }: AuthGateProps) {
   const [authRequired, setAuthRequired] = useState<boolean | null>(null);
   const [authMethods, setAuthMethods] = useState<AuthMethod[]>([]);
+  const [authUnavailable, setAuthUnavailable] = useState(false);
   const [authed, setAuthed] = useState(isAuthenticated);
 
   // Subscribe to auth state changes.
@@ -33,7 +34,7 @@ export function AuthGate({ children }: AuthGateProps) {
       try {
         const resp = await fetch("/auth/status");
         if (!resp.ok) {
-          if (!cancelled) setAuthRequired(false);
+          if (!cancelled) setAuthUnavailable(true);
           return;
         }
 
@@ -49,8 +50,7 @@ export function AuthGate({ children }: AuthGateProps) {
           }
         }
       } catch {
-        // Network error — assume auth not required, let real errors surface later.
-        if (!cancelled) setAuthRequired(false);
+        if (!cancelled) setAuthUnavailable(true);
       }
     }
 
@@ -63,6 +63,16 @@ export function AuthGate({ children }: AuthGateProps) {
   const handleLogin = useCallback(() => {
     setAuthed(true);
   }, []);
+
+  if (authUnavailable) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background text-foreground">
+        <p role="alert" className="text-sm text-muted-foreground">
+          Authentication unavailable
+        </p>
+      </div>
+    );
+  }
 
   // Still probing.
   if (authRequired === null) return null;

@@ -66,6 +66,14 @@ export function clearApiKey(): void {
   notifyAuthChange();
 }
 
+function clearCookieSession(): void {
+  if (cookieSession || csrfToken) {
+    cookieSession = false;
+    csrfToken = null;
+    notifyAuthChange();
+  }
+}
+
 /** Returns true if an API key is currently set. */
 export function isAuthenticated(): boolean {
   return apiKey !== null || cookieSession;
@@ -157,28 +165,40 @@ export async function checkSession(): Promise<boolean> {
   try {
     const response = await fetch("/auth/whoami", { credentials: "include" });
     if (!response.ok) {
-      if (cookieSession || csrfToken) {
-        cookieSession = false;
-        csrfToken = null;
-        notifyAuthChange();
-      }
+      clearCookieSession();
       return false;
     }
 
-    const body = (await response.json()) as { csrf_token?: string };
-    csrfToken = body.csrf_token ?? null;
+    const body = (await response.json()) as { csrf_token?: unknown };
+    if (typeof body.csrf_token !== "string" || body.csrf_token.length === 0) {
+      clearCookieSession();
+      return false;
+    }
+
+    csrfToken = body.csrf_token;
     if (!cookieSession) {
       cookieSession = true;
       notifyAuthChange();
     }
     return true;
   } catch {
-    if (cookieSession || csrfToken) {
-      cookieSession = false;
-      csrfToken = null;
-      notifyAuthChange();
-    }
+    clearCookieSession();
     return false;
+  }
+}
+
+/** Revoke the browser session if reachable, then always clear local auth state. */
+export async function logout(): Promise<void> {
+  try {
+    await fetch("/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: csrfHeader(),
+    });
+  } catch {
+    // Local logout must still complete if the server is unreachable.
+  } finally {
+    clearApiKey();
   }
 }
 

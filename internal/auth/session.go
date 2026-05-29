@@ -137,7 +137,18 @@ func (s *SessionStore) Validate(ctx context.Context, plaintext string) (*models.
 		return nil, nil, ErrSessionRevoked
 	}
 	now := s.nowUTC()
-	if now.After(sess.AbsoluteExpiresAt) || now.After(sess.IdleExpiresAt) {
+	if now.After(sess.AbsoluteExpiresAt) {
+		return nil, nil, ErrSessionExpired
+	}
+	idleExpiresAt := sess.IdleExpiresAt
+	if seenAt, ok := s.pendingSeen(sess.ID); ok {
+		pendingIdleExpiresAt := seenAt.Add(s.idleTTL)
+		if pendingIdleExpiresAt.After(idleExpiresAt) {
+			idleExpiresAt = pendingIdleExpiresAt
+			sess.IdleExpiresAt = idleExpiresAt
+		}
+	}
+	if now.After(idleExpiresAt) {
 		return nil, nil, ErrSessionExpired
 	}
 
@@ -257,6 +268,13 @@ func (s *SessionStore) recordSeen(id uuid.UUID) {
 	s.seenMu.Lock()
 	s.seen[id] = s.nowUTC()
 	s.seenMu.Unlock()
+}
+
+func (s *SessionStore) pendingSeen(id uuid.UUID) (time.Time, bool) {
+	s.seenMu.Lock()
+	seenAt, ok := s.seen[id]
+	s.seenMu.Unlock()
+	return seenAt, ok
 }
 
 func (s *SessionStore) nowUTC() time.Time {

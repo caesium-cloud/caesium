@@ -43,6 +43,73 @@ func TestSSOServiceComplete(t *testing.T) {
 	require.ErrorIs(t, err, ErrLoginDenied)
 }
 
+func TestSSOServiceCompleteRejectsInvalidExternalIdentity(t *testing.T) {
+	tests := []struct {
+		name string
+		ext  *ExternalIdentity
+	}{
+		{
+			name: "nil",
+			ext:  nil,
+		},
+		{
+			name: "blank issuer",
+			ext: &ExternalIdentity{
+				Issuer:  "",
+				Subject: "sub",
+				Groups:  []string{"eng"},
+			},
+		},
+		{
+			name: "whitespace issuer",
+			ext: &ExternalIdentity{
+				Issuer:  " \t\n",
+				Subject: "sub",
+				Groups:  []string{"eng"},
+			},
+		},
+		{
+			name: "blank subject",
+			ext: &ExternalIdentity{
+				Issuer:  "oidc",
+				Subject: "",
+				Groups:  []string{"eng"},
+			},
+		},
+		{
+			name: "whitespace subject",
+			ext: &ExternalIdentity{
+				Issuer:  "oidc",
+				Subject: " \t\n",
+				Groups:  []string{"eng"},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db := testutil.OpenTestDB(t)
+			defer testutil.CloseDB(db)
+			mapper, err := NewRoleMapper("eng=operator", "")
+			require.NoError(t, err)
+			sso := NewSSOService(NewUserStore(db), NewSessionStore(db), mapper)
+
+			cookie, sess, err := sso.Complete(context.Background(), tt.ext, "oidc", "1.2.3.4", "agent")
+			require.ErrorIs(t, err, ErrInvalidExternalIdentity)
+			require.Empty(t, cookie)
+			require.Nil(t, sess)
+
+			var users int64
+			require.NoError(t, db.Model(&models.User{}).Count(&users).Error)
+			require.Zero(t, users)
+
+			var sessions int64
+			require.NoError(t, db.Model(&models.Session{}).Count(&sessions).Error)
+			require.Zero(t, sessions)
+		})
+	}
+}
+
 func TestSSOServiceCompleteRejectsDisabledUser(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	defer testutil.CloseDB(db)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	authpkg "github.com/caesium-cloud/caesium/internal/auth"
@@ -46,6 +47,9 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !hasRedirectSSOBinding(idpMetadata) {
+		return nil, ErrNoRedirectBinding
+	}
 	cert, key, err := loadKeyPair(cfg.SPCertPath, cfg.SPKeyPath)
 	if err != nil {
 		return nil, err
@@ -83,6 +87,20 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		replayCache:     cfg.ReplayCache,
 		now:             time.Now,
 	}, nil
+}
+
+func hasRedirectSSOBinding(metadata *crewsaml.EntityDescriptor) bool {
+	if metadata == nil {
+		return false
+	}
+	for _, descriptor := range metadata.IDPSSODescriptors {
+		for _, service := range descriptor.SingleSignOnServices {
+			if service.Binding == crewsaml.HTTPRedirectBinding && strings.TrimSpace(service.Location) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Name reports the provider id used by the shared SSO completion path.
