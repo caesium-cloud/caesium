@@ -31,7 +31,7 @@ type SessionStore struct {
 	absoluteTTL     time.Duration
 	now             func() time.Time
 
-	seenMu sync.Mutex
+	seenMu sync.RWMutex
 	seen   map[uuid.UUID]time.Time
 }
 
@@ -205,6 +205,8 @@ func (s *SessionStore) RunLastSeenFlusher(ctx context.Context) {
 
 // Reap deletes expired sessions and sessions revoked more than an hour ago.
 func (s *SessionStore) Reap(ctx context.Context) (int64, error) {
+	s.flushSeen(ctx)
+
 	now := s.nowUTC()
 	res := s.db.WithContext(ctx).
 		Where(
@@ -271,9 +273,9 @@ func (s *SessionStore) recordSeen(id uuid.UUID) {
 }
 
 func (s *SessionStore) pendingSeen(id uuid.UUID) (time.Time, bool) {
-	s.seenMu.Lock()
+	s.seenMu.RLock()
 	seenAt, ok := s.seen[id]
-	s.seenMu.Unlock()
+	s.seenMu.RUnlock()
 	return seenAt, ok
 }
 

@@ -220,9 +220,6 @@ func validateIdentityShape(idToken *gooidc.IDToken, claims map[string]json.RawMe
 	if strings.TrimSpace(idToken.Subject) == "" {
 		return fmt.Errorf("%w: missing subject", ErrInvalidIDToken)
 	}
-	if len(idToken.Audience) <= 1 {
-		return nil
-	}
 
 	rawAuthorizedParty, ok := claims["azp"]
 	if !ok {

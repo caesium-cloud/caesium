@@ -308,6 +308,25 @@ func TestCompleteRejectsAuthorizedPartyMismatchForMultipleAudiences(t *testing.T
 	require.NotNil(t, issuer.lastTokenForm)
 }
 
+func TestCompleteRejectsAuthorizedPartyMismatchForSingleAudience(t *testing.T) {
+	issuer := newMockIssuer(t, "groups")
+	provider := newTestProvider(t, issuer, "groups")
+
+	stateCookie, state := beginForCallback(t, provider, "/")
+	issuer.nextNonce = state.Nonce
+	issuer.nextAuthorizedParty = "different-client"
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"https://app.example.com/auth/sso/oidc/callback?code=good-code&state="+url.QueryEscape(state.State),
+		nil,
+	)
+	req.AddCookie(stateCookie)
+
+	_, _, err := provider.CompleteWithReturnTo(req)
+	require.ErrorIs(t, err, ErrInvalidIDToken)
+	require.NotNil(t, issuer.lastTokenForm)
+}
+
 func TestExtractGroupsClaim(t *testing.T) {
 	groups, err := extractGroups(json.RawMessage(`"one"`))
 	require.NoError(t, err)
