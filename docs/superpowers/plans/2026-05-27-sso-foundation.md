@@ -33,11 +33,15 @@
   negative fixtures for OIDC, SAML, and LDAP. `codex/sso-p5-hardening-wave`
   then covered fail-closed state-cookie callbacks, LDAP malformed search
   results, trusted-proxy same-origin redirects, and secure-cookie checks for
-  redirect callbacks. Wave 9 on `codex/sso-remaining-foundation-wave` is scoped
-  to remaining foundation hardening and docs cleanup. Wave 10 on
-  `codex/sso-post-foundation-hardening` clears one-time OIDC/SAML state cookies
-  after redirect callbacks, tightens OIDC multi-audience `azp` checks, validates
-  trusted-proxy TLS-guard config, and corrects role-mapping docs/tests.
+  redirect callbacks. Wave 9 on `codex/sso-remaining-foundation-wave` covered
+  remaining foundation hardening and docs cleanup. Wave 10 on
+  `codex/sso-post-foundation-hardening` cleared one-time OIDC/SAML state cookies
+  after redirect callbacks, tightened OIDC multi-audience `azp` checks,
+  validated trusted-proxy TLS-guard config, and corrected role-mapping
+  docs/tests. Wave 11 on `codex/sso-ui-logout-contract` (PR #202) documented
+  the browser-auth status, whoami, logout, coexistence, and operator-console
+  sign-out contract. Wave 12 on `codex/sso-plan-closure-coverage` closed stale
+  plan metadata and added route-level API-key logout coexistence coverage.
 
 ## File structure
 
@@ -1661,6 +1665,9 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   contract for `/auth/status` method objects, `/auth/whoami` session CSRF
   surfacing, `/auth/logout` CSRF requirements, API-key/SSO coexistence, and
   the operator-console sign-out affordance.
+- [x] **Wave 12 status:** Closed stale plan metadata and added route-level
+  coverage proving bearer API-key logout does not require CSRF and does not
+  revoke API keys or cookie sessions when both credentials are present.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 
@@ -1670,4 +1677,4 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
 
 - **Spec coverage:** §5.1 Principal → Tasks 0.1–0.3, 1.10; §6 data model → 1.2; §7 config → 1.1; §9 role mapping → 1.6; §10 sessions → 1.4/1.5; §11 middleware/CSRF/endpoints → 1.9–1.11; §5.2 provider interface + login tail → 1.8; UI → 1.13; providers §8 → P2–P4 plans; docs §17 → P5.
 - **Type consistency:** `Principal.Scope` is `[]byte` (matches `auth.ScopeJobs`/`CheckScope` and `models.APIKey.Scope` = `datatypes.JSON`); `SSOService.Complete` returns `(cookieValue string, *models.Session, error)` consistent with `SessionStore.Create`; `RoleMapper.Resolve` returns `(models.Role, bool)` consumed by `Complete`.
-- **Open follow-through for the executor:** `ExternalIdentity` (Task 1.8) must exist before Tasks 1.7/1.8 tests compile — do Task 1.8's struct first if ordering causes a compile gap. Reuse one `newTestDB`/`newCtx` helper across `internal/auth` and `api/middleware` tests rather than duplicating.
+- **Test helper note:** Reuse one `newTestDB`/`newCtx` helper across `internal/auth` and `api/middleware` tests rather than duplicating.

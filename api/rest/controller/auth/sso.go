@@ -117,6 +117,11 @@ func (s *SSOController) LDAPLogin(c *echo.Context) error {
 }
 
 func (s *SSOController) Logout(c *echo.Context) error {
+	if principal := authmw.GetPrincipal(c); principal != nil && principal.Kind == iauth.PrincipalAPIKey {
+		s.recordAPIKeyLogoutNoop(c, principal)
+		return c.NoContent(http.StatusNoContent)
+	}
+
 	var sess *models.Session
 	var user *models.User
 	recordLogout := false
@@ -309,6 +314,28 @@ func (s *SSOController) recordLogout(c *echo.Context, outcome string, sess *mode
 		entry.ResourceType = "session"
 		entry.ResourceID = sess.ID.String()
 		entry.Metadata["provider"] = sess.AuthMethod
+	}
+	logAuditFailure(s.auditor.Log(entry))
+}
+
+func (s *SSOController) recordAPIKeyLogoutNoop(c *echo.Context, principal *iauth.Principal) {
+	if s.auditor == nil || principal == nil {
+		return
+	}
+	entry := iauth.AuditEntry{
+		Actor:        principal.Subject,
+		Action:       iauth.ActionAuthLogout,
+		ResourceType: "api_key",
+		SourceIP:     c.RealIP(),
+		Outcome:      iauth.OutcomeSuccess,
+		Metadata: map[string]interface{}{
+			"method": c.Request().Method,
+			"path":   c.Request().URL.Path,
+			"noop":   true,
+		},
+	}
+	if principal.KeyID != nil {
+		entry.ResourceID = principal.KeyID.String()
 	}
 	logAuditFailure(s.auditor.Log(entry))
 }
