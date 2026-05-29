@@ -1657,6 +1657,10 @@ Each becomes its own `docs/superpowers/plans/2026-…-sso-<phase>.md`, written j
   required OIDC `azp` for multi-audience ID tokens, rejected invalid trusted
   proxy entries in the auth TLS startup guard, and corrected SSO role-mapping
   docs/tests to include the supported `runner` role.
+- [x] **Wave 11 status:** Documented the visible browser-auth endpoint
+  contract for `/auth/status` method objects, `/auth/whoami` session CSRF
+  surfacing, `/auth/logout` CSRF requirements, API-key/SSO coexistence, and
+  the operator-console sign-out affordance.
 - **Files:** `docs/sso-authentication.md` (operator setup for all three + role mapping + session tuning + TLS), README/roadmap updates.
 - **Key work:** end-to-end security pass; verify cookie flags/CSRF/open-redirect guards across providers; finalize metrics + audit actions (`auth.login`, `auth.logout`, `auth.session_revoked`, `user.provisioned`, `auth.login_denied`).
 

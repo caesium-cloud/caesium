@@ -1,9 +1,10 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Bell, ChevronRight } from "lucide-react";
+import { Bell, ChevronRight, LogOut } from "lucide-react";
 import { ModeToggle } from "../mode-toggle";
 import { CommandMenu } from "../command-menu";
 import { Button } from "@/components/ui/button";
 import { UTCClock } from "@/components/ui/utc-clock";
+import { logout } from "@/lib/auth";
 
 interface Crumb {
   label: string;
@@ -95,6 +96,15 @@ export function Header() {
           className="text-text-2 hover:text-text-1"
         >
           <Bell className="h-4 w-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Sign out"
+          className="text-text-2 hover:text-text-1"
+          onClick={() => void logout()}
+        >
+          <LogOut className="h-4 w-4" />
         </Button>
         <ModeToggle />
       </div>
