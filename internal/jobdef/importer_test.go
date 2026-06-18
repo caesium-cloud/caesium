@@ -2,12 +2,14 @@ package jobdef
 
 import (
 	"context"
+	"encoding/json"
 	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
@@ -89,6 +91,47 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	var edges []models.TaskEdge
 	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&edges).Error)
 	s.Len(edges, 2)
+}
+
+func (s *ImporterTestSuite) TestApplyPersistsResolvedVolumeAndIdentitySpec() {
+	def, err := schema.Parse([]byte(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: volume-spec
+  serviceAccountName: default-sa
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+volumes:
+  - name: work
+    sources:
+      kubernetes: {pvc: ci-shared-rwx}
+steps:
+  - name: run
+    engine: kubernetes
+    image: alpine:3.23
+    serviceAccountName: step-sa
+    volumeMounts:
+      - {volume: work, path: /work, readOnly: true}
+`))
+	s.Require().NoError(err)
+
+	_, err = s.importer.Apply(context.Background(), def)
+	s.Require().NoError(err)
+
+	var atom models.Atom
+	s.Require().NoError(s.db.First(&atom).Error)
+
+	var spec container.Spec
+	s.Require().NoError(json.Unmarshal(atom.Spec, &spec))
+	s.Require().Len(spec.ResolvedVolumeMounts, 1)
+	s.Equal(container.VolumeMountTypePVC, spec.ResolvedVolumeMounts[0].Type)
+	s.Equal("ci-shared-rwx", spec.ResolvedVolumeMounts[0].Source)
+	s.Equal("/work", spec.ResolvedVolumeMounts[0].Target)
+	s.True(spec.ResolvedVolumeMounts[0].ReadOnly)
+	s.Require().NotNil(spec.Kubernetes)
+	s.Equal("step-sa", spec.Kubernetes.ServiceAccountName)
 }
 
 func (s *ImporterTestSuite) TestApplyUpdatesExistingJob() {

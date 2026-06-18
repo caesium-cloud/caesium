@@ -24,6 +24,11 @@ func (s *SpecSuite) TestHasMounts() {
 	s.True(spec.HasMounts())
 }
 
+func (s *SpecSuite) TestHasMountsResolvedVolumes() {
+	spec := Spec{ResolvedVolumeMounts: []VolumeMount{{Type: VolumeMountTypeVolume, Source: "work", Target: "/work"}}}
+	s.True(spec.HasMounts())
+}
+
 func TestSpecSuite(t *testing.T) {
 	suite.Run(t, new(SpecSuite))
 }

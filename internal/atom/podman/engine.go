@@ -3,6 +3,7 @@ package podman
 import (
 	"context"
 	"io"
+	"strconv"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -94,8 +95,9 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	if req.Spec.WorkDir != "" {
 		spec.WorkDir = req.Spec.WorkDir
 	}
-	if mounts := convertPodmanMounts(req.Spec.Mounts); len(mounts) > 0 {
+	if mounts, volumes := convertPodmanMounts(req.Spec.Mounts, req.Spec.ResolvedVolumeMounts); len(mounts) > 0 || len(volumes) > 0 {
 		spec.Mounts = mounts
+		spec.Volumes = volumes
 	}
 
 	created, err := e.backend.ContainerCreate(spec)
@@ -188,17 +190,21 @@ func (e *podmanEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) 
 	return e.backend.ContainerLogs(req.ID, opts)
 }
 
-func convertPodmanMounts(specMounts []container.Mount) []specs.Mount {
-	if len(specMounts) == 0 {
-		return nil
+func convertPodmanMounts(specMounts []container.Mount, resolvedMounts []container.VolumeMount) ([]specs.Mount, []*specgen.NamedVolume) {
+	if len(specMounts) == 0 && len(resolvedMounts) == 0 {
+		return nil, nil
 	}
-	result := make([]specs.Mount, 0, len(specMounts))
+	result := make([]specs.Mount, 0, len(specMounts)+len(resolvedMounts))
+	volumes := make([]*specgen.NamedVolume, 0)
 	for _, mnt := range specMounts {
-		if mnt.Source == "" || mnt.Target == "" {
+		if mnt.Target == "" {
 			continue
 		}
 		switch mnt.Type {
 		case container.MountTypeBind, "":
+			if mnt.Source == "" {
+				continue
+			}
 			mount := specs.Mount{
 				Type:        string(container.MountTypeBind),
 				Source:      mnt.Source,
@@ -208,7 +214,82 @@ func convertPodmanMounts(specMounts []container.Mount) []specs.Mount {
 				mount.Options = append(mount.Options, "ro")
 			}
 			result = append(result, mount)
+		case container.MountTypeVolume:
+			if mnt.Source == "" {
+				continue
+			}
+			options := []string{}
+			if mnt.ReadOnly {
+				options = append(options, "ro")
+			}
+			volumes = append(volumes, &specgen.NamedVolume{
+				Name:    mnt.Source,
+				Dest:    mnt.Target,
+				Options: options,
+			})
+		case container.MountTypeTmpfs:
+			mount := specs.Mount{
+				Type:        string(container.MountTypeTmpfs),
+				Source:      string(container.MountTypeTmpfs),
+				Destination: mnt.Target,
+			}
+			if mnt.ReadOnly {
+				mount.Options = append(mount.Options, "ro")
+			}
+			result = append(result, mount)
 		}
 	}
-	return result
+	for _, mnt := range resolvedMounts {
+		if mnt.Target == "" {
+			continue
+		}
+		switch mnt.Type {
+		case container.VolumeMountTypeBind:
+			if mnt.Source == "" {
+				continue
+			}
+			mount := specs.Mount{
+				Type:        string(container.MountTypeBind),
+				Source:      mnt.Source,
+				Destination: mnt.Target,
+			}
+			if mnt.ReadOnly {
+				mount.Options = append(mount.Options, "ro")
+			}
+			result = append(result, mount)
+		case container.VolumeMountTypeVolume:
+			if mnt.Source == "" {
+				continue
+			}
+			options := []string{}
+			if mnt.ReadOnly {
+				options = append(options, "ro")
+			}
+			volumes = append(volumes, &specgen.NamedVolume{
+				Name:    mnt.Source,
+				Dest:    mnt.Target,
+				Options: options,
+				SubPath: mnt.SubPath,
+			})
+		case container.VolumeMountTypeTmpfs:
+			mount := specs.Mount{
+				Type:        string(container.MountTypeTmpfs),
+				Source:      string(container.MountTypeTmpfs),
+				Destination: mnt.Target,
+			}
+			if mnt.ReadOnly {
+				mount.Options = append(mount.Options, "ro")
+			}
+			if mnt.Tmpfs != nil {
+				if mnt.Tmpfs.SizeBytes > 0 {
+					mount.Options = append(mount.Options, "size="+strconv.FormatInt(mnt.Tmpfs.SizeBytes, 10))
+				}
+				if mnt.Tmpfs.Mode != nil {
+					mount.Options = append(mount.Options, "mode="+strconv.FormatInt(int64(*mnt.Tmpfs.Mode), 8))
+				}
+			}
+			result = append(result, mount)
+		}
+	}
+	return result, volumes
 }

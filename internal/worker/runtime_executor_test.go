@@ -13,6 +13,7 @@ import (
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
@@ -180,6 +181,128 @@ func TestRunSchemaValidationFailReturnsErrorForMissingRequiredOutput(t *testing.
 	require.NotEmpty(t, violations)
 }
 
+func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	store := run.NewStore(db)
+	now := time.Now().UTC()
+	trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(trigger).Error)
+	job := &models.Job{ID: uuid.New(), Alias: "worker-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(job).Error)
+
+	specBytes, err := json.Marshal(container.Spec{
+		Env: map[string]string{
+			"PLAIN":  "value",
+			"SECRET": "secret://env/TOKEN",
+		},
+		WorkDir: "/workspace",
+		Mounts: []container.Mount{{
+			Type:   container.MountTypeBind,
+			Source: "/host",
+			Target: "/data",
+		}},
+		ResolvedVolumeMounts: []container.VolumeMount{{
+			Name:   "work",
+			Type:   container.VolumeMountTypeVolume,
+			Source: "caesium-work",
+			Target: "/work",
+		}},
+	})
+	require.NoError(t, err)
+	atomModel := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine:3.23",
+		Command:   `["sh","-c","true"]`,
+		Spec:      datatypes.JSON(specBytes),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+
+	predAtom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["true"]`, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(predAtom).Error)
+	predTask := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: predAtom.ID, Name: "extract", CreatedAt: now, UpdatedAt: now}
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "load", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(predTask).Error)
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, db.Create(&models.TaskEdge{ID: uuid.New(), JobID: job.ID, FromTaskID: predTask.ID, ToTaskID: task.ID, CreatedAt: now, UpdatedAt: now}).Error)
+
+	paramsBytes, err := json.Marshal(map[string]string{"branch": "main"})
+	require.NoError(t, err)
+	jobRun := &models.JobRun{
+		ID:          uuid.New(),
+		JobID:       job.ID,
+		TriggerID:   trigger.ID,
+		TriggerType: string(trigger.Type),
+		Status:      string(run.StatusRunning),
+		Params:      datatypes.JSON(paramsBytes),
+		StartedAt:   now,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, db.Create(jobRun).Error)
+	outputBytes, err := json.Marshal(map[string]string{"plan": "/work/tf.plan"})
+	require.NoError(t, err)
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID:        uuid.New(),
+		JobRunID:  jobRun.ID,
+		TaskID:    predTask.ID,
+		AtomID:    predAtom.ID,
+		Engine:    predAtom.Engine,
+		Image:     predAtom.Image,
+		Command:   predAtom.Command,
+		Status:    string(run.TaskStatusSucceeded),
+		Result:    string(atom.Success),
+		Output:    datatypes.JSON(outputBytes),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}).Error)
+	taskRun := &models.TaskRun{
+		ID:          uuid.New(),
+		JobRunID:    jobRun.ID,
+		TaskID:      task.ID,
+		AtomID:      atomModel.ID,
+		Engine:      atomModel.Engine,
+		Image:       atomModel.Image,
+		Command:     atomModel.Command,
+		Status:      string(run.TaskStatusRunning),
+		ClaimedBy:   "node-a",
+		Attempt:     1,
+		MaxAttempts: 1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, db.Create(taskRun).Error)
+
+	engine := &captureCreateEngine{}
+	executor := &runtimeExecutor{
+		store:          store,
+		localSink:      NewLocalSink(store),
+		secretResolver: staticSecretResolver{"secret://env/TOKEN": "resolved-token"},
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}
+	executor.Execute(context.Background(), taskRun)
+
+	require.NotNil(t, engine.createReq)
+	got := engine.createReq.Spec
+	require.Equal(t, "/workspace", got.WorkDir)
+	require.Equal(t, []container.Mount{{Type: container.MountTypeBind, Source: "/host", Target: "/data"}}, got.Mounts)
+	require.Equal(t, []container.VolumeMount{{Name: "work", Type: container.VolumeMountTypeVolume, Source: "caesium-work", Target: "/work"}}, got.ResolvedVolumeMounts)
+	require.Equal(t, "value", got.Env["PLAIN"])
+	require.Equal(t, "resolved-token", got.Env["SECRET"])
+	require.Equal(t, jobRun.ID.String(), got.Env["CAESIUM_RUN_ID"])
+	require.Equal(t, "worker-job", got.Env["CAESIUM_JOB_ALIAS"])
+	require.Equal(t, "main", got.Env["CAESIUM_PARAM_BRANCH"])
+	require.Equal(t, "/work/tf.plan", got.Env["CAESIUM_OUTPUT_EXTRACT_PLAN"])
+}
+
 func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models.TaskRun, *gorm.DB) {
 	t.Helper()
 
@@ -281,4 +404,44 @@ func persistedSchemaViolations(t *testing.T, db *gorm.DB, runID, taskID uuid.UUI
 	var violations []pkgtask.SchemaViolation
 	require.NoError(t, json.Unmarshal(taskRun.SchemaViolations, &violations))
 	return violations
+}
+
+type staticSecretResolver map[string]string
+
+func (r staticSecretResolver) Resolve(_ context.Context, ref string) (string, error) {
+	value, ok := r[ref]
+	if !ok {
+		return "", errors.New("missing secret")
+	}
+	return value, nil
+}
+
+type captureCreateEngine struct {
+	createReq *atom.EngineCreateRequest
+}
+
+func (e *captureCreateEngine) Get(*atom.EngineGetRequest) (atom.Atom, error) {
+	return &fakeMonitorAtom{id: "runtime", result: atom.Success}, nil
+}
+
+func (e *captureCreateEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) {
+	return nil, nil
+}
+
+func (e *captureCreateEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	copyReq := *req
+	e.createReq = &copyReq
+	return &fakeMonitorAtom{id: "runtime", result: atom.Unknown}, nil
+}
+
+func (e *captureCreateEngine) Wait(*atom.EngineWaitRequest) (atom.Atom, error) {
+	return &fakeMonitorAtom{id: "runtime", result: atom.Success}, nil
+}
+
+func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
+	return nil
+}
+
+func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }

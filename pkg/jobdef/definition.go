@@ -3,6 +3,7 @@ package jobdef
 import (
 	"encoding/json"
 	"fmt"
+	"path"
 	"regexp"
 	"slices"
 	"strings"
@@ -45,6 +46,7 @@ type Definition struct {
 	Metadata   Metadata   `yaml:"metadata" json:"metadata"`
 	Trigger    Trigger    `yaml:"trigger" json:"trigger"`
 	Callbacks  []Callback `yaml:"callbacks,omitempty" json:"callbacks,omitempty"`
+	Volumes    []Volume   `yaml:"volumes,omitempty" json:"volumes,omitempty"`
 	Steps      []Step     `yaml:"steps" json:"steps"`
 }
 
@@ -87,11 +89,14 @@ type Metadata struct {
 	//   completedBy — wall-clock time of day ("HH:MM", UTC) by which the job
 	//                 must have a successfully completed run. Alerts even if
 	//                 no run has started.
-	SLA              *SLAConfig        `yaml:"sla,omitempty" json:"sla,omitempty"`
+	SLA *SLAConfig `yaml:"sla,omitempty" json:"sla,omitempty"`
 	// SchemaValidation controls runtime output schema validation.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
-	SchemaValidation string      `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
-	Cache            interface{} `yaml:"cache,omitempty" json:"cache"`
+	SchemaValidation             string            `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
+	Cache                        interface{}       `yaml:"cache,omitempty" json:"cache"`
+	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
+	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
+	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
 }
 
 // Trigger defines how the job is triggered.
@@ -107,20 +112,65 @@ type Callback struct {
 	Configuration map[string]any `yaml:"configuration" json:"configuration"`
 }
 
+// Volume declares a named BYO storage source that steps can mount by name.
+type Volume struct {
+	Name       string                  `yaml:"name" json:"name"`
+	Source     *VolumeSource           `yaml:"source,omitempty" json:"source,omitempty"`
+	Sources    map[string]VolumeSource `yaml:"sources,omitempty" json:"sources,omitempty"`
+	AccessMode string                  `yaml:"accessMode,omitempty" json:"accessMode,omitempty"`
+}
+
+// VolumeSource describes one concrete engine-specific source kind.
+type VolumeSource struct {
+	PVC           string         `yaml:"pvc,omitempty" json:"pvc,omitempty"`
+	ClaimTemplate *ClaimTemplate `yaml:"claimTemplate,omitempty" json:"claimTemplate,omitempty"`
+	VolumeSource  map[string]any `yaml:"volumeSource,omitempty" json:"volumeSource,omitempty"`
+	Bind          string         `yaml:"bind,omitempty" json:"bind,omitempty"`
+	Volume        string         `yaml:"volume,omitempty" json:"volume,omitempty"`
+	Tmpfs         *TmpfsSource   `yaml:"tmpfs,omitempty" json:"tmpfs,omitempty"`
+}
+
+// ClaimTemplate configures a Kubernetes inline ephemeral PVC claim template.
+type ClaimTemplate struct {
+	StorageClass string            `yaml:"storageClass,omitempty" json:"storageClass,omitempty"`
+	Size         string            `yaml:"size,omitempty" json:"size,omitempty"`
+	AccessMode   string            `yaml:"accessMode,omitempty" json:"accessMode,omitempty"`
+	Labels       map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
+	Annotations  map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
+}
+
+// TmpfsSource configures a Docker/Podman tmpfs source.
+type TmpfsSource struct {
+	SizeBytes int64 `yaml:"sizeBytes,omitempty" json:"sizeBytes,omitempty"`
+	Mode      *int  `yaml:"mode,omitempty" json:"mode,omitempty"`
+}
+
+// VolumeMount references a job-level volume from a step.
+type VolumeMount struct {
+	Volume   string `yaml:"volume" json:"volume"`
+	Path     string `yaml:"path" json:"path"`
+	ReadOnly bool   `yaml:"readOnly,omitempty" json:"readOnly,omitempty"`
+	SubPath  string `yaml:"subPath,omitempty" json:"subPath,omitempty"`
+}
+
 // Step defines an execution step.
 type Step struct {
-	Name         string            `yaml:"name" json:"name"`
-	Type         string            `yaml:"type,omitempty" json:"type,omitempty"`
-	Engine       string            `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Image        string            `yaml:"image" json:"image"`
-	Command      []string          `yaml:"command,omitempty" json:"command,omitempty"`
-	NodeSelector map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
-	Next         []string          `yaml:"next,omitempty" json:"next,omitempty"`
-	DependsOn    []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
-	Retries      int               `yaml:"retries,omitempty" json:"retries,omitempty"`
-	RetryDelay   time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
-	RetryBackoff bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
-	TriggerRule  string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	Name                         string            `yaml:"name" json:"name"`
+	Type                         string            `yaml:"type,omitempty" json:"type,omitempty"`
+	Engine                       string            `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Image                        string            `yaml:"image" json:"image"`
+	Command                      []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	NodeSelector                 map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
+	Next                         []string          `yaml:"next,omitempty" json:"next,omitempty"`
+	DependsOn                    []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Retries                      int               `yaml:"retries,omitempty" json:"retries,omitempty"`
+	RetryDelay                   time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
+	RetryBackoff                 bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	TriggerRule                  string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	VolumeMounts                 []VolumeMount     `yaml:"volumeMounts,omitempty" json:"volumeMounts,omitempty"`
+	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
+	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
+	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
 	// OutputSchema is a JSON Schema describing this step's expected output keys.
 	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
@@ -133,22 +183,26 @@ type Step struct {
 // UnmarshalYAML sets defaults while deserialising a step.
 func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	type rawStep struct {
-		Name           string                    `yaml:"name"`
-		Type           string                    `yaml:"type"`
-		Engine         string                    `yaml:"engine"`
-		Image          string                    `yaml:"image"`
-		Command        []string                  `yaml:"command"`
-		NodeSelector   map[string]string         `yaml:"nodeSelector"`
-		Next           interface{}               `yaml:"next"`
-		DependsOn      interface{}               `yaml:"dependsOn"`
-		Retries        int                       `yaml:"retries"`
-		RetryDelay     time.Duration             `yaml:"retryDelay"`
-		RetryBackoff   bool                      `yaml:"retryBackoff"`
-		TriggerRule    string                    `yaml:"triggerRule"`
-		OutputSchema   map[string]any            `yaml:"outputSchema"`
-		InputSchema    map[string]map[string]any `yaml:"inputSchema"`
-		Cache          interface{}               `yaml:"cache"`
-		container.Spec `yaml:",inline"`
+		Name                         string                    `yaml:"name"`
+		Type                         string                    `yaml:"type"`
+		Engine                       string                    `yaml:"engine"`
+		Image                        string                    `yaml:"image"`
+		Command                      []string                  `yaml:"command"`
+		NodeSelector                 map[string]string         `yaml:"nodeSelector"`
+		Next                         interface{}               `yaml:"next"`
+		DependsOn                    interface{}               `yaml:"dependsOn"`
+		Retries                      int                       `yaml:"retries"`
+		RetryDelay                   time.Duration             `yaml:"retryDelay"`
+		RetryBackoff                 bool                      `yaml:"retryBackoff"`
+		TriggerRule                  string                    `yaml:"triggerRule"`
+		VolumeMounts                 []VolumeMount             `yaml:"volumeMounts"`
+		ServiceAccountName           string                    `yaml:"serviceAccountName"`
+		PodAnnotations               map[string]string         `yaml:"podAnnotations"`
+		AutomountServiceAccountToken *bool                     `yaml:"automountServiceAccountToken"`
+		OutputSchema                 map[string]any            `yaml:"outputSchema"`
+		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
+		Cache                        interface{}               `yaml:"cache"`
+		container.Spec               `yaml:",inline"`
 	}
 
 	rs := rawStep{Engine: EngineDocker}
@@ -184,6 +238,10 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
+	s.VolumeMounts = rs.VolumeMounts
+	s.ServiceAccountName = rs.ServiceAccountName
+	s.PodAnnotations = rs.PodAnnotations
+	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -196,22 +254,26 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 // the same as YAML manifests loaded from disk.
 func (s *Step) UnmarshalJSON(data []byte) error {
 	type rawStep struct {
-		Name           string                    `json:"name"`
-		Type           string                    `json:"type"`
-		Engine         string                    `json:"engine"`
-		Image          string                    `json:"image"`
-		Command        []string                  `json:"command"`
-		NodeSelector   map[string]string         `json:"nodeSelector"`
-		Next           []string                  `json:"next"`
-		DependsOn      []string                  `json:"dependsOn"`
-		Retries        int                       `json:"retries"`
-		RetryDelay     time.Duration             `json:"retryDelay"`
-		RetryBackoff   bool                      `json:"retryBackoff"`
-		TriggerRule    string                    `json:"triggerRule"`
-		OutputSchema   map[string]any            `json:"outputSchema"`
-		InputSchema    map[string]map[string]any `json:"inputSchema"`
-		Cache          interface{}               `json:"cache"`
-		container.Spec `json:",inline"`
+		Name                         string                    `json:"name"`
+		Type                         string                    `json:"type"`
+		Engine                       string                    `json:"engine"`
+		Image                        string                    `json:"image"`
+		Command                      []string                  `json:"command"`
+		NodeSelector                 map[string]string         `json:"nodeSelector"`
+		Next                         []string                  `json:"next"`
+		DependsOn                    []string                  `json:"dependsOn"`
+		Retries                      int                       `json:"retries"`
+		RetryDelay                   time.Duration             `json:"retryDelay"`
+		RetryBackoff                 bool                      `json:"retryBackoff"`
+		TriggerRule                  string                    `json:"triggerRule"`
+		VolumeMounts                 []VolumeMount             `json:"volumeMounts"`
+		ServiceAccountName           string                    `json:"serviceAccountName"`
+		PodAnnotations               map[string]string         `json:"podAnnotations"`
+		AutomountServiceAccountToken *bool                     `json:"automountServiceAccountToken"`
+		OutputSchema                 map[string]any            `json:"outputSchema"`
+		InputSchema                  map[string]map[string]any `json:"inputSchema"`
+		Cache                        interface{}               `json:"cache"`
+		container.Spec               `json:",inline"`
 	}
 
 	rs := rawStep{Engine: EngineDocker}
@@ -237,6 +299,10 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
+	s.VolumeMounts = rs.VolumeMounts
+	s.ServiceAccountName = rs.ServiceAccountName
+	s.PodAnnotations = rs.PodAnnotations
+	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -282,10 +348,14 @@ func (d *Definition) Validate() error {
 	if err := validateCallbacks(d.Callbacks); err != nil {
 		return err
 	}
+	volumes, err := validateVolumes(d.Volumes)
+	if err != nil {
+		return err
+	}
 	if len(d.Steps) == 0 {
 		return fmt.Errorf("steps must contain at least one entry")
 	}
-	if err := validateSteps(d.Steps); err != nil {
+	if err := validateSteps(d.Steps, volumes); err != nil {
 		return err
 	}
 	return nil
@@ -387,9 +457,134 @@ func validateCallbacks(callbacks []Callback) error {
 	return nil
 }
 
-func validateSteps(steps []Step) error {
+func validateVolumes(volumes []Volume) (map[string]*Volume, error) {
+	byName := make(map[string]*Volume, len(volumes))
+	for i := range volumes {
+		volume := &volumes[i]
+		name := strings.TrimSpace(volume.Name)
+		if name == "" {
+			return nil, fmt.Errorf("volumes[%d].name is required", i)
+		}
+		if _, exists := byName[name]; exists {
+			return nil, fmt.Errorf("duplicate volume name %q", name)
+		}
+		volume.Name = name
+		byName[name] = volume
+
+		hasSource := volume.Source != nil
+		hasSources := len(volume.Sources) > 0
+		switch {
+		case hasSource == hasSources:
+			return nil, fmt.Errorf("volumes[%d] must set exactly one of source or sources", i)
+		case hasSource:
+			if err := validateVolumeSource(*volume.Source, "", fmt.Sprintf("volumes[%d].source", i)); err != nil {
+				return nil, err
+			}
+		case hasSources:
+			for rawEngine, source := range volume.Sources {
+				engine := strings.TrimSpace(rawEngine)
+				if engine != rawEngine {
+					return nil, fmt.Errorf("volumes[%d].sources has invalid engine key %q", i, rawEngine)
+				}
+				if err := validateEngine(engine, fmt.Sprintf("volumes[%d].sources", i)); err != nil {
+					return nil, err
+				}
+				if err := validateVolumeSource(source, engine, fmt.Sprintf("volumes[%d].sources[%q]", i, engine)); err != nil {
+					return nil, err
+				}
+			}
+		}
+		if strings.TrimSpace(volume.AccessMode) != "" && !isKnownAccessMode(volume.AccessMode) {
+			return nil, fmt.Errorf("volumes[%d].accessMode %q is not supported", i, volume.AccessMode)
+		}
+	}
+	return byName, nil
+}
+
+func validateVolumeSource(source VolumeSource, engine, field string) error {
+	kind, err := sourceKind(source)
+	if err != nil {
+		return fmt.Errorf("%s: %w", field, err)
+	}
+	if engine != "" && !sourceKindCompatible(kind, engine) {
+		return fmt.Errorf("%s.%s is not valid for engine %q", field, kind, engine)
+	}
+	if source.ClaimTemplate != nil {
+		accessMode := strings.TrimSpace(source.ClaimTemplate.AccessMode)
+		if accessMode != "" && !isKnownAccessMode(accessMode) {
+			return fmt.Errorf("%s.claimTemplate.accessMode %q is not supported", field, accessMode)
+		}
+		if strings.TrimSpace(source.ClaimTemplate.Size) == "" {
+			return fmt.Errorf("%s.claimTemplate.size is required", field)
+		}
+	}
+	if source.VolumeSource != nil && len(source.VolumeSource) == 0 {
+		return fmt.Errorf("%s.volumeSource must not be empty", field)
+	}
+	return nil
+}
+
+func sourceKind(source VolumeSource) (string, error) {
+	kinds := make([]string, 0, 6)
+	if strings.TrimSpace(source.PVC) != "" {
+		kinds = append(kinds, "pvc")
+	}
+	if source.ClaimTemplate != nil {
+		kinds = append(kinds, "claimTemplate")
+	}
+	if source.VolumeSource != nil {
+		kinds = append(kinds, "volumeSource")
+	}
+	if strings.TrimSpace(source.Bind) != "" {
+		kinds = append(kinds, "bind")
+	}
+	if strings.TrimSpace(source.Volume) != "" {
+		kinds = append(kinds, "volume")
+	}
+	if source.Tmpfs != nil {
+		kinds = append(kinds, "tmpfs")
+	}
+	if len(kinds) != 1 {
+		return "", fmt.Errorf("must set exactly one source kind, got %d", len(kinds))
+	}
+	return kinds[0], nil
+}
+
+func sourceKindCompatible(kind, engine string) bool {
+	switch engine {
+	case EngineKubernetes:
+		return kind == "pvc" || kind == "claimTemplate" || kind == "volumeSource"
+	case EngineDocker, EnginePodman:
+		return kind == "bind" || kind == "volume" || kind == "tmpfs"
+	default:
+		return false
+	}
+}
+
+func validateEngine(engine, field string) error {
+	switch engine {
+	case EngineDocker, EngineKubernetes, EnginePodman:
+		return nil
+	default:
+		return fmt.Errorf("%s has unknown engine %q", field, engine)
+	}
+}
+
+func isKnownAccessMode(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany", "ReadWriteOncePod":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateSteps(steps []Step, volumes map[string]*Volume) error {
 	names, adj, err := computeStepAdjacency(steps)
 	if err != nil {
+		return err
+	}
+	if err := validateStepVolumeMounts(steps, volumes); err != nil {
 		return err
 	}
 	if err := detectCycles(adj, names); err != nil {
@@ -409,6 +604,270 @@ func validateSteps(steps []Step) error {
 		return err
 	}
 	return nil
+}
+
+func validateStepVolumeMounts(steps []Step, volumes map[string]*Volume) error {
+	for i := range steps {
+		step := &steps[i]
+		paths := make(map[string]struct{}, len(step.Mounts)+len(step.VolumeMounts))
+		for _, mount := range step.Mounts {
+			target := strings.TrimSpace(mount.Target)
+			if target == "" {
+				continue
+			}
+			if _, exists := paths[target]; exists {
+				return fmt.Errorf("steps[%d] mounts duplicate target path %q", i, target)
+			}
+			paths[target] = struct{}{}
+		}
+		for j := range step.VolumeMounts {
+			mount := &step.VolumeMounts[j]
+			volumeName := strings.TrimSpace(mount.Volume)
+			if volumeName == "" {
+				return fmt.Errorf("steps[%d].volumeMounts[%d].volume is required", i, j)
+			}
+			volume, ok := volumes[volumeName]
+			if !ok {
+				return fmt.Errorf("steps[%d].volumeMounts[%d] references unknown volume %q", i, j, volumeName)
+			}
+			target := strings.TrimSpace(mount.Path)
+			if target == "" {
+				return fmt.Errorf("steps[%d].volumeMounts[%d].path is required", i, j)
+			}
+			if !path.IsAbs(target) {
+				return fmt.Errorf("steps[%d].volumeMounts[%d].path %q must be absolute", i, j, target)
+			}
+			if _, exists := paths[target]; exists {
+				return fmt.Errorf("steps[%d] mounts duplicate target path %q", i, target)
+			}
+			paths[target] = struct{}{}
+
+			source, err := volume.sourceForEngine(step.Engine)
+			if err != nil {
+				return fmt.Errorf("steps[%d].volumeMounts[%d]: %w", i, j, err)
+			}
+			kind, err := sourceKind(source)
+			if err != nil {
+				return fmt.Errorf("steps[%d].volumeMounts[%d]: %w", i, j, err)
+			}
+			if !sourceKindCompatible(kind, step.Engine) {
+				return fmt.Errorf("steps[%d].volumeMounts[%d]: volume %q source %q is not valid for engine %q", i, j, volumeName, kind, step.Engine)
+			}
+		}
+
+		if step.Engine != EngineKubernetes {
+			if strings.TrimSpace(step.ServiceAccountName) != "" {
+				return fmt.Errorf("steps[%d].serviceAccountName is only supported for kubernetes steps", i)
+			}
+			if len(step.PodAnnotations) > 0 {
+				return fmt.Errorf("steps[%d].podAnnotations is only supported for kubernetes steps", i)
+			}
+			if step.AutomountServiceAccountToken != nil {
+				return fmt.Errorf("steps[%d].automountServiceAccountToken is only supported for kubernetes steps", i)
+			}
+		}
+	}
+	return nil
+}
+
+func (v *Volume) sourceForEngine(engine string) (VolumeSource, error) {
+	if v == nil {
+		return VolumeSource{}, fmt.Errorf("volume is nil")
+	}
+	if v.Source != nil {
+		return *v.Source, nil
+	}
+	if len(v.Sources) == 0 {
+		return VolumeSource{}, fmt.Errorf("volume %q has no sources", v.Name)
+	}
+	source, ok := v.Sources[engine]
+	if !ok {
+		return VolumeSource{}, fmt.Errorf("volume %q has no source for engine %q", v.Name, engine)
+	}
+	return source, nil
+}
+
+// RuntimeSpecForStep resolves definition-level fields into the container spec
+// persisted on the step's atom. The returned spec contains only runtime-native
+// data and does not require the worker to reload the original job definition.
+func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
+	if d == nil || step == nil {
+		return container.Spec{}, fmt.Errorf("definition and step are required")
+	}
+	volumes := make(map[string]*Volume, len(d.Volumes))
+	for i := range d.Volumes {
+		volume := &d.Volumes[i]
+		volumes[volume.Name] = volume
+	}
+
+	spec := cloneContainerSpec(step.Spec)
+	spec.ResolvedVolumeMounts = nil
+	for _, mount := range step.VolumeMounts {
+		volume := volumes[strings.TrimSpace(mount.Volume)]
+		if volume == nil {
+			return container.Spec{}, fmt.Errorf("step %s references unknown volume %q", step.Name, mount.Volume)
+		}
+		source, err := volume.sourceForEngine(step.Engine)
+		if err != nil {
+			return container.Spec{}, fmt.Errorf("step %s volume %s: %w", step.Name, volume.Name, err)
+		}
+		resolved, err := resolveVolumeMount(volume.Name, source, mount)
+		if err != nil {
+			return container.Spec{}, fmt.Errorf("step %s volume %s: %w", step.Name, volume.Name, err)
+		}
+		spec.ResolvedVolumeMounts = append(spec.ResolvedVolumeMounts, resolved)
+	}
+
+	if step.Engine == EngineKubernetes {
+		k8sSpec := &container.KubernetesSpec{
+			ServiceAccountName:           strings.TrimSpace(d.Metadata.ServiceAccountName),
+			PodAnnotations:               cloneStringMap(d.Metadata.PodAnnotations),
+			AutomountServiceAccountToken: cloneBoolPtr(d.Metadata.AutomountServiceAccountToken),
+		}
+		if strings.TrimSpace(step.ServiceAccountName) != "" {
+			k8sSpec.ServiceAccountName = strings.TrimSpace(step.ServiceAccountName)
+		}
+		if len(step.PodAnnotations) > 0 {
+			if k8sSpec.PodAnnotations == nil {
+				k8sSpec.PodAnnotations = make(map[string]string, len(step.PodAnnotations))
+			}
+			for k, v := range step.PodAnnotations {
+				k8sSpec.PodAnnotations[k] = v
+			}
+		}
+		if step.AutomountServiceAccountToken != nil {
+			k8sSpec.AutomountServiceAccountToken = cloneBoolPtr(step.AutomountServiceAccountToken)
+		}
+		if k8sSpec.ServiceAccountName != "" || len(k8sSpec.PodAnnotations) > 0 || k8sSpec.AutomountServiceAccountToken != nil {
+			spec.Kubernetes = k8sSpec
+		}
+	}
+
+	return spec, nil
+}
+
+func resolveVolumeMount(name string, source VolumeSource, mount VolumeMount) (container.VolumeMount, error) {
+	kind, err := sourceKind(source)
+	if err != nil {
+		return container.VolumeMount{}, err
+	}
+	resolved := container.VolumeMount{
+		Name:     strings.TrimSpace(name),
+		Target:   strings.TrimSpace(mount.Path),
+		ReadOnly: mount.ReadOnly,
+		SubPath:  strings.TrimSpace(mount.SubPath),
+	}
+	switch kind {
+	case "bind":
+		resolved.Type = container.VolumeMountTypeBind
+		resolved.Source = strings.TrimSpace(source.Bind)
+	case "volume":
+		resolved.Type = container.VolumeMountTypeVolume
+		resolved.Source = strings.TrimSpace(source.Volume)
+	case "tmpfs":
+		resolved.Type = container.VolumeMountTypeTmpfs
+		if source.Tmpfs != nil {
+			resolved.Tmpfs = &container.TmpfsOptions{
+				SizeBytes: source.Tmpfs.SizeBytes,
+				Mode:      cloneIntPtr(source.Tmpfs.Mode),
+			}
+		}
+	case "pvc":
+		resolved.Type = container.VolumeMountTypePVC
+		resolved.Source = strings.TrimSpace(source.PVC)
+	case "claimTemplate":
+		resolved.Type = container.VolumeMountTypeClaimTemplate
+		resolved.ClaimTemplate = convertClaimTemplate(source.ClaimTemplate)
+	case "volumeSource":
+		resolved.Type = container.VolumeMountTypeVolumeSource
+		resolved.VolumeSource, err = cloneAnyMap(source.VolumeSource)
+		if err != nil {
+			return container.VolumeMount{}, fmt.Errorf("clone volumeSource: %w", err)
+		}
+	default:
+		return container.VolumeMount{}, fmt.Errorf("unsupported source kind %q", kind)
+	}
+	return resolved, nil
+}
+
+func convertClaimTemplate(source *ClaimTemplate) *container.KubernetesClaimTemplate {
+	if source == nil {
+		return nil
+	}
+	accessMode := strings.TrimSpace(source.AccessMode)
+	if accessMode == "" {
+		accessMode = "ReadWriteOnce"
+	}
+	return &container.KubernetesClaimTemplate{
+		StorageClass: strings.TrimSpace(source.StorageClass),
+		Size:         strings.TrimSpace(source.Size),
+		AccessMode:   accessMode,
+		Labels:       cloneStringMap(source.Labels),
+		Annotations:  cloneStringMap(source.Annotations),
+	}
+}
+
+func cloneContainerSpec(spec container.Spec) container.Spec {
+	out := spec
+	if len(spec.Env) > 0 {
+		out.Env = cloneStringMap(spec.Env)
+	}
+	if len(spec.Mounts) > 0 {
+		out.Mounts = slices.Clone(spec.Mounts)
+	}
+	if len(spec.ResolvedVolumeMounts) > 0 {
+		out.ResolvedVolumeMounts = slices.Clone(spec.ResolvedVolumeMounts)
+	}
+	if spec.Kubernetes != nil {
+		out.Kubernetes = &container.KubernetesSpec{
+			ServiceAccountName:           spec.Kubernetes.ServiceAccountName,
+			PodAnnotations:               cloneStringMap(spec.Kubernetes.PodAnnotations),
+			AutomountServiceAccountToken: cloneBoolPtr(spec.Kubernetes.AutomountServiceAccountToken),
+		}
+	}
+	return out
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for k, v := range values {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneAnyMap(values map[string]any) (map[string]any, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func cloneBoolPtr(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
+func cloneIntPtr(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	out := *value
+	return &out
 }
 
 // DeriveStepSuccessors builds the adjacency list for the provided steps.

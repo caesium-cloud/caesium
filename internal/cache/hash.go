@@ -3,6 +3,7 @@ package cache
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"hash"
 	"sort"
@@ -13,17 +14,19 @@ import (
 
 // HashInput contains all fields that contribute to a task's identity hash.
 type HashInput struct {
-	JobAlias           string
-	TaskName           string
-	Image              string
-	Command            []string
-	Env                map[string]string
-	WorkDir            string
-	Mounts             []container.Mount
-	PredecessorHashes  []string
-	PredecessorOutputs map[string]map[string]string
-	RunParams          map[string]string
-	CacheVersion       int
+	JobAlias             string
+	TaskName             string
+	Image                string
+	Command              []string
+	Env                  map[string]string
+	WorkDir              string
+	Mounts               []container.Mount
+	ResolvedVolumeMounts []container.VolumeMount
+	Kubernetes           *container.KubernetesSpec
+	PredecessorHashes    []string
+	PredecessorOutputs   map[string]map[string]string
+	RunParams            map[string]string
+	CacheVersion         int
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
@@ -55,6 +58,30 @@ func (h HashInput) Compute() string {
 	sort.Strings(mountStrs)
 	for _, m := range mountStrs {
 		w(digest, "mount:%s\n", m)
+	}
+
+	volumeMountStrs := make([]string, 0, len(h.ResolvedVolumeMounts))
+	for _, m := range h.ResolvedVolumeMounts {
+		volumeMountStrs = append(volumeMountStrs, fmt.Sprintf("%s:%s:%s:%s:%t:%s:%s:%s:%s", m.Name, m.Type, m.Source, m.Target, m.ReadOnly, m.SubPath, canonicalJSON(m.Tmpfs), canonicalJSON(m.ClaimTemplate), canonicalJSON(m.VolumeSource)))
+	}
+	sort.Strings(volumeMountStrs)
+	for _, m := range volumeMountStrs {
+		w(digest, "volume_mount:%s\n", m)
+	}
+
+	if h.Kubernetes != nil {
+		w(digest, "kubernetes.service_account:%s\n", h.Kubernetes.ServiceAccountName)
+		if h.Kubernetes.AutomountServiceAccountToken != nil {
+			w(digest, "kubernetes.automount:%t\n", *h.Kubernetes.AutomountServiceAccountToken)
+		}
+		keys := make([]string, 0, len(h.Kubernetes.PodAnnotations))
+		for k := range h.Kubernetes.PodAnnotations {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			w(digest, "kubernetes.annotation:%s=%s\n", k, h.Kubernetes.PodAnnotations[k])
+		}
 	}
 
 	// Sorted predecessor hashes
@@ -102,4 +129,15 @@ func (h HashInput) Compute() string {
 // an error so the error is intentionally discarded.
 func w(h hash.Hash, format string, args ...any) {
 	_, _ = fmt.Fprintf(h, format, args...)
+}
+
+func canonicalJSON(value any) string {
+	if value == nil {
+		return ""
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%v", value)
+	}
+	return string(data)
 }

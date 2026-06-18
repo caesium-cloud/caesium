@@ -14,6 +14,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `metadata` | object | required | Includes alias, labels, annotations. |
 | `trigger` | object | required | Defines how the job is invoked. |
 | `callbacks` | array | optional | Notification hooks executed after runs. |
+| `volumes` | array | optional | Named BYO storage sources mounted by steps. |
 | `steps` | array | required | Ordered list of atoms/tasks forming the DAG. |
 
 ## Metadata
@@ -28,6 +29,9 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |
 | `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
 | `cache` | boolean or object | optional | Job-level cache defaults; accepts `true` or `{ttl: "24h"}`. |
+| `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |
+| `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |
+| `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |
 
 ## Trigger
 
@@ -57,6 +61,20 @@ Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map
 
 Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.
 
+## Volumes
+
+Volumes are declared once at the job level and mounted by steps with `volumeMounts`.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | required | Unique volume name referenced by steps. |
+| `source` | object | optional | Single-engine shorthand. Exactly one of `source` or `sources` is required. |
+| `sources` | map[string]object | optional | Engine-keyed sources for portable manifests. Keys are `docker`, `podman`, or `kubernetes`. |
+| `accessMode` | string | optional | Advisory access mode; supported values are Kubernetes access modes. |
+
+Docker/Podman source kinds: `bind`, `volume`, `tmpfs`.
+Kubernetes source kinds: `pvc`, `claimTemplate`, `volumeSource`.
+
 ## Steps
 
 Each step represents a DAG node backed by a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted. When neither `next` nor `dependsOn` is provided, the importer links steps sequentially.
@@ -71,7 +89,11 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `env` | map[string]string | optional | Environment variables passed to the runtime. |
 | `workdir` | string | optional | Working directory inside the container runtime. |
 | `mounts` | array[object] | optional | Bind mounts with `source`, `target`, and optional `readOnly`. |
+| `volumeMounts` | array[object] | optional | Declared volume mounts with `volume`, `path`, optional `readOnly`, and optional `subPath`. |
 | `nodeSelector` | map[string]string | optional | Node labels required for claiming this step in distributed mode. |
+| `serviceAccountName` | string | optional | Kubernetes ServiceAccount for this step's pod. |
+| `podAnnotations` | map[string]string | optional | Kubernetes pod annotations for this step. |
+| `automountServiceAccountToken` | boolean | optional | Kubernetes pod service-account token setting for this step. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
 | `retries` | integer | optional | Number of retry attempts after the initial failure. |
