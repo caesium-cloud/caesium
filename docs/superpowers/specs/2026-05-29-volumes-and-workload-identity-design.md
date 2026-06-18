@@ -73,9 +73,11 @@ zero-dependency, self-hosted, container-native identity of the project.
    The step's real `atomSpec.Env` / `WorkDir` / `Mounts` are loaded **only** into the
    cache-hash input (lines ~143–167) and then discarded. By contrast the **local** executor
    (`internal/job/job.go:675–685`) merges and applies `spec.Env` + param env + output env.
-   **Net effect:** step-level `env`, `secret://` references, `workdir`, and `mounts` work
-   under `caesium dev` / single-node but are **silently ignored in distributed mode**. This
-   blocks Volumes (which extends `Mounts`) and any credential injection in distributed mode.
+   **Net effect:** step-level `env`, `secret://` references, `workdir`, `mounts`, **and
+   `CAESIUM_PARAM_*` per-run params** work under `caesium dev` / single-node but are
+   **silently ignored in distributed mode** — the distributed path never even queries params.
+   This blocks Volumes (which extends `Mounts`) and any credential injection in distributed
+   mode.
 
 2. **No inter-step file handoff.** Output is capped at 64 KB and is env-only; there is no
    shared filesystem between steps. Canonical file flows (a built binary, a `.tfplan`, a
@@ -133,7 +135,7 @@ Job definition (YAML)
          │ apply / git-sync
          ▼
   Validation (pkg/jobdef): volumes resolvable, mounts reference declared volumes,
-  one source kind per engine, a source for every engine a step uses,
+  one source kind per engine, a source for each mounting step's *declared* engine,
   access-mode sanity, engine compatibility.
 
          │ stored as Atom.Spec (JSON) + Job/Trigger models
@@ -144,7 +146,8 @@ Job definition (YAML)
     Engines materialize volumes + identity per runtime:
       docker/podman: bind | named volume | tmpfs ; env/mounts carry identity
       kubernetes:   PVC | ephemeral claimTemplate | generic source ; serviceAccountName
-    Ephemeral-volume lifecycle: create at run start, crash-safe cleanup at run end.
+    Ephemeral-volume lifecycle: k8s via native inline ephemeral claim (kubelet GCs it);
+      docker/podman via run-owner create-at-start + crash-safe reaper at run end.
 ```
 
 The three components are independently testable increments and should land in order:
@@ -152,21 +155,37 @@ The three components are independently testable increments and should land in or
 
 ## 5. Component 0 — Run-time spec application + secret resolution (prerequisite)
 
-**Problem.** The distributed worker discards the step spec (§2.2.1).
+**Problem.** The distributed worker discards the step spec (§2.2.1). Concretely,
+`executeTask()` builds `spec := container.Spec{}` and sets only
+`spec.Env = BuildOutputEnv(predOutputs)` — so **three** things the local executor applies are
+absent from the distributed path:
+1. the step-declared `Spec.Env` (including `secret://…` references), `WorkDir`, and `Mounts`;
+2. `CAESIUM_PARAM_*` per-run params — the local executor injects these via
+   `buildParamEnv(snapshot.ID, j.alias, snapshot.Params)`; the distributed path never queries
+   params at all. This is a **co-equal gap** with the missing step env, not an afterthought;
+3. `secret://` resolution (Component 0's headline).
 
 **Change.**
 
 - Extend `NewRuntimeExecutor` (`internal/worker/runtime_executor.go:46`) to accept a
   `secret.Resolver` (built once at worker startup via
   `internal/jobdef/runtime/config.go:BuildSecretResolver`).
-- In `executeTask()` (line ~312), replace `spec := container.Spec{}` (line ~332) with the
-  **full** atom spec: load `atomModel.Spec` (the load already exists at lines ~145–147 for
-  hashing) into `spec`, then:
+- **Make the step spec reachable from `executeTask()`.** Today the only `atomModel.Spec` load
+  lives in `Execute()` inside `if cacheCfg.Enabled { … }` (for the cache hash) and is **not
+  reachable** from `executeTask()` — and when caching is disabled it does not run at all. So
+  `executeTask()` must obtain the spec itself: either (preferred) refactor `executeTask` to
+  accept the already-loaded `container.Spec` as a parameter threaded from the caller, or do one
+  explicit `atoms` read inside `executeTask`. Whichever is chosen, the spec is **explicit**:
+  there is no pre-existing load to piggyback on, and a naive "reuse the hashing load" would add
+  a second per-task DB query (and break entirely with caching off).
+- In `executeTask()` (line ~312), replace `spec := container.Spec{}` (line ~332) with that
+  **full** atom spec, then:
   1. For every `spec.Env` value matching `secret://…`, call `resolver.Resolve(taskCtx, v)`
      and substitute the resolved value. A resolution error fails the task with a clear
      message (never silently blank).
-  2. Merge predecessor-output env and `CAESIUM_PARAM_*` env on top, using the **exact
-     precedence the local executor uses** (`internal/job/job.go:675–685` and 812–833).
+  2. Query per-run params and build `CAESIUM_PARAM_*`, then merge them and predecessor-output
+     env on top, using the **exact precedence the local executor uses**
+     (`internal/job/job.go:675–685` and 812–833).
   3. Carry `WorkDir` and `Mounts` through unchanged.
 - Pass the populated `spec` to `engine.Create` (line ~341).
 
@@ -182,10 +201,11 @@ way: hashing the *resolved* value would (a) leak secret material into the cache 
 (b) bust the cache on every rotation. Document: `secret://` URIs are hashed **by reference,
 not value**; volatile per-run values remain excluded.
 
-**Parity contract & test.** A golden test asserts that, for the same definition, the env /
-workdir / mounts handed to `engine.Create` are byte-identical between the local executor and
-the distributed executor. An integration test proves a `secret://env/...` value declared in
-`step.env` reaches the container in distributed mode (this test is currently absent).
+**Parity contract & test.** A golden test asserts that, for the same definition, the env
+(step env, `CAESIUM_PARAM_*`, and predecessor outputs) / workdir / mounts handed to
+`engine.Create` are byte-identical between the local executor and the distributed executor.
+Integration tests prove (a) a `secret://env/...` value declared in `step.env` and (b) a
+per-run param reach the container in distributed mode (both currently absent).
 
 **Dependency honesty.** This makes `secret://env` work with zero external dependency;
 `secret://vault` still requires a running Vault and `secret://k8s` requires cluster API
@@ -205,10 +225,10 @@ volumes:
     sources:
       kubernetes:
         pvc: ci-shared-rwx           # pre-existing PVC (mount only)
-        # claimTemplate:             #   ephemeral, CSI-provisioned (Caesium owns the claim)
-        #   storageClass: nfs-csi
+        # claimTemplate:             #   inline ephemeral, per-step (kubelet GCs with the pod)
+        #   storageClass: nfs-csi    #   NOT shared across steps — use an external `pvc` for that
         #   size: 5Gi
-        #   accessMode: ReadWriteMany
+        #   accessMode: ReadWriteOnce
         # volumeSource:              #   generic k8s VolumeSource pass-through (nfs, csi, …)
         #   nfs: { server: 10.0.0.5, path: /export/caesium }
       docker:
@@ -253,8 +273,12 @@ steps:
   - `pvc`/`claimTemplate`/`volumeSource` are k8s-only; `bind`/`volume`/`tmpfs` are
     docker/podman-only — reject a source kind that doesn't match its engine key (or, for the
     `source` shorthand, the step's `engine`);
-  - every engine a step actually uses has a resolvable source for each volume it mounts —
-    fail fast at lint/apply if a step runs on an engine the volume has no source for;
+  - each step has exactly one **declared** `engine` (defaulting to `docker`). Validation
+    checks only that a volume has a resolvable source for the *declared engine of each step
+    that mounts it* — **not** for every known engine. The `sources` map enables portability
+    but is never *required* to populate every engine: a single-engine job declaring only its
+    one engine's source is valid. Fail fast at lint/apply only when a mounting step's declared
+    engine has no source for that volume;
   - mount paths are absolute and unique per step; `accessMode` is a known value.
 
 ### 6.3 Container spec & engines
@@ -266,19 +290,31 @@ steps:
 - **Docker/Podman** (`internal/atom/docker/engine.go:convertMounts`, podman equivalent): add
   `mount.TypeVolume` (named volume) and `mount.TypeTmpfs` alongside `TypeBind`.
 - **Kubernetes** (`internal/atom/kubernetes/engine.go:convertKubernetesMounts`): emit
-  `PersistentVolumeClaim` volume sources, ephemeral `volumeClaimTemplate`, and generic
-  pass-through `VolumeSource`s — not only `HostPath`. Reuse `sanitizeVolumeName`.
+  `PersistentVolumeClaim` volume sources, **inline `ephemeral.volumeClaimTemplate`** for
+  ephemeral claims (kubelet-managed lifecycle — see §6.4), and generic pass-through
+  `VolumeSource`s — not only `HostPath`. Reuse `sanitizeVolumeName`.
 
 ### 6.4 Ephemeral-volume lifecycle
 
 - **External** sources (`pvc`, `bind`, named `volume`, generic source): mount only; Caesium
   never creates or deletes them.
-- **Ephemeral** (k8s `claimTemplate` / a per-run named docker/podman volume): Caesium creates
-  the claim object / volume at **run start** and deletes it at **run terminal state**. Backing
-  storage is still BYO (the StorageClass/CSI/volume driver). Cleanup must be **crash-safe**:
-  tie deletion to run completion in the run-owner state machine and add an orphan-reaper that
-  GCs ephemeral volumes whose run is terminal/absent (mirrors the existing cache pruner
-  pattern). Name ephemeral resources deterministically by run id for reliable GC.
+- **Ephemeral on k8s (`claimTemplate`): prefer the native inline
+  `volumes[].ephemeral.volumeClaimTemplate`** (pod-spec field, GA since k8s 1.23). The kubelet
+  owns the generated PVC's lifecycle and garbage-collects it (via owner-reference) when the pod
+  is deleted — so Caesium creates **no** separate claim object, there is **no** crash-unsafe
+  window between PVC-create and pod-create, and **no orphan-reaper is needed on k8s**. Backing
+  storage is still BYO (the StorageClass/CSI). **Scope:** an inline ephemeral claim is bound to
+  one pod, i.e. one **step** — it is per-step scratch, not a shared volume. Ephemeral scratch
+  that must be **shared across steps** is intentionally **not** offered via `claimTemplate` in
+  v1 (a standalone Caesium-managed PVC would reintroduce the manual create/delete + reaper this
+  bullet removes); users who need shared ephemeral scratch pre-provision an **external** RWX
+  `pvc` (mount-only, §7) instead. This keeps the entire k8s path reaper-free.
+- **Ephemeral on docker/podman (a per-run named volume):** there is no kubelet equivalent, so
+  Caesium creates the volume at **run start** and deletes it at **run terminal state**. Cleanup
+  must be **crash-safe**: tie deletion to run completion in the run-owner state machine and add
+  an orphan-reaper that GCs ephemeral volumes whose run is terminal/absent (mirrors the existing
+  cache pruner pattern). Name ephemeral resources deterministically by run id for reliable GC.
+  (The manual-lifecycle + reaper machinery is therefore docker/podman-only, not k8s.)
 - **Distributed-mode constraint on ephemeral docker/podman volumes (important):** a named
   docker/podman volume lives on a single daemon's local host. With no node-affinity (§7), a
   run-owner that creates a per-run named volume cannot share it with a co-mounting step
@@ -287,8 +323,9 @@ steps:
   volumes are single-node-only**; validation rejects them when execution mode is distributed.
   Cross-node sharing on docker/podman requires an **external** `bind` source pointing at a
   shared network filesystem (NFS/CephFS) mounted on every worker (which Caesium mounts but
-  does not manage). Ephemeral cross-node scratch on k8s works only with an **RWX**
-  `claimTemplate` storage class (RWO has the same single-mounter limitation — see §7).
+  does not manage). On k8s, inline ephemeral claims are per-pod (per-step) and so never
+  cross-node-shared by construction; cross-step shared scratch uses a pre-provisioned **RWX**
+  `pvc` (RWO has the single-mounter limitation — see §7).
 
 ### 6.5 File handoff via existing contracts (no new subsystem)
 
@@ -415,8 +452,10 @@ Each is dual-purpose — framed data-engineering-first, with CI/CD as the bonus:
 - **Component 1:** unit tests for schema validation (engine/source compatibility, dangling
   mount refs, dup paths); per-engine conversion tests (docker named volume + tmpfs; k8s PVC +
   ephemeral claim + generic source); an integration test where two steps share a volume and
-  pass a file (the `plan → apply` example) on each engine that supports it; ephemeral
-  create/cleanup test including crash/orphan-reaper.
+  pass a file (the `plan → apply` example) on each engine that supports it; for k8s inline
+  ephemeral, assert the pod carries `ephemeral.volumeClaimTemplate` and an owner-reference (so
+  the kubelet GCs it); for docker/podman ephemeral, a create/cleanup test including
+  crash/orphan-reaper.
 - **Component 2:** k8s engine test asserting `serviceAccountName`/annotations land on the pod
   spec; a documented manual verification recipe for IRSA/GKE-WI (cannot be hermetic).
 
@@ -426,8 +465,9 @@ Each is dual-purpose — framed data-engineering-first, with CI/CD as the bonus:
   + the RWX recommendation, lifted later by node-affinity / object-storage handoff. The
   docker/podman analogue is sharper — named/ephemeral volumes are node-local and validated
   single-node-only; distributed docker/podman sharing requires a shared-network-FS `bind`.
-- **Ephemeral-volume leak risk** if cleanup is not crash-safe → the orphan reaper is
-  mandatory, not optional.
+- **Ephemeral-volume leak risk (docker/podman only)** if cleanup is not crash-safe → the
+  orphan reaper is mandatory there. k8s avoids this entirely via inline ephemeral claims, whose
+  PVC the kubelet GCs with the pod (§6.4).
 - **Cache correctness for file outputs (§6.5)** — files are not content-addressed; documented,
   with the emit-a-hash escape hatch. The separate digest-pinned-cache fix (§9) is orthogonal.
 - **Two unmarshalers** (`UnmarshalYAML` + `UnmarshalJSON`) must both be updated for any new
