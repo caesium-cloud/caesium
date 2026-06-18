@@ -387,6 +387,63 @@ steps:
 	require.False(t, *clusterSpec.Kubernetes.AutomountServiceAccountToken)
 }
 
+func TestLegacyMountRelativeTargetStillValidates(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: legacy-mount
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: build
+    image: alpine:3.23
+    mounts:
+      - {type: bind, source: /tmp/work, target: relative/work}
+`
+
+	_, err := Parse([]byte(src))
+	require.NoError(t, err)
+}
+
+func TestRuntimeSpecForStepDeepCopiesRawVolumeSource(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: raw-volume-source
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+volumes:
+  - name: nfs-data
+    source:
+      volumeSource:
+        nfs:
+          server: nfs.example.com
+          path: /exports/data
+steps:
+  - name: cluster
+    engine: kubernetes
+    image: alpine:3.23
+    volumeMounts:
+      - {volume: nfs-data, path: /data}
+`
+
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	spec, err := def.RuntimeSpecForStep(&def.Steps[0])
+	require.NoError(t, err)
+	require.Len(t, spec.ResolvedVolumeMounts, 1)
+
+	resolvedNFS := spec.ResolvedVolumeMounts[0].VolumeSource["nfs"].(map[string]any)
+	resolvedNFS["server"] = "changed.example.com"
+
+	originalNFS := def.Volumes[0].Source.VolumeSource["nfs"].(map[string]any)
+	require.Equal(t, "nfs.example.com", originalNFS["server"])
+}
+
 func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
 	raw := []byte(`{
 		"name": "apply",

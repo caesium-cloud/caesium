@@ -615,9 +615,6 @@ func validateStepVolumeMounts(steps []Step, volumes map[string]*Volume) error {
 			if target == "" {
 				continue
 			}
-			if !path.IsAbs(target) {
-				return fmt.Errorf("steps[%d].mounts target %q must be absolute", i, target)
-			}
 			if _, exists := paths[target]; exists {
 				return fmt.Errorf("steps[%d] mounts duplicate target path %q", i, target)
 			}
@@ -783,7 +780,10 @@ func resolveVolumeMount(name string, source VolumeSource, mount VolumeMount) (co
 		resolved.ClaimTemplate = convertClaimTemplate(source.ClaimTemplate)
 	case "volumeSource":
 		resolved.Type = container.VolumeMountTypeVolumeSource
-		resolved.VolumeSource = cloneAnyMap(source.VolumeSource)
+		resolved.VolumeSource, err = cloneAnyMap(source.VolumeSource)
+		if err != nil {
+			return container.VolumeMount{}, fmt.Errorf("clone volumeSource: %w", err)
+		}
 	default:
 		return container.VolumeMount{}, fmt.Errorf("unsupported source kind %q", kind)
 	}
@@ -839,15 +839,19 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return out
 }
 
-func cloneAnyMap(values map[string]any) map[string]any {
+func cloneAnyMap(values map[string]any) (map[string]any, error) {
 	if len(values) == 0 {
-		return nil
+		return nil, nil
 	}
-	out := make(map[string]any, len(values))
-	for k, v := range values {
-		out[k] = v
+	data, err := json.Marshal(values)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var out map[string]any
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func cloneBoolPtr(value *bool) *bool {

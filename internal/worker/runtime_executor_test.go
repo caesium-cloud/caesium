@@ -280,18 +280,13 @@ func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
 	require.NoError(t, db.Create(taskRun).Error)
 
 	engine := &captureCreateEngine{}
-	oldNewEngine := newEngine
-	newEngine = func(context.Context, models.AtomEngine) (atom.Engine, error) {
-		return engine, nil
-	}
-	t.Cleanup(func() {
-		newEngine = oldNewEngine
-	})
-
 	executor := &runtimeExecutor{
 		store:          store,
 		localSink:      NewLocalSink(store),
 		secretResolver: staticSecretResolver{"secret://env/TOKEN": "resolved-token"},
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
 	}
 	executor.Execute(context.Background(), taskRun)
 

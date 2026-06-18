@@ -36,6 +36,7 @@ type runtimeExecutor struct {
 	store             *run.Store
 	taskTimeout       time.Duration
 	continueOnFailure bool
+	engineFactory     func(context.Context, models.AtomEngine) (atom.Engine, error)
 
 	// localSink finalizes ClaimNext'd tasks against the local DB (unchanged from
 	// Phase 1).  Dispatched tasks build an owner-routed sink per task instead.
@@ -59,6 +60,7 @@ func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePoli
 		store:             store,
 		taskTimeout:       taskTimeout,
 		continueOnFailure: normalizeTaskFailurePolicy(failurePolicy) == taskFailurePolicyContinue,
+		engineFactory:     defaultNewEngine,
 		localSink:         NewLocalSink(store),
 		secretResolver:    resolver,
 	}).Execute
@@ -370,7 +372,11 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 	defer cancel()
 
-	engine, err := newEngine(taskCtx, taskRun.Engine)
+	engineFactory := e.engineFactory
+	if engineFactory == nil {
+		engineFactory = defaultNewEngine
+	}
+	engine, err := engineFactory(taskCtx, taskRun.Engine)
 	if err != nil {
 		return err
 	}
@@ -607,8 +613,6 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 		}
 	}
 }
-
-var newEngine = defaultNewEngine
 
 func defaultNewEngine(ctx context.Context, engineType models.AtomEngine) (atom.Engine, error) {
 	switch engineType {
