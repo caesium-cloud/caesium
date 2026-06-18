@@ -173,6 +173,70 @@ func (s *PodmanTestSuite) TestCreateAppliesSpec() {
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
+func (s *PodmanTestSuite) TestCreateAppliesResolvedVolumeMounts() {
+	mode := 0o700
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"run"},
+		Spec: container.Spec{
+			ResolvedVolumeMounts: []container.VolumeMount{
+				{
+					Name:     "cache",
+					Type:     container.VolumeMountTypeVolume,
+					Source:   "caesium-cache",
+					Target:   "/cache",
+					ReadOnly: true,
+					SubPath:  "objects",
+				},
+				{
+					Name:   "scratch",
+					Type:   container.VolumeMountTypeTmpfs,
+					Target: "/scratch",
+					Tmpfs:  &container.TmpfsOptions{SizeBytes: 1024, Mode: &mode},
+				},
+			},
+		},
+	}
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(false, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImagePull", req.Image).
+		Return()
+
+	specMatcher := mock.MatchedBy(func(spec *specgen.SpecGenerator) bool {
+		if len(spec.Volumes) != 1 || len(spec.Mounts) != 1 {
+			return false
+		}
+		vol := spec.Volumes[0]
+		tmpfs := spec.Mounts[0]
+		return vol.Name == "caesium-cache" &&
+			vol.Dest == "/cache" &&
+			vol.SubPath == "objects" &&
+			len(vol.Options) == 1 &&
+			vol.Options[0] == "ro" &&
+			tmpfs.Type == string(container.MountTypeTmpfs) &&
+			tmpfs.Source == string(container.MountTypeTmpfs) &&
+			tmpfs.Destination == "/scratch"
+	})
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", specMatcher).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
 func (s *PodmanTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	req := &atom.EngineCreateRequest{
 		Name:    testContainerName,

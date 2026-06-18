@@ -475,7 +475,7 @@ func start(cmd *cobra.Command, args []string) error {
 		)
 
 		claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
-		executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy)
+		executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy, resolver)
 		wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
 		distributedWorker = worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).
 			WithReclaimInterval(vars.WorkerReclaimInterval).

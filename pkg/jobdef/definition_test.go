@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/stretchr/testify/require"
 )
 
@@ -246,6 +247,78 @@ steps:
     image: example
     next: build
 `,
+		"unknown volume": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    volumeMounts: [{volume: missing, path: /work}]
+`,
+		"missing engine source": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+volumes:
+  - name: work
+    sources:
+      kubernetes: {pvc: shared}
+steps:
+  - name: build
+    image: example
+    volumeMounts: [{volume: work, path: /work}]
+`,
+		"incompatible source": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+volumes:
+  - name: work
+    sources:
+      docker: {pvc: shared}
+steps:
+  - name: build
+    image: example
+    volumeMounts: [{volume: work, path: /work}]
+`,
+		"duplicate mount path": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+volumes:
+  - name: work
+    source: {bind: /tmp/work}
+steps:
+  - name: build
+    image: example
+    mounts: [{type: bind, source: /tmp/other, target: /work}]
+    volumeMounts: [{volume: work, path: /work}]
+`,
+		"service account on docker": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    serviceAccountName: deployer
+`,
 	}
 
 	for name, src := range cases {
@@ -253,6 +326,86 @@ steps:
 			t.Fatalf("%s: expected error", name)
 		}
 	}
+}
+
+func TestVolumesAndWorkloadIdentityRuntimeSpec(t *testing.T) {
+	automount := false
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: volume-identity
+  serviceAccountName: default-deployer
+  podAnnotations:
+    team: platform
+  automountServiceAccountToken: true
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+volumes:
+  - name: work
+    sources:
+      docker: {bind: /mnt/shared/work}
+      kubernetes: {pvc: ci-shared-rwx}
+steps:
+  - name: local
+    image: alpine:3.23
+    volumeMounts:
+      - {volume: work, path: /work}
+  - name: cluster
+    engine: kubernetes
+    image: alpine:3.23
+    serviceAccountName: step-deployer
+    podAnnotations:
+      purpose: deploy
+    automountServiceAccountToken: false
+    volumeMounts:
+      - {volume: work, path: /work, readOnly: true, subPath: plans}
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+
+	localSpec, err := def.RuntimeSpecForStep(&def.Steps[0])
+	require.NoError(t, err)
+	require.Len(t, localSpec.ResolvedVolumeMounts, 1)
+	require.Equal(t, container.VolumeMountTypeBind, localSpec.ResolvedVolumeMounts[0].Type)
+	require.Equal(t, "/mnt/shared/work", localSpec.ResolvedVolumeMounts[0].Source)
+	require.Nil(t, localSpec.Kubernetes)
+
+	def.Metadata.AutomountServiceAccountToken = &automount
+	clusterSpec, err := def.RuntimeSpecForStep(&def.Steps[1])
+	require.NoError(t, err)
+	require.Len(t, clusterSpec.ResolvedVolumeMounts, 1)
+	require.Equal(t, container.VolumeMountTypePVC, clusterSpec.ResolvedVolumeMounts[0].Type)
+	require.Equal(t, "ci-shared-rwx", clusterSpec.ResolvedVolumeMounts[0].Source)
+	require.True(t, clusterSpec.ResolvedVolumeMounts[0].ReadOnly)
+	require.Equal(t, "plans", clusterSpec.ResolvedVolumeMounts[0].SubPath)
+	require.NotNil(t, clusterSpec.Kubernetes)
+	require.Equal(t, "step-deployer", clusterSpec.Kubernetes.ServiceAccountName)
+	require.Equal(t, map[string]string{"team": "platform", "purpose": "deploy"}, clusterSpec.Kubernetes.PodAnnotations)
+	require.NotNil(t, clusterSpec.Kubernetes.AutomountServiceAccountToken)
+	require.False(t, *clusterSpec.Kubernetes.AutomountServiceAccountToken)
+}
+
+func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
+	raw := []byte(`{
+		"name": "apply",
+		"engine": "kubernetes",
+		"image": "alpine:3.23",
+		"serviceAccountName": "deployer",
+		"podAnnotations": {"iam": "enabled"},
+		"automountServiceAccountToken": false,
+		"volumeMounts": [{"volume": "work", "path": "/work"}]
+	}`)
+
+	var step Step
+	require.NoError(t, json.Unmarshal(raw, &step))
+	require.Equal(t, EngineKubernetes, step.Engine)
+	require.Equal(t, "deployer", step.ServiceAccountName)
+	require.Equal(t, map[string]string{"iam": "enabled"}, step.PodAnnotations)
+	require.NotNil(t, step.AutomountServiceAccountToken)
+	require.False(t, *step.AutomountServiceAccountToken)
+	require.Equal(t, []VolumeMount{{Volume: "work", Path: "/work"}}, step.VolumeMounts)
 }
 
 func TestValidateSimpleJSONPath(t *testing.T) {

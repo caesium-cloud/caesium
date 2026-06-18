@@ -23,6 +23,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/event"
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -111,6 +113,7 @@ type job struct {
 	newKubernetesEngine    func(context.Context) atom.Engine
 	newPodmanEngine        func(context.Context) atom.Engine
 	atomPollInterval       time.Duration
+	secretResolver         secret.Resolver
 }
 
 // JobOption configures a job before execution.
@@ -267,6 +270,14 @@ func WithParams(params map[string]string) JobOption {
 	}
 }
 
+// WithSecretResolver configures secret:// resolution for step environment
+// values. If omitted, Run builds the resolver from the processed environment.
+func WithSecretResolver(resolver secret.Resolver) JobOption {
+	return func(j *job) {
+		j.secretResolver = resolver
+	}
+}
+
 // buildParamEnv returns a map of environment variables derived from params.
 // It also injects CAESIUM_RUN_ID and CAESIUM_JOB_ALIAS.
 func buildParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
@@ -295,6 +306,14 @@ func unmarshalCacheConfig(raw []byte) interface{} {
 func (j *job) Run(ctx context.Context) error {
 	store := j.runStoreFactory()
 	vars := j.envVariables()
+	secretResolver := j.secretResolver
+	if secretResolver == nil {
+		var err error
+		secretResolver, err = jobdefruntime.BuildSecretResolver(vars)
+		if err != nil {
+			return fmt.Errorf("secret resolver configuration failure: %w", err)
+		}
+	}
 
 	cacheConfig := cache.ConfigFromEnv()
 	var cacheStore *cache.Store
@@ -671,6 +690,10 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
+		spec, err := jobdefruntime.ResolveContainerSpecSecrets(taskCtx, secretResolver, spec)
+		if err != nil {
+			return "", nil, nil, nil, err
+		}
 		if len(paramEnv) > 0 || len(extraEnv) > 0 {
 			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
 			for k, v := range spec.Env {
@@ -826,17 +849,19 @@ func (j *job) Run(ctx context.Context) error {
 			}
 
 			hashInput := cache.HashInput{
-				JobAlias:           j.alias,
-				TaskName:           taskName,
-				Image:              runner.image,
-				Command:            runner.command,
-				Env:                mergedEnv,
-				WorkDir:            runner.spec.WorkDir,
-				Mounts:             runner.spec.Mounts,
-				PredecessorHashes:  predHashes,
-				PredecessorOutputs: predOutputs,
-				RunParams:          snapshot.Params,
-				CacheVersion:       cacheCfg.Version,
+				JobAlias:             j.alias,
+				TaskName:             taskName,
+				Image:                runner.image,
+				Command:              runner.command,
+				Env:                  mergedEnv,
+				WorkDir:              runner.spec.WorkDir,
+				Mounts:               runner.spec.Mounts,
+				ResolvedVolumeMounts: runner.spec.ResolvedVolumeMounts,
+				Kubernetes:           runner.spec.Kubernetes,
+				PredecessorHashes:    predHashes,
+				PredecessorOutputs:   predOutputs,
+				RunParams:            snapshot.Params,
+				CacheVersion:         cacheCfg.Version,
 			}
 			inputHash = hashInput.Compute()
 			if err := store.SetTaskHash(runID, taskID, inputHash); err != nil {

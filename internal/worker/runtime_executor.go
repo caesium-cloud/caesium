@@ -14,6 +14,8 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -40,12 +42,17 @@ type runtimeExecutor struct {
 	localSink CompletionSink
 	// completePost is the seam the owner sink uses to POST to /internal/complete.
 	// nil in production → defaults to dispatch.PostComplete; tests inject a fake.
-	completePost completePoster
+	completePost   completePoster
+	secretResolver secret.Resolver
 }
 
-func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string) TaskExecutor {
+func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePolicy string, resolvers ...secret.Resolver) TaskExecutor {
 	if store == nil {
 		panic("runtime executor requires run store")
+	}
+	var resolver secret.Resolver
+	if len(resolvers) > 0 {
+		resolver = resolvers[0]
 	}
 
 	return (&runtimeExecutor{
@@ -53,6 +60,7 @@ func NewRuntimeExecutor(store *run.Store, taskTimeout time.Duration, failurePoli
 		taskTimeout:       taskTimeout,
 		continueOnFailure: normalizeTaskFailurePolicy(failurePolicy) == taskFailurePolicyContinue,
 		localSink:         NewLocalSink(store),
+		secretResolver:    resolver,
 	}).Execute
 }
 
@@ -108,6 +116,23 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		taskName = taskModel.Name
 	}
 
+	atomSpec, err := e.loadAtomSpec(taskRun.AtomID)
+	if err != nil {
+		log.Error("failed to load atom spec for worker task", "task_id", taskRun.TaskID, "atom_id", taskRun.AtomID, "error", err)
+		if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+			log.Error("failed to persist atom spec load failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+		}
+		return
+	}
+	runParams, err := e.loadRunParams(taskRun.JobRunID)
+	if err != nil {
+		log.Error("failed to load run params for worker task", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
+		if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+			log.Error("failed to persist run param load failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+		}
+		return
+	}
+
 	// Cache check: attempt to satisfy the task from cache before container execution.
 	var cacheStore *cache.Store
 	var cacheHash string
@@ -132,20 +157,6 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			log.Warn("cache: failed to query predecessor hashes", "task_id", taskRun.TaskID, "error", predHashErr)
 		}
 
-		// Fetch run params from the job run record.
-		var runParams map[string]string
-		var jobRun models.JobRun
-		if err := e.store.DB().Select("params").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err == nil && len(jobRun.Params) > 0 {
-			_ = json.Unmarshal(jobRun.Params, &runParams)
-		}
-
-		// Load atom spec for env/workdir/mounts to match local execution hash.
-		var atomSpec container.Spec
-		var atomModel models.Atom
-		if err := e.store.DB().First(&atomModel, "id = ?", taskRun.AtomID).Error; err == nil && len(atomModel.Spec) > 0 {
-			_ = json.Unmarshal(atomModel.Spec, &atomSpec)
-		}
-
 		// Build merged env for hashing, excluding volatile per-run vars.
 		mergedEnv := make(map[string]string, len(atomSpec.Env))
 		for k, v := range atomSpec.Env {
@@ -158,17 +169,19 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		}
 
 		hashInput := cache.HashInput{
-			JobAlias:           cacheJobAlias,
-			TaskName:           taskName,
-			Image:              taskRun.Image,
-			Command:            parseTaskCommand(taskRun.Command),
-			Env:                mergedEnv,
-			WorkDir:            atomSpec.WorkDir,
-			Mounts:             atomSpec.Mounts,
-			PredecessorHashes:  predHashes,
-			PredecessorOutputs: predOutputs,
-			RunParams:          runParams,
-			CacheVersion:       cacheCfg.Version,
+			JobAlias:             cacheJobAlias,
+			TaskName:             taskName,
+			Image:                taskRun.Image,
+			Command:              parseTaskCommand(taskRun.Command),
+			Env:                  mergedEnv,
+			WorkDir:              atomSpec.WorkDir,
+			Mounts:               atomSpec.Mounts,
+			ResolvedVolumeMounts: atomSpec.ResolvedVolumeMounts,
+			Kubernetes:           atomSpec.Kubernetes,
+			PredecessorHashes:    predHashes,
+			PredecessorOutputs:   predOutputs,
+			RunParams:            runParams,
+			CacheVersion:         cacheCfg.Version,
 		}
 		cacheHash = hashInput.Compute()
 		if err := e.store.SetTaskHash(taskRun.JobRunID, taskRun.TaskID, cacheHash); err != nil {
@@ -211,7 +224,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		execErr := e.executeTask(ctx, taskRun, sink)
+		execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias())
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
@@ -309,7 +322,47 @@ func (e *runtimeExecutor) sleepRetryDelay(ctx context.Context, delay time.Durati
 	}
 }
 
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink) error {
+func (e *runtimeExecutor) loadAtomSpec(atomID uuid.UUID) (container.Spec, error) {
+	var atomModel models.Atom
+	if err := e.store.DB().Select("spec").First(&atomModel, "id = ?", atomID).Error; err != nil {
+		return container.Spec{}, err
+	}
+	if len(atomModel.Spec) == 0 {
+		return container.Spec{}, nil
+	}
+	var spec container.Spec
+	if err := json.Unmarshal(atomModel.Spec, &spec); err != nil {
+		return container.Spec{}, fmt.Errorf("decode atom spec: %w", err)
+	}
+	return spec, nil
+}
+
+func (e *runtimeExecutor) loadRunParams(runID uuid.UUID) (map[string]string, error) {
+	var jobRun models.JobRun
+	if err := e.store.DB().Select("params").First(&jobRun, "id = ?", runID).Error; err != nil {
+		return nil, err
+	}
+	if len(jobRun.Params) == 0 {
+		return nil, nil
+	}
+	var params map[string]string
+	if err := json.Unmarshal(jobRun.Params, &params); err != nil {
+		return nil, fmt.Errorf("decode run params: %w", err)
+	}
+	return params, nil
+}
+
+func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
+	env := make(map[string]string, len(params)+2)
+	env["CAESIUM_RUN_ID"] = runID.String()
+	env["CAESIUM_JOB_ALIAS"] = jobAlias
+	for k, v := range params {
+		env["CAESIUM_PARAM_"+strings.ToUpper(k)] = v
+	}
+	return env
+}
+
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string) error {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -328,14 +381,29 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		atomName = fmt.Sprintf("%s-attempt%d", atomName, taskRun.ClaimAttempt)
 	}
 
-	// Query predecessor outputs from the DB and build env vars.
-	spec := container.Spec{}
+	spec, err := jobdefruntime.ResolveContainerSpecSecrets(taskCtx, e.secretResolver, atomSpec)
+	if err != nil {
+		return err
+	}
+
 	predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
 	if predErr != nil {
 		log.Warn("failed to query predecessor outputs", "task_id", taskRun.TaskID, "error", predErr)
 	}
-	if outputEnv := pkgtask.BuildOutputEnv(predOutputs); len(outputEnv) > 0 {
-		spec.Env = outputEnv
+	paramEnv := buildRunParamEnv(taskRun.JobRunID, jobAlias, runParams)
+	outputEnv := pkgtask.BuildOutputEnv(predOutputs)
+	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 {
+		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv))
+		for k, v := range spec.Env {
+			merged[k] = v
+		}
+		for k, v := range paramEnv {
+			merged[k] = v
+		}
+		for k, v := range outputEnv {
+			merged[k] = v
+		}
+		spec.Env = merged
 	}
 
 	a, err := engine.Create(&atom.EngineCreateRequest{
@@ -540,7 +608,9 @@ func (e *runtimeExecutor) monitorTask(ctx context.Context, taskRun *models.TaskR
 	}
 }
 
-func newEngine(ctx context.Context, engineType models.AtomEngine) (atom.Engine, error) {
+var newEngine = defaultNewEngine
+
+func defaultNewEngine(ctx context.Context, engineType models.AtomEngine) (atom.Engine, error) {
 	switch engineType {
 	case models.AtomEngineDocker:
 		return docker.NewEngine(ctx), nil

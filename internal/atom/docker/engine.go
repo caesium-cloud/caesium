@@ -4,17 +4,18 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	cerrdefs "github.com/containerd/errdefs"
 	dockercontainer "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 )
@@ -109,7 +110,7 @@ func (e *dockerEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 	}
 
 	var hostCfg *dockercontainer.HostConfig
-	if mounts := convertMounts(req.Spec.Mounts); len(mounts) > 0 {
+	if mounts := convertMounts(req.Spec.Mounts, req.Spec.ResolvedVolumeMounts); len(mounts) > 0 {
 		hostCfg = &dockercontainer.HostConfig{Mounts: mounts}
 	}
 
@@ -264,23 +265,83 @@ func formatEnv(values map[string]string) []string {
 	return env
 }
 
-func convertMounts(specMounts []container.Mount) []mount.Mount {
-	if len(specMounts) == 0 {
+func convertMounts(specMounts []container.Mount, resolvedMounts []container.VolumeMount) []mount.Mount {
+	if len(specMounts) == 0 && len(resolvedMounts) == 0 {
 		return nil
 	}
-	result := make([]mount.Mount, 0, len(specMounts))
+	result := make([]mount.Mount, 0, len(specMounts)+len(resolvedMounts))
 	for _, mnt := range specMounts {
-		if mnt.Source == "" || mnt.Target == "" {
+		if mnt.Target == "" {
 			continue
 		}
 		switch mnt.Type {
 		case container.MountTypeBind, "":
+			if mnt.Source == "" {
+				continue
+			}
 			result = append(result, mount.Mount{
 				Type:     mount.TypeBind,
 				Source:   mnt.Source,
 				Target:   mnt.Target,
 				ReadOnly: mnt.ReadOnly,
 			})
+		case container.MountTypeVolume:
+			if mnt.Source == "" {
+				continue
+			}
+			result = append(result, mount.Mount{
+				Type:     mount.TypeVolume,
+				Source:   mnt.Source,
+				Target:   mnt.Target,
+				ReadOnly: mnt.ReadOnly,
+			})
+		case container.MountTypeTmpfs:
+			result = append(result, mount.Mount{
+				Type:     mount.TypeTmpfs,
+				Target:   mnt.Target,
+				ReadOnly: mnt.ReadOnly,
+			})
+		}
+	}
+	for _, mnt := range resolvedMounts {
+		if mnt.Target == "" {
+			continue
+		}
+		switch mnt.Type {
+		case container.VolumeMountTypeBind:
+			if mnt.Source == "" {
+				continue
+			}
+			result = append(result, mount.Mount{
+				Type:     mount.TypeBind,
+				Source:   mnt.Source,
+				Target:   mnt.Target,
+				ReadOnly: mnt.ReadOnly,
+			})
+		case container.VolumeMountTypeVolume:
+			if mnt.Source == "" {
+				continue
+			}
+			result = append(result, mount.Mount{
+				Type:     mount.TypeVolume,
+				Source:   mnt.Source,
+				Target:   mnt.Target,
+				ReadOnly: mnt.ReadOnly,
+			})
+		case container.VolumeMountTypeTmpfs:
+			dockerMount := mount.Mount{
+				Type:     mount.TypeTmpfs,
+				Target:   mnt.Target,
+				ReadOnly: mnt.ReadOnly,
+			}
+			if mnt.Tmpfs != nil && (mnt.Tmpfs.SizeBytes > 0 || mnt.Tmpfs.Mode != nil) {
+				opts := &mount.TmpfsOptions{SizeBytes: mnt.Tmpfs.SizeBytes}
+				if mnt.Tmpfs.Mode != nil {
+					opts.Mode = os.FileMode(*mnt.Tmpfs.Mode)
+				}
+				dockerMount.TmpfsOptions = opts
+			}
+			result = append(result, dockerMount)
 		}
 	}
 	return result

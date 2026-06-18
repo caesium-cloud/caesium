@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os/user"
@@ -14,6 +15,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/client-go/kubernetes"
@@ -107,7 +109,10 @@ func (e *kubernetesEngine) List(req *atom.EngineListRequest) ([]atom.Atom, error
 // Create a Caesium Kubernetes pod. Currently every pod that
 // Caesium creates has exactly one pod.
 func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	volumeMounts, volumes := convertKubernetesMounts(req.Name, req.Spec.Mounts)
+	volumeMounts, volumes, err := convertKubernetesMounts(req.Name, req.Spec.Mounts, req.Spec.ResolvedVolumeMounts)
+	if err != nil {
+		return nil, err
+	}
 	envVars := convertEnvVars(req.Spec.Env)
 
 	spec := &v1.Pod{
@@ -134,6 +139,17 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 			Volumes:       volumes,
 			RestartPolicy: v1.RestartPolicyNever,
 		},
+	}
+	if req.Spec.Kubernetes != nil {
+		if len(req.Spec.Kubernetes.PodAnnotations) > 0 {
+			spec.Annotations = req.Spec.Kubernetes.PodAnnotations
+		}
+		if req.Spec.Kubernetes.ServiceAccountName != "" {
+			spec.Spec.ServiceAccountName = req.Spec.Kubernetes.ServiceAccountName
+		}
+		if req.Spec.Kubernetes.AutomountServiceAccountToken != nil {
+			spec.Spec.AutomountServiceAccountToken = req.Spec.Kubernetes.AutomountServiceAccountToken
+		}
 	}
 
 	pod, err := e.backend.Create(e.ctx, spec, metav1.CreateOptions{})
@@ -244,12 +260,12 @@ func convertEnvVars(env map[string]string) []v1.EnvVar {
 	return vars
 }
 
-func convertKubernetesMounts(baseName string, mounts []container.Mount) ([]v1.VolumeMount, []v1.Volume) {
-	if len(mounts) == 0 {
-		return nil, nil
+func convertKubernetesMounts(baseName string, mounts []container.Mount, resolvedMounts []container.VolumeMount) ([]v1.VolumeMount, []v1.Volume, error) {
+	if len(mounts) == 0 && len(resolvedMounts) == 0 {
+		return nil, nil, nil
 	}
-	volumeMounts := make([]v1.VolumeMount, 0, len(mounts))
-	volumes := make([]v1.Volume, 0, len(mounts))
+	volumeMounts := make([]v1.VolumeMount, 0, len(mounts)+len(resolvedMounts))
+	volumes := make([]v1.Volume, 0, len(mounts)+len(resolvedMounts))
 	for idx, m := range mounts {
 		if m.Source == "" || m.Target == "" {
 			continue
@@ -267,7 +283,89 @@ func convertKubernetesMounts(baseName string, mounts []container.Mount) ([]v1.Vo
 			},
 		})
 	}
-	return volumeMounts, volumes
+	for idx, m := range resolvedMounts {
+		if m.Target == "" {
+			continue
+		}
+		name := sanitizeVolumeName(fmt.Sprintf("%s-vol-%s-%d", baseName, m.Name, idx))
+		volumeMounts = append(volumeMounts, v1.VolumeMount{
+			Name:      name,
+			MountPath: m.Target,
+			ReadOnly:  m.ReadOnly,
+			SubPath:   m.SubPath,
+		})
+		volume, err := convertResolvedKubernetesVolume(name, m)
+		if err != nil {
+			return nil, nil, err
+		}
+		volumes = append(volumes, volume)
+	}
+	return volumeMounts, volumes, nil
+}
+
+func convertResolvedKubernetesVolume(name string, mount container.VolumeMount) (v1.Volume, error) {
+	volume := v1.Volume{Name: name}
+	switch mount.Type {
+	case container.VolumeMountTypePVC:
+		if mount.Source == "" {
+			return v1.Volume{}, fmt.Errorf("kubernetes pvc volume %q missing source", mount.Name)
+		}
+		volume.VolumeSource.PersistentVolumeClaim = &v1.PersistentVolumeClaimVolumeSource{
+			ClaimName: mount.Source,
+			ReadOnly:  mount.ReadOnly,
+		}
+	case container.VolumeMountTypeClaimTemplate:
+		template, err := buildPersistentVolumeClaimTemplate(mount.ClaimTemplate)
+		if err != nil {
+			return v1.Volume{}, fmt.Errorf("kubernetes claimTemplate volume %q: %w", mount.Name, err)
+		}
+		volume.VolumeSource.Ephemeral = &v1.EphemeralVolumeSource{VolumeClaimTemplate: template}
+	case container.VolumeMountTypeVolumeSource:
+		if len(mount.VolumeSource) == 0 {
+			return v1.Volume{}, fmt.Errorf("kubernetes volumeSource volume %q is empty", mount.Name)
+		}
+		data, err := json.Marshal(mount.VolumeSource)
+		if err != nil {
+			return v1.Volume{}, fmt.Errorf("marshal kubernetes volumeSource %q: %w", mount.Name, err)
+		}
+		if err := json.Unmarshal(data, &volume.VolumeSource); err != nil {
+			return v1.Volume{}, fmt.Errorf("decode kubernetes volumeSource %q: %w", mount.Name, err)
+		}
+	default:
+		return v1.Volume{}, fmt.Errorf("volume %q type %q is not supported by kubernetes", mount.Name, mount.Type)
+	}
+	return volume, nil
+}
+
+func buildPersistentVolumeClaimTemplate(template *container.KubernetesClaimTemplate) (*v1.PersistentVolumeClaimTemplate, error) {
+	if template == nil {
+		return nil, fmt.Errorf("missing claim template")
+	}
+	quantity, err := resource.ParseQuantity(template.Size)
+	if err != nil {
+		return nil, fmt.Errorf("invalid size %q: %w", template.Size, err)
+	}
+	accessMode := template.AccessMode
+	if accessMode == "" {
+		accessMode = string(v1.ReadWriteOnce)
+	}
+	claim := &v1.PersistentVolumeClaimTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:      template.Labels,
+			Annotations: template.Annotations,
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{v1.PersistentVolumeAccessMode(accessMode)},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{v1.ResourceStorage: quantity},
+			},
+		},
+	}
+	if template.StorageClass != "" {
+		storageClass := template.StorageClass
+		claim.Spec.StorageClassName = &storageClass
+	}
+	return claim, nil
 }
 
 func sanitizeVolumeName(value string) string {

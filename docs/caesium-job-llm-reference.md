@@ -22,11 +22,18 @@ trigger:
     timezone: "UTC"              # Optional, defaults to UTC
   defaultParams:                 # Optional run parameters
     key: value
+volumes:                         # Optional BYO storage declarations.
+  - name: work
+    sources:
+      docker: {bind: /mnt/nfs/caesium-work}
+      kubernetes: {pvc: ci-shared-rwx}
 steps:
   - name: step-one
     engine: docker               # "docker" (default), "podman", or "kubernetes"
     image: alpine:3.23
     command: ["sh", "-c", "echo hello"]
+    volumeMounts:
+      - {volume: work, path: /work}
 ```
 
 ---
@@ -38,8 +45,9 @@ steps:
 ### Structure at a glance
 
 - `apiVersion: v1` and `kind: Job` (both required)
-- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `cache`
+- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
 - `trigger` (required): `type` (`cron` | `http`) + `configuration` + optional `defaultParams` — see the snippets below
+- `volumes` (optional): named BYO storage sources mounted by steps
 - `steps` (required, ≥1): see the step quick-reference below
 - `callbacks` (optional): post-run notification hooks
 
@@ -86,6 +94,33 @@ trigger:
 | `cache` | bool or object | no | Task caching — `true` or `{ttl: "12h", version: 2}` |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
+| `volumeMounts` | array | no | Mount a declared job volume: `{volume, path, readOnly?, subPath?}` |
+| `serviceAccountName` / `podAnnotations` / `automountServiceAccountToken` | string / map / bool | no | Kubernetes workload-identity passthrough |
+
+### Volumes
+
+Declare storage once and mount it from steps. Caesium mounts user-provided storage; it does not create external storage or copy file contents.
+
+```yaml
+volumes:
+  - name: work
+    sources:
+      docker: {bind: /mnt/nfs/caesium-work}
+      podman: {bind: /mnt/nfs/caesium-work}
+      kubernetes: {pvc: ci-shared-rwx}
+steps:
+  - name: produce
+    image: alpine:3.23
+    command: ["sh", "-c", "echo data > /work/out.txt && echo '##caesium::output {\"path\":\"/work/out.txt\"}'"]
+    volumeMounts: [{volume: work, path: /work}]
+  - name: consume
+    image: alpine:3.23
+    dependsOn: [produce]
+    command: ["cat", "$CAESIUM_OUTPUT_PRODUCE_PATH"]
+    volumeMounts: [{volume: work, path: /work, readOnly: true}]
+```
+
+Docker/Podman source kinds are `bind`, `volume`, and `tmpfs`. Kubernetes source kinds are `pvc`, `claimTemplate`, and generic `volumeSource`.
 
 ### Callbacks
 

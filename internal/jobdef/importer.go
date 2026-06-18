@@ -103,7 +103,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 				jobModel.TriggerID = triggerModel.ID
 			}
 
-			taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def.Steps, opts)
+			taskByName, _, retiredAtomIDs, err := i.reconcileTasksTx(tx, jobModel, def, opts)
 			if err != nil {
 				return err
 			}
@@ -461,7 +461,8 @@ func (i *Importer) upsertTriggerTx(tx *gorm.DB, existingJob *models.Job, alias s
 	return triggerModel, nil
 }
 
-func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, opts *ApplyOptions) (map[string]*models.Task, []uuid.UUID, []uuid.UUID, error) {
+func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition, opts *ApplyOptions) (map[string]*models.Task, []uuid.UUID, []uuid.UUID, error) {
+	steps := def.Steps
 	var existingTasks []models.Task
 	if err := tx.Unscoped().Where("job_id = ?", jobModel.ID).Order("position asc").Order("created_at asc").Find(&existingTasks).Error; err != nil {
 		return nil, nil, nil, err
@@ -484,7 +485,11 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, steps []s
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("step %s: %w", step.Name, err)
 		}
-		specJSON, err := json.Marshal(step.Spec)
+		runtimeSpec, err := def.RuntimeSpecForStep(step)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		specJSON, err := json.Marshal(runtimeSpec)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("step %s: %w", step.Name, err)
 		}

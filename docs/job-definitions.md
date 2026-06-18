@@ -135,6 +135,52 @@ steps:
 - Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
 - Steps can set container options directly on the manifest via `env`, `workdir`, and `mounts`. Environment values are passed to every runtime, while bind mounts map host paths (`source`) into the container at `target` (set `readOnly: true` when needed). These fields are optional and default to the runtime image configuration.
+- Job-level `volumes` declare user-provided storage, and `steps[].volumeMounts` mount those volumes by name. Caesium mounts the storage; it does not provision or copy the bytes.
+- Kubernetes steps may set `serviceAccountName`, `podAnnotations`, and `automountServiceAccountToken`; metadata-level values act as defaults for Kubernetes steps. Docker/Podman identity is attached through normal `env` and `mounts` once those fields are applied at runtime.
+
+## Volumes And Workload Identity
+
+Volumes are bring-your-own storage. Use `sources` for portable manifests that run locally with Docker/Podman and in production on Kubernetes; use `source` only for single-engine jobs.
+
+```yaml
+volumes:
+  - name: work
+    sources:
+      docker:
+        bind: /mnt/nfs/caesium-work
+      podman:
+        bind: /mnt/nfs/caesium-work
+      kubernetes:
+        pvc: ci-shared-rwx
+
+steps:
+  - name: plan
+    engine: kubernetes
+    image: hashicorp/terraform:1.9
+    command: ["sh", "-c", "terraform plan -out=/work/tf.plan && echo '##caesium::output {\"plan\":\"/work/tf.plan\"}'"]
+    volumeMounts:
+      - {volume: work, path: /work}
+
+  - name: apply
+    engine: kubernetes
+    image: hashicorp/terraform:1.9
+    dependsOn: [plan]
+    serviceAccountName: caesium-deployer
+    volumeMounts:
+      - {volume: work, path: /work, readOnly: true}
+    command: ["terraform", "apply", "$CAESIUM_OUTPUT_PLAN_PLAN"]
+```
+
+Supported source kinds:
+
+| Engine | Source kinds |
+|--------|--------------|
+| Docker/Podman | `bind`, `volume`, `tmpfs` |
+| Kubernetes | `pvc`, `claimTemplate`, `volumeSource` |
+
+Kubernetes `claimTemplate` creates an inline ephemeral PVC for one pod/step. Use a pre-provisioned RWX `pvc` for shared cross-step storage. In distributed Docker/Podman deployments, named volumes are node-local; use a `bind` path backed by shared network storage when steps may run on different workers.
+
+Workload identity is also bring-your-own. For Kubernetes, create and secure the ServiceAccount in the cluster, then reference it with `serviceAccountName`. Operators should bound which ServiceAccounts Caesium may use through Kubernetes RBAC and admission policy; otherwise a user who can apply a job may select an overly privileged ServiceAccount.
 
 ## Caching
 
@@ -164,7 +210,8 @@ Caching is appropriate for idempotent, side-effect-free tasks such as data trans
 
 ### Cache Behavior
 
-- A cache hit requires the full task identity to match, including run parameters and upstream outputs.
+- A cache hit requires the full task identity to match, including run parameters, upstream outputs, mounts, volumes, and Kubernetes identity settings.
+- Shared-volume file contents are not content-addressed by Caesium. If a downstream cache must change when a file changes, emit the file path and a content hash as normal `##caesium::output` values.
 - Scheduled cron runs now always include `logical_date`, so the scheduler naturally invalidates cache across distinct cron slots.
 - Manual reruns hit cache only when they use the same effective parameters as the original run.
 - Backfills also carry `logical_date`, so each replayed slot gets its own cache namespace.
@@ -261,7 +308,7 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
 - Environment variables: `secret://env/VAR_NAME` (or `secret://env/path/to/name`, which expands to `path_to_name`). Use the `name` query parameter to override the derived variable name (`secret://env/foo?name=MY_VAR`).
 - Kubernetes Secrets: `secret://k8s/<secret>/<key>` uses the default namespace; include the namespace as the first segment to target another namespace (`secret://k8s/infra/git-creds/token`). Query parameters `namespace`, `name`, and `key` override each component when needed.
 - Vault KV paths: `secret://vault/<path>?field=<key>` resolves using the configured Vault client. If `field` is omitted, the final path segment is treated as the key (e.g. `secret://vault/secret/legacy/password`). Both KV v1 and v2 responses are supported.
-- Secret resolvers are pluggable; Git sync and CLI tooling load values via the configured resolver chain so credentials never persist inside job manifests.
+- Secret resolvers are pluggable; Git sync, CLI tooling, and runtime step environment resolution load values via the configured resolver chain so credentials never persist inside job manifests.
 
 ## Linting Definitions
 
