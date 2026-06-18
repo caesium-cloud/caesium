@@ -435,11 +435,19 @@ func tamperCookieValue(value string) string {
 	if len(value) == 0 {
 		return "tampered"
 	}
+	// Mutate the FIRST base64 character rather than the last. The state cookie is
+	// base64.RawURLEncoding(payload) + "." + base64.RawURLEncoding(sig); a 32-byte
+	// HMAC encodes to 43 chars whose final character carries only 4 significant
+	// bits — the decoder discards the trailing 2. So replacing the last character
+	// ('A'->'B' when already 'A') can decode to identical bytes, leaving the
+	// signature valid ~1/16 of runs and making this test flaky. The first
+	// character's six bits are all significant, so changing it always alters the
+	// decoded payload and is reliably rejected as a signature mismatch.
 	replacement := byte('A')
-	if value[len(value)-1] == replacement {
+	if value[0] == replacement {
 		replacement = 'B'
 	}
-	return value[:len(value)-1] + string(replacement)
+	return string(replacement) + value[1:]
 }
 
 type mockIssuer struct {
