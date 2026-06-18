@@ -67,6 +67,7 @@ func Markdown() string {
 	b.WriteString("| `metadata` | object | required | Includes alias, labels, annotations. |\n")
 	b.WriteString("| `trigger` | object | required | Defines how the job is invoked. |\n")
 	b.WriteString("| `callbacks` | array | optional | Notification hooks executed after runs. |\n")
+	b.WriteString("| `volumes` | array | optional | Named BYO storage sources mounted by steps. |\n")
 	b.WriteString("| `steps` | array | required | Ordered list of atoms/tasks forming the DAG. |\n\n")
 
 	b.WriteString("## Metadata\n\n")
@@ -79,7 +80,10 @@ func Markdown() string {
 	b.WriteString("| `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |\n")
 	b.WriteString("| `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |\n")
 	b.WriteString("| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |\n")
-	b.WriteString("| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true` or `{ttl: \"24h\"}`. |\n\n")
+	b.WriteString("| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true` or `{ttl: \"24h\"}`. |\n")
+	b.WriteString("| `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |\n")
+	b.WriteString("| `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |\n")
+	b.WriteString("| `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |\n\n")
 
 	b.WriteString("## Trigger\n\n")
 	b.WriteString("Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.\n\n")
@@ -104,6 +108,17 @@ func Markdown() string {
 	b.WriteString("## Callbacks\n\n")
 	b.WriteString("Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.\n\n")
 
+	b.WriteString("## Volumes\n\n")
+	b.WriteString("Volumes are declared once at the job level and mounted by steps with `volumeMounts`.\n\n")
+	b.WriteString("| Field | Type | Required | Notes |\n")
+	b.WriteString("|-------|------|----------|-------|\n")
+	b.WriteString("| `name` | string | required | Unique volume name referenced by steps. |\n")
+	b.WriteString("| `source` | object | optional | Single-engine shorthand. Exactly one of `source` or `sources` is required. |\n")
+	b.WriteString("| `sources` | map[string]object | optional | Engine-keyed sources for portable manifests. Keys are `docker`, `podman`, or `kubernetes`. |\n")
+	b.WriteString("| `accessMode` | string | optional | Advisory access mode; supported values are Kubernetes access modes. |\n\n")
+	b.WriteString("Docker/Podman source kinds: `bind`, `volume`, `tmpfs`.\n")
+	b.WriteString("Kubernetes source kinds: `pvc`, `claimTemplate`, `volumeSource`.\n\n")
+
 	b.WriteString("## Steps\n\n")
 	b.WriteString("Each step represents a DAG node backed by a task/atom pair. Steps default to the Docker engine when the `engine` field is omitted. When neither `next` nor `dependsOn` is provided, the importer links steps sequentially.\n\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
@@ -116,7 +131,11 @@ func Markdown() string {
 	b.WriteString("| `env` | map[string]string | optional | Environment variables passed to the runtime. |\n")
 	b.WriteString("| `workdir` | string | optional | Working directory inside the container runtime. |\n")
 	b.WriteString("| `mounts` | array[object] | optional | Bind mounts with `source`, `target`, and optional `readOnly`. |\n")
+	b.WriteString("| `volumeMounts` | array[object] | optional | Declared volume mounts with `volume`, `path`, optional `readOnly`, and optional `subPath`. |\n")
 	b.WriteString("| `nodeSelector` | map[string]string | optional | Node labels required for claiming this step in distributed mode. |\n")
+	b.WriteString("| `serviceAccountName` | string | optional | Kubernetes ServiceAccount for this step's pod. |\n")
+	b.WriteString("| `podAnnotations` | map[string]string | optional | Kubernetes pod annotations for this step. |\n")
+	b.WriteString("| `automountServiceAccountToken` | boolean | optional | Kubernetes pod service-account token setting for this step. |\n")
 	b.WriteString("| `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |\n")
 	b.WriteString("| `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |\n")
 	b.WriteString("| `retries` | integer | optional | Number of retry attempts after the initial failure. |\n")
@@ -144,14 +163,14 @@ func RenderSummaryMarkdown(summary Summary) string {
 	var b strings.Builder
 
 	b.WriteString("# Job Definition Conformance Report\n\n")
-	b.WriteString(fmt.Sprintf("Total definitions: **%d**\n\n", summary.Total))
+	fmt.Fprintf(&b, "Total definitions: **%d**\n\n", summary.Total)
 
 	if len(summary.MissingAliases) > 0 {
 		sorted := slices.Clone(summary.MissingAliases)
 		slices.Sort(sorted)
 		b.WriteString("## Missing Aliases\n\n")
 		for _, entry := range sorted {
-			b.WriteString(fmt.Sprintf("- %s\n", entry))
+			fmt.Fprintf(&b, "- %s\n", entry)
 		}
 		b.WriteString("\n")
 	}

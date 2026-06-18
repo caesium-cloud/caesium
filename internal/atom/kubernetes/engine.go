@@ -310,7 +310,7 @@ func convertResolvedKubernetesVolume(name string, mount container.VolumeMount) (
 		if mount.Source == "" {
 			return v1.Volume{}, fmt.Errorf("kubernetes pvc volume %q missing source", mount.Name)
 		}
-		volume.VolumeSource.PersistentVolumeClaim = &v1.PersistentVolumeClaimVolumeSource{
+		volume.PersistentVolumeClaim = &v1.PersistentVolumeClaimVolumeSource{
 			ClaimName: mount.Source,
 			ReadOnly:  mount.ReadOnly,
 		}
@@ -319,7 +319,7 @@ func convertResolvedKubernetesVolume(name string, mount container.VolumeMount) (
 		if err != nil {
 			return v1.Volume{}, fmt.Errorf("kubernetes claimTemplate volume %q: %w", mount.Name, err)
 		}
-		volume.VolumeSource.Ephemeral = &v1.EphemeralVolumeSource{VolumeClaimTemplate: template}
+		volume.Ephemeral = &v1.EphemeralVolumeSource{VolumeClaimTemplate: template}
 	case container.VolumeMountTypeVolumeSource:
 		if len(mount.VolumeSource) == 0 {
 			return v1.Volume{}, fmt.Errorf("kubernetes volumeSource volume %q is empty", mount.Name)
