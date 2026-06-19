@@ -29,7 +29,9 @@ ui/node_modules
 
 # LLMs
 .crush
-.claude
+.claude/*
+# ...but track shared, version-controlled skills under .claude/skills/
+!.claude/skills/
 
 # UI
 ui/node_modules
