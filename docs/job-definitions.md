@@ -324,6 +324,8 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Explicit edge wiring (`explicit-links.job.yaml`).
   - Fan-out/fan-in DAG (`fanout-join.job.yaml`).
   - Data contract validation across producer and consumer steps (`data-contracts.job.yaml`).
+  - Artifact handoff through shared task volumes (`volume-artifacts.job.yaml`).
+  - Kubernetes workload identity with projected credentials and volume mounts (`k8s-workload-identity-volume.job.yaml`).
   - HTTP-triggered debugging workflow (`http-ops-debug.job.yaml`).
   - Incremental execution and cache reuse (`incremental-cache.job.yaml`).
   - HTTP-triggered log streaming showcase with ANSI color and sustained output (`log-streaming.job.yaml`).
