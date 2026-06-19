@@ -1,0 +1,65 @@
+# Demonstrates Kubernetes workload identity and BYO PVC-backed volumes.
+# Hydrate-safe: this job uses an HTTP trigger, so it is visible in the UI
+# after `just hydrate` but only runs when explicitly triggered.
+#
+# To run this on Kubernetes, create the referenced ServiceAccounts and PVC
+# first, then fire the HTTP trigger.
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-workload-identity-volume-demo
+  labels:
+    team: platform
+    feature: workload-identity
+    runtime: kubernetes
+  annotations:
+    purpose: "Show Kubernetes serviceAccountName, pod annotations, and PVC mounts"
+  serviceAccountName: caesium-report-reader
+  podAnnotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/caesium-report-reader
+  automountServiceAccountToken: false
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/examples/k8s-workload-identity-volume"
+volumes:
+  - name: cloud-workspace
+    sources:
+      kubernetes:
+        pvc: caesium-cloud-workspace-rwx
+steps:
+  - name: plan-access
+    engine: kubernetes
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /workspace/plans
+        echo "Plan cloud access using metadata-level ServiceAccount defaults."
+        echo '##caesium::output {"plan": "/workspace/plans/access-plan.txt"}'
+    volumeMounts:
+      - volume: cloud-workspace
+        path: /workspace
+    next:
+      - write-cloud-report
+
+  - name: write-cloud-report
+    engine: kubernetes
+    image: alpine:3.23
+    dependsOn: [plan-access]
+    serviceAccountName: caesium-cloud-writer
+    podAnnotations:
+      eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/caesium-cloud-writer
+    automountServiceAccountToken: true
+    command:
+      - sh
+      - -c
+      - |
+        echo "Use the step-level ServiceAccount override for cloud writes."
+        echo "Would write cloud report into /workspace/reports."
+    volumeMounts:
+      - volume: cloud-workspace
+        path: /workspace
+        subPath: reports

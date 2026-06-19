@@ -1,8 +1,9 @@
 import { useState, useEffect } from "react";
+import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { api, type DiffResponse, type LintResponse } from "@/lib/api";
-import { FileCode2, Play, CheckCircle2, XCircle, Upload, GitBranch, FileWarning, Info } from "lucide-react";
+import { FileCode2, Play, CheckCircle2, XCircle, Upload, GitBranch, FileWarning, Info, HardDrive, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
@@ -10,38 +11,47 @@ import { linter, type Diagnostic } from "@codemirror/lint";
 import { EditorView } from "@codemirror/view";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
+import { getJobDefRuntimeHints, type JobDefRuntimeHints } from "./runtimeHints";
 
-const EXAMPLE_YAML = `apiVersion: v1
+export const EXAMPLE_YAML = `apiVersion: v1
 kind: Job
 metadata:
-  alias: nightly-etl-warehouse
+  alias: infra-plan-apply
   labels:
-    team: data-platform
+    team: platform
     tier: critical
+  serviceAccountName: caesium-planner
+  podAnnotations:
+    iam.gke.io/gcp-service-account: terraform-planner@example.iam.gserviceaccount.com
+  automountServiceAccountToken: true
 trigger:
-  type: cron
+  type: http
   configuration:
-    cron: "0 2 * * *"
-    timezone: "UTC"
+    path: "/hooks/infra/apply"
+volumes:
+  - name: work
+    sources:
+      docker:
+        bind: /mnt/nfs/caesium-work
+      podman:
+        bind: /mnt/nfs/caesium-work
+      kubernetes:
+        pvc: ci-shared-rwx
 steps:
-  - name: extract.users
-    image: ghcr.io/cs/postgres-extractor:1.4
-    command: ["python", "/app/extract.py", "--table=users"]
-  - name: extract.orders
-    image: ghcr.io/cs/postgres-extractor:1.4
-    command: ["python", "/app/extract.py", "--table=orders"]
-  - name: transform.users
-    image: ghcr.io/cs/dbt:1.7
-    dependsOn: [extract.users]
-    command: ["dbt", "run", "--select", "users"]
-  - name: transform.orders
-    image: ghcr.io/cs/dbt:1.7
-    dependsOn: [extract.orders]
-    command: ["dbt", "run", "--select", "orders"]
-  - name: load.warehouse
-    image: snowflake/snowsql
-    dependsOn: [transform.users, transform.orders]
-    command: ["snowsql", "-f", "/sql/load.sql"]
+  - name: plan
+    engine: kubernetes
+    image: hashicorp/terraform:1.9
+    command: ["terraform", "plan", "-out=/work/tf.plan"]
+    volumeMounts:
+      - {volume: work, path: /work}
+  - name: apply
+    engine: kubernetes
+    image: hashicorp/terraform:1.9
+    dependsOn: [plan]
+    serviceAccountName: caesium-deployer
+    volumeMounts:
+      - {volume: work, path: /work, readOnly: true, subPath: plans}
+    command: ["terraform", "apply", "/work/tf.plan"]
 `;
 
 // Simple custom theme for the editor to match our brand
@@ -161,6 +171,7 @@ export function JobDefsPage() {
   const lineCount = yaml.split("\n").length;
   const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
   const hasErrors = lintResult.errors && lintResult.errors.length > 0;
+  const runtimeHints = getJobDefRuntimeHints(yaml);
 
   return (
     <div className="space-y-6 pb-12">
@@ -328,6 +339,24 @@ export function JobDefsPage() {
         {/* Right rail */}
         <div className="flex flex-col gap-3 sticky top-4">
           <Card className="bg-midnight/30 border-graphite/50 p-4 shadow-md">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-text-3 mb-3">Runtime support</div>
+            <div className="flex flex-col gap-3">
+              <RuntimeHint
+                icon={<HardDrive className="h-3.5 w-3.5" />}
+                label="Volumes"
+                value={formatVolumeHint(runtimeHints)}
+                detail={formatVolumeDetail(runtimeHints)}
+              />
+              <RuntimeHint
+                icon={<ShieldCheck className="h-3.5 w-3.5" />}
+                label="Kubernetes identity"
+                value={formatIdentityHint(runtimeHints)}
+                detail={formatIdentityDetail(runtimeHints)}
+              />
+            </div>
+          </Card>
+
+          <Card className="bg-midnight/30 border-graphite/50 p-4 shadow-md">
             <div className="text-[10px] font-bold uppercase tracking-widest text-text-3 mb-3">Schema reference</div>
             <RefBlock title="Top-level fields" code={`apiVersion: v1
 kind: Job
@@ -341,6 +370,21 @@ dependsOn: [extract.users]
 
 # Or explicit successors
 next: [transform.users]`} />
+            <RefBlock title="Volumes" code={`volumes:
+  - name: work
+    sources:
+      docker: {bind: /mnt/nfs/work}
+      kubernetes: {pvc: ci-shared-rwx}
+
+volumeMounts:
+  - {volume: work, path: /work}`} />
+            <RefBlock title="Kubernetes identity" code={`metadata:
+  serviceAccountName: caesium-runner
+  podAnnotations: {...}
+
+steps:
+  - engine: kubernetes
+    serviceAccountName: caesium-deployer`} />
             <RefBlock title="Callbacks" code={`callbacks:
   - type: notification
     configuration:
@@ -367,12 +411,68 @@ next: [transform.users]`} />
                 <span className="text-cyan-glow mt-0.5">·</span> 
                 <span>Without edges, steps run sequentially.</span>
               </li>
+              <li className="flex gap-2">
+                <span className="text-cyan-glow mt-0.5">·</span>
+                <span>Use a shared <code className="font-mono bg-obsidian px-1 py-0.5 rounded text-[11px] text-cyan-glow border border-graphite/50">bind</code> path or RWX <code className="font-mono bg-obsidian px-1 py-0.5 rounded text-[11px] text-cyan-glow border border-graphite/50">pvc</code> for cross-step files.</span>
+              </li>
             </ul>
           </Card>
         </div>
       </div>
     </div>
   );
+}
+
+function RuntimeHint({
+  icon,
+  label,
+  value,
+  detail,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <div className="flex items-start gap-2.5 text-xs">
+      <div className="mt-0.5 text-cyan-glow shrink-0">{icon}</div>
+      <div className="min-w-0">
+        <div className="font-medium text-text-1">{label}</div>
+        <div className="font-mono text-[11px] text-text-2 break-all">{value}</div>
+        <div className="text-[11px] text-text-4 leading-relaxed">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
+function formatVolumeHint(hints: JobDefRuntimeHints) {
+  if (hints.parseError) return "Waiting for valid YAML";
+  if (hints.volumeCount === 0) return "No volumes declared";
+  return `${hints.volumeCount} declared`;
+}
+
+function formatVolumeDetail(hints: JobDefRuntimeHints) {
+  if (hints.parseError) return "Live lint will show parser details.";
+  if (hints.volumeMountCount === 0) return "No step mounts a declared volume.";
+  const steps = `${hints.volumeMountedStepCount} ${hints.volumeMountedStepCount === 1 ? "step" : "steps"}`;
+  const mounts = `${hints.volumeMountCount} ${hints.volumeMountCount === 1 ? "mount" : "mounts"}`;
+  return `${mounts} across ${steps}.`;
+}
+
+function formatIdentityHint(hints: JobDefRuntimeHints) {
+  if (hints.parseError) return "Waiting for valid YAML";
+  if (hints.serviceAccountNames.length === 0) return "No service account";
+  return hints.serviceAccountNames.join(", ");
+}
+
+function formatIdentityDetail(hints: JobDefRuntimeHints) {
+  if (hints.parseError) return "Live lint will show parser details.";
+  const extras = [];
+  if (hints.hasPodAnnotations) extras.push("pod annotations");
+  if (hints.hasAutomountTokenSetting) extras.push("token setting");
+  if (extras.length === 0) return "Step-level values override metadata defaults.";
+  return `Includes ${extras.join(" and ")}.`;
 }
 
 function DiffView({ diff }: { diff: DiffResponse | null }) {

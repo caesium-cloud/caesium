@@ -74,6 +74,68 @@ describe('api', () => {
     expect(mockFetch).toHaveBeenCalledWith('/v1/jobs/job-42/cache', expect.anything());
   });
 
+  it('applyJobDef preserves volume and workload identity fields in the request payload', async () => {
+    mockFetch.mockResolvedValue(okResponse({ applied: 1 }));
+
+    await api.applyJobDef(`apiVersion: v1
+kind: Job
+metadata:
+  alias: runtime-contract
+  serviceAccountName: caesium-reader
+  podAnnotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789012:role/caesium-reader
+  automountServiceAccountToken: false
+trigger:
+  type: http
+  configuration:
+    path: /hooks/runtime-contract
+volumes:
+  - name: workspace
+    sources:
+      kubernetes:
+        pvc: caesium-workspace-rwx
+steps:
+  - name: run
+    engine: kubernetes
+    image: alpine:3.23
+    serviceAccountName: caesium-writer
+    volumeMounts:
+      - {volume: workspace, path: /workspace, readOnly: true}
+`);
+
+    const [, init] = mockFetch.mock.calls[0];
+    const payload = JSON.parse(String(init?.body));
+    expect(payload.definitions).toHaveLength(1);
+    expect(payload.definitions[0]).toMatchObject({
+      metadata: {
+        alias: 'runtime-contract',
+        serviceAccountName: 'caesium-reader',
+        podAnnotations: {
+          'eks.amazonaws.com/role-arn': 'arn:aws:iam::123456789012:role/caesium-reader',
+        },
+        automountServiceAccountToken: false,
+      },
+      volumes: [
+        {
+          name: 'workspace',
+          sources: {
+            kubernetes: { pvc: 'caesium-workspace-rwx' },
+          },
+        },
+      ],
+      steps: [
+        expect.objectContaining({
+          name: 'run',
+          engine: 'kubernetes',
+          serviceAccountName: 'caesium-writer',
+          volumeMounts: [
+            { volume: 'workspace', path: '/workspace', readOnly: true },
+          ],
+        }),
+      ],
+    });
+  });
+
   it('deleteTaskCache encodes the task name in the URL', async () => {
     mockFetch.mockResolvedValue({
       ok: true,

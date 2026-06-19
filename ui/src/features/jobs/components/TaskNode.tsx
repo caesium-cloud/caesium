@@ -15,12 +15,15 @@ import {
   AlertTriangle,
   Archive,
   SkipForward,
+  HardDrive,
+  ShieldCheck,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
   const taskLabel = typeof label === 'string' ? label : '';
+  const runtimeHints = getRuntimeHints(atom?.spec);
 
   const getStatusIcon = () => {
     switch (status) {
@@ -124,6 +127,26 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                     SHELL
                   </span>
                 )}
+                {runtimeHints.volumeCount > 0 && (
+                  <span
+                    data-testid="runtime-volume-badge"
+                    title={`${runtimeHints.volumeCount} resolved volume ${runtimeHints.volumeCount === 1 ? 'mount' : 'mounts'}`}
+                    className="inline-flex items-center gap-0.5 rounded border border-caesium-cyan/30 bg-caesium-cyan/10 px-1 text-[8px] font-black text-caesium-cyan"
+                  >
+                    <HardDrive className="h-2.5 w-2.5" />
+                    {runtimeHints.volumeCount}
+                  </span>
+                )}
+                {runtimeHints.hasKubernetesIdentity && (
+                  <span
+                    data-testid="runtime-identity-badge"
+                    title={runtimeHints.serviceAccountName ? `ServiceAccount ${runtimeHints.serviceAccountName}` : 'Kubernetes pod identity settings'}
+                    className="inline-flex items-center gap-0.5 rounded border border-gold/35 bg-gold/10 px-1 text-[8px] font-black text-gold"
+                  >
+                    <ShieldCheck className="h-2.5 w-2.5" />
+                    SA
+                  </span>
+                )}
                 <span className="truncate text-[9px] font-mono text-muted-foreground">
                   {shortId(taskLabel)}
                 </span>
@@ -209,3 +232,33 @@ export const TaskNode = memo(({ data }: NodeProps) => {
 });
 
 TaskNode.displayName = 'TaskNode';
+
+function getRuntimeHints(spec: unknown) {
+  if (!isRecord(spec)) {
+    return {
+      volumeCount: 0,
+      hasKubernetesIdentity: false,
+      serviceAccountName: '',
+    };
+  }
+
+  const resolvedVolumeMounts = Array.isArray(spec.resolvedVolumeMounts)
+    ? spec.resolvedVolumeMounts
+    : [];
+  const kubernetes = isRecord(spec.kubernetes) ? spec.kubernetes : null;
+  const serviceAccountName = typeof kubernetes?.serviceAccountName === 'string'
+    ? kubernetes.serviceAccountName.trim()
+    : '';
+  const hasPodAnnotations = isRecord(kubernetes?.podAnnotations) && Object.keys(kubernetes.podAnnotations).length > 0;
+  const hasAutomountSetting = typeof kubernetes?.automountServiceAccountToken === 'boolean';
+
+  return {
+    volumeCount: resolvedVolumeMounts.length,
+    hasKubernetesIdentity: serviceAccountName !== '' || hasPodAnnotations || hasAutomountSetting,
+    serviceAccountName,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}

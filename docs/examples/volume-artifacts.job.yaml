@@ -1,0 +1,76 @@
+# Demonstrates named job volumes with Docker/Podman-compatible sources.
+# Hydrate-safe: this job uses an HTTP trigger, so it is visible in the UI
+# after `just hydrate` but only runs when explicitly triggered.
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: volume-artifacts-demo
+  labels:
+    team: platform
+    feature: volumes
+  annotations:
+    purpose: "Show named volumes and read-only mounts in the DAG and atom spec"
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/examples/volume-artifacts"
+volumes:
+  - name: workspace
+    sources:
+      docker:
+        volume: caesium-example-workspace
+      podman:
+        volume: caesium-example-workspace
+      kubernetes:
+        pvc: caesium-example-workspace-rwx
+steps:
+  - name: prepare-artifact
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        mkdir -p /workspace/reports
+        printf 'status=prepared\nfeature=volumes\n' > /workspace/reports/summary.txt
+        echo '##caesium::output {"artifact_path": "/workspace/reports/summary.txt"}'
+    volumeMounts:
+      - volume: workspace
+        path: /workspace
+    next:
+      - verify-artifact
+
+  - name: verify-artifact
+    engine: docker
+    image: alpine:3.23
+    dependsOn: [prepare-artifact]
+    command:
+      - sh
+      - -c
+      - |
+        test -s /workspace/reports/summary.txt
+        echo "Verified shared artifact:"
+        cat /workspace/reports/summary.txt
+        echo '##caesium::output {"verified": "true"}'
+    volumeMounts:
+      - volume: workspace
+        path: /workspace
+        readOnly: true
+    next:
+      - publish-manifest
+
+  - name: publish-manifest
+    engine: docker
+    image: alpine:3.23
+    dependsOn: [verify-artifact]
+    command:
+      - sh
+      - -c
+      - |
+        cat /workspace/reports/summary.txt
+        echo "Would publish manifest metadata from shared storage."
+    volumeMounts:
+      - volume: workspace
+        path: /workspace
+        readOnly: true
