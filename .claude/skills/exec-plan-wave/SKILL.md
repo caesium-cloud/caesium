@@ -63,12 +63,14 @@ Substitute placeholders when dispatching.
 
 These are baked into the skill (do not deviate):
 
-- **Repo + branch**: working tree is `/Users/cryan/dev/caesium`, remote
-  `caesium-cloud/caesium`, default branch **`master`**. Rely on
+- **Repo + branch**: the working tree is the caesium checkout root —
+  written `$REPO_ROOT` below; resolve it with `git rev-parse --show-toplevel`
+  (do not hardcode a machine-specific path). Remote `caesium-cloud/caesium`,
+  default branch **`master`**. Rely on
   `isolation: "worktree"` for **general-purpose** stream agents; the
   auto-generated branch (`worktree-agent-<id>`) is the PR branch. For
   review-resolve agents, reuse the existing worktree at
-  `/Users/cryan/dev/caesium/.claude/worktrees/agent-<id>` (do not spawn
+  `$REPO_ROOT/.claude/worktrees/agent-<id>` (do not spawn
   fresh worktrees because the branch is checked out there). **Codex streams
   in a parallel wave are the exception**: do NOT use `isolation: "worktree"`
   for them — the forwarder agent's worktree gets auto-cleaned out from under

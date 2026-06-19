@@ -118,8 +118,10 @@ companions=("$HOME"/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-com
 shopt -u nullglob
 companion=""
 if [ "${#companions[@]}" -gt 0 ]; then
-  # Sort by version (highest last); take the last one.
-  IFS=$'\n' sorted=($(sort -V <<<"${companions[*]}"))
+  # Sort by version (highest last); take the last one. printf one path per
+  # line so `sort -V` actually sees multiple lines (a "${companions[*]}"
+  # here-string collapses to a single space-joined line and sorts nothing).
+  IFS=$'\n' sorted=($(printf '%s\n' "${companions[@]}" | sort -V))
   unset IFS
   companion="${sorted[${#sorted[@]}-1]}"
 fi
@@ -137,4 +139,4 @@ echo "  companion: ${companion}"
 echo
 
 cd "${workspace}"
-exec node "${companion}" task --background --write --resume "${thread_id}" "${prompt}"
+exec node "${companion}" task --background --write --resume "${thread_id}" -- "${prompt}"

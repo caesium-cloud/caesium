@@ -4,12 +4,19 @@ Detailed instructions for each phase of the `exec-plan-wave` skill. Read
 this once at phase 1 start; the rubrics here drive autonomous decisions
 across all later phases.
 
-Repo facts baked in: working tree `/Users/cryan/dev/caesium`, remote
-`caesium-cloud/caesium`, default branch **`master`**. Stack: Go (echo,
-Cobra, GORM over dqlite/SQLite), embedded React/Vite UI, Prometheus,
-Docker/Podman/Kubernetes runtimes. Everything builds/tests inside the
-`caesium-builder` images via `just` targets — host `go build` is
-discouraged (`CLAUDE.md`).
+Repo facts baked in: remote `caesium-cloud/caesium`, default branch
+**`master`**. Stack: Go (echo, Cobra, GORM over dqlite/SQLite), embedded
+React/Vite UI, Prometheus, Docker/Podman/Kubernetes runtimes. Everything
+builds/tests inside the `caesium-builder` images via `just` targets — host
+`go build` is discouraged (`CLAUDE.md`).
+
+**Paths below use `$REPO_ROOT`** — the caesium checkout root. Resolve it
+once at the start of a wave and export it so every `$REPO_ROOT/...` snippet
+below works on any contributor's machine, not just the author's:
+
+```sh
+export REPO_ROOT="$(git rev-parse --show-toplevel)"
+```
 
 ---
 
@@ -161,7 +168,7 @@ If the wave invocation specifies codex sub-agents (e.g. "use the codex plugin"),
 
   ```sh
   companion=$(ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)
-  wt="/Users/cryan/dev/caesium/.claude/worktrees/agent-<wave>-<stream>"   # e.g. agent-w3-beta; keep the agent-* prefix so Phase 7.5b prunes it
+  wt="$REPO_ROOT/.claude/worktrees/agent-<wave>-<stream>"   # e.g. agent-w3-beta; keep the agent-* prefix so Phase 7.5b prunes it
   git worktree add "$wt" -b "worktree-agent-<wave>-<stream>" master       # orchestrator owns this worktree → never auto-cleaned
   pf=$(mktemp)                                                            # write the filled prompt to a file to avoid shell-quoting hell
   cat > "$pf" <<'PROMPT'
@@ -184,7 +191,7 @@ If the wave invocation specifies codex sub-agents (e.g. "use the codex plugin"),
 
   1. **Resume** (cheap; first attempt when uncertain). Re-attach to the same codex thread so the agent picks up its context and finishes staging + the plan-doc edit. Best when: last phase was `implementing`, worktree has substantial in-scope work, and the implementation looks correct in shape. Use [`codex-resume.sh`](codex-resume.sh):
      ```sh
-     bash /Users/cryan/dev/caesium/.claude/skills/exec-plan-wave/codex-resume.sh <dispatching-agent-id>
+     bash $REPO_ROOT/.claude/skills/exec-plan-wave/codex-resume.sh <dispatching-agent-id>
      # Optional: --prompt "specific continuation text" for non-default guidance
      ```
      The helper reads the agent's `state.json`, refuses if pid is still alive, and dispatches `codex-companion task --background --write --resume <threadId>` from the agent's worktree.
@@ -233,7 +240,7 @@ For each codex stream:
 
 | Symptom | Worktree location | How to detect |
 |---|---|---|
-| Standard | `/Users/cryan/dev/caesium/.claude/worktrees/agent-<id>/` | `git -C .claude/worktrees/agent-<id> status --short` lists modified/untracked files |
+| Standard | `$REPO_ROOT/.claude/worktrees/agent-<id>/` | `git -C .claude/worktrees/agent-<id> status --short` lists modified/untracked files |
 | /private/tmp fallback | `/private/tmp/caesium-agent-<id>-impl/` | The orchestrator's worktree is clean/absent; `ls -d /private/tmp/caesium-agent-<id>*` finds the temp clone (on `master`) |
 | Already committed locally | Same as above, but `git log master..HEAD` is non-empty | Codex's `git commit` succeeded but the push failed; commit is preserved |
 | Worktree never materialized (rsync recovery) | `.claude/worktrees/agent-<id>/` exists as a plain dir (not a git worktree) | `git worktree list` lacks `agent-<id>`; `git -C <path> status` errors; the dir is a flat copy of the repo minus `.git/` |
@@ -259,7 +266,7 @@ If they pass: codex's work is credible enough to publish.
 Standard worktree case:
 
 ```sh
-cd /Users/cryan/dev/caesium/.claude/worktrees/agent-<id>
+cd $REPO_ROOT/.claude/worktrees/agent-<id>
 git add -A
 git status --short
 git commit -m "$(cat <<'EOF'
@@ -267,7 +274,7 @@ git commit -m "$(cat <<'EOF'
 
 <2-3 sentence body describing what changed and why>
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+{{MODEL_TRAILER}}
 EOF
 )"
 git push -u origin "$(git symbolic-ref --short HEAD)"
@@ -278,7 +285,7 @@ For the /private/tmp fallback: `cd /private/tmp/caesium-agent-<id>-impl`, `git c
 Then create the PR from the host repo:
 
 ```sh
-cd /Users/cryan/dev/caesium
+cd $REPO_ROOT
 gh pr create --title "<Imperative subject> (<plan-slug> W<n>-<greek>)" --head <branch-name> --body "$(cat <<'EOF'
 ## Summary
 <bullets from agent's suggested PR body>
@@ -545,7 +552,7 @@ After each merge:
 
 If `gh pr merge` returns `Pull Request has merge conflicts`:
 
-1. cd to the PR's worktree (`/Users/cryan/dev/caesium/.claude/worktrees/agent-<id>`).
+1. cd to the PR's worktree (`$REPO_ROOT/.claude/worktrees/agent-<id>`).
 2. `git fetch origin master && git merge --no-commit --no-ff origin/master`
 3. `grep -n "<<<<<<< \|>>>>>>> \|^=======$" <conflicted_files>` to find conflict regions.
 4. Resolve via `Read` + `Edit`. Common caesium patterns:
@@ -606,8 +613,8 @@ git worktree remove --force "$path"
 `.claude/worktrees/agent-*` accumulates orphans (codex silent-deaths, crashed sub-agents, manual worktree calls that never raised PRs). Enumerate every `agent-*` and prune those whose branch's PR is closed/merged on origin:
 
 ```sh
-cd /Users/cryan/dev/caesium
-for path in /Users/cryan/dev/caesium/.claude/worktrees/agent-*; do
+cd $REPO_ROOT
+for path in $REPO_ROOT/.claude/worktrees/agent-*; do
   [ -d "$path" ] || continue
   branch=$(git -C "$path" symbolic-ref --short HEAD 2>/dev/null) || branch=""
   # Skip THIS wave's still-in-flight worktrees (tracked in orchestrator state)
@@ -632,14 +639,14 @@ Also prune `/private/tmp/caesium-*-bridge` and `/private/tmp/caesium-agent-*-imp
 
 ### Step 7.5c: Do NOT prune
 
-- Worktrees the operator created manually (e.g. `/Users/cryan/dev/caesium-<feature>/`) — user-owned. Surface their existence in the final report if disk pressure remains; never auto-prune without explicit consent.
+- Worktrees the operator created manually (e.g. a sibling clone like `../caesium-<feature>/` outside `$REPO_ROOT`) — user-owned. Surface their existence in the final report if disk pressure remains; never auto-prune without explicit consent.
 - Active claude-code chat worktrees (`.claude/worktrees/<adjective-name>/` like `adoring-pascal` — not `agent-*`).
-- The main checkout (`/Users/cryan/dev/caesium/`).
+- The main checkout (`$REPO_ROOT/`).
 
 ### Step 7.5d: Verify reclaim
 
 ```sh
-du -sh /Users/cryan/dev/caesium/.claude/worktrees
+du -sh $REPO_ROOT/.claude/worktrees
 git worktree list | wc -l
 ```
 
@@ -687,7 +694,7 @@ docs(<plan-slug>): sync plan with merged wave-<N> state
 Updates:
 - <bulleted list of dashboard changes>
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+{{MODEL_TRAILER}}
 ```
 
 Then publish it:
@@ -722,7 +729,7 @@ Use the format from `SKILL.md` § Output. Be terse. Include all PR URLs and call
 - **Worktrees share a git stash store**: a `git stash` from one worktree can be popped into a sibling, silently corrupting foreign work. Stream agents commit WIP (`git add -A && git commit -m "wip" --no-verify`, then `git reset HEAD~1`) instead. Codified in the stream prompts.
 - **Security stub-on-merge is a P0**: an agent stubbing `validateSignature` / `ValidateKey` / `HasRole` / `CheckScope` / a `subtle.ConstantTimeCompare` / the SAML `recordAssertion` / the OIDC nonce check AND merging ships a forgery / privilege-escalation / replay hole. Treat these as merge-blocking; re-dispatch as a fix-forward (sonnet → opus) before Phase 7. Verify any "dep would conflict" stub-justification against `go.mod`/`go.sum` first.
 - **`docs/roadmap.md` is lowercase**: there is NO `ROADMAP.md`. A dashboard sync that edits "ROADMAP.md" creates a duplicate file. Always edit `docs/roadmap.md`.
-- **Commit trailer**: use `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` (the current global trailer), not the older `Claude Opus 4.7` seen in archived plans.
+- **Commit trailer**: the snippets use a `{{MODEL_TRAILER}}` placeholder — substitute the `Co-Authored-By:` trailer your environment / `CLAUDE.md` currently mandates (at time of writing, `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`). Using the placeholder rather than a baked-in literal keeps trailers from going stale across model rotations (an archived plan still carries the older `Claude Opus 4.7`). Resolve `{{MODEL_TRAILER}}` from your current instructions, not from this line.
 
 ## When something genuinely doesn't fit the playbook
 

@@ -5,7 +5,7 @@ Substitute every `{{PLACEHOLDER}}` before passing this to `Agent({prompt: ...})`
 Required placeholders:
 - `{{PR}}` — PR number, e.g. `212`
 - `{{REPO}}` — `caesium-cloud/caesium`
-- `{{WORKTREE_PATH}}` — absolute path of the existing worktree, e.g. `/Users/cryan/dev/caesium/.claude/worktrees/agent-a3d38286ebfbe3b78`
+- `{{WORKTREE_PATH}}` — absolute path of the existing worktree (the orchestrator substitutes the real `$REPO_ROOT`), e.g. `<repo-root>/.claude/worktrees/agent-a3d38286ebfbe3b78`
 - `{{BRANCH_NAME}}` — the worktree's branch name (`worktree-agent-<id>`)
 - `{{STREAM_LABEL}}` — e.g. `W3-β`
 - `{{STREAM_TOPIC}}` — short PR topic, e.g. "event-trigger evaluation engine + store"

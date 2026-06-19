@@ -19,6 +19,7 @@ Required placeholders:
 - `{{ITEM_DETAIL}}` — for each item, copy the plan doc's bullet text + any extra context the orchestrator gathered (file paths, suggested approach)
 - `{{COORDINATION}}` — list of files/sections this stream owns vs. files other streams in the same wave own (so this agent doesn't touch them)
 - `{{PR_TITLE}}` — `<Imperative subject> ({{PLAN_SLUG}} {{WAVE_LABEL}}-{{STREAM_LABEL}})`
+- `{{MODEL_TRAILER}}` — the `Co-Authored-By:` trailer the orchestrator's environment mandates (e.g. `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`); the orchestrator fills the current value so commit trailers don't go stale on model rotation
 
 ---
 
@@ -112,7 +113,7 @@ git commit -m "$(cat <<'EOF'
 
 <2-3 sentence body describing what changed and why>
 
-Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+{{MODEL_TRAILER}}
 EOF
 )"
 git push -u origin "$(git symbolic-ref --short HEAD)"
