@@ -1,4 +1,5 @@
 import { parseAllDocuments } from "yaml";
+import { isRecord } from "@/lib/typeGuards";
 
 export interface JobDefRuntimeHints {
   volumeCount: number;
@@ -75,20 +76,19 @@ function collectIdentityHints(
 ) {
   if (!isRecord(value)) return;
 
-  if (typeof value.serviceAccountName === "string") {
-    const serviceAccountName = value.serviceAccountName.trim();
+  const rawServiceAccountName = value.serviceAccountName;
+  if (typeof rawServiceAccountName === "string") {
+    const serviceAccountName = rawServiceAccountName.trim();
     if (serviceAccountName) serviceAccounts.add(serviceAccountName);
   }
 
-  if (isRecord(value.podAnnotations) && Object.keys(value.podAnnotations).length > 0) {
+  const rawPodAnnotations = value.podAnnotations;
+  if (isRecord(rawPodAnnotations) && Object.keys(rawPodAnnotations).length > 0) {
     hints.hasPodAnnotations = true;
   }
 
-  if (typeof value.automountServiceAccountToken === "boolean") {
+  const rawAutomountServiceAccountToken = value.automountServiceAccountToken;
+  if (typeof rawAutomountServiceAccountToken === "boolean") {
     hints.hasAutomountTokenSetting = true;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object" && !Array.isArray(value);
 }

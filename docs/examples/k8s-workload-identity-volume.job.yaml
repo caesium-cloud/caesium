@@ -42,8 +42,6 @@ steps:
     volumeMounts:
       - volume: cloud-workspace
         path: /workspace
-    next:
-      - write-cloud-report
 
   - name: write-cloud-report
     engine: kubernetes

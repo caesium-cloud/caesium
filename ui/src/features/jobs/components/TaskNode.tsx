@@ -1,5 +1,6 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
+import { isRecord } from '@/lib/typeGuards';
 import { cn, shortId } from '@/lib/utils';
 import {
   Activity,
@@ -246,19 +247,18 @@ function getRuntimeHints(spec: unknown) {
     ? spec.resolvedVolumeMounts
     : [];
   const kubernetes = isRecord(spec.kubernetes) ? spec.kubernetes : null;
-  const serviceAccountName = typeof kubernetes?.serviceAccountName === 'string'
-    ? kubernetes.serviceAccountName.trim()
+  const rawServiceAccountName = kubernetes?.serviceAccountName;
+  const serviceAccountName = typeof rawServiceAccountName === 'string'
+    ? rawServiceAccountName.trim()
     : '';
-  const hasPodAnnotations = isRecord(kubernetes?.podAnnotations) && Object.keys(kubernetes.podAnnotations).length > 0;
-  const hasAutomountSetting = typeof kubernetes?.automountServiceAccountToken === 'boolean';
+  const rawPodAnnotations = kubernetes?.podAnnotations;
+  const hasPodAnnotations = isRecord(rawPodAnnotations) && Object.keys(rawPodAnnotations).length > 0;
+  const rawAutomountServiceAccountToken = kubernetes?.automountServiceAccountToken;
+  const hasAutomountSetting = typeof rawAutomountServiceAccountToken === 'boolean';
 
   return {
     volumeCount: resolvedVolumeMounts.length,
     hasKubernetesIdentity: serviceAccountName !== '' || hasPodAnnotations || hasAutomountSetting,
     serviceAccountName,
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }

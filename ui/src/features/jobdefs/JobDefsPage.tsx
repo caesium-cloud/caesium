@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -171,7 +171,8 @@ export function JobDefsPage() {
   const lineCount = yaml.split("\n").length;
   const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
   const hasErrors = lintResult.errors && lintResult.errors.length > 0;
-  const runtimeHints = getJobDefRuntimeHints(yaml);
+  const deferredYaml = useDeferredValue(yaml);
+  const runtimeHints = useMemo(() => getJobDefRuntimeHints(deferredYaml), [deferredYaml]);
 
   return (
     <div className="space-y-6 pb-12">

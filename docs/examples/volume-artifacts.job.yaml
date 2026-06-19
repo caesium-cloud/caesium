@@ -38,8 +38,6 @@ steps:
     volumeMounts:
       - volume: workspace
         path: /workspace
-    next:
-      - verify-artifact
 
   - name: verify-artifact
     engine: docker
@@ -57,8 +55,6 @@ steps:
       - volume: workspace
         path: /workspace
         readOnly: true
-    next:
-      - publish-manifest
 
   - name: publish-manifest
     engine: docker

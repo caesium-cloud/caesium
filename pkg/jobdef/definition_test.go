@@ -148,6 +148,7 @@ func TestParseRepositoryExamples(t *testing.T) {
 		require.NotEmpty(t, matches, "expected example manifests in %s", dir)
 
 		for _, path := range matches {
+			path := path
 			t.Run(filepath.ToSlash(path[len(repoRoot)+1:]), func(t *testing.T) {
 				data, err := os.ReadFile(path)
 				require.NoError(t, err)
