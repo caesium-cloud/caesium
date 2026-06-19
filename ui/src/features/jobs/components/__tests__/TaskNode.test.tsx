@@ -122,4 +122,31 @@ describe('TaskNode', () => {
     expect(screen.queryByText('IN')).not.toBeInTheDocument();
     expect(screen.queryByText('OUT')).not.toBeInTheDocument();
   });
+
+  it('renders runtime badges for resolved volumes and Kubernetes identity', () => {
+    renderTaskNode({
+      label: 'task-runtime',
+      status: 'pending',
+      atom: {
+        image: 'alpine:3.23',
+        engine: 'kubernetes',
+        command: ['echo', 'runtime'],
+        spec: {
+          resolvedVolumeMounts: [
+            { type: 'pvc', source: 'shared-work', target: '/work' },
+            { type: 'pvc', source: 'shared-cache', target: '/cache' },
+          ],
+          kubernetes: {
+            serviceAccountName: 'caesium-writer',
+          },
+        },
+      },
+      engine: 'kubernetes',
+      command: ['echo', 'runtime'],
+    });
+
+    expect(screen.getByTestId('runtime-volume-badge')).toHaveTextContent('2');
+    expect(screen.getByTestId('runtime-identity-badge')).toHaveTextContent('SA');
+    expect(screen.getByTitle('ServiceAccount caesium-writer')).toBeInTheDocument();
+  });
 });

@@ -2,6 +2,9 @@ package jobdef
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -129,6 +132,31 @@ func TestParseValidDefinitions(t *testing.T) {
 			if len(start.Next) != 2 {
 				t.Fatalf("branchy job should have two successors, got %d", len(start.Next))
 			}
+		}
+	}
+}
+
+func TestParseRepositoryExamples(t *testing.T) {
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+
+	for _, dir := range []string{"docs/examples", "docs/examples-k8s"} {
+		pattern := filepath.Join(repoRoot, filepath.FromSlash(dir), "*.job.yaml")
+		matches, err := filepath.Glob(pattern)
+		require.NoError(t, err)
+		require.NotEmpty(t, matches, "expected example manifests in %s", dir)
+
+		for _, path := range matches {
+			path := path
+			t.Run(filepath.ToSlash(path[len(repoRoot)+1:]), func(t *testing.T) {
+				data, err := os.ReadFile(path)
+				require.NoError(t, err)
+				def, err := Parse(data)
+				require.NoError(t, err)
+				require.NotEmpty(t, def.Metadata.Alias)
+				require.NotEmpty(t, def.Steps)
+			})
 		}
 	}
 }

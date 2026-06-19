@@ -11,6 +11,7 @@ import 'reactflow/dist/style.css';
 import dagre from 'dagre';
 import { ShieldCheck } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { isRecord } from '@/lib/typeGuards';
 import type { JobDAGResponse, Atom, JobTask, TaskRun } from '@/lib/api';
 import { TaskNode } from './components/TaskNode';
 import { BranchNode } from './components/BranchNode';
@@ -401,8 +402,4 @@ function EmptyState({ message }: { message: string }) {
             {message}
         </div>
     );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
