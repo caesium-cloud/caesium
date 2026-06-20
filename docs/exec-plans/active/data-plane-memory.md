@@ -248,7 +248,7 @@ Replace the 64 KB error cap with content-addressed reference passing, then use i
 for a *proven* (not heuristic) skip. Touches `internal/cache/hash.go`, so it
 sequences after Stream A.
 
-- [ ] D1. Add a `##caesium::output` reference variant that offloads payloads over
+- [x] D1. Add a `##caesium::output` reference variant that offloads payloads over
       64 KB to a BYO volume/object store (reuse the volumes abstraction) and
       passes only a content-addressed reference (path + digest) between
       containers; fold the reference digest into `HashInput`. dqlite keeps
@@ -258,6 +258,22 @@ sequences after Stream A.
       volumes integration (`internal/jobdef/runtime/spec.go`, engines),
       `pkg/env/env.go`, `docs/caesium-job-llm-reference.md`.
       Depends on: A2.
+      Done (W3-γ): new `##caesium::output-ref` marker (`pkg/task/output.go`) parses a
+      `{key,path,digest,size}` reference into a canonical `OutputRef` value stored under
+      its key in the output map; the encoded value embeds the sha256 digest, so it folds
+      into the consumer's cache key through the existing `pred_output:` line in
+      `HashInput.Compute()` — byte-identical payload → identical digest → cache hit; a
+      changed payload → different digest → miss. No change to `Compute()`'s byte output, so
+      a job that never emits a reference hashes byte-identically to pre-D1. `BuildOutputEnv`
+      exposes the volume path as `CAESIUM_OUTPUT_<STEP>_<KEY>` plus a `_DIGEST` companion;
+      large payloads stay on the BYO volume, only the bounded reference enters dqlite (the
+      64 KB scalar cap never trips). Operator guard `CAESIUM_OUTPUT_REF_MAX_BYTES`
+      (`pkg/env/env.go`, default 0 = unbounded) rejects an over-cap reference on the
+      local/scheduler path. Reuses the existing volumes abstraction (no `spec.go`/engine
+      change needed; references propagate to workers via the existing predecessor-output
+      machinery). `job-schema-reference.md` unchanged (generated; the protocol is a stdout
+      convention, not a YAML field). Guard test pins that an encoded reference is not
+      promoted to a lineage dataset (C1).
 - [ ] D2. Implement the value-verified short-circuit: replay a changed step; if its
       output reference digest matches the last successful run's, stop —
       downstream stays green (proven via content equality, preserving the
