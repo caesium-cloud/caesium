@@ -98,6 +98,7 @@ This thesis was not authored top-down. It came from: (1) a structured competitiv
 
 ## Related documents
 
+- [`exec-plans/active/sovereignty-execution.md`](exec-plans/active/sovereignty-execution.md) — the execution plan operationalizing this positioning (README repositioning + Kueue delegation).
 - [`design-data-plane-memory.md`](design-data-plane-memory.md) — the second-act substrate build, in correctness-first order.
 - [`roadmap.md`](roadmap.md) — feature roadmap (to be re-ranked behind this positioning).
 - [`design-incremental-execution.md`](design-incremental-execution.md) — the shipped content-addressed cache this builds on.
