@@ -14,6 +14,11 @@ type Config struct {
 	TTL           time.Duration
 	PruneInterval time.Duration
 	MaxEntries    int
+	// PinDigests is the global default for image-digest pinning. A job or step
+	// may still override it via cache.pinDigests.
+	PinDigests bool
+	// DigestTTL bounds how long a resolved tag->digest mapping is reused.
+	DigestTTL time.Duration
 }
 
 // ConfigFromEnv reads cache configuration from environment variables.
@@ -24,6 +29,8 @@ func ConfigFromEnv() Config {
 		TTL:           e.CacheTTL,
 		PruneInterval: e.CachePruneInterval,
 		MaxEntries:    e.CacheMaxEntries,
+		PinDigests:    e.CachePinDigests,
+		DigestTTL:     e.CacheDigestTTL,
 	}
 }
 

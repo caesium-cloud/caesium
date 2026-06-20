@@ -21,8 +21,11 @@ type Entry struct {
 	BranchSelections []string
 	RunID            uuid.UUID
 	TaskRunID        uuid.UUID
-	CreatedAt        time.Time
-	ExpiresAt        *time.Time
+	// ResolvedImageDigest is the content digest folded into Hash when the
+	// originating task ran with digest pinning on. Empty when pinning was off.
+	ResolvedImageDigest string
+	CreatedAt           time.Time
+	ExpiresAt           *time.Time
 }
 
 // Store provides cache operations backed by GORM.
@@ -67,7 +70,7 @@ func (s *Store) Put(entry *Entry) error {
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "hash"}},
-		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "created_at", "expires_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "resolved_image_digest", "created_at", "expires_at"}),
 	}).Create(model).Error
 }
 
@@ -115,14 +118,15 @@ func (s *Store) Prune() (int, error) {
 
 func modelToEntry(model *models.TaskCache) (*Entry, error) {
 	entry := &Entry{
-		Hash:      model.Hash,
-		JobID:     model.JobID,
-		TaskName:  model.TaskName,
-		Result:    model.Result,
-		RunID:     model.RunID,
-		TaskRunID: model.TaskRunID,
-		CreatedAt: model.CreatedAt,
-		ExpiresAt: model.ExpiresAt,
+		Hash:                model.Hash,
+		JobID:               model.JobID,
+		TaskName:            model.TaskName,
+		Result:              model.Result,
+		RunID:               model.RunID,
+		TaskRunID:           model.TaskRunID,
+		ResolvedImageDigest: model.ResolvedImageDigest,
+		CreatedAt:           model.CreatedAt,
+		ExpiresAt:           model.ExpiresAt,
 	}
 
 	if len(model.Output) > 0 {
@@ -142,14 +146,15 @@ func modelToEntry(model *models.TaskCache) (*Entry, error) {
 
 func entryToModel(entry *Entry) (*models.TaskCache, error) {
 	model := &models.TaskCache{
-		Hash:      entry.Hash,
-		JobID:     entry.JobID,
-		TaskName:  entry.TaskName,
-		Result:    entry.Result,
-		RunID:     entry.RunID,
-		TaskRunID: entry.TaskRunID,
-		CreatedAt: entry.CreatedAt,
-		ExpiresAt: entry.ExpiresAt,
+		Hash:                entry.Hash,
+		JobID:               entry.JobID,
+		TaskName:            entry.TaskName,
+		Result:              entry.Result,
+		RunID:               entry.RunID,
+		TaskRunID:           entry.TaskRunID,
+		ResolvedImageDigest: entry.ResolvedImageDigest,
+		CreatedAt:           entry.CreatedAt,
+		ExpiresAt:           entry.ExpiresAt,
 	}
 
 	if len(entry.Output) > 0 {

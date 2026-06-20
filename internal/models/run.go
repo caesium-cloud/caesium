@@ -54,9 +54,23 @@ type TaskRun struct {
 	CacheEnabled     bool              `gorm:"not null;default:false" json:"-"`
 	CacheTTL         time.Duration     `gorm:"not null;default:0" json:"-"`
 	CacheVersion     int               `gorm:"not null;default:0" json:"-"`
-	CacheOriginRunID *uuid.UUID        `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
-	CacheCreatedAt   *time.Time        `json:"cache_created_at,omitempty"`
-	CacheExpiresAt   *time.Time        `gorm:"index" json:"cache_expires_at,omitempty"`
+	// CachePinDigests snapshots whether image-digest pinning is in effect for
+	// this task. Like CacheEnabled/CacheTTL/CacheVersion it is scheduler-set on
+	// the row so distributed workers behave identically to local execution
+	// without reloading the job definition.
+	CachePinDigests bool `gorm:"not null;default:false" json:"-"`
+	// CacheDigestTTL snapshots how long a resolved tag->digest mapping may be
+	// reused before re-resolution (0 = re-resolve every check). Scheduler-set so
+	// distributed workers apply the same freshness window as local execution.
+	CacheDigestTTL time.Duration `gorm:"not null;default:0" json:"-"`
+	// ResolvedImageDigest records the content digest (sha256:...) the image tag
+	// resolved to when pinning is on. Nullable: empty/unset when pinning is off
+	// or the digest could not be resolved (in which case the cache key falls
+	// back to the literal tag).
+	ResolvedImageDigest string     `gorm:"type:text" json:"resolved_image_digest,omitempty"`
+	CacheOriginRunID    *uuid.UUID `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt      *time.Time `json:"cache_created_at,omitempty"`
+	CacheExpiresAt      *time.Time `gorm:"index" json:"cache_expires_at,omitempty"`
 	// OutputSchema snapshots the task's declared runtime output schema onto the task run.
 	OutputSchema datatypes.JSON `gorm:"type:json" json:"-"`
 	// SchemaValidation snapshots the job's schema validation mode onto the task run.
@@ -98,6 +112,10 @@ type TaskCache struct {
 	BranchSelections datatypes.JSON `gorm:"type:json"`
 	RunID            uuid.UUID      `gorm:"type:uuid;not null"`
 	TaskRunID        uuid.UUID      `gorm:"type:uuid;not null"`
-	CreatedAt        time.Time
-	ExpiresAt        *time.Time `gorm:"index:idx_task_cache_expires"`
+	// ResolvedImageDigest records the content digest folded into Hash when the
+	// originating task ran with digest pinning on. Nullable: empty when pinning
+	// was off. Stored so a cache hit can attest which image content it covers.
+	ResolvedImageDigest string `gorm:"type:text"`
+	CreatedAt           time.Time
+	ExpiresAt           *time.Time `gorm:"index:idx_task_cache_expires"`
 }

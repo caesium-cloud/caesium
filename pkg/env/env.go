@@ -119,6 +119,16 @@ type Environment struct {
 	CacheTTL                      time.Duration `default:"24h" split_words:"true"`
 	CachePruneInterval            time.Duration `default:"1h" split_words:"true"`
 	CacheMaxEntries               int           `default:"10000" split_words:"true"`
+	// CachePinDigests is the global default for resolving image tags to content
+	// digests and folding the digest (not the mutable tag) into the cache key.
+	// Off by default so steady-state runs pay no registry round-trip; a job or
+	// step may opt in via cache.pinDigests. When on, a tag that moves to a new
+	// digest produces a cache miss instead of a stale hit.
+	CachePinDigests               bool          `envconfig:"CACHE_PIN_DIGESTS" default:"false"`
+	// CacheDigestTTL bounds how long a resolved tag->digest mapping is reused
+	// before it is re-resolved. Short by design so steady-state runs avoid the
+	// registry round-trip while a moving tag is still detected promptly.
+	CacheDigestTTL                time.Duration `envconfig:"CACHE_DIGEST_TTL" default:"5m"`
 	OpenLineageEnabled            bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
 	OpenLineageTransport          string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
 	OpenLineageURL                string        `envconfig:"OPEN_LINEAGE_URL" default:""`

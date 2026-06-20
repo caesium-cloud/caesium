@@ -54,6 +54,61 @@ func TestCompute_DifferentImage(t *testing.T) {
 	assert.NotEqual(t, a.Compute(), b.Compute())
 }
 
+// TestCompute_PinDigestsOffPreservesLegacyHash asserts that when no digest is
+// resolved (pinDigests off), the hash is byte-identical to the pre-pinning
+// behavior — i.e. an empty ResolvedImageDigest contributes nothing. This keeps
+// existing cache entries valid across the rollout.
+func TestCompute_PinDigestsOffPreservesLegacyHash(t *testing.T) {
+	withField := baseInput() // ResolvedImageDigest is "" by default
+	withField.ResolvedImageDigest = ""
+	assert.Equal(t, baseInput().Compute(), withField.Compute(),
+		"empty resolved digest must not change the hash")
+}
+
+// TestCompute_ResolvedDigestChangesHash asserts that folding a resolved digest
+// into the input changes the cache key. A pinned tag is no longer hashed by its
+// mutable name alone.
+func TestCompute_ResolvedDigestChangesHash(t *testing.T) {
+	tagOnly := baseInput()
+	pinned := baseInput()
+	pinned.ResolvedImageDigest = "sha256:aaaa"
+	assert.NotEqual(t, tagOnly.Compute(), pinned.Compute(),
+		"adding a resolved digest must change the key")
+}
+
+// TestCompute_MovingTagMisses is the core correctness invariant for digest
+// pinning: the same image tag resolving to two different content digests must
+// produce two different cache keys, so a moving :latest is a cache miss rather
+// than a stale hit.
+func TestCompute_MovingTagMisses(t *testing.T) {
+	old := baseInput()
+	old.Image = "app:latest"
+	old.ResolvedImageDigest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+
+	moved := baseInput()
+	moved.Image = "app:latest" // identical mutable tag
+	moved.ResolvedImageDigest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+
+	assert.NotEqual(t, old.Compute(), moved.Compute(),
+		"a tag that moves to a new digest must miss the cache")
+}
+
+// TestCompute_SameDigestHits asserts the steady-state path: the same tag
+// re-resolving to the same digest yields the same key (a cache hit), so a
+// stable pinned image pays no correctness penalty.
+func TestCompute_SameDigestHits(t *testing.T) {
+	first := baseInput()
+	first.Image = "app:latest"
+	first.ResolvedImageDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+	second := baseInput()
+	second.Image = "app:latest"
+	second.ResolvedImageDigest = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+
+	assert.Equal(t, first.Compute(), second.Compute(),
+		"an unchanged pinned digest must keep hitting the cache")
+}
+
 func TestCompute_DifferentCommand(t *testing.T) {
 	a := baseInput()
 	b := baseInput()

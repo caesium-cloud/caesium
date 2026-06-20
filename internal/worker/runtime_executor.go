@@ -14,6 +14,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/atom/kubernetes"
 	"github.com/caesium-cloud/caesium/internal/atom/podman"
 	"github.com/caesium-cloud/caesium/internal/cache"
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -138,10 +139,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// Cache check: attempt to satisfy the task from cache before container execution.
 	var cacheStore *cache.Store
 	var cacheHash string
+	// resolvedImageDigest is the content digest folded into cacheHash when
+	// pinning is on; empty otherwise. Reused when caching the result.
+	var resolvedImageDigest string
 	cacheCfg := jobdefschema.CacheConfig{
-		Enabled: taskRun.CacheEnabled,
-		TTL:     taskRun.CacheTTL,
-		Version: taskRun.CacheVersion,
+		Enabled:    taskRun.CacheEnabled,
+		TTL:        taskRun.CacheTTL,
+		Version:    taskRun.CacheVersion,
+		PinDigests: taskRun.CachePinDigests,
+		DigestTTL:  taskRun.CacheDigestTTL,
 	}
 	if cacheCfg.Enabled {
 		cacheStore = cache.NewStore(e.store.DB())
@@ -170,10 +176,20 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			}
 		}
 
+		// When digest pinning is on, resolve the image tag to its content
+		// digest and fold the digest into the cache key. A resolution failure
+		// falls back to the literal tag — a cache miss is always safe.
+		if cacheCfg.PinDigests {
+			if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
+				resolvedImageDigest = digest
+			}
+		}
+
 		hashInput := cache.HashInput{
 			JobAlias:             cacheJobAlias,
 			TaskName:             taskName,
 			Image:                taskRun.Image,
+			ResolvedImageDigest:  resolvedImageDigest,
 			Command:              parseTaskCommand(taskRun.Command),
 			Env:                  mergedEnv,
 			WorkDir:              atomSpec.WorkDir,
@@ -186,7 +202,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			CacheVersion:         cacheCfg.Version,
 		}
 		cacheHash = hashInput.Compute()
-		if err := e.store.SetTaskHash(taskRun.JobRunID, taskRun.TaskID, cacheHash); err != nil {
+		if err := e.store.SetTaskHashWithDigest(taskRun.JobRunID, taskRun.TaskID, cacheHash, resolvedImageDigest); err != nil {
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
 
@@ -230,7 +246,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
-				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, taskRun)
+				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, taskRun)
 			}
 			return
 		}
@@ -494,7 +510,7 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
-func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash string, taskRun *models.TaskRun) {
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, taskRun *models.TaskRun) {
 	// Read back the completed task run to get output and result.
 	var completed models.TaskRun
 	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
@@ -532,15 +548,16 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 	}
 
 	entry := &cache.Entry{
-		Hash:             hash,
-		JobID:            jobRun.JobID,
-		TaskName:         taskModel.Name,
-		Result:           completed.Result,
-		Output:           output,
-		BranchSelections: branchSelections,
-		RunID:            taskRun.JobRunID,
-		TaskRunID:        completed.ID,
-		CreatedAt:        time.Now().UTC(),
+		Hash:                hash,
+		JobID:               jobRun.JobID,
+		TaskName:            taskModel.Name,
+		Result:              completed.Result,
+		Output:              output,
+		BranchSelections:    branchSelections,
+		RunID:               taskRun.JobRunID,
+		TaskRunID:           completed.ID,
+		ResolvedImageDigest: resolvedImageDigest,
+		CreatedAt:           time.Now().UTC(),
 	}
 
 	if cacheCfg.TTL > 0 {

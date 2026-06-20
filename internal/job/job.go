@@ -23,6 +23,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/callback"
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/imagecheck"
 	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -817,12 +818,16 @@ func (j *job) Run(ctx context.Context) error {
 		// Cache check — attempt to bypass container execution.
 		var cacheCfg jobdefschema.CacheConfig
 		var inputHash string
+		// resolvedImageDigest is the content digest folded into inputHash when
+		// pinning is on; empty otherwise. Reused when the result is cached so
+		// the cache Entry records which image content the hash covers.
+		var resolvedImageDigest string
 		// Resolve cache config from step-level, job-level, then env defaults.
 		var stepCache interface{}
 		if taskModel != nil {
 			stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
 		}
-		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL)
+		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL, cacheConfig.PinDigests, cacheConfig.DigestTTL)
 
 		if cacheCfg.Enabled {
 			cacheStore := getCacheStore()
@@ -848,10 +853,25 @@ func (j *job) Run(ctx context.Context) error {
 				}
 			}
 
+			// When digest pinning is enabled, resolve the image tag to its
+			// content digest and fold the digest (not the mutable tag) into the
+			// cache key. Resolution failures fall back to the tag — a cache miss
+			// is always safe, so an unresolved digest never serves a stale hit.
+			if cacheCfg.PinDigests {
+				engineKind := models.AtomEngineDocker
+				if a := atomsByTask[taskID]; a != nil {
+					engineKind = a.Engine
+				}
+				if digest, derr := imagecheck.Default().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
+					resolvedImageDigest = digest
+				}
+			}
+
 			hashInput := cache.HashInput{
 				JobAlias:             j.alias,
 				TaskName:             taskName,
 				Image:                runner.image,
+				ResolvedImageDigest:  resolvedImageDigest,
 				Command:              runner.command,
 				Env:                  mergedEnv,
 				WorkDir:              runner.spec.WorkDir,
@@ -864,7 +884,7 @@ func (j *job) Run(ctx context.Context) error {
 				CacheVersion:         cacheCfg.Version,
 			}
 			inputHash = hashInput.Compute()
-			if err := store.SetTaskHash(runID, taskID, inputHash); err != nil {
+			if err := store.SetTaskHashWithDigest(runID, taskID, inputHash, resolvedImageDigest); err != nil {
 				log.Warn("failed to persist task hash", "task", taskName, "error", err)
 			}
 
@@ -955,16 +975,17 @@ func (j *job) Run(ctx context.Context) error {
 						expiresAt = &t
 					}
 					if putErr := cacheStore.Put(&cache.Entry{
-						Hash:             inputHash,
-						JobID:            j.id,
-						TaskName:         taskName,
-						Result:           result,
-						Output:           output,
-						BranchSelections: branchNames,
-						RunID:            runID,
-						TaskRunID:        taskID,
-						CreatedAt:        time.Now(),
-						ExpiresAt:        expiresAt,
+						Hash:                inputHash,
+						JobID:               j.id,
+						TaskName:            taskName,
+						Result:              result,
+						Output:              output,
+						BranchSelections:    branchNames,
+						RunID:               runID,
+						TaskRunID:           taskID,
+						ResolvedImageDigest: resolvedImageDigest,
+						CreatedAt:           time.Now(),
+						ExpiresAt:           expiresAt,
 					}); putErr != nil {
 						log.Warn("failed to store cache entry", "task", taskName, "error", putErr)
 					}

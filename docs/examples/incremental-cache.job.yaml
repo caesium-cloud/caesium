@@ -11,7 +11,13 @@ metadata:
     team: data-eng
     scenario: caching
   # Job-level default: all steps cache their outputs unless overridden.
-  cache: true
+  # pinDigests resolves each step's image tag to its content digest and folds
+  # the digest (not the mutable tag) into the cache key, so a re-pushed tag
+  # (e.g. a moving :latest) produces a cache miss instead of a stale hit. The
+  # resolved tag->digest mapping is cached for CAESIUM_CACHE_DIGEST_TTL, so
+  # steady-state runs pay no registry round-trip.
+  cache:
+    pinDigests: true
 trigger:
   type: cron
   configuration:
