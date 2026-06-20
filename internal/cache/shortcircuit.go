@@ -1,10 +1,5 @@
 package cache
 
-import (
-	"encoding/json"
-	"sort"
-)
-
 // PriorEntry is a candidate prior successful execution of a task, used to prove
 // a value-verified short-circuit. It carries only the two fields the proof
 // needs: the identity Hash that execution committed to, and the Output it
@@ -71,12 +66,6 @@ func EquivalentPriorHash(newHash string, newOutput map[string]string, priors []P
 		return newHash
 	}
 
-	newCanonical, ok := canonicalOutput(newOutput)
-	if !ok {
-		// The current output could not be canonicalized — treat as unprovable.
-		return newHash
-	}
-
 	var (
 		best      string
 		bestStamp int64
@@ -92,19 +81,15 @@ func EquivalentPriorHash(newHash string, newOutput map[string]string, priors []P
 		if p.Hash == newHash {
 			continue
 		}
-		priorCanonical, ok := canonicalOutput(p.Output)
-		if !ok {
-			continue
-		}
-		// The proof: byte-identical canonical output — exactly the bytes
-		// HashInput.Compute folds into a downstream cache key (its pred_output
-		// line). For a large-object reference those bytes embed the sha256
-		// content digest, so a re-emitted byte-identical payload proves content
-		// equality. This is deliberately no weaker than the cache key itself: if
-		// the encoded output differs at all (a changed digest, or a changed
-		// reference path that the key also hashes), it is not proven equal and we
-		// re-run. Conservative by construction — never a false short-circuit.
-		if priorCanonical != newCanonical {
+		// The proof: byte-identical output — exactly the bytes HashInput.Compute
+		// folds into a downstream cache key (its pred_output line). For a
+		// large-object reference those bytes embed the sha256 content digest, so a
+		// re-emitted byte-identical payload proves content equality. This is
+		// deliberately no weaker than the cache key itself: if the output differs
+		// at all (a changed digest, or a changed reference path that the key also
+		// hashes), it is not proven equal and we re-run. Conservative by
+		// construction — never a false short-circuit.
+		if !mapsEqual(newOutput, p.Output) {
 			continue
 		}
 		if !found || p.CreatedAt >= bestStamp {
@@ -120,35 +105,23 @@ func EquivalentPriorHash(newHash string, newOutput map[string]string, priors []P
 	return best
 }
 
-// canonicalOutput renders an output map to a deterministic byte string for
-// equality comparison. Keys are sorted so map iteration order never produces a
-// spurious inequality; values are compared verbatim (a reference value already
-// embeds its content digest, so verbatim equality IS content equality). It
-// returns ok=false only if the (string-keyed, string-valued) map somehow fails
-// to marshal, which the JSON encoder does not do for this type — the guard
-// exists so an unexpected failure degrades to "cannot prove equality" (re-run)
-// rather than to a panic or a false match.
-func canonicalOutput(out map[string]string) (string, bool) {
-	if len(out) == 0 {
-		// An empty/nil map canonicalizes to a stable empty marker. Callers only
-		// reach here for prior candidates; the current output is already screened
-		// for emptiness before any comparison, so an empty prior never matches a
-		// non-empty current.
-		return "{}", true
+// mapsEqual reports whether two string→string output maps are equal,
+// independent of map iteration order. Value equality IS content equality here:
+// a large-object reference value embeds its sha256 content digest, so two maps
+// are equal exactly when every key carries byte-identical bytes — the same
+// bytes HashInput.Compute folds into a downstream cache key. It is O(N) and
+// zero-alloc (no serialization), and a length mismatch or any missing/unequal
+// key short-circuits to false, so a changed/added/removed output never proves
+// equal.
+func mapsEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
 	}
-	keys := make([]string, 0, len(out))
-	for k := range out {
-		keys = append(keys, k)
+	for k, av := range a {
+		bv, ok := b[k]
+		if !ok || av != bv {
+			return false
+		}
 	}
-	sort.Strings(keys)
-
-	ordered := make([][2]string, 0, len(out))
-	for _, k := range keys {
-		ordered = append(ordered, [2]string{k, out[k]})
-	}
-	data, err := json.Marshal(ordered)
-	if err != nil {
-		return "", false
-	}
-	return string(data), true
+	return true
 }

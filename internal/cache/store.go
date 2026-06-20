@@ -79,14 +79,26 @@ func (s *Store) Put(entry *Entry) error {
 	}).Create(model).Error
 }
 
-// PriorEntriesByTask returns the non-expired cache entries for a (job, task)
-// as PriorEntry candidates for the value-verified short-circuit
-// (EquivalentPriorHash). It deliberately excludes the entry whose Hash equals
-// excludeHash — that is the current re-execution's own (new) identity, which is
-// never its own prior. Only Hash + Output + CreatedAt are needed by the proof,
-// so this is a narrow projection that stays cheap even with many historical
-// entries. A query failure returns the error; the caller treats any failure as
-// "no provable prior" and re-runs (a miss is always safe).
+// maxPriorEntriesForShortCircuit bounds how many historical cache entries
+// PriorEntriesByTask loads as short-circuit candidates. The proof
+// (EquivalentPriorHash) substitutes the MOST-RECENT proven-equal prior, so
+// ordering by created_at DESC and capping the scan loses nothing: an entry
+// older than the N most recent could only win if every newer one differed, and
+// a value reverting to a form last produced beyond the N-most-recent runs is a
+// vanishingly rare case where conservatively re-running (a miss is always safe)
+// is acceptable. The bound keeps the per-task scan O(1) instead of growing with
+// run history.
+const maxPriorEntriesForShortCircuit = 64
+
+// PriorEntriesByTask returns up to maxPriorEntriesForShortCircuit of the
+// most-recent non-expired cache entries for a (job, task) as PriorEntry
+// candidates for the value-verified short-circuit (EquivalentPriorHash). It
+// deliberately excludes the entry whose Hash equals excludeHash — that is the
+// current re-execution's own (new) identity, which is never its own prior. Only
+// Hash + Output + CreatedAt are needed by the proof, so this is a narrow
+// projection; ordering by created_at DESC with a LIMIT keeps it cheap even for
+// a task with a long run history. A query failure returns the error; the caller
+// treats any failure as "no provable prior" and re-runs (a miss is always safe).
 func (s *Store) PriorEntriesByTask(jobID uuid.UUID, taskName, excludeHash string) ([]PriorEntry, error) {
 	if taskName == "" {
 		return nil, nil
@@ -97,6 +109,8 @@ func (s *Store) PriorEntriesByTask(jobID uuid.UUID, taskName, excludeHash string
 		Select("hash", "output", "created_at").
 		Where("job_id = ? AND task_name = ? AND hash <> ? AND (expires_at IS NULL OR expires_at > ?)",
 			jobID, taskName, excludeHash, now).
+		Order("created_at DESC").
+		Limit(maxPriorEntriesForShortCircuit).
 		Find(&rows).Error; err != nil {
 		return nil, err
 	}
