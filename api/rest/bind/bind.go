@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
+	"github.com/caesium-cloud/caesium/api/rest/controller/topology"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
@@ -77,6 +78,10 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.PUT("/jobs/:id/pause", job.Pause)
 		g.PUT("/jobs/:id/unpause", job.Unpause)
 		g.DELETE("/jobs/:id", job.Delete)
+
+		// historical DAG topology (data-plane-memory B2)
+		g.GET("/jobs/:id/topology", topology.Get)
+		g.GET("/jobs/:id/topology/history", topology.History)
 
 		// job cache management
 		g.GET("/jobs/:id/cache", jobcache.List)
