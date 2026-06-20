@@ -1,6 +1,6 @@
 # Design: Data-Plane Memory (the second-act substrate)
 
-> Status: Proposed (2026-06-19). This is the **retention / differentiation layer**, not the lead positioning — see [`differentiation-strategy.md`](differentiation-strategy.md). It turns Caesium's already-shipped content-addressed cache, event store, and OpenLineage pipeline into a *queryable memory of what data flowed and why each task ran*. It is sequenced **after** sovereignty positioning and built in a **correctness-first order**. Do not market the features here until the components they depend on have shipped — a reproducibility claim on an unpinned image tag is worse than no claim.
+> Status: Active (2026-06-19) — execution tracked by [`exec-plans/active/data-plane-memory.md`](exec-plans/active/data-plane-memory.md) (5 components → streams A–D). This is the **retention / differentiation layer**, not the lead positioning — see [`differentiation-strategy.md`](differentiation-strategy.md). It turns Caesium's already-shipped content-addressed cache, event store, and OpenLineage pipeline into a *queryable memory of what data flowed and why each task ran*. It is sequenced **after** sovereignty positioning and built in a **correctness-first order**. Do not market the features here until the components they depend on have shipped — a reproducibility claim on an unpinned image tag is worse than no claim.
 
 ## Thesis (scoped)
 
