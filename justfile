@@ -226,6 +226,8 @@ integration-up: build-test
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         {{ local_image_ref }}:{{ tag }}-test start
 
 lint: builder-full

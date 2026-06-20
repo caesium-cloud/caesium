@@ -51,6 +51,28 @@ caesium job apply --path jobs/          # Deploy to server
 - Aim for meaningful coverage on core packages; keep tests deterministic and hermetic.
 - Generate coverage locally with `just unit-test` (writes `coverage.txt`).
 
+### End-to-end coverage is the gate (drive the real surface)
+"Green CI" must mean the feature works, not that internal functions pass on
+synthetic inputs. A unit test that hand-seeds DB rows, mocks a clock, or
+import-and-calls an internal function proves the function — never the wiring.
+Several data-plane features shipped green-but-hollow this way (the lineage
+impact query never persisted rows; `caesium why --json` / `caesium receipt get`
+wrote machine output to stderr). So:
+
+- **Every new CLI command and REST query ships with an integration test in
+  `test/` that drives it through its real surface** — invoke the CLI binary
+  (`s.runCLI*`) or hit the HTTP endpoint against the live server, and assert on
+  observed output. Not a unit test on the internal handler.
+- **For machine-readable CLI output (`--json`, receipts), assert stdout is
+  clean and parseable, capturing stdout SEPARATELY from stderr** (`runCLIStdout`,
+  not the stream-merging `runCLIRaw`). Log lines and cobra `cmd.Print*` both
+  leak to the wrong stream; a merged capture hides it.
+- **If a feature is config-gated** (e.g. lineage needs
+  `CAESIUM_OPEN_LINEAGE_ENABLED=true`), enable it on the integration server in
+  `just integration-up` so the path actually executes in CI.
+- A new `cmd/` subcommand or `api/rest/controller` endpoint with no
+  corresponding `test/` integration scenario should block review.
+
 ## Commit & Pull Request Guidelines
 - Commits: concise, imperative subject (50–72 chars). Example: `Add HTTP triggers for jobs (#51)`.
 - PRs: include a clear summary, linked issues, test evidence (logs or output), and docs updates when behavior/UI/CLI changes.
