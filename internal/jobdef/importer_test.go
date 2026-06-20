@@ -439,3 +439,191 @@ steps:
 		"disk": "ssd",
 	}, tasks[0].NodeSelector)
 }
+
+// TestDagSnapshotWrittenOnApply verifies that a DagSnapshot row is written when
+// a job is first applied.
+func (s *ImporterTestSuite) TestDagSnapshotWrittenOnApply() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&snaps).Error)
+	s.Len(snaps, 1)
+	s.NotEmpty(snaps[0].ContentHash)
+	s.NotEmpty(snaps[0].Tasks)
+	s.NotEmpty(snaps[0].Edges)
+	s.False(snaps[0].CreatedAt.IsZero())
+}
+
+// TestDagSnapshotDeduplicatedOnUnchangedTopology verifies that applying the
+// same topology twice writes only one snapshot (dedup by content hash).
+func (s *ImporterTestSuite) TestDagSnapshotDeduplicatedOnUnchangedTopology() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	// Apply again with the same manifest — only an annotation changes, not the
+	// DAG topology (tasks + edges stay identical).
+	updated := strings.Replace(testutil.SampleJob, "owner: etl", "owner: analytics", 1)
+	def2, err := schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def2)
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Find(&snaps).Error)
+	s.Len(snaps, 1, "unchanged topology must not produce a second snapshot")
+}
+
+// TestDagSnapshotNewRowOnTopologyChange verifies that a topology change (adding
+// or removing a step) produces a second snapshot, while the first snapshot is
+// still queryable.
+func (s *ImporterTestSuite) TestDagSnapshotNewRowOnTopologyChange() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	// Remove the publish step — changes the DAG.
+	updated := strings.Replace(
+		testutil.SampleJob,
+		"  - name: publish\n    image: busybox:1.36.1\n    command: [\"sh\", \"-c\", \"echo publish\"]\n",
+		"",
+		1,
+	)
+	def2, err := schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def2)
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("created_at asc").Find(&snaps).Error)
+	s.Len(snaps, 2, "changed topology must produce a new snapshot")
+
+	// Content hashes must differ.
+	s.NotEqual(snaps[0].ContentHash, snaps[1].ContentHash)
+
+	// The original snapshot (3 tasks, 2 edges) must still be queryable.
+	var firstTasks []models.DagSnapshotTask
+	s.Require().NoError(json.Unmarshal(snaps[0].Tasks, &firstTasks))
+	s.Len(firstTasks, 3, "prior snapshot must retain original task count")
+
+	// The new snapshot reflects the reduced graph.
+	var secondTasks []models.DagSnapshotTask
+	s.Require().NoError(json.Unmarshal(snaps[1].Tasks, &secondTasks))
+	s.Len(secondTasks, 2, "new snapshot must reflect updated task count")
+}
+
+// TestDagSnapshotCapturesProvenanceCommit verifies that the git commit from
+// Provenance is stored on the snapshot when present.
+func (s *ImporterTestSuite) TestDagSnapshotCapturesProvenanceCommit() {
+	def, err := schema.Parse([]byte(testutil.SampleJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.ApplyWithOptions(ctx, def, &ApplyOptions{
+		Provenance: &Provenance{
+			SourceID: "git-sync",
+			Repo:     "https://example.com/repo.git",
+			Ref:      "refs/heads/main",
+			Commit:   "deadbeef42",
+			Path:     "jobs/sample.job.yaml",
+		},
+	})
+	s.Require().NoError(err)
+
+	var snap models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).First(&snap).Error)
+	s.Equal("deadbeef42", snap.GitCommit)
+}
+
+// TestDagSnapshotNewRowOnImageChange verifies that changing a step's image
+// (without altering the graph structure) produces a new snapshot, because image
+// is folded into the content hash.
+func (s *ImporterTestSuite) TestDagSnapshotNewRowOnImageChange() {
+	const imgChangeJob = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: img-change-job
+trigger:
+  type: cron
+  configuration:
+    cron: "* * * * *"
+steps:
+  - name: extract
+    image: repo/extract:v1
+  - name: load
+    image: repo/load:v1
+    dependsOn: extract
+`
+	def, err := schema.Parse([]byte(imgChangeJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	// Change the image on one step — graph structure (task names + edges) unchanged.
+	updated := strings.Replace(imgChangeJob, "repo/extract:v1", "repo/extract:v2", 1)
+	def2, err := schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def2)
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("created_at asc").Find(&snaps).Error)
+	s.Len(snaps, 2, "image change must produce a new snapshot")
+	s.NotEqual(snaps[0].ContentHash, snaps[1].ContentHash)
+}
+
+// TestDagTopologyHash verifies that the content hash is stable for the same
+// topology and differs when the topology changes — including image/command changes
+// that do not alter graph structure.
+func TestDagTopologyHash(t *testing.T) {
+	steps := []schema.Step{
+		{Name: "a", Image: "img-a", Engine: schema.EngineDocker, Type: schema.StepTypeTask},
+		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
+	}
+	successors, err := schema.DeriveStepSuccessors(steps)
+	require.NoError(t, err)
+
+	h1 := dagTopologyHash(steps, successors)
+	require.NotEmpty(t, h1)
+
+	// Same topology → same hash.
+	h2 := dagTopologyHash(steps, successors)
+	require.Equal(t, h1, h2)
+
+	// Add a step → different hash.
+	stepsPlus := append(steps, schema.Step{Name: "c", Image: "img-c", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"b"}})
+	successorsPlus, err := schema.DeriveStepSuccessors(stepsPlus)
+	require.NoError(t, err)
+	h3 := dagTopologyHash(stepsPlus, successorsPlus)
+	require.NotEqual(t, h1, h3)
+
+	// Image change on same graph structure → different hash.
+	stepsNewImage := []schema.Step{
+		{Name: "a", Image: "img-a-v2", Engine: schema.EngineDocker, Type: schema.StepTypeTask},
+		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
+	}
+	h4 := dagTopologyHash(stepsNewImage, successors)
+	require.NotEqual(t, h1, h4, "image change must produce a different hash")
+
+	// Command change on same graph structure → different hash.
+	stepsNewCmd := []schema.Step{
+		{Name: "a", Image: "img-a", Command: []string{"sh", "-c", "echo changed"}, Engine: schema.EngineDocker, Type: schema.StepTypeTask},
+		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
+	}
+	h5 := dagTopologyHash(stepsNewCmd, successors)
+	require.NotEqual(t, h1, h5, "command change must produce a different hash")
+}

@@ -32,4 +32,7 @@ var All = []interface{}{
 	// unsharded, hot shard when sharded — see hotPathModels), so it is listed
 	// here for the unsharded case and in hotPathModels for the sharded case.
 	&RunCheckpoint{},
+	// dag_snapshots is append-only topology history (data-plane-memory B1).
+	// Must follow Job (FK parent) so AutoMigrate creates the parent table first.
+	&DagSnapshot{},
 }
