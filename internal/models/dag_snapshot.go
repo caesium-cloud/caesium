@@ -20,13 +20,15 @@ type DagSnapshot struct {
 
 	// JobID links this snapshot to its job. Rows are cascade-deleted when the
 	// job is hard-deleted; soft-deleted jobs retain their snapshots.
-	JobID uuid.UUID `gorm:"type:uuid;index;not null" json:"job_id"`
+	// Part of the composite dedup index (job_id, content_hash) and the
+	// query-by-recency index (job_id, created_at).
+	JobID uuid.UUID `gorm:"type:uuid;not null;index:idx_dag_snapshot_job_hash;index:idx_dag_snapshot_job_created" json:"job_id"`
 	Job   Job       `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 
 	// ContentHash is a SHA-256 hex digest of the canonical topology (sorted
-	// task names + sorted from→to edge pairs). It is the dedup key: if the
-	// most-recent snapshot for this job already carries this hash, no new row
-	// is written.
+	// task names each with image+command, plus sorted from→to edge pairs).
+	// It is the dedup key: if the most-recent snapshot for this job already
+	// carries this hash, no new row is written.
 	ContentHash string `gorm:"type:text;not null;index:idx_dag_snapshot_job_hash" json:"content_hash"`
 
 	// GitCommit is the provenance commit SHA at apply time (empty when the
@@ -44,15 +46,17 @@ type DagSnapshot struct {
 	Edges datatypes.JSON `gorm:"type:json;not null" json:"edges"`
 
 	// CreatedAt is the wall-clock time the snapshot was written (append-only;
-	// rows are never updated).
-	CreatedAt time.Time `gorm:"not null" json:"created_at"`
+	// rows are never updated). Part of the idx_dag_snapshot_job_created index
+	// so the dedup query (ORDER BY created_at DESC LIMIT 1) uses the index.
+	CreatedAt time.Time `gorm:"not null;index:idx_dag_snapshot_job_created" json:"created_at"`
 }
 
 // DagSnapshotTask is the per-task descriptor stored inside DagSnapshot.Tasks.
+// Command is stored as a slice (not space-joined) to preserve argument boundaries.
 type DagSnapshotTask struct {
-	Name    string `json:"name"`
-	Image   string `json:"image"`
-	Command string `json:"command,omitempty"`
+	Name    string   `json:"name"`
+	Image   string   `json:"image"`
+	Command []string `json:"command,omitempty"`
 }
 
 // DagSnapshotEdge is the per-edge descriptor stored inside DagSnapshot.Edges.

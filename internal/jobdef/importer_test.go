@@ -546,31 +546,84 @@ func (s *ImporterTestSuite) TestDagSnapshotCapturesProvenanceCommit() {
 	s.Equal("deadbeef42", snap.GitCommit)
 }
 
+// TestDagSnapshotNewRowOnImageChange verifies that changing a step's image
+// (without altering the graph structure) produces a new snapshot, because image
+// is folded into the content hash.
+func (s *ImporterTestSuite) TestDagSnapshotNewRowOnImageChange() {
+	const imgChangeJob = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: img-change-job
+trigger:
+  type: cron
+  configuration:
+    cron: "* * * * *"
+steps:
+  - name: extract
+    image: repo/extract:v1
+  - name: load
+    image: repo/load:v1
+    dependsOn: extract
+`
+	def, err := schema.Parse([]byte(imgChangeJob))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	// Change the image on one step — graph structure (task names + edges) unchanged.
+	updated := strings.Replace(imgChangeJob, "repo/extract:v1", "repo/extract:v2", 1)
+	def2, err := schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def2)
+	s.Require().NoError(err)
+
+	var snaps []models.DagSnapshot
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("created_at asc").Find(&snaps).Error)
+	s.Len(snaps, 2, "image change must produce a new snapshot")
+	s.NotEqual(snaps[0].ContentHash, snaps[1].ContentHash)
+}
+
 // TestDagTopologyHash verifies that the content hash is stable for the same
-// topology and differs when the topology changes.
+// topology and differs when the topology changes — including image/command changes
+// that do not alter graph structure.
 func TestDagTopologyHash(t *testing.T) {
-	// schema.Step requires Engine and Type to be set (DeriveStepSuccessors validates).
 	steps := []schema.Step{
 		{Name: "a", Image: "img-a", Engine: schema.EngineDocker, Type: schema.StepTypeTask},
 		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
 	}
-	taskByName := map[string]*models.Task{
-		"a": {Name: "a"},
-		"b": {Name: "b"},
-	}
-
-	h1, err := dagTopologyHash(steps, taskByName)
+	successors, err := schema.DeriveStepSuccessors(steps)
 	require.NoError(t, err)
+
+	h1 := dagTopologyHash(steps, successors)
 	require.NotEmpty(t, h1)
 
 	// Same topology → same hash.
-	h2, err := dagTopologyHash(steps, taskByName)
-	require.NoError(t, err)
+	h2 := dagTopologyHash(steps, successors)
 	require.Equal(t, h1, h2)
 
 	// Add a step → different hash.
 	stepsPlus := append(steps, schema.Step{Name: "c", Image: "img-c", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"b"}})
-	h3, err := dagTopologyHash(stepsPlus, taskByName)
+	successorsPlus, err := schema.DeriveStepSuccessors(stepsPlus)
 	require.NoError(t, err)
+	h3 := dagTopologyHash(stepsPlus, successorsPlus)
 	require.NotEqual(t, h1, h3)
+
+	// Image change on same graph structure → different hash.
+	stepsNewImage := []schema.Step{
+		{Name: "a", Image: "img-a-v2", Engine: schema.EngineDocker, Type: schema.StepTypeTask},
+		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
+	}
+	h4 := dagTopologyHash(stepsNewImage, successors)
+	require.NotEqual(t, h1, h4, "image change must produce a different hash")
+
+	// Command change on same graph structure → different hash.
+	stepsNewCmd := []schema.Step{
+		{Name: "a", Image: "img-a", Command: []string{"sh", "-c", "echo changed"}, Engine: schema.EngineDocker, Type: schema.StepTypeTask},
+		{Name: "b", Image: "img-b", Engine: schema.EngineDocker, Type: schema.StepTypeTask, DependsOn: []string{"a"}},
+	}
+	h5 := dagTopologyHash(stepsNewCmd, successors)
+	require.NotEqual(t, h1, h5, "command change must produce a different hash")
 }
