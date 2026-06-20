@@ -734,6 +734,12 @@ func TestLooksLikeDatasetRef(t *testing.T) {
 		{"", false, "empty string"},
 		{"nodot", false, "no dot, no scheme, no leading slash"},
 		{"v1.2.3", false, "version with v prefix — all segs are digit-only or 'v'+digits"},
+		// A large-object reference (pkg/task.OutputRef) is carried as a compact
+		// JSON value. It embeds paths but must NOT be promoted to a dataset by
+		// this heuristic — the leading '{' segment fails the all-letter-start
+		// rule — so a reference output never pollutes the lineage graph with a
+		// JSON-blob dataset name. Pinned as a literal to catch an Encode() change.
+		{`{"caesiumOutputRef":1,"path":"/data/out.parquet","digest":"sha256:abc","size":100}`, false, "encoded output reference"},
 	}
 	for _, tc := range cases {
 		got := looksLikeDatasetRef(tc.value)

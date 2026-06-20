@@ -124,22 +124,30 @@ type Environment struct {
 	// Off by default so steady-state runs pay no registry round-trip; a job or
 	// step may opt in via cache.pinDigests. When on, a tag that moves to a new
 	// digest produces a cache miss instead of a stale hit.
-	CachePinDigests               bool          `envconfig:"CACHE_PIN_DIGESTS" default:"false"`
+	CachePinDigests bool `envconfig:"CACHE_PIN_DIGESTS" default:"false"`
 	// CacheDigestTTL bounds how long a resolved tag->digest mapping is reused
 	// before it is re-resolved. Short by design so steady-state runs avoid the
 	// registry round-trip while a moving tag is still detected promptly.
-	CacheDigestTTL                time.Duration `envconfig:"CACHE_DIGEST_TTL" default:"5m"`
-	OpenLineageEnabled            bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
-	OpenLineageTransport          string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
-	OpenLineageURL                string        `envconfig:"OPEN_LINEAGE_URL" default:""`
-	OpenLineageNamespace          string        `envconfig:"OPEN_LINEAGE_NAMESPACE" default:"caesium"`
-	OpenLineageHeaders            string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
-	OpenLineageFilePath           string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
-	OpenLineageTimeout            time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
-	OpenLineageRetryAttempts      uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
-	WebhookMaxBodySize            ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
-	WebhookRateLimitPerMinute     int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
-	WebhookRateLimitBurst         int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
+	CacheDigestTTL time.Duration `envconfig:"CACHE_DIGEST_TTL" default:"5m"`
+	// OutputRefMaxBytes bounds the payload size a step may reference via the
+	// ##caesium::output-ref large-object protocol, checked against the size the
+	// producer reports in the reference marker. 0 (the default) means unbounded —
+	// the reference itself is tiny (path + digest) and never enters dqlite, so
+	// this is an operator guard against a runaway producer pinning arbitrarily
+	// large BYO storage, not a correctness control. A reference whose reported
+	// size exceeds this is rejected and the step's other outputs still apply.
+	OutputRefMaxBytes         ByteSize      `envconfig:"OUTPUT_REF_MAX_BYTES" default:"0"`
+	OpenLineageEnabled        bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
+	OpenLineageTransport      string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
+	OpenLineageURL            string        `envconfig:"OPEN_LINEAGE_URL" default:""`
+	OpenLineageNamespace      string        `envconfig:"OPEN_LINEAGE_NAMESPACE" default:"caesium"`
+	OpenLineageHeaders        string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
+	OpenLineageFilePath       string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
+	OpenLineageTimeout        time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
+	OpenLineageRetryAttempts  uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
+	WebhookMaxBodySize        ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
+	WebhookRateLimitPerMinute int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
+	WebhookRateLimitBurst     int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
 
 	// Notification Watcher
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`

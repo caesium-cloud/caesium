@@ -181,7 +181,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `internal/run/` (read-side diff), harness assertion support.
       Depends on: A2.
       Done (W3-α): `GET /v1/jobs/:id/runs/:run_id/why?task=<name-or-id>` + `caesium why <run-id> --task <t> --job-id <id> [--json]`. `internal/run/whydiff.go` decodes two canonical `HashInput` blobs (A2) and emits a sorted, field-by-field `BlobDiff` — scalars (image/digest/command/workdir/cacheVersion), per-key env (literal values stay redacted to their `sha256:` digest, `secret://` refs shown verbatim), per-step predecessor outputs (the headline data-contract diff, shown verbatim), run params, predecessor-hash set, and structural mounts/volumes/k8s (canonical-JSON equality). `internal/run/why.go` classifies the verdict (CACHE_HIT/MISS/DISABLED), picks the baseline (cache-origin task-run/entry for a hit; most-recent earlier run of the same task for a miss), joins the `run_started` `ExecutionEvent` for trigger/param causation, and renders a one-line summary. Degrades gracefully on missing/oversized/version-mismatched blobs. Unit tests cover the diff + verdict/summary logic.
-- [ ] A4. Add the reproducibility receipt + `caesium verify`: a content-addressed,
+- [x] A4. Add the reproducibility receipt + `caesium verify`: a content-addressed,
       git-committable Merkle receipt = hash(sorted per-task identity hashes +
       resolved image digests + manifest content hash + git commit); `verify`
       re-derives and flags drift ("tag mutated: digest mismatch"). Does **not**
@@ -191,6 +191,21 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `api/rest/controller/receipt/` + service + `api/rest/bind/bind.go`,
       `docs/design-data-plane-memory.md` (mark REPRODUCE shipped).
       Depends on: A1 + A2.
+      Done (W3-β): `internal/receipt` builds a finalized `Receipt` (sorted per-task
+      identity hashes + resolved image digests + manifest content hash from the
+      matching `dag_snapshot` + git provenance), Merkle-aggregated into a single
+      `ReceiptDigest`. `Verify` re-derives from persisted `models.TaskRun` state and
+      reports typed drift (`image_digest_mismatch`, `identity_hash_mismatch`,
+      `manifest_changed`, `git_commit_changed`, task added/missing). **Correctness
+      rule enforced:** a task with an empty `ResolvedImageDigest` (pinning off or
+      Podman/k8s tag fallback) or no identity hash is marked `degraded` with an
+      honest reason, the whole receipt is `degraded`, and a degraded run *never*
+      reports a clean `Match` even when the tag-only digest is byte-equal — a mutable
+      tag is never silently attested. CLI: `caesium receipt get` (emit, with a
+      degraded warning) + `caesium verify <receipt>` (drift report, non-zero exit on
+      drift/unverifiable). REST: `GET /jobs/:id/runs/:run_id/receipt` +
+      `POST /jobs/:id/runs/:run_id/receipt/verify`. No new table — re-derives from
+      existing persisted state.
 
 #### Deferred to a follow-on feature plan
 
@@ -249,7 +264,7 @@ Replace the 64 KB error cap with content-addressed reference passing, then use i
 for a *proven* (not heuristic) skip. Touches `internal/cache/hash.go`, so it
 sequences after Stream A.
 
-- [ ] D1. Add a `##caesium::output` reference variant that offloads payloads over
+- [x] D1. Add a `##caesium::output` reference variant that offloads payloads over
       64 KB to a BYO volume/object store (reuse the volumes abstraction) and
       passes only a content-addressed reference (path + digest) between
       containers; fold the reference digest into `HashInput`. dqlite keeps
@@ -259,6 +274,22 @@ sequences after Stream A.
       volumes integration (`internal/jobdef/runtime/spec.go`, engines),
       `pkg/env/env.go`, `docs/caesium-job-llm-reference.md`.
       Depends on: A2.
+      Done (W3-γ): new `##caesium::output-ref` marker (`pkg/task/output.go`) parses a
+      `{key,path,digest,size}` reference into a canonical `OutputRef` value stored under
+      its key in the output map; the encoded value embeds the sha256 digest, so it folds
+      into the consumer's cache key through the existing `pred_output:` line in
+      `HashInput.Compute()` — byte-identical payload → identical digest → cache hit; a
+      changed payload → different digest → miss. No change to `Compute()`'s byte output, so
+      a job that never emits a reference hashes byte-identically to pre-D1. `BuildOutputEnv`
+      exposes the volume path as `CAESIUM_OUTPUT_<STEP>_<KEY>` plus a `_DIGEST` companion;
+      large payloads stay on the BYO volume, only the bounded reference enters dqlite (the
+      64 KB scalar cap never trips). Operator guard `CAESIUM_OUTPUT_REF_MAX_BYTES`
+      (`pkg/env/env.go`, default 0 = unbounded) rejects an over-cap reference on the
+      local/scheduler path. Reuses the existing volumes abstraction (no `spec.go`/engine
+      change needed; references propagate to workers via the existing predecessor-output
+      machinery). `job-schema-reference.md` unchanged (generated; the protocol is a stdout
+      convention, not a YAML field). Guard test pins that an encoded reference is not
+      promoted to a lineage dataset (C1).
 - [ ] D2. Implement the value-verified short-circuit: replay a changed step; if its
       output reference digest matches the last successful run's, stop —
       downstream stays green (proven via content equality, preserving the

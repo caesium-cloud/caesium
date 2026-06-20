@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -212,6 +213,80 @@ func TestCompute_DifferentPredecessorOutputs(t *testing.T) {
 	b := baseInput()
 	b.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "different"}}
 	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+// --- Large-object reference digest folds into the hash (design Component 5/D1) ---
+//
+// A reference output is carried in PredecessorOutputs as a pkg/task.OutputRef
+// encoded value, whose content digest is part of the encoding. These tests pin
+// the invariant that makes value-verified skip sound: the digest, and only the
+// digest's content, decides cache equality.
+
+// refValue builds the encoded reference value exactly as the producer-side
+// parser stores it, so the hash sees the same bytes production would.
+func refValue(t *testing.T, path, digest string) string {
+	t.Helper()
+	return pkgtask.OutputRef{Ref: 1, Path: path, Digest: digest, Size: 1 << 20}.Encode()
+}
+
+// TestCompute_ReferenceDigestChangesHash: a changed payload digest in a
+// predecessor reference output must change the consuming task's hash (a miss),
+// so a changed large object never serves a stale downstream result.
+func TestCompute_ReferenceDigestChangesHash(t *testing.T) {
+	digestA := "sha256:" + strings.Repeat("a", 64)
+	digestB := "sha256:" + strings.Repeat("b", 64)
+
+	a := baseInput()
+	a.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": refValue(t, "/data/out.bin", digestA)}}
+	b := baseInput()
+	b.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": refValue(t, "/data/out.bin", digestB)}}
+
+	assert.NotEqual(t, a.Compute(), b.Compute(), "different reference digest must change the hash")
+}
+
+// TestCompute_ByteIdenticalReferenceSameHash: a byte-identical payload (same
+// digest) yields an identical hash even if the path differs — equality tracks
+// content, not location. This is the substrate for the value-verified skip.
+func TestCompute_ByteIdenticalReferenceSameHash(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("c", 64)
+
+	a := baseInput()
+	a.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": refValue(t, "/data/run-1/out.bin", digest)}}
+	b := baseInput()
+	b.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": refValue(t, "/data/run-1/out.bin", digest)}}
+
+	assert.Equal(t, a.Compute(), b.Compute(), "identical reference must produce identical hash")
+}
+
+// TestCompute_ReferenceVsScalarDiffers: a reference output and a scalar output
+// under the same key are not interchangeable — the encoded reference is a
+// distinct value, so the hash distinguishes them.
+func TestCompute_ReferenceVsScalarDiffers(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("d", 64)
+
+	ref := baseInput()
+	ref.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": refValue(t, "/data/out.bin", digest)}}
+	scalar := baseInput()
+	scalar.PredecessorOutputs = map[string]map[string]string{"extract": {"frame": "small-value"}}
+
+	assert.NotEqual(t, ref.Compute(), scalar.Compute())
+}
+
+// TestCompute_NoReferenceHashUnchanged: the reference machinery is inert on the
+// default (scalar-only) path. The scalar-only hash is deterministic, and adding
+// a reference output is what — and the only thing that — perturbs it, so a job
+// that never emits a reference hashes exactly as it did pre-D1.
+func TestCompute_NoReferenceHashUnchanged(t *testing.T) {
+	got := baseInput().Compute()
+	assert.Equal(t, baseInput().Compute(), got, "scalar-only hash must be deterministic")
+
+	withRef := baseInput()
+	digest := "sha256:" + strings.Repeat("e", 64)
+	withRef.PredecessorOutputs = map[string]map[string]string{
+		"step1":   {"key": "val"}, // identical to baseInput's scalar output
+		"extract": {"frame": refValue(t, "/data/out.bin", digest)},
+	}
+	assert.NotEqual(t, got, withRef.Compute(), "adding a reference output must change the hash")
 }
 
 // --- CanonicalJSON (persisted decomposed HashInput blob) ---
