@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
@@ -315,6 +316,91 @@ func (s *ImpactSuite) createJobAndRunWithRepo(alias, commit, repo string) (*mode
 	s.Require().NoError(s.db.Create(taskRun).Error)
 
 	return job, taskRun
+}
+
+// createTaskWithRun seeds a named task (with optional declared schemas) plus its
+// succeeded task run under the given job, and returns the task run.
+func (s *ImpactSuite) createTaskWithRun(jobID, jobRunID uuid.UUID, name string, inputSchema, outputSchema []byte) *models.TaskRun {
+	atomID := uuid.New()
+	s.Require().NoError(s.db.Create(&models.Atom{
+		ID: atomID, Engine: models.AtomEngineDocker, Image: "alpine:3.23",
+	}).Error)
+	task := &models.Task{
+		ID:           uuid.New(),
+		JobID:        jobID,
+		AtomID:       atomID,
+		Name:         name,
+		InputSchema:  datatypes.JSON(inputSchema),
+		OutputSchema: datatypes.JSON(outputSchema),
+	}
+	s.Require().NoError(s.db.Create(task).Error)
+	tr := &models.TaskRun{
+		ID: uuid.New(), JobRunID: jobRunID, TaskID: task.ID, AtomID: atomID,
+		Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: "[]",
+		Status: "succeeded", Attempt: 1,
+	}
+	s.Require().NoError(s.db.Create(tr).Error)
+	return tr
+}
+
+// TestMapperPersistsAndLinksImpact is the end-to-end regression for the
+// data-plane-memory lineage impact feature: it drives the REAL mapper path
+// (which resolves step names + schemas from the task record and persists the
+// dataset graph) rather than inserting synthetic lineage_datasets rows, then
+// asserts QueryImpact links a producer's output to its downstream consumer.
+// Before the fix, the mapper never persisted any datasets, so this query was
+// permanently empty even though the unit tests over hand-seeded rows passed.
+func (s *ImpactSuite) TestMapperPersistsAndLinksImpact() {
+	const ns = "caesium"
+	job, _ := s.createJobAndRun("impact-e2e", "deadbeef")
+	// Reuse the run created above (it already has one task run for impact-e2e-task).
+	var jobRun models.JobRun
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).First(&jobRun).Error)
+
+	outSchema := []byte(`{"type":"object","properties":{"rows":{"type":"string"}}}`)
+	inSchema := []byte(`{"extract":{"properties":{"rows":{"type":"string"}}}}`)
+
+	extractRun := s.createTaskWithRun(job.ID, jobRun.ID, "extract", nil, outSchema)
+	transformRun := s.createTaskWithRun(job.ID, jobRun.ID, "transform", inSchema, outSchema)
+
+	m := newMapper(ns, s.db)
+
+	// Drive a COMPLETE event for each task through the real mapper. The payload
+	// deliberately omits TaskName/schemas — enrichTaskPayload must recover them
+	// from the seeded task records.
+	for _, tr := range []*models.TaskRun{extractRun, transformRun} {
+		payload := taskRunPayload{
+			ID: tr.ID, JobRunID: jobRun.ID, TaskID: tr.TaskID,
+			Engine: "docker", Image: "alpine:3.23", Status: "succeeded",
+		}
+		evt := event.Event{
+			Type:      event.TypeTaskSucceeded,
+			JobID:     job.ID,
+			RunID:     jobRun.ID,
+			TaskID:    tr.TaskID,
+			Timestamp: time.Now().UTC(),
+			Payload:   marshalFacet(payload),
+		}
+		_, err := m.mapEvent(evt)
+		s.Require().NoError(err)
+	}
+
+	// The mapper must have written the bounded dataset graph.
+	var count int64
+	s.Require().NoError(s.db.Model(&models.LineageDataset{}).Count(&count).Error)
+	s.Greater(count, int64(0), "mapper persisted no lineage datasets")
+
+	// Impact of the producer's output must reach the consumer's output.
+	res, err := QueryImpact(s.ctx, s.db, ns, "impact-e2e.extract.output", 0)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(res.Downstream, "impact query returned no downstream consumer")
+	found := false
+	for _, n := range res.Downstream {
+		if n.DatasetName == "impact-e2e.transform.output" {
+			found = true
+		}
+	}
+	s.True(found, "expected transform.output downstream of extract.output, got %+v", res.Downstream)
 }
 
 func (s *ImpactSuite) createDataset(run *models.TaskRun, ns, name, direction, stepName string) {

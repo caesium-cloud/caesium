@@ -8,8 +8,11 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -220,6 +223,7 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
+	m.enrichTaskPayload(&payload)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -228,6 +232,12 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+	// Persist the bounded dataset graph on each terminal task event so the
+	// cross-job impact query has edges to traverse. Without this, the
+	// lineage_datasets table is never written and /lineage/impact always
+	// returns empty. The upsert keys on (task_run, namespace, name, direction),
+	// so re-emitted events are idempotent.
+	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
 		EventTime: evt.Timestamp,
@@ -253,6 +263,7 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
+	m.enrichTaskPayload(&payload)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -261,6 +272,12 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+	// Persist the bounded dataset graph on each terminal task event so the
+	// cross-job impact query has edges to traverse. Without this, the
+	// lineage_datasets table is never written and /lineage/impact always
+	// returns empty. The upsert keys on (task_run, namespace, name, direction),
+	// so re-emitted events are idempotent.
+	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
 		EventTime: evt.Timestamp,
@@ -286,6 +303,7 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
+	m.enrichTaskPayload(&payload)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -326,6 +344,7 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	if err := json.Unmarshal(evt.Payload, &payload); err != nil {
 		return nil, fmt.Errorf("unmarshal task payload: %w", err)
 	}
+	m.enrichTaskPayload(&payload)
 
 	jobAlias := m.resolveJobAlias(evt.JobID, "")
 	taskJobName := fmt.Sprintf("%s.task.%s", jobAlias, payload.TaskID)
@@ -334,6 +353,12 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+	// Persist the bounded dataset graph on each terminal task event so the
+	// cross-job impact query has edges to traverse. Without this, the
+	// lineage_datasets table is never written and /lineage/impact always
+	// returns empty. The upsert keys on (task_run, namespace, name, direction),
+	// so re-emitted events are idempotent.
+	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
 		EventTime: evt.Timestamp,
@@ -457,6 +482,116 @@ func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]inte
 //  3. For inputs, each predecessor name listed in inputSchema becomes an input
 //     Dataset referencing that step's logical output namespace.
 //
+// taskRecord is the subset of the tasks table the lineage mapper reads to
+// recover a task's step name and declared schemas (mirrors jobRecord's pattern
+// of mapping a local struct to a table to avoid importing internal/models).
+type taskRecord struct {
+	Name         string `gorm:"column:name"`
+	OutputSchema []byte `gorm:"column:output_schema"`
+	InputSchema  []byte `gorm:"column:input_schema"`
+}
+
+func (taskRecord) TableName() string { return "tasks" }
+
+// enrichTaskPayload fills the step name and declared input/output schemas from
+// the persisted task record when the lifecycle event omitted them. The event
+// payload carries execution state, not the static task definition, so these
+// fields arrive empty — yet buildTaskDatasets needs them:
+//   - Without the step name, datasets fall back to the task UUID and never link
+//     across steps or jobs (a producer's `job.<uuid>.output` can't match a
+//     consumer's `job.<stepName>.output`).
+//   - Without the schemas, no input datasets are emitted at all, so the
+//     cross-job impact query has no edges to traverse and always returns empty.
+//
+// On any lookup failure it leaves the payload as-is — the worst case is the
+// pre-existing (degraded) behavior, never a wrong dataset.
+func (m *mapper) enrichTaskPayload(payload *taskRunPayload) {
+	if m.db == nil || payload.TaskID == uuid.Nil {
+		return
+	}
+	if payload.TaskName != "" && payload.OutputSchema != nil && payload.InputSchema != nil {
+		return
+	}
+	var rec taskRecord
+	if err := m.db.Select("name", "output_schema", "input_schema").
+		Where("id = ?", payload.TaskID).First(&rec).Error; err != nil {
+		return
+	}
+	if payload.TaskName == "" {
+		payload.TaskName = rec.Name
+	}
+	if payload.OutputSchema == nil && len(rec.OutputSchema) > 0 {
+		var os map[string]interface{}
+		if json.Unmarshal(rec.OutputSchema, &os) == nil {
+			payload.OutputSchema = os
+		}
+	}
+	if payload.InputSchema == nil && len(rec.InputSchema) > 0 {
+		var is map[string]map[string]interface{}
+		if json.Unmarshal(rec.InputSchema, &is) == nil {
+			payload.InputSchema = is
+		}
+	}
+}
+
+// persistTaskDatasets writes the task's input/output datasets to the bounded
+// lineage_datasets graph that the cross-job impact query (QueryImpact) reads.
+// It is best-effort: any failure leaves the graph as-is rather than disrupting
+// event emission. Rows are upserted on the (task_run, namespace, name,
+// direction) unique key so re-emitted lifecycle events are idempotent.
+func (m *mapper) persistTaskDatasets(payload taskRunPayload, inputs, outputs []Dataset) {
+	if m.db == nil || (len(inputs) == 0 && len(outputs) == 0) {
+		return
+	}
+	// Resolve the task_run PK (the FK target) from the run+task identity,
+	// preferring the most recent attempt. Scan into a struct (GORM cannot Scan
+	// a single column into a bare scalar).
+	var rec struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	if err := m.db.Table("task_runs").
+		Select("id").
+		Where("job_run_id = ? AND task_id = ?", payload.JobRunID, payload.TaskID).
+		Order("attempt DESC").
+		Limit(1).
+		Scan(&rec).Error; err != nil || rec.ID == uuid.Nil {
+		return
+	}
+	taskRunID := rec.ID
+
+	summary, _ := json.Marshal(map[string]string{"step_name": payload.TaskName})
+	rows := make([]models.LineageDataset, 0, len(inputs)+len(outputs))
+	appendRow := func(ds Dataset, direction string) {
+		if ds.Name == "" {
+			return
+		}
+		rows = append(rows, models.LineageDataset{
+			ID:           uuid.New(),
+			TaskRunID:    taskRunID,
+			Namespace:    ds.Namespace,
+			Name:         ds.Name,
+			Direction:    direction,
+			FacetSummary: datatypes.JSON(summary),
+			CreatedAt:    time.Now().UTC(),
+		})
+	}
+	for _, ds := range inputs {
+		appendRow(ds, "input")
+	}
+	for _, ds := range outputs {
+		appendRow(ds, "output")
+	}
+	if len(rows) == 0 {
+		return
+	}
+	_ = m.db.Clauses(clause.OnConflict{
+		Columns: []clause.Column{
+			{Name: "task_run_id"}, {Name: "namespace"}, {Name: "name"}, {Name: "direction"},
+		},
+		DoNothing: true,
+	}).Create(&rows).Error
+}
+
 // The namespace is always the mapper's configured namespace so datasets from
 // the same Caesium instance share a namespace and can be joined across jobs.
 func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inputs, outputs []Dataset) {
