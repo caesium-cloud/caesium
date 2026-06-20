@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -372,6 +373,45 @@ steps:
     image: example
     kueue: {queueName: "  "}
 `,
+		"kueue uppercase queue name": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    engine: kubernetes
+    image: example
+    kueue: {queueName: Data-Eng}
+`,
+		"kueue queue name with spaces": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    engine: kubernetes
+    image: example
+    kueue: {queueName: "data eng"}
+`,
+		"kueue queue name too long": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    engine: kubernetes
+    image: example
+    kueue: {queueName: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
+`,
 	}
 
 	for name, src := range cases {
@@ -476,6 +516,39 @@ steps:
 	require.Equal(t, "data-eng", clusterSpec.Kubernetes.QueueName)
 	// The queue alone carries no execution identity.
 	require.False(t, clusterSpec.Kubernetes.HasIdentityFields())
+}
+
+// TestKueueQueueNameAcceptsValidDNSLabels asserts the queueName validation
+// accepts the DNS-1123 forms Kueue uses for a LocalQueue name — a plain label, a
+// dotted subdomain, and the 63-character boundary — so the guard rejects only
+// genuinely invalid names. The invalid forms (uppercase, spaces, >63 chars) are
+// covered as error cases in TestParseInvalidDefinitions.
+func TestKueueQueueNameAcceptsValidDNSLabels(t *testing.T) {
+	valid := []string{
+		"data-eng",
+		"gpu.shared",
+		"q0",
+		strings.Repeat("a", 63), // length boundary
+	}
+	for _, name := range valid {
+		src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: kueue-valid
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: cluster
+    engine: kubernetes
+    image: alpine:3.23
+    kueue:
+      queueName: ` + name + `
+`
+		_, err := Parse([]byte(src))
+		require.NoErrorf(t, err, "queueName %q should be valid", name)
+	}
 }
 
 func TestLegacyMountRelativeTargetStillValidates(t *testing.T) {

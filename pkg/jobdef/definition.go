@@ -38,6 +38,13 @@ const (
 
 var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\.[^.\s]+)*$`)
 
+// kueueQueueNamePattern matches a Kubernetes DNS-1123 label, the form Kueue
+// requires for a LocalQueue name (which Caesium emits verbatim as the
+// `kueue.x-k8s.io/queue-name` label value). Validating it at lint time turns an
+// invalid name into an upfront `caesium job lint` error rather than a pod that
+// the API server rejects at apply/run time.
+var kueueQueueNamePattern = regexp.MustCompile(`^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$`)
+
 // Definition models the root job document.
 type Definition struct {
 	Schema     string     `yaml:"$schema,omitempty" json:"$schema,omitempty"`
@@ -688,8 +695,16 @@ func validateStepVolumeMounts(steps []Step, volumes map[string]*Volume) error {
 				return fmt.Errorf("steps[%d].kueue is only supported for kubernetes steps", i)
 			}
 		}
-		if step.Kueue != nil && strings.TrimSpace(step.Kueue.QueueName) == "" {
-			return fmt.Errorf("steps[%d].kueue.queueName is required when kueue is set", i)
+		if step.Kueue != nil {
+			queueName := strings.TrimSpace(step.Kueue.QueueName)
+			switch {
+			case queueName == "":
+				return fmt.Errorf("steps[%d].kueue.queueName is required when kueue is set", i)
+			case len(queueName) > 63:
+				return fmt.Errorf("steps[%d].kueue.queueName %q must be at most 63 characters", i, queueName)
+			case !kueueQueueNamePattern.MatchString(queueName):
+				return fmt.Errorf("steps[%d].kueue.queueName %q must be a valid DNS-1123 label (lowercase alphanumeric, '-' or '.', starting and ending with an alphanumeric)", i, queueName)
+			}
 		}
 	}
 	return nil
