@@ -239,6 +239,7 @@ Features that were previously on the roadmap and are now shipped:
 ## Related Documents
 
 - [Differentiation Strategy: Where Caesium Wins](differentiation-strategy.md) — positioning thesis; re-ranks this roadmap behind a sovereignty-led funnel
+- [Exec Plan: Sovereignty Execution](exec-plans/active/sovereignty-execution.md) — operationalizes the positioning pivot (README repositioning + Kueue delegation)
 - [Design: Data-Plane Memory](design-data-plane-memory.md) — the second-act substrate enabling explain/reproduce/skip
 - [Brainstorm: Killer Features Beyond Airflow Parity](archive/brainstorm-differentiators.md) — original idea backlog
 - [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system

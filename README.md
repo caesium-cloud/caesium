@@ -5,7 +5,7 @@
 <h1 align="center">caesium</h1>
 
 <p align="center">
-  <strong>Open-source distributed job scheduler with DAG pipelines, multi-runtime support, and an embedded web UI</strong>
+  <strong>The zero-dependency, self-hosted DAG scheduler — one Go binary, no Postgres, no Redis, no broker. Runs where Airflow, Dagster, and Flyte can't.</strong>
 </p>
 
 <p align="center">
@@ -17,7 +17,18 @@
   <a href="https://hub.docker.com/r/caesiumcloud/caesium/"><img src="https://img.shields.io/docker/pulls/caesiumcloud/caesium?style=plastic" alt="Docker Pulls"></a>
 </p>
 
-Caesium lets you define jobs as declarative YAML DAGs, run them on Docker, Podman, or Kubernetes, and operate them through a REST API, Prometheus metrics, an embedded React UI, and an optional GraphQL endpoint when API-key auth is disabled.
+Caesium runs your data pipelines as declarative YAML DAGs on Docker, Podman, or Kubernetes — and ships as a **single self-contained binary with an embedded database**. No PostgreSQL, no Redis, no message broker, no control plane to babysit. `scp` one binary to a laptop, an edge node, an air-gapped cluster, or a regulated on-prem environment, and it just runs. Everything the managed orchestrators paywall — HA, RBAC, SSO, audit logging, Kubernetes execution — is free and self-hosted, forever.
+
+You still operate it through a REST API, Prometheus metrics, and an embedded React UI (plus an optional GraphQL endpoint when API-key auth is disabled).
+
+## Why Caesium
+
+Most orchestrators force a trade-off Caesium refuses:
+
+- **vs. Airflow / Dagster / Flyte** — they're data-aware, but they make you stand up and operate Postgres, Redis, Kafka, or a Kubernetes control plane, and they paywall the parts that matter (HA, RBAC, SSO, lineage). Caesium is one binary on embedded distributed SQLite (dqlite/Raft): HA out of the box, nothing external to run, none of it gated behind a paid tier.
+- **vs. raw Kubernetes + Kueue + Argo** — they schedule containers but understand nothing about your data. Caesium adds content-addressed caching, typed data contracts between steps, lineage, backfills, and a local-to-prod dev loop on top of *any* container image — no SDK, no language lock-in.
+
+If you've searched for a *lightweight Airflow alternative with no database*, a *self-hosted orchestrator that doesn't need Postgres*, or an *air-gapped pipeline scheduler*, that's the gap Caesium fills. See [`docs/differentiation-strategy.md`](docs/differentiation-strategy.md) for the full positioning.
 
 ## Local Developer Experience
 
