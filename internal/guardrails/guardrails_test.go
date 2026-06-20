@@ -338,12 +338,14 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	files := []string{
 		"docs/design-airflow-parity.md",
 		"docs/design-concurrency-priority.md",
+		"docs/design-data-plane-memory.md",
 		"docs/design-database-locking-fix.md",
 		"docs/design-event-triggers.md",
 		"docs/design-incremental-execution.md",
 		"docs/design-scaling-job-execution.md",
 		"docs/design-sla-management.md",
 		"docs/design-task-templates.md",
+		"docs/differentiation-strategy.md",
 	}
 
 	for _, rel := range files {
