@@ -169,7 +169,10 @@ type VolumeMount struct {
 type Kueue struct {
 	// QueueName is the Kueue LocalQueue (in the pod's namespace) to admit
 	// through. It is the value of the `kueue.x-k8s.io/queue-name` label.
-	QueueName string `yaml:"queueName" json:"queueName"`
+	// omitempty keeps the marshaled form symmetric with
+	// container.KubernetesSpec.QueueName; an empty value is unreachable through
+	// normal parsing because Validate() rejects a blank queueName.
+	QueueName string `yaml:"queueName,omitempty" json:"queueName,omitempty"`
 }
 
 // Step defines an execution step.
