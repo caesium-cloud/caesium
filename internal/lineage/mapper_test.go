@@ -454,3 +454,349 @@ func TestCachePopulatedOnResolve(t *testing.T) {
 		t.Errorf("alias3 = %v, want explicit-hint", alias3)
 	}
 }
+
+// --- Dataset population tests ---
+
+// TestTaskCompleteWithPathOutput asserts that a task with a path-like structured
+// output produces a non-empty Outputs slice and an empty Inputs slice.
+func TestTaskCompleteWithPathOutput(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.Status = "succeeded"
+	payload.TaskName = "extract"
+	payload.Output = map[string]string{
+		"output_path": "/data/warehouse/extract/2026-06-19.parquet",
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskSucceeded,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if len(olEvent.Outputs) == 0 {
+		t.Fatal("expected non-empty Outputs for a step with a path-like output value")
+	}
+	if len(olEvent.Inputs) != 0 {
+		t.Errorf("expected empty Inputs, got %d", len(olEvent.Inputs))
+	}
+
+	out := olEvent.Outputs[0]
+	if out.Name != "/data/warehouse/extract/2026-06-19.parquet" {
+		t.Errorf("output dataset name = %v, want the file path", out.Name)
+	}
+	if out.Namespace != "caesium-test" {
+		t.Errorf("output namespace = %v, want caesium-test", out.Namespace)
+	}
+	df, ok := out.Facets["caesium_dataset"].(CaesiumDatasetFacet)
+	if !ok {
+		t.Fatal("missing or wrong type for caesium_dataset facet on output dataset")
+	}
+	if df.Direction != "output" {
+		t.Errorf("direction = %v, want output", df.Direction)
+	}
+	if df.StepName != "extract" {
+		t.Errorf("stepName = %v, want extract", df.StepName)
+	}
+}
+
+// TestTaskStartWithDeclaredOutputSchema asserts that a task with only a declared
+// outputSchema (no path-like output values) emits a synthetic output Dataset.
+func TestTaskStartWithDeclaredOutputSchema(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "transform"
+	payload.OutputSchema = map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"row_count": map[string]interface{}{"type": "integer"},
+		},
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskStarted,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if len(olEvent.Outputs) == 0 {
+		t.Fatal("expected a synthetic output Dataset for a step with outputSchema")
+	}
+	out := olEvent.Outputs[0]
+	expectedName := uuid.MustParse("bbbb0000-0000-0000-0000-000000000001").String() + ".transform.output"
+	if out.Name != expectedName {
+		t.Errorf("synthetic output name = %v, want %v", out.Name, expectedName)
+	}
+	if _, ok := out.Facets["caesium_schema"]; !ok {
+		t.Error("expected caesium_schema facet on synthetic output dataset")
+	}
+}
+
+// TestTaskStartWithInputSchema asserts that a task with a declared inputSchema
+// emits non-empty Inputs, one per predecessor step.
+func TestTaskStartWithInputSchema(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "load"
+	payload.InputSchema = map[string]map[string]interface{}{
+		"transform": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"row_count": map[string]interface{}{"type": "integer"},
+			},
+		},
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskStarted,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if len(olEvent.Inputs) == 0 {
+		t.Fatal("expected non-empty Inputs for a step with inputSchema")
+	}
+	inp := olEvent.Inputs[0]
+	if inp.Namespace != "caesium-test" {
+		t.Errorf("input namespace = %v, want caesium-test", inp.Namespace)
+	}
+	// The input dataset name references the predecessor step's output.
+	jobID := uuid.MustParse("bbbb0000-0000-0000-0000-000000000001")
+	expectedName := jobID.String() + ".transform.output"
+	if inp.Name != expectedName {
+		t.Errorf("input dataset name = %v, want %v", inp.Name, expectedName)
+	}
+	df, ok := inp.Facets["caesium_dataset"].(CaesiumDatasetFacet)
+	if !ok {
+		t.Fatal("missing or wrong type for caesium_dataset facet on input dataset")
+	}
+	if df.Direction != "input" {
+		t.Errorf("direction = %v, want input", df.Direction)
+	}
+}
+
+// TestTaskNoIOYieldsEmptyDatasets asserts that a task with no output, no
+// outputSchema, and no inputSchema produces empty (non-nil) slices so the JSON
+// serializes as [] not null.
+func TestTaskNoIOYieldsEmptyDatasets(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+
+	evt := event.Event{
+		Type:      event.TypeTaskStarted,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if olEvent.Inputs == nil {
+		t.Error("Inputs must be non-nil (serialize as [] not null)")
+	}
+	if olEvent.Outputs == nil {
+		t.Error("Outputs must be non-nil (serialize as [] not null)")
+	}
+	if len(olEvent.Inputs) != 0 {
+		t.Errorf("expected 0 Inputs, got %d", len(olEvent.Inputs))
+	}
+	if len(olEvent.Outputs) != 0 {
+		t.Errorf("expected 0 Outputs, got %d", len(olEvent.Outputs))
+	}
+}
+
+// TestTaskWithS3OutputPath asserts that an S3-scheme value is recognised as a
+// path-like dataset reference.
+func TestTaskWithS3OutputPath(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "export"
+	payload.Output = map[string]string{
+		"s3_path": "s3://my-bucket/output/2026-06-19/data.csv",
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskSucceeded,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if len(olEvent.Outputs) == 0 {
+		t.Fatal("expected non-empty Outputs for an S3 path output value")
+	}
+	if olEvent.Outputs[0].Name != "s3://my-bucket/output/2026-06-19/data.csv" {
+		t.Errorf("output name = %v", olEvent.Outputs[0].Name)
+	}
+}
+
+// TestTaskWithDottedTableName asserts that a dotted "schema.table" value is
+// recognised as a dataset reference.
+func TestTaskWithDottedTableName(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "load"
+	payload.Output = map[string]string{
+		"target_table": "analytics.public.fact_orders",
+	}
+
+	evt := event.Event{
+		Type:      event.TypeTaskSucceeded,
+		JobID:     uuid.MustParse("bbbb0000-0000-0000-0000-000000000001"),
+		RunID:     payload.JobRunID,
+		TaskID:    payload.TaskID,
+		Timestamp: time.Now().UTC(),
+		Payload:   mustMarshal(t, payload),
+	}
+
+	olEvent, err := m.mapEvent(evt)
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+
+	if len(olEvent.Outputs) == 0 {
+		t.Fatal("expected non-empty Outputs for a dotted table name output value")
+	}
+	if olEvent.Outputs[0].Name != "analytics.public.fact_orders" {
+		t.Errorf("output name = %v", olEvent.Outputs[0].Name)
+	}
+}
+
+// TestLooksLikeDatasetRef exercises the heuristic directly, including the
+// false-positive cases that the tightened implementation must exclude.
+func TestLooksLikeDatasetRef(t *testing.T) {
+	cases := []struct {
+		value string
+		want  bool
+		label string
+	}{
+		// --- should be true ---
+		{"/data/output/file.parquet", true, "absolute path"},
+		{"s3://bucket/key", true, "S3 URI"},
+		{"gs://bucket/key", true, "GCS URI"},
+		{"hdfs://namenode/path", true, "HDFS URI"},
+		{"file:///tmp/out.csv", true, "file URI"},
+		{"abfs://container@account.dfs.core.windows.net/path", true, "ABFS URI"},
+		{"analytics.public.fact_orders", true, "dotted table name"},
+		{"db.schema.table", true, "three-part table name"},
+		{"mydb.mytable", true, "two-part table name"},
+		{"/data/extract/2026-06-19.parquet", true, "absolute path with known ext"},
+		{"output/data.csv", true, "relative path with known ext"},
+		// --- should be false (false-positive exclusions) ---
+		{"3.14", false, "decimal number"},
+		{"3.14159", false, "pi"},
+		{"1.2.3", false, "version string"},
+		{"10.0.0.1", false, "IP address"},
+		{"192.168.1.100", false, "IP address 4-octets"},
+		{".hidden", false, "hidden file / leading dot"},
+		{".", false, "bare dot"},
+		{"..", false, "double dot"},
+		{"./relative/path", false, "dot-relative path"},
+		{"1234567", false, "plain integer"},
+		{"succeeded", false, "plain word without dot"},
+		{"hello world", false, "has space"},
+		{"", false, "empty string"},
+		{"nodot", false, "no dot, no scheme, no leading slash"},
+		{"v1.2.3", false, "version with v prefix — all segs are digit-only or 'v'+digits"},
+	}
+	for _, tc := range cases {
+		got := looksLikeDatasetRef(tc.value)
+		if got != tc.want {
+			t.Errorf("[%s] looksLikeDatasetRef(%q) = %v, want %v", tc.label, tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestDatasetsOrderIsDeterministic asserts that repeated calls to
+// buildTaskDatasets with the same multi-key Output and multi-predecessor
+// InputSchema always produce the same slice order.
+func TestDatasetsOrderIsDeterministic(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "load"
+	payload.Output = map[string]string{
+		"z_path": "/data/z.parquet",
+		"a_path": "/data/a.parquet",
+		"m_path": "/data/m.parquet",
+	}
+	payload.InputSchema = map[string]map[string]interface{}{
+		"zebra":  {"type": "object"},
+		"alpha":  {"type": "object"},
+		"middle": {"type": "object"},
+	}
+
+	// Call twice and compare.
+	in1, out1 := m.buildTaskDatasets("etl", payload)
+	in2, out2 := m.buildTaskDatasets("etl", payload)
+
+	if len(out1) != len(out2) {
+		t.Fatalf("outputs length mismatch: %d vs %d", len(out1), len(out2))
+	}
+	for i := range out1 {
+		if out1[i].Name != out2[i].Name {
+			t.Errorf("outputs[%d] name mismatch: %q vs %q", i, out1[i].Name, out2[i].Name)
+		}
+	}
+
+	if len(in1) != len(in2) {
+		t.Fatalf("inputs length mismatch: %d vs %d", len(in1), len(in2))
+	}
+	for i := range in1 {
+		if in1[i].Name != in2[i].Name {
+			t.Errorf("inputs[%d] name mismatch: %q vs %d", i, in1[i].Name, i)
+		}
+	}
+
+	// Verify alphabetical order for outputs (sorted by key, value is the name).
+	expectedOutputNames := []string{"/data/a.parquet", "/data/m.parquet", "/data/z.parquet"}
+	for i, want := range expectedOutputNames {
+		if out1[i].Name != want {
+			t.Errorf("outputs[%d].Name = %q, want %q (expected sorted by output key)", i, out1[i].Name, want)
+		}
+	}
+
+	// Verify alphabetical order for inputs (sorted by predecessor name).
+	expectedInputPreds := []string{"alpha", "middle", "zebra"}
+	for i, pred := range expectedInputPreds {
+		want := "etl." + pred + ".output"
+		if in1[i].Name != want {
+			t.Errorf("inputs[%d].Name = %q, want %q (expected sorted by predecessor name)", i, in1[i].Name, want)
+		}
+	}
+}

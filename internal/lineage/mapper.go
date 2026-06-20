@@ -3,6 +3,8 @@ package lineage
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -45,6 +47,24 @@ type taskRunPayload struct {
 	ClaimedBy string    `json:"claimed_by"`
 	Result    string    `json:"result"`
 	Error     string    `json:"error"`
+
+	// Output holds the structured key→value pairs emitted via ##caesium::output.
+	// Values may be file paths, table names, URIs, or scalar summaries.
+	Output map[string]string `json:"output,omitempty"`
+
+	// TaskName is the human-readable step name; populated from the job record
+	// when available and used to name datasets.
+	TaskName string `json:"task_name,omitempty"`
+
+	// OutputSchema is the task's declared JSON Schema for its outputs, stored
+	// as a raw JSON blob (map[string]any shape).  Non-nil when the step declares
+	// outputSchema in the job manifest.
+	OutputSchema map[string]interface{} `json:"output_schema,omitempty"`
+
+	// InputSchema maps predecessor step names to JSON Schema fragments
+	// describing which keys this step consumes.  Non-nil when the step declares
+	// inputSchema in the job manifest.
+	InputSchema map[string]map[string]interface{} `json:"input_schema,omitempty"`
 }
 
 type jobRecord struct {
@@ -207,6 +227,8 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeStart,
@@ -221,8 +243,8 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -238,6 +260,8 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeComplete,
@@ -252,8 +276,8 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -276,6 +300,8 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 		}
 	}
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeFail,
@@ -290,8 +316,8 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -307,6 +333,8 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeAbort,
@@ -321,8 +349,8 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -414,4 +442,249 @@ func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]inte
 	}
 
 	return facets
+}
+
+// buildTaskDatasets derives OpenLineage Dataset entries from a task run's
+// declared I/O contracts and structured outputs.
+//
+// Strategy (highest to lowest specificity):
+//  1. Structured output values (##caesium::output) that look like a path or URI
+//     are promoted to individual output Datasets — each key becomes a distinct
+//     named dataset so consumers can track per-artifact lineage.
+//  2. If outputSchema is declared but no path-like output values exist, a single
+//     synthetic output Dataset is emitted using the step name so the job still
+//     appears in the lineage graph.
+//  3. For inputs, each predecessor name listed in inputSchema becomes an input
+//     Dataset referencing that step's logical output namespace.
+//
+// The namespace is always the mapper's configured namespace so datasets from
+// the same Caesium instance share a namespace and can be joined across jobs.
+func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inputs, outputs []Dataset) {
+	stepName := payload.TaskName
+	if stepName == "" {
+		stepName = payload.TaskID.String()
+	}
+
+	// --- Outputs ---
+	// Promote path/URI-like structured output values to individual Datasets.
+	outputKeys := pathLikeKeys(payload.Output)
+	if len(outputKeys) > 0 {
+		for _, key := range outputKeys {
+			value := payload.Output[key]
+			datasetName := datasetNameFromValue(jobAlias, stepName, key, value)
+			facets := map[string]interface{}{
+				"caesium_dataset": CaesiumDatasetFacet{
+					BaseFacet:  newCaesiumBaseFacet("CaesiumDatasetFacet"),
+					StepName:   stepName,
+					Direction:  "output",
+					OutputKeys: []string{key},
+				},
+			}
+			outputs = append(outputs, Dataset{
+				Namespace: m.namespace,
+				Name:      datasetName,
+				Facets:    facets,
+			})
+		}
+	} else if len(payload.OutputSchema) > 0 {
+		// Declared schema but no path-like outputs: emit a synthetic dataset so
+		// the step appears in the lineage graph.
+		facets := map[string]interface{}{
+			"caesium_dataset": CaesiumDatasetFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
+				StepName:  stepName,
+				Direction: "output",
+			},
+			"caesium_schema": CaesiumSchemaFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumSchemaFacet"),
+				Schema:    payload.OutputSchema,
+			},
+		}
+		outputs = append(outputs, Dataset{
+			Namespace: m.namespace,
+			Name:      jobAlias + "." + stepName + ".output",
+			Facets:    facets,
+		})
+	}
+
+	// --- Inputs ---
+	// Each predecessor in inputSchema becomes an input Dataset, referencing the
+	// predecessor step's logical output namespace within the same job.
+	// Sort predecessor names so the Inputs slice order is deterministic.
+	predNames := make([]string, 0, len(payload.InputSchema))
+	for predStepName := range payload.InputSchema {
+		predNames = append(predNames, predStepName)
+	}
+	sort.Strings(predNames)
+	for _, predStepName := range predNames {
+		schema := payload.InputSchema[predStepName]
+		facets := map[string]interface{}{
+			"caesium_dataset": CaesiumDatasetFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
+				StepName:  predStepName,
+				Direction: "input",
+			},
+		}
+		if len(schema) > 0 {
+			facets["caesium_schema"] = CaesiumSchemaFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumSchemaFacet"),
+				Schema:    schema,
+			}
+		}
+		inputs = append(inputs, Dataset{
+			Namespace: m.namespace,
+			Name:      jobAlias + "." + predStepName + ".output",
+			Facets:    facets,
+		})
+	}
+
+	// Ensure non-nil slices so JSON serializes as [] rather than null, which
+	// is required by the OpenLineage RunEvent spec.
+	if inputs == nil {
+		inputs = []Dataset{}
+	}
+	if outputs == nil {
+		outputs = []Dataset{}
+	}
+	return inputs, outputs
+}
+
+// pathLikeKeys returns the keys from output whose values look like file paths,
+// URIs, or table references — the types of values that form meaningful dataset
+// identities.  Scalar summaries (numbers, short words) are excluded to keep
+// the dataset graph focused on structural lineage.  The returned slice is
+// sorted so callers produce a deterministic Outputs order.
+func pathLikeKeys(output map[string]string) []string {
+	if len(output) == 0 {
+		return nil
+	}
+	var keys []string
+	for k, v := range output {
+		if looksLikeDatasetRef(v) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// knownURISchemes are the URI prefixes that unambiguously identify a dataset
+// reference.  Checked before the dotted-identifier heuristic.
+var knownURISchemes = []string{
+	"s3://", "gs://", "hdfs://", "file://", "abfs://", "az://",
+	"http://", "https://",
+}
+
+// knownFileExtensions are suffixes that unambiguously mark a file path when
+// combined with the dotted-identifier heuristic.
+var knownFileExtensions = []string{
+	".parquet", ".csv", ".json", ".jsonl", ".ndjson", ".avro", ".orc",
+	".tsv", ".gz", ".zst", ".snappy", ".yaml", ".yml", ".xml", ".txt",
+	".log", ".arrow", ".feather",
+}
+
+// looksLikeDatasetRef returns true when v appears to be a file path, URI,
+// or dotted table name (schema.table or db.schema.table) rather than a plain
+// scalar value such as a decimal number, version string, IP address, or
+// relative dot-path.
+//
+// Inclusion rules (checked in order):
+//  1. Absolute file path starting with '/'.
+//  2. Known URI scheme prefix (s3://, gs://, hdfs://, file://, etc.).
+//  3. Dotted identifier: has a dot, no whitespace, not purely numeric,
+//     not a version string (all segments are digits), not an IP address
+//     (four numeric octets), no leading dot (relative / hidden paths),
+//     and either has a known file extension OR every dot-segment starts
+//     with a letter (table names like db.schema.table).
+func looksLikeDatasetRef(v string) bool {
+	if len(v) == 0 {
+		return false
+	}
+
+	// Rule 1: absolute file path.
+	if v[0] == '/' {
+		return true
+	}
+
+	// Rule 2: known URI scheme.
+	for _, scheme := range knownURISchemes {
+		if strings.HasPrefix(v, scheme) && len(v) > len(scheme) {
+			return true
+		}
+	}
+
+	// Rule 3: dotted identifier heuristic — must have a dot, no whitespace,
+	// reasonable length, and pass the false-positive filters below.
+	if len(v) > 255 {
+		return false
+	}
+	dotIdx := strings.IndexByte(v, '.')
+	if dotIdx < 0 {
+		return false // no dot at all
+	}
+	if strings.ContainsAny(v, " \t\n\r") {
+		return false
+	}
+	// Leading dot: relative path (./foo), hidden file (.hidden) — exclude.
+	if v[0] == '.' {
+		return false
+	}
+
+	// Known file extension: accept even if segments contain digits.
+	for _, ext := range knownFileExtensions {
+		if strings.HasSuffix(v, ext) {
+			return true
+		}
+	}
+
+	// Split on dots and inspect segments.
+	segments := strings.Split(v, ".")
+	allDigitSegments := true
+	allLetterStart := true
+	for _, seg := range segments {
+		if len(seg) == 0 {
+			return false // consecutive dots or trailing dot
+		}
+		if !isAllDigits(seg) {
+			allDigitSegments = false
+		}
+		if !isLetter(rune(seg[0])) {
+			allLetterStart = false
+		}
+	}
+
+	// Pure-numeric: decimal (3.14), version (1.2.3), IP (192.168.1.1) — exclude.
+	if allDigitSegments {
+		return false
+	}
+
+	// Accept dotted identifiers where every segment starts with a letter
+	// (database.schema.table, analytics.public.fact_orders, etc.).
+	return allLetterStart
+}
+
+// isAllDigits returns true if s contains only ASCII digit characters.
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLetter returns true if c is an ASCII letter (a–z, A–Z).
+func isLetter(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// datasetNameFromValue builds a human-readable dataset name from the output
+// value.  If the value itself is short enough to be meaningful, it is used
+// directly.  Otherwise the job+step+key triple forms the name.
+func datasetNameFromValue(jobAlias, stepName, key, value string) string {
+	const maxValueLen = 256
+	if len(value) > 0 && len(value) <= maxValueLen {
+		return value
+	}
+	return jobAlias + "." + stepName + "." + key
 }

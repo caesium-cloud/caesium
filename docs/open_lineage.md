@@ -49,6 +49,20 @@ The integration subscribes to the internal event bus and translates events into 
 |-----------|------------|--------|
 | `caesium_dag` | Run START | `totalTasks`, `triggerType`, `triggerAlias` |
 | `caesium_execution` | Task events | `engine`, `image`, `command`, `runtimeId`, `claimedBy` |
+| `caesium_dataset` | Dataset entries (Inputs/Outputs) | `stepName`, `direction` (`input`/`output`), `outputKeys` (when derived from structured output) |
+| `caesium_schema` | Dataset entries (when schema is declared) | `schema` — the raw JSON Schema object from the step's `outputSchema`/`inputSchema` |
+
+### Dataset population
+
+Task-level `RunEvent` messages carry non-empty `Inputs` and `Outputs` when the step has declared I/O contracts or emits structured outputs:
+
+- **Structured outputs** (`##caesium::output` values that look like file paths, S3/GCS/HDFS URIs, or dotted table names such as `db.schema.table`) are promoted to individual output `Dataset` entries. The value itself becomes the dataset name so consumers can correlate it across steps and jobs.
+- **Declared `outputSchema`** (from the job manifest's `steps[].outputSchema`): if no path-like output values were emitted, a synthetic output Dataset is created using the step name and the schema is attached as a `caesium_schema` facet.
+- **Declared `inputSchema`** (from `steps[].inputSchema`): each predecessor step listed in the schema map becomes an input `Dataset` whose name is `{job}.{predecessor}.output`, referencing the predecessor's logical output namespace. The schema fragment is attached as a `caesium_schema` facet so consumers can check compatibility.
+
+Run-level events (DAG start/complete/fail) continue to emit empty `Inputs`/`Outputs`; dataset lineage lives at the task level where the data contracts are declared.
+
+A bounded summary of each task's dataset graph is also persisted in dqlite via the `lineage_datasets` table (namespace, name, direction, and a small facet digest) to support future cross-job impact queries — full facets are emitted only to the configured transport backend.
 
 ## Configuration
 
