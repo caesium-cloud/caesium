@@ -91,15 +91,41 @@ autonomously via `exec-plan-wave`.
   outputs; bounded, upsert-keyed `lineage_dataset` graph persisted. Review:
   1 greptile P1 (missing unique index) + determinism/heuristic fixes.
 
-Next eligible items (deps now satisfied): **A2, B2, C2** (Wave 2), then D1→D2.
+### Wave 2 — caesium-why substrate, topology history, and cross-job impact (shipped)
+
+The next three leaf items (A2, B2, C2) shipped — reviewed, integration-gated,
+squash-merged. Pre-created per-stream worktrees eliminated the Wave-1 isolation
+issues; all three agents stayed in-lane.
+
+- **A2 (Stream A) — persist the decomposed `HashInput`.** PR #216 → merge `2a82c8a`.
+  A canonical, secret-redacted JSON blob of the full `HashInput` is stored on
+  `TaskRun` + `TaskCache` (additive nullable column), serialized in the same
+  sorted order `Compute()` hashes so it faithfully represents the cache key — the
+  read-side substrate `caesium why` (A3) will diff. Review: greptile P1 (mount
+  ordering vs `Compute()`) + 2 P2 (double-Compute, comment accuracy).
+- **B2 (Stream B) — historical DAG topology API.** PR #218 → merge `d8af495`.
+  `GET /v1/jobs/:id/topology[?snapshot=|?commit=]` + `/topology/history` read the
+  append-only `dag_snapshot` table as-of a snapshot/commit. **Stream B complete.**
+  Review: 2 gemini HIGH on `*echo.Context` (false positives — verified house
+  pattern) + greptile P1 nil-slice + P2s.
+- **C2 (Stream C) — cross-job dataset impact query.** PR #217 → merge `7ed1d57`.
+  `GET /lineage/impact` BFS over the `lineage_dataset` graph ("what breaks if this
+  table changes"), bound to producing step + git provenance. **Stream C complete.**
+  Review: 2 gemini HIGH (BFS dedup; SQLite 999-param two-step → correlated
+  subquery) + 2 greptile P1 (`max_depth=0`; non-deterministic attribution) + a P2.
+
+Next eligible items (deps now satisfied): **A3** (`caesium why`, needs A2 ✅),
+**A4** (reproducibility receipt + `caesium verify`, needs A1 ✅ + A2 ✅), and
+**D1** (large-object reference passing, needs A2 ✅; touches `internal/cache/hash.go`
+so sequence/merge after A-stream work), then **D2**.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | A1 shipped (#215); A2–A4 pending |
-| B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | B1 shipped (#213); B2 pending |
-| C | Lineage dataset population + cross-job impact query | P1 | C1 shipped (#214); C2 pending |
+| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | A1+A2 shipped (#215, #216); A3–A4 pending |
+| B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | **Complete** — B1+B2 shipped (#213, #218) |
+| C | Lineage dataset population + cross-job impact query | P1 | **Complete** — C1+C2 shipped (#214, #217) |
 | D | Large-object reference passing + value-verified skip | P2 | Not started |
 
 ## Streams
