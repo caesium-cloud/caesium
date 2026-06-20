@@ -11,6 +11,7 @@ import (
 	jobcache "github.com/caesium-cloud/caesium/api/rest/controller/job/cache"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
+	lineagectrl "github.com/caesium-cloud/caesium/api/rest/controller/lineage"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
 	"github.com/caesium-cloud/caesium/api/rest/controller/topology"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
@@ -162,6 +163,11 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	// nodes
 	{
 		g.GET("/nodes/:address/workers", node.Workers)
+	}
+
+	// lineage impact (data-plane-memory C2)
+	{
+		g.GET("/lineage/impact", lineagectrl.Impact)
 	}
 }
 
