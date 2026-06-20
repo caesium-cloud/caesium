@@ -347,7 +347,15 @@ func (h HashInput) Compute() string {
 		w(digest, "pred_hash:%s\n", ph)
 	}
 
-	// Sorted predecessor outputs
+	// Sorted predecessor outputs. This is also where a large-object *reference*
+	// digest folds into the key: a reference output (see pkg/task.OutputRef) is
+	// carried in this same map as its canonical encoded value, and that encoding
+	// embeds the content digest. So a predecessor that re-emits a byte-identical
+	// payload — hence an identical sha256 digest — produces an identical
+	// pred_output line and an identical hash (a cache hit), while a changed
+	// payload changes the digest and forces a miss. Reference values must NOT be
+	// special-cased out of this loop: the digest entering the key here is exactly
+	// what makes the downstream skip value-verified rather than heuristic.
 	predNames := make([]string, 0, len(h.PredecessorOutputs))
 	for name := range h.PredecessorOutputs {
 		predNames = append(predNames, name)

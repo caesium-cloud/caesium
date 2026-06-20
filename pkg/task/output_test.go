@@ -115,6 +115,123 @@ func TestParseOutput_SizeLimit(t *testing.T) {
 	assert.Contains(t, err.Error(), "exceeds")
 }
 
+// ── Large-object reference output (##caesium::output-ref) ────────────
+
+const testDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+func TestParseOutput_Reference(t *testing.T) {
+	logs := strings.NewReader(`writing payload...
+##caesium::output-ref {"key":"frame","path":"/data/out.parquet","digest":"` + testDigest + `","size":734003200}
+done
+`)
+	result, err := ParseOutput(logs)
+	require.NoError(t, err)
+	require.Contains(t, result, "frame")
+
+	ref, ok := DecodeOutputRef(result["frame"])
+	require.True(t, ok, "stored value must decode as a reference")
+	assert.Equal(t, "/data/out.parquet", ref.Path)
+	assert.Equal(t, testDigest, ref.Digest)
+	assert.Equal(t, int64(734003200), ref.Size)
+	assert.Equal(t, outputRefVersion, ref.Ref)
+}
+
+// A payload far larger than MaxOutputBytes passes through the reference
+// protocol: only the small reference line (path + digest) is stored, so the
+// 64 KB scalar cap never trips. This is the core D1 acceptance behavior.
+func TestParseOutput_ReferenceExceeds64KBPayloadSucceeds(t *testing.T) {
+	// size is well over MaxOutputBytes (64 KB); the reference itself is tiny.
+	logs := strings.NewReader(`##caesium::output-ref {"key":"big","path":"/data/huge.bin","digest":"` + testDigest + `","size":1073741824}` + "\n")
+	result, err := ParseOutput(logs)
+	require.NoError(t, err)
+	require.Contains(t, result, "big")
+	ref, ok := DecodeOutputRef(result["big"])
+	require.True(t, ok)
+	assert.Equal(t, int64(1073741824), ref.Size)
+}
+
+func TestParseOutput_ReferenceMalformedSkipped(t *testing.T) {
+	cases := []string{
+		`##caesium::output-ref {"path":"/p","digest":"` + testDigest + `"}`,     // missing key
+		`##caesium::output-ref {"key":"k","digest":"` + testDigest + `"}`,       // missing path
+		`##caesium::output-ref {"key":"k","path":"/p","digest":"sha256:short"}`, // bad digest
+		`##caesium::output-ref {"key":"k","path":"/p","digest":"md5:abc"}`,      // wrong algo
+		`##caesium::output-ref not json`,                                        // not JSON
+	}
+	for _, line := range cases {
+		result, err := ParseOutput(strings.NewReader(line + "\n"))
+		require.NoError(t, err)
+		assert.Nil(t, result, "malformed reference must be skipped: %s", line)
+	}
+}
+
+// A reference and a scalar marker may both be present; both are collected.
+func TestParseMarkers_ReferenceAndScalar(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output {"rows":"5"}
+##caesium::output-ref {"key":"frame","path":"/data/out.bin","digest":"` + testDigest + `"}
+`)
+	m, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, "5", m.Output["rows"])
+	ref, ok := DecodeOutputRef(m.Output["frame"])
+	require.True(t, ok)
+	assert.Equal(t, "/data/out.bin", ref.Path)
+}
+
+// CaptureMarkersWithRefLimit drops a reference whose reported size exceeds the
+// operator cap, while leaving an under-cap reference (and scalars) intact.
+func TestCaptureMarkersWithRefLimit_RejectsOversizedReference(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output-ref {"key":"big","path":"/p","digest":"` + testDigest + `","size":2000}
+##caesium::output-ref {"key":"ok","path":"/q","digest":"` + testDigest + `","size":500}
+`)
+	m, err := CaptureMarkersWithRefLimit(logs, MaxLogSnapshotBytes, 1000)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.NotContains(t, m.Output, "big", "over-cap reference must be dropped")
+	assert.Contains(t, m.Output, "ok", "under-cap reference must be kept")
+}
+
+func TestOutputRef_EncodeDecodeRoundTrip(t *testing.T) {
+	ref := OutputRef{Ref: outputRefVersion, Path: "/data/x", Digest: testDigest, Size: 42}
+	encoded := ref.Encode()
+	assert.True(t, IsOutputRef(encoded))
+	decoded, ok := DecodeOutputRef(encoded)
+	require.True(t, ok)
+	assert.Equal(t, ref, decoded)
+}
+
+func TestOutputRef_EncodeDeterministic(t *testing.T) {
+	ref := OutputRef{Ref: outputRefVersion, Path: "/data/x", Digest: testDigest, Size: 42}
+	assert.Equal(t, ref.Encode(), ref.Encode(), "encoding must be byte-stable for cache equality")
+}
+
+func TestIsOutputRef_RejectsScalars(t *testing.T) {
+	assert.False(t, IsOutputRef("42"))
+	assert.False(t, IsOutputRef(`{"path":"/data"}`))          // JSON but not a ref
+	assert.False(t, IsOutputRef(`{"caesiumOutputRefish":1}`)) // near-miss sentinel
+	assert.True(t, IsOutputRef(`{"caesiumOutputRef":1,"path":"/p","digest":"`+testDigest+`"}`))
+}
+
+func TestDecodeOutputRef_RejectsIncomplete(t *testing.T) {
+	// Has the sentinel but no digest — not a usable reference.
+	_, ok := DecodeOutputRef(`{"caesiumOutputRef":1,"path":"/p"}`)
+	assert.False(t, ok)
+}
+
+func TestBuildOutputEnv_Reference(t *testing.T) {
+	ref := OutputRef{Ref: outputRefVersion, Path: "/data/out.parquet", Digest: testDigest, Size: 100}
+	predOutputs := map[string]map[string]string{
+		"extract": {"frame": ref.Encode(), "rows": "5"},
+	}
+	env := BuildOutputEnv(predOutputs)
+	// Reference exposes the path (not the raw JSON) plus a _DIGEST companion.
+	assert.Equal(t, "/data/out.parquet", env["CAESIUM_OUTPUT_EXTRACT_FRAME"])
+	assert.Equal(t, testDigest, env["CAESIUM_OUTPUT_EXTRACT_FRAME_DIGEST"])
+	// Scalars in the same map are unaffected.
+	assert.Equal(t, "5", env["CAESIUM_OUTPUT_EXTRACT_ROWS"])
+}
+
 func TestNormalizeStepName(t *testing.T) {
 	tests := []struct {
 		input    string

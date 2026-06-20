@@ -194,6 +194,69 @@ steps:
 
 Set `metadata.schemaValidation` to `"warn"` (log violations) or `"fail"` (fail task on violation).
 
+### Large-Object Reference Passing
+
+Scalar `##caesium::output` payloads are capped at 64 KB total. To pass something
+larger — a Parquet file, a model artifact, a dataframe — do **not** inline it.
+Instead, write the payload to a **mounted volume** (BYO shared storage; see
+`volumes` / `volumeMounts`) and emit a *reference* with the content digest:
+
+```
+##caesium::output-ref {"key":"frame","path":"/data/out.parquet","digest":"sha256:<64-hex>","size":734003200}
+```
+
+- `key` (required): the output key, exactly like a scalar output key.
+- `path` (required): where the producer wrote the payload (a path inside a
+  mounted volume the downstream step also mounts).
+- `digest` (required): `sha256:` + the lowercase-hex SHA-256 of the payload
+  bytes. Compute it deterministically, e.g. `sha256sum /data/out.parquet`.
+- `size` (optional): payload size in bytes (advisory; used only by the
+  operator-side `CAESIUM_OUTPUT_REF_MAX_BYTES` guard).
+
+Only the reference (path + digest) crosses the step boundary and lands in the
+database — never the payload. The digest is folded into the downstream step's
+cache key, so a producer that re-emits a **byte-identical** payload (hence an
+identical digest) yields a **cache hit** downstream; a changed payload changes
+the digest and forces a re-run. This is content-verified, not path-heuristic.
+
+Downstream steps receive:
+
+```
+$CAESIUM_OUTPUT_<STEP>_<KEY>          # the volume path to read
+$CAESIUM_OUTPUT_<STEP>_<KEY>_DIGEST   # sha256:… to re-verify the bytes
+```
+
+Example — producer writes to a shared volume and references it; consumer reads
+it back:
+
+```yaml
+volumes:
+  - name: shared
+    source: { bind: { path: /srv/caesium/shared } }   # BYO storage
+steps:
+  - name: extract
+    image: alpine:3.23
+    volumeMounts:
+      - { volume: shared, path: /data }
+    command: ["sh", "-c", "dd if=/dev/zero of=/data/out.bin bs=1M count=128 && echo \"##caesium::output-ref {\\\"key\\\":\\\"frame\\\",\\\"path\\\":\\\"/data/out.bin\\\",\\\"digest\\\":\\\"sha256:$(sha256sum /data/out.bin | cut -d' ' -f1)\\\",\\\"size\\\":134217728}\""]
+
+  - name: transform
+    image: alpine:3.23
+    dependsOn: [extract]
+    volumeMounts:
+      - { volume: shared, path: /data }
+    command: ["sh", "-c", "test \"$(sha256sum $CAESIUM_OUTPUT_EXTRACT_FRAME | cut -d' ' -f1)\" = \"${CAESIUM_OUTPUT_EXTRACT_FRAME_DIGEST#sha256:}\""]
+```
+
+Notes:
+- The reference protocol is **opt-in and BYO**: nothing breaks if you never use
+  it, and it adds no mandatory storage dependency. The volume is yours.
+- A malformed reference line (missing `key`/`path`, or a non-`sha256:<64-hex>`
+  digest) is skipped like any malformed output line; the step's other outputs
+  still apply.
+- Caesium does not move bytes for you (no SDK): the container writes the file and
+  computes the digest; Caesium records and propagates the reference.
+
 ---
 
 ## Secret References
