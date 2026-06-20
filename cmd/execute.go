@@ -11,6 +11,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/start"
 	"github.com/caesium-cloud/caesium/cmd/test"
 	"github.com/caesium-cloud/caesium/cmd/verify"
+	"github.com/caesium-cloud/caesium/cmd/why"
 	"github.com/spf13/cobra"
 )
 
@@ -25,6 +26,7 @@ var cmds = []*cobra.Command{
 	start.Cmd,
 	test.Cmd,
 	verify.Cmd,
+	why.Cmd,
 }
 
 // Execute builds the command tree and executes commands.
