@@ -1,0 +1,33 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: k8s-kueue-delegation
+  labels:
+    team: data-eng
+    runtime: kubernetes
+  annotations:
+    purpose: "Delegate scheduling to Kueue — Caesium never bin-packs"
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+    timezone: "UTC"
+steps:
+  # Each kubernetes step delegates admission to a Kueue LocalQueue. Caesium
+  # stamps the kueue.x-k8s.io/queue-name label on the pod and Kueue gates
+  # scheduling against the queue's quota — Caesium does not schedule itself.
+  # The queue is scheduling metadata and is excluded from the cache identity
+  # hash, so re-queuing a task never busts its cache.
+  - name: extract
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extracting data"]
+    kueue:
+      queueName: data-eng
+  - name: train
+    engine: kubernetes
+    image: alpine:3.23
+    command: ["sh", "-c", "echo training on GPU quota gated by Kueue"]
+    kueue:
+      queueName: gpu-shared

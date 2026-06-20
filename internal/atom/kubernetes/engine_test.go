@@ -210,6 +210,66 @@ func (s *KubernetesTestSuite) TestCreateAppliesResolvedVolumesAndIdentity() {
 	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
 }
 
+// TestCreateDelegatesToKueue asserts that a step declaring a Kueue queue stamps
+// the kueue.x-k8s.io/queue-name label on the created pod (and preserves the
+// Caesium management label). The label is all Caesium sets — Kueue's webhook
+// gates the pod for admission, which is how scheduling is delegated rather than
+// performed by Caesium.
+func (s *KubernetesTestSuite) TestCreateDelegatesToKueue() {
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test"},
+		Spec: container.Spec{
+			Kubernetes: &container.KubernetesSpec{
+				QueueName: "data-eng",
+			},
+		},
+	}
+
+	podMatcher := mock.MatchedBy(func(pod *v1.Pod) bool {
+		if pod.Labels[kueueQueueLabel] != "data-eng" {
+			return false
+		}
+		// The Caesium management label must not be clobbered by the queue label.
+		if _, ok := pod.Labels[atom.Label]; !ok {
+			return false
+		}
+		return true
+	})
+
+	s.engine.backend.(*mockKubernetesBackend).
+		On("Create", podMatcher).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+}
+
+// TestCreateNoQueueOmitsKueueLabel asserts the queue label is absent when no
+// queue is declared, so non-Kueue clusters are unaffected.
+func (s *KubernetesTestSuite) TestCreateNoQueueOmitsKueueLabel() {
+	req := &atom.EngineCreateRequest{
+		Name:    testAtomID,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	podMatcher := mock.MatchedBy(func(pod *v1.Pod) bool {
+		_, hasQueue := pod.Labels[kueueQueueLabel]
+		return !hasQueue
+	})
+
+	s.engine.backend.(*mockKubernetesBackend).
+		On("Create", podMatcher).
+		Return()
+
+	_, err := s.engine.Create(req)
+	s.Require().NoError(err)
+	s.engine.backend.(*mockKubernetesBackend).AssertExpectations(s.T())
+}
+
 func (s *KubernetesTestSuite) TestCreateError() {
 	req := &atom.EngineCreateRequest{
 		Name:    "",

@@ -168,7 +168,7 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		WorkDir:              h.WorkDir,
 		Mounts:               sortedMounts(h.Mounts),
 		ResolvedVolumeMounts: sortedVolumeMounts(h.ResolvedVolumeMounts),
-		Kubernetes:           h.Kubernetes,
+		Kubernetes:           hashableKubernetes(h.Kubernetes),
 		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
 		PredecessorOutputs:   h.PredecessorOutputs,
 		RunParams:            h.RunParams,
@@ -324,7 +324,15 @@ func (h HashInput) Compute() string {
 		w(digest, "volume_mount:%s\n", volumeMountSortKey(m))
 	}
 
-	if h.Kubernetes != nil {
+	// Gate on HasIdentityFields, not a nil check: a KubernetesSpec whose ONLY
+	// populated field is QueueName carries no execution identity, so it must hash
+	// byte-identically to an absent spec. QueueName (the Kueue LocalQueue) is
+	// deliberately NOT folded in below — it is scheduling metadata, like secrets
+	// and workload identity, not an execution input: two otherwise-identical
+	// tasks that differ only in queue must share one cache identity, or a
+	// scheduling tweak would silently bust the cache. hashableKubernetes()
+	// likewise strips it from the persisted blob so the two stay in lockstep.
+	if h.Kubernetes.HasIdentityFields() {
 		w(digest, "kubernetes.service_account:%s\n", h.Kubernetes.ServiceAccountName)
 		if h.Kubernetes.AutomountServiceAccountToken != nil {
 			w(digest, "kubernetes.automount:%t\n", *h.Kubernetes.AutomountServiceAccountToken)
@@ -403,4 +411,21 @@ func canonicalJSON(value any) string {
 		return fmt.Sprintf("%v", value)
 	}
 	return string(data)
+}
+
+// hashableKubernetes returns the KubernetesSpec stripped of fields that do not
+// contribute to the cache identity, so the persisted blob (CanonicalJSON) lists
+// exactly the fields Compute() folds in. Today that means dropping QueueName:
+// the Kueue queue is scheduling metadata, not an execution input, and must not
+// appear in the identity record any more than it appears in the hash. A spec
+// whose only content was QueueName has no identity fields and collapses to nil —
+// matching Compute(), which skips the Kubernetes block unless HasIdentityFields.
+// It returns a copy and never mutates the caller's spec. nil in, nil out.
+func hashableKubernetes(k *container.KubernetesSpec) *container.KubernetesSpec {
+	if !k.HasIdentityFields() {
+		return nil
+	}
+	out := *k
+	out.QueueName = ""
+	return &out
 }

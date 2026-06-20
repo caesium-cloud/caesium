@@ -66,15 +66,26 @@ the two plans touch the same files, the sibling's Stream A owns
   Airflow/Dagster/Flyte can't", "free what they paywall") using search-term-aware
   copy. Iterate as positioning sharpens.
 
-The first full wave is the next eligible run of `exec-plan-wave` against this
-doc. Leaf items ready: **A2, B1** (A1 is in-flight/landed in this PR).
+### Wave 1 — Kueue delegation
+
+- **Stream B**: B1 landed — steps declare `kueue: {queueName: "..."}` on the
+  kubernetes engine; the engine stamps the `kueue.x-k8s.io/queue-name` label on
+  the pod and delegates admission to Kueue (Caesium never bin-packs). The queue
+  is excluded from the cache identity hash (carried on `KubernetesSpec`, gated out
+  of `Compute()` by `HasIdentityFields()`, stripped from the persisted blob by
+  `hashableKubernetes()`); unit tests assert hash-equality with/without the queue.
+  Schema docs, the schema-doc generator, the k8s-deployment guide, and a
+  `docs/examples-k8s/kueue-delegation.job.yaml` sample updated. `just lint` and
+  `just unit-test` green.
+
+Leaf items remaining: **A2** (sovereignty proof-point docs).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Sovereignty positioning — reposition the public surface; proof-point docs | **P0** | A1 first pass landed; A2 not started |
-| B | Kueue delegation — emit `kueue.x-k8s.io/queue-name`, never bin-pack | P1 | Not started |
+| B | Kueue delegation — emit `kueue.x-k8s.io/queue-name`, never bin-pack | P1 | B1 landed (Wave 1) |
 
 ## Streams
 
@@ -103,17 +114,23 @@ single binary). Sells by constraint; needs no benchmark or sales motion.
 Answer "why not Kueue?" by *using* Kueue for admission instead of reimplementing
 it. The data DAG inherits Kueue's quota/fair-share/preemption for free.
 
-- [ ] B1. Add a Kueue passthrough: a job/step field that creates the Kubernetes
-      Job **suspended** with the `kueue.x-k8s.io/queue-name` label so Kueue gates
-      admission (un-suspends on quota). The field is **excluded from the cache
-      identity hash** — it is scheduling metadata, not execution input (treat it
-      like secrets / workload-identity, which are already excluded). Add a unit
-      test asserting the hash is identical with and without it.
-      Files: `pkg/jobdef/definition.go` (+ `pkg/jobdef/schema.go`),
-      `internal/jobdef/runtime/spec.go`, `internal/atom/kubernetes/engine.go`
-      (suspend + label), `internal/cache/hash.go` (assert exclusion + test),
+- [x] B1. Add a Kueue passthrough: a step `kueue: {queueName: "..."}` field that,
+      on the kubernetes engine, stamps the `kueue.x-k8s.io/queue-name` label on the
+      created pod so Kueue gates admission (its webhook injects the
+      `kueue.x-k8s.io/admission` scheduling gate — the pod-level equivalent of a
+      suspended Job — and un-gates on quota; Caesium's engine creates a Pod, not a
+      batch/v1 Job). The field is **excluded from the cache identity hash** — it is
+      scheduling metadata, not execution input — carried on `container.KubernetesSpec`
+      and gated out of `Compute()` via `HasIdentityFields()` and stripped from the
+      persisted blob via `hashableKubernetes()`. Unit tests assert the hash is
+      identical with and without the queue (and that a queue-only spec equals an
+      absent one). Landed in PR (sovereignty-execution β).
+      Files: `pkg/container/spec.go` (the `QueueName` carrier + `HasIdentityFields`),
+      `pkg/jobdef/definition.go` (the `kueue` field + Validate + threading),
+      `internal/atom/kubernetes/engine.go` (label), `internal/cache/hash.go`
+      (exclusion + tests), `internal/jobdef/report/report.go` (schema-doc generator),
       `docs/caesium-job-llm-reference.md` + `docs/job-schema-reference.md` +
-      `docs/kubernetes-deployment.md`, `docs/examples-k8s/*.job.yaml`.
+      `docs/kubernetes-deployment.md`, `docs/examples-k8s/kueue-delegation.job.yaml`.
 
 ## Sequencing & Dependencies
 

@@ -153,6 +153,18 @@ type VolumeMount struct {
 	SubPath  string `yaml:"subPath,omitempty" json:"subPath,omitempty"`
 }
 
+// Kueue declares that a step delegates admission to Kueue. When set on a
+// kubernetes step, Caesium stamps the `kueue.x-k8s.io/queue-name` label on the
+// created pod so Kueue gates scheduling against the named LocalQueue's quota and
+// admits the task only when capacity is available. Caesium never bin-packs or
+// prioritizes itself — it delegates scheduling to Kueue — so this field is pure
+// scheduling metadata and is excluded from the cache identity hash.
+type Kueue struct {
+	// QueueName is the Kueue LocalQueue (in the pod's namespace) to admit
+	// through. It is the value of the `kueue.x-k8s.io/queue-name` label.
+	QueueName string `yaml:"queueName" json:"queueName"`
+}
+
 // Step defines an execution step.
 type Step struct {
 	Name                         string            `yaml:"name" json:"name"`
@@ -171,6 +183,9 @@ type Step struct {
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
+	// Kueue delegates this step's admission to a Kueue LocalQueue (kubernetes
+	// engine only). It is scheduling metadata and does not affect the cache hash.
+	Kueue *Kueue `yaml:"kueue,omitempty" json:"kueue,omitempty"`
 	// OutputSchema is a JSON Schema describing this step's expected output keys.
 	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
@@ -199,6 +214,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		ServiceAccountName           string                    `yaml:"serviceAccountName"`
 		PodAnnotations               map[string]string         `yaml:"podAnnotations"`
 		AutomountServiceAccountToken *bool                     `yaml:"automountServiceAccountToken"`
+		Kueue                        *Kueue                    `yaml:"kueue"`
 		OutputSchema                 map[string]any            `yaml:"outputSchema"`
 		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
 		Cache                        interface{}               `yaml:"cache"`
@@ -242,6 +258,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.ServiceAccountName = rs.ServiceAccountName
 	s.PodAnnotations = rs.PodAnnotations
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
+	s.Kueue = rs.Kueue
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -270,6 +287,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		ServiceAccountName           string                    `json:"serviceAccountName"`
 		PodAnnotations               map[string]string         `json:"podAnnotations"`
 		AutomountServiceAccountToken *bool                     `json:"automountServiceAccountToken"`
+		Kueue                        *Kueue                    `json:"kueue"`
 		OutputSchema                 map[string]any            `json:"outputSchema"`
 		InputSchema                  map[string]map[string]any `json:"inputSchema"`
 		Cache                        interface{}               `json:"cache"`
@@ -303,6 +321,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.ServiceAccountName = rs.ServiceAccountName
 	s.PodAnnotations = rs.PodAnnotations
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
+	s.Kueue = rs.Kueue
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -665,6 +684,12 @@ func validateStepVolumeMounts(steps []Step, volumes map[string]*Volume) error {
 			if step.AutomountServiceAccountToken != nil {
 				return fmt.Errorf("steps[%d].automountServiceAccountToken is only supported for kubernetes steps", i)
 			}
+			if step.Kueue != nil {
+				return fmt.Errorf("steps[%d].kueue is only supported for kubernetes steps", i)
+			}
+		}
+		if step.Kueue != nil && strings.TrimSpace(step.Kueue.QueueName) == "" {
+			return fmt.Errorf("steps[%d].kueue.queueName is required when kueue is set", i)
 		}
 	}
 	return nil
@@ -738,7 +763,10 @@ func (d *Definition) RuntimeSpecForStep(step *Step) (container.Spec, error) {
 		if step.AutomountServiceAccountToken != nil {
 			k8sSpec.AutomountServiceAccountToken = cloneBoolPtr(step.AutomountServiceAccountToken)
 		}
-		if k8sSpec.ServiceAccountName != "" || len(k8sSpec.PodAnnotations) > 0 || k8sSpec.AutomountServiceAccountToken != nil {
+		if step.Kueue != nil {
+			k8sSpec.QueueName = strings.TrimSpace(step.Kueue.QueueName)
+		}
+		if k8sSpec.ServiceAccountName != "" || len(k8sSpec.PodAnnotations) > 0 || k8sSpec.AutomountServiceAccountToken != nil || k8sSpec.QueueName != "" {
 			spec.Kubernetes = k8sSpec
 		}
 	}
@@ -823,6 +851,7 @@ func cloneContainerSpec(spec container.Spec) container.Spec {
 			ServiceAccountName:           spec.Kubernetes.ServiceAccountName,
 			PodAnnotations:               cloneStringMap(spec.Kubernetes.PodAnnotations),
 			AutomountServiceAccountToken: cloneBoolPtr(spec.Kubernetes.AutomountServiceAccountToken),
+			QueueName:                    spec.Kubernetes.QueueName,
 		}
 	}
 	return out
