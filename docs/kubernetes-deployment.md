@@ -170,15 +170,7 @@ scp etl-extract.tar.gz user@k8s-node:/tmp/
 ssh user@k8s-node "ctr -n=k8s.io images import /tmp/etl-extract.tar.gz"
 ```
 
-Set `imagePullPolicy: Never` (or `IfNotPresent`) in your job definition to prevent the kubelet from attempting a registry pull:
-
-```yaml
-steps:
-  - name: extract
-    image: my-etl-extract:1.4.2
-    kubernetes:
-      imagePullPolicy: Never
-```
+The Caesium Kubernetes engine sets `imagePullPolicy: IfNotPresent` on every pod it creates (`internal/atom/kubernetes/engine.go`). This means if the image is already present on the node (pre-loaded via one of the options above), the kubelet will not attempt a registry pull. No job-definition field is needed — pre-loading the image onto the node is sufficient.
 
 ### No Caesium control plane egress
 

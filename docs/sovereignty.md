@@ -24,7 +24,7 @@ The following table compares Caesium against the open-core data orchestrators en
 | **Single binary / zero external deps** | **Yes** (Go binary + embedded dqlite) | No (Postgres required) | No (JVM + Postgres + Redis) | No (Postgres + Redis) | No (Postgres + broker + executor) |
 | **Air-gapped / offline operation** | **Yes** (no outbound network required at runtime) | No (control plane phones home) | No (JVM telemetry; external DB) | No (cloud-first architecture) | Possible, but multi-process complexity |
 | **Self-hosted with no vendor account** | **Yes** | OSS tier (limited features) | OSS tier (limited features) | Limited (some features require account) | Yes |
-| **Data-plane memory (explain/reproduce/skip)** | Free (shipped; see [`design-data-plane-memory.md`](design-data-plane-memory.md)) | Paid (Dagster+ Insights) | Not available | Not available | Not available |
+| **Data-plane memory (explain/reproduce/skip)** | Free (shipped; `caesium why`, reproducibility receipts, value-verified skip — see [`design-data-plane-memory.md`](design-data-plane-memory.md)) | Paid (Dagster+ Insights) | Not available | Not available | Not available |
 
 ### What this means in practice
 
@@ -77,7 +77,7 @@ On the air-gapped host, no configuration is required for a single-node deploymen
 caesium server
 ```
 
-Caesium creates its embedded dqlite database in `$HOME/.caesium/` (or `CAESIUM_DATA_DIR` if set) and starts listening on port 8080. No Postgres, no Redis, no Kafka, no network egress.
+Caesium creates its embedded dqlite database at `/var/lib/caesium/dqlite` (override with `CAESIUM_DATABASE_PATH`) and starts listening on port 8080. No Postgres, no Redis, no Kafka, no network egress.
 
 Verify it is running:
 
@@ -95,7 +95,9 @@ kind: Job
 metadata:
   alias: nightly-etl
 trigger:
-  cron: "0 2 * * *"
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
 steps:
   - name: extract
     image: my-registry.internal/etl-extract:1.4.2
@@ -130,9 +132,9 @@ caesium job apply --path nightly-etl.job.yaml
 For a resilient 3-node cluster — still with no external dependencies — copy the binary to three hosts and configure them to form a RAFT cluster via environment variables:
 
 ```bash
-# On each node, set the peer list
+# On each node, set this node's own address and the full peer list
+export CAESIUM_NODE_ADDRESS="node1:9001"        # this node's dqlite listen address
 export CAESIUM_DATABASE_NODES="node1:9001,node2:9001,node3:9001"
-export CAESIUM_NODE_ID="node1"  # unique per node
 caesium server
 ```
 
