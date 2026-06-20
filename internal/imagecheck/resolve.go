@@ -30,8 +30,23 @@ var ErrDigestUnavailable = errors.New("imagecheck: image digest unavailable")
 type DigestFunc func(ctx context.Context, imageRef string) (string, error)
 
 type cachedDigest struct {
+	// digest is the resolved sha256:... value, or "" for a negative entry
+	// (resolution failed/unavailable). Negative entries are cached with a
+	// shorter TTL so a transiently unreachable registry is retried promptly
+	// without being hammered on every check.
 	digest    string
 	expiresAt time.Time
+}
+
+// negativeTTL bounds how long a failed resolution is remembered. It is capped
+// well below the positive TTL so a registry blip or a freshly pushed tag is
+// re-checked soon, while still absorbing a burst of lookups for the same image.
+func (r *Resolver) negativeTTL() time.Duration {
+	const cap = time.Minute
+	if r.ttl < cap {
+		return r.ttl
+	}
+	return cap
 }
 
 // Resolver resolves image tags to content digests and caches the mapping with a
@@ -82,12 +97,19 @@ func WithClock(now func() time.Time) ResolverOption {
 }
 
 // NewResolver builds a Resolver with the given tag->digest cache TTL. By
-// default the Docker engine resolves via the local Docker daemon (inspecting
-// RepoDigests, pulling the image if it is not already present so the digest is
-// available). Private-registry auth flows through the daemon's existing
-// credential store exactly as the normal pull path does — no new credential
-// configuration is introduced. Podman and Kubernetes have no pre-run digest
-// source wired here yet, so they fall back to the literal tag.
+// default the Docker engine resolves via the local Docker daemon: it inspects
+// the image (using its content config digest / RepoDigests) and, only if the
+// image is not already present locally, pulls it first so a digest is
+// available.
+//
+// Registry auth limitation: the pull-if-absent path uses an anonymous pull
+// (no RegistryAuth is sent), so digest resolution for an image that must be
+// pulled from a *private* registry will fail and the step falls back to the
+// literal tag — which is always safe (a cache miss is never a stale hit).
+// Images already present locally (the steady-state case, and any image the
+// runtime already pulled) resolve without auth. Wiring RegistryAuth from the
+// secret providers is a tracked follow-up. Podman and Kubernetes have no
+// pre-run digest source wired here yet, so they also fall back to the tag.
 func NewResolver(ttl time.Duration, opts ...ResolverOption) *Resolver {
 	if ttl <= 0 {
 		ttl = 5 * time.Minute
@@ -130,12 +152,20 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 	if entry, ok := r.entries[key]; ok && r.now().Before(entry.expiresAt) {
 		digest := entry.digest
 		r.mu.Unlock()
+		// A cached entry with an empty digest is a remembered failure: fall
+		// back to the tag without re-hitting the backend (negative caching).
+		if digest == "" {
+			return "", ErrDigestUnavailable
+		}
 		return digest, nil
 	}
 	fn := r.byEngine[engine]
 	r.mu.Unlock()
 
 	if fn == nil {
+		// No backend for this engine is a stable condition (e.g. k8s/podman),
+		// so cache it negatively to avoid re-evaluating on every check.
+		r.cacheNegative(key)
 		return "", ErrDigestUnavailable
 	}
 
@@ -143,12 +173,14 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 	if err != nil {
 		log.Warn("image digest resolution failed; falling back to tag",
 			"engine", engine, "image", imageRef, "error", err)
+		r.cacheNegative(key)
 		return "", ErrDigestUnavailable
 	}
 	digest = strings.TrimSpace(digest)
 	if !strings.HasPrefix(digest, "sha256:") {
 		log.Warn("image digest resolution returned a non-sha256 value; falling back to tag",
 			"engine", engine, "image", imageRef, "digest", digest)
+		r.cacheNegative(key)
 		return "", ErrDigestUnavailable
 	}
 
@@ -159,15 +191,42 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 	return digest, nil
 }
 
+// cacheNegative remembers a failed/unavailable resolution for a bounded window
+// so an unreachable registry (or an unsupported engine) is not re-probed and
+// the logs are not flooded on every task check.
+func (r *Resolver) cacheNegative(key string) {
+	r.mu.Lock()
+	r.entries[key] = cachedDigest{digest: "", expiresAt: r.now().Add(r.negativeTTL())}
+	r.mu.Unlock()
+}
+
+var (
+	dockerCli     *client.Client
+	dockerCliOnce sync.Once
+	dockerCliErr  error
+)
+
+// getDockerClient returns a process-wide shared Docker client, created lazily.
+// The Docker client is thread-safe and intended to be long-lived, so a single
+// instance is reused across all digest resolutions rather than re-dialed (and
+// re-FD'd) per call. It is intentionally never Closed — it lives for the
+// process.
+func getDockerClient() (*client.Client, error) {
+	dockerCliOnce.Do(func() {
+		dockerCli, dockerCliErr = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	})
+	return dockerCli, dockerCliErr
+}
+
 // dockerDigestFunc resolves a digest via the local Docker daemon. It inspects
-// the image, pulling it first if it is not already present so RepoDigests are
-// populated (a freshly built/untagged local image may have none).
+// the image first; if the image is already present (the common case) no network
+// I/O happens. Only when the image is absent does it pull it (anonymously —
+// see the NewResolver doc for the private-registry caveat) and re-inspect.
 func dockerDigestFunc(ctx context.Context, imageRef string) (string, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	cli, err := getDockerClient()
 	if err != nil {
 		return "", fmt.Errorf("docker client: %w", err)
 	}
-	defer func() { _ = cli.Close() }()
 
 	digest, err := dockerInspectDigest(ctx, cli, imageRef)
 	if err == nil && digest != "" {
@@ -188,17 +247,29 @@ func dockerDigestFunc(ctx context.Context, imageRef string) (string, error) {
 		return "", err
 	}
 	if digest == "" {
-		return "", fmt.Errorf("docker: no RepoDigest for %s after pull", imageRef)
+		return "", fmt.Errorf("docker: no digest for %s after pull", imageRef)
 	}
 	return digest, nil
 }
 
+// dockerInspectDigest returns a content-addressed digest for an image. It
+// prefers a RepoDigest (the registry manifest digest, stable across hosts), and
+// falls back to the image's own config digest (inspect.ID) when there are no
+// RepoDigests — which is the case for locally built or never-pushed images.
+// Using the config digest there gives a valid, content-addressed cache key and
+// avoids a doomed registry pull for an image that exists only locally.
 func dockerInspectDigest(ctx context.Context, cli client.ImageAPIClient, imageRef string) (string, error) {
 	inspect, err := cli.ImageInspect(ctx, imageRef)
 	if err != nil {
 		return "", err
 	}
-	return repoDigest(imageRef, inspect.RepoDigests), nil
+	if digest := repoDigest(imageRef, inspect.RepoDigests); digest != "" {
+		return digest, nil
+	}
+	if strings.HasPrefix(inspect.ID, "sha256:") {
+		return inspect.ID, nil
+	}
+	return "", nil
 }
 
 func dockerPull(ctx context.Context, cli client.ImageAPIClient, imageRef string) error {
