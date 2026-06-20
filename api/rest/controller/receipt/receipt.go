@@ -21,6 +21,14 @@ import (
 // honest: if any task ran on an unpinned, mutable image tag, the receipt cannot
 // attest reproducibility and says so.
 func Get(c *echo.Context) error {
+	// Parse and validate BOTH path params up-front. The job ID must be a valid
+	// UUID so the ownership cross-check below cannot be silently bypassed by a
+	// malformed `id` (a non-UUID would otherwise skip the check and leak the
+	// receipt for any run_id under any path).
+	jobID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
 	runID, err := uuid.Parse(c.Param("run_id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
@@ -38,7 +46,7 @@ func Get(c *echo.Context) error {
 
 	// Cross-check the run belongs to the job in the path so the route is not a
 	// way to read receipts for arbitrary runs under any job ID.
-	if jobID, perr := uuid.Parse(c.Param("id")); perr == nil && r.JobID != jobID {
+	if r.JobID != jobID {
 		return echo.ErrNotFound
 	}
 
@@ -54,6 +62,12 @@ func Get(c *echo.Context) error {
 // tasks were not digest-pinned is reported as degraded and never as a clean
 // match.
 func Verify(c *echo.Context) error {
+	// Parse and validate BOTH path params up-front (see Get) so the ownership
+	// cross-check below cannot be bypassed by a malformed `id`.
+	jobID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+	}
 	runID, err := uuid.Parse(c.Param("run_id"))
 	if err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
@@ -79,8 +93,7 @@ func Verify(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	if jobID, perr := uuid.Parse(c.Param("id")); perr == nil &&
-		result.Rederived != nil && result.Rederived.JobID != jobID {
+	if result.Rederived != nil && result.Rederived.JobID != jobID {
 		return echo.ErrNotFound
 	}
 

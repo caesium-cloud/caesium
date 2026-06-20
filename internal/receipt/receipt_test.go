@@ -322,6 +322,86 @@ func (s *ReceiptSuite) TestBuildRunNotFound() {
 	s.ErrorIs(err, ErrRunNotFound)
 }
 
+// TestRetryUsesTerminalAttempt: when a task was retried (multiple TaskRun rows
+// for one TaskID), the receipt attests the terminal (highest-Attempt) attempt
+// and never emits a duplicate task entry that would corrupt the Merkle digest.
+func (s *ReceiptSuite) TestRetryUsesTerminalAttempt() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", []taskSpec{
+		{name: "extract", image: "alpine:3.23", hash: "attempt-1", digest: "sha256:old", pinRequested: true},
+	})
+
+	// Find the run's task and add a second, terminal attempt with a different
+	// identity (the retry that actually decided the outcome).
+	var tr models.TaskRun
+	s.Require().NoError(s.db.Where("job_run_id = ?", runID).First(&tr).Error)
+
+	now := time.Now()
+	s.Require().NoError(s.db.Create(&models.TaskRun{
+		ID:                  uuid.New(),
+		JobRunID:            runID,
+		TaskID:              tr.TaskID,
+		AtomID:              uuid.New(),
+		Engine:              models.AtomEngineDocker,
+		Image:               "alpine:3.23",
+		Command:             "[]",
+		Status:              "succeeded",
+		Attempt:             2,
+		Hash:                "attempt-2",
+		ResolvedImageDigest: "sha256:new",
+		CachePinDigests:     true,
+		CreatedAt:           now,
+		UpdatedAt:           now.Add(time.Second),
+	}).Error)
+
+	r, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+
+	// Exactly one entry for the task, and it is the terminal attempt.
+	s.Require().Len(r.Tasks, 1, "duplicate attempts must collapse to one entry")
+	s.Equal("extract", r.Tasks[0].TaskName)
+	s.Equal("attempt-2", r.Tasks[0].IdentityHash)
+	s.Equal("sha256:new", r.Tasks[0].ResolvedImageDigest)
+
+	// And the digest must be deterministic regardless of which attempt row the
+	// database returns first: rebuild and compare.
+	r2, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+	s.Equal(r.ReceiptDigest, r2.ReceiptDigest)
+}
+
+// TestSoftDeletedJobProvenancePreserved: a receipt is a record of the past, so
+// soft-deleting the job afterward must NOT strip the git provenance the run
+// executed under (requires Unscoped() on the job load).
+func (s *ReceiptSuite) TestSoftDeletedJobProvenancePreserved() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", pinnedSpecs())
+
+	// Soft-delete the job (sets deleted_at; default scope would now hide it).
+	s.Require().NoError(s.db.Where("alias = ?", "etl").Delete(&models.Job{}).Error)
+
+	r, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+	s.Equal("commit-1", r.GitCommit, "soft-deleted job must still yield its provenance")
+	s.Equal("etl", r.JobAlias)
+}
+
+// TestSoftDeletedTaskNamePreserved: a task soft-deleted after the run still
+// resolves its human name in the receipt rather than falling back to the UUID
+// (requires Unscoped() on the task-name load).
+func (s *ReceiptSuite) TestSoftDeletedTaskNamePreserved() {
+	runID := s.seedRun("etl", "commit-1", "manifest-1", []taskSpec{
+		{name: "extract", image: "alpine:3.23", hash: "h1", digest: "sha256:a", pinRequested: true},
+	})
+
+	var tr models.TaskRun
+	s.Require().NoError(s.db.Where("job_run_id = ?", runID).First(&tr).Error)
+	s.Require().NoError(s.db.Where("id = ?", tr.TaskID).Delete(&models.Task{}).Error)
+
+	r, err := Build(s.ctx, s.db, runID)
+	s.Require().NoError(err)
+	s.Require().Len(r.Tasks, 1)
+	s.Equal("extract", r.Tasks[0].TaskName, "soft-deleted task must still resolve its name")
+}
+
 // --- helpers ---
 
 func (s *ReceiptSuite) indexOf(r *Receipt, name string) int {

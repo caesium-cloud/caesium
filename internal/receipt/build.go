@@ -41,12 +41,16 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 		return nil, fmt.Errorf("receipt: load run: %w", err)
 	}
 
-	// Load the job for git provenance. A soft-deleted job still carries the
-	// provenance the run executed under, so this is best-effort: a missing job
-	// (hard-deleted) leaves GitCommit empty rather than failing the build.
+	// Load the job for git provenance. A receipt is a record of the PAST: it
+	// must reflect the provenance the run actually executed under, even if the
+	// job definition was soft-deleted afterward. GORM's default scope hides
+	// soft-deleted rows, so Unscoped() is required — otherwise deleting a job
+	// would silently strip the git provenance from receipts of its historical
+	// runs. Best-effort: a hard-deleted job leaves GitCommit empty rather than
+	// failing the build.
 	var job models.Job
 	gitCommit := ""
-	if err := conn.Where("id = ?", run.JobID).First(&job).Error; err == nil {
+	if err := conn.Unscoped().Where("id = ?", run.JobID).First(&job).Error; err == nil {
 		gitCommit = job.ProvenanceCommit
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("receipt: load job: %w", err)
@@ -58,6 +62,14 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 	if err := conn.Where("job_run_id = ?", runID).Find(&taskRuns).Error; err != nil {
 		return nil, fmt.Errorf("receipt: load task runs: %w", err)
 	}
+
+	// Retries produce multiple TaskRun rows for the same TaskID (one per
+	// attempt). Collapse to the terminal attempt per task so the receipt attests
+	// what each task FINALLY ran as — and so duplicate TaskName entries can never
+	// corrupt the (order-sensitive) Merkle aggregation. Without this, two equal
+	// task names would both fold into the digest and `caesium why`/verify drift
+	// detection would key on an arbitrary attempt.
+	taskRuns = terminalAttempts(taskRuns)
 
 	// Resolve task names. TaskRun carries only TaskID; the human-meaningful
 	// name lives on Task. Build the name map in one query rather than N.
@@ -97,6 +109,47 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 	return receipt, nil
 }
 
+// terminalAttempts collapses multiple TaskRun rows that share a TaskID (the
+// retry case) to the single terminal attempt per task, preserving input order
+// of the first time each TaskID is seen so the result is deterministic. The
+// terminal attempt is the highest Attempt; ties (which should not occur) break
+// on the later UpdatedAt, then the lexicographically larger row ID, so the
+// choice is fully determined and never depends on database row order.
+func terminalAttempts(taskRuns []models.TaskRun) []models.TaskRun {
+	if len(taskRuns) <= 1 {
+		return taskRuns
+	}
+
+	bestIdx := make(map[uuid.UUID]int, len(taskRuns)) // TaskID -> index into out
+	out := make([]models.TaskRun, 0, len(taskRuns))
+
+	for i := range taskRuns {
+		tr := taskRuns[i]
+		if idx, ok := bestIdx[tr.TaskID]; ok {
+			if isLaterAttempt(tr, out[idx]) {
+				out[idx] = tr
+			}
+			continue
+		}
+		bestIdx[tr.TaskID] = len(out)
+		out = append(out, tr)
+	}
+	return out
+}
+
+// isLaterAttempt reports whether candidate should replace incumbent as the
+// terminal attempt for a task. Ordering: higher Attempt wins; then later
+// UpdatedAt; then the larger row ID as a final deterministic tiebreaker.
+func isLaterAttempt(candidate, incumbent models.TaskRun) bool {
+	if candidate.Attempt != incumbent.Attempt {
+		return candidate.Attempt > incumbent.Attempt
+	}
+	if !candidate.UpdatedAt.Equal(incumbent.UpdatedAt) {
+		return candidate.UpdatedAt.After(incumbent.UpdatedAt)
+	}
+	return candidate.ID.String() > incumbent.ID.String()
+}
+
 // taskNames returns a TaskID -> name map for the given task runs in a single
 // query. An empty input yields an empty map.
 func taskNames(conn *gorm.DB, taskRuns []models.TaskRun) (map[uuid.UUID]string, error) {
@@ -116,8 +169,11 @@ func taskNames(conn *gorm.DB, taskRuns []models.TaskRun) (map[uuid.UUID]string, 
 		ids = append(ids, id)
 	}
 
+	// Unscoped() so a task soft-deleted after the run still resolves its
+	// human-meaningful name in the receipt (a record of the past), rather than
+	// falling back to the raw Task ID UUID.
 	var tasks []models.Task
-	if err := conn.Where("id IN ?", ids).Find(&tasks).Error; err != nil {
+	if err := conn.Unscoped().Where("id IN ?", ids).Find(&tasks).Error; err != nil {
 		return nil, fmt.Errorf("receipt: load task names: %w", err)
 	}
 	for i := range tasks {
