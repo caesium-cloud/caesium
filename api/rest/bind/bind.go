@@ -20,6 +20,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/system"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
+	whyctrl "github.com/caesium-cloud/caesium/api/rest/controller/why"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -72,6 +73,8 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id/runs", run.List)
 		g.GET("/jobs/:id/runs/:run_id", run.Get)
 		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
+		// causal explainer (data-plane-memory A3): why a task ran/hit cache/re-ran
+		g.GET("/jobs/:id/runs/:run_id/why", whyctrl.Get)
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/runs/:run_id/retry", run.Retry)
 		g.POST("/jobs/:id/run", run.Post)

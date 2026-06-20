@@ -170,7 +170,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `internal/dispatch/`, `internal/worker/` (distributed propagation).
       Depends on: A1.
       Done (W2-α): `HashInput.CanonicalJSON()` serializes a versioned, secret-redacted, field-by-field blob (env values redacted to a `sha256:` digest, `secret://` references kept verbatim; bounded at 64 KB with a graceful oversized-marker fallback). Nullable `hash_input_blob` JSON column added to `TaskRun` and `TaskCache` (additive AutoMigrate). `SetTaskHashWithBlob` writes it alongside the hash on the existing write-path (`SetTaskHashWithDigest` retained as a shim). Threaded through `cache.Entry` → `TaskCache`. Wired into both hash sites — `internal/job/job.go` (local/scheduler) and `internal/worker/runtime_executor.go` (distributed): the worker rebuilds the identical `HashInput` from the scheduler-propagated `TaskRun` + predecessor data, so no new dispatch-time field was needed.
-- [ ] A3. Add `caesium why <run> --task <t>`: a read-side, field-by-field diff of
+- [x] A3. Add `caesium why <run> --task <t>`: a read-side, field-by-field diff of
       two stored `HashInput` blobs ("CACHE MISS — predecessor `extract.row_count`
       changed 1.2M→1.4M; image, command, env identical"), joined to the
       `ExecutionEvent` store for trigger-side causation, emitting machine-readable
@@ -180,6 +180,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `api/rest/controller/why/` + `api/rest/service/why/` + route in `api/rest/bind/bind.go`,
       `internal/run/` (read-side diff), harness assertion support.
       Depends on: A2.
+      Done (W3-α): `GET /v1/jobs/:id/runs/:run_id/why?task=<name-or-id>` + `caesium why <run-id> --task <t> --job-id <id> [--json]`. `internal/run/whydiff.go` decodes two canonical `HashInput` blobs (A2) and emits a sorted, field-by-field `BlobDiff` — scalars (image/digest/command/workdir/cacheVersion), per-key env (literal values stay redacted to their `sha256:` digest, `secret://` refs shown verbatim), per-step predecessor outputs (the headline data-contract diff, shown verbatim), run params, predecessor-hash set, and structural mounts/volumes/k8s (canonical-JSON equality). `internal/run/why.go` classifies the verdict (CACHE_HIT/MISS/DISABLED), picks the baseline (cache-origin task-run/entry for a hit; most-recent earlier run of the same task for a miss), joins the `run_started` `ExecutionEvent` for trigger/param causation, and renders a one-line summary. Degrades gracefully on missing/oversized/version-mismatched blobs. Unit tests cover the diff + verdict/summary logic.
 - [ ] A4. Add the reproducibility receipt + `caesium verify`: a content-addressed,
       git-committable Merkle receipt = hash(sorted per-task identity hashes +
       resolved image digests + manifest content hash + git commit); `verify`
