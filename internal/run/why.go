@@ -139,7 +139,7 @@ func (s *Store) WhyTask(ctx context.Context, runID uuid.UUID, taskRef string) (*
 
 	exp.Trigger = s.loadTrigger(ctx, &jobRun)
 
-	baselineBlob, baseline, err := s.resolveBaseline(ctx, taskRun, jobRun.JobID)
+	baselineBlob, baseline, err := s.resolveBaseline(ctx, taskRun, jobRun.JobID, jobRun.StartedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -266,23 +266,33 @@ func (s *Store) loadTrigger(ctx context.Context, jobRun *models.JobRun) WhyTrigg
 //     hash) if the origin task-run row is gone.
 //   - Cache MISS / OFF: the most-recent earlier run of the same task that has a
 //     persisted blob, so the diff names what changed and forced the re-run.
-func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jobID uuid.UUID) ([]byte, WhyBaseline, error) {
+// subjectStartedAt is the subject run's start time (already loaded by the
+// caller); the prior-run lookup uses it to consider only strictly-earlier runs,
+// avoiding a redundant re-query.
+func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jobID uuid.UUID, subjectStartedAt time.Time) ([]byte, WhyBaseline, error) {
 	db := s.db.WithContext(ctx)
 
-	if TaskStatus(subject.Status) == TaskStatusCached && subject.CacheOriginRunID != nil {
-		var origin models.TaskRun
-		err := db.Where("job_run_id = ? AND task_id = ?", *subject.CacheOriginRunID, subject.TaskID).
-			First(&origin).Error
-		if err == nil {
-			b := WhyBaseline{Kind: "cache_origin", RunID: subject.CacheOriginRunID, TaskRunID: &origin.ID}
-			if originStart := origin.StartedAt; originStart != nil {
-				b.StartedAt = originStart
+	// A cached task is always a cache hit, regardless of whether
+	// CacheOriginRunID is populated: try the named origin task-run first, then
+	// fall back to the live cache entry keyed by the subject's hash. (A nil
+	// CacheOriginRunID must not fall through to the MISS path — that would
+	// mislabel a hit as a re-run.)
+	if TaskStatus(subject.Status) == TaskStatusCached {
+		if subject.CacheOriginRunID != nil {
+			var origin models.TaskRun
+			err := db.Where("job_run_id = ? AND task_id = ?", *subject.CacheOriginRunID, subject.TaskID).
+				First(&origin).Error
+			if err == nil {
+				b := WhyBaseline{Kind: "cache_origin", RunID: subject.CacheOriginRunID, TaskRunID: &origin.ID}
+				if originStart := origin.StartedAt; originStart != nil {
+					b.StartedAt = originStart
+				}
+				if len(origin.HashInputBlob) > 0 {
+					return origin.HashInputBlob, b, nil
+				}
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, WhyBaseline{}, err
 			}
-			if len(origin.HashInputBlob) > 0 {
-				return origin.HashInputBlob, b, nil
-			}
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, WhyBaseline{}, err
 		}
 
 		// Fall back to the live cache entry keyed by the subject's hash.
@@ -308,7 +318,7 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 	err := db.
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Where("task_runs.task_id = ? AND job_runs.job_id = ? AND task_runs.job_run_id <> ? AND job_runs.started_at < ? AND task_runs.hash_input_blob IS NOT NULL",
-			subject.TaskID, jobID, subject.JobRunID, subjectRunStart(ctx, db, subject)).
+			subject.TaskID, jobID, subject.JobRunID, subjectStartedAt).
 		Order("job_runs.started_at DESC").
 		First(&prior).Error
 	if err != nil {
@@ -323,17 +333,6 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 		b.StartedAt = prior.StartedAt
 	}
 	return prior.HashInputBlob, b, nil
-}
-
-// subjectRunStart returns the subject run's start time so the prior-run lookup
-// only considers strictly-earlier runs. On any error it returns the current time
-// (a permissive upper bound), preserving the "earlier run" intent.
-func subjectRunStart(ctx context.Context, db *gorm.DB, subject *models.TaskRun) time.Time {
-	var jr models.JobRun
-	if err := db.Select("started_at").First(&jr, "id = ?", subject.JobRunID).Error; err == nil {
-		return jr.StartedAt
-	}
-	return time.Now().UTC()
 }
 
 // summarize renders the one-line human-readable verdict from the structured
@@ -362,13 +361,17 @@ func summarizeChanged(exp *WhyExplanation, verdict, ranVerb string) string {
 	if exp.Diff == nil {
 		return fmt.Sprintf("%s — task %q %s", verdict, exp.TaskName, ranVerb)
 	}
+	// No comparison run at all is the "first run" case — report that rather than
+	// the generic degraded-blob message (the diff degrades because the baseline
+	// blob is absent, but the *reason* it is absent is that there is nothing to
+	// compare against, which is the more useful thing to say).
+	if exp.Baseline.Kind == "none" {
+		return fmt.Sprintf("%s — task %q %s; no prior run to compare against (first run of this task)", verdict, exp.TaskName, ranVerb)
+	}
 	if exp.Diff.Degraded != "" {
 		return fmt.Sprintf("%s — task %q %s; %s", verdict, exp.TaskName, ranVerb, exp.Diff.Degraded)
 	}
 	if len(exp.Diff.Changes) == 0 {
-		if exp.Baseline.Kind == "none" {
-			return fmt.Sprintf("%s — task %q %s; no prior run to compare against (first run of this task)", verdict, exp.TaskName, ranVerb)
-		}
 		return fmt.Sprintf("%s — task %q %s; no input field differs from the prior run (cause is outside the persisted hash inputs, e.g. an expired/pruned cache entry)", verdict, exp.TaskName, ranVerb)
 	}
 
