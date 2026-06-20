@@ -28,7 +28,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |
 | `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |
 | `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
-| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true` or `{ttl: "24h"}`. |
+| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true`, `{ttl: "24h"}`, or `{pinDigests: true}`. Step-level `cache` overrides these defaults. |
 | `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |
 | `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |
 | `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |
@@ -102,7 +102,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
-| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, or `{ttl: "12h", version: 2}`. |
+| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}`. |
 
 ### Cache
 
@@ -110,7 +110,9 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 |-------|------|----------|-------|
 | `ttl` | duration string | optional | Cache entry lifetime (e.g. "24h", "7d"). Defaults to CAESIUM_CACHE_TTL. |
 | `version` | integer | optional | Bump to invalidate existing cache entries without changing task definition. |
+| `pinDigests` | boolean | optional | Resolve each step's image tag to its content digest (`sha256:…`) and fold the digest, not the mutable tag, into the cache key. A tag that moves to new content (e.g. a re-pushed `:latest`) then produces a cache **miss** instead of serving a stale hit. Defaults to `CAESIUM_CACHE_PIN_DIGESTS`. Set at job (`metadata.cache`) or step level; a step value overrides the job default. Resolution is opt-in because it costs a registry round-trip on first sight; the resolved tag→digest mapping is cached for `CAESIUM_CACHE_DIGEST_TTL` so steady-state runs pay no network cost. |
 
 ## Secret References
 
 Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.
+

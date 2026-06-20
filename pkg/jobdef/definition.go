@@ -1114,12 +1114,20 @@ type CacheConfig struct {
 	Enabled bool
 	TTL     time.Duration
 	Version int
+	// PinDigests resolves each step's image tag to its content digest and folds
+	// the digest (not the mutable tag) into the cache key, so a moving :latest
+	// produces a cache miss rather than a stale hit.
+	PinDigests bool
 }
 
 // ResolveCacheConfig resolves the cache configuration for a step,
 // considering step-level config, job-level defaults, and environment settings.
-func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration) CacheConfig {
-	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL}
+//
+// envPinDigests is the global CAESIUM_CACHE_PIN_DIGESTS default; a job- or
+// step-level cache.pinDigests entry overrides it. Resolution is layered
+// env -> job -> step so the most specific declaration wins for each field.
+func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration, envPinDigests bool) CacheConfig {
+	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL, PinDigests: envPinDigests}
 
 	// Apply job-level defaults
 	applyCache(&cfg, metaCache)
@@ -1148,6 +1156,13 @@ func applyCache(cfg *CacheConfig, raw interface{}) {
 				cfg.Version = n
 			case float64:
 				cfg.Version = int(n)
+			}
+		}
+		// pinDigests is only overridden when explicitly present at this level,
+		// so a job-level default flows through to steps that omit it.
+		if pin, ok := v["pinDigests"]; ok {
+			if b, ok := pin.(bool); ok {
+				cfg.PinDigests = b
 			}
 		}
 	}

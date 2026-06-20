@@ -101,7 +101,7 @@ path (a true-conflict surface), and because correctness-first order makes this
 the P0 gate that REPRODUCE and SKIP depend on. This stream turns the cache key
 from a tamper-prone opaque digest into a tamper-evident, explainable record.
 
-- [ ] A1. Resolve image tags to content digests and fold the **digest** (not the
+- [x] A1. Resolve image tags to content digests and fold the **digest** (not the
       tag) into the task-identity hash; opt-in per job via `cache.pinDigests`,
       with a short-TTL tag→digest cache so steady-state runs pay no network
       cost. A moving `:latest` must produce a cache miss.
@@ -111,6 +111,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `pkg/env/env.go` (`CAESIUM_CACHE_PIN_DIGESTS` default),
       `docs/caesium-job-llm-reference.md` + `docs/job-schema-reference.md`,
       new `test/dataplane_test.go` harness scenario asserting `cacheHit: false` on a re-pushed tag.
+      Done (W1-α): added `HashInput.ResolvedImageDigest` (empty preserves the legacy tag-only hash); `imagecheck.Resolver` with a TTL tag→digest cache (Docker via `ImageInspect` RepoDigests + pull-if-absent, Podman/k8s fall back to the tag); `cache.pinDigests` threaded through `ResolveCacheConfig` + `CAESIUM_CACHE_PIN_DIGESTS`/`CAESIUM_CACHE_DIGEST_TTL`; nullable `resolved_image_digest` recorded on `TaskRun` + `TaskCache`; `test/dataplane_test.go` asserts a moved tag misses and a stable tag still hits.
 - [ ] A2. Persist the decomposed `HashInput` as a canonical, secret-redacted JSON
       blob on `TaskRun` and the cache `Entry`, written on the existing hash
       write-path, gated on cache being enabled and bounded/pruned with the cache

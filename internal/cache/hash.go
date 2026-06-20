@@ -14,9 +14,16 @@ import (
 
 // HashInput contains all fields that contribute to a task's identity hash.
 type HashInput struct {
-	JobAlias             string
-	TaskName             string
-	Image                string
+	JobAlias string
+	TaskName string
+	Image    string
+	// ResolvedImageDigest is the content digest (sha256:...) the Image tag
+	// resolved to when digest pinning is enabled. It is empty when pinning is
+	// off, in which case the hash is byte-identical to the pre-pinning era and
+	// only the mutable tag contributes. When set, the digest is folded into the
+	// key in addition to the tag, so a tag that moves to a new digest yields a
+	// different hash — a cache miss, never a stale hit.
+	ResolvedImageDigest  string
 	Command              []string
 	Env                  map[string]string
 	WorkDir              string
@@ -36,6 +43,14 @@ func (h HashInput) Compute() string {
 	w(digest, "job_alias:%s\n", h.JobAlias)
 	w(digest, "task_name:%s\n", h.TaskName)
 	w(digest, "image:%s\n", h.Image)
+	// When digest pinning is on, the resolved content digest is folded in
+	// alongside the tag. Empty means pinning off; the line is omitted so the
+	// hash stays byte-identical to the literal-tag behavior, preserving
+	// existing cache entries. A non-empty digest that changes (a moving tag)
+	// changes the key, forcing a cache miss instead of a stale hit.
+	if h.ResolvedImageDigest != "" {
+		w(digest, "image_digest:%s\n", h.ResolvedImageDigest)
+	}
 	w(digest, "command:%s\n", strings.Join(h.Command, "\x00"))
 
 	// Sorted env vars

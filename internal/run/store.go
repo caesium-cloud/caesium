@@ -279,6 +279,21 @@ func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
 		Update("hash", hash).Error
 }
 
+// SetTaskHashWithDigest persists the task identity hash together with the
+// resolved image digest that was folded into it. The digest may be empty when
+// pinning is off or resolution failed; in that case only the hash is written
+// and the existing digest column (if any) is left untouched, keeping the row
+// consistent with the literal-tag cache key.
+func (s *Store) SetTaskHashWithDigest(runID, taskID uuid.UUID, hash, resolvedImageDigest string) error {
+	updates := map[string]any{"hash": hash}
+	if resolvedImageDigest != "" {
+		updates["resolved_image_digest"] = resolvedImageDigest
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Updates(updates).Error
+}
+
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
@@ -572,6 +587,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					jobCacheConfig,
 					envCache.Enabled,
 					envCache.TTL,
+					envCache.PinDigests,
 				)
 
 				records = append(records, models.TaskRun{
@@ -590,6 +606,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					CacheEnabled:            resolvedCache.Enabled,
 					CacheTTL:                resolvedCache.TTL,
 					CacheVersion:            resolvedCache.Version,
+					CachePinDigests:         resolvedCache.PinDigests,
 					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
 					SchemaValidation:        schemaValidation,
 				})
