@@ -18,6 +18,7 @@ This directory separates current-source operator documentation from forward-look
 
 ## Strategy & Roadmap
 
+- [differentiation-strategy.md](differentiation-strategy.md): Positioning thesis — the sovereignty-led funnel, why Caesium wins by constraint not comparison, and the kill-conditions that test it.
 - [roadmap.md](roadmap.md): Strategic vision, design principles, and the prioritized feature plan.
 
 ## Active Design Records
@@ -32,6 +33,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 - [design-incremental-execution.md](design-incremental-execution.md): Smart incremental execution and task caching (Phase 1 shipped; follow-on phases planned).
 - [design-sla-management.md](design-sla-management.md): SLA deadline tracking, predictive completion estimates, and escalation chains (proposed).
 - [design-task-templates.md](design-task-templates.md): Reusable, parameterized step templates (proposed).
+- [design-data-plane-memory.md](design-data-plane-memory.md): The second-act substrate (digest pinning, decomposed-hash persistence, DAG versioning, lineage datasets, large-object passing) that makes the data-plane queryable — explain/reproduce/skip (proposed).
 
 ## Load Testing
 
