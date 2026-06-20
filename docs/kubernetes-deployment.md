@@ -186,6 +186,49 @@ The full field shape is in
 - For backup/restore, snapshot or back up the PVCs using your storage platform tooling.
 - If `persistence.enabled=false`, all data is ephemeral and lost on pod restart/recreation.
 
+## Air-Gapped Deployment Notes
+
+Caesium itself has **no external runtime dependencies** — the binary embeds dqlite and requires no outbound network access to operate. The considerations for an air-gapped Kubernetes deployment are specific to the cluster runtime and image availability, not to Caesium itself.
+
+### Pre-loading images
+
+In an air-gapped cluster, images must be available to the cluster runtime before jobs run. The two common approaches:
+
+**Option 1: Internal container registry.** Mirror the images your jobs need into a registry reachable from within the cluster (e.g. Harbor, Artifactory, a private ECR endpoint). Update job definitions to reference the internal registry:
+
+```yaml
+steps:
+  - name: extract
+    image: registry.internal/my-team/etl-extract:1.4.2
+```
+
+**Option 2: Pre-load directly into the node runtime.** For small clusters or edge nodes, load images directly into containerd or CRI-O using `ctr images import` or `crictl`:
+
+```bash
+# Save image on a connected host
+docker save my-etl-extract:1.4.2 | gzip > etl-extract.tar.gz
+
+# Transfer to each node (e.g. via scp or USB)
+scp etl-extract.tar.gz user@k8s-node:/tmp/
+
+# Import into containerd on the node
+ssh user@k8s-node "ctr -n=k8s.io images import /tmp/etl-extract.tar.gz"
+```
+
+The Caesium Kubernetes engine sets `imagePullPolicy: IfNotPresent` on every pod it creates (`internal/atom/kubernetes/engine.go`). This means if the image is already present on the node (pre-loaded via one of the options above), the kubelet will not attempt a registry pull. No job-definition field is needed — pre-loading the image onto the node is sufficient.
+
+### No Caesium control plane egress
+
+Once installed, the Caesium server pod does not make outbound network calls. It does not phone home, emit telemetry, or contact a license server. The Helm chart installs cleanly in a cluster with egress blocked at the network policy level.
+
+### Image digest pinning for regulated environments
+
+In air-gapped or regulated deployments where reproducibility must be auditable, enable digest pinning so cache keys are computed from content-addressed `sha256:` digests rather than mutable tags. This is tracked in the data-plane memory substrate — see [`cache.pinDigests` in `design-data-plane-memory.md`](design-data-plane-memory.md) for details and current build status. Do not duplicate that configuration here; cross-link instead.
+
+### Further reading
+
+For the full zero-dependency story and a non-Kubernetes quickstart, see [`sovereignty.md`](sovereignty.md).
+
 ## Troubleshooting
 
 Check release resources:

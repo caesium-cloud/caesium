@@ -57,7 +57,7 @@ owned by the sibling plan [`data-plane-memory.md`](data-plane-memory.md); where
 the two plans touch the same files, the sibling's Stream A owns
 `internal/cache/hash.go` and `pkg/jobdef/definition.go` (see Sequencing).
 
-## Progress (as of 2026-06-19)
+## Progress (as of 2026-06-20)
 
 ### Wave 0 — Reposition (this PR)
 
@@ -66,26 +66,38 @@ the two plans touch the same files, the sibling's Stream A owns
   Airflow/Dagster/Flyte can't", "free what they paywall") using search-term-aware
   copy. Iterate as positioning sharpens.
 
-### Wave 1 — Kueue delegation
+### Wave 1 — Proof-point docs + Kueue delegation (shipped) — PLAN COMPLETE
 
-- **Stream B**: B1 landed — steps declare `kueue: {queueName: "..."}` on the
+- **Stream A**: A2 landed (PR #223) — `docs/sovereignty.md` adds the free-vs-paywalled
+  comparison table (HA/RBAC/SSO/audit/k8s/lineage vs. Dagster+/Kestra
+  Enterprise/Prefect Cloud) and the zero-dependency / air-gapped quickstart
+  (`scp` one binary story, no Postgres). Index entry added to `docs/README.md`
+  (guardrail green). Air-gapped k8s notes subsection added to
+  `docs/kubernetes-deployment.md` with cross-link to `cache.pinDigests` in
+  `design-data-plane-memory.md` (not duplicated). Review: greptile found real
+  doc-accuracy bugs (invalid trigger YAML, non-existent `imagePullPolicy` field,
+  wrong env vars `CAESIUM_NODE_ID`/data-dir) — all fixed and verified against source.
+- **Stream B**: B1 landed (PR #224) — steps declare `kueue: {queueName: "..."}` on the
   kubernetes engine; the engine stamps the `kueue.x-k8s.io/queue-name` label on
   the pod and delegates admission to Kueue (Caesium never bin-packs). The queue
   is excluded from the cache identity hash (carried on `KubernetesSpec`, gated out
   of `Compute()` by `HasIdentityFields()`, stripped from the persisted blob by
   `hashableKubernetes()`); unit tests assert hash-equality with/without the queue.
   Schema docs, the schema-doc generator, the k8s-deployment guide, and a
-  `docs/examples-k8s/kueue-delegation.job.yaml` sample updated. `just lint` and
-  `just unit-test` green.
+  `docs/examples-k8s/kueue-delegation.job.yaml` sample updated. Review: gemini HIGH
+  (DNS-1123 queue-name validation) + greptile P2 (`omitempty`). Note: the k8s engine
+  creates a bare Pod (not a `batch/v1` Job), so the faithful "suspended" equivalent is
+  the queue-name label → Kueue's webhook gates the Pod via an admission scheduling gate.
 
-Leaf items remaining: **A2** (sovereignty proof-point docs).
+**🏁 All items shipped (A1, A2, B1). The sovereignty-execution plan is complete — a
+candidate for archive to `docs/exec-plans/completed/`.**
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Sovereignty positioning — reposition the public surface; proof-point docs | **P0** | A1 first pass landed; A2 not started |
-| B | Kueue delegation — emit `kueue.x-k8s.io/queue-name`, never bin-pack | P1 | B1 landed (Wave 1) |
+| A | Sovereignty positioning — reposition the public surface; proof-point docs | **P0** | **Complete** — A1 (#212) + A2 (#223) landed |
+| B | Kueue delegation — emit `kueue.x-k8s.io/queue-name`, never bin-pack | P1 | **Complete** — B1 (#224) landed |
 
 ## Streams
 
@@ -100,7 +112,7 @@ single binary). Sells by constraint; needs no benchmark or sales motion.
       "everything they paywall, free", in words a frustrated engineer searches
       for. (First pass landed in this PR; refine as positioning sharpens.)
       Files: `README.md`.
-- [ ] A2. Add sovereignty proof-point docs: a "free vs. paywalled" comparison
+- [x] A2. Add sovereignty proof-point docs: a "free vs. paywalled" comparison
       (HA/RBAC/SSO/audit/k8s vs. Dagster+/Kestra/Prefect Cloud) and a
       zero-dependency / air-gapped quickstart ("`scp` one binary, no Postgres").
       Files: new `docs/sovereignty.md` (or `docs/comparison.md`) **plus its index
