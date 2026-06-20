@@ -822,6 +822,11 @@ func (j *job) Run(ctx context.Context) error {
 		// pinning is on; empty otherwise. Reused when the result is cached so
 		// the cache Entry records which image content the hash covers.
 		var resolvedImageDigest string
+		// hashInputBlob is the canonical secret-redacted decomposition of the
+		// HashInput; declared here (like inputHash) so it survives into the
+		// success path where it is also written onto the cache Entry, letting a
+		// cache hit be explained as well as a re-run.
+		var hashInputBlob []byte
 		// Resolve cache config from step-level, job-level, then env defaults.
 		var stepCache interface{}
 		if taskModel != nil {
@@ -884,7 +889,17 @@ func (j *job) Run(ctx context.Context) error {
 				CacheVersion:         cacheCfg.Version,
 			}
 			inputHash = hashInput.Compute()
-			if err := store.SetTaskHashWithDigest(runID, taskID, inputHash, resolvedImageDigest); err != nil {
+			// Serialize the decomposed input to a canonical, secret-redacted
+			// blob so `caesium why` can later diff this run field-by-field. A
+			// serialization failure is non-fatal: persist the hash without the
+			// blob (a missing blob degrades `why` to digest-only, never wrong).
+			blob, blobErr := hashInput.CanonicalJSON(inputHash)
+			if blobErr != nil {
+				log.Warn("failed to serialize hash-input blob", "task", taskName, "error", blobErr)
+				blob = nil
+			}
+			hashInputBlob = blob
+			if err := store.SetTaskHashWithBlob(runID, taskID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
 				log.Warn("failed to persist task hash", "task", taskName, "error", err)
 			}
 
@@ -984,6 +999,7 @@ func (j *job) Run(ctx context.Context) error {
 						RunID:               runID,
 						TaskRunID:           taskID,
 						ResolvedImageDigest: resolvedImageDigest,
+						HashInputBlob:       hashInputBlob,
 						CreatedAt:           time.Now(),
 						ExpiresAt:           expiresAt,
 					}); putErr != nil {

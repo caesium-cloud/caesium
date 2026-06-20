@@ -1368,3 +1368,88 @@ func TestSkipPropagation_MultiLevel(t *testing.T) {
 	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runRecord.ID, tail.ID).First(&tailRunFinal).Error)
 	require.Equal(t, string(TaskStatusSkipped), tailRunFinal.Status)
 }
+
+// registerSingleTaskRun creates a job/atom/task and registers one TaskRun,
+// returning the run and task IDs for hash-write assertions.
+func registerSingleTaskRun(t *testing.T, store *Store, db *gorm.DB) (runID, taskID uuid.UUID) {
+	t.Helper()
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:      uuid.New(),
+		Engine:  models.AtomEngineDocker,
+		Image:   "alpine:3.23",
+		Command: `["echo","hi"]`,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	task := &models.Task{
+		ID:     uuid.New(),
+		JobID:  jobID,
+		AtomID: atom.ID,
+		Name:   "only",
+	}
+	require.NoError(t, db.Create(task).Error)
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+	return runRecord.ID, task.ID
+}
+
+// TestSetTaskHashWithBlobPersistsBlobAndDigest asserts the decomposed-input blob
+// and resolved digest are written onto the TaskRun row alongside the hash on the
+// existing write path, so a distributed worker and the local scheduler both
+// leave a queryable record for `caesium why`.
+func TestSetTaskHashWithBlobPersistsBlobAndDigest(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	runID, taskID := registerSingleTaskRun(t, store, db)
+
+	blob := datatypes.JSON(`{"blobVersion":1,"hash":"abc","image":"alpine:3.23"}`)
+	require.NoError(t, store.SetTaskHashWithBlob(runID, taskID, "abc", "sha256:deadbeef", blob))
+
+	var got models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&got).Error)
+	require.Equal(t, "abc", got.Hash)
+	require.Equal(t, "sha256:deadbeef", got.ResolvedImageDigest)
+	require.JSONEq(t, string(blob), string(got.HashInputBlob))
+}
+
+// TestSetTaskHashWithBlobNilBlobLeavesColumnNull asserts the nullable contract:
+// writing a hash with a nil blob (cache-off / serialization-failure path) leaves
+// the blob column unset rather than writing an empty value.
+func TestSetTaskHashWithBlobNilBlobLeavesColumnNull(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	runID, taskID := registerSingleTaskRun(t, store, db)
+
+	require.NoError(t, store.SetTaskHashWithBlob(runID, taskID, "h", "", nil))
+
+	var got models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&got).Error)
+	require.Equal(t, "h", got.Hash)
+	require.Empty(t, got.HashInputBlob)
+}
+
+// TestSetTaskHashWithDigestLeavesBlobNull asserts the back-compat shim
+// (SetTaskHashWithDigest) still writes hash + digest without touching the blob
+// column, so the A1 call sites keep behaving identically.
+func TestSetTaskHashWithDigestLeavesBlobNull(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	runID, taskID := registerSingleTaskRun(t, store, db)
+
+	require.NoError(t, store.SetTaskHashWithDigest(runID, taskID, "h2", "sha256:cafe"))
+
+	var got models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&got).Error)
+	require.Equal(t, "h2", got.Hash)
+	require.Equal(t, "sha256:cafe", got.ResolvedImageDigest)
+	require.Empty(t, got.HashInputBlob)
+}

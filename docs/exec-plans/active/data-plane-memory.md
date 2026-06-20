@@ -133,7 +133,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `docs/caesium-job-llm-reference.md` + `docs/job-schema-reference.md`,
       new `test/dataplane_test.go` harness scenario asserting `cacheHit: false` on a re-pushed tag.
       Done (W1-α): added `HashInput.ResolvedImageDigest` (empty preserves the legacy tag-only hash); `imagecheck.Resolver` with a TTL tag→digest cache (Docker via `ImageInspect` RepoDigests + pull-if-absent, Podman/k8s fall back to the tag); `cache.pinDigests` threaded through `ResolveCacheConfig` + `CAESIUM_CACHE_PIN_DIGESTS`/`CAESIUM_CACHE_DIGEST_TTL`; nullable `resolved_image_digest` recorded on `TaskRun` + `TaskCache`; `test/dataplane_test.go` asserts a moved tag misses and a stable tag still hits.
-- [ ] A2. Persist the decomposed `HashInput` as a canonical, secret-redacted JSON
+- [x] A2. Persist the decomposed `HashInput` as a canonical, secret-redacted JSON
       blob on `TaskRun` and the cache `Entry`, written on the existing hash
       write-path, gated on cache being enabled and bounded/pruned with the cache
       TTL/LRU. Propagate to distributed workers via `TaskRun` fields the way
@@ -143,6 +143,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `internal/run/store.go` (write alongside `SetTaskHash`),
       `internal/dispatch/`, `internal/worker/` (distributed propagation).
       Depends on: A1.
+      Done (W2-α): `HashInput.CanonicalJSON()` serializes a versioned, secret-redacted, field-by-field blob (env values redacted to a `sha256:` digest, `secret://` references kept verbatim; bounded at 64 KB with a graceful oversized-marker fallback). Nullable `hash_input_blob` JSON column added to `TaskRun` and `TaskCache` (additive AutoMigrate). `SetTaskHashWithBlob` writes it alongside the hash on the existing write-path (`SetTaskHashWithDigest` retained as a shim). Threaded through `cache.Entry` → `TaskCache`. Wired into both hash sites — `internal/job/job.go` (local/scheduler) and `internal/worker/runtime_executor.go` (distributed): the worker rebuilds the identical `HashInput` from the scheduler-propagated `TaskRun` + predecessor data, so no new dispatch-time field was needed.
 - [ ] A3. Add `caesium why <run> --task <t>`: a read-side, field-by-field diff of
       two stored `HashInput` blobs ("CACHE MISS — predecessor `extract.row_count`
       changed 1.2M→1.4M; image, command, env identical"), joined to the

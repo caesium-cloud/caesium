@@ -142,6 +142,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	// resolvedImageDigest is the content digest folded into cacheHash when
 	// pinning is on; empty otherwise. Reused when caching the result.
 	var resolvedImageDigest string
+	// hashInputBlob is the canonical secret-redacted decomposition of the
+	// HashInput; reused when caching the result so a cache hit can be explained.
+	var hashInputBlob []byte
 	cacheCfg := jobdefschema.CacheConfig{
 		Enabled:    taskRun.CacheEnabled,
 		TTL:        taskRun.CacheTTL,
@@ -202,7 +205,18 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			CacheVersion:         cacheCfg.Version,
 		}
 		cacheHash = hashInput.Compute()
-		if err := e.store.SetTaskHashWithDigest(taskRun.JobRunID, taskRun.TaskID, cacheHash, resolvedImageDigest); err != nil {
+		// Serialize the decomposed input to a canonical, secret-redacted blob so
+		// a distributed worker persists the same field-by-field record the local
+		// path does (the worker rebuilds the identical HashInput from the
+		// scheduler-propagated TaskRun + predecessor data). A serialization
+		// failure is non-fatal — the hash is still written without the blob.
+		blob, blobErr := hashInput.CanonicalJSON(cacheHash)
+		if blobErr != nil {
+			log.Warn("cache: failed to serialize hash-input blob", "task_id", taskRun.TaskID, "error", blobErr)
+			blob = nil
+		}
+		hashInputBlob = blob
+		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.TaskID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
 
@@ -246,7 +260,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
-				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, taskRun)
+				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun)
 			}
 			return
 		}
@@ -510,7 +524,7 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
-func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, taskRun *models.TaskRun) {
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun) {
 	// Read back the completed task run to get output and result.
 	var completed models.TaskRun
 	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
@@ -557,6 +571,7 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 		RunID:               taskRun.JobRunID,
 		TaskRunID:           completed.ID,
 		ResolvedImageDigest: resolvedImageDigest,
+		HashInputBlob:       hashInputBlob,
 		CreatedAt:           time.Now().UTC(),
 	}
 

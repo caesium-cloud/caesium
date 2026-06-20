@@ -12,6 +12,254 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/container"
 )
 
+// HashInputBlobVersion is the schema version of the persisted decomposed
+// HashInput blob (see CanonicalJSON). Bump it whenever the on-disk shape
+// changes so a reader (e.g. `caesium why`) can tell two blobs were produced by
+// different serializers and avoid diffing incompatible layouts. It is
+// independent of CacheVersion, which keys the cache itself.
+const HashInputBlobVersion = 1
+
+// maxHashInputBlobBytes bounds the size of a single persisted blob. dqlite
+// writes serialize through Raft, so an unbounded blob (e.g. a task with
+// thousands of predecessor outputs) would amplify write pressure. When the
+// canonical encoding exceeds this, CanonicalJSON returns a compact "oversized"
+// marker carrying only the digest + counts instead of the full decomposition —
+// the field-level explanation degrades gracefully rather than bloating dqlite.
+const maxHashInputBlobBytes = 64 * 1024
+
+// redactedEnvValue is the placeholder stored in place of a non-secret-reference
+// env value. The value is replaced by a digest so `caesium why` can still
+// detect that an env var changed (the digest differs) without ever persisting
+// the plaintext value, which may contain a credential that was injected as a
+// literal rather than through a secret:// reference.
+type redactedEnvValue struct {
+	// Digest is "sha256:" + the hex SHA-256 of the raw value. A changed value
+	// yields a changed digest, so two blobs remain diffable field-by-field.
+	Digest string `json:"digest"`
+	// Redacted is always true; it documents in the persisted JSON that the
+	// literal value was intentionally withheld.
+	Redacted bool `json:"redacted"`
+}
+
+// envBlobValue is one entry in the persisted env map. Exactly one of Secret or
+// Redacted is set: a secret:// reference is stored verbatim (it is a non-secret
+// pointer and is the informative thing to show), and every other value is
+// redacted to a digest.
+type envBlobValue struct {
+	// Secret holds the literal secret:// URI when the value is a secret
+	// reference. The URI itself IS included in the hash — a changed URI
+	// (secret://vault/db/pass -> .../pass-v2) changes the key. What is NOT
+	// hashed is the resolved secret value, which is substituted at
+	// container-create time, after hashing (see
+	// jobdefruntime.ResolveContainerSpecSecrets). The URI carries no credential
+	// material and is safe to store verbatim, so `caesium why` can show it in a
+	// diff.
+	Secret string `json:"secret,omitempty"`
+	// Redacted holds the digest of a non-reference value. nil when Secret is
+	// set.
+	Redacted *redactedEnvValue `json:"redacted,omitempty"`
+}
+
+// HashInputBlob is the canonical, secret-redacted, field-by-field
+// representation of a HashInput that is persisted alongside the opaque digest.
+// It exists so the system can answer *which* input changed between two runs
+// (the basis of `caesium why`), not merely that "the hashes differ". Every
+// field that contributes to Compute() is represented here; env values are
+// redacted (see envBlobValue) but all other fields — including predecessor
+// outputs, which are typed data-contract values, not secrets — are stored
+// verbatim so a reader can show the before/after.
+type HashInputBlob struct {
+	// BlobVersion is HashInputBlobVersion at serialization time.
+	BlobVersion int `json:"blobVersion"`
+	// Hash is the Compute() digest this blob decomposes. Storing it inline lets
+	// a reader confirm the blob matches the persisted TaskRun.Hash before
+	// trusting the decomposition.
+	Hash string `json:"hash"`
+
+	JobAlias             string                       `json:"jobAlias,omitempty"`
+	TaskName             string                       `json:"taskName,omitempty"`
+	Image                string                       `json:"image,omitempty"`
+	ResolvedImageDigest  string                       `json:"resolvedImageDigest,omitempty"`
+	Command              []string                     `json:"command,omitempty"`
+	Env                  map[string]envBlobValue      `json:"env,omitempty"`
+	WorkDir              string                       `json:"workDir,omitempty"`
+	Mounts               []container.Mount            `json:"mounts,omitempty"`
+	ResolvedVolumeMounts []container.VolumeMount      `json:"resolvedVolumeMounts,omitempty"`
+	Kubernetes           *container.KubernetesSpec    `json:"kubernetes,omitempty"`
+	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
+	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
+	RunParams            map[string]string            `json:"runParams,omitempty"`
+	CacheVersion         int                          `json:"cacheVersion"`
+
+	// Oversized is set (with Digest/EnvCount/PredecessorOutputCount populated
+	// and the verbatim fields cleared) when the full decomposition exceeded
+	// maxHashInputBlobBytes. A reader can still report "inputs changed" via the
+	// digest but cannot diff field-by-field.
+	Oversized *oversizedBlob `json:"oversized,omitempty"`
+}
+
+// oversizedBlob is the degraded representation stored when a full HashInputBlob
+// would exceed maxHashInputBlobBytes.
+type oversizedBlob struct {
+	EnvCount               int `json:"envCount"`
+	PredecessorCount       int `json:"predecessorCount"`
+	PredecessorOutputCount int `json:"predecessorOutputCount"`
+}
+
+// secretRefPrefix is the scheme prefix identifying a secret:// reference. It
+// must match internal/jobdef/secret's scheme. An env value with this prefix is
+// a non-secret pointer whose URI is hashed verbatim but whose resolved value is
+// substituted only at container-create time (after hashing); it is stored
+// verbatim in the blob, while every other value is redacted.
+const secretRefPrefix = "secret://"
+
+// redactEnv produces the persisted env map: secret:// references verbatim, all
+// other values replaced by a digest. The map is built deterministically by the
+// caller's JSON encoder (encoding/json sorts map keys), so the result is
+// canonical.
+func redactEnv(env map[string]string) map[string]envBlobValue {
+	if len(env) == 0 {
+		return nil
+	}
+	out := make(map[string]envBlobValue, len(env))
+	for k, v := range env {
+		if strings.HasPrefix(v, secretRefPrefix) {
+			out[k] = envBlobValue{Secret: v}
+			continue
+		}
+		sum := sha256.Sum256([]byte(v))
+		out[k] = envBlobValue{Redacted: &redactedEnvValue{
+			Digest:   "sha256:" + hex.EncodeToString(sum[:]),
+			Redacted: true,
+		}}
+	}
+	return out
+}
+
+// CanonicalJSON serializes the decomposed HashInput to a canonical,
+// secret-redacted JSON blob suitable for persistence and later field-by-field
+// diffing (`caesium why`). It is deterministic: encoding/json emits object keys
+// in sorted order and every slice is stored in the same canonical order
+// Compute() hashes it (predecessor hashes sorted; mounts and volume mounts
+// sorted by their Compute() sort key), so the blob faithfully represents the
+// hashed inputs and a diff never reports a spurious reorder. The returned bytes
+// are bounded by maxHashInputBlobBytes; if the full decomposition would exceed
+// that, a compact oversized marker is returned instead so dqlite write pressure
+// stays bounded.
+//
+// precomputed is the digest Compute() already produced on the hash write-path;
+// it is embedded inline (so a reader can confirm the blob matches the persisted
+// Hash) and reused rather than recomputed, avoiding a second full SHA-256 pass.
+//
+// Env values are never stored verbatim: secret:// references are kept as-is
+// (the URI itself is hashed but carries no credential material) and all other
+// values are reduced to a digest, so a credential injected as a literal env
+// value never lands in the blob.
+func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
+	blob := HashInputBlob{
+		BlobVersion:          HashInputBlobVersion,
+		Hash:                 precomputed,
+		JobAlias:             h.JobAlias,
+		TaskName:             h.TaskName,
+		Image:                h.Image,
+		ResolvedImageDigest:  h.ResolvedImageDigest,
+		Command:              h.Command,
+		Env:                  redactEnv(h.Env),
+		WorkDir:              h.WorkDir,
+		Mounts:               sortedMounts(h.Mounts),
+		ResolvedVolumeMounts: sortedVolumeMounts(h.ResolvedVolumeMounts),
+		Kubernetes:           h.Kubernetes,
+		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
+		PredecessorOutputs:   h.PredecessorOutputs,
+		RunParams:            h.RunParams,
+		CacheVersion:         h.CacheVersion,
+	}
+
+	data, err := json.Marshal(blob)
+	if err != nil {
+		return nil, fmt.Errorf("cache: marshal hash-input blob: %w", err)
+	}
+	if len(data) <= maxHashInputBlobBytes {
+		return data, nil
+	}
+
+	// Degrade gracefully: keep identity + a digest, drop the verbatim fields.
+	oversized := HashInputBlob{
+		BlobVersion:         HashInputBlobVersion,
+		Hash:                blob.Hash,
+		JobAlias:            h.JobAlias,
+		TaskName:            h.TaskName,
+		Image:               h.Image,
+		ResolvedImageDigest: h.ResolvedImageDigest,
+		CacheVersion:        h.CacheVersion,
+		Oversized: &oversizedBlob{
+			EnvCount:               len(h.Env),
+			PredecessorCount:       len(h.PredecessorHashes),
+			PredecessorOutputCount: len(h.PredecessorOutputs),
+		},
+	}
+	data, err = json.Marshal(oversized)
+	if err != nil {
+		return nil, fmt.Errorf("cache: marshal oversized hash-input blob: %w", err)
+	}
+	return data, nil
+}
+
+// sortedCopy returns a sorted copy of s without mutating the input, so the
+// persisted blob lists predecessor hashes in the same deterministic order
+// Compute() folds them in.
+func sortedCopy(s []string) []string {
+	if len(s) == 0 {
+		return nil
+	}
+	out := make([]string, len(s))
+	copy(out, s)
+	sort.Strings(out)
+	return out
+}
+
+// mountSortKey is the canonical string a Mount is sorted by. Compute() and
+// CanonicalJSON() both order mounts by this key so the hash and the persisted
+// blob agree on order — otherwise `caesium why` could report a spurious
+// mount-reorder that had no effect on the hash.
+func mountSortKey(m container.Mount) string {
+	return fmt.Sprintf("%s:%s:%s:%t", m.Source, m.Target, m.Type, m.ReadOnly)
+}
+
+// volumeMountSortKey is the canonical string a VolumeMount is sorted by, shared
+// by Compute() and CanonicalJSON() for the same reason as mountSortKey.
+func volumeMountSortKey(m container.VolumeMount) string {
+	return fmt.Sprintf("%s:%s:%s:%s:%t:%s:%s:%s:%s", m.Name, m.Type, m.Source, m.Target, m.ReadOnly, m.SubPath, canonicalJSON(m.Tmpfs), canonicalJSON(m.ClaimTemplate), canonicalJSON(m.VolumeSource))
+}
+
+// sortedMounts returns a copy of mounts ordered by mountSortKey without
+// mutating the input.
+func sortedMounts(mounts []container.Mount) []container.Mount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]container.Mount, len(mounts))
+	copy(out, mounts)
+	sort.Slice(out, func(i, j int) bool {
+		return mountSortKey(out[i]) < mountSortKey(out[j])
+	})
+	return out
+}
+
+// sortedVolumeMounts returns a copy of mounts ordered by volumeMountSortKey
+// without mutating the input.
+func sortedVolumeMounts(mounts []container.VolumeMount) []container.VolumeMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]container.VolumeMount, len(mounts))
+	copy(out, mounts)
+	sort.Slice(out, func(i, j int) bool {
+		return volumeMountSortKey(out[i]) < volumeMountSortKey(out[j])
+	})
+	return out
+}
+
 // HashInput contains all fields that contribute to a task's identity hash.
 type HashInput struct {
 	JobAlias string
@@ -65,23 +313,15 @@ func (h HashInput) Compute() string {
 
 	w(digest, "workdir:%s\n", h.WorkDir)
 
-	// Sorted mounts (serialize each mount deterministically)
-	mountStrs := make([]string, 0, len(h.Mounts))
-	for _, m := range h.Mounts {
-		mountStrs = append(mountStrs, fmt.Sprintf("%s:%s:%s:%t", m.Source, m.Target, m.Type, m.ReadOnly))
-	}
-	sort.Strings(mountStrs)
-	for _, m := range mountStrs {
-		w(digest, "mount:%s\n", m)
+	// Sorted mounts (serialize each mount deterministically). The same sort
+	// keys are reused by CanonicalJSON so the persisted blob lists mounts in the
+	// identical order they were hashed.
+	for _, m := range sortedMounts(h.Mounts) {
+		w(digest, "mount:%s\n", mountSortKey(m))
 	}
 
-	volumeMountStrs := make([]string, 0, len(h.ResolvedVolumeMounts))
-	for _, m := range h.ResolvedVolumeMounts {
-		volumeMountStrs = append(volumeMountStrs, fmt.Sprintf("%s:%s:%s:%s:%t:%s:%s:%s:%s", m.Name, m.Type, m.Source, m.Target, m.ReadOnly, m.SubPath, canonicalJSON(m.Tmpfs), canonicalJSON(m.ClaimTemplate), canonicalJSON(m.VolumeSource)))
-	}
-	sort.Strings(volumeMountStrs)
-	for _, m := range volumeMountStrs {
-		w(digest, "volume_mount:%s\n", m)
+	for _, m := range sortedVolumeMounts(h.ResolvedVolumeMounts) {
+		w(digest, "volume_mount:%s\n", volumeMountSortKey(m))
 	}
 
 	if h.Kubernetes != nil {

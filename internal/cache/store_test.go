@@ -60,6 +60,48 @@ func TestGetNonexistent(t *testing.T) {
 	assert.Nil(t, got)
 }
 
+// TestPutThenGet_HashInputBlobPersists asserts the decomposed-input blob is
+// written to and read back from the new TaskCache JSON column verbatim, so a
+// cache hit can be explained field-by-field. This exercises the AutoMigrate'd
+// nullable column end-to-end.
+func TestPutThenGet_HashInputBlobPersists(t *testing.T) {
+	store := newTestStore(t)
+	entry := sampleEntry()
+
+	in := HashInput{
+		JobAlias: "j",
+		TaskName: "t",
+		Image:    "alpine:3.23",
+		Env:      map[string]string{"FOO": "bar"},
+	}
+	blob, err := in.CanonicalJSON(in.Compute())
+	require.NoError(t, err)
+	entry.HashInputBlob = blob
+
+	require.NoError(t, store.Put(entry))
+
+	got, found, err := store.Get(entry.Hash)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.JSONEq(t, string(blob), string(got.HashInputBlob),
+		"persisted blob must round-trip through the cache column")
+}
+
+// TestPutThenGet_NilHashInputBlob asserts an entry with no blob round-trips with
+// a nil/empty blob column (the nullable contract — pre-A2 rows and cache-off
+// paths stay valid).
+func TestPutThenGet_NilHashInputBlob(t *testing.T) {
+	store := newTestStore(t)
+	entry := sampleEntry() // HashInputBlob unset
+
+	require.NoError(t, store.Put(entry))
+
+	got, found, err := store.Get(entry.Hash)
+	require.NoError(t, err)
+	require.True(t, found)
+	assert.Empty(t, got.HashInputBlob)
+}
+
 func TestExpiredEntryReturnsFalse(t *testing.T) {
 	store := newTestStore(t)
 	entry := sampleEntry()
