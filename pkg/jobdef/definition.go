@@ -1118,16 +1118,23 @@ type CacheConfig struct {
 	// the digest (not the mutable tag) into the cache key, so a moving :latest
 	// produces a cache miss rather than a stale hit.
 	PinDigests bool
+	// DigestTTL bounds how long a resolved tag->digest mapping is reused before
+	// re-resolution. It is a perf cache: within the window a moved tag is not
+	// re-detected. 0 means "re-resolve every check" (immediate moved-tag
+	// detection, at a registry round-trip per check). Defaults to
+	// CAESIUM_CACHE_DIGEST_TTL; only meaningful when PinDigests is on.
+	DigestTTL time.Duration
 }
 
 // ResolveCacheConfig resolves the cache configuration for a step,
 // considering step-level config, job-level defaults, and environment settings.
 //
-// envPinDigests is the global CAESIUM_CACHE_PIN_DIGESTS default; a job- or
-// step-level cache.pinDigests entry overrides it. Resolution is layered
-// env -> job -> step so the most specific declaration wins for each field.
-func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration, envPinDigests bool) CacheConfig {
-	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL, PinDigests: envPinDigests}
+// envPinDigests / envDigestTTL are the global CAESIUM_CACHE_PIN_DIGESTS and
+// CAESIUM_CACHE_DIGEST_TTL defaults; a job- or step-level cache entry overrides
+// them. Resolution is layered env -> job -> step so the most specific
+// declaration wins for each field.
+func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration, envPinDigests bool, envDigestTTL time.Duration) CacheConfig {
+	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL, PinDigests: envPinDigests, DigestTTL: envDigestTTL}
 
 	// Apply job-level defaults
 	applyCache(&cfg, metaCache)
@@ -1165,5 +1172,34 @@ func applyCache(cfg *CacheConfig, raw interface{}) {
 				cfg.PinDigests = b
 			}
 		}
+		// digestTTL accepts a duration string ("30s") or a numeric 0 (the only
+		// numeric value that is meaningful: "re-resolve every check"). Only
+		// overridden when explicitly present so a job-level default flows
+		// through to steps that omit it.
+		if dt, ok := v["digestTTL"]; ok {
+			if d, ok := parseDigestTTL(dt); ok {
+				cfg.DigestTTL = d
+			}
+		}
 	}
+}
+
+// parseDigestTTL interprets a cache.digestTTL value. A string is parsed as a
+// Go duration; a numeric value is treated as a count of nanoseconds (so the
+// idiomatic `digestTTL: 0` disables the cache). Returns false for unparseable
+// values so the inherited default is kept.
+func parseDigestTTL(raw any) (time.Duration, bool) {
+	switch n := raw.(type) {
+	case string:
+		if d, err := time.ParseDuration(n); err == nil {
+			return d, true
+		}
+	case int:
+		return time.Duration(n), true
+	case int64:
+		return time.Duration(n), true
+	case float64:
+		return time.Duration(int64(n)), true
+	}
+	return 0, false
 }

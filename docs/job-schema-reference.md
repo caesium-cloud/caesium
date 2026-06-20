@@ -102,7 +102,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
-| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}`. |
+| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
 
 ### Cache
 
@@ -110,7 +110,8 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 |-------|------|----------|-------|
 | `ttl` | duration string | optional | Cache entry lifetime (e.g. "24h", "7d"). Defaults to CAESIUM_CACHE_TTL. |
 | `version` | integer | optional | Bump to invalidate existing cache entries without changing task definition. |
-| `pinDigests` | boolean | optional | Resolve each step's image tag to its content digest (`sha256:…`) and fold the digest, not the mutable tag, into the cache key. A tag that moves to new content (e.g. a re-pushed `:latest`) then produces a cache **miss** instead of serving a stale hit. Defaults to `CAESIUM_CACHE_PIN_DIGESTS`. Set at job (`metadata.cache`) or step level; a step value overrides the job default. Resolution is opt-in because it costs a registry round-trip on first sight; the resolved tag→digest mapping is cached for `CAESIUM_CACHE_DIGEST_TTL` so steady-state runs pay no network cost. |
+| `pinDigests` | boolean | optional | Resolve each step's image tag to its content digest (`sha256:…`) and fold the digest, not the mutable tag, into the cache key. A tag that moves to new content (e.g. a re-pushed `:latest`) then produces a cache **miss** instead of serving a stale hit. Defaults to `CAESIUM_CACHE_PIN_DIGESTS`. Set at job (`metadata.cache`) or step level; a step value overrides the job default. Resolution is opt-in because it costs a registry round-trip on first sight; the resolved tag→digest mapping is cached for `digestTTL` so steady-state runs pay no network cost. |
+| `digestTTL` | duration string or 0 | optional | How long a resolved tag→digest mapping is reused before re-resolution (a **perf cache**). Within the window a moved tag is **not** re-detected — the prior digest is served. `0` re-resolves on every check, so a moved tag is detected immediately at the cost of a registry round-trip per check. Defaults to `CAESIUM_CACHE_DIGEST_TTL` (5m). Only meaningful with `pinDigests`. |
 
 ## Secret References
 

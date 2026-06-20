@@ -38,23 +38,33 @@ type cachedDigest struct {
 	expiresAt time.Time
 }
 
-// negativeTTL bounds how long a failed resolution is remembered. It is capped
-// well below the positive TTL so a registry blip or a freshly pushed tag is
-// re-checked soon, while still absorbing a burst of lookups for the same image.
-func (r *Resolver) negativeTTL() time.Duration {
+// negativeTTL bounds how long a failed resolution is remembered, given the
+// caller's positive TTL. It is capped well below the positive TTL so a registry
+// blip or a freshly pushed tag is re-checked soon, while still absorbing a
+// burst of lookups for the same image. A zero (or negative) positive TTL means
+// "always re-resolve", so the negative window is zero too.
+func negativeTTL(ttl time.Duration) time.Duration {
 	const cap = time.Minute
-	if r.ttl < cap {
-		return r.ttl
+	if ttl <= 0 {
+		return 0
+	}
+	if ttl < cap {
+		return ttl
 	}
 	return cap
 }
 
 // Resolver resolves image tags to content digests and caches the mapping with a
-// short TTL. It is safe for concurrent use. Resolution is engine-aware: each
-// supported engine supplies a DigestFunc; engines without one (or with a nil
-// func) report ErrDigestUnavailable so the caller falls back to the tag.
+// short, per-call TTL. It is safe for concurrent use. Resolution is
+// engine-aware: each supported engine supplies a DigestFunc; engines without
+// one (or with a nil func) report ErrDigestUnavailable so the caller falls back
+// to the tag.
+//
+// The TTL is supplied per Resolve call (not fixed on the Resolver) so different
+// jobs can demand different freshness against the same warm cache — e.g. a job
+// with digestTTL: 0 re-resolves every check (immediate moved-tag detection)
+// while others reuse the steady-state default and pay no registry round-trip.
 type Resolver struct {
-	ttl     time.Duration
 	now     func() time.Time
 	mu      sync.Mutex
 	entries map[string]cachedDigest
@@ -69,14 +79,14 @@ var (
 	defaultResolverOnce sync.Once
 )
 
-// Default returns a process-wide shared Resolver, built lazily from the given
-// tag->digest cache TTL on first call. The TTL is fixed at first call (the
-// shared cache outlives any single run); pass the configured CAESIUM_CACHE_*
-// value. Sharing one instance means the tag->digest cache is warm across runs,
-// so steady-state execution pays no per-task registry round-trip.
-func Default(ttl time.Duration) *Resolver {
+// Default returns a process-wide shared Resolver, built lazily on first call.
+// Sharing one instance means the tag->digest cache is warm across runs, so
+// steady-state execution pays no per-task registry round-trip. The cache TTL is
+// supplied per Resolve call, so the shared instance can serve jobs with
+// different freshness requirements.
+func Default() *Resolver {
 	defaultResolverOnce.Do(func() {
-		defaultResolver = NewResolver(ttl)
+		defaultResolver = NewResolver()
 	})
 	return defaultResolver
 }
@@ -96,11 +106,10 @@ func WithClock(now func() time.Time) ResolverOption {
 	}
 }
 
-// NewResolver builds a Resolver with the given tag->digest cache TTL. By
-// default the Docker engine resolves via the local Docker daemon: it inspects
-// the image (using its content config digest / RepoDigests) and, only if the
-// image is not already present locally, pulls it first so a digest is
-// available.
+// NewResolver builds a Resolver. By default the Docker engine resolves via the
+// local Docker daemon: it inspects the image (using its content config digest /
+// RepoDigests) and, only if the image is not already present locally, pulls it
+// first so a digest is available. The cache TTL is supplied per Resolve call.
 //
 // Registry auth limitation: the pull-if-absent path uses an anonymous pull
 // (no RegistryAuth is sent), so digest resolution for an image that must be
@@ -110,12 +119,8 @@ func WithClock(now func() time.Time) ResolverOption {
 // runtime already pulled) resolve without auth. Wiring RegistryAuth from the
 // secret providers is a tracked follow-up. Podman and Kubernetes have no
 // pre-run digest source wired here yet, so they also fall back to the tag.
-func NewResolver(ttl time.Duration, opts ...ResolverOption) *Resolver {
-	if ttl <= 0 {
-		ttl = 5 * time.Minute
-	}
+func NewResolver(opts ...ResolverOption) *Resolver {
 	r := &Resolver{
-		ttl:      ttl,
 		now:      time.Now,
 		entries:  make(map[string]cachedDigest),
 		byEngine: make(map[models.AtomEngine]DigestFunc),
@@ -130,10 +135,15 @@ func NewResolver(ttl time.Duration, opts ...ResolverOption) *Resolver {
 // Resolve returns the content digest (sha256:...) for the image run by the
 // given engine. On any resolution failure it returns ErrDigestUnavailable (the
 // underlying cause is logged), so callers can fall back to the tag without
-// special-casing every engine. A returned digest is cached for the Resolver's
-// TTL, keyed by engine + image, so repeated resolutions within the window are
-// free.
-func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageRef string) (string, error) {
+// special-casing every engine.
+//
+// ttl bounds how long a resolved tag->digest mapping is reused. It is a perf
+// cache: within the window a moved tag is NOT re-detected (the prior digest is
+// served). A ttl of 0 (or negative) disables the cache for this call — the
+// digest is re-resolved every time, so a moved tag is detected immediately at
+// the cost of a registry round-trip per check. Different callers may pass
+// different TTLs against the same shared, warm cache.
+func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageRef string, ttl time.Duration) (string, error) {
 	imageRef = strings.TrimSpace(imageRef)
 	if imageRef == "" {
 		return "", ErrDigestUnavailable
@@ -148,24 +158,29 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 
 	key := string(engine) + "|" + imageRef
 
-	r.mu.Lock()
-	if entry, ok := r.entries[key]; ok && r.now().Before(entry.expiresAt) {
-		digest := entry.digest
-		r.mu.Unlock()
-		// A cached entry with an empty digest is a remembered failure: fall
-		// back to the tag without re-hitting the backend (negative caching).
-		if digest == "" {
-			return "", ErrDigestUnavailable
+	// ttl <= 0 means "always re-resolve": skip the positive-cache read so a
+	// moved tag is detected on the very next check. (Resolved values are also
+	// not stored below, so the cache cannot mask a later move either.)
+	if ttl > 0 {
+		r.mu.Lock()
+		if entry, ok := r.entries[key]; ok && r.now().Before(entry.expiresAt) {
+			digest := entry.digest
+			r.mu.Unlock()
+			// A cached entry with an empty digest is a remembered failure: fall
+			// back to the tag without re-hitting the backend (negative caching).
+			if digest == "" {
+				return "", ErrDigestUnavailable
+			}
+			return digest, nil
 		}
-		return digest, nil
+		r.mu.Unlock()
 	}
-	fn := r.byEngine[engine]
-	r.mu.Unlock()
 
+	fn := r.byEngine[engine]
 	if fn == nil {
 		// No backend for this engine is a stable condition (e.g. k8s/podman),
 		// so cache it negatively to avoid re-evaluating on every check.
-		r.cacheNegative(key)
+		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
 	}
 
@@ -173,30 +188,37 @@ func (r *Resolver) Resolve(ctx context.Context, engine models.AtomEngine, imageR
 	if err != nil {
 		log.Warn("image digest resolution failed; falling back to tag",
 			"engine", engine, "image", imageRef, "error", err)
-		r.cacheNegative(key)
+		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
 	}
 	digest = strings.TrimSpace(digest)
 	if !strings.HasPrefix(digest, "sha256:") {
 		log.Warn("image digest resolution returned a non-sha256 value; falling back to tag",
 			"engine", engine, "image", imageRef, "digest", digest)
-		r.cacheNegative(key)
+		r.cacheNegative(key, ttl)
 		return "", ErrDigestUnavailable
 	}
 
-	r.mu.Lock()
-	r.entries[key] = cachedDigest{digest: digest, expiresAt: r.now().Add(r.ttl)}
-	r.mu.Unlock()
+	if ttl > 0 {
+		r.mu.Lock()
+		r.entries[key] = cachedDigest{digest: digest, expiresAt: r.now().Add(ttl)}
+		r.mu.Unlock()
+	}
 
 	return digest, nil
 }
 
 // cacheNegative remembers a failed/unavailable resolution for a bounded window
 // so an unreachable registry (or an unsupported engine) is not re-probed and
-// the logs are not flooded on every task check.
-func (r *Resolver) cacheNegative(key string) {
+// the logs are not flooded on every task check. With ttl <= 0 the failure is
+// not cached (the caller opted into always re-resolving).
+func (r *Resolver) cacheNegative(key string, ttl time.Duration) {
+	negTTL := negativeTTL(ttl)
+	if negTTL <= 0 {
+		return
+	}
 	r.mu.Lock()
-	r.entries[key] = cachedDigest{digest: "", expiresAt: r.now().Add(r.negativeTTL())}
+	r.entries[key] = cachedDigest{digest: "", expiresAt: r.now().Add(negTTL)}
 	r.mu.Unlock()
 }
 

@@ -59,6 +59,10 @@ type TaskRun struct {
 	// the row so distributed workers behave identically to local execution
 	// without reloading the job definition.
 	CachePinDigests bool `gorm:"not null;default:false" json:"-"`
+	// CacheDigestTTL snapshots how long a resolved tag->digest mapping may be
+	// reused before re-resolution (0 = re-resolve every check). Scheduler-set so
+	// distributed workers apply the same freshness window as local execution.
+	CacheDigestTTL time.Duration `gorm:"not null;default:0" json:"-"`
 	// ResolvedImageDigest records the content digest (sha256:...) the image tag
 	// resolved to when pinning is on. Nullable: empty/unset when pinning is off
 	// or the digest could not be resolved (in which case the cache key falls

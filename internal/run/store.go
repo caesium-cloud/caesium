@@ -588,6 +588,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					envCache.Enabled,
 					envCache.TTL,
 					envCache.PinDigests,
+					envCache.DigestTTL,
 				)
 
 				records = append(records, models.TaskRun{
@@ -607,6 +608,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					CacheTTL:                resolvedCache.TTL,
 					CacheVersion:            resolvedCache.Version,
 					CachePinDigests:         resolvedCache.PinDigests,
+					CacheDigestTTL:          resolvedCache.DigestTTL,
 					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
 					SchemaValidation:        schemaValidation,
 				})

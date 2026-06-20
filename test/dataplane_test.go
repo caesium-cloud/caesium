@@ -28,6 +28,11 @@ import (
 // between runs. Docker carries the content RepoDigest across a local re-tag, so
 // the server (sharing the daemon) resolves a different digest on the second run
 // without needing a registry.
+//
+// The job sets cache.digestTTL: 0 so the resolver re-resolves the tag on every
+// check. With the default tag->digest TTL (a perf cache), the moved tag would
+// be masked within the window and the second run — milliseconds later — would
+// hit the stale digest; digestTTL: 0 opts into immediate moved-tag detection.
 func (s *IntegrationTestSuite) TestPinDigestsMissOnMovedTag() {
 	if s.engineType != "docker" {
 		s.T().Skipf("digest pinning harness uses the docker SDK; engine=%s", s.engineType)
@@ -57,6 +62,7 @@ metadata:
   alias: %s
   cache:
     pinDigests: true
+    digestTTL: 0
 trigger:
   type: cron
   configuration:
@@ -115,6 +121,9 @@ func (s *IntegrationTestSuite) TestPinDigestsHitOnStableTag() {
 	defer s.dockerRemove(cli, stableTag)
 
 	alias := fmt.Sprintf("integration-pindigest-hit-%d", time.Now().UnixNano())
+	// digestTTL: 0 forces a fresh resolution on the second run too, so the HIT
+	// is proven to come from the tag re-resolving to an identical digest — not
+	// from the perf cache short-circuiting resolution.
 	manifest := fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -122,6 +131,7 @@ metadata:
   alias: %s
   cache:
     pinDigests: true
+    digestTTL: 0
 trigger:
   type: cron
   configuration:

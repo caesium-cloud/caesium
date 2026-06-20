@@ -827,7 +827,7 @@ func (j *job) Run(ctx context.Context) error {
 		if taskModel != nil {
 			stepCache = unmarshalCacheConfig(taskModel.CacheConfig)
 		}
-		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL, cacheConfig.PinDigests)
+		cacheCfg = jobdefschema.ResolveCacheConfig(stepCache, j.jobCacheConfig, cacheConfig.Enabled, cacheConfig.TTL, cacheConfig.PinDigests, cacheConfig.DigestTTL)
 
 		if cacheCfg.Enabled {
 			cacheStore := getCacheStore()
@@ -862,7 +862,7 @@ func (j *job) Run(ctx context.Context) error {
 				if a := atomsByTask[taskID]; a != nil {
 					engineKind = a.Engine
 				}
-				if digest, derr := imagecheck.Default(cacheConfig.DigestTTL).Resolve(ctx, engineKind, runner.image); derr == nil {
+				if digest, derr := imagecheck.Default().Resolve(ctx, engineKind, runner.image, cacheCfg.DigestTTL); derr == nil {
 					resolvedImageDigest = digest
 				}
 			}

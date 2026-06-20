@@ -21,7 +21,6 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
-	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -148,6 +147,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		TTL:        taskRun.CacheTTL,
 		Version:    taskRun.CacheVersion,
 		PinDigests: taskRun.CachePinDigests,
+		DigestTTL:  taskRun.CacheDigestTTL,
 	}
 	if cacheCfg.Enabled {
 		cacheStore = cache.NewStore(e.store.DB())
@@ -180,7 +180,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// digest and fold the digest into the cache key. A resolution failure
 		// falls back to the literal tag — a cache miss is always safe.
 		if cacheCfg.PinDigests {
-			if digest, derr := imagecheck.Default(env.Variables().CacheDigestTTL).Resolve(ctx, taskRun.Engine, taskRun.Image); derr == nil {
+			if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
 				resolvedImageDigest = digest
 			}
 		}
