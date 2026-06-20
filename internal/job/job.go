@@ -765,7 +765,7 @@ func (j *job) Run(ctx context.Context) error {
 			var logSnapshot *run.TaskLogSnapshot
 			logStream, logErr := runner.engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 			if logErr == nil {
-				markers, parseErr := pkgtask.CaptureMarkersWithRefLimit(logStream, pkgtask.MaxLogSnapshotBytes, env.Variables().OutputRefMaxBytes.Int64())
+				markers, parseErr := pkgtask.CaptureMarkersWithRefLimit(logStream, pkgtask.MaxLogSnapshotBytes, vars.OutputRefMaxBytes.Int64())
 				if closeErr := logStream.Close(); closeErr != nil {
 					log.Warn("failed to close log stream", "task_id", taskID, "error", closeErr)
 				}

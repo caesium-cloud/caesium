@@ -155,9 +155,9 @@ func DecodeOutputRef(value string) (OutputRef, bool) {
 // parseOutputRefLine parses one ##caesium::output-ref payload into a key and its
 // canonical encoded value. It returns ok=false for a malformed or incomplete
 // reference (missing key/path/digest, a digest that is not a sha256: hex string,
-// or a reported size exceeding maxRefBytes when that cap is > 0) so a bad line is
-// skipped rather than failing the whole task — the same lenient posture
-// ParseOutput takes for malformed ##caesium::output lines.
+// a negative reported size, or a size exceeding maxRefBytes when that cap is > 0)
+// so a bad line is skipped rather than failing the whole task — the same lenient
+// posture ParseOutput takes for malformed ##caesium::output lines.
 func parseOutputRefLine(payload string, maxRefBytes int64) (key, encoded string, ok bool) {
 	var p outputRefPayload
 	if err := json.Unmarshal([]byte(payload), &p); err != nil {
@@ -167,6 +167,12 @@ func parseOutputRefLine(payload string, maxRefBytes int64) (key, encoded string,
 	p.Path = strings.TrimSpace(p.Path)
 	p.Digest = strings.TrimSpace(p.Digest)
 	if p.Key == "" || p.Path == "" || !validSHA256Ref(p.Digest) {
+		return "", "", false
+	}
+	// Reject a physically invalid size: a negative value is meaningless and could
+	// slip under the maxRefBytes upper bound below (a negative is never > the
+	// cap), so it is screened first.
+	if p.Size < 0 {
 		return "", "", false
 	}
 	if maxRefBytes > 0 && p.Size > maxRefBytes {

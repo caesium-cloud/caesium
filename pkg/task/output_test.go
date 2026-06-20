@@ -152,11 +152,12 @@ func TestParseOutput_ReferenceExceeds64KBPayloadSucceeds(t *testing.T) {
 
 func TestParseOutput_ReferenceMalformedSkipped(t *testing.T) {
 	cases := []string{
-		`##caesium::output-ref {"path":"/p","digest":"` + testDigest + `"}`,     // missing key
-		`##caesium::output-ref {"key":"k","digest":"` + testDigest + `"}`,       // missing path
-		`##caesium::output-ref {"key":"k","path":"/p","digest":"sha256:short"}`, // bad digest
-		`##caesium::output-ref {"key":"k","path":"/p","digest":"md5:abc"}`,      // wrong algo
-		`##caesium::output-ref not json`,                                        // not JSON
+		`##caesium::output-ref {"path":"/p","digest":"` + testDigest + `"}`,                     // missing key
+		`##caesium::output-ref {"key":"k","digest":"` + testDigest + `"}`,                       // missing path
+		`##caesium::output-ref {"key":"k","path":"/p","digest":"sha256:short"}`,                 // bad digest
+		`##caesium::output-ref {"key":"k","path":"/p","digest":"md5:abc"}`,                      // wrong algo
+		`##caesium::output-ref {"key":"k","path":"/p","digest":"` + testDigest + `","size":-1}`, // negative size
+		`##caesium::output-ref not json`,                                                        // not JSON
 	}
 	for _, line := range cases {
 		result, err := ParseOutput(strings.NewReader(line + "\n"))
