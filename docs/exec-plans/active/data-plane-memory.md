@@ -205,11 +205,14 @@ pipeline ships but emits empty datasets). Independent of Stream A.
       Files: `internal/lineage/mapper.go` (all 7 mappers — replace `[]Dataset{}`),
       `internal/lineage/facets.go`, new `internal/models/lineage_dataset.go` + `internal/models/models.go` (additive),
       `docs/open_lineage.md`. — Landed in data-plane-memory W1-γ PR.
-- [ ] C2. Add a cross-job impact query ("what breaks if this table changes") over
+- [x] C2. Add a cross-job impact query ("what breaks if this table changes") over
       the dataset graph, bound to the producing step + git commit/author.
       Files: `api/rest/controller/` + `api/rest/service/` + `api/rest/bind/bind.go`,
       optional `cmd/`, `internal/lineage/` query.
       Depends on: C1 (graph-change attribution is sharper with B1 but does not require it).
+      <!-- W2-γ: BFS traversal in internal/lineage/impact.go (QueryImpact), service in
+      api/rest/service/lineage/, controller in api/rest/controller/lineage/impact.go,
+      route GET /lineage/impact in api/rest/bind/bind.go; 7 unit tests (PR data-plane-memory W2-γ). -->
 
 ### Stream D — Large-object reference passing + value-verified skip (design C5)
 
