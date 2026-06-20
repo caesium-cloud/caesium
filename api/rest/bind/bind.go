@@ -13,11 +13,12 @@ import (
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	lineagectrl "github.com/caesium-cloud/caesium/api/rest/controller/lineage"
 	"github.com/caesium-cloud/caesium/api/rest/controller/logs"
-	"github.com/caesium-cloud/caesium/api/rest/controller/topology"
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
+	receiptctrl "github.com/caesium-cloud/caesium/api/rest/controller/receipt"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/system"
+	"github.com/caesium-cloud/caesium/api/rest/controller/topology"
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
 	"github.com/caesium-cloud/caesium/internal/auth"
@@ -83,6 +84,10 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		// historical DAG topology (data-plane-memory B2)
 		g.GET("/jobs/:id/topology", topology.Get)
 		g.GET("/jobs/:id/topology/history", topology.History)
+
+		// reproducibility receipt + verify (data-plane-memory A4)
+		g.GET("/jobs/:id/runs/:run_id/receipt", receiptctrl.Get)
+		g.POST("/jobs/:id/runs/:run_id/receipt/verify", receiptctrl.Verify)
 
 		// job cache management
 		g.GET("/jobs/:id/cache", jobcache.List)
