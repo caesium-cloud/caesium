@@ -1,0 +1,224 @@
+//go:build integration
+
+package test
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// These scenarios drive the data-plane-memory features (caesium why,
+// reproducibility receipt + verify, and the cross-job lineage impact query)
+// through their REAL surfaces against the live integration server. They exist
+// because the original ship of those features passed CI on unit tests over
+// synthetic state while the end-to-end paths were hollow (the impact query
+// never persisted rows; the receipt CLI contaminated stdout). Each assertion
+// here would have turned those bugs red.
+
+// runCLIStdout runs the CLI capturing stdout and stderr SEPARATELY, returning
+// stdout only. The shared runCLIRaw helper merges the streams (CombinedOutput),
+// which is precisely why no existing test could detect log lines leaking onto
+// stdout and corrupting machine-readable command output.
+func (s *IntegrationTestSuite) runCLIStdout(args ...string) (string, error) {
+	s.T().Helper()
+	cmd := exec.CommandContext(s.T().Context(), s.cliPath, args...)
+	cmd.Dir = s.projectRoot
+	cmd.Env = os.Environ()
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.String(), err
+}
+
+// whyExplanation mirrors the fields of the `caesium why --json` output that the
+// assertions below read.
+type whyExplanation struct {
+	Verdict string `json:"verdict"`
+	Diff    *struct {
+		Changes []struct {
+			Field string `json:"field"`
+		} `json:"changes"`
+	} `json:"diff"`
+}
+
+// TestCaesiumWhyExplainsHitAndMiss verifies the EXPLAIN feature end-to-end:
+// `caesium why` reports CACHE_HIT when inputs are unchanged and a field-level
+// CACHE_MISS when a run param changes.
+func (s *IntegrationTestSuite) TestCaesiumWhyExplainsHitAndMiss() {
+	alias := fmt.Sprintf("e2e-why-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache:
+    enabled: true
+trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
+steps:
+  - name: produce
+    engine: docker
+    image: alpine:3.23
+    cache: true
+    command: ["sh","-c","echo '##caesium::output {\"rows\": \"100\"}'"]
+`, alias)
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	// Run #1 (cold) then run #2 (same inputs → cache hit on the cacheable step).
+	run1 := s.triggerRun(job.ID)
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, run1, 90*time.Second).Status)
+	run2 := s.triggerRun(job.ID)
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, run2, 90*time.Second).Status)
+
+	hit := s.parseWhy(job.ID, run2, "produce")
+	s.Equal("CACHE_HIT", hit.Verdict, "second run of an unchanged step must be a cache hit")
+
+	// Run #3 with a changed run param → cache miss attributable to that field.
+	run3 := s.triggerRunWithParams(job.ID, map[string]string{"scenario": "changed"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, run3, 90*time.Second).Status)
+	miss := s.parseWhy(job.ID, run3, "produce")
+	s.Equal("CACHE_MISS", miss.Verdict, "a changed run param must produce a cache miss")
+	s.Require().NotNil(miss.Diff, "a miss vs a prior run must carry a field-level diff")
+	foundParam := false
+	for _, c := range miss.Diff.Changes {
+		if strings.HasPrefix(c.Field, "runParams.") {
+			foundParam = true
+		}
+	}
+	s.True(foundParam, "the changed run param must appear as a discriminating field, got %+v", miss.Diff.Changes)
+}
+
+func (s *IntegrationTestSuite) parseWhy(jobID, runID, task string) whyExplanation {
+	s.T().Helper()
+	out, err := s.runCLIStdout("why", runID, "--job-id", jobID, "--task", task, "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err, "caesium why failed:\n%s", out)
+	s.Require().True(json.Valid([]byte(out)), "caesium why --json stdout was not valid JSON (log contamination?):\n%s", out)
+	var exp whyExplanation
+	s.Require().NoError(json.Unmarshal([]byte(out), &exp))
+	return exp
+}
+
+// TestReproducibilityReceiptRoundTrip verifies the REPRODUCE feature end-to-end
+// AND guards the documented `receipt get > file` → `verify file` workflow: the
+// receipt printed to stdout must be clean JSON (no leaked log lines), and the
+// committed file must verify against the run's persisted state.
+func (s *IntegrationTestSuite) TestReproducibilityReceiptRoundTrip() {
+	alias := fmt.Sprintf("e2e-receipt-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache:
+    enabled: true
+    pinDigests: true
+trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
+steps:
+  - name: produce
+    engine: docker
+    image: alpine:3.23
+    cache: true
+    command: ["sh","-c","echo '##caesium::output {\"rows\": \"1\"}'"]
+`, alias)
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, runID, 90*time.Second).Status)
+
+	// `receipt get` stdout MUST be clean JSON — this is the regression for log
+	// lines leaking onto stdout and breaking the round-trip.
+	receipt, err := s.runCLIStdout("receipt", "get", "--job-id", job.ID, "--run-id", runID, "--server", s.caesiumURL)
+	s.Require().NoError(err, "receipt get failed:\n%s", receipt)
+	s.Require().True(json.Valid([]byte(receipt)), "receipt get stdout was not clean JSON (log contamination):\n%s", receipt)
+
+	// Commit the receipt and verify it — the documented audit workflow.
+	receiptFile := filepath.Join(dir, "receipt.json")
+	s.Require().NoError(os.WriteFile(receiptFile, []byte(receipt), 0o644))
+	out, err := s.runCLIRaw("verify", receiptFile, "--server", s.caesiumURL)
+	s.NotContains(out, "invalid character", "verify must parse the committed receipt file, not choke on contamination:\n%s", out)
+	if err != nil {
+		// A degraded (unpinned) run legitimately exits non-zero as UNVERIFIABLE;
+		// the contamination bug instead produced a parse error, asserted above.
+		s.Contains(out, "UNVERIFIABLE", "verify failed for a reason other than a degraded run:\n%s", out)
+	} else {
+		s.Contains(out, "OK", "verify of a pinned run should report a match:\n%s", out)
+	}
+}
+
+type impactResult struct {
+	Downstream []struct {
+		DatasetName string `json:"dataset_name"`
+	} `json:"downstream"`
+}
+
+// TestLineageImpactReturnsDownstream verifies the cross-job impact query
+// end-to-end: a producer→consumer pipeline (linked via declared schemas)
+// populates the persisted lineage graph so /lineage/impact returns the
+// downstream consumer. Requires OPEN_LINEAGE enabled on the integration server
+// (set in `just integration-up`).
+func (s *IntegrationTestSuite) TestLineageImpactReturnsDownstream() {
+	alias := fmt.Sprintf("e2e-lineage-%d", time.Now().UnixNano())
+	manifest := fmt.Sprintf(`apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger: { type: cron, configuration: { cron: "0 2 * * *" } }
+steps:
+  - name: extract
+    engine: docker
+    image: alpine:3.23
+    outputSchema: { type: object, properties: { rows: { type: string } } }
+    command: ["sh","-c","echo '##caesium::output {\"rows\": \"1\"}'"]
+    next: transform
+  - name: transform
+    engine: docker
+    image: alpine:3.23
+    inputSchema: { extract: { properties: { rows: { type: string } } } }
+    outputSchema: { type: object, properties: { clean: { type: string } } }
+    command: ["sh","-c","echo got $CAESIUM_OUTPUT_EXTRACT_ROWS; echo '##caesium::output {\"clean\": \"y\"}'"]
+    dependsOn: extract
+`, alias)
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	runID := s.triggerRun(job.ID)
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, runID, 90*time.Second).Status)
+
+	// Lineage persistence is driven asynchronously by the event subscriber, so
+	// poll the impact endpoint until the downstream edge appears.
+	rootName := alias + ".extract.output"
+	wantName := alias + ".transform.output"
+	deadline := time.Now().Add(30 * time.Second)
+	var res impactResult
+	for {
+		res = impactResult{}
+		s.getJSON("/v1/lineage/impact?namespace=caesium&name="+rootName, &res)
+		if len(res.Downstream) > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	s.Require().NotEmpty(res.Downstream, "impact query returned no downstream consumer for %s", rootName)
+	found := false
+	for _, n := range res.Downstream {
+		if n.DatasetName == wantName {
+			found = true
+		}
+	}
+	s.True(found, "expected %s downstream of %s, got %+v", wantName, rootName, res.Downstream)
+}
