@@ -134,6 +134,51 @@ helm upgrade caesium ./helm/caesium \
   --set ingress.hosts[0].host=caesium.local
 ```
 
+## Delegating scheduling to Kueue
+
+Caesium does not bin-pack, prioritize, or gang-schedule workloads — it delegates
+admission control to [Kueue](https://kueue.sigs.k8s.io/), the Kubernetes-native
+job-queueing controller, so the data DAG inherits Kueue's quota, fair-share, and
+preemption without Caesium reimplementing any of it.
+
+When a step sets `kueue.queueName`, Caesium stamps the
+`kueue.x-k8s.io/queue-name` label on the pod it creates. Kueue's admission
+webhook then gates the pod — it injects the `kueue.x-k8s.io/admission`
+scheduling gate (the pod-level equivalent of a suspended Job), holding the pod
+out of scheduling until the named LocalQueue's ClusterQueue has quota, and
+removes the gate once the workload is admitted. Caesium never schedules the pod
+itself.
+
+### Cluster prerequisites
+
+1. **Install Kueue** and enable its pod integration (`pod` in
+   `integrations.frameworks`), so its webhook manages plain pods. See the
+   [Kueue installation guide](https://kueue.sigs.k8s.io/docs/installation/) and
+   [Run Plain Pods](https://kueue.sigs.k8s.io/docs/tasks/run/plain_pods/).
+2. **Provision a ClusterQueue and a LocalQueue** in the namespace Caesium runs
+   pods in (`CAESIUM_KUBERNETES_NAMESPACE`). The `queueName` in a job manifest
+   must match a LocalQueue `metadata.name`.
+3. Ensure Caesium's namespace is in scope for Kueue's
+   `managedJobsNamespaceSelector` (it must not be excluded like `kube-system`).
+
+### Job manifest
+
+```yaml
+steps:
+  - name: train
+    engine: kubernetes
+    image: ghcr.io/acme/trainer:1.4
+    kueue:
+      queueName: data-eng     # an existing Kueue LocalQueue in the pod namespace
+```
+
+The queue is scheduling metadata, not an execution input, so it is excluded from
+Caesium's cache identity hash — changing the queue never busts the task cache.
+The full field shape is in
+[`job-schema-reference.md`](job-schema-reference.md#kueue). A pod stuck in the
+`SchedulingGated` state is waiting on Kueue quota; inspect its Workload with
+`kubectl get workloads` and the [Kueue pod troubleshooting guide](https://kueue.sigs.k8s.io/docs/tasks/troubleshooting/troubleshooting_pods/).
+
 ## Persistence and Backup
 
 - dqlite data is stored under `/var/lib/caesium/dqlite` in each pod.

@@ -96,6 +96,22 @@ trigger:
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
 | `volumeMounts` | array | no | Mount a declared job volume: `{volume, path, readOnly?, subPath?}` |
 | `serviceAccountName` / `podAnnotations` / `automountServiceAccountToken` | string / map / bool | no | Kubernetes workload-identity passthrough |
+| `kueue` | object | no | Delegate admission to a [Kueue](https://kueue.sigs.k8s.io/) LocalQueue (kubernetes engine only): `{queueName: <local-queue>}`. Caesium stamps `kueue.x-k8s.io/queue-name` on the pod; Kueue gates scheduling against the queue's quota. Pure scheduling metadata — excluded from the cache hash. See [Delegating scheduling to Kueue](#delegating-scheduling-to-kueue) |
+
+### Delegating scheduling to Kueue
+
+Caesium does not bin-pack, prioritize, or gang-schedule — it delegates that to [Kueue](https://kueue.sigs.k8s.io/), the Kubernetes-native queueing controller. Set `kueue.queueName` on a `kubernetes` step and Caesium stamps the `kueue.x-k8s.io/queue-name` label on the pod; Kueue's webhook then gates the pod (via the `kueue.x-k8s.io/admission` scheduling gate it injects) until the named LocalQueue has quota, and un-gates it on admission.
+
+```yaml
+steps:
+  - name: train
+    engine: kubernetes          # kueue is rejected on docker/podman
+    image: ghcr.io/acme/trainer:1.4
+    kueue:
+      queueName: data-eng       # an existing Kueue LocalQueue in the pod namespace
+```
+
+The queue is scheduling metadata, **not** an execution input, so it is excluded from the cache identity hash (like secrets and workload identity): changing the queue never busts the cache. The cluster must have Kueue installed with the LocalQueue and its backing ClusterQueue provisioned — see [`kubernetes-deployment.md`](kubernetes-deployment.md#delegating-scheduling-to-kueue).
 
 ### Volumes
 

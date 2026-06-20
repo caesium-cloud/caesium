@@ -24,6 +24,14 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
+// kueueQueueLabel is the label Kueue reads to assign a workload to a LocalQueue.
+// Stamping it on the pod delegates admission to Kueue: its webhook gates the pod
+// (injecting the kueue.x-k8s.io/admission scheduling gate) until the named
+// queue's quota is available, then un-gates it. Caesium never bin-packs or
+// schedules itself — it hands scheduling to Kueue. See
+// https://kueue.sigs.k8s.io/docs/tasks/run/plain_pods/.
+const kueueQueueLabel = "kueue.x-k8s.io/queue-name"
+
 // Engine defines the interface for treating the
 // Kubernetes API as a atom.Engine.
 type Engine interface {
@@ -149,6 +157,13 @@ func (e *kubernetesEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, err
 		}
 		if req.Spec.Kubernetes.AutomountServiceAccountToken != nil {
 			spec.Spec.AutomountServiceAccountToken = req.Spec.Kubernetes.AutomountServiceAccountToken
+		}
+		// Delegate admission to Kueue. The label is all Caesium sets — Kueue's
+		// webhook gates the pod (injecting the kueue.x-k8s.io/admission
+		// scheduling gate, the pod-level equivalent of a suspended Job) until the
+		// LocalQueue has quota, then un-gates it. Caesium does not schedule.
+		if q := req.Spec.Kubernetes.QueueName; q != "" {
+			spec.Labels[kueueQueueLabel] = q
 		}
 	}
 

@@ -71,6 +71,28 @@ type KubernetesSpec struct {
 	ServiceAccountName           string            `json:"serviceAccountName,omitempty" yaml:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `json:"podAnnotations,omitempty" yaml:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `json:"automountServiceAccountToken,omitempty" yaml:"automountServiceAccountToken,omitempty"`
+	// QueueName is the Kueue LocalQueue this task is admitted through. When set,
+	// the Kubernetes engine stamps the `kueue.x-k8s.io/queue-name` label on the
+	// created pod and delegates admission to Kueue, which gates scheduling until
+	// quota is available. It is pure scheduling metadata — Caesium never
+	// bin-packs or schedules itself — and is therefore deliberately EXCLUDED
+	// from the cache identity hash (see internal/cache/hash.go): two otherwise
+	// identical tasks that differ only in queue must share one cache identity.
+	QueueName string `json:"queueName,omitempty" yaml:"queueName,omitempty"`
+}
+
+// HasIdentityFields reports whether the spec carries any field that contributes
+// to a task's cache identity (service account, pod annotations, automount).
+// QueueName is excluded: it is scheduling metadata, not an execution input, so a
+// spec whose only populated field is QueueName has no identity content and the
+// cache hash must treat it the same as an absent KubernetesSpec.
+func (k *KubernetesSpec) HasIdentityFields() bool {
+	if k == nil {
+		return false
+	}
+	return k.ServiceAccountName != "" ||
+		len(k.PodAnnotations) > 0 ||
+		k.AutomountServiceAccountToken != nil
 }
 
 // Spec captures shared container runtime knobs regardless of engine.

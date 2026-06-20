@@ -510,3 +510,79 @@ func TestCanonicalJSON_EmptyInput(t *testing.T) {
 	assert.Nil(t, blob.Env)
 	assert.Nil(t, blob.Oversized)
 }
+
+// --- Kueue queue name (scheduling metadata, excluded from identity) ---
+
+// TestCompute_KueueQueueNameExcluded is the B1 cache-identity guarantee: the
+// Kueue queue is scheduling metadata, not an execution input, so two otherwise
+// identical tasks that differ ONLY in queue name must produce the SAME hash —
+// changing the queue must never bust the cache.
+func TestCompute_KueueQueueNameExcluded(t *testing.T) {
+	a := baseInput()
+	a.Kubernetes = &container.KubernetesSpec{QueueName: "team-a"}
+	b := baseInput()
+	b.Kubernetes = &container.KubernetesSpec{QueueName: "team-b"}
+	assert.Equal(t, a.Compute(), b.Compute(),
+		"queue name is scheduling metadata and must not change the cache hash")
+}
+
+// TestCompute_KueueQueueOnlyEqualsNoKubernetes asserts that a KubernetesSpec
+// whose only populated field is QueueName hashes byte-identically to a task with
+// no KubernetesSpec at all. Without this, setting a queue on an otherwise
+// non-k8s-identity task would silently bust its cache.
+func TestCompute_KueueQueueOnlyEqualsNoKubernetes(t *testing.T) {
+	noK8s := baseInput()
+	queueOnly := baseInput()
+	queueOnly.Kubernetes = &container.KubernetesSpec{QueueName: "team-a"}
+	assert.Equal(t, noK8s.Compute(), queueOnly.Compute(),
+		"a queue-only KubernetesSpec carries no identity and must match an absent one")
+}
+
+// TestCompute_KueueQueueNameDoesNotMaskIdentityFields guards the inverse: adding
+// a queue must not erase the contribution of real identity fields. The hash with
+// identity fields present must still differ from one without them, whether or not
+// a queue is also set.
+func TestCompute_KueueQueueNameDoesNotMaskIdentityFields(t *testing.T) {
+	plain := baseInput()
+	withSA := baseInput()
+	withSA.Kubernetes = &container.KubernetesSpec{ServiceAccountName: "deployer"}
+	withSAAndQueue := baseInput()
+	withSAAndQueue.Kubernetes = &container.KubernetesSpec{ServiceAccountName: "deployer", QueueName: "team-a"}
+
+	assert.NotEqual(t, plain.Compute(), withSA.Compute(),
+		"service account is an identity field and must change the hash")
+	assert.Equal(t, withSA.Compute(), withSAAndQueue.Compute(),
+		"adding a queue on top of identity fields must not change the hash")
+}
+
+// TestCanonicalJSON_KueueQueueNameStrippedFromBlob asserts the persisted
+// decomposed blob (the basis of `caesium why`) never records the queue name, so
+// the identity record stays in lockstep with the hash — a queue change must not
+// even appear as a field-level diff.
+func TestCanonicalJSON_KueueQueueNameStrippedFromBlob(t *testing.T) {
+	in := baseInput()
+	in.Kubernetes = &container.KubernetesSpec{ServiceAccountName: "deployer", QueueName: "team-a"}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+
+	// The raw JSON must not mention the queue at all.
+	assert.NotContains(t, string(data), "team-a", "queue name must not appear in the blob")
+	assert.NotContains(t, string(data), "queueName", "queueName key must not appear in the blob")
+
+	blob := unmarshalBlob(t, data)
+	require.NotNil(t, blob.Kubernetes, "identity-bearing k8s fields must still be recorded")
+	assert.Equal(t, "deployer", blob.Kubernetes.ServiceAccountName)
+	assert.Empty(t, blob.Kubernetes.QueueName, "queue name must be stripped from the persisted blob")
+}
+
+// TestCanonicalJSON_KueueQueueOnlyOmitsKubernetes asserts that when the queue was
+// the only reason a KubernetesSpec existed, the blob omits the Kubernetes object
+// entirely — matching Compute(), which skips it unless HasIdentityFields.
+func TestCanonicalJSON_KueueQueueOnlyOmitsKubernetes(t *testing.T) {
+	in := baseInput()
+	in.Kubernetes = &container.KubernetesSpec{QueueName: "team-a"}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	assert.Nil(t, blob.Kubernetes, "a queue-only KubernetesSpec must not appear in the blob")
+}
