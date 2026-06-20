@@ -31,6 +31,31 @@ type CaesiumProvenanceFacet struct {
 	Path     string `json:"path,omitempty"`
 }
 
+// CaesiumDatasetFacet is a dataset-level facet carrying Caesium-specific
+// lineage fields (step name, direction, and the structured output keys that
+// produced or consumed this dataset).  It is attached to every Dataset entry
+// emitted in Inputs/Outputs of a task RunEvent.
+type CaesiumDatasetFacet struct {
+	BaseFacet
+	// StepName is the task/step name that produced or consumed this dataset.
+	StepName string `json:"stepName,omitempty"`
+	// Direction is "input" or "output" from the step's perspective.
+	Direction string `json:"direction"`
+	// OutputKeys lists the structured-output keys (from ##caesium::output) whose
+	// values contributed to this dataset's identity.  Empty when the dataset
+	// was derived from a declared schema rather than structured output.
+	OutputKeys []string `json:"outputKeys,omitempty"`
+}
+
+// CaesiumSchemaFacet carries the declared JSON Schema for a dataset so
+// OpenLineage consumers can perform field-level compatibility checks.
+type CaesiumSchemaFacet struct {
+	BaseFacet
+	// Schema is the raw JSON Schema object (map form) as declared in the job
+	// manifest's outputSchema / inputSchema field for this step.
+	Schema map[string]interface{} `json:"schema,omitempty"`
+}
+
 func newCaesiumBaseFacet(facetName string) BaseFacet {
 	return BaseFacet{
 		Producer:  producerURI,

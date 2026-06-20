@@ -174,14 +174,14 @@ from dqlite without `git checkout`. Independent of Stream A.
 The highest leverage-to-effort gap in the repo (~80% built — the emission
 pipeline ships but emits empty datasets). Independent of Stream A.
 
-- [ ] C1. Populate OpenLineage `Inputs`/`Outputs` from declared step I/O and from
+- [x] C1. Populate OpenLineage `Inputs`/`Outputs` from declared step I/O and from
       structured outputs that already carry file paths / table names; attach a
       dataset + schema facet; persist a **bounded** dataset graph (references +
       small facet summaries) in dqlite, emitting full facets via the existing
       http transport.
       Files: `internal/lineage/mapper.go` (all 7 mappers — replace `[]Dataset{}`),
       `internal/lineage/facets.go`, new `internal/models/lineage_dataset.go` + `internal/models/models.go` (additive),
-      `docs/open_lineage.md`.
+      `docs/open_lineage.md`. — Landed in data-plane-memory W1-γ PR.
 - [ ] C2. Add a cross-job impact query ("what breaks if this table changes") over
       the dataset graph, bound to the producing step + git commit/author.
       Files: `api/rest/controller/` + `api/rest/service/` + `api/rest/bind/bind.go`,

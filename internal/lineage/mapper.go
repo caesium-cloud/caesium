@@ -45,6 +45,24 @@ type taskRunPayload struct {
 	ClaimedBy string    `json:"claimed_by"`
 	Result    string    `json:"result"`
 	Error     string    `json:"error"`
+
+	// Output holds the structured key→value pairs emitted via ##caesium::output.
+	// Values may be file paths, table names, URIs, or scalar summaries.
+	Output map[string]string `json:"output,omitempty"`
+
+	// TaskName is the human-readable step name; populated from the job record
+	// when available and used to name datasets.
+	TaskName string `json:"task_name,omitempty"`
+
+	// OutputSchema is the task's declared JSON Schema for its outputs, stored
+	// as a raw JSON blob (map[string]any shape).  Non-nil when the step declares
+	// outputSchema in the job manifest.
+	OutputSchema map[string]interface{} `json:"output_schema,omitempty"`
+
+	// InputSchema maps predecessor step names to JSON Schema fragments
+	// describing which keys this step consumes.  Non-nil when the step declares
+	// inputSchema in the job manifest.
+	InputSchema map[string]map[string]interface{} `json:"input_schema,omitempty"`
 }
 
 type jobRecord struct {
@@ -207,6 +225,8 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeStart,
@@ -221,8 +241,8 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -238,6 +258,8 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeComplete,
@@ -252,8 +274,8 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -276,6 +298,8 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 		}
 	}
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeFail,
@@ -290,8 +314,8 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -307,6 +331,8 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	runFacets := m.buildParentFacet(evt.RunID, jobAlias)
 	m.addExecutionFacet(runFacets, payload)
 
+	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+
 	return &RunEvent{
 		EventTime: evt.Timestamp,
 		EventType: EventTypeAbort,
@@ -321,8 +347,8 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 			Name:      taskJobName,
 			Facets:    m.buildJobFacets(evt.JobID, "TASK"),
 		},
-		Inputs:  []Dataset{},
-		Outputs: []Dataset{},
+		Inputs:  inputs,
+		Outputs: outputs,
 	}, nil
 }
 
@@ -414,4 +440,167 @@ func (m *mapper) buildJobFacets(jobID uuid.UUID, jobType string) map[string]inte
 	}
 
 	return facets
+}
+
+// buildTaskDatasets derives OpenLineage Dataset entries from a task run's
+// declared I/O contracts and structured outputs.
+//
+// Strategy (highest to lowest specificity):
+//  1. Structured output values (##caesium::output) that look like a path or URI
+//     are promoted to individual output Datasets — each key becomes a distinct
+//     named dataset so consumers can track per-artifact lineage.
+//  2. If outputSchema is declared but no path-like output values exist, a single
+//     synthetic output Dataset is emitted using the step name so the job still
+//     appears in the lineage graph.
+//  3. For inputs, each predecessor name listed in inputSchema becomes an input
+//     Dataset referencing that step's logical output namespace.
+//
+// The namespace is always the mapper's configured namespace so datasets from
+// the same Caesium instance share a namespace and can be joined across jobs.
+func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inputs, outputs []Dataset) {
+	stepName := payload.TaskName
+	if stepName == "" {
+		stepName = payload.TaskID.String()
+	}
+
+	// --- Outputs ---
+	// Promote path/URI-like structured output values to individual Datasets.
+	outputKeys := pathLikeKeys(payload.Output)
+	if len(outputKeys) > 0 {
+		for _, key := range outputKeys {
+			value := payload.Output[key]
+			datasetName := datasetNameFromValue(jobAlias, stepName, key, value)
+			facets := map[string]interface{}{
+				"caesium_dataset": CaesiumDatasetFacet{
+					BaseFacet:  newCaesiumBaseFacet("CaesiumDatasetFacet"),
+					StepName:   stepName,
+					Direction:  "output",
+					OutputKeys: []string{key},
+				},
+			}
+			outputs = append(outputs, Dataset{
+				Namespace: m.namespace,
+				Name:      datasetName,
+				Facets:    facets,
+			})
+		}
+	} else if len(payload.OutputSchema) > 0 {
+		// Declared schema but no path-like outputs: emit a synthetic dataset so
+		// the step appears in the lineage graph.
+		facets := map[string]interface{}{
+			"caesium_dataset": CaesiumDatasetFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
+				StepName:  stepName,
+				Direction: "output",
+			},
+			"caesium_schema": CaesiumSchemaFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumSchemaFacet"),
+				Schema:    payload.OutputSchema,
+			},
+		}
+		outputs = append(outputs, Dataset{
+			Namespace: m.namespace,
+			Name:      jobAlias + "." + stepName + ".output",
+			Facets:    facets,
+		})
+	}
+
+	// --- Inputs ---
+	// Each predecessor in inputSchema becomes an input Dataset, referencing the
+	// predecessor step's logical output namespace within the same job.
+	for predStepName, schema := range payload.InputSchema {
+		facets := map[string]interface{}{
+			"caesium_dataset": CaesiumDatasetFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
+				StepName:  predStepName,
+				Direction: "input",
+			},
+		}
+		if len(schema) > 0 {
+			facets["caesium_schema"] = CaesiumSchemaFacet{
+				BaseFacet: newCaesiumBaseFacet("CaesiumSchemaFacet"),
+				Schema:    schema,
+			}
+		}
+		inputs = append(inputs, Dataset{
+			Namespace: m.namespace,
+			Name:      jobAlias + "." + predStepName + ".output",
+			Facets:    facets,
+		})
+	}
+
+	// Ensure non-nil slices so JSON serializes as [] rather than null, which
+	// is required by the OpenLineage RunEvent spec.
+	if inputs == nil {
+		inputs = []Dataset{}
+	}
+	if outputs == nil {
+		outputs = []Dataset{}
+	}
+	return inputs, outputs
+}
+
+// pathLikeKeys returns the keys from output whose values look like file paths,
+// URIs, or table references — the types of values that form meaningful dataset
+// identities.  Scalar summaries (numbers, short words) are excluded to keep
+// the dataset graph focused on structural lineage.
+func pathLikeKeys(output map[string]string) []string {
+	if len(output) == 0 {
+		return nil
+	}
+	var keys []string
+	for k, v := range output {
+		if looksLikeDatasetRef(v) {
+			keys = append(keys, k)
+		}
+	}
+	return keys
+}
+
+// looksLikeDatasetRef returns true when v appears to be a file path, URI,
+// or dotted table name (schema.table or db.schema.table) rather than a plain
+// scalar.
+func looksLikeDatasetRef(v string) bool {
+	if len(v) == 0 {
+		return false
+	}
+	// Absolute file path.
+	if v[0] == '/' {
+		return true
+	}
+	// URI schemes: s3://, gs://, hdfs://, file://, etc.
+	for _, scheme := range []string{"s3://", "gs://", "hdfs://", "file://", "abfs://", "az://", "http://", "https://"} {
+		if len(v) > len(scheme) && v[:len(scheme)] == scheme {
+			return true
+		}
+	}
+	// Dotted table reference (at least one dot, no spaces, reasonable length).
+	if len(v) < 256 {
+		hasDot := false
+		hasSpace := false
+		for _, c := range v {
+			if c == '.' {
+				hasDot = true
+			}
+			if c == ' ' || c == '\t' || c == '\n' {
+				hasSpace = true
+				break
+			}
+		}
+		if hasDot && !hasSpace {
+			return true
+		}
+	}
+	return false
+}
+
+// datasetNameFromValue builds a human-readable dataset name from the output
+// value.  If the value itself is short enough to be meaningful, it is used
+// directly.  Otherwise the job+step+key triple forms the name.
+func datasetNameFromValue(jobAlias, stepName, key, value string) string {
+	const maxValueLen = 256
+	if len(value) > 0 && len(value) <= maxValueLen {
+		return value
+	}
+	return jobAlias + "." + stepName + "." + key
 }
