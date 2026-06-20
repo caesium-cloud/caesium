@@ -67,10 +67,17 @@ type TaskRun struct {
 	// resolved to when pinning is on. Nullable: empty/unset when pinning is off
 	// or the digest could not be resolved (in which case the cache key falls
 	// back to the literal tag).
-	ResolvedImageDigest string     `gorm:"type:text" json:"resolved_image_digest,omitempty"`
-	CacheOriginRunID    *uuid.UUID `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
-	CacheCreatedAt      *time.Time `json:"cache_created_at,omitempty"`
-	CacheExpiresAt      *time.Time `gorm:"index" json:"cache_expires_at,omitempty"`
+	ResolvedImageDigest string `gorm:"type:text" json:"resolved_image_digest,omitempty"`
+	// HashInputBlob is the canonical, secret-redacted, field-by-field JSON
+	// decomposition of the HashInput that produced Hash. Nullable: written only
+	// when caching is enabled and the hash was computed, left null otherwise.
+	// It lets `caesium why` report *which* input changed between two runs
+	// instead of only "the hashes differ". Env values are redacted in the blob;
+	// see cache.HashInput.CanonicalJSON.
+	HashInputBlob    datatypes.JSON `gorm:"type:json" json:"-"`
+	CacheOriginRunID *uuid.UUID     `gorm:"type:uuid;index" json:"cache_origin_run_id,omitempty"`
+	CacheCreatedAt   *time.Time     `json:"cache_created_at,omitempty"`
+	CacheExpiresAt   *time.Time     `gorm:"index" json:"cache_expires_at,omitempty"`
 	// OutputSchema snapshots the task's declared runtime output schema onto the task run.
 	OutputSchema datatypes.JSON `gorm:"type:json" json:"-"`
 	// SchemaValidation snapshots the job's schema validation mode onto the task run.
@@ -97,9 +104,9 @@ type TaskRun struct {
 	// (job_run_id, terminal_sequence) makes the post-checkpoint tail scan cheap.
 	TerminalSequence int64      `gorm:"not null;default:0;index:idx_taskrun_terminal_seq,priority:2" json:"terminal_sequence,omitempty"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
-	CompletedAt     *time.Time `json:"completed_at,omitempty"`
-	CreatedAt       time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt       time.Time  `gorm:"not null" json:"updated_at"`
+	CompletedAt      *time.Time `json:"completed_at,omitempty"`
+	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
 }
 
 // TaskCache stores cached task results keyed by identity hash.
@@ -116,6 +123,10 @@ type TaskCache struct {
 	// originating task ran with digest pinning on. Nullable: empty when pinning
 	// was off. Stored so a cache hit can attest which image content it covers.
 	ResolvedImageDigest string `gorm:"type:text"`
-	CreatedAt           time.Time
-	ExpiresAt           *time.Time `gorm:"index:idx_task_cache_expires"`
+	// HashInputBlob is the canonical, secret-redacted decomposition of the
+	// HashInput that produced Hash, mirrored from the originating TaskRun so a
+	// cache *hit* can also be explained field-by-field. Nullable.
+	HashInputBlob datatypes.JSON `gorm:"type:json"`
+	CreatedAt     time.Time
+	ExpiresAt     *time.Time `gorm:"index:idx_task_cache_expires"`
 }

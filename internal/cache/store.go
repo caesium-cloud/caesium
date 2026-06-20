@@ -24,8 +24,13 @@ type Entry struct {
 	// ResolvedImageDigest is the content digest folded into Hash when the
 	// originating task ran with digest pinning on. Empty when pinning was off.
 	ResolvedImageDigest string
-	CreatedAt           time.Time
-	ExpiresAt           *time.Time
+	// HashInputBlob is the canonical, secret-redacted decomposition of the
+	// HashInput that produced Hash (see cache.HashInput.CanonicalJSON). Stored
+	// on the cache entry so a cache hit can be explained field-by-field, not
+	// only attested by the opaque digest. nil when not computed.
+	HashInputBlob []byte
+	CreatedAt     time.Time
+	ExpiresAt     *time.Time
 }
 
 // Store provides cache operations backed by GORM.
@@ -70,7 +75,7 @@ func (s *Store) Put(entry *Entry) error {
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "hash"}},
-		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "resolved_image_digest", "created_at", "expires_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "resolved_image_digest", "hash_input_blob", "created_at", "expires_at"}),
 	}).Create(model).Error
 }
 
@@ -129,6 +134,10 @@ func modelToEntry(model *models.TaskCache) (*Entry, error) {
 		ExpiresAt:           model.ExpiresAt,
 	}
 
+	if len(model.HashInputBlob) > 0 {
+		entry.HashInputBlob = append([]byte(nil), model.HashInputBlob...)
+	}
+
 	if len(model.Output) > 0 {
 		if err := json.Unmarshal(model.Output, &entry.Output); err != nil {
 			return nil, err
@@ -155,6 +164,10 @@ func entryToModel(entry *Entry) (*models.TaskCache, error) {
 		ResolvedImageDigest: entry.ResolvedImageDigest,
 		CreatedAt:           entry.CreatedAt,
 		ExpiresAt:           entry.ExpiresAt,
+	}
+
+	if len(entry.HashInputBlob) > 0 {
+		model.HashInputBlob = datatypes.JSON(append([]byte(nil), entry.HashInputBlob...))
 	}
 
 	if len(entry.Output) > 0 {

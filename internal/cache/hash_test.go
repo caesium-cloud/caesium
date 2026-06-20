@@ -1,6 +1,11 @@
 package cache
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -207,4 +212,172 @@ func TestCompute_DifferentPredecessorOutputs(t *testing.T) {
 	b := baseInput()
 	b.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "different"}}
 	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+// --- CanonicalJSON (persisted decomposed HashInput blob) ---
+
+// unmarshalBlob decodes a CanonicalJSON blob, failing the test on error.
+func unmarshalBlob(t *testing.T, data []byte) HashInputBlob {
+	t.Helper()
+	var blob HashInputBlob
+	require.NoError(t, json.Unmarshal(data, &blob))
+	return blob
+}
+
+// TestCanonicalJSON_Deterministic asserts the serialization is stable: the same
+// input (including unordered maps) yields byte-identical blobs, so two runs are
+// comparable and dedup/diff logic is sound.
+func TestCanonicalJSON_Deterministic(t *testing.T) {
+	a, err := baseInput().CanonicalJSON()
+	require.NoError(t, err)
+	b, err := baseInput().CanonicalJSON()
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "same input must serialize to byte-identical blobs")
+
+	// Reorder the map literals; encoding/json sorts keys, so output is identical.
+	reordered := baseInput()
+	reordered.Env = map[string]string{"BAZ": "qux", "FOO": "bar"}
+	reordered.RunParams = map[string]string{"param1": "value1"}
+	c, err := reordered.CanonicalJSON()
+	require.NoError(t, err)
+	assert.Equal(t, a, c, "map ordering must not affect the canonical blob")
+}
+
+// TestCanonicalJSON_BlobHashMatchesCompute asserts the blob carries the same
+// digest Compute() produces, so a reader can confirm a blob decomposes the
+// persisted TaskRun.Hash before trusting it.
+func TestCanonicalJSON_BlobHashMatchesCompute(t *testing.T) {
+	in := baseInput()
+	data, err := in.CanonicalJSON()
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, in.Compute(), blob.Hash)
+	assert.Equal(t, HashInputBlobVersion, blob.BlobVersion)
+}
+
+// TestCanonicalJSON_FieldsRoundTrip asserts the non-redacted fields survive
+// serialization verbatim — these are what `caesium why` diffs field-by-field.
+func TestCanonicalJSON_FieldsRoundTrip(t *testing.T) {
+	in := baseInput()
+	in.ResolvedImageDigest = "sha256:abc"
+	in.WorkDir = "/app"
+	data, err := in.CanonicalJSON()
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+
+	assert.Equal(t, in.JobAlias, blob.JobAlias)
+	assert.Equal(t, in.TaskName, blob.TaskName)
+	assert.Equal(t, in.Image, blob.Image)
+	assert.Equal(t, in.ResolvedImageDigest, blob.ResolvedImageDigest)
+	assert.Equal(t, in.Command, blob.Command)
+	assert.Equal(t, in.WorkDir, blob.WorkDir)
+	assert.Equal(t, in.Mounts, blob.Mounts)
+	assert.Equal(t, in.CacheVersion, blob.CacheVersion)
+	// Predecessor outputs are typed data-contract values (not secrets) and are
+	// stored verbatim so `why` can show the before/after.
+	assert.Equal(t, in.PredecessorOutputs, blob.PredecessorOutputs)
+	// Predecessor hashes are stored sorted (matching Compute's fold order).
+	assert.Equal(t, []string{"abc123", "def456"}, blob.PredecessorHashes)
+}
+
+// TestCanonicalJSON_RedactsNonSecretEnvValues is the core guardrail: a plain env
+// value (which could be a credential injected as a literal) is never persisted
+// verbatim — only a digest of it appears, and the digest matches sha256(value).
+func TestCanonicalJSON_RedactsNonSecretEnvValues(t *testing.T) {
+	in := baseInput()
+	in.Env = map[string]string{"API_TOKEN": "super-secret-literal-value"}
+	data, err := in.CanonicalJSON()
+	require.NoError(t, err)
+
+	assert.NotContains(t, string(data), "super-secret-literal-value",
+		"a literal env value must never appear in the persisted blob")
+
+	blob := unmarshalBlob(t, data)
+	ev, ok := blob.Env["API_TOKEN"]
+	require.True(t, ok, "env key must be retained so `why` can name the changed var")
+	require.NotNil(t, ev.Redacted)
+	assert.True(t, ev.Redacted.Redacted)
+	assert.Empty(t, ev.Secret)
+
+	sum := sha256.Sum256([]byte("super-secret-literal-value"))
+	assert.Equal(t, "sha256:"+hex.EncodeToString(sum[:]), ev.Redacted.Digest)
+}
+
+// TestCanonicalJSON_SecretReferencesStoredVerbatim asserts a secret:// reference
+// (a non-secret pointer resolved after hashing) is kept verbatim — it is the
+// informative thing to show and carries no credential material.
+func TestCanonicalJSON_SecretReferencesStoredVerbatim(t *testing.T) {
+	in := baseInput()
+	in.Env = map[string]string{"DB_PASSWORD": "secret://vault/db/password"}
+	data, err := in.CanonicalJSON()
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+
+	ev, ok := blob.Env["DB_PASSWORD"]
+	require.True(t, ok)
+	assert.Equal(t, "secret://vault/db/password", ev.Secret)
+	assert.Nil(t, ev.Redacted)
+}
+
+// TestCanonicalJSON_RedactionDistinguishesValues asserts two different non-secret
+// env values produce different redacted digests, so `caesium why` can still
+// detect an env change field-by-field without seeing the plaintext.
+func TestCanonicalJSON_RedactionDistinguishesValues(t *testing.T) {
+	a := baseInput()
+	a.Env = map[string]string{"FOO": "value-1"}
+	b := baseInput()
+	b.Env = map[string]string{"FOO": "value-2"}
+
+	da, err := a.CanonicalJSON()
+	require.NoError(t, err)
+	db, err := b.CanonicalJSON()
+	require.NoError(t, err)
+	assert.NotEqual(t, da, db, "a changed env value must change the redacted blob")
+
+	// ...and an unchanged value yields an identical digest (a stable diff).
+	c := baseInput()
+	c.Env = map[string]string{"FOO": "value-1"}
+	dc, err := c.CanonicalJSON()
+	require.NoError(t, err)
+	assert.Equal(t, da, dc)
+}
+
+// TestCanonicalJSON_OversizedDegrades asserts that a blob exceeding the size
+// bound degrades to a compact marker (identity + counts, verbatim fields
+// dropped) rather than persisting an unbounded payload into dqlite.
+func TestCanonicalJSON_OversizedDegrades(t *testing.T) {
+	in := baseInput()
+	// Build a predecessor-output set large enough to blow past the bound: 200
+	// distinct steps, each emitting a ~1 KB value (~200 KB total > 64 KB).
+	in.PredecessorOutputs = map[string]map[string]string{}
+	big := strings.Repeat("x", 1024)
+	for i := 0; i < 200; i++ {
+		step := "step-" + strconv.Itoa(i)
+		in.PredecessorOutputs[step] = map[string]string{"out": big}
+	}
+
+	data, err := in.CanonicalJSON()
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(data), maxHashInputBlobBytes,
+		"oversized blob must be bounded")
+
+	blob := unmarshalBlob(t, data)
+	require.NotNil(t, blob.Oversized, "an over-bound blob must carry the oversized marker")
+	assert.Equal(t, in.Compute(), blob.Hash, "identity digest survives degradation")
+	assert.Equal(t, len(in.PredecessorOutputs), blob.Oversized.PredecessorOutputCount)
+	// Verbatim fields are dropped on degradation.
+	assert.Nil(t, blob.PredecessorOutputs)
+	assert.Nil(t, blob.Env)
+}
+
+// TestCanonicalJSON_EmptyInput asserts the empty input serializes cleanly to a
+// minimal, parseable blob (version + zero-value identity), never an error.
+func TestCanonicalJSON_EmptyInput(t *testing.T) {
+	data, err := HashInput{}.CanonicalJSON()
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, HashInputBlobVersion, blob.BlobVersion)
+	assert.Equal(t, HashInput{}.Compute(), blob.Hash)
+	assert.Nil(t, blob.Env)
+	assert.Nil(t, blob.Oversized)
 }

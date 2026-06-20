@@ -285,9 +285,23 @@ func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
 // and the existing digest column (if any) is left untouched, keeping the row
 // consistent with the literal-tag cache key.
 func (s *Store) SetTaskHashWithDigest(runID, taskID uuid.UUID, hash, resolvedImageDigest string) error {
+	return s.SetTaskHashWithBlob(runID, taskID, hash, resolvedImageDigest, nil)
+}
+
+// SetTaskHashWithBlob persists the task identity hash, the resolved image
+// digest folded into it, and the canonical secret-redacted decomposition of the
+// HashInput (the blob) on the same write — the existing hash write-path. The
+// digest and blob are optional: an empty digest or a nil/empty blob leaves the
+// corresponding column untouched (so a literal-tag, blob-less run stays
+// consistent). The blob lets `caesium why` later diff two runs field-by-field
+// rather than only observing that the opaque hashes differ.
+func (s *Store) SetTaskHashWithBlob(runID, taskID uuid.UUID, hash, resolvedImageDigest string, hashInputBlob []byte) error {
 	updates := map[string]any{"hash": hash}
 	if resolvedImageDigest != "" {
 		updates["resolved_image_digest"] = resolvedImageDigest
+	}
+	if len(hashInputBlob) > 0 {
+		updates["hash_input_blob"] = datatypes.JSON(hashInputBlob)
 	}
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
