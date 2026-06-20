@@ -1,6 +1,6 @@
 # Data-Plane Memory — Substrate Build
 
-Last updated: 2026-06-19
+Last updated: 2026-06-20
 
 This plan implements the five-component substrate specified in
 [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md): the
@@ -64,21 +64,42 @@ do-not-market constraints) defers to
 change to the job-definition YAML contract (e.g. the `cache.pinDigests` field in
 A1) additionally defers to `pkg/jobdef/definition.go`.
 
-## Progress (as of 2026-06-19)
+## Progress (as of 2026-06-20)
 
-No implementation waves have shipped yet. The plan was published from the
-PR #210 design merge (`docs/design-data-plane-memory.md`,
-`docs/differentiation-strategy.md`); the first wave is the next eligible run of
-the `exec-plan-wave` skill against this doc. Leaf items with no unmet
-dependencies: **A1, B1, C1** (parallelizable in Wave 1).
+### Wave 1 — content-key, DAG-versioning, and lineage substrate (shipped)
+
+The three leaf substrate items (A1, B1, C1) shipped — each reviewed (gemini +
+greptile), integration-gated, and squash-merged to master. Orchestrated
+autonomously via `exec-plan-wave`.
+
+- **A1 (Stream A) — image digest resolution.** PR #215 → merge `8705145`.
+  Opt-in `cache.pinDigests` resolves image tags to content digests and folds the
+  digest (not the tag) into the cache key; resolved digest recorded on
+  `TaskRun`/`TaskCache`; per-call `cache.digestTTL` (default = perf cache;
+  `digestTTL: 0` for immediate moved-tag detection). The integration gate caught
+  a real bug — a frozen-singleton TTL masked moved tags — fixed by making the TTL
+  per-resolve-call. Review: 2 gemini HIGH (Docker client reuse; honest
+  registry-auth scoping) + 2 MEDIUM. **Deferred follow-ups:** private-registry
+  `RegistryAuth` wiring for digest resolution; Podman/k8s pre-run digest
+  resolution (both documented in code/docs).
+- **B1 (Stream B) — DAG topology versioning.** PR #213 → merge `a48943f`.
+  Append-only `dag_snapshot` model (topology + per-edge provenance, content-hash
+  dedup incl. image+command) replaces the destructive edge hard-delete. Review:
+  1 gemini HIGH (image/command in the topology hash) + 4 greptile P2.
+- **C1 (Stream C) — lineage dataset population.** PR #214 → merge `e1a79df`.
+  OpenLineage `Inputs`/`Outputs` populated from declared step I/O + structured
+  outputs; bounded, upsert-keyed `lineage_dataset` graph persisted. Review:
+  1 greptile P1 (missing unique index) + determinism/heuristic fixes.
+
+Next eligible items (deps now satisfied): **A2, B2, C2** (Wave 2), then D1→D2.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | Not started |
-| B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | Not started |
-| C | Lineage dataset population + cross-job impact query | P1 | Not started |
+| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | A1 shipped (#215); A2–A4 pending |
+| B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | B1 shipped (#213); B2 pending |
+| C | Lineage dataset population + cross-job impact query | P1 | C1 shipped (#214); C2 pending |
 | D | Large-object reference passing + value-verified skip | P2 | Not started |
 
 ## Streams
