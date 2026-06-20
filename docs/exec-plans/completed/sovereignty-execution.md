@@ -1,6 +1,8 @@
 # Sovereignty Execution — Operationalize the Positioning Pivot
 
-Last updated: 2026-06-19
+> Status: Complete (2026-06-20) — all items shipped: A1 (README repositioning, PR #212), A2 (proof-point docs, PR #223), B1 (Kueue delegation, PR #224). Archived to `docs/exec-plans/completed/`.
+
+Last updated: 2026-06-20
 
 This plan operationalizes the positioning pivot recorded in
 [`docs/differentiation-strategy.md`](../../differentiation-strategy.md): **lead
