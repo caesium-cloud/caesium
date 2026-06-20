@@ -76,7 +76,7 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 // List returns all snapshots for jobID ordered by created_at descending
 // (newest first).
 func (q *SnapshotQuery) List(jobID uuid.UUID) ([]models.DagSnapshot, error) {
-	var snaps []models.DagSnapshot
+	snaps := make([]models.DagSnapshot, 0)
 	err := q.db.WithContext(q.ctx).
 		Where("job_id = ?", jobID).
 		Order("created_at desc").

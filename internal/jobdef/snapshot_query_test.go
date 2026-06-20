@@ -98,8 +98,10 @@ func TestSnapshotQuery_ByGitCommit(t *testing.T) {
 	jobID := seedJob(t, db)
 	q := NewSnapshotQuery(context.Background(), db)
 
-	// Empty commit returns an error from the service layer, but the query
-	// layer accepts it; test the non-empty path here.
+	// Both the query layer and the service layer reject an empty commit.
+	_, err := q.ByGitCommit(jobID, "")
+	require.Error(t, err)
+
 	now := time.Now().UTC()
 	seedSnapshot(t, db, jobID, "hash-y", "abc123", now)
 
