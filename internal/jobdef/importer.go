@@ -2,6 +2,8 @@ package jobdef
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -108,6 +110,9 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 				return err
 			}
 			if err := i.reconcileEdgesTx(tx, jobModel, def.Steps, taskByName, opts); err != nil {
+				return err
+			}
+			if err := i.writeSnapshotTx(tx, jobModel, def.Steps, taskByName, opts); err != nil {
 				return err
 			}
 			if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
@@ -659,6 +664,141 @@ func (i *Importer) reconcileEdgesTx(tx *gorm.DB, jobModel *models.Job, steps []s
 		return nil
 	}
 	return tx.Create(&edges).Error
+}
+
+// dagTopologyHash computes a stable SHA-256 content hash from the DAG topology:
+// sorted task names + sorted from→to edge pairs. It is used to dedup snapshots
+// so that an apply that does not change the graph does not write a new row.
+func dagTopologyHash(steps []schema.Step, taskByName map[string]*models.Task) (string, error) {
+	// Collect and sort task names.
+	taskNames := make([]string, 0, len(steps))
+	for _, step := range steps {
+		taskNames = append(taskNames, step.Name)
+	}
+	sort.Strings(taskNames)
+
+	// Collect edge pairs from the successor map.
+	successors, err := schema.DeriveStepSuccessors(steps)
+	if err != nil {
+		return "", err
+	}
+
+	type edgePair struct{ from, to string }
+	pairs := make([]edgePair, 0)
+	for from, tos := range successors {
+		for _, to := range tos {
+			pairs = append(pairs, edgePair{from, to})
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].from != pairs[j].from {
+			return pairs[i].from < pairs[j].from
+		}
+		return pairs[i].to < pairs[j].to
+	})
+
+	h := sha256.New()
+	for _, name := range taskNames {
+		_, _ = fmt.Fprintf(h, "task:%s\n", name)
+	}
+	for _, p := range pairs {
+		_, _ = fmt.Fprintf(h, "edge:%s->%s\n", p.from, p.to)
+	}
+	_ = taskByName // taskByName is passed for future use (e.g. image in hash); task names suffice today
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// writeSnapshotTx appends a DagSnapshot row if the topology changed since the
+// last recorded snapshot.  If the latest snapshot for this job already carries
+// the same content hash, no row is written (dedup on unchanged topology).
+func (i *Importer) writeSnapshotTx(tx *gorm.DB, jobModel *models.Job, steps []schema.Step, taskByName map[string]*models.Task, opts *ApplyOptions) error {
+	contentHash, err := dagTopologyHash(steps, taskByName)
+	if err != nil {
+		return fmt.Errorf("dag snapshot: compute hash: %w", err)
+	}
+
+	// Check whether the most recent snapshot for this job already matches.
+	var latest models.DagSnapshot
+	err = tx.Where("job_id = ?", jobModel.ID).
+		Order("created_at desc").
+		Limit(1).
+		First(&latest).Error
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		return fmt.Errorf("dag snapshot: query latest: %w", err)
+	}
+	if err == nil && latest.ContentHash == contentHash {
+		// Topology unchanged — no new snapshot needed.
+		return nil
+	}
+
+	// Build the task descriptors.
+	taskDescs := make([]models.DagSnapshotTask, 0, len(steps))
+	for _, step := range steps {
+		taskDescs = append(taskDescs, models.DagSnapshotTask{
+			Name:    step.Name,
+			Image:   step.Image,
+			Command: strings.Join(step.Command, " "),
+		})
+	}
+	tasksJSON, err := json.Marshal(taskDescs)
+	if err != nil {
+		return fmt.Errorf("dag snapshot: marshal tasks: %w", err)
+	}
+
+	// Build the edge descriptors; derive successors again (cheap recompute).
+	successors, err := schema.DeriveStepSuccessors(steps)
+	if err != nil {
+		return fmt.Errorf("dag snapshot: derive successors: %w", err)
+	}
+	stepOrder := make(map[string]int, len(steps))
+	for idx, step := range steps {
+		stepOrder[step.Name] = idx
+	}
+	fromNames := make([]string, 0, len(successors))
+	for fromName := range successors {
+		fromNames = append(fromNames, fromName)
+	}
+	sort.Slice(fromNames, func(a, b int) bool {
+		la, lb := stepOrder[fromNames[a]], stepOrder[fromNames[b]]
+		if la != lb {
+			return la < lb
+		}
+		return fromNames[a] < fromNames[b]
+	})
+
+	edgeDescs := make([]models.DagSnapshotEdge, 0)
+	for _, fromName := range fromNames {
+		for _, toName := range successors[fromName] {
+			ed := models.DagSnapshotEdge{From: fromName, To: toName}
+			if opts != nil && opts.Provenance != nil {
+				ed.ProvenanceCommit = opts.Provenance.Commit
+			}
+			edgeDescs = append(edgeDescs, ed)
+		}
+	}
+	edgesJSON, err := json.Marshal(edgeDescs)
+	if err != nil {
+		return fmt.Errorf("dag snapshot: marshal edges: %w", err)
+	}
+
+	gitCommit := ""
+	if opts != nil && opts.Provenance != nil {
+		gitCommit = opts.Provenance.Commit
+	}
+
+	snap := &models.DagSnapshot{
+		ID:          uuid.New(),
+		JobID:       jobModel.ID,
+		ContentHash: contentHash,
+		GitCommit:   gitCommit,
+		Tasks:       datatypes.JSON(tasksJSON),
+		Edges:       datatypes.JSON(edgesJSON),
+		CreatedAt:   time.Now().UTC(),
+	}
+	if err := tx.Create(snap).Error; err != nil {
+		return fmt.Errorf("dag snapshot: create: %w", err)
+	}
+	return nil
 }
 
 func (i *Importer) reconcileCallbacksTx(tx *gorm.DB, jobID uuid.UUID, callbacks []schema.Callback) error {

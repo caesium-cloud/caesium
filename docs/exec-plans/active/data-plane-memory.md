@@ -155,7 +155,7 @@ below the design level here.
 Stop destroying pipeline history so "the DAG as of commit X" is reconstructable
 from dqlite without `git checkout`. Independent of Stream A.
 
-- [ ] B1. Stop hard-deleting `TaskEdge` rows on apply; add an append-only
+- [x] B1. Stop hard-deleting `TaskEdge` rows on apply; add an append-only
       `dag_snapshot` model capturing full topology (tasks + edges) + per-edge
       `provenance_commit`, keyed by manifest content-hash + git SHA, dedup'd on
       unchanged topology. The live graph still drives execution; history is no
@@ -163,6 +163,7 @@ from dqlite without `git checkout`. Independent of Stream A.
       Files: `internal/jobdef/importer.go` (`reconcileEdgesTx` ~:602 `Unscoped().Delete`; in-place `provenance_commit` update),
       new `internal/models/dag_snapshot.go` + register in `internal/models/models.go` (`All` slice, additive),
       `internal/jobdef/` snapshot write.
+      <!-- W1-β: DagSnapshot model + writeSnapshotTx + dedup-on-unchanged; lint+unit-test green (PR data-plane-memory W1-β). -->
 - [ ] B2. Expose historical topology: an API (and optional CLI) to fetch the DAG
       as-of a snapshot/commit.
       Files: `api/rest/controller/` + `api/rest/service/` + `api/rest/bind/bind.go`,
