@@ -32,7 +32,7 @@ Caesium uniquely computes a transitive content hash that folds in the **typed da
 
 ### Component 1 — Image digest resolution (FIRST: correctness gate)
 
-**Current state.** Image digest pinning does **not exist**. `HashInput.Image` (`internal/cache/hash.go:21`) hashes the literal tag (`alpine:3.23`, `foo:latest`); `Compute()` (`hash.go:33`) writes `image:%s` as-is. `internal/imagecheck/check.go` only checks local availability via `ImageInspectWithRaw`; it never resolves or stores a digest. No `RepoDigest`/`@sha256` handling anywhere in `internal/` or `pkg/`.
+**Current state.** Image digest pinning does **not exist**. `HashInput.Image` (`internal/cache/hash.go:19`) hashes the literal tag (`alpine:3.23`, `foo:latest`); `Compute()` (`hash.go:33`) writes `image:%s` as-is. `internal/imagecheck/check.go` only checks local availability via `ImageInspectWithRaw`; it never resolves or stores a digest. No `RepoDigest`/`@sha256` handling anywhere in `internal/` or `pkg/`.
 
 **Why first.** A reproducibility receipt or a content-addressed skip built on a mutable tag is unsound: a `:latest` that changes underneath leaves the hash unchanged, so the cache serves a stale result and the "receipt" attests to the wrong image. **Shipping REPRODUCE before this is a silent correctness failure** (see the kill-conditions in the strategy doc).
 
