@@ -203,7 +203,7 @@ sequences after Stream A.
       `internal/cache/hash.go` (reference digest into the key),
       volumes integration (`internal/jobdef/runtime/spec.go`, engines),
       `pkg/env/env.go`, `docs/caesium-job-llm-reference.md`.
-      Depends on: A1.
+      Depends on: A2.
 - [ ] D2. Implement the value-verified short-circuit: replay a changed step; if its
       output reference digest matches the last successful run's, stop —
       downstream stays green (proven via content equality, preserving the
@@ -218,8 +218,8 @@ sequences after Stream A.
 - Streams **A, B, C are independent** and can run in parallel in Wave 1 (leaf
   items A1, B1, C1).
 - Stream **D depends on Stream A** (D1 folds a reference digest into
-  `internal/cache/hash.go`, which Stream A rewrites) — sequence D into a wave
-  after A1/A2 merge.
+  `internal/cache/hash.go`, which A1 and A2 both rewrite) — sequence D into a
+  wave after **A2** merges.
 
 **Within-stream order.**
 - A: `A1 → A2 → (A3, A4 in parallel)`.
@@ -229,7 +229,7 @@ sequences after Stream A.
 
 **Cross-stream file conflicts.**
 - `internal/cache/hash.go` — Streams **A** (A1, A2) and **D** (D1). True
-  conflict; sequence D after A (enforced by `D1 Depends on A1`).
+  conflict; sequence D after A2 (enforced by `D1 Depends on A2`).
 - `internal/models/models.go` — Streams **B** (`dag_snapshot`) and **C**
   (`lineage_dataset`) both append to the `All` slice. Additive at different
   lines → OK in parallel; rebases mechanically.
