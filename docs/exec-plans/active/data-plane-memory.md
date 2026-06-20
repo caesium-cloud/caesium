@@ -180,7 +180,7 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `api/rest/controller/why/` + `api/rest/service/why/` + route in `api/rest/bind/bind.go`,
       `internal/run/` (read-side diff), harness assertion support.
       Depends on: A2.
-- [ ] A4. Add the reproducibility receipt + `caesium verify`: a content-addressed,
+- [x] A4. Add the reproducibility receipt + `caesium verify`: a content-addressed,
       git-committable Merkle receipt = hash(sorted per-task identity hashes +
       resolved image digests + manifest content hash + git commit); `verify`
       re-derives and flags drift ("tag mutated: digest mismatch"). Does **not**
@@ -190,6 +190,21 @@ from a tamper-prone opaque digest into a tamper-evident, explainable record.
       `api/rest/controller/receipt/` + service + `api/rest/bind/bind.go`,
       `docs/design-data-plane-memory.md` (mark REPRODUCE shipped).
       Depends on: A1 + A2.
+      Done (W3-β): `internal/receipt` builds a finalized `Receipt` (sorted per-task
+      identity hashes + resolved image digests + manifest content hash from the
+      matching `dag_snapshot` + git provenance), Merkle-aggregated into a single
+      `ReceiptDigest`. `Verify` re-derives from persisted `models.TaskRun` state and
+      reports typed drift (`image_digest_mismatch`, `identity_hash_mismatch`,
+      `manifest_changed`, `git_commit_changed`, task added/missing). **Correctness
+      rule enforced:** a task with an empty `ResolvedImageDigest` (pinning off or
+      Podman/k8s tag fallback) or no identity hash is marked `degraded` with an
+      honest reason, the whole receipt is `degraded`, and a degraded run *never*
+      reports a clean `Match` even when the tag-only digest is byte-equal — a mutable
+      tag is never silently attested. CLI: `caesium receipt get` (emit, with a
+      degraded warning) + `caesium verify <receipt>` (drift report, non-zero exit on
+      drift/unverifiable). REST: `GET /jobs/:id/runs/:run_id/receipt` +
+      `POST /jobs/:id/runs/:run_id/receipt/verify`. No new table — re-derives from
+      existing persisted state.
 
 #### Deferred to a follow-on feature plan
 
