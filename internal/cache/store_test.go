@@ -208,6 +208,60 @@ func TestListByJobReturnsNonExpired(t *testing.T) {
 	assert.Equal(t, "hash1", entries[0].Hash)
 }
 
+func TestPriorEntriesByTask_ExcludesHashAndExpired(t *testing.T) {
+	store := newTestStore(t)
+	jobID := uuid.New()
+
+	// A prior successful entry for the task.
+	prior := sampleEntry()
+	prior.JobID = jobID
+	prior.TaskName = "extract"
+	prior.Hash = "h_old"
+	prior.Output = map[string]string{"row_count": "42"}
+	require.NoError(t, store.Put(prior))
+
+	// The current re-execution's own (new) entry — must be excluded.
+	current := sampleEntry()
+	current.JobID = jobID
+	current.TaskName = "extract"
+	current.Hash = "h_new"
+	current.Output = map[string]string{"row_count": "42"}
+	require.NoError(t, store.Put(current))
+
+	// An expired prior — must be excluded.
+	expiredEntry := sampleEntry()
+	expiredEntry.JobID = jobID
+	expiredEntry.TaskName = "extract"
+	expiredEntry.Hash = "h_expired"
+	past := time.Now().UTC().Add(-time.Hour)
+	expiredEntry.ExpiresAt = &past
+	require.NoError(t, store.Put(expiredEntry))
+
+	// A different task's entry — must be excluded.
+	other := sampleEntry()
+	other.JobID = jobID
+	other.TaskName = "load"
+	other.Hash = "h_other"
+	require.NoError(t, store.Put(other))
+
+	priors, err := store.PriorEntriesByTask(jobID, "extract", "h_new")
+	require.NoError(t, err)
+	require.Len(t, priors, 1)
+	assert.Equal(t, "h_old", priors[0].Hash)
+	assert.Equal(t, map[string]string{"row_count": "42"}, priors[0].Output)
+
+	// End to end: the proof presents h_old for the byte-identical re-execution.
+	got := EquivalentPriorHash("h_new", map[string]string{"row_count": "42"}, priors)
+	assert.Equal(t, "h_old", got)
+}
+
+func TestPriorEntriesByTask_EmptyTaskName(t *testing.T) {
+	store := newTestStore(t)
+	priors, err := store.PriorEntriesByTask(uuid.New(), "", "h_new")
+	require.NoError(t, err)
+	assert.Empty(t, priors)
+}
+
 func TestPruneRemovesExpiredEntries(t *testing.T) {
 	store := newTestStore(t)
 

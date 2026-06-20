@@ -315,13 +315,36 @@ sequences after Stream A.
       machinery). `job-schema-reference.md` unchanged (generated; the protocol is a stdout
       convention, not a YAML field). Guard test pins that an encoded reference is not
       promoted to a lineage dataset (C1).
-- [ ] D2. Implement the value-verified short-circuit: replay a changed step; if its
+- [x] D2. Implement the value-verified short-circuit: replay a changed step; if its
       output reference digest matches the last successful run's, stop —
       downstream stays green (proven via content equality, preserving the
       cache-correctness invariant).
       Files: `internal/job/job.go` + `internal/worker/` (cache decision),
       new `test/` harness scenario asserting byte-identical short-circuit.
       Depends on: D1.
+      Done (W4-α): when a step re-executes because its OWN identity hash changed
+      (a cache MISS) but produces output byte-identical to a prior successful run,
+      it presents that prior run's identity to downstream consumers so a downstream
+      whose only changed input was this step stays a cache HIT — proven by output
+      equality, not heuristic. `cache.EquivalentPriorHash` (new
+      `internal/cache/shortcircuit.go`) is the proof: it compares the current
+      output to the canonical output of `cache.Store.PriorEntriesByTask` candidates
+      (same job+task, the new hash excluded) and returns the most-recent
+      proven-equal prior hash, else the new hash (default-to-rerun). Equality is
+      byte-identical canonical output — exactly the bytes `HashInput.Compute` folds
+      into the downstream key (for a large object that embeds the sha256 reference
+      digest), so it is never weaker than the cache key itself. A new nullable
+      `TaskRun.EffectiveHash` column carries the substituted prior identity;
+      `PredecessorHashes` reads `COALESCE(effective_hash, hash)`, so downstream
+      hashing uses the proven prior identity while the step's own `Hash` (receipt /
+      `caesium why`) stays its true identity. Wired into both the local
+      (`internal/job/job.go`) and distributed (`internal/worker/runtime_executor.go`)
+      paths; new `caesium_task_cache_short_circuits_total` metric. Default-to-rerun
+      guards: empty current hash, no current output, no prior with a non-empty hash
+      and byte-identical output, or any query failure → no substitution.
+      `test/dataplane_test.go` asserts both directions (identical output → downstream
+      stays `cached`; changed output → downstream re-runs `succeeded`). **Stream D
+      complete.**
 
 ## Sequencing & Dependencies
 

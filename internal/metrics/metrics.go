@@ -165,6 +165,18 @@ var (
 		[]string{"job_alias", "task_name"},
 	)
 
+	// TaskCacheShortCircuitsTotal counts value-verified short-circuits (D2): a
+	// task that re-executed because its own identity changed but produced
+	// byte-identical output to a prior successful run, so it presented that
+	// prior identity to downstream consumers and spared them a re-run.
+	TaskCacheShortCircuitsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_task_cache_short_circuits_total",
+			Help: "Total number of value-verified short-circuits (unchanged output despite a changed identity hash).",
+		},
+		[]string{"job_alias", "task_name"},
+	)
+
 	TaskCacheEntries = prometheus.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "caesium_task_cache_entries",
@@ -394,6 +406,7 @@ func Register() {
 			BackfillsActive,
 			TaskCacheHitsTotal,
 			TaskCacheMissesTotal,
+			TaskCacheShortCircuitsTotal,
 			TaskCacheEntries,
 			AuthRequestsTotal,
 			AuthFailuresTotal,

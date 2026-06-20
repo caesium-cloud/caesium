@@ -308,6 +308,24 @@ func (s *Store) SetTaskHashWithBlob(runID, taskID uuid.UUID, hash, resolvedImage
 		Updates(updates).Error
 }
 
+// SetTaskEffectiveHash records the proven-equivalent prior identity a task
+// presents to its downstream consumers when a value-verified short-circuit was
+// proven (design Component 5 / D2). It writes ONLY the effective_hash column;
+// the task's own Hash, output, and result are untouched, so its receipt and
+// `caesium why` still reflect its true identity. Passing an empty effectiveHash
+// is a no-op (the common case — no short-circuit), keeping the column nil and
+// PredecessorHashes falling back to the true hash. This is the only writer of
+// effective_hash, so a downstream reader observes either the proven prior
+// identity or nothing.
+func (s *Store) SetTaskEffectiveHash(runID, taskID uuid.UUID, effectiveHash string) error {
+	if effectiveHash == "" {
+		return nil
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("effective_hash", effectiveHash).Error
+}
+
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
 	model := &models.JobRun{
 		ID:        uuid.New(),
@@ -2912,6 +2930,16 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 // PredecessorHashes returns the execution hashes recorded on predecessor task
 // runs that completed successfully in the current run. This keeps distributed
 // cache hashing aligned with local execution, including transitive cache hits.
+//
+// The hash returned per predecessor is its EFFECTIVE identity: effective_hash
+// when a value-verified short-circuit was proven for that predecessor (its code
+// changed but it produced byte-identical output, see cache.EquivalentPriorHash
+// and TaskRun.EffectiveHash), otherwise its own hash. Reading the effective
+// hash is what stops a no-op upstream change from cascading a re-run downstream:
+// the predecessor presents its prior, proven-equivalent identity, so a
+// downstream whose only changed input was this predecessor sees an unchanged
+// hash and cache-hits. Falling back to hash (effective_hash empty) is the
+// common case and is byte-identical to the pre-D2 behavior.
 func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 	var edges []models.TaskEdge
 	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
@@ -2929,7 +2957,7 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 
 	var taskRuns []models.TaskRun
 	if err := s.db.
-		Select("hash").
+		Select("hash", "effective_hash").
 		Where("job_run_id = ? AND task_id IN ? AND status IN ? AND hash <> ''",
 			runID,
 			predTaskIDs,
@@ -2945,8 +2973,8 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 
 	hashes := make([]string, 0, len(taskRuns))
 	for _, taskRun := range taskRuns {
-		if taskRun.Hash != "" {
-			hashes = append(hashes, taskRun.Hash)
+		if h := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); h != "" {
+			hashes = append(hashes, h)
 		}
 	}
 	if len(hashes) == 0 {
@@ -2954,6 +2982,16 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 	}
 	sort.Strings(hashes)
 	return hashes, nil
+}
+
+// effectiveTaskHash returns the identity a predecessor presents to downstream
+// cache hashing: its proven-equivalent effectiveHash when set, otherwise its
+// own hash. Centralized so the local and distributed paths agree on the rule.
+func effectiveTaskHash(hash, effectiveHash string) string {
+	if effectiveHash != "" {
+		return effectiveHash
+	}
+	return hash
 }
 
 // RetryFromFailure resets a failed run so that previously-succeeded and cached

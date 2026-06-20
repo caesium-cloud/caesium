@@ -47,6 +47,18 @@ type TaskRun struct {
 	MaxAttempts      int               `gorm:"not null;default:1" json:"max_attempts"`
 	NodeSelector     datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Hash             string            `gorm:"type:text;index" json:"-"`
+	// EffectiveHash is the identity this task presents to its DOWNSTREAM
+	// consumers when a value-verified short-circuit was proven (design Component
+	// 5 / D2). Nullable: empty means "use Hash" — the common case. When this
+	// task re-executed because its OWN identity changed (Hash != a prior run's)
+	// but it produced byte-identical output to a prior successful run, this is
+	// set to that prior run's identity hash. Downstream PredecessorHashes reads
+	// COALESCE(effective_hash, hash), so a downstream task whose only changed
+	// input was this step sees an UNCHANGED predecessor and cache-hits — proven,
+	// not heuristic. Hash itself is left untouched so this task's own receipt /
+	// `caesium why` still reflect its true identity. See
+	// cache.EquivalentPriorHash for the proof and its default-to-rerun guards.
+	EffectiveHash    string            `gorm:"type:text" json:"-"`
 	Result           string            `json:"result,omitempty"`
 	Output           datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`

@@ -813,6 +813,57 @@ func TestPredecessorHashes(t *testing.T) {
 	require.Equal(t, []string{"pred-hash-1"}, hashes)
 }
 
+// TestPredecessorHashesUsesEffectiveHash asserts the value-verified
+// short-circuit (D2): when a predecessor recorded an effective_hash (its code
+// changed but its output was proven byte-identical to a prior run), downstream
+// PredecessorHashes presents that prior identity, not the predecessor's new
+// hash — so the downstream task sees an unchanged input and stays a cache hit.
+func TestPredecessorHashesUsesEffectiveHash(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+
+	jobID := uuid.New()
+	runRecord, err := store.Start(jobID, nil)
+	require.NoError(t, err)
+
+	atomA := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","a"]`}
+	atomB := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","b"]`}
+	require.NoError(t, db.Create(atomA).Error)
+	require.NoError(t, db.Create(atomB).Error)
+
+	taskA := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomA.ID, Name: "step-a"}
+	taskB := &models.Task{ID: uuid.New(), JobID: jobID, AtomID: atomB.ID, Name: "step-b"}
+	require.NoError(t, db.Create(taskA).Error)
+	require.NoError(t, db.Create(taskB).Error)
+
+	edge := &models.TaskEdge{ID: uuid.New(), JobID: jobID, FromTaskID: taskA.ID, ToTaskID: taskB.ID, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	require.NoError(t, db.Create(edge).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskA, atomA, 0))
+	require.NoError(t, store.RegisterTask(runRecord.ID, taskB, atomB, 1))
+	require.NoError(t, store.StartTask(runRecord.ID, taskA.ID, "runtime-a"))
+	require.NoError(t, store.CompleteTask(runRecord.ID, taskA.ID, "ok", map[string]string{"row_count": "42"}, nil))
+
+	// taskA re-executed with a NEW identity but was proven value-equal to a
+	// prior run whose identity was "pred-hash-old".
+	require.NoError(t, store.SetTaskHash(runRecord.ID, taskA.ID, "pred-hash-new"))
+	require.NoError(t, store.SetTaskEffectiveHash(runRecord.ID, taskA.ID, "pred-hash-old"))
+
+	hashes, err := store.PredecessorHashes(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"pred-hash-old"}, hashes, "downstream must see the proven prior identity, not the new one")
+
+	// Sanity: an empty effective hash is a no-op (falls back to the true hash).
+	require.NoError(t, store.SetTaskEffectiveHash(runRecord.ID, taskA.ID, ""))
+	hashes, err = store.PredecessorHashes(runRecord.ID, taskB.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"pred-hash-old"}, hashes, "empty effective hash must not clear an already-set one")
+}
+
 func TestPredecessorHashesIncludesCachedPredecessors(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

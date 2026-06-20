@@ -982,7 +982,35 @@ func (j *job) Run(ctx context.Context) error {
 					if taskModel != nil {
 						taskName = taskModel.Name
 					}
-					taskHashes[taskID] = inputHash
+
+					// Value-verified short-circuit (D2): this task re-executed
+					// because its OWN identity hash (inputHash) changed. If it
+					// produced output byte-identical to a prior successful run,
+					// present that prior run's identity to downstream consumers so
+					// a downstream whose only changed input was this step stays a
+					// cache hit instead of re-running. The substitution only
+					// happens when content equality is PROVEN (see
+					// cache.EquivalentPriorHash); on any uncertainty it returns
+					// inputHash unchanged (re-run downstream — always safe). The
+					// proof reads priors filtered to exclude inputHash, so the
+					// order relative to the Put below does not matter.
+					effectiveHash := inputHash
+					if priors, priorErr := cacheStore.PriorEntriesByTask(j.id, taskName, inputHash); priorErr != nil {
+						log.Warn("short-circuit: failed to load prior entries", "task", taskName, "error", priorErr)
+					} else {
+						effectiveHash = cache.EquivalentPriorHash(inputHash, output, priors)
+					}
+					// taskHashes drives the in-memory predHashes a downstream task
+					// folds into its own key; storing the effective (possibly
+					// prior) identity is what stops the cascade locally.
+					taskHashes[taskID] = effectiveHash
+					if effectiveHash != inputHash {
+						metrics.TaskCacheShortCircuitsTotal.WithLabelValues(j.alias, taskName).Inc()
+						log.Info("value-verified short-circuit", "task", taskName, "new_hash", inputHash[:12], "effective_hash", effectiveHash[:12])
+						if scErr := store.SetTaskEffectiveHash(runID, taskID, effectiveHash); scErr != nil {
+							log.Warn("short-circuit: failed to persist effective hash", "task", taskName, "error", scErr)
+						}
+					}
 
 					var expiresAt *time.Time
 					if cacheCfg.TTL > 0 {
