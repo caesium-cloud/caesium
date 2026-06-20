@@ -141,8 +141,23 @@ integration-gated, squash-merged. **Stream A is now complete.**
   cache key (the substrate for D2's value-verified skip). Review: env-access
   (gemini HIGH) + payload-size validation.
 
-Next eligible item: **D2** (value-verified short-circuit, needs D1 ✅) — the last
-item in the plan.
+### Wave 4 — value-verified short-circuit (shipped) — PLAN COMPLETE
+
+- **D2 (Stream D) — value-verified short-circuit.** PR #222 → merge `5d5a6d0`.
+  When a step re-executes (its identity hash changed) but produces **byte-identical
+  output** to a prior successful run, its proven-equivalent prior identity is
+  substituted into the downstream `PredecessorHashes` (via a new `effective_hash`
+  column read as `COALESCE(effective_hash, hash)`, consistent across local and
+  distributed paths) — so a no-op code change does NOT cascade re-runs downstream.
+  Conservative by construction: substitution only on proven content equality (a
+  large-object ref value embeds its sha256 digest, so byte-equality = content
+  equality); every uncertainty defaults to re-run. Ships with a P0-correctness
+  control test (`TestValueVerifiedShortCircuitRerunsOnRealChange`) asserting a real
+  change re-runs. Review: gemini HIGH (direct `mapsEqual` over JSON serialization) +
+  MEDIUM (bounded prior query). **Stream D complete.**
+
+**🏁 All 10 items shipped (A1–A4, B1–B2, C1–C2, D1–D2). The plan is complete — a
+candidate for archive to `docs/exec-plans/completed/`.**
 
 ### Stream Status
 
@@ -151,7 +166,7 @@ item in the plan.
 | A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | **Complete** — A1–A4 shipped (#215, #216, #221, #220) |
 | B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | **Complete** — B1+B2 shipped (#213, #218) |
 | C | Lineage dataset population + cross-job impact query | P1 | **Complete** — C1+C2 shipped (#214, #217) |
-| D | Large-object reference passing + value-verified skip | P2 | D1 shipped (#219); D2 pending |
+| D | Large-object reference passing + value-verified skip | P2 | **Complete** — D1+D2 shipped (#219, #222) |
 
 ## Streams
 

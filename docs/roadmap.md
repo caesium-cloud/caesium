@@ -184,6 +184,8 @@ steps:
 
 ### 3.4 Live DAG Debugging & Run Diff
 
+**Status**: Partially shipped via the [data-plane-memory](design-data-plane-memory.md) substrate. `caesium why <run> --task <t>` reimagines the causal half of this item — a field-level, machine-checkable explanation of why a task ran/skipped/re-ran (the discriminating `HashInput` field + trigger causation), reconstructed from the persisted decomposed hash + event store rather than a UI state-viewer. A git-committable reproducibility receipt + `caesium verify` and append-only DAG-topology history also land here. Remaining: the UI timeline/step-through replay surface.
+
 **Current state**: Debugging failed runs requires manual log inspection. No way to compare two runs side-by-side.
 
 **Target state**: The UI supports step-through replay of completed/failed runs showing the state at each point in time. A one-click root-cause trace follows the dependency chain from a failed task back to the unexpected input. Run diff compares two runs side-by-side (env, params, timing, outputs).
