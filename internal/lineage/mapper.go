@@ -3,6 +3,8 @@ package lineage
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -508,7 +510,14 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 	// --- Inputs ---
 	// Each predecessor in inputSchema becomes an input Dataset, referencing the
 	// predecessor step's logical output namespace within the same job.
-	for predStepName, schema := range payload.InputSchema {
+	// Sort predecessor names so the Inputs slice order is deterministic.
+	predNames := make([]string, 0, len(payload.InputSchema))
+	for predStepName := range payload.InputSchema {
+		predNames = append(predNames, predStepName)
+	}
+	sort.Strings(predNames)
+	for _, predStepName := range predNames {
+		schema := payload.InputSchema[predStepName]
 		facets := map[string]interface{}{
 			"caesium_dataset": CaesiumDatasetFacet{
 				BaseFacet: newCaesiumBaseFacet("CaesiumDatasetFacet"),
@@ -543,7 +552,8 @@ func (m *mapper) buildTaskDatasets(jobAlias string, payload taskRunPayload) (inp
 // pathLikeKeys returns the keys from output whose values look like file paths,
 // URIs, or table references — the types of values that form meaningful dataset
 // identities.  Scalar summaries (numbers, short words) are excluded to keep
-// the dataset graph focused on structural lineage.
+// the dataset graph focused on structural lineage.  The returned slice is
+// sorted so callers produce a deterministic Outputs order.
 func pathLikeKeys(output map[string]string) []string {
 	if len(output) == 0 {
 		return nil
@@ -554,44 +564,118 @@ func pathLikeKeys(output map[string]string) []string {
 			keys = append(keys, k)
 		}
 	}
+	sort.Strings(keys)
 	return keys
+}
+
+// knownURISchemes are the URI prefixes that unambiguously identify a dataset
+// reference.  Checked before the dotted-identifier heuristic.
+var knownURISchemes = []string{
+	"s3://", "gs://", "hdfs://", "file://", "abfs://", "az://",
+	"http://", "https://",
+}
+
+// knownFileExtensions are suffixes that unambiguously mark a file path when
+// combined with the dotted-identifier heuristic.
+var knownFileExtensions = []string{
+	".parquet", ".csv", ".json", ".jsonl", ".ndjson", ".avro", ".orc",
+	".tsv", ".gz", ".zst", ".snappy", ".yaml", ".yml", ".xml", ".txt",
+	".log", ".arrow", ".feather",
 }
 
 // looksLikeDatasetRef returns true when v appears to be a file path, URI,
 // or dotted table name (schema.table or db.schema.table) rather than a plain
-// scalar.
+// scalar value such as a decimal number, version string, IP address, or
+// relative dot-path.
+//
+// Inclusion rules (checked in order):
+//  1. Absolute file path starting with '/'.
+//  2. Known URI scheme prefix (s3://, gs://, hdfs://, file://, etc.).
+//  3. Dotted identifier: has a dot, no whitespace, not purely numeric,
+//     not a version string (all segments are digits), not an IP address
+//     (four numeric octets), no leading dot (relative / hidden paths),
+//     and either has a known file extension OR every dot-segment starts
+//     with a letter (table names like db.schema.table).
 func looksLikeDatasetRef(v string) bool {
 	if len(v) == 0 {
 		return false
 	}
-	// Absolute file path.
+
+	// Rule 1: absolute file path.
 	if v[0] == '/' {
 		return true
 	}
-	// URI schemes: s3://, gs://, hdfs://, file://, etc.
-	for _, scheme := range []string{"s3://", "gs://", "hdfs://", "file://", "abfs://", "az://", "http://", "https://"} {
-		if len(v) > len(scheme) && v[:len(scheme)] == scheme {
+
+	// Rule 2: known URI scheme.
+	for _, scheme := range knownURISchemes {
+		if strings.HasPrefix(v, scheme) && len(v) > len(scheme) {
 			return true
 		}
 	}
-	// Dotted table reference (at least one dot, no spaces, reasonable length).
-	if len(v) < 256 {
-		hasDot := false
-		hasSpace := false
-		for _, c := range v {
-			if c == '.' {
-				hasDot = true
-			}
-			if c == ' ' || c == '\t' || c == '\n' {
-				hasSpace = true
-				break
-			}
-		}
-		if hasDot && !hasSpace {
+
+	// Rule 3: dotted identifier heuristic — must have a dot, no whitespace,
+	// reasonable length, and pass the false-positive filters below.
+	if len(v) > 255 {
+		return false
+	}
+	dotIdx := strings.IndexByte(v, '.')
+	if dotIdx < 0 {
+		return false // no dot at all
+	}
+	if strings.ContainsAny(v, " \t\n\r") {
+		return false
+	}
+	// Leading dot: relative path (./foo), hidden file (.hidden) — exclude.
+	if v[0] == '.' {
+		return false
+	}
+
+	// Known file extension: accept even if segments contain digits.
+	for _, ext := range knownFileExtensions {
+		if strings.HasSuffix(v, ext) {
 			return true
 		}
 	}
-	return false
+
+	// Split on dots and inspect segments.
+	segments := strings.Split(v, ".")
+	allDigitSegments := true
+	allLetterStart := true
+	for _, seg := range segments {
+		if len(seg) == 0 {
+			return false // consecutive dots or trailing dot
+		}
+		if !isAllDigits(seg) {
+			allDigitSegments = false
+		}
+		if !isLetter(rune(seg[0])) {
+			allLetterStart = false
+		}
+	}
+
+	// Pure-numeric: decimal (3.14), version (1.2.3), IP (192.168.1.1) — exclude.
+	if allDigitSegments {
+		return false
+	}
+
+	// Accept dotted identifiers where every segment starts with a letter
+	// (database.schema.table, analytics.public.fact_orders, etc.).
+	return allLetterStart
+}
+
+// isAllDigits returns true if s contains only ASCII digit characters.
+func isAllDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isLetter returns true if c is an ASCII letter (a–z, A–Z).
+func isLetter(c rune) bool {
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // datasetNameFromValue builds a human-readable dataset name from the output

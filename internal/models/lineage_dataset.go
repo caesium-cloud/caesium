@@ -12,24 +12,25 @@ import (
 // facets are emitted out-of-process via the existing http transport; dqlite
 // holds only what is needed for impact queries (references + digests).
 //
-// The record is keyed by (TaskRunID, Namespace, Name, Direction) so that a
-// repeated task-run does not accumulate unbounded rows: a re-run replaces via
-// upsert (caller's responsibility).  It is deleted when its parent TaskRun is
-// deleted (constraint:OnDelete:CASCADE).
+// The natural key is (TaskRunID, Namespace, Name, Direction): a unique index
+// enforces this at the DB level, and callers must upsert (OnConflict DoNothing
+// or DoUpdates) rather than plain-insert to avoid accumulating unbounded rows
+// when a task run emits the same dataset twice.  Records are deleted when the
+// parent TaskRun is deleted (constraint:OnDelete:CASCADE).
 type LineageDataset struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 
 	// TaskRunID is the FK into task_runs.  Records are deleted when the parent
 	// task run is deleted.
-	TaskRunID uuid.UUID `gorm:"type:uuid;index;not null" json:"task_run_id"`
+	TaskRunID uuid.UUID `gorm:"type:uuid;not null;uniqueIndex:idx_lineage_dataset_key,priority:1" json:"task_run_id"`
 	TaskRun   TaskRun   `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 
 	// Namespace and Name form the OpenLineage dataset identity.
-	Namespace string `gorm:"type:text;not null" json:"namespace"`
-	Name      string `gorm:"type:text;not null" json:"name"`
+	Namespace string `gorm:"type:text;not null;uniqueIndex:idx_lineage_dataset_key,priority:2" json:"namespace"`
+	Name      string `gorm:"type:text;not null;uniqueIndex:idx_lineage_dataset_key,priority:3" json:"name"`
 
 	// Direction is "input" or "output" from the step's perspective.
-	Direction string `gorm:"type:text;not null" json:"direction"`
+	Direction string `gorm:"type:text;not null;uniqueIndex:idx_lineage_dataset_key,priority:4" json:"direction"`
 
 	// FacetSummary is a bounded JSON object holding a digest + small facet
 	// summary (step name, output keys, schema keys).  Full facets are emitted

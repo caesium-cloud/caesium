@@ -698,29 +698,105 @@ func TestTaskWithDottedTableName(t *testing.T) {
 	}
 }
 
-// TestLooksLikeDatasetRef exercises the heuristic directly.
+// TestLooksLikeDatasetRef exercises the heuristic directly, including the
+// false-positive cases that the tightened implementation must exclude.
 func TestLooksLikeDatasetRef(t *testing.T) {
 	cases := []struct {
 		value string
 		want  bool
+		label string
 	}{
-		{"/data/output/file.parquet", true},
-		{"s3://bucket/key", true},
-		{"gs://bucket/key", true},
-		{"hdfs://namenode/path", true},
-		{"file:///tmp/out.csv", true},
-		{"analytics.public.fact_orders", true},
-		{"db.schema.table", true},
-		{"1234567", false},          // scalar number
-		{"succeeded", false},        // plain word
-		{"hello world", false},      // has space
-		{"", false},                 // empty
-		{"nodot", false},            // no dot, no scheme, no leading slash
+		// --- should be true ---
+		{"/data/output/file.parquet", true, "absolute path"},
+		{"s3://bucket/key", true, "S3 URI"},
+		{"gs://bucket/key", true, "GCS URI"},
+		{"hdfs://namenode/path", true, "HDFS URI"},
+		{"file:///tmp/out.csv", true, "file URI"},
+		{"abfs://container@account.dfs.core.windows.net/path", true, "ABFS URI"},
+		{"analytics.public.fact_orders", true, "dotted table name"},
+		{"db.schema.table", true, "three-part table name"},
+		{"mydb.mytable", true, "two-part table name"},
+		{"/data/extract/2026-06-19.parquet", true, "absolute path with known ext"},
+		{"output/data.csv", true, "relative path with known ext"},
+		// --- should be false (false-positive exclusions) ---
+		{"3.14", false, "decimal number"},
+		{"3.14159", false, "pi"},
+		{"1.2.3", false, "version string"},
+		{"10.0.0.1", false, "IP address"},
+		{"192.168.1.100", false, "IP address 4-octets"},
+		{".hidden", false, "hidden file / leading dot"},
+		{".", false, "bare dot"},
+		{"..", false, "double dot"},
+		{"./relative/path", false, "dot-relative path"},
+		{"1234567", false, "plain integer"},
+		{"succeeded", false, "plain word without dot"},
+		{"hello world", false, "has space"},
+		{"", false, "empty string"},
+		{"nodot", false, "no dot, no scheme, no leading slash"},
+		{"v1.2.3", false, "version with v prefix — all segs are digit-only or 'v'+digits"},
 	}
 	for _, tc := range cases {
 		got := looksLikeDatasetRef(tc.value)
 		if got != tc.want {
-			t.Errorf("looksLikeDatasetRef(%q) = %v, want %v", tc.value, got, tc.want)
+			t.Errorf("[%s] looksLikeDatasetRef(%q) = %v, want %v", tc.label, tc.value, got, tc.want)
+		}
+	}
+}
+
+// TestDatasetsOrderIsDeterministic asserts that repeated calls to
+// buildTaskDatasets with the same multi-key Output and multi-predecessor
+// InputSchema always produce the same slice order.
+func TestDatasetsOrderIsDeterministic(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testTaskRunPayload()
+	payload.TaskName = "load"
+	payload.Output = map[string]string{
+		"z_path": "/data/z.parquet",
+		"a_path": "/data/a.parquet",
+		"m_path": "/data/m.parquet",
+	}
+	payload.InputSchema = map[string]map[string]interface{}{
+		"zebra":  {"type": "object"},
+		"alpha":  {"type": "object"},
+		"middle": {"type": "object"},
+	}
+
+	// Call twice and compare.
+	in1, out1 := m.buildTaskDatasets("etl", payload)
+	in2, out2 := m.buildTaskDatasets("etl", payload)
+
+	if len(out1) != len(out2) {
+		t.Fatalf("outputs length mismatch: %d vs %d", len(out1), len(out2))
+	}
+	for i := range out1 {
+		if out1[i].Name != out2[i].Name {
+			t.Errorf("outputs[%d] name mismatch: %q vs %q", i, out1[i].Name, out2[i].Name)
+		}
+	}
+
+	if len(in1) != len(in2) {
+		t.Fatalf("inputs length mismatch: %d vs %d", len(in1), len(in2))
+	}
+	for i := range in1 {
+		if in1[i].Name != in2[i].Name {
+			t.Errorf("inputs[%d] name mismatch: %q vs %d", i, in1[i].Name, i)
+		}
+	}
+
+	// Verify alphabetical order for outputs (sorted by key, value is the name).
+	expectedOutputNames := []string{"/data/a.parquet", "/data/m.parquet", "/data/z.parquet"}
+	for i, want := range expectedOutputNames {
+		if out1[i].Name != want {
+			t.Errorf("outputs[%d].Name = %q, want %q (expected sorted by output key)", i, out1[i].Name, want)
+		}
+	}
+
+	// Verify alphabetical order for inputs (sorted by predecessor name).
+	expectedInputPreds := []string{"alpha", "middle", "zebra"}
+	for i, pred := range expectedInputPreds {
+		want := "etl." + pred + ".output"
+		if in1[i].Name != want {
+			t.Errorf("inputs[%d].Name = %q, want %q (expected sorted by predecessor name)", i, in1[i].Name, want)
 		}
 	}
 }
