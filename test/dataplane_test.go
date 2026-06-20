@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/image"
@@ -161,6 +163,188 @@ steps:
 	s.Equal("succeeded", run2.Status)
 	s.Equal("cached", s.taskStatusesByName(job.ID, run2)["pinned"],
 		"an unchanged pinned digest must still hit the cache")
+}
+
+// --------------------------------------------------------------------------
+// Data-plane memory D2: value-verified short-circuit
+// --------------------------------------------------------------------------
+
+// TestValueVerifiedShortCircuit is the D2 headline assertion. A producer step's
+// CODE changes between runs (its command is rewritten) so its identity hash
+// changes and it re-executes — a cache MISS. But it emits BYTE-IDENTICAL output.
+// A downstream consumer whose only changed input was the producer's identity
+// must therefore stay GREEN as a cache hit ("cached"), not cascade a re-run.
+// The skip is proven by output equality, not inferred.
+//
+//   - Run 1: producer + consumer both execute and cache.
+//   - Re-apply: producer command rewritten (different code) but the emitted
+//     ##caesium::output is the SAME bytes; consumer is byte-for-byte unchanged.
+//   - Run 2: producer MISSES (its identity changed) and re-executes, but its
+//     output is proven equal to the prior run, so consumer short-circuits and
+//     stays "cached".
+func (s *IntegrationTestSuite) TestValueVerifiedShortCircuit() {
+	alias := fmt.Sprintf("integration-d2-shortcircuit-%d", time.Now().UnixNano())
+
+	// Producer v1: a no-op `true` then the canonical output line.
+	manifestV1 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache: true
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: producer
+    image: alpine:3.23
+    command: ["sh", "-c", "true; echo '##caesium::output {\"val\": \"42\"}'"]
+    next: consumer
+  - name: consumer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo got=$CAESIUM_OUTPUT_PRODUCER_VAL && echo '##caesium::output {\"done\": \"yes\"}'"]
+    dependsOn: producer
+`, alias)
+
+	dir := s.writeJobManifest(manifestV1)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	run1 := s.awaitRun(job.ID, s.triggerRun(job.ID), runTimeout)
+	s.Equal("succeeded", run1.Status, "first run should succeed")
+	statuses1 := s.taskStatusesByName(job.ID, run1)
+	s.Equal("succeeded", statuses1["producer"], "producer executes on first run")
+	s.Equal("succeeded", statuses1["consumer"], "consumer executes on first run")
+
+	// Producer v2: DIFFERENT code (`false || true` instead of `true`) so its
+	// identity hash changes — but the emitted output is byte-identical. The
+	// consumer step is unchanged.
+	manifestV2 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache: true
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: producer
+    image: alpine:3.23
+    command: ["sh", "-c", "false || true; echo '##caesium::output {\"val\": \"42\"}'"]
+    next: consumer
+  - name: consumer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo got=$CAESIUM_OUTPUT_PRODUCER_VAL && echo '##caesium::output {\"done\": \"yes\"}'"]
+    dependsOn: producer
+`, alias)
+	s.rewriteJobManifest(dir, manifestV2)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run2 := s.awaitRun(job.ID, s.triggerRun(job.ID), runTimeout)
+	s.Equal("succeeded", run2.Status, "second run should succeed")
+	statuses2 := s.taskStatusesByName(job.ID, run2)
+	// Producer's code changed -> identity changed -> it must re-execute (MISS).
+	s.Equal("succeeded", statuses2["producer"],
+		"producer's code changed, so it must re-execute (cache MISS)")
+	// Consumer's only changed input was the producer's identity, but the
+	// producer's output is byte-identical, so the value-verified short-circuit
+	// keeps the consumer a cache hit.
+	s.Equal("cached", statuses2["consumer"],
+		"a code-only producer change with identical output must NOT cascade a downstream re-run")
+}
+
+// TestValueVerifiedShortCircuitRerunsOnRealChange is the correctness control:
+// when the producer's output ACTUALLY changes, the consumer's inputs really
+// changed, so it MUST re-run. This guards the cache-correctness invariant — a
+// short-circuit here would serve a stale downstream result (a P0 bug).
+//
+//   - Run 1: producer emits {"val":"42"}; both steps execute + cache.
+//   - Re-apply: producer emits {"val":"99"} (genuinely different output).
+//   - Run 2: producer MISSES and re-executes; the consumer's predecessor output
+//     changed, so it MUST re-execute ("succeeded"), never short-circuit.
+func (s *IntegrationTestSuite) TestValueVerifiedShortCircuitRerunsOnRealChange() {
+	alias := fmt.Sprintf("integration-d2-realchange-%d", time.Now().UnixNano())
+
+	manifestV1 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache: true
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: producer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::output {\"val\": \"42\"}'"]
+    next: consumer
+  - name: consumer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo got=$CAESIUM_OUTPUT_PRODUCER_VAL && echo '##caesium::output {\"done\": \"yes\"}'"]
+    dependsOn: producer
+`, alias)
+
+	dir := s.writeJobManifest(manifestV1)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	run1 := s.awaitRun(job.ID, s.triggerRun(job.ID), runTimeout)
+	s.Equal("succeeded", run1.Status)
+	statuses1 := s.taskStatusesByName(job.ID, run1)
+	s.Equal("succeeded", statuses1["producer"])
+	s.Equal("succeeded", statuses1["consumer"])
+
+	// Producer now emits genuinely different output.
+	manifestV2 := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+  cache: true
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+steps:
+  - name: producer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::output {\"val\": \"99\"}'"]
+    next: consumer
+  - name: consumer
+    image: alpine:3.23
+    command: ["sh", "-c", "echo got=$CAESIUM_OUTPUT_PRODUCER_VAL && echo '##caesium::output {\"done\": \"yes\"}'"]
+    dependsOn: producer
+`, alias)
+	s.rewriteJobManifest(dir, manifestV2)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+
+	run2 := s.awaitRun(job.ID, s.triggerRun(job.ID), runTimeout)
+	s.Equal("succeeded", run2.Status)
+	statuses2 := s.taskStatusesByName(job.ID, run2)
+	s.Equal("succeeded", statuses2["producer"],
+		"producer's output changed, so it must re-execute")
+	s.Equal("succeeded", statuses2["consumer"],
+		"a real upstream output change MUST re-run the consumer, never short-circuit")
+}
+
+// rewriteJobManifest overwrites the single job.yaml in dir (created by
+// writeJobManifest) with new contents, applying the same engine injection so
+// non-docker engines still run. Used to simulate a code change between applies.
+func (s *IntegrationTestSuite) rewriteJobManifest(dir, contents string) {
+	s.T().Helper()
+	path := filepath.Join(dir, "job.yaml")
+	s.Require().NoError(os.WriteFile(path, []byte(strings.TrimSpace(s.injectEngine(contents))), 0o644))
 }
 
 // --------------------------------------------------------------------------

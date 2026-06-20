@@ -79,6 +79,65 @@ func (s *Store) Put(entry *Entry) error {
 	}).Create(model).Error
 }
 
+// maxPriorEntriesForShortCircuit bounds how many historical cache entries
+// PriorEntriesByTask loads as short-circuit candidates. The proof
+// (EquivalentPriorHash) substitutes the MOST-RECENT proven-equal prior, so
+// ordering by created_at DESC and capping the scan loses nothing: an entry
+// older than the N most recent could only win if every newer one differed, and
+// a value reverting to a form last produced beyond the N-most-recent runs is a
+// vanishingly rare case where conservatively re-running (a miss is always safe)
+// is acceptable. The bound keeps the per-task scan O(1) instead of growing with
+// run history.
+const maxPriorEntriesForShortCircuit = 64
+
+// PriorEntriesByTask returns up to maxPriorEntriesForShortCircuit of the
+// most-recent non-expired cache entries for a (job, task) as PriorEntry
+// candidates for the value-verified short-circuit (EquivalentPriorHash). It
+// deliberately excludes the entry whose Hash equals excludeHash — that is the
+// current re-execution's own (new) identity, which is never its own prior. Only
+// Hash + Output + CreatedAt are needed by the proof, so this is a narrow
+// projection; ordering by created_at DESC with a LIMIT keeps it cheap even for
+// a task with a long run history. A query failure returns the error; the caller
+// treats any failure as "no provable prior" and re-runs (a miss is always safe).
+func (s *Store) PriorEntriesByTask(jobID uuid.UUID, taskName, excludeHash string) ([]PriorEntry, error) {
+	if taskName == "" {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	var rows []models.TaskCache
+	if err := s.db.
+		Select("hash", "output", "created_at").
+		Where("job_id = ? AND task_name = ? AND hash <> ? AND (expires_at IS NULL OR expires_at > ?)",
+			jobID, taskName, excludeHash, now).
+		Order("created_at DESC").
+		Limit(maxPriorEntriesForShortCircuit).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	out := make([]PriorEntry, 0, len(rows))
+	for i := range rows {
+		m := &rows[i]
+		var output map[string]string
+		if len(m.Output) > 0 {
+			if err := json.Unmarshal(m.Output, &output); err != nil {
+				// A corrupt prior output cannot prove equality — skip it rather
+				// than abort, so other valid candidates still apply.
+				continue
+			}
+		}
+		out = append(out, PriorEntry{
+			Hash:      m.Hash,
+			Output:    output,
+			CreatedAt: m.CreatedAt.UnixNano(),
+		})
+	}
+	return out, nil
+}
+
 // Invalidate removes cache entries for a specific task.
 func (s *Store) Invalidate(jobID uuid.UUID, taskName string) error {
 	return s.db.Where("job_id = ? AND task_name = ?", jobID, taskName).

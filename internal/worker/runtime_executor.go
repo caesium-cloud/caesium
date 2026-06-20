@@ -260,7 +260,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" {
-				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun)
+				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun, resolveJobAlias())
 			}
 			return
 		}
@@ -524,7 +524,7 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
-func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun) {
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun, jobAlias string) {
 	// Read back the completed task run to get output and result.
 	var completed models.TaskRun
 	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
@@ -559,6 +559,33 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 	var branchSelections []string
 	if len(completed.BranchSelections) > 0 {
 		_ = json.Unmarshal(completed.BranchSelections, &branchSelections)
+	}
+
+	// Value-verified short-circuit (D2): this worker task re-executed because
+	// its own identity hash changed (a cache miss). If it produced output
+	// byte-identical to a prior successful run, persist that prior run's
+	// identity as the effective hash so downstream tasks — which read
+	// PredecessorHashes (COALESCE(effective_hash, hash)) from the DB — see an
+	// unchanged predecessor and cache-hit instead of re-running. The
+	// substitution only happens when content equality is PROVEN; otherwise
+	// EquivalentPriorHash returns hash and no effective_hash is written
+	// (re-run downstream — always safe). Excluding hash from the prior query
+	// makes the order relative to the Put below irrelevant.
+	//
+	// Ordering note: this task is already marked Succeeded (sink.Succeeded ran
+	// before storeCacheEntry) when effective_hash is written here. A downstream
+	// claimed in that narrow window would read the producer's true hash without
+	// the effective_hash and therefore re-run — a missed optimization, NEVER a
+	// stale result. The invariant (a miss is always safe) is preserved; we
+	// optimize the common case and never risk a false short-circuit.
+	if priors, priorErr := cacheStore.PriorEntriesByTask(jobRun.JobID, taskModel.Name, hash); priorErr != nil {
+		log.Warn("short-circuit: failed to load prior entries", "task_id", taskRun.TaskID, "error", priorErr)
+	} else if effectiveHash := cache.EquivalentPriorHash(hash, output, priors); effectiveHash != hash {
+		metrics.TaskCacheShortCircuitsTotal.WithLabelValues(jobAlias, taskModel.Name).Inc()
+		log.Info("value-verified short-circuit for worker task", "task_id", taskRun.TaskID, "new_hash", hash, "effective_hash", effectiveHash)
+		if scErr := e.store.SetTaskEffectiveHash(taskRun.JobRunID, taskRun.TaskID, effectiveHash); scErr != nil {
+			log.Warn("short-circuit: failed to persist effective hash", "task_id", taskRun.TaskID, "error", scErr)
+		}
 	}
 
 	entry := &cache.Entry{
