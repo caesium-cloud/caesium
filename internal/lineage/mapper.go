@@ -319,6 +319,9 @@ func (m *mapper) mapTaskFail(evt event.Event) (*RunEvent, error) {
 	}
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
+	// A failed task's declared inputs (and any partial outputs) are still
+	// recorded so lineage impact queries reflect failed runs too.
+	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
 		EventTime: evt.Timestamp,
@@ -561,10 +564,20 @@ func (m *mapper) persistTaskDatasets(payload taskRunPayload, inputs, outputs []D
 
 	summary, _ := json.Marshal(map[string]string{"step_name": payload.TaskName})
 	rows := make([]models.LineageDataset, 0, len(inputs)+len(outputs))
+	// Deduplicate within the batch: distinct output keys can resolve to the same
+	// dataset value (e.g. the same file path), and a duplicate
+	// (task_run, namespace, name, direction) tuple would otherwise violate the
+	// unique index within a single multi-row insert.
+	seen := make(map[string]struct{}, len(inputs)+len(outputs))
 	appendRow := func(ds Dataset, direction string) {
 		if ds.Name == "" {
 			return
 		}
+		key := ds.Namespace + "\x00" + ds.Name + "\x00" + direction
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
 		rows = append(rows, models.LineageDataset{
 			ID:           uuid.New(),
 			TaskRunID:    taskRunID,
