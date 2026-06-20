@@ -37,7 +37,7 @@ type topologyService struct {
 func Service(ctx context.Context) Topology {
 	return &topologyService{
 		ctx:   ctx,
-		query: jobdef.NewSnapshotQuery(db.Connection()),
+		query: jobdef.NewSnapshotQuery(ctx, db.Connection()),
 	}
 }
 
@@ -47,12 +47,12 @@ func Service(ctx context.Context) Topology {
 func ServiceWithDB(ctx context.Context, conn *gorm.DB) Topology {
 	return &topologyService{
 		ctx:   ctx,
-		query: jobdef.NewSnapshotQuery(conn),
+		query: jobdef.NewSnapshotQuery(ctx, conn),
 	}
 }
 
 func (s *topologyService) WithDatabase(conn *gorm.DB) Topology {
-	s.query = jobdef.NewSnapshotQuery(conn)
+	s.query = jobdef.NewSnapshotQuery(s.ctx, conn)
 	return s
 }
 

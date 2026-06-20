@@ -1,6 +1,7 @@
 package jobdef
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -54,7 +55,7 @@ func TestSnapshotQuery_Latest(t *testing.T) {
 	defer testutil.CloseDB(db)
 
 	jobID := seedJob(t, db)
-	q := NewSnapshotQuery(db)
+	q := NewSnapshotQuery(context.Background(), db)
 
 	// No snapshot yet → ErrRecordNotFound.
 	_, err := q.Latest(jobID)
@@ -75,7 +76,7 @@ func TestSnapshotQuery_ByContentHash(t *testing.T) {
 	defer testutil.CloseDB(db)
 
 	jobID := seedJob(t, db)
-	q := NewSnapshotQuery(db)
+	q := NewSnapshotQuery(context.Background(), db)
 
 	now := time.Now().UTC()
 	seedSnapshot(t, db, jobID, "hash-x", "commit-x", now)
@@ -95,7 +96,7 @@ func TestSnapshotQuery_ByGitCommit(t *testing.T) {
 	defer testutil.CloseDB(db)
 
 	jobID := seedJob(t, db)
-	q := NewSnapshotQuery(db)
+	q := NewSnapshotQuery(context.Background(), db)
 
 	// Empty commit returns an error from the service layer, but the query
 	// layer accepts it; test the non-empty path here.
@@ -115,7 +116,7 @@ func TestSnapshotQuery_List(t *testing.T) {
 	defer testutil.CloseDB(db)
 
 	jobID := seedJob(t, db)
-	q := NewSnapshotQuery(db)
+	q := NewSnapshotQuery(context.Background(), db)
 
 	// No rows yet → empty slice, no error.
 	snaps, err := q.List(jobID)
@@ -142,7 +143,7 @@ func TestSnapshotQuery_IsolatedByJob(t *testing.T) {
 
 	jobA := seedJob(t, db)
 	jobB := seedJob(t, db)
-	q := NewSnapshotQuery(db)
+	q := NewSnapshotQuery(context.Background(), db)
 
 	now := time.Now().UTC()
 	seedSnapshot(t, db, jobA, "hash-a", "", now)

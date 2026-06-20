@@ -1,6 +1,7 @@
 package jobdef
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -11,20 +12,25 @@ import (
 
 // SnapshotQuery provides read-only access to dag_snapshot rows.
 // It does not touch the write path (writeSnapshotTx in importer.go).
+// ctx is propagated to every query via db.WithContext so that
+// request cancellation and deadlines are honoured — matching the
+// house pattern used by other services (trigger, notification, etc.).
 type SnapshotQuery struct {
-	db *gorm.DB
+	ctx context.Context
+	db  *gorm.DB
 }
 
 // NewSnapshotQuery returns a SnapshotQuery backed by conn.
-func NewSnapshotQuery(conn *gorm.DB) *SnapshotQuery {
-	return &SnapshotQuery{db: conn}
+func NewSnapshotQuery(ctx context.Context, conn *gorm.DB) *SnapshotQuery {
+	return &SnapshotQuery{ctx: ctx, db: conn}
 }
 
 // Latest returns the most-recently written snapshot for jobID, or
 // gorm.ErrRecordNotFound when no snapshot exists.
 func (q *SnapshotQuery) Latest(jobID uuid.UUID) (*models.DagSnapshot, error) {
 	var snap models.DagSnapshot
-	err := q.db.Where("job_id = ?", jobID).
+	err := q.db.WithContext(q.ctx).
+		Where("job_id = ?", jobID).
 		Order("created_at desc").
 		Limit(1).
 		First(&snap).Error
@@ -38,7 +44,8 @@ func (q *SnapshotQuery) Latest(jobID uuid.UUID) (*models.DagSnapshot, error) {
 // gorm.ErrRecordNotFound when none matches.
 func (q *SnapshotQuery) ByContentHash(jobID uuid.UUID, contentHash string) (*models.DagSnapshot, error) {
 	var snap models.DagSnapshot
-	err := q.db.Where("job_id = ? AND content_hash = ?", jobID, contentHash).
+	err := q.db.WithContext(q.ctx).
+		Where("job_id = ? AND content_hash = ?", jobID, contentHash).
 		Order("created_at desc").
 		Limit(1).
 		First(&snap).Error
@@ -55,7 +62,8 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 		return nil, fmt.Errorf("commit must not be empty")
 	}
 	var snap models.DagSnapshot
-	err := q.db.Where("job_id = ? AND git_commit = ?", jobID, commit).
+	err := q.db.WithContext(q.ctx).
+		Where("job_id = ? AND git_commit = ?", jobID, commit).
 		Order("created_at desc").
 		Limit(1).
 		First(&snap).Error
@@ -69,7 +77,8 @@ func (q *SnapshotQuery) ByGitCommit(jobID uuid.UUID, commit string) (*models.Dag
 // (newest first).
 func (q *SnapshotQuery) List(jobID uuid.UUID) ([]models.DagSnapshot, error) {
 	var snaps []models.DagSnapshot
-	err := q.db.Where("job_id = ?", jobID).
+	err := q.db.WithContext(q.ctx).
+		Where("job_id = ?", jobID).
 		Order("created_at desc").
 		Find(&snaps).Error
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
