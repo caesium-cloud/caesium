@@ -19,6 +19,7 @@ This directory separates current-source operator documentation from forward-look
 ## Strategy & Roadmap
 
 - [differentiation-strategy.md](differentiation-strategy.md): Positioning thesis — the sovereignty-led funnel, why Caesium wins by constraint not comparison, and the kill-conditions that test it.
+- [sovereignty.md](sovereignty.md): Sovereignty proof-points — free vs. paywalled feature comparison (HA, RBAC, SSO, audit, lineage vs. Dagster+/Kestra Enterprise/Prefect Cloud) and a zero-dependency / air-gapped quickstart.
 - [roadmap.md](roadmap.md): Strategic vision, design principles, and the prioritized feature plan.
 
 ## Active Design Records

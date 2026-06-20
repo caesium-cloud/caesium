@@ -57,7 +57,7 @@ owned by the sibling plan [`data-plane-memory.md`](data-plane-memory.md); where
 the two plans touch the same files, the sibling's Stream A owns
 `internal/cache/hash.go` and `pkg/jobdef/definition.go` (see Sequencing).
 
-## Progress (as of 2026-06-19)
+## Progress (as of 2026-06-20)
 
 ### Wave 0 — Reposition (this PR)
 
@@ -66,14 +66,21 @@ the two plans touch the same files, the sibling's Stream A owns
   Airflow/Dagster/Flyte can't", "free what they paywall") using search-term-aware
   copy. Iterate as positioning sharpens.
 
-The first full wave is the next eligible run of `exec-plan-wave` against this
-doc. Leaf items ready: **A2, B1** (A1 is in-flight/landed in this PR).
+### Wave 1 — Proof-point docs (sovereignty-execution-alpha)
+
+- **Stream A**: A2 landed — `docs/sovereignty.md` adds the free-vs-paywalled
+  comparison table (HA/RBAC/SSO/audit/k8s/lineage vs. Dagster+/Kestra
+  Enterprise/Prefect Cloud) and the zero-dependency / air-gapped quickstart
+  (`scp` one binary story, no Postgres). Index entry added to `docs/README.md`
+  (guardrail green). Air-gapped k8s notes subsection added to
+  `docs/kubernetes-deployment.md` with cross-link to `cache.pinDigests` in
+  `design-data-plane-memory.md` (not duplicated). Leaf item remaining: **B1**.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Sovereignty positioning — reposition the public surface; proof-point docs | **P0** | A1 first pass landed; A2 not started |
+| A | Sovereignty positioning — reposition the public surface; proof-point docs | **P0** | A1 landed; **A2 landed** |
 | B | Kueue delegation — emit `kueue.x-k8s.io/queue-name`, never bin-pack | P1 | Not started |
 
 ## Streams
@@ -89,7 +96,7 @@ single binary). Sells by constraint; needs no benchmark or sales motion.
       "everything they paywall, free", in words a frustrated engineer searches
       for. (First pass landed in this PR; refine as positioning sharpens.)
       Files: `README.md`.
-- [ ] A2. Add sovereignty proof-point docs: a "free vs. paywalled" comparison
+- [x] A2. Add sovereignty proof-point docs: a "free vs. paywalled" comparison
       (HA/RBAC/SSO/audit/k8s vs. Dagster+/Kestra/Prefect Cloud) and a
       zero-dependency / air-gapped quickstart ("`scp` one binary, no Postgres").
       Files: new `docs/sovereignty.md` (or `docs/comparison.md`) **plus its index
