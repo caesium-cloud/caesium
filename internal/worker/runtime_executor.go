@@ -210,7 +210,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// path does (the worker rebuilds the identical HashInput from the
 		// scheduler-propagated TaskRun + predecessor data). A serialization
 		// failure is non-fatal — the hash is still written without the blob.
-		blob, blobErr := hashInput.CanonicalJSON()
+		blob, blobErr := hashInput.CanonicalJSON(cacheHash)
 		if blobErr != nil {
 			log.Warn("cache: failed to serialize hash-input blob", "task_id", taskRun.TaskID, "error", blobErr)
 			blob = nil

@@ -893,7 +893,7 @@ func (j *job) Run(ctx context.Context) error {
 			// blob so `caesium why` can later diff this run field-by-field. A
 			// serialization failure is non-fatal: persist the hash without the
 			// blob (a missing blob degrades `why` to digest-only, never wrong).
-			blob, blobErr := hashInput.CanonicalJSON()
+			blob, blobErr := hashInput.CanonicalJSON(inputHash)
 			if blobErr != nil {
 				log.Warn("failed to serialize hash-input blob", "task", taskName, "error", blobErr)
 				blob = nil

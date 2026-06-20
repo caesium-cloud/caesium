@@ -68,12 +68,13 @@ func TestPutThenGet_HashInputBlobPersists(t *testing.T) {
 	store := newTestStore(t)
 	entry := sampleEntry()
 
-	blob, err := HashInput{
+	in := HashInput{
 		JobAlias: "j",
 		TaskName: "t",
 		Image:    "alpine:3.23",
 		Env:      map[string]string{"FOO": "bar"},
-	}.CanonicalJSON()
+	}
+	blob, err := in.CanonicalJSON(in.Compute())
 	require.NoError(t, err)
 	entry.HashInputBlob = blob
 

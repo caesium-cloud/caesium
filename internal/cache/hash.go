@@ -47,9 +47,13 @@ type redactedEnvValue struct {
 // redacted to a digest.
 type envBlobValue struct {
 	// Secret holds the literal secret:// URI when the value is a secret
-	// reference. Secret references resolve through internal/jobdef/secret and
-	// are excluded from the hash; they are safe to store and carry no
-	// credential material.
+	// reference. The URI itself IS included in the hash — a changed URI
+	// (secret://vault/db/pass -> .../pass-v2) changes the key. What is NOT
+	// hashed is the resolved secret value, which is substituted at
+	// container-create time, after hashing (see
+	// jobdefruntime.ResolveContainerSpecSecrets). The URI carries no credential
+	// material and is safe to store verbatim, so `caesium why` can show it in a
+	// diff.
 	Secret string `json:"secret,omitempty"`
 	// Redacted holds the digest of a non-reference value. nil when Secret is
 	// set.
@@ -103,9 +107,10 @@ type oversizedBlob struct {
 }
 
 // secretRefPrefix is the scheme prefix identifying a secret:// reference. It
-// must match internal/jobdef/secret's scheme; an env value with this prefix is
-// a non-secret pointer (resolved at container-create time, after hashing) and
-// is stored verbatim, while every other value is redacted.
+// must match internal/jobdef/secret's scheme. An env value with this prefix is
+// a non-secret pointer whose URI is hashed verbatim but whose resolved value is
+// substituted only at container-create time (after hashing); it is stored
+// verbatim in the blob, while every other value is redacted.
 const secretRefPrefix = "secret://"
 
 // redactEnv produces the persisted env map: secret:// references verbatim, all
@@ -134,18 +139,26 @@ func redactEnv(env map[string]string) map[string]envBlobValue {
 // CanonicalJSON serializes the decomposed HashInput to a canonical,
 // secret-redacted JSON blob suitable for persistence and later field-by-field
 // diffing (`caesium why`). It is deterministic: encoding/json emits object keys
-// in sorted order and every slice is hashed/copied in the same order Compute()
-// uses. The returned bytes are bounded by maxHashInputBlobBytes; if the full
-// decomposition would exceed that, a compact oversized marker is returned
-// instead so dqlite write pressure stays bounded.
+// in sorted order and every slice is stored in the same canonical order
+// Compute() hashes it (predecessor hashes sorted; mounts and volume mounts
+// sorted by their Compute() sort key), so the blob faithfully represents the
+// hashed inputs and a diff never reports a spurious reorder. The returned bytes
+// are bounded by maxHashInputBlobBytes; if the full decomposition would exceed
+// that, a compact oversized marker is returned instead so dqlite write pressure
+// stays bounded.
+//
+// precomputed is the digest Compute() already produced on the hash write-path;
+// it is embedded inline (so a reader can confirm the blob matches the persisted
+// Hash) and reused rather than recomputed, avoiding a second full SHA-256 pass.
 //
 // Env values are never stored verbatim: secret:// references are kept as-is
-// (they are safe pointers) and all other values are reduced to a digest, so a
-// credential injected as a literal env value never lands in the blob.
-func (h HashInput) CanonicalJSON() ([]byte, error) {
+// (the URI itself is hashed but carries no credential material) and all other
+// values are reduced to a digest, so a credential injected as a literal env
+// value never lands in the blob.
+func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 	blob := HashInputBlob{
 		BlobVersion:          HashInputBlobVersion,
-		Hash:                 h.Compute(),
+		Hash:                 precomputed,
 		JobAlias:             h.JobAlias,
 		TaskName:             h.TaskName,
 		Image:                h.Image,
@@ -153,8 +166,8 @@ func (h HashInput) CanonicalJSON() ([]byte, error) {
 		Command:              h.Command,
 		Env:                  redactEnv(h.Env),
 		WorkDir:              h.WorkDir,
-		Mounts:               h.Mounts,
-		ResolvedVolumeMounts: h.ResolvedVolumeMounts,
+		Mounts:               sortedMounts(h.Mounts),
+		ResolvedVolumeMounts: sortedVolumeMounts(h.ResolvedVolumeMounts),
 		Kubernetes:           h.Kubernetes,
 		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
 		PredecessorOutputs:   h.PredecessorOutputs,
@@ -202,6 +215,48 @@ func sortedCopy(s []string) []string {
 	out := make([]string, len(s))
 	copy(out, s)
 	sort.Strings(out)
+	return out
+}
+
+// mountSortKey is the canonical string a Mount is sorted by. Compute() and
+// CanonicalJSON() both order mounts by this key so the hash and the persisted
+// blob agree on order — otherwise `caesium why` could report a spurious
+// mount-reorder that had no effect on the hash.
+func mountSortKey(m container.Mount) string {
+	return fmt.Sprintf("%s:%s:%s:%t", m.Source, m.Target, m.Type, m.ReadOnly)
+}
+
+// volumeMountSortKey is the canonical string a VolumeMount is sorted by, shared
+// by Compute() and CanonicalJSON() for the same reason as mountSortKey.
+func volumeMountSortKey(m container.VolumeMount) string {
+	return fmt.Sprintf("%s:%s:%s:%s:%t:%s:%s:%s:%s", m.Name, m.Type, m.Source, m.Target, m.ReadOnly, m.SubPath, canonicalJSON(m.Tmpfs), canonicalJSON(m.ClaimTemplate), canonicalJSON(m.VolumeSource))
+}
+
+// sortedMounts returns a copy of mounts ordered by mountSortKey without
+// mutating the input.
+func sortedMounts(mounts []container.Mount) []container.Mount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]container.Mount, len(mounts))
+	copy(out, mounts)
+	sort.Slice(out, func(i, j int) bool {
+		return mountSortKey(out[i]) < mountSortKey(out[j])
+	})
+	return out
+}
+
+// sortedVolumeMounts returns a copy of mounts ordered by volumeMountSortKey
+// without mutating the input.
+func sortedVolumeMounts(mounts []container.VolumeMount) []container.VolumeMount {
+	if len(mounts) == 0 {
+		return nil
+	}
+	out := make([]container.VolumeMount, len(mounts))
+	copy(out, mounts)
+	sort.Slice(out, func(i, j int) bool {
+		return volumeMountSortKey(out[i]) < volumeMountSortKey(out[j])
+	})
 	return out
 }
 
@@ -258,23 +313,15 @@ func (h HashInput) Compute() string {
 
 	w(digest, "workdir:%s\n", h.WorkDir)
 
-	// Sorted mounts (serialize each mount deterministically)
-	mountStrs := make([]string, 0, len(h.Mounts))
-	for _, m := range h.Mounts {
-		mountStrs = append(mountStrs, fmt.Sprintf("%s:%s:%s:%t", m.Source, m.Target, m.Type, m.ReadOnly))
-	}
-	sort.Strings(mountStrs)
-	for _, m := range mountStrs {
-		w(digest, "mount:%s\n", m)
+	// Sorted mounts (serialize each mount deterministically). The same sort
+	// keys are reused by CanonicalJSON so the persisted blob lists mounts in the
+	// identical order they were hashed.
+	for _, m := range sortedMounts(h.Mounts) {
+		w(digest, "mount:%s\n", mountSortKey(m))
 	}
 
-	volumeMountStrs := make([]string, 0, len(h.ResolvedVolumeMounts))
-	for _, m := range h.ResolvedVolumeMounts {
-		volumeMountStrs = append(volumeMountStrs, fmt.Sprintf("%s:%s:%s:%s:%t:%s:%s:%s:%s", m.Name, m.Type, m.Source, m.Target, m.ReadOnly, m.SubPath, canonicalJSON(m.Tmpfs), canonicalJSON(m.ClaimTemplate), canonicalJSON(m.VolumeSource)))
-	}
-	sort.Strings(volumeMountStrs)
-	for _, m := range volumeMountStrs {
-		w(digest, "volume_mount:%s\n", m)
+	for _, m := range sortedVolumeMounts(h.ResolvedVolumeMounts) {
+		w(digest, "volume_mount:%s\n", volumeMountSortKey(m))
 	}
 
 	if h.Kubernetes != nil {
