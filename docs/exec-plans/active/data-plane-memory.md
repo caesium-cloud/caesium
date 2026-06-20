@@ -114,19 +114,44 @@ issues; all three agents stayed in-lane.
   Review: 2 gemini HIGH (BFS dedup; SQLite 999-param two-step → correlated
   subquery) + 2 greptile P1 (`max_depth=0`; non-deterministic attribution) + a P2.
 
-Next eligible items (deps now satisfied): **A3** (`caesium why`, needs A2 ✅),
-**A4** (reproducibility receipt + `caesium verify`, needs A1 ✅ + A2 ✅), and
-**D1** (large-object reference passing, needs A2 ✅; touches `internal/cache/hash.go`
-so sequence/merge after A-stream work), then **D2**.
+### Wave 3 — explain / reproduce / large-object substrate (shipped)
+
+The EXPLAIN + REPRODUCE features and the SKIP substrate shipped — reviewed,
+integration-gated, squash-merged. **Stream A is now complete.**
+
+- **A3 (Stream A) — `caesium why` causal explainer.** PR #221 → merge `41b69f6`.
+  `caesium why <run> --task <t>` (+ REST) decodes two persisted `HashInput` blobs
+  (A2) into a sorted field-by-field diff — scalars, per-key env (secrets stay
+  redacted), per-step predecessor outputs (the headline data-contract diff), run
+  params, predecessor-hash set — classifies the verdict (CACHE_HIT/MISS/DISABLED),
+  picks the baseline, and joins the `run_started` event for trigger causation.
+  Review: gemini HIGH nil-`CacheOriginRunID` logic bug + a baseline-query refactor
+  (+ `*echo.Context` false positive).
+- **A4 (Stream A) — reproducibility receipt + `caesium verify`.** PR #220 → merge `564b565`.
+  Content-addressed Merkle receipt (per-task identity hashes + resolved image
+  digests + manifest hash + git commit), re-derived from persisted state; `verify`
+  flags drift; a task without a resolved digest is marked **degraded/unverifiable**
+  (never silently attests a mutable tag). Review: soft-delete `Unscoped()`
+  provenance (gemini HIGH), retry→terminal-attempt dedup, a **greptile P1
+  auth-bypass** (validate `:id` up-front → 400), + 2 `*echo.Context` CRITICAL false
+  positives. **Stream A complete.**
+- **D1 (Stream D) — large-object reference passing.** PR #219 → merge `b1653b2`.
+  A `##caesium::output` reference variant offloads >64 KB payloads to BYO storage
+  and passes a content-addressed reference; the reference digest folds into the
+  cache key (the substrate for D2's value-verified skip). Review: env-access
+  (gemini HIGH) + payload-size validation.
+
+Next eligible item: **D2** (value-verified short-circuit, needs D1 ✅) — the last
+item in the plan.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | A1+A2 shipped (#215, #216); A3–A4 pending |
+| A | Content-key integrity: image digest resolution + persist decomposed HashInput (+ `caesium why`, reproducibility receipt) | **P0** | **Complete** — A1–A4 shipped (#215, #216, #221, #220) |
 | B | DAG topology versioning — append-only `dag_snapshot`, stop hard-deleting edges | P1 | **Complete** — B1+B2 shipped (#213, #218) |
 | C | Lineage dataset population + cross-job impact query | P1 | **Complete** — C1+C2 shipped (#214, #217) |
-| D | Large-object reference passing + value-verified skip | P2 | Not started |
+| D | Large-object reference passing + value-verified skip | P2 | D1 shipped (#219); D2 pending |
 
 ## Streams
 
