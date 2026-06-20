@@ -186,11 +186,12 @@ from dqlite without `git checkout`. Independent of Stream A.
       new `internal/models/dag_snapshot.go` + register in `internal/models/models.go` (`All` slice, additive),
       `internal/jobdef/` snapshot write.
       <!-- W1-β: DagSnapshot model + writeSnapshotTx + dedup-on-unchanged; lint+unit-test green (PR data-plane-memory W1-β). -->
-- [ ] B2. Expose historical topology: an API (and optional CLI) to fetch the DAG
+- [x] B2. Expose historical topology: an API (and optional CLI) to fetch the DAG
       as-of a snapshot/commit.
       Files: `api/rest/controller/` + `api/rest/service/` + `api/rest/bind/bind.go`,
       optional `cmd/`, `internal/jobdef/` query.
       Depends on: B1.
+      <!-- W2-β: GET /v1/jobs/:id/topology (latest, ?snapshot=<hash>, ?commit=<sha>) + GET /v1/jobs/:id/topology/history; SnapshotQuery in internal/jobdef/; topology service + controller; unit tests all green. -->
 
 ### Stream C — Lineage dataset population + impact (design C4)
 
