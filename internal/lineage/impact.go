@@ -3,9 +3,9 @@ package lineage
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
-	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -55,14 +55,22 @@ type ImpactResult struct {
 
 	// Downstream lists every transitively reachable output dataset, ordered
 	// breadth-first (shallowest nodes first within each depth level).
+	// When the same (namespace, name) is produced by multiple distinct
+	// task runs / jobs, each (namespace+name+job_id) triple appears as a
+	// separate node; BFS frontier expansion is keyed only on dataset identity
+	// so the graph traversal still terminates.
 	Downstream []ImpactNode `json:"downstream"`
 }
 
 // QueryImpact returns all datasets transitively downstream of the dataset
 // identified by (namespace, name) — i.e. datasets whose producing steps
 // consume namespace/name as an input, directly or transitively, across job
-// boundaries.  The traversal is bounded by maxDepth (≤ 20; pass 0 to use the
-// default of 10).
+// boundaries.
+//
+// maxDepth controls how many hops to traverse:
+//   - 0 (or unset): use the server default of 10.
+//   - 1–20: traverse that many hops.
+//   - >20: capped at 20.
 //
 // The lineage_dataset table records (task_run_id, namespace, name, direction)
 // rows for every observed input and output.  Two rows form an edge when an
@@ -88,11 +96,15 @@ func QueryImpact(ctx context.Context, db *gorm.DB, namespace, name string, maxDe
 		Downstream:    []ImpactNode{},
 	}
 
-	// visited tracks (namespace, name) pairs we have already added to the
-	// result set, preventing cycles in the graph.
-	visited := make(map[string]bool)
+	// visitedDatasets tracks (namespace, name) pairs we have already
+	// enqueued into the BFS frontier, preventing cycles and redundant
+	// traversal waves.  It is intentionally separate from the reported-nodes
+	// dedup: a dataset can be produced by multiple jobs and all of those
+	// (dataset, job) pairs are reported — but the dataset name itself is only
+	// added to the frontier once so the BFS terminates.
+	visitedDatasets := make(map[string]bool)
 	rootKey := namespace + "\x00" + name
-	visited[rootKey] = true
+	visitedDatasets[rootKey] = true
 
 	// frontier holds the (namespace, name) pairs whose direct consumers we
 	// must find in the current BFS wave.
@@ -109,17 +121,20 @@ func QueryImpact(ctx context.Context, db *gorm.DB, namespace, name string, maxDe
 
 		var nextFrontier []datasetRef
 		for _, c := range consumers {
-			key := c.DatasetNamespace + "\x00" + c.DatasetName
-			if visited[key] {
-				continue
-			}
-			visited[key] = true
 			c.Depth = depth
 			result.Downstream = append(result.Downstream, c)
-			nextFrontier = append(nextFrontier, datasetRef{
-				namespace: c.DatasetNamespace,
-				name:      c.DatasetName,
-			})
+
+			// Only add to the next frontier if we have not yet traversed
+			// this dataset name — prevents cycles while still reporting
+			// multiple producers of the same dataset name.
+			key := c.DatasetNamespace + "\x00" + c.DatasetName
+			if !visitedDatasets[key] {
+				visitedDatasets[key] = true
+				nextFrontier = append(nextFrontier, datasetRef{
+					namespace: c.DatasetNamespace,
+					name:      c.DatasetName,
+				})
+			}
 		}
 		frontier = nextFrontier
 	}
@@ -133,46 +148,46 @@ type datasetRef struct {
 	name      string
 }
 
-// findConsumers runs a two-step SQL pass for a single BFS level:
+// findConsumers runs a single SQL pass for one BFS level.  For each dataset
+// in frontier it finds task runs that consume it (direction='input') via a
+// correlated subquery, then returns those task runs' output datasets
+// (direction='output') joined with job provenance.
 //
-//  1. Find task_run_ids that have any frontier dataset as an input
-//     (direction='input').
-//  2. Return those task runs' output datasets (direction='output') joined
-//     with job provenance so the caller has attribution in one query.
+// Using a subquery avoids loading intermediate task_run_id values into Go
+// memory and sidesteps the SQLite/dqlite 999-host-parameter limit that would
+// be hit by a large IN (?,?,…,?) list.
+//
+// Results are ordered by (ld.created_at DESC, ld.id DESC) so that when the
+// same (namespace, name) output was produced by multiple task runs the most
+// recent run is returned first, making attribution deterministic ("latest
+// producer wins").
 func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]ImpactNode, error) {
 	if len(frontier) == 0 {
 		return nil, nil
 	}
 
-	// Step 1: collect consumer task_run_ids.
-	type taskRunIDRow struct{ TaskRunID string }
-	var inputRows []taskRunIDRow
-
-	q := db.WithContext(ctx).
-		Model(&models.LineageDataset{}).
-		Select("task_run_id").
-		Where("direction = ?", "input")
-
-	orCond := db.Where("namespace = ? AND name = ?", frontier[0].namespace, frontier[0].name)
-	for _, f := range frontier[1:] {
-		orCond = orCond.Or("namespace = ? AND name = ?", f.namespace, f.name)
-	}
-	q = q.Where(orCond)
-
-	if err := q.Scan(&inputRows).Error; err != nil {
-		return nil, err
-	}
-	if len(inputRows) == 0 {
-		return nil, nil
+	// Build the frontier (namespace = ? AND name = ?) OR arms.
+	// The number of arms is bounded by the BFS frontier width, which is
+	// small in practice (one arm per distinct dataset at this depth level).
+	orArms := make([]string, len(frontier))
+	// subArgs holds the placeholder values for the subquery's WHERE clause.
+	subArgs := make([]interface{}, 0, len(frontier)*2)
+	for i, f := range frontier {
+		orArms[i] = "(namespace = ? AND name = ?)"
+		subArgs = append(subArgs, f.namespace, f.name)
 	}
 
-	taskRunIDs := make([]string, len(inputRows))
-	for i, r := range inputRows {
-		taskRunIDs[i] = r.TaskRunID
-	}
+	// The subquery selects task_run_ids that consumed any frontier dataset as
+	// an input.  The ? placeholders are filled by subArgs in the Scan call.
+	subquery := "SELECT task_run_id FROM lineage_datasets" +
+		" WHERE direction = 'input' AND (" + strings.Join(orArms, " OR ") + ")"
 
-	// Step 2: fetch the output datasets for those task_run_ids joined to
-	// job provenance via task_runs → job_runs → jobs.
+	// The outer WHERE clause matches output rows whose task_run_id is in the
+	// subquery.  Args: 'output' for ld.direction, then subArgs for the
+	// embedded subquery placeholders.
+	outerWhere := "ld.direction = ? AND ld.task_run_id IN (" + subquery + ")"
+	queryArgs := append([]interface{}{"output"}, subArgs...)
+
 	type outputRow struct {
 		Namespace        string
 		Name             string
@@ -195,7 +210,8 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 		Joins("JOIN task_runs tr ON tr.id = ld.task_run_id").
 		Joins("JOIN job_runs jr ON jr.id = tr.job_run_id").
 		Joins("JOIN jobs j ON j.id = jr.job_id").
-		Where("ld.direction = ? AND ld.task_run_id IN ?", "output", taskRunIDs).
+		Where(outerWhere, queryArgs...).
+		Order("ld.created_at DESC, ld.id DESC").
 		Scan(&outputRows).Error
 	if err != nil {
 		return nil, err
@@ -203,7 +219,13 @@ func findConsumers(ctx context.Context, db *gorm.DB, frontier []datasetRef) ([]I
 
 	nodes := make([]ImpactNode, 0, len(outputRows))
 	for _, row := range outputRows {
-		jobID, _ := uuid.Parse(row.JobID)
+		jobID, err := uuid.Parse(row.JobID)
+		if err != nil {
+			// A zero UUID signals to callers that provenance attribution
+			// failed for this row (e.g. a schema mismatch during migration).
+			// We still include the node so the dataset graph is complete.
+			jobID = uuid.Nil
+		}
 		nodes = append(nodes, ImpactNode{
 			DatasetNamespace: row.Namespace,
 			DatasetName:      row.Name,

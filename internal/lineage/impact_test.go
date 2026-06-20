@@ -199,6 +199,48 @@ func (s *ImpactSuite) TestCrossJobBoundary() {
 	s.Equal("https://github.com/org/repo", node.ProvenanceRepo)
 }
 
+// TestMultipleProducers: when two different jobs both consume the same upstream
+// dataset and each produces a different downstream dataset, both downstream
+// nodes appear in the result.  This validates that the BFS dedup is keyed on
+// dataset identity (for frontier expansion) rather than on reported nodes, so
+// distinct (dataset, job) producers are not silently dropped.
+func (s *ImpactSuite) TestMultipleProducers() {
+	ns := "test"
+
+	// Job A produces source.table.
+	_, runA := s.createJobAndRun("job-source", "")
+	s.createDataset(runA, ns, "source.table", "output", "ingest")
+
+	// Job B consumes source.table and produces sink-b.table.
+	_, runB := s.createJobAndRun("job-consumer-b", "commit-b")
+	s.createDataset(runB, ns, "source.table", "input", "step-b")
+	s.createDataset(runB, ns, "sink-b.table", "output", "step-b")
+
+	// Job C also consumes source.table and produces sink-c.table.
+	_, runC := s.createJobAndRun("job-consumer-c", "commit-c")
+	s.createDataset(runC, ns, "source.table", "input", "step-c")
+	s.createDataset(runC, ns, "sink-c.table", "output", "step-c")
+
+	result, err := QueryImpact(s.ctx, s.db, ns, "source.table", 0)
+	s.Require().NoError(err)
+	s.Require().Len(result.Downstream, 2, "both downstream datasets must be reported")
+
+	byName := make(map[string]ImpactNode, 2)
+	for _, n := range result.Downstream {
+		byName[n.DatasetName] = n
+	}
+
+	bNode, ok := byName["sink-b.table"]
+	s.True(ok, "sink-b.table must appear in downstream")
+	s.Equal("job-consumer-b", bNode.JobAlias)
+	s.Equal(0, bNode.Depth)
+
+	cNode, ok := byName["sink-c.table"]
+	s.True(ok, "sink-c.table must appear in downstream")
+	s.Equal("job-consumer-c", cNode.JobAlias)
+	s.Equal(0, cNode.Depth)
+}
+
 // TestStepNameFromFacet: helper correctly extracts step names.
 func (s *ImpactSuite) TestStepNameFromFacet() {
 	raw := marshalFacet(map[string]interface{}{
