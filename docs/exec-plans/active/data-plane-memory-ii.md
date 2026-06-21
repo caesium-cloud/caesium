@@ -117,13 +117,17 @@ A–D, #213–#222); the first wave is the next eligible run of the
 `exec-plan-wave` skill against this doc. Leaf items eligible for Wave 1:
 **A1**, **B1** (design memo), **C1**, **H-1** (independent RBAC backfill).
 
-This plan was revised on 2026-06-20 in response to a Codex adversarial review:
-Stream B is now fail-closed (non-bypassable quarantine, callbacks-off, fail-on-
-missing-baseline, explicit opt-in for side-effecting replay); every new REST
-route carries an RBAC policy entry; Stream C's blame uses transition-based
-attribution (handles delete/readd); and **H-1** was added to fix a pre-existing
-bug the review surfaced — the shipped `why`/`receipt`/`topology`/`impact`
-endpoints are absent from `endpointPolicy` and 403 under auth.
+This plan was revised twice on 2026-06-20 in response to two Codex adversarial
+review rounds. Round 1: Stream B is now fail-closed (non-bypassable quarantine,
+callbacks-off, fail-on-missing-baseline, explicit opt-in for side-effecting
+replay); every new REST route carries an RBAC policy entry. Round 2: Stream C's
+blame is scoped to **commit/snapshot-level** attribution keyed by the full task
+descriptor (matching what `DagSnapshot` actually persists — no historical
+author/ref; same-name content mutations counted correctly); and the RBAC work was
+split into **H-1** (a full, explicit backfill of all ~19 unpolicied `Protected()`
+routes — the auth trust boundary) and **H-2** (the completeness guard, which lands
+after H-1 so it goes green). The RBAC gap is a **latent** bug — the project is
+pre-alpha with no users, so nothing is broken in production today.
 
 ### Stream Status
 
@@ -131,8 +135,8 @@ endpoints are absent from `endpointPolicy` and 403 under auth.
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
 | B | Quarantined what-if replay (`caesium run replay --set … --diff`) — fail-closed | P2 | Not started |
-| C | `caesium blame` over commit ranges (dag_snapshot attribution) | **P1** | Not started |
-| H | RBAC policy backfill for shipped endpoints + completeness guardrail | **P1** | Not started |
+| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Not started |
+| H | Full RBAC policy backfill (H-1) + completeness guard (H-2) | P2 | Not started |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
 
 ## Streams
@@ -304,26 +308,38 @@ lands.
 ### Stream C — `caesium blame` over commit ranges
 
 Ship `caesium blame <job> [--task t] [--from <commit> --to <commit>]`: attribute
-each task/edge in a job's DAG to the provenance commit (+ author/ref) that
-introduced it, by walking the append-only `dag_snapshot` history shipped in
+each task/edge in a job's DAG to the **commit/snapshot** that introduced its
+current form, by walking the append-only `dag_snapshot` history shipped in
 data-plane-memory Stream B. Independent of Streams A and B (different substrate:
 topology history vs. hash blobs), so it runs fully in parallel.
 
+**Scope honestly to what `DagSnapshot` actually persists** (adversarial review,
+2026-06-20). The shipped snapshot stores `GitCommit` (the apply-time commit SHA,
+possibly empty), a per-task descriptor `{name, image, command}`, and per-edge
+`{from, to, provenance_commit}` — and the dedup `ContentHash` already folds in
+each task's image+command. It does **not** persist historical **author** or
+**ref**; those live only on the live `Job`/`Atom` rows and are overwritten on
+every apply, so they are unrecoverable for past snapshots. Blame therefore
+attributes to **commit + snapshot identity only**; surfacing author/ref is a
+deferred enhancement requiring an additive `DagSnapshot` change (capture
+author/ref at write time) and is recorded as out of scope here, not promised.
+
 - [ ] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
       order and attribute each task/edge to its **most recent introduction** — the
-      snapshot at which it transitioned from *absent → present* — not the
-      earliest-ever containment. This matters because the history is append-only and
-      topology churns: an element can be removed and later re-added, or the selected
-      range can begin after the original introduction. Compute introduction as a
-      present/absent transition **relative to the selected `[from, to]` range** (or
-      the element's current lifecycle when unbounded), so a delete-and-readd is
-      blamed on the commit that re-added it and a rollback is not misattributed to
-      stale provenance. Surface the introducing snapshot's `provenance_commit` /
-      author / ref. Support a single-task filter. Reuse
-      `internal/models/dag_snapshot.go` and the snapshot query shipped in
-      data-plane-memory B2.
+      snapshot at which its *current descriptor* transitioned from absent → present
+      — not the earliest-ever containment. **Key identity by the full descriptor,
+      not the name**: a same-name task whose `image`/`command` changed is a content
+      transition (the prior descriptor went absent, a new one appeared → a new
+      snapshot with a new `ContentHash`), so blame must attribute it to the
+      mutating snapshot, not the original introduction. This also handles the
+      append-only churn cases: delete-and-readd is blamed on the re-adding commit,
+      and a `[from, to]` range that begins after the original introduction is
+      computed relative to the range. Surface the introducing snapshot's
+      `GitCommit` and the per-edge `provenance_commit` (commit-only — no author/ref,
+      per the scope note above). Support a single-task filter.
       Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`
-      (cover delete/readd and range-start-after-introduction explicitly).
+      (cover delete/readd, **same-name image/command mutation**, and
+      range-start-after-introduction explicitly).
 - [ ] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
       returning per-element attribution as JSON. Register the route in
       `endpointPolicy` (`GET /v1/jobs/:id/blame` → `RoleViewer`) or the middleware
@@ -342,40 +358,66 @@ topology history vs. hash blobs), so it runs fully in parallel.
       (add an edge/step) that writes a second `dag_snapshot`, then drive
       `caesium blame --json` and assert the new element is attributed to the later
       snapshot/commit while the unchanged elements stay attributed to the first;
-      assert clean stdout via `runCLIStdout`. Add a **delete-and-readd** case: remove
-      an edge/step (third snapshot), re-add it (fourth), and assert blame attributes
-      it to the fourth — the reintroduction — not the original first snapshot. This
-      is the regression for C1's transition-based attribution.
+      assert clean stdout via `runCLIStdout`. Add two regressions for C1's
+      descriptor-keyed attribution: (a) a **same-name image/command mutation** —
+      change a step's image (fifth snapshot) and assert blame attributes it to the
+      mutating snapshot, not the original; and (b) a **delete-and-readd** — remove
+      an edge/step then re-add it, and assert blame attributes it to the re-adding
+      snapshot.
       Files: new `test/blame_test.go` (`//go:build integration`).
       Depends on: C3.
-      Note: whether the integration apply path stamps a distinct
-      `provenance_commit`/author (provenance is normally set by git-sync) is an
-      open harness question — see `## Sequencing & Dependencies`. If apply cannot
-      stamp provenance, the assertion falls back to per-snapshot attribution
-      (snapshot id/time) rather than commit SHA.
+      Note: whether the integration apply path stamps a distinct `GitCommit`
+      (provenance is normally set by git-sync) is an open harness question — see
+      `## Sequencing & Dependencies`. If apply cannot stamp a commit, the assertion
+      falls back to per-snapshot attribution (snapshot id/`created_at`) rather than
+      commit SHA — which is fine, since snapshot identity is the attribution key.
 
 ## Harness Strengthening
 
-- [ ] H-1. Backfill RBAC policy for the **already-shipped** data-plane endpoints
-      and add a completeness guardrail. The adversarial review (2026-06-20) found
-      that `GET /v1/jobs/:id/runs/:id/why`, `GET …/receipt` +
-      `POST …/receipt/verify`, `GET /v1/jobs/:id/topology` + `…/topology/history`,
-      and `GET /v1/lineage/impact` are **absent from `endpointPolicy`**, so
-      `api/middleware/auth.go`'s `RequiredRole` returns `!ok` and the middleware
-      denies them `unknown_route` (403) under any API-key/SSO deployment — i.e. the
-      sovereignty buyer cannot use the shipped explain/reproduce/impact features at
-      all. Add the missing entries (the read endpoints → `RoleViewer`;
-      `receipt/verify` is a read-only re-derivation despite being POST →
-      `RoleViewer`). Then add a **completeness test** asserting every route
-      registered in `bind.go`'s `Protected()` group has an `endpointPolicy` entry,
-      so a new authenticated route without a policy fails CI instead of 403-ing in
-      production. This guard also covers A2/B4/C2.
-      Files: `internal/auth/rbac.go` (backfill entries), new
-      `internal/auth/rbac_policy_completeness_test.go` (or extend
-      `internal/auth/rbac_test.go`), and a `test/` integration assertion that an
-      authenticated viewer can reach `why`/`receipt`/`topology`/`impact`.
-      Note: this item fixes shipped code, so it is also a candidate to land as a
-      standalone fix PR ahead of the wave — see the cover note on PR #229.
+> Urgency note: the project is **pre-alpha with no users**, so the RBAC gap below
+> is a **latent correctness bug**, not an active outage — these endpoints only
+> 403 when auth is enabled, and no real auth-gated deployment exists yet. It is
+> worth fixing now because the policy map is the auth trust boundary and the fix
+> is cheap, but it does not warrant emergency sequencing.
+
+- [ ] H-1. **Full RBAC policy backfill** for every currently-unpolicied route in
+      `bind.go`'s `Protected()` group, with the trust boundary made explicit. The
+      adversarial review (2026-06-20) found that `api/middleware/auth.go`'s
+      `RequiredRole` returns `!ok` for any route absent from `endpointPolicy` and
+      the middleware then denies it `unknown_route` (403) under auth — and that
+      **~19 Protected routes are unpolicied today**, well beyond the data-plane
+      ones. Add an entry for each, with these proposed minimum roles (confirm with
+      the maintainer; consistent with the existing Viewer=read / Operator=manage
+      semantics):
+      - Data-plane reads → `RoleViewer`: `GET …/runs/:id/why`, `GET …/runs/:id/receipt`,
+        `POST …/runs/:id/receipt/verify` (read-only re-derivation), `GET …/topology`,
+        `GET …/topology/history`, `GET /v1/lineage/impact`.
+      - Other reads → `RoleViewer`: `GET /v1/stats/summary`, `GET /v1/system/features`,
+        `GET /v1/system/nodes`, `GET /v1/notifications/channels`(+`/:id`),
+        `GET /v1/notifications/policies`(+`/:id`), `POST /v1/jobdefs/lint`,
+        `POST /v1/jobdefs/diff` (both read-only previews — no state mutation).
+      - Notification management → `RoleOperator`: `POST/PATCH/DELETE
+        /v1/notifications/channels` and `…/policies`.
+      `POST /hooks/*` is **out of scope** — it is registered by `bindWebhooks` on
+      the outer group (its own webhook HMAC auth), not inside `Protected()`, so it
+      is intentionally not RBAC-gated. Add `RequiredRole` assertions for the new
+      entries.
+      Files: `internal/auth/rbac.go` (backfill entries), `internal/auth/rbac_test.go`
+      (assertions).
+- [ ] H-2. Add the **completeness guard**: a test asserting every route registered
+      under `bind.go`'s `Protected()` group has an `endpointPolicy` entry, so a new
+      authenticated route without a policy fails CI instead of 403-ing at runtime.
+      This is what makes A2/B4/C2's entries non-optional. It must land **after**
+      H-1 (or it goes red against the existing gap) and must exclude the outer-group
+      public routes (`/hooks/*`, anything in `skipPaths`).
+      Files: new `internal/auth/rbac_policy_completeness_test.go` (enumerate the
+      `Protected()` routes and diff against `endpointPolicy`), plus a `test/`
+      integration assertion that an authenticated viewer can reach the data-plane
+      reads (`why`/`receipt`/`topology`/`impact`).
+      Depends on: H-1.
+      Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
+      this is low-urgency, but they can land as a small standalone PR whenever
+      convenient — see the cover note on PR #229.
 
 ## Navigational / Organizational Improvements
 
@@ -402,9 +444,12 @@ topology history vs. hash blobs), so it runs fully in parallel.
 - **B1 gates the rest of Stream B.** The design memo resolves the fail-closed
   safety model; B2–B6 must not implement runtime replay before it lands. Treat B1
   as a hard barrier within Stream B, not a parallel doc item.
-- **H-1 is independent** and high-value on its own (it fixes shipped endpoints);
-  it can land first, even as a standalone PR ahead of the wave. Its completeness
-  test, once in, also enforces the RBAC entries A2/B4/C2 must add.
+- **Stream H is independent** of A/B/C (it fixes shipped RBAC) and can land as a
+  small standalone PR ahead of the wave. **H-2 depends on H-1**: the completeness
+  guard must land only after the full backfill, or it fails CI against the
+  existing gap. Once H-2 is in, it makes A2/B4/C2's policy entries non-optional —
+  so ideally land H before those endpoint items, or accept that an endpoint item
+  landing first will trip the guard (intended).
 - **N-1 depends on A4 + B6 + C4** — the plan-level cross-links run last, after all
   three verbs ship.
 
@@ -414,7 +459,7 @@ topology history vs. hash blobs), so it runs fully in parallel.
 - B: `B1 (design memo, hard barrier) → B2 → B3 → B4 → B5 → B6`; B5 additionally
   needs A2.
 - C: `C1 → C2 → C3 → C4` (strictly linear).
-- H: `H-1` is a single self-contained item.
+- H: `H-1 (full backfill) → H-2 (completeness guard)`.
 
 **Cross-stream file conflicts.**
 
@@ -422,11 +467,11 @@ topology history vs. hash blobs), so it runs fully in parallel.
   import. Additive but the import block is rebase-prone; if two land in the same
   wave, sequence (A2 → B4 → C2) or expect a one-line mechanical rebase, not a
   semantic merge.
-- `internal/auth/rbac.go` — A2, B4, C2, and H-1 each add entries to the
-  `endpointPolicy` map (and H-1 backfills shipped routes). Map-literal appends on
-  different lines, parallel-safe like the other slice/map appends — but if H-1's
-  completeness test lands first, any endpoint item missing its entry will fail CI
-  (intended). Co-scheduled additions rebase mechanically.
+- `internal/auth/rbac.go` — H-1 (the bulk backfill) plus A2, B4, C2 each add
+  entries to the `endpointPolicy` map. Map-literal appends on different lines,
+  parallel-safe like the other slice/map appends; co-scheduled additions rebase
+  mechanically. Once H-2's guard is in, any endpoint item missing its entry fails
+  CI (intended).
 - `internal/auth/rbac_test.go` — A2, B4, C2, H-1 each add an assertion; additive,
   parallel-safe (distinct lines).
 - `cmd/run/` package — A3 (`diff.go`) and B5 (`replay.go`) add **separate new
@@ -445,11 +490,12 @@ topology history vs. hash blobs), so it runs fully in parallel.
   one suite across files, so they reuse the shared helpers without conflict.
 
 **Open harness question (flag for the wave that picks up C4).** The integration
-apply path may not stamp a distinct `provenance_commit`/author the way git-sync
-does. If it cannot, C4 attributes by snapshot identity/time rather than commit
-SHA, and a small harness item to thread provenance through the test apply path
-may be warranted — enumerate it before implementing C4 rather than fabricating it
-now.
+apply path may not stamp a distinct `GitCommit` the way git-sync does. If it
+cannot, C4 attributes by snapshot identity/`created_at` rather than commit SHA —
+which is acceptable, since snapshot identity (not the commit) is blame's
+attribution key; the commit is a display detail. No author/ref is involved
+(`DagSnapshot` does not persist them). Confirm the apply path's commit stamping
+before implementing C4 rather than fabricating a provenance-threading item now.
 
 ## Verification (Run For Every PR)
 
@@ -480,12 +526,14 @@ Per-stream conditional gates:
   unchanged task's baseline cache is absent, and that quarantined runs fire no
   callbacks. The replay path exercises the docker tier by default; no new engine
   tier is required.
-- **RBAC (every new authenticated route — A2, B4, C2 — and H-1):** each new route
-  has an `endpointPolicy` entry with a `RequiredRole` assertion, and once H-1's
-  completeness test is in, CI fails if any `Protected()` route lacks a policy
-  entry. Verify with `go test ./internal/auth/...` plus an integration assertion
-  that an authenticated principal of the intended role can reach the endpoint
-  (viewer for diff/blame/why/receipt/topology/impact; runner for replay).
+- **RBAC (every new authenticated route — A2, B4, C2 — plus Stream H):** each new
+  route has an `endpointPolicy` entry with a `RequiredRole` assertion; H-1
+  backfills all currently-unpolicied `Protected()` routes; and once H-2's
+  completeness guard is in, CI fails if any `Protected()` route lacks a policy
+  entry (the guard excludes outer-group public routes like `/hooks/*` and
+  `skipPaths`). Verify with `go test ./internal/auth/...` plus an integration
+  assertion that an authenticated principal of the intended role can reach the
+  endpoint (viewer for diff/blame/why/receipt/topology/impact; runner for replay).
 - This plan's checkbox ticked, the active-wave `## Progress` bullet appended, and
   any cross-linked doc refreshed in the same PR.
 
@@ -507,16 +555,20 @@ The plan is done when **all** of these hold:
    replay fails closed when a baseline cache entry is missing, and a quarantined
    run fires no callbacks. The design doc's `Quarantined what-if replay`
    feature-table row reads shipped.
-3. **Stream C — `caesium blame`** is a runtime feature: `GET /v1/jobs/:id/blame`
-   attributes each task/edge to its **most recent introduction** (absent→present
-   transition), the `caesium blame --json` command emits clean stdout, and
-   `test/blame_test.go` asserts in CI both an ordinary topology addition **and** a
-   delete-and-readd case (attributed to the reintroduction, not the original).
-4. **Stream H — RBAC** is closed: the shipped data-plane endpoints
-   (`why`/`receipt`/`topology`/`impact`) have `endpointPolicy` entries, the new
-   routes (A2/B4/C2) do too, the completeness test asserting every `Protected()`
-   route has a policy entry is green, and an authenticated viewer can reach the
-   read endpoints in an integration test.
+3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
+   `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
+   that introduced its current descriptor (keyed by `name+image+command`, not name
+   alone; no historical author/ref, which `DagSnapshot` does not persist), the
+   `caesium blame --json` command emits clean stdout, and `test/blame_test.go`
+   asserts in CI an ordinary addition **plus** the two descriptor-keyed regressions
+   — a same-name image/command mutation and a delete-and-readd, each attributed to
+   the mutating/re-adding snapshot, not the original.
+4. **Stream H — RBAC** is closed: H-1 has backfilled `endpointPolicy` for **all**
+   previously-unpolicied `Protected()` routes (data-plane + stats/summary +
+   system/* + notifications/* + jobdefs/lint+diff) with the roles in the H-1
+   inventory, the new routes (A2/B4/C2) have entries, H-2's completeness guard
+   (excluding `/hooks/*` and `skipPaths`) is green, and an authenticated viewer can
+   reach the data-plane read endpoints in an integration test.
 5. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
    §3.4 records the causal reimagining as shipped, `docs/README.md` indexes this
    plan, and `docs/differentiation-strategy.md` notes the Retain-layer progress.
