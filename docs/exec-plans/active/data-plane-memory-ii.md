@@ -167,8 +167,13 @@ is refused by default (REST + CLI) so an impl can't pass the side-effect tests y
 still run a prod `deploy`/`delete` what-if; (ii) `run diff`'s sensitive run ids are
 `left`/`right` **query params** that scope middleware doesn't check, so A2's
 same-job validation is the real boundary — A4 now adds a cross-scope query-param
-leak test. All these gaps are **latent** — pre-alpha, no users — so nothing is
-broken in production today.
+leak test. Round 8: same path/owner mismatch class for **replay** —
+`POST /v1/jobs/<jobB>/runs/<runA>/replay` passes middleware (it authorizes
+`/runs/:run_id` by the run's owner, not the path job), so B4 now requires a
+handler `baselineRun.JobID == :id` check and B6(9) tests the mismatch; generalized
+to: every job-scoped handler (A2, B4) verifies path-job == resource-owner, not the
+middleware alone. All these gaps are **latent** — pre-alpha, no users — so nothing
+is broken in production today.
 
 ### Stream Status
 
@@ -412,10 +417,19 @@ write, lineage emit, or callback.
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a
       request attempting to disable it is rejected (the invariant cannot be turned
-      off over the wire). Validate the baseline run belongs to `:id`. Register the
-      route in `endpointPolicy` (`POST /v1/jobs/:id/runs/:id/replay` →
-      `RoleRunner`, matching `run`/`retry`) or the middleware denies it
-      `unknown_route` (403) under auth.
+      off over the wire). **Handler-side ownership check (security boundary):**
+      validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
+      constructing or dispatching the replay. This is load-bearing: the scope
+      middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning
+      job (`JobAliasByRunID`), so a scoped key for job A calling
+      `POST /v1/jobs/<jobB>/runs/<runA>/replay` passes middleware (runA→jobA is in
+      scope) even though the path job is jobB — only the handler's path-vs-owner
+      check stops a cross-job replay dispatch. This is the same path/owner mismatch
+      class as A2's run-diff query-param guard; **every** job-scoped resource
+      handler in this plan (A2, B4) must verify path-job == resource-owner, not rely
+      on the middleware alone. Register the route in `endpointPolicy`
+      (`POST /v1/jobs/:id/runs/:id/replay` → `RoleRunner`, matching `run`/`retry`)
+      or the middleware denies it `unknown_route` (403) under auth.
       Files: new `api/rest/controller/replay/`, new `api/rest/service/replay/`,
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
@@ -462,8 +476,13 @@ write, lineage emit, or callback.
       replay` exits non-zero with a clear message; a marked/explicitly-acknowledged
       job proceeds; and the acknowledgement path still cannot disable quarantine
       (compose with (4)). Without this an implementation could pass (1)–(7) while
-      still letting replay run a production `deploy`/`delete` as a "what-if." Flip
-      the design doc's `Quarantined what-if replay` feature-table row to shipped.
+      still letting replay run a production `deploy`/`delete` as a "what-if."
+      **(9) Cross-job ownership (security):** a scoped runner for job A calling
+      `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
+      404/403 and create **no** replay run — and the inverse — proving the B4
+      handler check, not just the middleware, enforces the boundary (the H-2 matrix
+      alone passes an impl that omits it). Flip the design doc's `Quarantined
+      what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -603,10 +622,13 @@ behavior must be deliberate, not an accident of the fall-through.
       - *scoped runner* is allowed `replay` for an in-scope job and denied (403)
         for an out-of-scope job (proves replay's scope allow/deny);
       - *scoped* principals are denied the global routes that intend to deny them;
-      - the **query-param run-id** case for `run diff` is covered by A4
-        (`TestRunDiffRejectsCrossScopeRunIDs`): an in-scope path with an
-        out-of-scope `left`/`right` must 403/404, since scope middleware checks only
-        the path job — not a path-only matrix.
+      - the **path-vs-owner mismatch** cases are covered in the feature streams,
+        not just this path-only matrix, because scope middleware resolves
+        `/runs/:run_id` routes by the run's owner: `run diff`'s query-param run ids
+        in A4 (`TestRunDiffRejectsCrossScopeRunIDs`), and replay's mismatched
+        `POST /v1/jobs/<jobB>/runs/<runA>/replay` in B6(9) — both assert 403/404 and
+        prove the handler's path-job == resource-owner check, which the middleware
+        alone does not provide.
       Depends on: H-1.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
@@ -795,10 +817,11 @@ The plan is done when **all** of these hold:
    suppressed, asserted via real notification policies on both a lifecycle and a
    `run_timed_out`/`sla_missed` event **and** zero new `lineage_datasets` rows),
    the **replay-safe gate** (an unmarked job is refused by default via REST and CLI
-   — the guard against running a prod `deploy`/`delete` as a what-if), **and** a
-   distributed-tier assertion that no `TaskCache` entry is written from a
-   quarantined run. The design doc's `Quarantined what-if replay` feature-table row
-   reads shipped.
+   — the guard against running a prod `deploy`/`delete` as a what-if), a
+   **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
+   is rejected and creates no run), **and** a distributed-tier assertion that no
+   `TaskCache` entry is written from a quarantined run. The design doc's
+   `Quarantined what-if replay` feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
    that introduced its current descriptor (keyed by `name+image+command`, not name
