@@ -108,23 +108,28 @@ var Cmd = &cobra.Command{
 			return fmt.Errorf("why failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
+		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT
+		// cmd.Print/Println — cobra's Print* helpers go to stderr, which would
+		// leave `--json` output unusable for piping (e.g. into `caesium verify`).
+		stdout := cmd.OutOrStdout()
 		if whyJSON {
 			// Re-indent for readability; fall back to the raw body if it isn't
 			// JSON (it always should be).
 			var out interface{}
 			if err := json.Unmarshal(body, &out); err != nil {
-				cmd.Print(string(body))
+				_, _ = stdout.Write(body)
 				return nil
 			}
 			pretty, _ := json.MarshalIndent(out, "", "  ")
-			cmd.Println(string(pretty))
+			_, _ = stdout.Write(pretty)
+			_, _ = fmt.Fprintln(stdout)
 			return nil
 		}
 
 		var exp explanation
 		if err := json.Unmarshal(body, &exp); err != nil {
 			// Unknown shape — just print what we got.
-			cmd.Print(string(body))
+			_, _ = stdout.Write(body)
 			return nil
 		}
 		renderTable(cmd, &exp)
@@ -133,10 +138,13 @@ var Cmd = &cobra.Command{
 }
 
 func renderTable(cmd *cobra.Command, exp *explanation) {
-	cmd.Println(exp.Summary)
-	cmd.Println()
+	// All rendered output goes to stdout (cobra's cmd.Print* would route to
+	// stderr, splitting the report across streams).
+	out := cmd.OutOrStdout()
+	_, _ = fmt.Fprintln(out, exp.Summary)
+	_, _ = fmt.Fprintln(out)
 
-	tw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "TASK\t%s\n", exp.TaskName)
 	_, _ = fmt.Fprintf(tw, "VERDICT\t%s\n", exp.Verdict)
 	_, _ = fmt.Fprintf(tw, "STATUS\t%s\n", exp.Status)
@@ -163,23 +171,23 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 		return
 	}
 	if exp.Diff.Degraded != "" {
-		cmd.Println()
-		cmd.Printf("note: %s\n", exp.Diff.Degraded)
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "note: %s\n", exp.Diff.Degraded)
 		return
 	}
 	if len(exp.Diff.Changes) == 0 {
-		cmd.Println()
+		_, _ = fmt.Fprintln(out)
 		if exp.Diff.HashEqual {
-			cmd.Println("All hashed inputs are identical (no discriminating field).")
+			_, _ = fmt.Fprintln(out, "All hashed inputs are identical (no discriminating field).")
 		} else {
-			cmd.Println("No discriminating input field found.")
+			_, _ = fmt.Fprintln(out, "No discriminating input field found.")
 		}
 		return
 	}
 
-	cmd.Println()
-	cmd.Printf("Discriminating fields (%d):\n", len(exp.Diff.Changes))
-	dw := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Discriminating fields (%d):\n", len(exp.Diff.Changes))
+	dw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(dw, "FIELD\tCHANGE\tBEFORE\tAFTER")
 	for _, ch := range exp.Diff.Changes {
 		before, after := ch.Before, ch.After

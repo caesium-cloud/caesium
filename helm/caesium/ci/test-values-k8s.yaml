@@ -8,6 +8,11 @@ config:
   extraEnv:
     - name: CAESIUM_MANUAL_TRIGGER_API_KEY
       value: integration-test-key
+    # Enable lineage so the data-plane impact integration scenario runs here too.
+    - name: CAESIUM_OPEN_LINEAGE_ENABLED
+      value: "true"
+    - name: CAESIUM_OPEN_LINEAGE_TRANSPORT
+      value: console
 
 kubernetes:
   engine:
