@@ -18,33 +18,49 @@ const defaultRingSize = 2000
 
 func init() {
 	logLevel = zap.NewAtomicLevelAt(zapcore.DebugLevel)
-
-	format := strings.ToLower(strings.TrimSpace(os.Getenv("CAESIUM_LOG_FORMAT")))
-
-	var encoder zapcore.Encoder
-	switch format {
-	case "text":
-		encoder = zapcore.NewConsoleEncoder(textConfig())
-	default:
-		encoder = zapcore.NewJSONEncoder(jsonConfig())
-	}
-
-	stdoutCore := zapcore.NewCore(
-		encoder,
-		zapcore.Lock(os.Stdout),
-		logLevel,
-	)
-
 	ring = NewRingBuffer(defaultRingSize, zapcore.DebugLevel)
+	// Default the structured logger to STDERR so that machine-readable command
+	// output on stdout (e.g. `caesium receipt get` → a JSON receipt piped into
+	// `caesium verify`) is never interleaved with log lines — including logs
+	// emitted from package init() functions, which run before main(). The
+	// server restores stdout in its start command (see ToStdout) before it
+	// installs the stderr capture pipe.
+	rebuildLogger(os.Stderr)
+}
 
+// newEncoder builds the encoder honoring CAESIUM_LOG_FORMAT (text|json).
+func newEncoder() zapcore.Encoder {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CAESIUM_LOG_FORMAT"))) {
+	case "text":
+		return zapcore.NewConsoleEncoder(textConfig())
+	default:
+		return zapcore.NewJSONEncoder(jsonConfig())
+	}
+}
+
+// rebuildLogger installs the global logger writing structured logs to ws,
+// teed into the in-memory ring buffer. Safe to call repeatedly.
+func rebuildLogger(ws *os.File) {
+	core := zapcore.NewCore(newEncoder(), zapcore.Lock(ws), logLevel)
 	logger := zap.New(
-		zapcore.NewTee(stdoutCore, ring),
+		zapcore.NewTee(core, ring),
 		zap.AddCaller(),
 		zap.AddCallerSkip(1), // skip the wrapper functions in this package
 	)
-
 	zap.ReplaceGlobals(logger)
 }
+
+// ToStderr routes structured logs to stderr. CLI commands call this so that
+// stdout carries only the command's machine-readable output (e.g. a
+// `caesium receipt get` JSON receipt that gets piped into `caesium verify`).
+// The server does NOT use this — it logs to stdout and captures C-library
+// stderr separately (see CaptureStderr), where routing logs to stderr would
+// feed the capture pipe back into the logger.
+func ToStderr() { rebuildLogger(os.Stderr) }
+
+// ToStdout routes structured logs to stdout (the server default). Used to
+// restore stdout logging before the server installs its stderr capture.
+func ToStdout() { rebuildLogger(os.Stdout) }
 
 func jsonConfig() zapcore.EncoderConfig {
 	cfg := zap.NewProductionEncoderConfig()

@@ -83,6 +83,11 @@ var (
 )
 
 func start(cmd *cobra.Command, args []string) error {
+	// The server logs to stdout (main() defaulted the CLI to stderr). Restore
+	// stdout BEFORE CaptureStderr redirects fd 2 through a pipe back into the
+	// logger — routing logs to stderr here would feed that pipe in a loop.
+	log.ToStdout()
+
 	if err := log.CaptureStderr(); err != nil {
 		log.Warn("failed to capture stderr for unified logging", "error", err)
 	}
