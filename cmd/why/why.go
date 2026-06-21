@@ -117,18 +117,19 @@ var Cmd = &cobra.Command{
 			// JSON (it always should be).
 			var out interface{}
 			if err := json.Unmarshal(body, &out); err != nil {
-				_, _ = fmt.Fprint(stdout, string(body))
+				_, _ = stdout.Write(body)
 				return nil
 			}
 			pretty, _ := json.MarshalIndent(out, "", "  ")
-			_, _ = fmt.Fprintln(stdout, string(pretty))
+			_, _ = stdout.Write(pretty)
+			_, _ = fmt.Fprintln(stdout)
 			return nil
 		}
 
 		var exp explanation
 		if err := json.Unmarshal(body, &exp); err != nil {
 			// Unknown shape — just print what we got.
-			_, _ = fmt.Fprint(stdout, string(body))
+			_, _ = stdout.Write(body)
 			return nil
 		}
 		renderTable(cmd, &exp)
