@@ -161,7 +161,13 @@ lineage-authoritative and pollute the impact graph; B2 drops marked events befor
 transport emit + `lineage_datasets` persist, B6 asserts zero new dataset rows.
 Also tightened the replay/run-diff CLI contract: `--job-id` is **required** (the
 endpoints are job-scoped; a run-id-only lookup breaks under scoped keys), matching
-`caesium why`. All these gaps are **latent** — pre-alpha, no users — so nothing is
+`caesium why`. Round 7: (i) the **replay-safe gate** — the most important safety
+check — was described in B3 but never *tested*; B6(8) now asserts an unmarked job
+is refused by default (REST + CLI) so an impl can't pass the side-effect tests yet
+still run a prod `deploy`/`delete` what-if; (ii) `run diff`'s sensitive run ids are
+`left`/`right` **query params** that scope middleware doesn't check, so A2's
+same-job validation is the real boundary — A4 now adds a cross-scope query-param
+leak test. All these gaps are **latent** — pre-alpha, no users — so nothing is
 broken in production today.
 
 ### Stream Status
@@ -198,8 +204,12 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       Files: new `internal/run/rundiff.go`, new `internal/run/rundiff_test.go`;
       reuses `internal/run/whydiff.go` (read-only).
 - [ ] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
-      `RunDiff` as JSON. Validate both runs belong to `:id`; 404 on unknown run,
-      400 on missing query params. Register the route in `endpointPolicy`
+      `RunDiff` as JSON. **Validate both `left` and `right` belong to `:id` — this
+      is the security boundary, not just input hygiene.** Scope middleware only
+      authorizes the *path* job (`:id`); the run ids are query params it does not
+      check, so without this validation an in-scope path could return another job's
+      `HashInput` diff (the leak A4 tests). 404 on unknown/foreign run, 400 on
+      missing query params. Register the route in `endpointPolicy`
       (`GET /v1/jobs/:id/runs/diff` → `RoleViewer`) or the middleware denies it
       `unknown_route` (403) under auth; add an RBAC assertion. Note the echo
       routing order: `/runs/diff` is a static segment that must register so it
@@ -225,10 +235,17 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       against the live server: two runs of a cacheable job differing by one run
       param, asserting the discriminating `runParams.*` field appears in the diff
       and that stdout is clean parseable JSON (captured via `runCLIStdout`, not the
-      stream-merging `runCLIRaw`). Flip the design doc's `run diff` feature-table
-      row from honest-scope-until-then to shipped.
-      Files: `test/data_plane_e2e_test.go` (add `TestRunDiffAttributesChangedField`),
-      `docs/design-data-plane-memory.md`.
+      stream-merging `runCLIRaw`). **Cross-job query-param guard (security):** the
+      sensitive run ids are the `left`/`right` **query params**, but scope
+      middleware only authorizes the path job (`:id`), so A2's same-job validation
+      is the real boundary. Add a scoped-key assertion that an *in-scope*
+      `/v1/jobs/:id/runs/diff` path with `left` and/or `right` pointing at an
+      *out-of-scope* job's run returns 403/404 — including the mixed one-in/one-out
+      case — so a handler that forgets the same-job check can't leak out-of-scope
+      `HashInput` diffs through an in-scope path. Flip the design doc's `run diff`
+      feature-table row from honest-scope-until-then to shipped.
+      Files: `test/data_plane_e2e_test.go` (add `TestRunDiffAttributesChangedField`
+      + `TestRunDiffRejectsCrossScopeRunIDs`), `docs/design-data-plane-memory.md`.
       Depends on: A3.
 
 ### Stream B — Quarantined what-if replay
@@ -377,12 +394,17 @@ write, lineage emit, or callback.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
       executor so only hash-changed tasks re-run and the rest are cache hits.
-      **Fail-closed**: if a task is hash-unchanged but its baseline cache entry /
-      result is unavailable (pruned/expired), abort the replay with a clear error
-      rather than silently re-executing it; and refuse to re-execute tasks of a job
-      not marked replay-safe unless the operator explicitly opted in (per B1).
-      Re-execution is identical-code-against-pinned-digests — it does not resurrect
-      overwritten source data.
+      **Fail-closed, two ways**: (a) if a task is hash-unchanged but its baseline
+      cache entry / result is unavailable (pruned/expired), abort the replay with a
+      clear error rather than silently re-executing it; and (b) **the replay-safe
+      gate** — a job/step that is **not** marked replay-safe (per B1's containment
+      contract) is **refused by default**; re-execution proceeds only for a marked
+      job or under an explicit operator acknowledgement, and that acknowledgement
+      never disables quarantine. This refusal is the primary guard against running a
+      production `deploy`/`delete` as a what-if; it is surfaced by B4 (REST error)
+      and B5 (CLI non-zero exit) and tested in B6(8). Re-execution is
+      identical-code-against-pinned-digests — it does not resurrect overwritten
+      source data.
       Files: new `internal/replay/` (the replay constructor over `run.Store` +
       dispatch; the fail-closed guards), `internal/run/store.go`.
       Depends on: B2.
@@ -434,8 +456,14 @@ write, lineage emit, or callback.
       the distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks
       execute via `runtime_executor.go`) and assert no `TaskCache` entry is written
       from a quarantined replay — the local-mode assertion alone would miss the
-      worker bypass. Flip the design doc's `Quarantined what-if replay`
-      feature-table row to shipped.
+      worker bypass. **(8) The replay-safe gate (the core safety test):** a job/step
+      **not** marked replay-safe (per B1's containment contract) is **refused by
+      default** — assert the REST `POST …/replay` returns an error and `caesium run
+      replay` exits non-zero with a clear message; a marked/explicitly-acknowledged
+      job proceeds; and the acknowledgement path still cannot disable quarantine
+      (compose with (4)). Without this an implementation could pass (1)–(7) while
+      still letting replay run a production `deploy`/`delete` as a "what-if." Flip
+      the design doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -574,7 +602,11 @@ behavior must be deliberate, not an accident of the fall-through.
         side-effecting container run);
       - *scoped runner* is allowed `replay` for an in-scope job and denied (403)
         for an out-of-scope job (proves replay's scope allow/deny);
-      - *scoped* principals are denied the global routes that intend to deny them.
+      - *scoped* principals are denied the global routes that intend to deny them;
+      - the **query-param run-id** case for `run diff` is covered by A4
+        (`TestRunDiffRejectsCrossScopeRunIDs`): an in-scope path with an
+        out-of-scope `left`/`right` must 403/404, since scope middleware checks only
+        the path job — not a path-only matrix.
       Depends on: H-1.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
@@ -747,7 +779,9 @@ The plan is done when **all** of these hold:
    /v1/jobs/:id/runs/diff` returns per-task `HashInput`-blob attribution, the
    `caesium run diff --json` subcommand emits clean parseable stdout, and
    `test/data_plane_e2e_test.go`'s `TestRunDiffAttributesChangedField` is green in
-   CI. The design doc's `run diff` feature-table row reads shipped.
+   CI, **and** a scoped-key cross-job test (`TestRunDiffRejectsCrossScopeRunIDs`)
+   proves an in-scope path with out-of-scope `left`/`right` run ids is rejected.
+   The design doc's `run diff` feature-table row reads shipped.
 2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed
    and distributed-safe**: the replay design memo
    (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
@@ -760,7 +794,9 @@ The plan is done when **all** of these hold:
    subscriber, the timeout/SLA watcher, and the OpenLineage subscriber all
    suppressed, asserted via real notification policies on both a lifecycle and a
    `run_timed_out`/`sla_missed` event **and** zero new `lineage_datasets` rows),
-   **and** a distributed-tier assertion that no `TaskCache` entry is written from a
+   the **replay-safe gate** (an unmarked job is refused by default via REST and CLI
+   — the guard against running a prod `deploy`/`delete` as a what-if), **and** a
+   distributed-tier assertion that no `TaskCache` entry is written from a
    quarantined run. The design doc's `Quarantined what-if replay` feature-table row
    reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
