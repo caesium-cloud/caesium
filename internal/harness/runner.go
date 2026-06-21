@@ -75,12 +75,13 @@ func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
 			}
 
 			lineage.RegisterMetrics()
+			obs.db = db // for impact assertions over the persisted dataset graph
 
 			bus := event.New()
 			store.SetBus(bus)
 
 			transport := &recordingTransport{}
-			subscriber := lineage.NewSubscriber(bus, transport, "caesium-harness", db)
+			subscriber := lineage.NewSubscriber(bus, transport, harnessNamespace, db)
 			subscriber.SetTransportName("harness")
 
 			lineageCtx, cancel := context.WithCancel(ctx)
@@ -127,7 +128,7 @@ func Execute(ctx context.Context, scenario ResolvedScenario) (*Result, error) {
 		MetricObservations: metricObservations,
 		LineageEvents:      lineageEvents,
 	}
-	result.Failures = evaluateScenario(scenario, runResult, execErr, metricObservations, lineageEvents, lineageErr)
+	result.Failures = evaluateScenario(ctx, obs.db, scenario, runResult, execErr, metricObservations, lineageEvents, lineageErr)
 	return result, nil
 }
 
@@ -137,11 +138,16 @@ type placeholderState struct {
 	TaskIDs  map[string]uuid.UUID
 }
 
+// harnessNamespace is the OpenLineage namespace datasets are recorded under
+// when the harness runs a scenario; impact assertions default to it.
+const harnessNamespace = "caesium-harness"
+
 type observabilityCapture struct {
 	baselines        map[int]float64
 	lineageTransport *recordingTransport
 	lineageCancel    context.CancelFunc
 	lineageErrCh     chan error
+	db               *gorm.DB // set when lineage is enabled; used by impact assertions
 }
 
 func (o *observabilityCapture) finish(runResult *localrun.RunResult) ([]lineage.RunEvent, error) {
@@ -196,6 +202,8 @@ func (t *recordingTransport) Events() []lineage.RunEvent {
 }
 
 func evaluateScenario(
+	ctx context.Context,
+	db *gorm.DB,
 	scenario ResolvedScenario,
 	runResult *localrun.RunResult,
 	execErr error,
@@ -310,8 +318,46 @@ func evaluateScenario(
 				failures = append(failures, fmt.Sprintf("lineage jobNames: expected %q to appear", jobName))
 			}
 		}
+
+		// Impact assertions query the PERSISTED dataset graph (what
+		// /lineage/impact reads), proving datasets are not just emitted but
+		// stored and linked.
+		for _, imp := range expect.Lineage.Impact {
+			failures = append(failures, evaluateImpact(ctx, db, imp)...)
+		}
 	}
 
+	return failures
+}
+
+// evaluateImpact runs the cross-job impact query for one expectation and reports
+// any expected downstream dataset that is missing from the result.
+func evaluateImpact(ctx context.Context, db *gorm.DB, imp ImpactExpectation) []string {
+	if db == nil {
+		return []string{fmt.Sprintf("lineage impact[%s]: no database available (is lineage enabled?)", imp.Dataset)}
+	}
+	ns := imp.Namespace
+	if ns == "" {
+		ns = harnessNamespace
+	}
+	res, err := lineage.QueryImpact(ctx, db, ns, imp.Dataset, imp.MaxDepth)
+	if err != nil {
+		return []string{fmt.Sprintf("lineage impact[%s]: query failed: %v", imp.Dataset, err)}
+	}
+	got := make(map[string]struct{}, len(res.Downstream))
+	for _, node := range res.Downstream {
+		got[node.DatasetName] = struct{}{}
+	}
+	var failures []string
+	for _, want := range imp.Downstream {
+		if _, ok := got[want]; !ok {
+			names := make([]string, 0, len(res.Downstream))
+			for _, node := range res.Downstream {
+				names = append(names, node.DatasetName)
+			}
+			failures = append(failures, fmt.Sprintf("lineage impact[%s]: expected downstream %q, got %v", imp.Dataset, want, names))
+		}
+	}
 	return failures
 }
 
