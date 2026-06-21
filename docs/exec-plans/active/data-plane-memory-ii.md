@@ -172,8 +172,13 @@ leak test. Round 8: same path/owner mismatch class for **replay** —
 `/runs/:run_id` by the run's owner, not the path job), so B4 now requires a
 handler `baselineRun.JobID == :id` check and B6(9) tests the mismatch; generalized
 to: every job-scoped handler (A2, B4) verifies path-job == resource-owner, not the
-middleware alone. All these gaps are **latent** — pre-alpha, no users — so nothing
-is broken in production today.
+middleware alone. Round 9: replay's isolation must extend **inward** too — (i)
+**observability**: quarantined runs must be excluded from (or labelled in) stats
+aggregates + Prometheus counters + run-lists, or a slow/failed what-if dents
+production dashboards/alerts (B1 audit + B2 + B6(11)); (ii) **idempotency**: a
+side-effecting replay POST needs an idempotency key/fingerprint so a client retry
+doesn't run the what-if twice (B1 + B4 + B6(10)). All these gaps are **latent** —
+pre-alpha, no users — so nothing is broken in production today.
 
 ### Stream Status
 
@@ -333,6 +338,21 @@ write, lineage emit, or callback.
         an allowlist. The memo enumerates the full surface as of implementation
         time and states the invariant so a future producer that ignores it is a
         review-blocking regression.
+      - **Observability isolation (the audit covers inward surfaces too).** A
+        quarantined run must not pollute **production health signals**: the stats
+        aggregates (`api/rest/service/stats`, which count all `job_runs`/`task_runs`),
+        the standard Prometheus run/task counters + duration histograms, and the
+        run-list/UI payloads. A failed or slow what-if would otherwise dent success
+        rates, top-failing-jobs, dashboards, and alerts. Rule: quarantined runs are
+        **excluded from production aggregates/metrics or emitted only under an
+        explicit `quarantine`/replay label** — decide which in the memo; either way
+        the default production view excludes them.
+      - **Idempotent creation.** Because replay re-executes real container commands,
+        a client retry after a timeout/5xx must **not** spawn a second what-if (and
+        a second round of side effects). The memo defines an idempotency contract: a
+        required `Idempotency-Key` header and/or a request fingerprint over
+        `(baseline run, overrides, actor, job)`; a repeat returns the **existing**
+        replay run rather than creating a new one.
       - **Fail-closed on missing baseline.** If an "unchanged" task's baseline
         cache/result is pruned or absent, replay **fails** rather than silently
         re-executing it (an unannounced re-run could have side effects).
@@ -383,6 +403,11 @@ write, lineage emit, or callback.
         it pollutes the impact graph). This is the load-bearing lineage-isolation
         fix; "skip authoritative lineage emission" in the executor is not enough
         because emission happens here, on the bus, not in the executor.
+      - **Observability surfaces** (`api/rest/service/stats`, the
+        `internal/metrics` run/task counters + duration histograms, run-list
+        payloads) — exclude quarantined runs from production aggregates/metrics (or
+        label them) per B1's decision, so a slow/failed what-if does not dent
+        success rates, dashboards, or alerts.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
@@ -392,9 +417,10 @@ write, lineage emit, or callback.
       `TaskRun`s (`internal/dispatch/`), `internal/notification/subscriber.go` +
       the event-emission path that stamps the marker,
       `internal/notification/watcher.go` (exclude quarantined runs from
-      timeout/SLA scans), and `internal/lineage/subscriber.go` + `mapper.go` (drop
-      marked events before transport emit and `lineage_datasets` persist). The
-      complete producer list comes from B1's audit.
+      timeout/SLA scans), `internal/lineage/subscriber.go` + `mapper.go` (drop
+      marked events before transport emit and `lineage_datasets` persist), and
+      `api/rest/service/stats/` + `internal/metrics/` (exclude/label quarantined
+      runs in aggregates + counters). The complete surface comes from B1's audit.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -417,7 +443,11 @@ write, lineage emit, or callback.
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a
       request attempting to disable it is rejected (the invariant cannot be turned
-      off over the wire). **Handler-side ownership check (security boundary):**
+      off over the wire). **Idempotent creation (per B1's contract):** a retry after
+      a timeout/5xx must not spawn a second what-if (and a second round of real
+      container side effects) — honor an `Idempotency-Key` header and/or a request
+      fingerprint over `(baseline run, overrides, actor, :id)`, returning the
+      **existing** replay run on a repeat instead of creating a new one. **Handler-side ownership check (security boundary):**
       validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
       constructing or dispatching the replay. This is load-bearing: the scope
       middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning
@@ -481,8 +511,14 @@ write, lineage emit, or callback.
       `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
       404/403 and create **no** replay run — and the inverse — proving the B4
       handler check, not just the middleware, enforces the boundary (the H-2 matrix
-      alone passes an impl that omits it). Flip the design doc's `Quarantined
-      what-if replay` feature-table row to shipped.
+      alone passes an impl that omits it). **(10) Idempotent creation:** two
+      identical replay requests (same key/fingerprint) create **one** replay run and
+      **one** task execution, not two. **(11) No observability pollution:** a
+      quarantined replay does not change `GET /v1/stats/summary` success/failure
+      counts or the production run-list (and Prometheus run/task counters are
+      excluded or quarantine-labelled) — assert the stats/run-list before/after are
+      unchanged by a (deliberately failing) quarantined replay. Flip the design
+      doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -819,7 +855,9 @@ The plan is done when **all** of these hold:
    the **replay-safe gate** (an unmarked job is refused by default via REST and CLI
    — the guard against running a prod `deploy`/`delete` as a what-if), a
    **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
-   is rejected and creates no run), **and** a distributed-tier assertion that no
+   is rejected and creates no run), **idempotent creation** (a retried request makes
+   one run, not two), **no observability pollution** (stats/run-list unchanged by a
+   failing quarantined replay), **and** a distributed-tier assertion that no
    `TaskCache` entry is written from a quarantined run. The design doc's
    `Quarantined what-if replay` feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
