@@ -232,11 +232,12 @@ func (m *mapper) mapTaskStart(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each terminal task event so the
-	// cross-job impact query has edges to traverse. Without this, the
-	// lineage_datasets table is never written and /lineage/impact always
-	// returns empty. The upsert keys on (task_run, namespace, name, direction),
-	// so re-emitted events are idempotent.
+	// Persist the bounded dataset graph on each task lifecycle event (start
+	// through terminal) so the impact query has edges to traverse — eagerly, so
+	// even an in-progress task's declared datasets are present. Without this the
+	// lineage_datasets table is never written and /lineage/impact always returns
+	// empty. The upsert keys on (task_run, namespace, name, direction), so
+	// re-emitted events are idempotent.
 	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
@@ -272,11 +273,12 @@ func (m *mapper) mapTaskComplete(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each terminal task event so the
-	// cross-job impact query has edges to traverse. Without this, the
-	// lineage_datasets table is never written and /lineage/impact always
-	// returns empty. The upsert keys on (task_run, namespace, name, direction),
-	// so re-emitted events are idempotent.
+	// Persist the bounded dataset graph on each task lifecycle event (start
+	// through terminal) so the impact query has edges to traverse — eagerly, so
+	// even an in-progress task's declared datasets are present. Without this the
+	// lineage_datasets table is never written and /lineage/impact always returns
+	// empty. The upsert keys on (task_run, namespace, name, direction), so
+	// re-emitted events are idempotent.
 	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
@@ -356,11 +358,12 @@ func (m *mapper) mapTaskAbort(evt event.Event) (*RunEvent, error) {
 	m.addExecutionFacet(runFacets, payload)
 
 	inputs, outputs := m.buildTaskDatasets(jobAlias, payload)
-	// Persist the bounded dataset graph on each terminal task event so the
-	// cross-job impact query has edges to traverse. Without this, the
-	// lineage_datasets table is never written and /lineage/impact always
-	// returns empty. The upsert keys on (task_run, namespace, name, direction),
-	// so re-emitted events are idempotent.
+	// Persist the bounded dataset graph on each task lifecycle event (start
+	// through terminal) so the impact query has edges to traverse — eagerly, so
+	// even an in-progress task's declared datasets are present. Without this the
+	// lineage_datasets table is never written and /lineage/impact always returns
+	// empty. The upsert keys on (task_run, namespace, name, direction), so
+	// re-emitted events are idempotent.
 	m.persistTaskDatasets(payload, inputs, outputs)
 
 	return &RunEvent{
@@ -546,21 +549,15 @@ func (m *mapper) persistTaskDatasets(payload taskRunPayload, inputs, outputs []D
 	if m.db == nil || (len(inputs) == 0 && len(outputs) == 0) {
 		return
 	}
-	// Resolve the task_run PK (the FK target) from the run+task identity,
-	// preferring the most recent attempt. Scan into a struct (GORM cannot Scan
-	// a single column into a bare scalar).
-	var rec struct {
-		ID uuid.UUID `gorm:"column:id"`
-	}
-	if err := m.db.Table("task_runs").
-		Select("id").
-		Where("job_run_id = ? AND task_id = ?", payload.JobRunID, payload.TaskID).
-		Order("attempt DESC").
-		Limit(1).
-		Scan(&rec).Error; err != nil || rec.ID == uuid.Nil {
+	// payload.ID is the task_run PK (the FK target): every task-event publish
+	// path sets it to the task run's own ID — the convert-based publishes and
+	// recordTaskEventTx alike — and a retried attempt emits its own event with
+	// its own ID, so this is already the right attempt. Use it directly rather
+	// than a per-event SELECT on the hot lineage path.
+	taskRunID := payload.ID
+	if taskRunID == uuid.Nil {
 		return
 	}
-	taskRunID := rec.ID
 
 	summary, _ := json.Marshal(map[string]string{"step_name": payload.TaskName})
 	rows := make([]models.LineageDataset, 0, len(inputs)+len(outputs))

@@ -96,7 +96,13 @@ func capture(logFunc func(string, ...interface{}), msg string, kv ...interface{}
 // (re)built INSIDE fn so it locks onto the swapped fd.
 func captureFD(fd **os.File, fn func()) string {
 	orig := *fd
-	r, w, _ := os.Pipe()
+	r, w, err := os.Pipe()
+	if err != nil || r == nil || w == nil {
+		// Don't assign a nil *os.File to the global fd — a later write would
+		// nil-panic in unrelated code. Run fn against the original fd instead.
+		fn()
+		return ""
+	}
 	*fd = w
 	fn()
 	_ = w.Close()
