@@ -225,9 +225,12 @@ steps:
 	deadline := time.Now().Add(30 * time.Second)
 	var res impactResult
 	// Loop while the test context is live (cancelled/timed-out → stop polling).
+	// Use tryGetJSON, not getJSON: a transient non-200 during async lineage
+	// startup (e.g. a brief 500) must NOT FailNow the test — swallow it and keep
+	// polling until the downstream edge appears or the deadline passes.
 	for s.T().Context().Err() == nil {
 		res = impactResult{}
-		s.getJSON("/v1/lineage/impact?namespace=caesium&name="+rootName, &res)
+		_ = s.tryGetJSON("/v1/lineage/impact?namespace=caesium&name="+rootName, &res)
 		if len(res.Downstream) > 0 || time.Now().After(deadline) {
 			break
 		}
