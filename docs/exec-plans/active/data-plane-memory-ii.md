@@ -86,14 +86,18 @@ scope and must survive into the shipped surfaces:
   baseline result is unavailable, and gates side-effecting replay behind explicit
   opt-in (a replay-safe job/step annotation and/or an alternate env namespace).
   The quarantine invariant is **non-bypassable** — there is no API/CLI knob to
-  produce an authoritative what-if run. See item B1's design memo.
-- **Every new authenticated REST route ships its RBAC policy entry.** Caesium's
-  auth middleware (`api/middleware/auth.go`) denies any authenticated route absent
-  from `endpointPolicy` (`internal/auth/rbac.go`) as `unknown_route` (403). A
-  handler that passes its no-auth integration test but lacks a policy entry is
-  broken for every API-key/SSO deployment — the sovereignty buyer's default.
-  Read-only `run diff`/`blame` map to `RoleViewer`; `replay` maps to `RoleRunner`
-  (matching `run`/`retry`). Item H-1 also backfills the **shipped** data-plane
+  produce an authoritative what-if run — **and it must hold in distributed mode**:
+  the flag propagates on `TaskRun` to the worker (`runtime_executor.go`), which
+  otherwise writes cache/lineage independently. See item B1's design memo.
+- **Authorization is role AND scope, on every new authenticated route.** The
+  middleware (`api/middleware/auth.go`) denies any authenticated route absent from
+  `endpointPolicy` (`internal/auth/rbac.go`) as `unknown_route` (403); separately,
+  `auth_scope.go` denies *scoped* API keys on any route outside `/v1/jobs…`. A
+  handler that passes its no-auth integration test but is missing from the policy
+  map — or that is global+cross-job and ignores scope — is broken or leaky under a
+  real auth-gated deployment. The three new verbs are job-scoped (`/v1/jobs/:id…`)
+  so scope enforcement covers them; the cross-job `/v1/lineage/impact` needs an
+  explicit scope decision (H-3). Item H-1 also backfills the **shipped** data-plane
   endpoints, which this review found are missing from the policy.
 
 ## Source-Of-Truth Note
@@ -117,26 +121,29 @@ A–D, #213–#222); the first wave is the next eligible run of the
 `exec-plan-wave` skill against this doc. Leaf items eligible for Wave 1:
 **A1**, **B1** (design memo), **C1**, **H-1** (independent RBAC backfill).
 
-This plan was revised twice on 2026-06-20 in response to two Codex adversarial
-review rounds. Round 1: Stream B is now fail-closed (non-bypassable quarantine,
-callbacks-off, fail-on-missing-baseline, explicit opt-in for side-effecting
-replay); every new REST route carries an RBAC policy entry. Round 2: Stream C's
-blame is scoped to **commit/snapshot-level** attribution keyed by the full task
-descriptor (matching what `DagSnapshot` actually persists — no historical
-author/ref; same-name content mutations counted correctly); and the RBAC work was
-split into **H-1** (a full, explicit backfill of all ~19 unpolicied `Protected()`
-routes — the auth trust boundary) and **H-2** (the completeness guard, which lands
-after H-1 so it goes green). The RBAC gap is a **latent** bug — the project is
-pre-alpha with no users, so nothing is broken in production today.
+This plan was revised across three Codex adversarial review rounds on 2026-06-20.
+Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
+fail-on-missing-baseline, explicit opt-in for side-effecting replay); every new
+REST route carries an RBAC policy entry. Round 2: Stream C's blame scoped to
+**commit/snapshot-level** attribution keyed by the full task descriptor (matching
+what `DagSnapshot` actually persists — no historical author/ref; same-name
+mutations counted); RBAC split into H-1 (full backfill) + H-2 (completeness
+guard). Round 3: (i) quarantine must hold in **distributed mode** — B2 now
+propagates the flag on `TaskRun` to the worker (`runtime_executor.go`), which
+writes cache/lineage independently, and B6 adds a distributed regression; (ii)
+authorization is **scope as well as role** — global cross-job `/v1/lineage/impact`
+gets explicit scope semantics (new **H-3**), and the job-scoped verbs get scoped
+allow/deny tests. All these gaps are **latent** — pre-alpha, no users — so nothing
+is broken in production today.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
-| B | Quarantined what-if replay (`caesium run replay --set … --diff`) — fail-closed | P2 | Not started |
+| B | Quarantined what-if replay — fail-closed, distributed-safe | P2 | Not started |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Not started |
-| H | Full RBAC policy backfill (H-1) + completeness guard (H-2) | P2 | Not started |
+| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) | P2 | Not started |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
 
 ## Streams
@@ -218,6 +225,20 @@ re-executing tasks of a job not marked replay-safe requires explicit operator
 opt-in. The B1 memo is the gate that makes these binding before any runtime code
 lands.
 
+**Quarantine must hold in distributed mode, not just the local executor**
+(adversarial review round 3, 2026-06-20). Caesium has two executors: the
+in-process scheduler (`internal/job/job.go`) and the distributed worker
+(`internal/worker/runtime_executor.go`), and in distributed mode the **worker**
+independently computes the cache hash and calls `storeCacheEntry` →
+`cacheStore.Put` after a task succeeds — `job.go` only registers tasks and waits.
+So enforcing quarantine only in `job.go` would let a quarantined replay task run
+by a worker write an **authoritative** `TaskCache` entry, silently making what-if
+output a future production cache hit. The flag must therefore propagate to the
+worker **on the `TaskRun`** — exactly how `ResolvedImageDigest` and the
+predecessor-cache fields are already threaded scheduler→worker (the design's
+"distributed parity" constraint) — and the worker must honor it before any cache
+write, lineage emit, or callback.
+
 - [ ] B1. Author the replay design memo, which must resolve the safety model
       **before** B2–B6 implement anything. Nail: (a) **quarantine isolation** — how
       a quarantined run reuses the cache for hash-unchanged tasks yet is excluded
@@ -249,16 +270,28 @@ lands.
       `TestDocsREADMEIndexesEveryTopLevelDoc` requires every `docs/*.md` to be
       linked from the README; the `> Status:` banner satisfies
       `TestPlanningAndHistoricalDocsCarryStatusBanner`).
-- [ ] B2. Add quarantine to the run model + executor: an additive `Quarantine bool`
-      (and a captured override-params blob) on `JobRun`; the executor honors cache
-      **reads** for unchanged tasks but skips cache-authoritative **writes**,
-      authoritative lineage emission, **and external callbacks/notifications** when
-      the run is quarantined. AutoMigrate picks up the additive column; no
-      `hotTables` change (no new table). The flag is internal-only — set by the
-      replay path (B3), never from a request body (see B4).
-      Files: `internal/models/run.go` (`JobRun` struct, additive column),
-      `internal/run/store.go`, `internal/job/job.go` (skip cache-write + lineage +
-      callback dispatch when quarantined).
+- [ ] B2. Add quarantine to the run model **and propagate it to both executors**.
+      An additive `Quarantine bool` (and a captured override-params blob) on
+      `JobRun`, **plus a `Quarantine bool` on `TaskRun`** threaded scheduler→worker
+      the same way `ResolvedImageDigest` is (so the distributed worker sees it
+      without re-deriving it). Both executors must, when quarantined, honor cache
+      **reads** for unchanged tasks but skip cache-authoritative **writes**,
+      authoritative lineage emission, **and external callbacks/notifications**:
+      - `internal/job/job.go` — the in-process scheduler path.
+      - `internal/worker/runtime_executor.go` — the distributed worker, which
+        independently calls `storeCacheEntry` (~:263) → `cacheStore.Put` (~:610)
+        and emits lineage; it must read `TaskRun.Quarantine` and short-circuit
+        those writes. **This is the load-bearing fix** — without it the worker
+        bypasses quarantine entirely.
+      - the dispatch/registration path that materializes `TaskRun` rows must copy
+        the run-level flag onto each task run.
+      AutoMigrate picks up the additive columns; no `hotTables` change (no new
+      table). The flag is internal-only — set by the replay path (B3), never from a
+      request body (see B4).
+      Files: `internal/models/run.go` (`JobRun` + `TaskRun` additive columns),
+      `internal/run/store.go`, `internal/job/job.go`,
+      `internal/worker/runtime_executor.go`, the dispatch path that builds
+      `TaskRun`s (`internal/dispatch/`).
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -299,8 +332,13 @@ lands.
       regression** assertions: (4) a `POST …/replay` body attempting `quarantine:
       false` (or any quarantine override) is rejected, not honored; (5) replay of a
       run whose unchanged task's cache entry has been pruned **fails closed** rather
-      than re-executing; and (6) a quarantined run fires no external callbacks. Flip
-      the design doc's `Quarantined what-if replay` feature-table row to shipped.
+      than re-executing; and (6) a quarantined run fires no external callbacks.
+      **(7) Distributed regression:** run the cache-isolation assertion under the
+      distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks execute
+      via `runtime_executor.go`) and assert no `TaskCache` entry is written from a
+      quarantined replay — the local-mode assertion alone would miss the worker
+      bypass. Flip the design doc's `Quarantined what-if replay` feature-table row
+      to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -374,11 +412,19 @@ author/ref at write time) and is recorded as out of scope here, not promised.
 
 ## Harness Strengthening
 
-> Urgency note: the project is **pre-alpha with no users**, so the RBAC gap below
-> is a **latent correctness bug**, not an active outage — these endpoints only
-> 403 when auth is enabled, and no real auth-gated deployment exists yet. It is
-> worth fixing now because the policy map is the auth trust boundary and the fix
-> is cheap, but it does not warrant emergency sequencing.
+> Urgency note: the project is **pre-alpha with no users**, so the RBAC/scope
+> gaps below are **latent correctness bugs**, not active outages — they only bite
+> when auth (and scoped API keys) are enabled, and no real auth-gated deployment
+> exists yet. Worth fixing now because the policy map + scope rules are the auth
+> trust boundary and the fix is cheap, but no emergency sequencing.
+
+Authorization in Caesium has **two** layers, and both matter here: the **role**
+check (`endpointPolicy` → minimum `models.Role`) and the **scope** check
+(`api/middleware/auth_scope.go`, for API keys restricted to specific job
+aliases). A scoped principal is *denied* (`authorizeScope` falls through to 403)
+on any route that is not `/v1/jobs`, `/v1/jobdefs/apply`, or `/v1/jobs/:id…`. So
+backfilling roles alone is **not sufficient** for global routes — the scope
+behavior must be deliberate, not an accident of the fall-through.
 
 - [ ] H-1. **Full RBAC policy backfill** for every currently-unpolicied route in
       `bind.go`'s `Protected()` group, with the trust boundary made explicit. The
@@ -402,6 +448,14 @@ author/ref at write time) and is recorded as out of scope here, not promised.
       the outer group (its own webhook HMAC auth), not inside `Protected()`, so it
       is intentionally not RBAC-gated. Add `RequiredRole` assertions for the new
       entries.
+      **Also record each route's scope behavior** (not just role): the three new
+      verbs (`run diff`, `replay`, `blame`) are all under `/v1/jobs/:id…` so the
+      existing scope check resolves and enforces their job alias — no new scope code
+      needed. The global routes backfilled here (`stats/summary`, `system/*`,
+      `notifications/*`, `jobdefs/lint`+`diff`) currently **deny scoped principals**
+      via the fall-through; document that as the intended behavior for these (a
+      scoped key has no business reading global stats/system/notification config).
+      The one exception that needs real work is `/v1/lineage/impact` — see H-3.
       Files: `internal/auth/rbac.go` (backfill entries), `internal/auth/rbac_test.go`
       (assertions).
 - [ ] H-2. Add the **completeness guard**: a test asserting every route registered
@@ -411,13 +465,34 @@ author/ref at write time) and is recorded as out of scope here, not promised.
       H-1 (or it goes red against the existing gap) and must exclude the outer-group
       public routes (`/hooks/*`, anything in `skipPaths`).
       Files: new `internal/auth/rbac_policy_completeness_test.go` (enumerate the
-      `Protected()` routes and diff against `endpointPolicy`), plus a `test/`
-      integration assertion that an authenticated viewer can reach the data-plane
-      reads (`why`/`receipt`/`topology`/`impact`).
+      `Protected()` routes and diff against `endpointPolicy`), plus `test/`
+      integration assertions covering **scope, not just role**: an *unscoped* viewer
+      can reach the data-plane reads (`why`/`receipt`/`topology`/`impact`); a
+      *scoped* viewer is **allowed** the job-scoped verbs for a job in its scope and
+      **denied** (403) one outside its scope (proves `run diff`/`replay`/`blame`
+      inherit scope correctly); and a *scoped* viewer is denied the global routes
+      that intend to deny it.
       Depends on: H-1.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
       convenient — see the cover note on PR #229.
+- [ ] H-3. Resolve `/v1/lineage/impact` scope semantics — the cross-job leak. The
+      impact query is **global and intentionally cross-job** (it traverses dataset
+      edges across jobs), but scope enforcement currently 403s every scoped
+      principal on it (fall-through). A role-only backfill therefore leaves scoped
+      keys unable to use impact at all, and the naive "fix" (loosen scope) would
+      leak datasets from jobs the key is not scoped to. Pick one and implement it:
+      (a) **require an unscoped/admin principal** for impact — add an explicit
+      `authorizeScope` case that denies scoped keys with a clear message and
+      document the limitation; or (b) **filter the traversal by allowed aliases** —
+      thread `GetAllowedJobAliases` into the impact query so a scoped key sees only
+      downstream within its own jobs. (a) is the lean pre-alpha choice; (b) is the
+      correct long-term one. Add scoped allow/deny integration tests either way —
+      not just unscoped reachability.
+      Files: `api/middleware/auth_scope.go` (new case) and/or
+      `internal/lineage/impact.go` + `api/rest/service/lineage/` (alias filtering),
+      `internal/auth/` tests, `test/` scoped integration assertion.
+      Depends on: H-1.
 
 ## Navigational / Organizational Improvements
 
@@ -444,12 +519,13 @@ author/ref at write time) and is recorded as out of scope here, not promised.
 - **B1 gates the rest of Stream B.** The design memo resolves the fail-closed
   safety model; B2–B6 must not implement runtime replay before it lands. Treat B1
   as a hard barrier within Stream B, not a parallel doc item.
-- **Stream H is independent** of A/B/C (it fixes shipped RBAC) and can land as a
-  small standalone PR ahead of the wave. **H-2 depends on H-1**: the completeness
-  guard must land only after the full backfill, or it fails CI against the
-  existing gap. Once H-2 is in, it makes A2/B4/C2's policy entries non-optional —
-  so ideally land H before those endpoint items, or accept that an endpoint item
-  landing first will trip the guard (intended).
+- **Stream H is independent** of A/B/C (it fixes shipped RBAC/scope) and can land
+  as a small standalone PR ahead of the wave. **H-2 and H-3 depend on H-1**: the
+  completeness guard (H-2) must land only after the full backfill or it fails CI
+  against the existing gap; the lineage-impact scope fix (H-3) builds on the
+  policy entry H-1 adds. Once H-2 is in, it makes A2/B4/C2's policy entries
+  non-optional — so ideally land H before those endpoint items, or accept that an
+  endpoint item landing first will trip the guard (intended).
 - **N-1 depends on A4 + B6 + C4** — the plan-level cross-links run last, after all
   three verbs ship.
 
@@ -459,9 +535,17 @@ author/ref at write time) and is recorded as out of scope here, not promised.
 - B: `B1 (design memo, hard barrier) → B2 → B3 → B4 → B5 → B6`; B5 additionally
   needs A2.
 - C: `C1 → C2 → C3 → C4` (strictly linear).
-- H: `H-1 (full backfill) → H-2 (completeness guard)`.
+- H: `H-1 (full backfill) → (H-2 completeness/scope guard, H-3 lineage-impact
+  scope) in parallel`.
 
 **Cross-stream file conflicts.**
+
+- `internal/worker/runtime_executor.go` + `internal/dispatch/` — only B2 (the
+  distributed quarantine propagation). Sequential within Stream B; no cross-stream
+  conflict, but it is the load-bearing change, not an afterthought — call it out in
+  review.
+- `api/middleware/auth_scope.go` / `internal/lineage/impact.go` — only H-3; no
+  cross-stream conflict.
 
 - `api/rest/bind/bind.go` — A2, B4, and C2 each add a route line + a controller
   import. Additive but the import block is rebase-prone; if two land in the same
@@ -482,8 +566,8 @@ author/ref at write time) and is recorded as out of scope here, not promised.
   feature-table row; different lines, mechanically rebaseable if co-scheduled.
 - `internal/run/store.go` — B2 and B3 both touch it but are sequential within
   Stream B, so no cross-stream conflict.
-- `internal/models/run.go` — only B2 (additive `JobRun` column). No new table, so
-  no `models.All` / `hotTables` ordering concern.
+- `internal/models/run.go` — only B2 (additive `JobRun` **and** `TaskRun`
+  columns). No new table, so no `models.All` / `hotTables` ordering concern.
 - `go.sum` — no item adds a dependency; no `go mod tidy` conflict expected.
 - `test/` — A4, B6, C4 land in **separate files** (`data_plane_e2e_test.go`,
   `replay_test.go`, `blame_test.go`) on the same suite type; Go permits methods on
@@ -519,21 +603,24 @@ Per-stream conditional gates:
   stderr** via `runCLIStdout` — never the stream-merging `runCLIRaw`. Cobra
   `cmd.Print*` and log lines both leak to the wrong stream; a merged capture hides
   it.
-- **B (quarantine, cache-touching, side-effecting):** add unit tests asserting a
-  quarantined run does not write a cache-authoritative entry, that `--set`
-  overrides change the task-identity hash (so changed tasks miss, unchanged tasks
-  hit), that a request cannot disable quarantine, that replay fails closed when an
-  unchanged task's baseline cache is absent, and that quarantined runs fire no
-  callbacks. The replay path exercises the docker tier by default; no new engine
-  tier is required.
-- **RBAC (every new authenticated route — A2, B4, C2 — plus Stream H):** each new
-  route has an `endpointPolicy` entry with a `RequiredRole` assertion; H-1
-  backfills all currently-unpolicied `Protected()` routes; and once H-2's
-  completeness guard is in, CI fails if any `Protected()` route lacks a policy
-  entry (the guard excludes outer-group public routes like `/hooks/*` and
-  `skipPaths`). Verify with `go test ./internal/auth/...` plus an integration
-  assertion that an authenticated principal of the intended role can reach the
-  endpoint (viewer for diff/blame/why/receipt/topology/impact; runner for replay).
+- **B (quarantine, cache-touching, side-effecting, distributed):** add unit tests
+  asserting a quarantined run does not write a cache-authoritative entry, that
+  `--set` overrides change the task-identity hash (so changed tasks miss, unchanged
+  tasks hit), that a request cannot disable quarantine, that replay fails closed
+  when an unchanged task's baseline cache is absent, and that quarantined runs fire
+  no callbacks. **B6 additionally runs the cache-isolation assertion under the
+  distributed tier** (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker
+  (`runtime_executor.go`) writes cache independently — a docker-only assertion
+  would miss the worker bypass.
+- **RBAC + scope (every new route — A2, B4, C2 — plus Stream H):** each new route
+  has an `endpointPolicy` entry with a `RequiredRole` assertion; H-1 backfills all
+  unpolicied `Protected()` routes; H-2's completeness guard (excluding `/hooks/*`
+  and `skipPaths`) fails CI if any `Protected()` route lacks a policy entry; and
+  **scope, not just role, is tested** — a scoped viewer is allowed a job-scoped
+  verb (`run diff`/`replay`/`blame`) within its scope and denied one outside it,
+  and `/v1/lineage/impact` honors H-3's scope decision (deny scoped key, or
+  alias-filtered traversal). Verify with `go test ./internal/auth/...` plus the
+  scoped/unscoped integration assertions.
 - This plan's checkbox ticked, the active-wave `## Progress` bullet appended, and
   any cross-linked doc refreshed in the same PR.
 
@@ -546,14 +633,16 @@ The plan is done when **all** of these hold:
    `caesium run diff --json` subcommand emits clean parseable stdout, and
    `test/data_plane_e2e_test.go`'s `TestRunDiffAttributesChangedField` is green in
    CI. The design doc's `run diff` feature-table row reads shipped.
-2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed**:
-   the replay design memo (`docs/design-quarantined-replay.md`) has landed,
-   `caesium run replay --set … --diff` re-runs only hash-changed tasks in an
-   isolated run that leaves the baseline's cache/lineage authority untouched, and
-   `test/replay_test.go` asserts in CI both the field-level diff on clean stdout
-   **and** the safety invariants — quarantine cannot be disabled over the wire,
-   replay fails closed when a baseline cache entry is missing, and a quarantined
-   run fires no callbacks. The design doc's `Quarantined what-if replay`
+2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed
+   and distributed-safe**: the replay design memo
+   (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
+   --diff` re-runs only hash-changed tasks in an isolated run that leaves the
+   baseline's cache/lineage authority untouched **in both the local and distributed
+   executors** (the `Quarantine` flag propagates on `TaskRun` to the worker), and
+   `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
+   safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
+   no callbacks), **and** a distributed-tier assertion that no `TaskCache` entry is
+   written from a quarantined run. The design doc's `Quarantined what-if replay`
    feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
@@ -563,12 +652,15 @@ The plan is done when **all** of these hold:
    asserts in CI an ordinary addition **plus** the two descriptor-keyed regressions
    — a same-name image/command mutation and a delete-and-readd, each attributed to
    the mutating/re-adding snapshot, not the original.
-4. **Stream H — RBAC** is closed: H-1 has backfilled `endpointPolicy` for **all**
-   previously-unpolicied `Protected()` routes (data-plane + stats/summary +
+4. **Stream H — RBAC + scope** is closed: H-1 has backfilled `endpointPolicy` for
+   **all** previously-unpolicied `Protected()` routes (data-plane + stats/summary +
    system/* + notifications/* + jobdefs/lint+diff) with the roles in the H-1
    inventory, the new routes (A2/B4/C2) have entries, H-2's completeness guard
-   (excluding `/hooks/*` and `skipPaths`) is green, and an authenticated viewer can
-   reach the data-plane read endpoints in an integration test.
+   (excluding `/hooks/*` and `skipPaths`) is green with scoped allow/deny coverage
+   (a scoped viewer reaches an in-scope job-scoped verb and is denied an
+   out-of-scope one), and H-3 has resolved `/v1/lineage/impact` scope (scoped keys
+   either explicitly denied or alias-filtered, with tests) so cross-job lineage
+   cannot leak to a scoped principal.
 5. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
    §3.4 records the causal reimagining as shipped, `docs/README.md` indexes this
    plan, and `docs/differentiation-strategy.md` notes the Retain-layer progress.
