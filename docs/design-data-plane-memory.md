@@ -116,3 +116,5 @@ Each ships behind the existing opt-in cache/lineage config and is independently 
 - [`design-incremental-execution.md`](design-incremental-execution.md) — the shipped content-addressed cache and its distributed propagation pattern.
 - [`open_lineage.md`](open_lineage.md) — the shipped OpenLineage emission pipeline this populates.
 - [`roadmap.md`](roadmap.md) — `caesium why` / run-diff overlap with the "live DAG debugging" item (3.4), reimagined here as *causal* rather than a visual state-viewer.
+- [`exec-plans/completed/data-plane-memory.md`](exec-plans/completed/data-plane-memory.md) — the shipped substrate build plan (streams A–D, #213–#222).
+- [`exec-plans/active/data-plane-memory-ii.md`](exec-plans/active/data-plane-memory-ii.md) — the follow-on plan building the causal query verbs (`run diff`, quarantined `replay`, `blame`) on top of this substrate; honors the "What each feature needs" table above.

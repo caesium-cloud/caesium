@@ -1,0 +1,413 @@
+# Data-Plane Memory II — The Causal Query Layer
+
+Last updated: 2026-06-20
+
+This plan ships the three higher-order EXPLAIN verbs that the
+[data-plane-memory](../completed/data-plane-memory.md) substrate plan deferred to
+a follow-on. That plan's `#### Deferred to a follow-on feature plan` note named
+them explicitly — *"Causal `caesium run diff`, the quarantined what-if
+`replay --set … --diff`, and `caesium blame` over commit ranges … Draft a
+follow-on once A–D land"* — and streams A–D have now shipped (#213–#222: image
+digest pinning, persisted decomposed `HashInput`, `caesium why`, reproducibility
+receipt + `verify`, append-only `dag_snapshot` topology history, populated
+OpenLineage datasets + cross-job impact, large-object reference passing, and a
+value-verified short-circuit). The substrate those three verbs consume now
+exists, so this plan turns it into operator-facing query surfaces.
+
+Each verb sits on a substrate that already shipped, so the work is read-side
+assembly + one runtime mode, not new persistence:
+
+- **`caesium run diff` (causal)** reuses the persisted decomposed `HashInput`
+  blobs and the field-by-field differ already built for `caesium why`
+  (`internal/run/whydiff.go` → `DiffHashInputBlobs`/`BlobDiff`). The design notes
+  this is *the same computation as `why`* — because the hash already contains
+  predecessor outputs, "what data changed" and "why did this task re-run" collapse
+  into one diff.
+- **Quarantined what-if replay (`caesium run replay --set … --diff`)** re-runs a
+  baseline run under overridden inputs, re-executing only hash-changed tasks while
+  unchanged tasks resolve as provably-identical cache hits, in an isolated run
+  whose results never become cache- or lineage-authoritative. This is the one
+  net-new runtime mode and the only genuinely under-specified verb, so its stream
+  opens with a short design memo.
+- **`caesium blame` over commit ranges** walks the append-only `dag_snapshot`
+  history and attributes each task/edge to the provenance commit (+ author/ref)
+  that introduced it — version-aware EXPLAIN without `git checkout`.
+
+**Strategic frame.** This is the *Retain* layer of
+[`differentiation-strategy.md`](../../differentiation-strategy.md) — the
+differentiating axis the strategy protects, not the "why-not-Airflow" roadmap.
+It deliberately stays honestly scoped: `run diff` does **cache-bust attribution**
+(which step/output changed and why a task re-ran), and hands full row/column
+value diffs to dbt/Datafold; replay **re-executes identical code** against pinned
+digests and does **not** resurrect overwritten source data.
+
+This plan follows the `exec-plan-wave` skill's structural convention:
+`## Progress` is a wave-by-wave dashboard, `## Streams` is the work
+backlog, `## Sequencing & Dependencies` captures cross-stream order,
+and `## Acceptance Criteria` lists the gates that close out the entire
+plan. Any agent can:
+
+1. Pick a numbered checklist item from `## Streams` whose dependencies
+   are satisfied (per `## Sequencing & Dependencies`).
+2. Land it as a self-contained PR.
+3. Run the verification block under `## Verification (Run For Every
+   PR)`.
+4. Tick the checkbox and update the active wave's per-stream bullet in
+   `## Progress`.
+
+For wave orchestration of the streams below, see
+[`.claude/skills/exec-plan-wave/`](../../../.claude/skills/exec-plan-wave/).
+For drafting new plans in this same shape, see
+[`.claude/skills/draft-exec-plan/`](../../../.claude/skills/draft-exec-plan/).
+
+## Project Posture
+
+From [`differentiation-strategy.md`](../../differentiation-strategy.md): the
+data-plane memory is the **second act** — *"the killer differentiator within
+sovereignty … what makes Caesium more than 'Argo with a nicer binary,' once a
+user is already inside."* These three verbs are retention hooks no other
+zero-dependency scheduler has. Two strategy guardrails are load-bearing for
+scope and must survive into the shipped surfaces:
+
+- **Do not over-claim data causality.** We attribute *which step/output changed
+  and why a task re-ran* — not full dataset value diffs. Every surface that could
+  read as "we diff your data" must point the user at dbt/Datafold for value-level
+  comparison.
+- **Replay never resurrects data.** It re-executes identical code against the
+  same typed inputs + pinned digests. A receipt/replay over an unpinned tag stays
+  honestly degraded (the A4 correctness rule), never silently attested.
+
+## Source-Of-Truth Note
+
+When this plan and [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md)
+disagree, the **design doc wins** — it is the design-of-record for the
+data-plane-memory feature family and carries the "What each feature needs"
+substrate table and the honest-scope rules these verbs must honor. The scope
+deferral that spawned this plan lives in
+[`../completed/data-plane-memory.md`](../completed/data-plane-memory.md)
+(`#### Deferred to a follow-on feature plan`); that tracking is now owned here.
+Stream B additionally defers to its own design memo
+(`docs/design-quarantined-replay.md`, authored by item B1) for replay quarantine
+semantics once it lands.
+
+## Progress (as of 2026-06-20)
+
+No implementation waves have shipped yet. The plan was published as the
+pre-named follow-on to the completed data-plane-memory substrate plan (streams
+A–D, #213–#222); the first wave is the next eligible run of the
+`exec-plan-wave` skill against this doc. Leaf items eligible for Wave 1:
+**A1**, **B1** (design memo), **C1**.
+
+### Stream Status
+
+| Stream | Scope | Priority | Status |
+|--------|-------|----------|--------|
+| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
+| B | Quarantined what-if replay (`caesium run replay --set … --diff`) | P2 | Not started |
+| C | `caesium blame` over commit ranges (dag_snapshot attribution) | **P1** | Not started |
+| N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
+
+## Streams
+
+### Stream A — Causal `caesium run diff`
+
+Ship a read-side diff of two runs of the same job that attributes, per task, why
+it re-ran (or why it would have cache-hit) by diffing the two persisted
+decomposed `HashInput` blobs. This is the smallest stream and the highest
+leverage-to-effort: the differ already exists for `caesium why`
+(`internal/run/whydiff.go`), so Stream A is mostly endpoint + CLI assembly over a
+substrate that shipped in data-plane-memory A2. It also unblocks Stream B's
+`--diff` output. Honest scope, enforced in the rendered output: cache-bust
+attribution only — hand value-level row/column diffs to dbt/Datafold.
+
+- [ ] A1. Add the run-diff read-side core: given two run IDs of the same job,
+      pair terminal (latest-attempt) task-runs by task name and diff each pair's
+      persisted `HashInput` blob via `DiffHashInputBlobs`, assembling a `RunDiff`
+      (per-task verdict + `[]FieldChange` + run-level param/trigger deltas and a
+      tasks-added/removed set). Reuse the `whydiff.go` differ verbatim — do not
+      fork it. Degrade gracefully when a task's blob is missing/oversized/version-
+      mismatched (mirror `why`'s degraded handling). Emit a machine-readable
+      struct.
+      Files: new `internal/run/rundiff.go`, new `internal/run/rundiff_test.go`;
+      reuses `internal/run/whydiff.go` (read-only).
+- [ ] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
+      `RunDiff` as JSON. Validate both runs belong to `:id`; 404 on unknown run,
+      400 on missing query params.
+      Files: new `api/rest/controller/rundiff/`, new `api/rest/service/rundiff/`,
+      route + import in `api/rest/bind/bind.go`.
+      Depends on: A1.
+- [ ] A3. Add the `caesium run diff <left-run> <right-run> [--job-id <id>] [--json]`
+      subcommand: human-readable per-task table by default, machine JSON with
+      `--json`. Follow the `cmd/why/why.go` stdout discipline — all machine and
+      table output via `fmt.Fprint*(cmd.OutOrStdout(), …)`, never cobra's
+      `cmd.Print*` (which leaks to stderr and breaks `--json` piping).
+      Files: new `cmd/run/diff.go` (its own `func init()` calling
+      `Cmd.AddCommand(diffCmd)` on the existing `run.Cmd`).
+      Depends on: A2.
+- [ ] A4. Add an integration scenario driving `caesium run diff --json` end-to-end
+      against the live server: two runs of a cacheable job differing by one run
+      param, asserting the discriminating `runParams.*` field appears in the diff
+      and that stdout is clean parseable JSON (captured via `runCLIStdout`, not the
+      stream-merging `runCLIRaw`). Flip the design doc's `run diff` feature-table
+      row from honest-scope-until-then to shipped.
+      Files: `test/data_plane_e2e_test.go` (add `TestRunDiffAttributesChangedField`),
+      `docs/design-data-plane-memory.md`.
+      Depends on: A3.
+
+### Stream B — Quarantined what-if replay
+
+Ship `caesium run replay <run-id> --set k=v [--diff]`: re-run a baseline run
+under overridden inputs in an **isolated** run that re-executes only hash-changed
+tasks (unchanged tasks resolve as provably-identical cache hits) and whose
+results never become cache- or lineage-authoritative. This is the only net-new
+runtime mode in the plan and the one verb the substrate plan flagged as
+"under-specified … needs its own design pass," so the stream opens with a focused
+design memo before any runtime code. Replay reuses Stream A's diff for its
+`--diff` output and the shipped value-verified short-circuit (data-plane-memory
+Stream D) for unchanged-task reuse.
+
+- [ ] B1. Author the replay design memo: nail (a) **quarantine isolation** — how a
+      quarantined run reuses the cache for hash-unchanged tasks yet is excluded
+      from becoming cache-authoritative and from authoritative lineage emission;
+      (b) the `--set key=value` override plumbing into run params + `HashInput`
+      (overrides must fold into the hash so changed tasks miss and unchanged tasks
+      hit — the cache-correctness invariant); (c) the `--diff` comparison contract
+      (replay-vs-baseline via Stream A); and (d) the honest-scope boundary (no data
+      resurrection; degraded over unpinned tags). Carry a `> Status:` banner.
+      Files: new `docs/design-quarantined-replay.md`, `docs/README.md` (index the
+      new top-level doc — `internal/guardrails`'s
+      `TestDocsREADMEIndexesEveryTopLevelDoc` requires every `docs/*.md` to be
+      linked from the README; the `> Status:` banner satisfies
+      `TestPlanningAndHistoricalDocsCarryStatusBanner`).
+- [ ] B2. Add quarantine to the run model + executor: an additive `Quarantine bool`
+      (and a captured override-params blob) on `JobRun`; the executor honors cache
+      **reads** for unchanged tasks but skips cache-authoritative **writes** and
+      authoritative lineage emission when the run is quarantined. AutoMigrate picks
+      up the additive column; no `hotTables` change (no new table).
+      Files: `internal/models/run.go` (`JobRun` struct, additive column),
+      `internal/run/store.go`, `internal/job/job.go`.
+      Depends on: B1.
+- [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
+      `--set` overrides, build a quarantined `JobRun` and dispatch it through the
+      normal executor so only hash-changed tasks re-run and the rest are cache
+      hits. Re-execution is identical-code-against-pinned-digests — it does not
+      resurrect overwritten source data.
+      Files: new `internal/replay/` (the replay constructor over `run.Store` +
+      dispatch), `internal/run/store.go`.
+      Depends on: B2.
+- [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set":
+      {k:v}, "quarantine": true }`, quarantine defaulting true) returning the new
+      run id. Validate the baseline run belongs to `:id`.
+      Files: new `api/rest/controller/replay/`, new `api/rest/service/replay/`,
+      route + import in `api/rest/bind/bind.go`.
+      Depends on: B3.
+- [ ] B5. Add `caesium run replay <run-id> --set k=v [--diff] [--json]`: fires a
+      quarantined replay; with `--diff`, awaits the replay's terminal state and
+      renders the run-diff vs the baseline by calling the Stream A endpoint.
+      `cmd.OutOrStdout()` stdout discipline as in A3.
+      Files: new `cmd/run/replay.go` (its own `func init()` calling
+      `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
+      Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
+- [ ] B6. Add an integration scenario: replay a completed run with a changed
+      `--set` param; assert (1) only the affected task re-ran while unchanged tasks
+      report cache hits, (2) `--diff --json` reports the discriminating field on
+      clean stdout (`runCLIStdout`), and (3) the quarantined run did **not** mutate
+      the baseline's cache entry or authoritative lineage. Flip the design doc's
+      `Quarantined what-if replay` feature-table row to shipped.
+      Files: new `test/replay_test.go` (`//go:build integration`; reuses the
+      existing suite helpers), `docs/design-data-plane-memory.md`.
+      Depends on: B5.
+
+### Stream C — `caesium blame` over commit ranges
+
+Ship `caesium blame <job> [--task t] [--from <commit> --to <commit>]`: attribute
+each task/edge in a job's DAG to the provenance commit (+ author/ref) that
+introduced it, by walking the append-only `dag_snapshot` history shipped in
+data-plane-memory Stream B. Independent of Streams A and B (different substrate:
+topology history vs. hash blobs), so it runs fully in parallel.
+
+- [ ] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
+      order and compute, for each task and edge, the earliest snapshot whose
+      topology first contained it, surfacing that snapshot's `provenance_commit` /
+      author / ref. Support an optional `[from, to]` commit range and a single-task
+      filter. Reuse `internal/models/dag_snapshot.go` and the snapshot query shipped
+      in data-plane-memory B2.
+      Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`.
+- [ ] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
+      returning per-element attribution as JSON.
+      Files: new `api/rest/controller/blame/`, new `api/rest/service/blame/`,
+      route + import in `api/rest/bind/bind.go`.
+      Depends on: C1.
+- [ ] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
+      [--json]` top-level command: per-element table by default, machine JSON with
+      `--json` via `cmd.OutOrStdout()`.
+      Files: new `cmd/blame/`, append `blame.Cmd` to the `cmds` slice in
+      `cmd/execute.go`.
+      Depends on: C2.
+- [ ] C4. Add an integration scenario: apply a job, then apply a topology change
+      (add an edge/step) that writes a second `dag_snapshot`, then drive
+      `caesium blame --json` and assert the new element is attributed to the later
+      snapshot/commit while the unchanged elements stay attributed to the first;
+      assert clean stdout via `runCLIStdout`.
+      Files: new `test/blame_test.go` (`//go:build integration`).
+      Depends on: C3.
+      Note: whether the integration apply path stamps a distinct
+      `provenance_commit`/author (provenance is normally set by git-sync) is an
+      open harness question — see `## Sequencing & Dependencies`. If apply cannot
+      stamp provenance, the assertion falls back to per-snapshot attribution
+      (snapshot id/time) rather than commit SHA.
+
+## Navigational / Organizational Improvements
+
+- [ ] N-1. Cross-link the shipped trio at the plan level: record the causal
+      `run diff` / quarantined `replay` / `blame` reimagining under
+      `docs/roadmap.md` §3.4 (Live DAG Debugging — already flagged "partially
+      shipped via data-plane-memory"; extend it to mark the causal half shipped),
+      add this plan to the `docs/README.md` active-records index, and note the
+      Retain-layer progress in `docs/differentiation-strategy.md`. Concentrating
+      all roadmap/README/strategy edits here keeps Streams A/B/C from colliding on
+      those shared docs.
+      Files: `docs/roadmap.md`, `docs/README.md`, `docs/differentiation-strategy.md`.
+      Depends on: A4 + B6 + C4 (runs last, once all three verbs have shipped).
+
+## Sequencing & Dependencies
+
+**Cross-stream order.**
+
+- Streams **A**, **B**, and **C** are independent at their cores and may all
+  start in Wave 1 (leaf items A1, B1, C1).
+- **B5 depends on A2** — the replay `--diff` output reuses the run-diff endpoint.
+  A must reach A2 (the endpoint) before B5 (the CLI) lands; B1–B4 do not depend
+  on A.
+- **N-1 depends on A4 + B6 + C4** — the plan-level cross-links run last, after all
+  three verbs ship.
+
+**Within-stream order.**
+
+- A: `A1 → A2 → A3 → A4` (strictly linear; each layer wraps the prior).
+- B: `B1 (design memo) → B2 → B3 → B4 → B5 → B6`; B5 additionally needs A2.
+- C: `C1 → C2 → C3 → C4` (strictly linear).
+
+**Cross-stream file conflicts.**
+
+- `api/rest/bind/bind.go` — A2, B4, and C2 each add a route line + a controller
+  import. Additive but the import block is rebase-prone; if two land in the same
+  wave, sequence (A2 → B4 → C2) or expect a one-line mechanical rebase, not a
+  semantic merge.
+- `cmd/run/` package — A3 (`diff.go`) and B5 (`replay.go`) add **separate new
+  files**, each with its own `init()` calling `AddCommand` on the existing
+  `run.Cmd`; parallel-safe (no shared-line edit). `cmd/execute.go`'s `cmds` slice
+  is touched **only** by C3 (top-level `blame.Cmd`) — no contention.
+- `docs/design-data-plane-memory.md` — A4 and B6 each flip a different
+  feature-table row; different lines, mechanically rebaseable if co-scheduled.
+- `internal/run/store.go` — B2 and B3 both touch it but are sequential within
+  Stream B, so no cross-stream conflict.
+- `internal/models/run.go` — only B2 (additive `JobRun` column). No new table, so
+  no `models.All` / `hotTables` ordering concern.
+- `go.sum` — no item adds a dependency; no `go mod tidy` conflict expected.
+- `test/` — A4, B6, C4 land in **separate files** (`data_plane_e2e_test.go`,
+  `replay_test.go`, `blame_test.go`) on the same suite type; Go permits methods on
+  one suite across files, so they reuse the shared helpers without conflict.
+
+**Open harness question (flag for the wave that picks up C4).** The integration
+apply path may not stamp a distinct `provenance_commit`/author the way git-sync
+does. If it cannot, C4 attributes by snapshot identity/time rather than commit
+SHA, and a small harness item to thread provenance through the test apply path
+may be warranted — enumerate it before implementing C4 rather than fabricating it
+now.
+
+## Verification (Run For Every PR)
+
+```sh
+just lint              # go fmt + go vet + golangci-lint
+just unit-test         # go test -race -coverprofile=coverage.txt ./...
+just integration-test  # builds :latest-test, runs a real server, go test ./test/ -tags=integration
+```
+
+Per-stream conditional gates:
+
+- **Every stream ships an integration scenario** (A4, B6, C4) — a new
+  `cmd/`/REST surface with no `test/` scenario driving it through the real surface
+  must block review (CLAUDE.md "End-to-end coverage is the gate"). `just unit-test`
+  does **not** compile `test/` (it is behind `//go:build integration`), so a green
+  unit-test is necessary but not sufficient; the integration gate is the
+  end-to-end signal. Run golangci-lint with the integration tag, since the local
+  `just lint` (no tag) does not catch issues in `//go:build integration` files.
+- **Machine-readable CLI output** (`run diff --json`, `replay --diff --json`,
+  `blame --json`) must be asserted clean on **stdout captured separately from
+  stderr** via `runCLIStdout` — never the stream-merging `runCLIRaw`. Cobra
+  `cmd.Print*` and log lines both leak to the wrong stream; a merged capture hides
+  it.
+- **B (quarantine, cache-touching):** add a unit test asserting a quarantined run
+  does not write a cache-authoritative entry and that `--set` overrides change the
+  task-identity hash (so changed tasks miss, unchanged tasks hit). The replay path
+  exercises the docker tier by default; no new engine tier is required.
+- This plan's checkbox ticked, the active-wave `## Progress` bullet appended, and
+  any cross-linked doc refreshed in the same PR.
+
+## Acceptance Criteria
+
+The plan is done when **all** of these hold:
+
+1. **Stream A — causal `run diff`** is a runtime feature: `GET
+   /v1/jobs/:id/runs/diff` returns per-task `HashInput`-blob attribution, the
+   `caesium run diff --json` subcommand emits clean parseable stdout, and
+   `test/data_plane_e2e_test.go`'s `TestRunDiffAttributesChangedField` is green in
+   CI. The design doc's `run diff` feature-table row reads shipped.
+2. **Stream B — quarantined replay** is a runtime feature: the replay design memo
+   (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
+   --diff` re-runs only hash-changed tasks in an isolated run that leaves the
+   baseline's cache/lineage authority untouched, and `test/replay_test.go` asserts
+   that isolation + the field-level diff on clean stdout in CI. The design doc's
+   `Quarantined what-if replay` feature-table row reads shipped.
+3. **Stream C — `caesium blame`** is a runtime feature: `GET /v1/jobs/:id/blame`
+   attributes each task/edge to its introducing snapshot/commit, the `caesium
+   blame --json` command emits clean stdout, and `test/blame_test.go` asserts a
+   topology change is attributed to the later commit/snapshot in CI.
+4. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
+   §3.4 records the causal reimagining as shipped, `docs/README.md` indexes this
+   plan, and `docs/differentiation-strategy.md` notes the Retain-layer progress.
+5. **Cross-cutting**: `docs/roadmap.md` and the
+   [data-plane-memory](../completed/data-plane-memory.md) sibling plan reflect
+   every shipped stream; this plan's per-stream `## Progress` entries match merged
+   PRs; and on full completion this plan is a candidate for archive to
+   `docs/exec-plans/completed/`.
+
+## How To Pick Up Work
+
+1. Read this file end-to-end so you understand the streams, their
+   interdependencies, and which acceptance criterion the item closes.
+2. Pick an unchecked item under `## Streams` whose `Depends on:` line
+   is satisfied (consult `## Sequencing & Dependencies`).
+3. Branch from `master` (or land in a worktree if dispatched by
+   `exec-plan-wave`); do the work as a self-contained PR.
+4. Run the verification block under `## Verification (Run For Every
+   PR)`.
+5. Tick the checkbox for your item, add a per-stream bullet to the
+   active wave subsection in `## Progress` (or open a new wave
+   subsection if none exists yet), and update any cross-linked design
+   doc / roadmap section in the same PR.
+6. Open the PR with title format
+   `<Imperative subject> (data-plane-memory-ii <wave>-<stream>)` —
+   e.g. `Add causal run-diff read-side (data-plane-memory-ii W1-α)`.
+   GitHub appends `(#NNN)` on squash-merge.
+
+## Cross-References
+
+- [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) — the
+  design-of-record and source of truth; carries the "What each feature needs"
+  substrate table and the honest-scope rules these verbs honor.
+- [`../completed/data-plane-memory.md`](../completed/data-plane-memory.md) — the
+  substrate plan (streams A–D) this builds on; its `#### Deferred to a follow-on
+  feature plan` note named these three verbs.
+- [`docs/differentiation-strategy.md`](../../differentiation-strategy.md) — why
+  the data-plane memory is the Retain layer (second act), and the do-not-overclaim
+  guardrails.
+- [`docs/roadmap.md`](../../roadmap.md) — §3.4 Live DAG Debugging, reimagined here
+  as *causal* (run diff / blame) rather than a visual state-viewer.
+- [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
+  replay quarantine-semantics design memo authored by item B1 (created when B1
+  lands).
+- `internal/run/whydiff.go` — the field-by-field `HashInput`-blob differ Stream A
+  reuses.
+- `internal/models/dag_snapshot.go` — the topology-history model Stream C reads.
