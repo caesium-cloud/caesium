@@ -81,15 +81,16 @@ scope and must survive into the shipped surfaces:
   **not** sandbox the container, so a re-executed task still runs its real command
   and can write to external systems, deploy, notify, or delete. The word
   "what-if" must never imply side-effect-free. Stream B is therefore designed
-  **fail-closed** (per the adversarial reviews, 2026-06-20): replay defaults to
-  **both external dispatch paths off** — Caesium has *two* independent ones, the
-  callback subsystem (`internal/callback/`) and the event-bus notification
-  subscriber (`internal/notification/subscriber.go`, which fires
-  Slack/webhook/email/PagerDuty on run/task lifecycle events independently of
-  callbacks) — so suppressing one is not enough; replay also fails rather than
-  silently re-running a task whose baseline result is unavailable, and gates
-  side-effecting replay behind explicit opt-in (a replay-safe job/step annotation
-  and/or an alternate env namespace).
+  **fail-closed** (per the adversarial reviews, 2026-06-20): replay reaches **no
+  outward channel** — and Caesium has *several independent* side-effect producers
+  (the callback subsystem `internal/callback/`; the event-bus notification
+  subscriber `internal/notification/subscriber.go` on lifecycle events; the
+  notification watcher `internal/notification/watcher.go` emitting timeout/SLA
+  events from `JobRun` state), so suppressing any one is not enough. B1's audit
+  enumerates the full set and the single marker-based suppression rule. Replay also
+  fails rather than silently re-running a task whose baseline result is
+  unavailable, and gates side-effecting replay behind explicit opt-in (a
+  replay-safe job/step annotation and/or an alternate env namespace).
   The quarantine invariant is **non-bypassable** — there is no API/CLI knob to
   produce an authoritative what-if run — **and it must hold in distributed mode**:
   the flag propagates on `TaskRun` to the worker (`runtime_executor.go`), which
@@ -144,8 +145,14 @@ independent event-bus path from callbacks) — B2 stamps a quarantine marker int
 lifecycle events and the subscriber fail-closed-suppresses, B6 asserts a real
 channel receives nothing; (ii) fixed a role/scope contradiction in the H-2 test
 matrix — a scoped *viewer* gets read-only `run diff`/`blame` and is **denied**
-`RoleRunner`-gated `replay`; a scoped *runner* covers `replay`. All these gaps are
-**latent** — pre-alpha, no users — so nothing is broken in production today.
+`RoleRunner`-gated `replay`; a scoped *runner* covers `replay`. Round 5: a *third*
+notification producer — the timeout/SLA **watcher** (`internal/notification/watcher.go`)
+— would page on a long/SLA-missing quarantined replay; rather than patch it alone,
+B1 now requires an **exhaustive side-effect-producer audit** + a single
+marker-based suppression rule (new producers inherit it), B2 excludes quarantined
+runs from the watcher's scans, and B6 tests `run_timed_out`/`sla_missed`
+suppression. All these gaps are **latent** — pre-alpha, no users — so nothing is
+broken in production today.
 
 ### Stream Status
 
@@ -267,16 +274,24 @@ write, lineage emit, or callback.
         volumes/workload-identity BYO-env abstraction) — and what replay does when
         a job is **not** marked safe (default: refuse, or require an explicit
         `--force-side-effects` acknowledgement).
-      - **Both external dispatch paths off by default.** Quarantined runs fire
-        neither callbacks (`internal/callback/`) **nor** notifications. The
-        notification subscriber (`internal/notification/subscriber.go`) is an
-        independent event-bus listener on run/task lifecycle events, so suppressing
-        callbacks alone leaks Slack/webhook/email/PagerDuty sends. The memo must
-        specify the mechanism: stamp a quarantine marker into the lifecycle-event
-        payload at emission and have the subscriber **fail-closed-suppress** sends
-        when it is set (mirroring its existing "fail closed on unparseable payload"
-        stance), so the rule generalizes to any future event-bus side-effect
-        subscriber — not a per-subscriber allowlist.
+      - **No external side effects — audit every producer, don't whack-a-mole.**
+        Quarantined runs must reach **no** outward channel. Four review rounds have
+        each surfaced a different producer, so the memo must include an
+        **exhaustive audit** (grep the event publishers + external senders) and a
+        single coherent suppression rule, rather than enumerating producers
+        reactively. Known producers so far: (1) callback dispatch
+        (`internal/callback/`, executor path); (2) the notification subscriber
+        (`internal/notification/subscriber.go`) on lifecycle events; (3) the
+        notification watcher (`internal/notification/watcher.go`) emitting
+        `run_timed_out`/`sla_missed` from `JobRun` state. The rule: a quarantined
+        run is **stamped on its `JobRun`/`TaskRun` and on every event it emits**,
+        and **every** external consumer/producer checks that marker
+        (fail-closed-suppress) — subscribers skip marked events, the watcher
+        excludes marked runs from its scans, callbacks short-circuit. New producers
+        added later inherit the rule by checking the marker, not by being added to
+        an allowlist. The memo enumerates the full surface as of implementation
+        time and states the invariant so a future producer that ignores it is a
+        review-blocking regression.
       - **Fail-closed on missing baseline.** If an "unchanged" task's baseline
         cache/result is pruned or absent, replay **fails** rather than silently
         re-executing it (an unannounced re-run could have side effects).
@@ -305,9 +320,19 @@ write, lineage emit, or callback.
       - the dispatch/registration path that materializes `TaskRun` rows must copy
         the run-level flag onto each task run.
       - `internal/notification/subscriber.go` — the **independent** event-bus
-        notification path. Stamp the quarantine marker into the lifecycle-event
-        payload at emission and have the subscriber suppress sends when set; the
-        executor short-circuiting callbacks does **not** cover this.
+        notification path on lifecycle events (`RunCompleted`/`TaskSucceeded`/
+        `RunFailed`/`TaskFailed`). Stamp the quarantine marker into the
+        lifecycle-event payload at emission and have the subscriber suppress sends
+        when set; the executor short-circuiting callbacks does **not** cover this.
+      - `internal/notification/watcher.go` — a **second, independent** producer: a
+        background scanner over `models.JobRun` that emits `run_timed_out` /
+        `sla_missed` events (`emitTimeoutEvent`/`emitSLAEvent` →
+        `persistAndPublish`) which the subscriber then dispatches. It builds its own
+        payload from `JobRun` state, so the lifecycle-event marker does not reach
+        it. **Exclude quarantined runs from its timeout/SLA scans** (filter
+        `JobRun.Quarantine` in `scanRunningRuns`/`scanCompletedBySLA`) so these
+        events are never produced for a what-if run — it should not be SLA-tracked
+        at all.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
@@ -315,7 +340,9 @@ write, lineage emit, or callback.
       `internal/run/store.go`, `internal/job/job.go`,
       `internal/worker/runtime_executor.go`, the dispatch path that builds
       `TaskRun`s (`internal/dispatch/`), `internal/notification/subscriber.go` +
-      the event-emission path that stamps the marker.
+      the event-emission path that stamps the marker, and
+      `internal/notification/watcher.go` (exclude quarantined runs from
+      timeout/SLA scans). The complete producer list comes from B1's audit.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -357,12 +384,14 @@ write, lineage emit, or callback.
       false` (or any quarantine override) is rejected, not honored; (5) replay of a
       run whose unchanged task's cache entry has been pruned **fails closed** rather
       than re-executing; (6) a quarantined run fires no external callbacks; and
-      **(6b) no notifications** — configure a real notification policy + channel
-      (e.g. a webhook channel pointed at a capture server) on an event a normal run
-      would trigger (`RunCompleted`/`TaskSucceeded`), run the quarantined replay,
-      and assert the channel receives **nothing**. Callback suppression alone does
-      not cover this — `internal/notification/subscriber.go` is a separate event-bus
-      path. **(7) Distributed regression:** run the cache-isolation assertion under
+      **(6b) no notifications from any producer** — configure real notification
+      policies + a capture channel on **both** a lifecycle event
+      (`RunCompleted`/`TaskSucceeded`, the subscriber path) **and** a watcher-
+      produced event (`run_timed_out` and/or `sla_missed` — give the replayed job a
+      short timeout/SLA so the watcher would fire), run the quarantined replay, and
+      assert the channel receives **nothing** on any of them. Callback suppression
+      and lifecycle-event suppression alone do not cover the watcher
+      (`internal/notification/watcher.go`), which is a separate producer. **(7) Distributed regression:** run the cache-isolation assertion under
       the distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks
       execute via `runtime_executor.go`) and assert no `TaskCache` entry is written
       from a quarantined replay — the local-mode assertion alone would miss the
@@ -576,10 +605,11 @@ behavior must be deliberate, not an accident of the fall-through.
 **Cross-stream file conflicts.**
 
 - `internal/worker/runtime_executor.go` + `internal/dispatch/` +
-  `internal/notification/subscriber.go` — only B2 (the distributed quarantine
-  propagation **and** the notification-suppression path). Sequential within Stream
-  B; no cross-stream conflict, but these are the two load-bearing side-effect
-  fixes, not afterthoughts — call them out in review.
+  `internal/notification/subscriber.go` + `internal/notification/watcher.go` — only
+  B2 (the distributed quarantine propagation **and** the side-effect suppression
+  across every producer B1's audit names). Sequential within Stream B; no
+  cross-stream conflict, but these are the load-bearing side-effect fixes, not
+  afterthoughts — call them out in review.
 - `api/middleware/auth_scope.go` / `internal/lineage/impact.go` — only H-3; no
   cross-stream conflict.
 
@@ -644,10 +674,12 @@ Per-stream conditional gates:
   `--set` overrides change the task-identity hash (so changed tasks miss, unchanged
   tasks hit), that a request cannot disable quarantine, that replay fails closed
   when an unchanged task's baseline cache is absent, and that quarantined runs fire
-  **neither callbacks nor notifications** (the latter via the independent
-  `internal/notification/subscriber.go` path). **B6 additionally** (a) integration-
-  tests that a real notification policy/channel receives nothing for a quarantined
-  replay, and (b) runs the cache-isolation assertion under the distributed tier
+  **no external side effects from any producer** — callbacks, the lifecycle-event
+  notification subscriber, and the timeout/SLA notification watcher
+  (`internal/notification/watcher.go`). **B6 additionally** (a) integration-tests
+  that a real notification policy/channel receives nothing for a quarantined replay
+  on **both** a lifecycle event and a watcher-produced `run_timed_out`/`sla_missed`
+  event, and (b) runs the cache-isolation assertion under the distributed tier
   (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker (`runtime_executor.go`)
   writes cache independently — a docker-only assertion would miss the worker
   bypass.
@@ -682,9 +714,11 @@ The plan is done when **all** of these hold:
    executors** (the `Quarantine` flag propagates on `TaskRun` to the worker), and
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
-   **neither callbacks nor notifications** fire — a real notification policy/channel
-   receives nothing), **and** a distributed-tier assertion that no `TaskCache` entry
-   is written from a quarantined run. The design doc's `Quarantined what-if replay`
+   **no external side effects from any producer** — callbacks, the lifecycle-event
+   subscriber, and the timeout/SLA watcher all suppressed, asserted via real
+   notification policies on both a lifecycle and a `run_timed_out`/`sla_missed`
+   event), **and** a distributed-tier assertion that no `TaskCache` entry is written
+   from a quarantined run. The design doc's `Quarantined what-if replay`
    feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
