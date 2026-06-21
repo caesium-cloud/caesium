@@ -68,9 +68,27 @@ type MetricExpectation struct {
 
 // LineageExpectation describes emitted OpenLineage assertions.
 type LineageExpectation struct {
-	TotalEvents *int           `yaml:"totalEvents,omitempty"`
-	EventTypes  map[string]int `yaml:"eventTypes,omitempty"`
-	JobNames    []string       `yaml:"jobNames,omitempty"`
+	TotalEvents *int                `yaml:"totalEvents,omitempty"`
+	EventTypes  map[string]int      `yaml:"eventTypes,omitempty"`
+	JobNames    []string            `yaml:"jobNames,omitempty"`
+	Impact      []ImpactExpectation `yaml:"impact,omitempty"`
+}
+
+// ImpactExpectation asserts the persisted lineage graph (the data the
+// /lineage/impact query reads), not just the emitted events: that a root
+// dataset reaches the expected downstream consumers. This catches regressions
+// where datasets are emitted but never persisted, so impact comes back empty.
+type ImpactExpectation struct {
+	// Dataset is the root dataset name whose downstream impact is queried
+	// (e.g. "<job-alias>.<step>.output").
+	Dataset string `yaml:"dataset"`
+	// Namespace overrides the dataset namespace; defaults to the harness
+	// namespace when empty.
+	Namespace string `yaml:"namespace,omitempty"`
+	// MaxDepth bounds the downstream BFS (0 = unbounded).
+	MaxDepth int `yaml:"maxDepth,omitempty"`
+	// Downstream lists dataset names that must appear in the impact result.
+	Downstream []string `yaml:"downstream"`
 }
 
 // ResolvedScenario is a validated scenario with its source location.
@@ -253,6 +271,18 @@ func (s *Scenario) Validate() error {
 			}
 			if count < 0 {
 				return fmt.Errorf("expect.lineage.eventTypes[%q] must be >= 0", eventType)
+			}
+		}
+		for i := range s.Expect.Lineage.Impact {
+			imp := &s.Expect.Lineage.Impact[i]
+			if strings.TrimSpace(imp.Dataset) == "" {
+				return fmt.Errorf("expect.lineage.impact[%d].dataset is required", i)
+			}
+			if len(imp.Downstream) == 0 {
+				return fmt.Errorf("expect.lineage.impact[%d] must list at least one downstream dataset", i)
+			}
+			if imp.MaxDepth < 0 {
+				return fmt.Errorf("expect.lineage.impact[%d].maxDepth must be >= 0", i)
 			}
 		}
 	}

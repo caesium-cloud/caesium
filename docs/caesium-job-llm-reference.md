@@ -338,6 +338,7 @@ Supported assertions:
 - `expect.lineage.totalEvents`: exact emitted OpenLineage event count
 - `expect.lineage.eventTypes`: exact OpenLineage event-type counts (`START`, `COMPLETE`, `FAIL`, `ABORT`)
 - `expect.lineage.jobNames`: required OpenLineage job names present in the emitted stream
+- `expect.lineage.impact[]`: assertions over the **persisted** dataset graph (what the `/lineage/impact` query reads), not just the emitted events. Each entry sets `dataset` (the root dataset name, e.g. `<job-alias>.<step>.output`), a `downstream` list of dataset names that must be reachable from it, an optional `maxDepth` (0 = unbounded), and an optional `namespace` (defaults to the harness namespace). Catches the class of bug where datasets are emitted but never stored, so impact comes back empty.
 
 Example with observability assertions:
 
@@ -367,6 +368,10 @@ scenarios:
           COMPLETE: 4
         jobNames:
           - nightly-etl
+        impact:
+          - dataset: nightly-etl.extract.output
+            downstream:
+              - nightly-etl.transform.output
 ```
 
 ---
