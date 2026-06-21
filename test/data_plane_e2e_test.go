@@ -224,10 +224,8 @@ steps:
 	wantName := alias + ".transform.output"
 	deadline := time.Now().Add(30 * time.Second)
 	var res impactResult
-	for {
-		if s.T().Context().Err() != nil {
-			break // test cancelled/timed out — stop hitting the server
-		}
+	// Loop while the test context is live (cancelled/timed-out → stop polling).
+	for s.T().Context().Err() == nil {
 		res = impactResult{}
 		s.getJSON("/v1/lineage/impact?namespace=caesium&name="+rootName, &res)
 		if len(res.Downstream) > 0 || time.Now().After(deadline) {
