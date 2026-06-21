@@ -81,10 +81,15 @@ scope and must survive into the shipped surfaces:
   **not** sandbox the container, so a re-executed task still runs its real command
   and can write to external systems, deploy, notify, or delete. The word
   "what-if" must never imply side-effect-free. Stream B is therefore designed
-  **fail-closed** (per the adversarial review, 2026-06-20): replay defaults to
-  callbacks/notifications off, fails rather than silently re-running a task whose
-  baseline result is unavailable, and gates side-effecting replay behind explicit
-  opt-in (a replay-safe job/step annotation and/or an alternate env namespace).
+  **fail-closed** (per the adversarial reviews, 2026-06-20): replay defaults to
+  **both external dispatch paths off** — Caesium has *two* independent ones, the
+  callback subsystem (`internal/callback/`) and the event-bus notification
+  subscriber (`internal/notification/subscriber.go`, which fires
+  Slack/webhook/email/PagerDuty on run/task lifecycle events independently of
+  callbacks) — so suppressing one is not enough; replay also fails rather than
+  silently re-running a task whose baseline result is unavailable, and gates
+  side-effecting replay behind explicit opt-in (a replay-safe job/step annotation
+  and/or an alternate env namespace).
   The quarantine invariant is **non-bypassable** — there is no API/CLI knob to
   produce an authoritative what-if run — **and it must hold in distributed mode**:
   the flag propagates on `TaskRun` to the worker (`runtime_executor.go`), which
@@ -133,8 +138,14 @@ propagates the flag on `TaskRun` to the worker (`runtime_executor.go`), which
 writes cache/lineage independently, and B6 adds a distributed regression; (ii)
 authorization is **scope as well as role** — global cross-job `/v1/lineage/impact`
 gets explicit scope semantics (new **H-3**), and the job-scoped verbs get scoped
-allow/deny tests. All these gaps are **latent** — pre-alpha, no users — so nothing
-is broken in production today.
+allow/deny tests. Round 4: (i) replay's "no side effects" must suppress the
+**notification subscriber** too (`internal/notification/subscriber.go` is an
+independent event-bus path from callbacks) — B2 stamps a quarantine marker into
+lifecycle events and the subscriber fail-closed-suppresses, B6 asserts a real
+channel receives nothing; (ii) fixed a role/scope contradiction in the H-2 test
+matrix — a scoped *viewer* gets read-only `run diff`/`blame` and is **denied**
+`RoleRunner`-gated `replay`; a scoped *runner* covers `replay`. All these gaps are
+**latent** — pre-alpha, no users — so nothing is broken in production today.
 
 ### Stream Status
 
@@ -256,8 +267,16 @@ write, lineage emit, or callback.
         volumes/workload-identity BYO-env abstraction) — and what replay does when
         a job is **not** marked safe (default: refuse, or require an explicit
         `--force-side-effects` acknowledgement).
-      - **Callbacks off by default.** Quarantined runs do not fire external
-        callbacks/notifications unless explicitly re-enabled.
+      - **Both external dispatch paths off by default.** Quarantined runs fire
+        neither callbacks (`internal/callback/`) **nor** notifications. The
+        notification subscriber (`internal/notification/subscriber.go`) is an
+        independent event-bus listener on run/task lifecycle events, so suppressing
+        callbacks alone leaks Slack/webhook/email/PagerDuty sends. The memo must
+        specify the mechanism: stamp a quarantine marker into the lifecycle-event
+        payload at emission and have the subscriber **fail-closed-suppress** sends
+        when it is set (mirroring its existing "fail closed on unparseable payload"
+        stance), so the rule generalizes to any future event-bus side-effect
+        subscriber — not a per-subscriber allowlist.
       - **Fail-closed on missing baseline.** If an "unchanged" task's baseline
         cache/result is pruned or absent, replay **fails** rather than silently
         re-executing it (an unannounced re-run could have side effects).
@@ -285,13 +304,18 @@ write, lineage emit, or callback.
         bypasses quarantine entirely.
       - the dispatch/registration path that materializes `TaskRun` rows must copy
         the run-level flag onto each task run.
+      - `internal/notification/subscriber.go` — the **independent** event-bus
+        notification path. Stamp the quarantine marker into the lifecycle-event
+        payload at emission and have the subscriber suppress sends when set; the
+        executor short-circuiting callbacks does **not** cover this.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
       Files: `internal/models/run.go` (`JobRun` + `TaskRun` additive columns),
       `internal/run/store.go`, `internal/job/job.go`,
       `internal/worker/runtime_executor.go`, the dispatch path that builds
-      `TaskRun`s (`internal/dispatch/`).
+      `TaskRun`s (`internal/dispatch/`), `internal/notification/subscriber.go` +
+      the event-emission path that stamps the marker.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -332,13 +356,18 @@ write, lineage emit, or callback.
       regression** assertions: (4) a `POST …/replay` body attempting `quarantine:
       false` (or any quarantine override) is rejected, not honored; (5) replay of a
       run whose unchanged task's cache entry has been pruned **fails closed** rather
-      than re-executing; and (6) a quarantined run fires no external callbacks.
-      **(7) Distributed regression:** run the cache-isolation assertion under the
-      distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks execute
-      via `runtime_executor.go`) and assert no `TaskCache` entry is written from a
-      quarantined replay — the local-mode assertion alone would miss the worker
-      bypass. Flip the design doc's `Quarantined what-if replay` feature-table row
-      to shipped.
+      than re-executing; (6) a quarantined run fires no external callbacks; and
+      **(6b) no notifications** — configure a real notification policy + channel
+      (e.g. a webhook channel pointed at a capture server) on an event a normal run
+      would trigger (`RunCompleted`/`TaskSucceeded`), run the quarantined replay,
+      and assert the channel receives **nothing**. Callback suppression alone does
+      not cover this — `internal/notification/subscriber.go` is a separate event-bus
+      path. **(7) Distributed regression:** run the cache-isolation assertion under
+      the distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks
+      execute via `runtime_executor.go`) and assert no `TaskCache` entry is written
+      from a quarantined replay — the local-mode assertion alone would miss the
+      worker bypass. Flip the design doc's `Quarantined what-if replay`
+      feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -466,12 +495,18 @@ behavior must be deliberate, not an accident of the fall-through.
       public routes (`/hooks/*`, anything in `skipPaths`).
       Files: new `internal/auth/rbac_policy_completeness_test.go` (enumerate the
       `Protected()` routes and diff against `endpointPolicy`), plus `test/`
-      integration assertions covering **scope, not just role**: an *unscoped* viewer
-      can reach the data-plane reads (`why`/`receipt`/`topology`/`impact`); a
-      *scoped* viewer is **allowed** the job-scoped verbs for a job in its scope and
-      **denied** (403) one outside its scope (proves `run diff`/`replay`/`blame`
-      inherit scope correctly); and a *scoped* viewer is denied the global routes
-      that intend to deny it.
+      integration assertions covering **scope, not just role** — keeping role and
+      scope orthogonal:
+      - *unscoped viewer* can reach the data-plane reads
+        (`why`/`receipt`/`topology`/`impact`);
+      - *scoped viewer* is **allowed** the read-only verbs `run diff` and `blame`
+        for an in-scope job and **denied** (403) for an out-of-scope job (proves
+        scope resolves on `/v1/jobs/:id…`), and is **denied `replay`** regardless of
+        scope (it is `RoleRunner`-gated — a read-only key must not trigger a
+        side-effecting container run);
+      - *scoped runner* is allowed `replay` for an in-scope job and denied (403)
+        for an out-of-scope job (proves replay's scope allow/deny);
+      - *scoped* principals are denied the global routes that intend to deny them.
       Depends on: H-1.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
@@ -540,10 +575,11 @@ behavior must be deliberate, not an accident of the fall-through.
 
 **Cross-stream file conflicts.**
 
-- `internal/worker/runtime_executor.go` + `internal/dispatch/` — only B2 (the
-  distributed quarantine propagation). Sequential within Stream B; no cross-stream
-  conflict, but it is the load-bearing change, not an afterthought — call it out in
-  review.
+- `internal/worker/runtime_executor.go` + `internal/dispatch/` +
+  `internal/notification/subscriber.go` — only B2 (the distributed quarantine
+  propagation **and** the notification-suppression path). Sequential within Stream
+  B; no cross-stream conflict, but these are the two load-bearing side-effect
+  fixes, not afterthoughts — call them out in review.
 - `api/middleware/auth_scope.go` / `internal/lineage/impact.go` — only H-3; no
   cross-stream conflict.
 
@@ -608,17 +644,22 @@ Per-stream conditional gates:
   `--set` overrides change the task-identity hash (so changed tasks miss, unchanged
   tasks hit), that a request cannot disable quarantine, that replay fails closed
   when an unchanged task's baseline cache is absent, and that quarantined runs fire
-  no callbacks. **B6 additionally runs the cache-isolation assertion under the
-  distributed tier** (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker
-  (`runtime_executor.go`) writes cache independently — a docker-only assertion
-  would miss the worker bypass.
+  **neither callbacks nor notifications** (the latter via the independent
+  `internal/notification/subscriber.go` path). **B6 additionally** (a) integration-
+  tests that a real notification policy/channel receives nothing for a quarantined
+  replay, and (b) runs the cache-isolation assertion under the distributed tier
+  (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker (`runtime_executor.go`)
+  writes cache independently — a docker-only assertion would miss the worker
+  bypass.
 - **RBAC + scope (every new route — A2, B4, C2 — plus Stream H):** each new route
   has an `endpointPolicy` entry with a `RequiredRole` assertion; H-1 backfills all
   unpolicied `Protected()` routes; H-2's completeness guard (excluding `/hooks/*`
   and `skipPaths`) fails CI if any `Protected()` route lacks a policy entry; and
-  **scope, not just role, is tested** — a scoped viewer is allowed a job-scoped
-  verb (`run diff`/`replay`/`blame`) within its scope and denied one outside it,
-  and `/v1/lineage/impact` honors H-3's scope decision (deny scoped key, or
+  **scope, not just role, is tested, with the two kept orthogonal** — a scoped
+  *viewer* is allowed the read-only verbs (`run diff`/`blame`) in-scope, denied
+  them out-of-scope, and denied `replay` outright (it is `RoleRunner`); a scoped
+  *runner* is allowed `replay` in-scope and denied it out-of-scope; and
+  `/v1/lineage/impact` honors H-3's scope decision (deny scoped key, or
   alias-filtered traversal). Verify with `go test ./internal/auth/...` plus the
   scoped/unscoped integration assertions.
 - This plan's checkbox ticked, the active-wave `## Progress` bullet appended, and
@@ -641,8 +682,9 @@ The plan is done when **all** of these hold:
    executors** (the `Quarantine` flag propagates on `TaskRun` to the worker), and
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
-   no callbacks), **and** a distributed-tier assertion that no `TaskCache` entry is
-   written from a quarantined run. The design doc's `Quarantined what-if replay`
+   **neither callbacks nor notifications** fire — a real notification policy/channel
+   receives nothing), **and** a distributed-tier assertion that no `TaskCache` entry
+   is written from a quarantined run. The design doc's `Quarantined what-if replay`
    feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
@@ -657,8 +699,10 @@ The plan is done when **all** of these hold:
    system/* + notifications/* + jobdefs/lint+diff) with the roles in the H-1
    inventory, the new routes (A2/B4/C2) have entries, H-2's completeness guard
    (excluding `/hooks/*` and `skipPaths`) is green with scoped allow/deny coverage
-   (a scoped viewer reaches an in-scope job-scoped verb and is denied an
-   out-of-scope one), and H-3 has resolved `/v1/lineage/impact` scope (scoped keys
+   that keeps role and scope orthogonal (a scoped *viewer* reaches in-scope
+   `run diff`/`blame`, is denied them out-of-scope, and is denied `replay`
+   outright; a scoped *runner* reaches in-scope `replay` and is denied it
+   out-of-scope), and H-3 has resolved `/v1/lineage/impact` scope (scoped keys
    either explicitly denied or alias-filtered, with tests) so cross-job lineage
    cannot leak to a scoped principal.
 5. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
