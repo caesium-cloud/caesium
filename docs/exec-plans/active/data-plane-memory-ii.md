@@ -82,12 +82,16 @@ scope and must survive into the shipped surfaces:
   and can write to external systems, deploy, notify, or delete. The word
   "what-if" must never imply side-effect-free. Stream B is therefore designed
   **fail-closed** (per the adversarial reviews, 2026-06-20): replay reaches **no
-  outward channel** — and Caesium has *several independent* side-effect producers
-  (the callback subsystem `internal/callback/`; the event-bus notification
-  subscriber `internal/notification/subscriber.go` on lifecycle events; the
-  notification watcher `internal/notification/watcher.go` emitting timeout/SLA
-  events from `JobRun` state), so suppressing any one is not enough. B1's audit
-  enumerates the full set and the single marker-based suppression rule. Replay also
+  outward channel, and stays non-authoritative** — Caesium has *several
+  independent* side-effect producers (the callback subsystem `internal/callback/`;
+  the notification subscriber `internal/notification/subscriber.go` on lifecycle
+  events; the notification watcher `internal/notification/watcher.go` on
+  timeout/SLA; and the **OpenLineage subscriber** `internal/lineage/subscriber.go`,
+  which both emits to the transport *and* persists `lineage_datasets`), so
+  suppressing any one is not enough — and the lineage one is the most dangerous,
+  because emitting it would make a what-if run *lineage-authoritative* and pollute
+  the impact graph. B1's audit enumerates the full set and the single marker-based
+  suppression rule. Replay also
   fails rather than silently re-running a task whose baseline result is
   unavailable, and gates side-effecting replay behind explicit opt-in (a
   replay-safe job/step annotation and/or an alternate env namespace).
@@ -151,7 +155,13 @@ notification producer — the timeout/SLA **watcher** (`internal/notification/wa
 B1 now requires an **exhaustive side-effect-producer audit** + a single
 marker-based suppression rule (new producers inherit it), B2 excludes quarantined
 runs from the watcher's scans, and B6 tests `run_timed_out`/`sla_missed`
-suppression. All these gaps are **latent** — pre-alpha, no users — so nothing is
+suppression. Round 6: the audit caught a *fourth* producer — the **OpenLineage
+subscriber** (`internal/lineage/subscriber.go`), which would make a what-if run
+lineage-authoritative and pollute the impact graph; B2 drops marked events before
+transport emit + `lineage_datasets` persist, B6 asserts zero new dataset rows.
+Also tightened the replay/run-diff CLI contract: `--job-id` is **required** (the
+endpoints are job-scoped; a run-id-only lookup breaks under scoped keys), matching
+`caesium why`. All these gaps are **latent** — pre-alpha, no users — so nothing is
 broken in production today.
 
 ### Stream Status
@@ -199,8 +209,12 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go`
       (policy entry) + `internal/auth/rbac_test.go` (RoleViewer assertion).
       Depends on: A1.
-- [ ] A3. Add the `caesium run diff <left-run> <right-run> [--job-id <id>] [--json]`
-      subcommand: human-readable per-task table by default, machine JSON with
+- [ ] A3. Add the `caesium run diff <left-run> <right-run> --job-id <id> [--json]`
+      subcommand. **`--job-id` is required** (matching `caesium why`): the REST
+      endpoint is job-scoped (`/v1/jobs/:id/runs/diff`), so the CLI cannot construct
+      the URL from run ids alone without a brittle global jobs/runs scan — and that
+      scan would fail under scoped API keys anyway. Error clearly if it is omitted,
+      as `why` does. Human-readable per-task table by default, machine JSON with
       `--json`. Follow the `cmd/why/why.go` stdout discipline — all machine and
       table output via `fmt.Fprint*(cmd.OutOrStdout(), …)`, never cobra's
       `cmd.Print*` (which leaks to stderr and breaks `--json` piping).
@@ -283,7 +297,12 @@ write, lineage emit, or callback.
         (`internal/callback/`, executor path); (2) the notification subscriber
         (`internal/notification/subscriber.go`) on lifecycle events; (3) the
         notification watcher (`internal/notification/watcher.go`) emitting
-        `run_timed_out`/`sla_missed` from `JobRun` state. The rule: a quarantined
+        `run_timed_out`/`sla_missed` from `JobRun` state; (4) the **OpenLineage
+        subscriber** (`internal/lineage/subscriber.go` → `mapper.mapEvent` →
+        `transport.Emit`), which also **persists `lineage_datasets`** — so a
+        quarantined replay would not only emit externally but make its what-if
+        output **lineage-authoritative**, corrupting the very impact graph that
+        Stream C and `/v1/lineage/impact` read. The rule: a quarantined
         run is **stamped on its `JobRun`/`TaskRun` and on every event it emits**,
         and **every** external consumer/producer checks that marker
         (fail-closed-suppress) — subscribers skip marked events, the watcher
@@ -333,6 +352,15 @@ write, lineage emit, or callback.
         `JobRun.Quarantine` in `scanRunningRuns`/`scanCompletedBySLA`) so these
         events are never produced for a what-if run — it should not be SLA-tracked
         at all.
+      - `internal/lineage/subscriber.go` (+ `mapper.go`) — the **OpenLineage**
+        producer: it subscribes to the lifecycle bus, maps events, **emits to the
+        transport, and persists `lineage_datasets`**. The marked quarantined events
+        must be **dropped in `handleEvent`/`mapEvent`** before both the
+        `transport.Emit` and the dataset persistence — otherwise a what-if run
+        emits externally *and* becomes lineage-authoritative (the worse failure:
+        it pollutes the impact graph). This is the load-bearing lineage-isolation
+        fix; "skip authoritative lineage emission" in the executor is not enough
+        because emission happens here, on the bus, not in the executor.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
@@ -340,9 +368,11 @@ write, lineage emit, or callback.
       `internal/run/store.go`, `internal/job/job.go`,
       `internal/worker/runtime_executor.go`, the dispatch path that builds
       `TaskRun`s (`internal/dispatch/`), `internal/notification/subscriber.go` +
-      the event-emission path that stamps the marker, and
+      the event-emission path that stamps the marker,
       `internal/notification/watcher.go` (exclude quarantined runs from
-      timeout/SLA scans). The complete producer list comes from B1's audit.
+      timeout/SLA scans), and `internal/lineage/subscriber.go` + `mapper.go` (drop
+      marked events before transport emit and `lineage_datasets` persist). The
+      complete producer list comes from B1's audit.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -368,10 +398,14 @@ write, lineage emit, or callback.
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
       Depends on: B3.
-- [ ] B5. Add `caesium run replay <run-id> --set k=v [--diff] [--json]`: fires a
-      quarantined replay; with `--diff`, awaits the replay's terminal state and
-      renders the run-diff vs the baseline by calling the Stream A endpoint.
-      `cmd.OutOrStdout()` stdout discipline as in A3.
+- [ ] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--diff] [--json]`:
+      fires a quarantined replay. **`--job-id` is required** (same reason as A3 and
+      `caesium why`): the endpoint is `POST /v1/jobs/:id/runs/:run_id/replay`, so the
+      CLI needs the job id to build the URL — a run-id-only lookup would require a
+      global scan that breaks under scoped keys. With `--diff`, awaits the replay's
+      terminal state and renders the run-diff vs the baseline via the Stream A
+      endpoint (also job-scoped — same `--job-id`). `cmd.OutOrStdout()` stdout
+      discipline as in A3.
       Files: new `cmd/run/replay.go` (its own `func init()` calling
       `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
@@ -391,7 +425,12 @@ write, lineage emit, or callback.
       short timeout/SLA so the watcher would fire), run the quarantined replay, and
       assert the channel receives **nothing** on any of them. Callback suppression
       and lifecycle-event suppression alone do not cover the watcher
-      (`internal/notification/watcher.go`), which is a separate producer. **(7) Distributed regression:** run the cache-isolation assertion under
+      (`internal/notification/watcher.go`), which is a separate producer. **(6c) no
+      OpenLineage** — with lineage enabled (the integration server already sets
+      `CAESIUM_OPEN_LINEAGE_ENABLED`), assert the quarantined replay emits **no**
+      OpenLineage transport event **and** writes **no** new `lineage_datasets` rows
+      (query the table before/after) — i.e. the impact graph is unchanged, so the
+      what-if run never becomes lineage-authoritative. **(7) Distributed regression:** run the cache-isolation assertion under
       the distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks
       execute via `runtime_executor.go`) and assert no `TaskCache` entry is written
       from a quarantined replay — the local-mode assertion alone would miss the
@@ -605,9 +644,10 @@ behavior must be deliberate, not an accident of the fall-through.
 **Cross-stream file conflicts.**
 
 - `internal/worker/runtime_executor.go` + `internal/dispatch/` +
-  `internal/notification/subscriber.go` + `internal/notification/watcher.go` — only
-  B2 (the distributed quarantine propagation **and** the side-effect suppression
-  across every producer B1's audit names). Sequential within Stream B; no
+  `internal/notification/{subscriber,watcher}.go` + `internal/lineage/{subscriber,
+  mapper}.go` — only B2 (the distributed quarantine propagation **and** the
+  side-effect suppression across every producer B1's audit names — callbacks,
+  notifications, timeout/SLA watcher, OpenLineage). Sequential within Stream B; no
   cross-stream conflict, but these are the load-bearing side-effect fixes, not
   afterthoughts — call them out in review.
 - `api/middleware/auth_scope.go` / `internal/lineage/impact.go` — only H-3; no
@@ -675,11 +715,13 @@ Per-stream conditional gates:
   tasks hit), that a request cannot disable quarantine, that replay fails closed
   when an unchanged task's baseline cache is absent, and that quarantined runs fire
   **no external side effects from any producer** — callbacks, the lifecycle-event
-  notification subscriber, and the timeout/SLA notification watcher
-  (`internal/notification/watcher.go`). **B6 additionally** (a) integration-tests
-  that a real notification policy/channel receives nothing for a quarantined replay
-  on **both** a lifecycle event and a watcher-produced `run_timed_out`/`sla_missed`
-  event, and (b) runs the cache-isolation assertion under the distributed tier
+  notification subscriber, the timeout/SLA notification watcher, and the
+  **OpenLineage subscriber** (no transport emit, no `lineage_datasets` rows).
+  **B6 additionally** (a) integration-tests that a real notification policy/channel
+  receives nothing for a quarantined replay on **both** a lifecycle event and a
+  watcher-produced `run_timed_out`/`sla_missed` event, that the impact graph gains
+  no `lineage_datasets` rows, and (b) runs the cache-isolation assertion under the
+  distributed tier
   (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker (`runtime_executor.go`)
   writes cache independently — a docker-only assertion would miss the worker
   bypass.
@@ -715,11 +757,12 @@ The plan is done when **all** of these hold:
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
    **no external side effects from any producer** — callbacks, the lifecycle-event
-   subscriber, and the timeout/SLA watcher all suppressed, asserted via real
-   notification policies on both a lifecycle and a `run_timed_out`/`sla_missed`
-   event), **and** a distributed-tier assertion that no `TaskCache` entry is written
-   from a quarantined run. The design doc's `Quarantined what-if replay`
-   feature-table row reads shipped.
+   subscriber, the timeout/SLA watcher, and the OpenLineage subscriber all
+   suppressed, asserted via real notification policies on both a lifecycle and a
+   `run_timed_out`/`sla_missed` event **and** zero new `lineage_datasets` rows),
+   **and** a distributed-tier assertion that no `TaskCache` entry is written from a
+   quarantined run. The design doc's `Quarantined what-if replay` feature-table row
+   reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
    that introduced its current descriptor (keyed by `name+image+command`, not name
