@@ -76,6 +76,25 @@ scope and must survive into the shipped surfaces:
 - **Replay never resurrects data.** It re-executes identical code against the
   same typed inputs + pinned digests. A receipt/replay over an unpinned tag stays
   honestly degraded (the A4 correctness rule), never silently attested.
+- **Replay re-executes real container commands — it is not a simulation.**
+  "Quarantine" isolates a replay run's *cache and lineage authority*; it does
+  **not** sandbox the container, so a re-executed task still runs its real command
+  and can write to external systems, deploy, notify, or delete. The word
+  "what-if" must never imply side-effect-free. Stream B is therefore designed
+  **fail-closed** (per the adversarial review, 2026-06-20): replay defaults to
+  callbacks/notifications off, fails rather than silently re-running a task whose
+  baseline result is unavailable, and gates side-effecting replay behind explicit
+  opt-in (a replay-safe job/step annotation and/or an alternate env namespace).
+  The quarantine invariant is **non-bypassable** — there is no API/CLI knob to
+  produce an authoritative what-if run. See item B1's design memo.
+- **Every new authenticated REST route ships its RBAC policy entry.** Caesium's
+  auth middleware (`api/middleware/auth.go`) denies any authenticated route absent
+  from `endpointPolicy` (`internal/auth/rbac.go`) as `unknown_route` (403). A
+  handler that passes its no-auth integration test but lacks a policy entry is
+  broken for every API-key/SSO deployment — the sovereignty buyer's default.
+  Read-only `run diff`/`blame` map to `RoleViewer`; `replay` maps to `RoleRunner`
+  (matching `run`/`retry`). Item H-1 also backfills the **shipped** data-plane
+  endpoints, which this review found are missing from the policy.
 
 ## Source-Of-Truth Note
 
@@ -96,15 +115,24 @@ No implementation waves have shipped yet. The plan was published as the
 pre-named follow-on to the completed data-plane-memory substrate plan (streams
 A–D, #213–#222); the first wave is the next eligible run of the
 `exec-plan-wave` skill against this doc. Leaf items eligible for Wave 1:
-**A1**, **B1** (design memo), **C1**.
+**A1**, **B1** (design memo), **C1**, **H-1** (independent RBAC backfill).
+
+This plan was revised on 2026-06-20 in response to a Codex adversarial review:
+Stream B is now fail-closed (non-bypassable quarantine, callbacks-off, fail-on-
+missing-baseline, explicit opt-in for side-effecting replay); every new REST
+route carries an RBAC policy entry; Stream C's blame uses transition-based
+attribution (handles delete/readd); and **H-1** was added to fix a pre-existing
+bug the review surfaced — the shipped `why`/`receipt`/`topology`/`impact`
+endpoints are absent from `endpointPolicy` and 403 under auth.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
-| B | Quarantined what-if replay (`caesium run replay --set … --diff`) | P2 | Not started |
+| B | Quarantined what-if replay (`caesium run replay --set … --diff`) — fail-closed | P2 | Not started |
 | C | `caesium blame` over commit ranges (dag_snapshot attribution) | **P1** | Not started |
+| H | RBAC policy backfill for shipped endpoints + completeness guardrail | **P1** | Not started |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
 
 ## Streams
@@ -132,9 +160,15 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       reuses `internal/run/whydiff.go` (read-only).
 - [ ] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
       `RunDiff` as JSON. Validate both runs belong to `:id`; 404 on unknown run,
-      400 on missing query params.
+      400 on missing query params. Register the route in `endpointPolicy`
+      (`GET /v1/jobs/:id/runs/diff` → `RoleViewer`) or the middleware denies it
+      `unknown_route` (403) under auth; add an RBAC assertion. Note the echo
+      routing order: `/runs/diff` is a static segment that must register so it
+      resolves ahead of the `/runs/:run_id` param route — verify the diff path is
+      not shadowed.
       Files: new `api/rest/controller/rundiff/`, new `api/rest/service/rundiff/`,
-      route + import in `api/rest/bind/bind.go`.
+      route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go`
+      (policy entry) + `internal/auth/rbac_test.go` (RoleViewer assertion).
       Depends on: A1.
 - [ ] A3. Add the `caesium run diff <left-run> <right-run> [--job-id <id>] [--json]`
       subcommand: human-readable per-task table by default, machine JSON with
@@ -166,14 +200,46 @@ design memo before any runtime code. Replay reuses Stream A's diff for its
 `--diff` output and the shipped value-verified short-circuit (data-plane-memory
 Stream D) for unchanged-task reuse.
 
-- [ ] B1. Author the replay design memo: nail (a) **quarantine isolation** — how a
-      quarantined run reuses the cache for hash-unchanged tasks yet is excluded
+**Safety is the dominant design constraint here, not a footnote** (adversarial
+review, 2026-06-20). Re-executing a hash-changed task runs its **real container
+command** — quarantine isolates cache/lineage *authority*, it does not sandbox
+the container, so a naive replay of a job that deploys, sends, or deletes will do
+exactly that against production. Stream B is therefore **fail-closed end to
+end**: (1) the quarantine invariant is non-bypassable — no request/CLI field can
+produce an authoritative what-if run; (2) external callbacks/notifications are
+**off by default** for replay runs; (3) replay **fails rather than silently
+re-executes** a task whose baseline cache/result is unavailable (a pruned cache
+entry must not turn a "what-if" into an unannounced production re-run); and (4)
+re-executing tasks of a job not marked replay-safe requires explicit operator
+opt-in. The B1 memo is the gate that makes these binding before any runtime code
+lands.
+
+- [ ] B1. Author the replay design memo, which must resolve the safety model
+      **before** B2–B6 implement anything. Nail: (a) **quarantine isolation** — how
+      a quarantined run reuses the cache for hash-unchanged tasks yet is excluded
       from becoming cache-authoritative and from authoritative lineage emission;
       (b) the `--set key=value` override plumbing into run params + `HashInput`
       (overrides must fold into the hash so changed tasks miss and unchanged tasks
       hit — the cache-correctness invariant); (c) the `--diff` comparison contract
-      (replay-vs-baseline via Stream A); and (d) the honest-scope boundary (no data
-      resurrection; degraded over unpinned tags). Carry a `> Status:` banner.
+      (replay-vs-baseline via Stream A); (d) the honest-scope boundary (no data
+      resurrection; degraded over unpinned tags); and the **fail-closed safety
+      contract** the review made load-bearing:
+      - **Side-effect honesty.** State plainly that a re-executed task runs its
+        real command; replay is not a sandbox. Decide and specify the containment
+        mechanism — a `replaySafe`/`idempotent` opt-in on the job/step schema,
+        and/or replay against an alternate env namespace (reusing the
+        volumes/workload-identity BYO-env abstraction) — and what replay does when
+        a job is **not** marked safe (default: refuse, or require an explicit
+        `--force-side-effects` acknowledgement).
+      - **Callbacks off by default.** Quarantined runs do not fire external
+        callbacks/notifications unless explicitly re-enabled.
+      - **Fail-closed on missing baseline.** If an "unchanged" task's baseline
+        cache/result is pruned or absent, replay **fails** rather than silently
+        re-executing it (an unannounced re-run could have side effects).
+      - **Non-bypassable quarantine.** There is no field/flag to make a what-if
+        run authoritative; non-quarantined re-execution is `caesium run retry`, a
+        separate existing command.
+      Carry a `> Status:` banner.
       Files: new `docs/design-quarantined-replay.md`, `docs/README.md` (index the
       new top-level doc — `internal/guardrails`'s
       `TestDocsREADMEIndexesEveryTopLevelDoc` requires every `docs/*.md` to be
@@ -181,25 +247,38 @@ Stream D) for unchanged-task reuse.
       `TestPlanningAndHistoricalDocsCarryStatusBanner`).
 - [ ] B2. Add quarantine to the run model + executor: an additive `Quarantine bool`
       (and a captured override-params blob) on `JobRun`; the executor honors cache
-      **reads** for unchanged tasks but skips cache-authoritative **writes** and
-      authoritative lineage emission when the run is quarantined. AutoMigrate picks
-      up the additive column; no `hotTables` change (no new table).
+      **reads** for unchanged tasks but skips cache-authoritative **writes**,
+      authoritative lineage emission, **and external callbacks/notifications** when
+      the run is quarantined. AutoMigrate picks up the additive column; no
+      `hotTables` change (no new table). The flag is internal-only — set by the
+      replay path (B3), never from a request body (see B4).
       Files: `internal/models/run.go` (`JobRun` struct, additive column),
-      `internal/run/store.go`, `internal/job/job.go`.
+      `internal/run/store.go`, `internal/job/job.go` (skip cache-write + lineage +
+      callback dispatch when quarantined).
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
-      normal executor so only hash-changed tasks re-run and the rest are cache
-      hits. Re-execution is identical-code-against-pinned-digests — it does not
-      resurrect overwritten source data.
+      executor so only hash-changed tasks re-run and the rest are cache hits.
+      **Fail-closed**: if a task is hash-unchanged but its baseline cache entry /
+      result is unavailable (pruned/expired), abort the replay with a clear error
+      rather than silently re-executing it; and refuse to re-execute tasks of a job
+      not marked replay-safe unless the operator explicitly opted in (per B1).
+      Re-execution is identical-code-against-pinned-digests — it does not resurrect
+      overwritten source data.
       Files: new `internal/replay/` (the replay constructor over `run.Store` +
-      dispatch), `internal/run/store.go`.
+      dispatch; the fail-closed guards), `internal/run/store.go`.
       Depends on: B2.
-- [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set":
-      {k:v}, "quarantine": true }`, quarantine defaulting true) returning the new
-      run id. Validate the baseline run belongs to `:id`.
+- [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
+      only) returning the new run id. **Replay is always quarantined** — the body
+      carries no `quarantine` field; the handler sets quarantine internally and a
+      request attempting to disable it is rejected (the invariant cannot be turned
+      off over the wire). Validate the baseline run belongs to `:id`. Register the
+      route in `endpointPolicy` (`POST /v1/jobs/:id/runs/:id/replay` →
+      `RoleRunner`, matching `run`/`retry`) or the middleware denies it
+      `unknown_route` (403) under auth.
       Files: new `api/rest/controller/replay/`, new `api/rest/service/replay/`,
-      route + import in `api/rest/bind/bind.go`.
+      route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
+      entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
       Depends on: B3.
 - [ ] B5. Add `caesium run replay <run-id> --set k=v [--diff] [--json]`: fires a
       quarantined replay; with `--diff`, awaits the replay's terminal state and
@@ -212,8 +291,12 @@ Stream D) for unchanged-task reuse.
       `--set` param; assert (1) only the affected task re-ran while unchanged tasks
       report cache hits, (2) `--diff --json` reports the discriminating field on
       clean stdout (`runCLIStdout`), and (3) the quarantined run did **not** mutate
-      the baseline's cache entry or authoritative lineage. Flip the design doc's
-      `Quarantined what-if replay` feature-table row to shipped.
+      the baseline's cache entry or authoritative lineage. Add **safety
+      regression** assertions: (4) a `POST …/replay` body attempting `quarantine:
+      false` (or any quarantine override) is rejected, not honored; (5) replay of a
+      run whose unchanged task's cache entry has been pruned **fails closed** rather
+      than re-executing; and (6) a quarantined run fires no external callbacks. Flip
+      the design doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
@@ -227,16 +310,27 @@ data-plane-memory Stream B. Independent of Streams A and B (different substrate:
 topology history vs. hash blobs), so it runs fully in parallel.
 
 - [ ] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
-      order and compute, for each task and edge, the earliest snapshot whose
-      topology first contained it, surfacing that snapshot's `provenance_commit` /
-      author / ref. Support an optional `[from, to]` commit range and a single-task
-      filter. Reuse `internal/models/dag_snapshot.go` and the snapshot query shipped
-      in data-plane-memory B2.
-      Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`.
+      order and attribute each task/edge to its **most recent introduction** — the
+      snapshot at which it transitioned from *absent → present* — not the
+      earliest-ever containment. This matters because the history is append-only and
+      topology churns: an element can be removed and later re-added, or the selected
+      range can begin after the original introduction. Compute introduction as a
+      present/absent transition **relative to the selected `[from, to]` range** (or
+      the element's current lifecycle when unbounded), so a delete-and-readd is
+      blamed on the commit that re-added it and a rollback is not misattributed to
+      stale provenance. Surface the introducing snapshot's `provenance_commit` /
+      author / ref. Support a single-task filter. Reuse
+      `internal/models/dag_snapshot.go` and the snapshot query shipped in
+      data-plane-memory B2.
+      Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`
+      (cover delete/readd and range-start-after-introduction explicitly).
 - [ ] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
-      returning per-element attribution as JSON.
+      returning per-element attribution as JSON. Register the route in
+      `endpointPolicy` (`GET /v1/jobs/:id/blame` → `RoleViewer`) or the middleware
+      denies it `unknown_route` (403) under auth; add an RBAC assertion.
       Files: new `api/rest/controller/blame/`, new `api/rest/service/blame/`,
-      route + import in `api/rest/bind/bind.go`.
+      route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
+      entry) + `internal/auth/rbac_test.go` (RoleViewer assertion).
       Depends on: C1.
 - [ ] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
       [--json]` top-level command: per-element table by default, machine JSON with
@@ -248,7 +342,10 @@ topology history vs. hash blobs), so it runs fully in parallel.
       (add an edge/step) that writes a second `dag_snapshot`, then drive
       `caesium blame --json` and assert the new element is attributed to the later
       snapshot/commit while the unchanged elements stay attributed to the first;
-      assert clean stdout via `runCLIStdout`.
+      assert clean stdout via `runCLIStdout`. Add a **delete-and-readd** case: remove
+      an edge/step (third snapshot), re-add it (fourth), and assert blame attributes
+      it to the fourth — the reintroduction — not the original first snapshot. This
+      is the regression for C1's transition-based attribution.
       Files: new `test/blame_test.go` (`//go:build integration`).
       Depends on: C3.
       Note: whether the integration apply path stamps a distinct
@@ -256,6 +353,29 @@ topology history vs. hash blobs), so it runs fully in parallel.
       open harness question — see `## Sequencing & Dependencies`. If apply cannot
       stamp provenance, the assertion falls back to per-snapshot attribution
       (snapshot id/time) rather than commit SHA.
+
+## Harness Strengthening
+
+- [ ] H-1. Backfill RBAC policy for the **already-shipped** data-plane endpoints
+      and add a completeness guardrail. The adversarial review (2026-06-20) found
+      that `GET /v1/jobs/:id/runs/:id/why`, `GET …/receipt` +
+      `POST …/receipt/verify`, `GET /v1/jobs/:id/topology` + `…/topology/history`,
+      and `GET /v1/lineage/impact` are **absent from `endpointPolicy`**, so
+      `api/middleware/auth.go`'s `RequiredRole` returns `!ok` and the middleware
+      denies them `unknown_route` (403) under any API-key/SSO deployment — i.e. the
+      sovereignty buyer cannot use the shipped explain/reproduce/impact features at
+      all. Add the missing entries (the read endpoints → `RoleViewer`;
+      `receipt/verify` is a read-only re-derivation despite being POST →
+      `RoleViewer`). Then add a **completeness test** asserting every route
+      registered in `bind.go`'s `Protected()` group has an `endpointPolicy` entry,
+      so a new authenticated route without a policy fails CI instead of 403-ing in
+      production. This guard also covers A2/B4/C2.
+      Files: `internal/auth/rbac.go` (backfill entries), new
+      `internal/auth/rbac_policy_completeness_test.go` (or extend
+      `internal/auth/rbac_test.go`), and a `test/` integration assertion that an
+      authenticated viewer can reach `why`/`receipt`/`topology`/`impact`.
+      Note: this item fixes shipped code, so it is also a candidate to land as a
+      standalone fix PR ahead of the wave — see the cover note on PR #229.
 
 ## Navigational / Organizational Improvements
 
@@ -274,19 +394,27 @@ topology history vs. hash blobs), so it runs fully in parallel.
 
 **Cross-stream order.**
 
-- Streams **A**, **B**, and **C** are independent at their cores and may all
-  start in Wave 1 (leaf items A1, B1, C1).
+- Streams **A**, **B**, **C**, and **H** are independent at their cores and may
+  all start in Wave 1 (leaf items A1, B1, C1, H-1).
 - **B5 depends on A2** — the replay `--diff` output reuses the run-diff endpoint.
   A must reach A2 (the endpoint) before B5 (the CLI) lands; B1–B4 do not depend
   on A.
+- **B1 gates the rest of Stream B.** The design memo resolves the fail-closed
+  safety model; B2–B6 must not implement runtime replay before it lands. Treat B1
+  as a hard barrier within Stream B, not a parallel doc item.
+- **H-1 is independent** and high-value on its own (it fixes shipped endpoints);
+  it can land first, even as a standalone PR ahead of the wave. Its completeness
+  test, once in, also enforces the RBAC entries A2/B4/C2 must add.
 - **N-1 depends on A4 + B6 + C4** — the plan-level cross-links run last, after all
   three verbs ship.
 
 **Within-stream order.**
 
 - A: `A1 → A2 → A3 → A4` (strictly linear; each layer wraps the prior).
-- B: `B1 (design memo) → B2 → B3 → B4 → B5 → B6`; B5 additionally needs A2.
+- B: `B1 (design memo, hard barrier) → B2 → B3 → B4 → B5 → B6`; B5 additionally
+  needs A2.
 - C: `C1 → C2 → C3 → C4` (strictly linear).
+- H: `H-1` is a single self-contained item.
 
 **Cross-stream file conflicts.**
 
@@ -294,6 +422,13 @@ topology history vs. hash blobs), so it runs fully in parallel.
   import. Additive but the import block is rebase-prone; if two land in the same
   wave, sequence (A2 → B4 → C2) or expect a one-line mechanical rebase, not a
   semantic merge.
+- `internal/auth/rbac.go` — A2, B4, C2, and H-1 each add entries to the
+  `endpointPolicy` map (and H-1 backfills shipped routes). Map-literal appends on
+  different lines, parallel-safe like the other slice/map appends — but if H-1's
+  completeness test lands first, any endpoint item missing its entry will fail CI
+  (intended). Co-scheduled additions rebase mechanically.
+- `internal/auth/rbac_test.go` — A2, B4, C2, H-1 each add an assertion; additive,
+  parallel-safe (distinct lines).
 - `cmd/run/` package — A3 (`diff.go`) and B5 (`replay.go`) add **separate new
   files**, each with its own `init()` calling `AddCommand` on the existing
   `run.Cmd`; parallel-safe (no shared-line edit). `cmd/execute.go`'s `cmds` slice
@@ -338,10 +473,19 @@ Per-stream conditional gates:
   stderr** via `runCLIStdout` — never the stream-merging `runCLIRaw`. Cobra
   `cmd.Print*` and log lines both leak to the wrong stream; a merged capture hides
   it.
-- **B (quarantine, cache-touching):** add a unit test asserting a quarantined run
-  does not write a cache-authoritative entry and that `--set` overrides change the
-  task-identity hash (so changed tasks miss, unchanged tasks hit). The replay path
-  exercises the docker tier by default; no new engine tier is required.
+- **B (quarantine, cache-touching, side-effecting):** add unit tests asserting a
+  quarantined run does not write a cache-authoritative entry, that `--set`
+  overrides change the task-identity hash (so changed tasks miss, unchanged tasks
+  hit), that a request cannot disable quarantine, that replay fails closed when an
+  unchanged task's baseline cache is absent, and that quarantined runs fire no
+  callbacks. The replay path exercises the docker tier by default; no new engine
+  tier is required.
+- **RBAC (every new authenticated route — A2, B4, C2 — and H-1):** each new route
+  has an `endpointPolicy` entry with a `RequiredRole` assertion, and once H-1's
+  completeness test is in, CI fails if any `Protected()` route lacks a policy
+  entry. Verify with `go test ./internal/auth/...` plus an integration assertion
+  that an authenticated principal of the intended role can reach the endpoint
+  (viewer for diff/blame/why/receipt/topology/impact; runner for replay).
 - This plan's checkbox ticked, the active-wave `## Progress` bullet appended, and
   any cross-linked doc refreshed in the same PR.
 
@@ -354,20 +498,29 @@ The plan is done when **all** of these hold:
    `caesium run diff --json` subcommand emits clean parseable stdout, and
    `test/data_plane_e2e_test.go`'s `TestRunDiffAttributesChangedField` is green in
    CI. The design doc's `run diff` feature-table row reads shipped.
-2. **Stream B — quarantined replay** is a runtime feature: the replay design memo
-   (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
-   --diff` re-runs only hash-changed tasks in an isolated run that leaves the
-   baseline's cache/lineage authority untouched, and `test/replay_test.go` asserts
-   that isolation + the field-level diff on clean stdout in CI. The design doc's
-   `Quarantined what-if replay` feature-table row reads shipped.
+2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed**:
+   the replay design memo (`docs/design-quarantined-replay.md`) has landed,
+   `caesium run replay --set … --diff` re-runs only hash-changed tasks in an
+   isolated run that leaves the baseline's cache/lineage authority untouched, and
+   `test/replay_test.go` asserts in CI both the field-level diff on clean stdout
+   **and** the safety invariants — quarantine cannot be disabled over the wire,
+   replay fails closed when a baseline cache entry is missing, and a quarantined
+   run fires no callbacks. The design doc's `Quarantined what-if replay`
+   feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature: `GET /v1/jobs/:id/blame`
-   attributes each task/edge to its introducing snapshot/commit, the `caesium
-   blame --json` command emits clean stdout, and `test/blame_test.go` asserts a
-   topology change is attributed to the later commit/snapshot in CI.
-4. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
+   attributes each task/edge to its **most recent introduction** (absent→present
+   transition), the `caesium blame --json` command emits clean stdout, and
+   `test/blame_test.go` asserts in CI both an ordinary topology addition **and** a
+   delete-and-readd case (attributed to the reintroduction, not the original).
+4. **Stream H — RBAC** is closed: the shipped data-plane endpoints
+   (`why`/`receipt`/`topology`/`impact`) have `endpointPolicy` entries, the new
+   routes (A2/B4/C2) do too, the completeness test asserting every `Protected()`
+   route has a policy entry is green, and an authenticated viewer can reach the
+   read endpoints in an integration test.
+5. **Plan-level cross-links (N-1)** reflect the shipped trio: `docs/roadmap.md`
    §3.4 records the causal reimagining as shipped, `docs/README.md` indexes this
    plan, and `docs/differentiation-strategy.md` notes the Retain-layer progress.
-5. **Cross-cutting**: `docs/roadmap.md` and the
+6. **Cross-cutting**: `docs/roadmap.md` and the
    [data-plane-memory](../completed/data-plane-memory.md) sibling plan reflect
    every shipped stream; this plan's per-stream `## Progress` entries match merged
    PRs; and on full completion this plan is a candidate for archive to
