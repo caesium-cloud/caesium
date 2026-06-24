@@ -116,16 +116,29 @@ scope and must survive into the shipped surfaces:
 
 ## Source-Of-Truth Note
 
-When this plan and [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md)
-disagree, the **design doc wins** — it is the design-of-record for the
-data-plane-memory feature family and carries the "What each feature needs"
-substrate table and the honest-scope rules these verbs must honor. The scope
-deferral that spawned this plan lives in
+Authority is **split by topic**, deliberately (adversarial review round 15):
+
+- For the **substrate** and **honest-scope** rules (what the cache/hash/lineage/
+  `DagSnapshot` can support, what each verb may and may not claim),
+  [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) is the
+  design-of-record and **wins** on disagreement — it carries the "What each
+  feature needs" table these verbs must honor.
+- For the **new verbs' behavior and — above all — the replay safety invariants**
+  (non-bypassable quarantine, the `replaySafe` gate, atomic idempotency, and
+  side-effect/observability suppression across *every* producer), **this plan and
+  the B1 replay memo (`docs/design-quarantined-replay.md`) are authoritative and
+  override the design doc.** These invariants are **non-negotiable**: they are
+  *not* in the older design table, so the "design doc wins" rule must **not** be
+  used to resolve ambiguity back to a weaker record — doing so is exactly how a
+  hollow-quarantine, side-effecting what-if would ship. A reviewer who finds the
+  design doc silent or laxer on a replay-safety point defers to this plan/B1, not
+  the reverse.
+
+The scope deferral that spawned this plan lives in
 [`../completed/data-plane-memory.md`](../completed/data-plane-memory.md)
 (`#### Deferred to a follow-on feature plan`); that tracking is now owned here.
-Stream B additionally defers to its own design memo
-(`docs/design-quarantined-replay.md`, authored by item B1) for replay quarantine
-semantics once it lands.
+Stream B's full quarantine semantics are fixed by item B1's memo before any
+runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-20)
 
@@ -218,7 +231,14 @@ unfiltered global scoped streams (sibling of H-3), B6(12) tests it; (ii) **blame
 honestly scoped to topology+image+command** — the snapshot `ContentHash` excludes
 `env`/`spec`/`retries`/`cache`/schema/`sla`/`triggerRules`, so those edits create no
 snapshot; C1/C3 now emit a coverage caveat and C4(c) tests a behavior-only `env`
-change isn't misattributed (full-descriptor blame deferred).
+change isn't misattributed (full-descriptor blame deferred). Round 15
+(governance/consistency): (i) the Source-Of-Truth Note let the older design doc
+override this plan — which would let a reviewer resolve a replay-safety ambiguity
+back to a *weaker* record; now authority is **split by topic**, with this plan +
+B1 **authoritative and non-overridable** for the replay safety invariants; (ii)
+idempotency keyed on the **scoped fingerprint** `(job, baseline, actor, overrides,
+key)`, not the raw `Idempotency-Key` (a global raw-key index would collide
+unrelated replays); B6(10) adds the negative-collision test.
 
 ### Stream Status
 
@@ -435,9 +455,14 @@ write, lineage emit, or callback.
       An additive `Quarantine bool` (and a captured override-params blob) on
       `JobRun`, **plus a `Quarantine bool` on `TaskRun`** threaded scheduler→worker
       the same way `ResolvedImageDigest` is (so the distributed worker sees it
-      without re-deriving it), **plus a nullable `ReplayIdempotencyKey` column on
+      without re-deriving it), **plus a nullable `ReplayFingerprint` column on
       `JobRun` with a unique index** (the durable reservation B4's atomic
-      idempotency depends on). Both executors must, when quarantined, honor cache
+      idempotency depends on). The unique key is a **scoped fingerprint**, not the
+      raw `Idempotency-Key`: derive it from `(job_id, baseline_run_id, actor/principal,
+      normalized overrides, idempotency-key)` so two *unrelated* replays that happen
+      to reuse a common key (e.g. different jobs both sending `retry-1`) do **not**
+      collide globally and return/block the wrong run. Both executors must, when
+      quarantined, honor cache
       **reads** for unchanged tasks but skip cache-authoritative **writes**,
       authoritative lineage emission, **and external callbacks/notifications**:
       - `internal/job/job.go` — the in-process scheduler path.
@@ -546,15 +571,21 @@ write, lineage emit, or callback.
       request attempting to disable it is rejected (the invariant cannot be turned
       off over the wire). **Idempotent creation — atomic, not check-then-create
       (per B1's contract):** a retry after a timeout/5xx must not spawn a second
-      what-if (and a second round of real container side effects). Honor an
-      `Idempotency-Key` header and/or a fingerprint over `(baseline run, overrides,
-      actor, :id)`, but enforce it with a **durable unique reservation** — a
-      persisted idempotency record / replay-run column with a **unique index** on
-      key/fingerprint, inserted **in the same transaction as the `JobRun`** before
-      dispatch. A check-then-create has a TOCTOU race: two concurrent identical
-      POSTs after a client timeout can both observe "no existing replay" and both
-      dispatch. On a duplicate-key collision, return the **existing** replay run
-      rather than creating a second. (Tested by B6(10)'s concurrent-POST case.) **Handler-side ownership check (security boundary):**
+      what-if (and a second round of real container side effects). Derive a
+      **scoped fingerprint** over `(job_id=:id, baseline_run_id=:run_id,
+      actor/principal, normalized overrides, Idempotency-Key)` — **not the raw key
+      alone**, or two unrelated replays reusing a common key collide globally and
+      return/block the wrong run. Enforce it with a **durable unique reservation**:
+      the `JobRun.ReplayFingerprint` column's **unique index**, inserted **in the
+      same transaction as the `JobRun`** before dispatch. A check-then-create has a
+      TOCTOU race: two concurrent identical POSTs after a client timeout can both
+      observe "no existing replay" and both dispatch. On a duplicate-fingerprint
+      collision, return the **existing** replay run rather than creating a second.
+      (Tested by B6(10): concurrent identical → one run; and same key with a
+      *different* job/baseline/actor/overrides → *distinct* runs.) **Handler-side ownership check (security boundary):**
+      validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
+      constructing or dispatching the replay. This is load-bearing: the scope
+      middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning **Handler-side ownership check (security boundary):**
       validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
       constructing or dispatching the replay. This is load-bearing: the scope
       middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning
@@ -636,10 +667,14 @@ write, lineage emit, or callback.
       404/403 and create **no** replay run — and the inverse — proving the B4
       handler check, not just the middleware, enforces the boundary (the H-2 matrix
       alone passes an impl that omits it). **(10) Idempotent creation under
-      concurrency:** two **concurrent** identical replay POSTs (same
-      key/fingerprint, fired in parallel to exercise the TOCTOU race) create
-      **one** replay run and **one** task execution — proving the atomic
-      unique-index reservation, not a check-then-create. **(11) No observability
+      concurrency, with a scoped fingerprint:** (a) two **concurrent** identical
+      replay POSTs (same fingerprint, fired in parallel to exercise the TOCTOU race)
+      create **one** replay run and **one** task execution — proving the atomic
+      unique-index reservation, not a check-then-create; **and (b) negative
+      collision** — the **same `Idempotency-Key`** sent with a *different* job,
+      baseline run, actor, or overrides creates **distinct** runs (proving the
+      reservation key is the scoped fingerprint, not the raw key — a global raw-key
+      index would wrongly block/return the unrelated run). **(11) No observability
       pollution:** a quarantined replay does not change `GET /v1/stats/summary`
       success/failure counts, the production run-list, the existing
       `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
@@ -1061,9 +1096,11 @@ The plan is done when **all** of these hold:
    persisted mark enables replay; no `--force`/ack bypass; the guard against running
    a prod `deploy`/`delete` as a what-if), a
    **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
-   is rejected and creates no run), **atomic idempotency** (concurrent identical
-   POSTs make one run, not two), **no observability pollution** (stats/run-list +
-   existing Prometheus counters unchanged by a failing quarantined replay), **and**
+   is rejected and creates no run), **atomic idempotency over a scoped fingerprint**
+   (concurrent identical POSTs make one run; the same key with a different
+   job/baseline/actor/overrides makes distinct runs), **no observability pollution**
+   (stats/run-list + existing Prometheus counters unchanged by a failing quarantined
+   replay), **and**
    a **direct worker-path** assertion that no `TaskCache` entry is written from a
    quarantined run (the worker starts only under `CAESIUM_EXECUTION_MODE=distributed`,
    so an engine-only e2e run can't cover it). The design doc's `Quarantined what-if
