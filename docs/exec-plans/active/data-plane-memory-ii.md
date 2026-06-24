@@ -244,7 +244,14 @@ the CLI generates+reuses one across its retry loop) — an absent key has no saf
 meaning; (ii) the quarantine bool columns must be **`not null;default:false`** with
 `IS NOT TRUE` filters, or a bare `= false` against the additive nullable column
 would hide historical non-quarantined runs/events post-migration; B6(13) is the
-migration-visibility regression.
+migration-visibility regression. Round 17: the `replaySafe` gate checked the
+**live** definition, but replay re-executes a *past baseline* — and a later "mark
+current job safe" apply could authorize replaying an older unsafe `deploy`/`delete`
+(live metadata is overwritten on apply; the snapshot stores only
+name/image/command). Made the gate **baseline-scoped**: B7 records `replay_safe` on
+the baseline `TaskRun` at exec time (distinct from the cache-hash exclusion), B3
+reads that recorded value, and B6(8b) tests replaying a pre-mark run + a
+definition-flipping apply against an older run.
 
 ### Stream Status
 
@@ -567,8 +574,10 @@ write, lineage emit, or callback.
       clear error rather than silently re-executing it; and (b) **the replay-safe
       gate** — a job/step that is **not** marked replay-safe (per B1's containment
       contract) is **refused, with no inline bypass**: re-execution proceeds only
-      for a job whose **persisted `replaySafe` mark** (the durable field built in
-      B7) is set (or under the alternate-namespace mode), never via a
+      for a task whose **baseline run recorded `replay_safe = true` at the time it
+      ran** (the recorded field from B7 — **not** the current live definition, which
+      a later apply could have flipped; see B7's baseline-scoped note), or under the
+      alternate-namespace mode, never via a
       `--force`/acknowledgement flag (that would be a first-class deploy/delete
       footgun; break-glass is a separate admin-only audited workflow, out of scope).
       This refusal is the primary guard against running a production
@@ -680,9 +689,16 @@ write, lineage emit, or callback.
       an error and `caesium run replay` exits non-zero with a clear message; a
       **durably `replaySafe`-marked** job (or the alternate-namespace mode) proceeds;
       and **any `--force`/acknowledgement field or flag is rejected** (there is no
-      inline bypass — that is the round-10 invariant). Without this an implementation
-      could pass (1)–(7) while still letting replay run a production
-      `deploy`/`delete` as a "what-if."
+      inline bypass — that is the round-10 invariant). **(8b) Baseline-scoped gate
+      (round 17):** the gate reads the *baseline run's recorded* `replay_safe`, not
+      the live definition — assert two cases: replaying a run created **before** the
+      mark existed is **refused**; and after marking a job safe + running it, a
+      *subsequent* apply that flips the definition (e.g. changes the command, or
+      unmarks) does **not** retroactively change whether the **older** run can be
+      replayed (the gate uses the baseline's recorded value, so a "mark current job
+      safe" apply can't authorize replay of an older unsafe `deploy`/`delete`).
+      Without (8)+(8b) an implementation could pass (1)–(7) while still letting
+      replay run a production `deploy`/`delete` as a "what-if."
       **(9) Cross-job ownership (security):** a scoped runner for job A calling
       `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
       404/403 and create **no** replay run — and the inverse — proving the B4
@@ -738,12 +754,22 @@ write, lineage emit, or callback.
       validation. **Cache-correctness:** `replaySafe` is a control-plane flag, not an
       execution input — it must be **excluded from the identity hash**
       (`internal/cache/hash.go`), like the Kueue `queueName`, so toggling it is not a
-      cache miss; add a unit test asserting the hash is unchanged by it. Integration
-      coverage: only a job whose **persisted YAML** carries the mark can be replayed
-      (B6(8)'s positive path drives this).
+      cache miss; add a unit test asserting the hash is unchanged by it.
+      **Baseline-scoped, not live (round 17):** the gate authorizes replaying a
+      *past baseline run*, but live job/step metadata is overwritten on every apply
+      and the snapshot stores only name/image/command — so checking the *current*
+      definition would let a later "mark it safe" apply authorize replay of an older
+      baseline whose `deploy`/`delete` was never safe (a spoofable mutable-state
+      gate). So **record the effective `replaySafe` value on the baseline `TaskRun`
+      at execution time** (a recorded `replay_safe` column on `TaskRun`/`run`,
+      captured when the task runs — distinct from the hash, which excludes it). B3's
+      gate reads *that recorded baseline value*, never the live definition.
+      Integration coverage: only a job whose **persisted YAML** carried the mark **at
+      baseline-run time** can be replayed (B6(8)'s positive path drives this).
       Files: `pkg/jobdef/definition.go`, `pkg/jobdef/schema.go`,
       `docs/job-schema-reference.md`, `docs/caesium-job-llm-reference.md`,
       `internal/jobdef/importer.go`, `internal/models/job.go` (+ `atom.go`),
+      `internal/models/run.go` (recorded `replay_safe` on `TaskRun` at exec time),
       `internal/cache/hash.go` (exclusion + test), `docs/examples/*.job.yaml`.
       Depends on: B1 (the memo fixes the field's exact shape + job-vs-step scope).
 
@@ -1120,9 +1146,10 @@ The plan is done when **all** of these hold:
    `/events` SSE stream** all suppressed (real notification policies on a lifecycle
    and a `run_timed_out`/`sla_missed` event; zero new `lineage_datasets` rows; a
    default `/events` subscriber sees none of the what-if's events), the
-   **replay-safe gate** built on a **durable `replaySafe` YAML field** (B7 — only a
-   persisted mark enables replay; no `--force`/ack bypass; the guard against running
-   a prod `deploy`/`delete` as a what-if), a
+   **replay-safe gate** built on a **durable, baseline-scoped `replaySafe` field**
+   (B7 — only a mark that was persisted **at baseline-run time** enables replay, so
+   a later apply can't authorize replaying an older unsafe run; no `--force`/ack
+   bypass; the guard against running a prod `deploy`/`delete` as a what-if), a
    **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
    is rejected and creates no run), **atomic idempotency over a scoped fingerprint**
    (concurrent identical POSTs make one run; the same key with a different
