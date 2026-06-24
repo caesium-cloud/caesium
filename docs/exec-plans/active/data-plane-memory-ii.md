@@ -275,7 +275,12 @@ provider-aware `ResolveWithIdentity` (vault version / k8s `resourceVersion` /
 env = un-verifiable; **never a reusable plain hash of the value**); (ii) the
 metric-exclusion list missed `caesium_jobs_active` + cache hit/short-circuit +
 `task_retries_total` (replay does cache reads + can retry) — B1's audit now owns
-the exhaustive metric list and B6(11) scrapes them. Round 19: that
+the exhaustive metric list and B6(11) scrapes them. Round 22: (i) CLI idempotency
+was process-local — a re-run after a CLI exit minted a fresh key → second replay;
+added an operator-supplied `--idempotency-key` (printed when auto-generated) +
+B6(10d) CLI-restart test; (ii) `caesium_jobs_active` is a **gauge** that a replay
+could bump *during* the run and reset before the final scrape — B6(11) now scrapes
+*during* the active replay, asserting gauges unchanged throughout. Round 19: that
 descriptor was enumerated **partially** (the same reactive-omission trap as the
 producer audit) — it missed `retries`/timeouts/schemas/cache/trigger-rules/full
 k8s-spec+workload-identity, and the secret-rotation case (replay *re-resolves*
@@ -721,17 +726,22 @@ write, lineage emit, or callback.
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
       Depends on: B3.
-- [ ] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--diff] [--json]`:
-      fires a quarantined replay. **`--job-id` is required** (same reason as A3 and
-      `caesium why`): the endpoint is `POST /v1/jobs/:id/runs/:run_id/replay`, so the
-      CLI needs the job id to build the URL — a run-id-only lookup would require a
-      global scan that breaks under scoped keys. With `--diff`, awaits the replay's
-      terminal state and renders the run-diff vs the baseline via the Stream A
-      endpoint (also job-scoped — same `--job-id`). **Generates a non-empty
-      `Idempotency-Key` once per invocation and reuses it across its own retry/poll
-      loop** (so a CLI-level retry after a transient failure dedupes to the same
-      replay, never a second side-effecting run), per B4's required-key contract.
-      `cmd.OutOrStdout()` stdout discipline as in A3.
+- [ ] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--idempotency-key
+      <k>] [--diff] [--json]`: fires a quarantined replay. **`--job-id` is required**
+      (same reason as A3 and `caesium why`): the endpoint is
+      `POST /v1/jobs/:id/runs/:run_id/replay`, so the CLI needs the job id to build
+      the URL — a run-id-only lookup would require a global scan that breaks under
+      scoped keys. With `--diff`, awaits the replay's terminal state and renders the
+      run-diff vs the baseline via the Stream A endpoint (also job-scoped — same
+      `--job-id`). **Restart-safe idempotency (round 22):** an auto-generated key
+      reused only *within* one process does **not** survive a CLI exit + re-run after
+      a timeout — the second invocation would mint a fresh key and dispatch a second
+      real container replay. So: accept an **operator-supplied `--idempotency-key`**
+      (pass the same value to a re-run → the server dedupes to the existing replay);
+      and when omitted, auto-generate one but **print it before dispatch** (`stderr`)
+      so the operator can reuse it on a manual retry. Document that *omitting* the
+      key on a re-run is "intentionally start another replay." `cmd.OutOrStdout()`
+      stdout discipline as in A3.
       Files: new `cmd/run/replay.go` (its own `func init()` calling
       `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
@@ -817,9 +827,12 @@ write, lineage emit, or callback.
       collision** — the **same `Idempotency-Key`** sent with a *different* job,
       baseline run, actor, or overrides creates **distinct** runs (proving the
       reservation key is the scoped fingerprint, not the raw key — a global raw-key
-      index would wrongly block/return the unrelated run). **And (c) missing key:** a
+      index would wrongly block/return the unrelated run). **(c) missing key:** a
       `POST …/replay` with no/blank `Idempotency-Key` is rejected `400` (not silently
-      treated as none/empty). **(11) No observability
+      treated as none/empty). **(d) CLI restart (round 22):** re-invoke `caesium run
+      replay` a second time with the **same `--idempotency-key`** (simulating an
+      operator re-run after a CLI exit/timeout) and assert **no second replay run**
+      is created — the server dedupes on the fingerprint. **(11) No observability
       pollution:** a quarantined replay does not change `GET /v1/stats/summary`
       success/failure counts, the production run-list, the existing
       `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
@@ -827,10 +840,14 @@ write, lineage emit, or callback.
       `RunTimeoutsTotal`/`SLAMissesTotal`/`NotificationSendsTotal`, the lineage emit
       metrics, **and the run/cache/retry series replay actually touches** —
       `caesium_jobs_active`, `caesium_task_cache_hits_total`/`…_short_circuits_total`,
-      `caesium_task_retries_total` (scrape `/metrics` before/after) — assert **all**
-      unchanged by a deliberately-failing, deliberately-slow (timeout/SLA),
-      cache-reading/retrying quarantined replay, since suppression is mandatory and
-      precedes the metric increment. **(12) No
+      `caesium_task_retries_total` — assert **all** unchanged by a
+      deliberately-failing, deliberately-slow (timeout/SLA), cache-reading/retrying
+      quarantined replay, since suppression is mandatory and precedes the metric
+      increment. **Scrape `/metrics` *during* the active replay, not only
+      before/after** — `caesium_jobs_active` (and any other gauge) is a gauge that a
+      replay could bump *while running* and reset before terminal state, passing a
+      before/after check while polluting dashboards/firing alerts mid-run; assert the
+      gauges are unchanged **throughout** the replay's lifetime. **(12) No
       SSE/event-stream leak + scoped auth:** a default `GET /v1/events` subscriber
       (and the backlog query) sees **none** of the quarantined replay's lifecycle
       events, while the initiating client's explicit **`run_id`-scoped**
