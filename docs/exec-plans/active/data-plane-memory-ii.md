@@ -251,7 +251,14 @@ current job safe" apply could authorize replaying an older unsafe `deploy`/`dele
 name/image/command). Made the gate **baseline-scoped**: B7 records `replay_safe` on
 the baseline `TaskRun` at exec time (distinct from the cache-hash exclusion), B3
 reads that recorded value, and B6(8b) tests replaying a pre-mark run + a
-definition-flipping apply against an older run.
+definition-flipping apply against an older run. Round 18 (deeper): the *whole*
+execution definition was live-vs-baseline — replay had **no immutable executable
+baseline descriptor** (live rows overwritten on apply; snapshot is name/image/
+command only; the `HashInput` blob redacts env + is diffing-oriented). A
+behavior-only apply (env/mounts/secrets) would make replay run the *current*
+definition under the what-if banner. B2 now persists an **immutable per-`TaskRun`
+execution descriptor at exec time**, B3 reconstructs from it (fail-closed if
+absent), and B6(8c) tests a post-baseline behavior-only apply.
 
 ### Stream Status
 
@@ -470,7 +477,16 @@ write, lineage emit, or callback.
       the same way `ResolvedImageDigest` is (so the distributed worker sees it
       without re-deriving it), **plus a nullable `ReplayFingerprint` column on
       `JobRun` with a unique index** (the durable reservation B4's atomic
-      idempotency depends on). The unique key is a **scoped fingerprint**, not the
+      idempotency depends on), **plus an immutable per-`TaskRun` execution
+      descriptor captured at exec time** — the faithful runtime spec replay
+      reconstructs from (image + `ResolvedImageDigest`, command, workdir, engine,
+      resolved env with secret *refs* not values, mount/volume references, the
+      effective run-params + predecessor outputs). This is **distinct from** the
+      redacted/diffing `HashInput` blob (which can't re-execute — env values are
+      redacted, blobs may be degraded) and from the live `Job`/`Atom` rows
+      (overwritten on apply). It is the only immutable source that lets B3 honor
+      "re-execute the *baseline's* identical code"; persist it for every task run so
+      a behavior-only later apply cannot change what replay executes. The unique key is a **scoped fingerprint**, not the
       raw `Idempotency-Key`: derive it from `(job_id, baseline_run_id, actor/principal,
       normalized overrides, idempotency-key)` so two *unrelated* replays that happen
       to reuse a common key (e.g. different jobs both sending `retry-1`) do **not**
@@ -582,11 +598,23 @@ write, lineage emit, or callback.
       footgun; break-glass is a separate admin-only audited workflow, out of scope).
       This refusal is the primary guard against running a production
       `deploy`/`delete` as a what-if; it is surfaced by B4 (REST error) and B5 (CLI
-      non-zero exit) and tested in B6(8). Re-execution is
+      non-zero exit) and tested in B6(8). And (c) **reconstruct from the immutable
+      baseline execution descriptor, never live rows** — replay must rebuild each
+      task's runtime spec from the per-task-run descriptor B2 persists at
+      baseline-exec time (image + `ResolvedImageDigest`, command, workdir, engine,
+      the resolved env *modulo* secret values [kept as refs, re-resolved], mount/
+      volume references, run-params + predecessor outputs), **not** from the live
+      `Job`/`Task`/`Atom` rows (overwritten on apply) or the redacted/diffing
+      `HashInput` blob (insufficient — env values are redacted, blobs can be
+      oversized/degraded). Without this, a behavior-only apply after the baseline
+      (env/mounts/secrets/retries/cache) would make replay execute the **current**
+      definition under the what-if banner — breaking the identical-code/audit claim.
+      **Fail closed** for any baseline task lacking the descriptor. Re-execution is
       identical-code-against-pinned-digests — it does not resurrect overwritten
       source data.
       Files: new `internal/replay/` (the replay constructor over `run.Store` +
-      dispatch; the fail-closed guards), `internal/run/store.go`.
+      dispatch; the fail-closed guards; reconstruct from the B2 descriptor),
+      `internal/run/store.go`.
       Depends on: B2 + B7 (the `replaySafe` schema the gate reads).
 - [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
       only) returning the new run id. **Replay is always quarantined** — the body
@@ -697,8 +725,15 @@ write, lineage emit, or callback.
       unmarks) does **not** retroactively change whether the **older** run can be
       replayed (the gate uses the baseline's recorded value, so a "mark current job
       safe" apply can't authorize replay of an older unsafe `deploy`/`delete`).
-      Without (8)+(8b) an implementation could pass (1)–(7) while still letting
-      replay run a production `deploy`/`delete` as a "what-if."
+      **(8c) Immutable baseline execution (round 18):** run a baseline, apply a
+      **behavior-only** change to the live job (change a step's `env`/command/mounts
+      — *not* topology), then replay the **older** run; assert replay executes the
+      **baseline's recorded execution descriptor** (the old env/command), not the
+      mutated live definition — or fails closed if none was recorded. This is the
+      core identical-code/audit guarantee; without it replay silently runs current
+      production behavior under the what-if banner. Without (8)–(8c) an
+      implementation could pass (1)–(7) while still letting replay run a production
+      `deploy`/`delete` as a "what-if."
       **(9) Cross-job ownership (security):** a scoped runner for job A calling
       `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
       404/403 and create **no** replay run — and the inverse — proving the B4
@@ -1138,7 +1173,10 @@ The plan is done when **all** of these hold:
    (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
    --diff` re-runs only hash-changed tasks in an isolated run that leaves the
    baseline's cache/lineage authority untouched **in both the local and distributed
-   executors** (the `Quarantine` flag propagates on `TaskRun` to the worker), and
+   executors** (the `Quarantine` flag propagates on `TaskRun` to the worker),
+   **reconstructs each re-executed task from an immutable baseline execution
+   descriptor** (not the live, possibly-mutated definition — so a post-baseline
+   apply can't change what replay runs; fail-closed if absent), and
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
    **no external side effects from any producer** — callbacks, the lifecycle-event
