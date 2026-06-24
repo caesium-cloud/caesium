@@ -194,6 +194,13 @@ worker only starts under `CAESIUM_EXECUTION_MODE=distributed`, so B6(7) is now a
 **direct `internal/worker` test** (with optional end-to-end tier H-4); (ii) B6(8)
 still referenced the acknowledgement path round 10 banned — now it asserts any
 `--force`/ack field is **rejected** and only a durable `replaySafe` mark proceeds.
+Round 12: (i) the worker-honor test doesn't prove *propagation* — B6(7b) now also
+asserts replay construction sets `Quarantine=true` on **every** materialized
+`TaskRun` (honor ≠ propagate); (ii) observability isolation missed the
+**alert-facing notification counters** (`TaskFailuresTotal`/`RunFailuresTotal`/
+`RunTimeoutsTotal`/`SLAMissesTotal`) the subscriber bumps via `recordEventMetric`
+*before* dispatch — suppression must precede the metric increment, and B6(11)
+scrapes them.
 
 ### Stream Status
 
@@ -369,7 +376,14 @@ write, lineage emit, or callback.
         suffice, because existing PromQL (`sum(caesium_job_runs_total)`) includes
         the labelled series unless every dashboard/alert is rewritten. If per-replay
         accounting is wanted, emit **separate** `*_replay_*` metric series; the
-        existing ones never see a quarantined run.
+        existing ones never see a quarantined run. **This includes the alert-facing
+        notification counters** — `TaskFailuresTotal`, `RunFailuresTotal`,
+        `RunTimeoutsTotal`, `SLAMissesTotal`, `NotificationSendsTotal`
+        (`internal/notification/metrics.go`) and the lineage emit metrics — which
+        the subscriber/watcher bump via `recordEventMetric` **before** dispatch. So
+        suppression for a quarantined run must happen **before the metric
+        increment**, not just before the channel send; otherwise a failed/slow
+        what-if dirties the very alert counters on-call watches.
       - **Idempotent creation, atomically.** Because replay re-executes real
         container commands, a client retry after a timeout/5xx must **not** spawn a
         second what-if (and a second round of side effects). The memo defines an
@@ -411,8 +425,12 @@ write, lineage emit, or callback.
       - `internal/notification/subscriber.go` — the **independent** event-bus
         notification path on lifecycle events (`RunCompleted`/`TaskSucceeded`/
         `RunFailed`/`TaskFailed`). Stamp the quarantine marker into the
-        lifecycle-event payload at emission and have the subscriber suppress sends
-        when set; the executor short-circuiting callbacks does **not** cover this.
+        lifecycle-event payload at emission and have the subscriber drop the marked
+        event **before `recordEventMetric`** (it bumps the alert counters
+        `TaskFailuresTotal`/`RunFailuresTotal`/etc. *before* dispatch — suppressing
+        only the channel send still dirties those alert metrics) — so neither the
+        send nor the metric fires. The executor short-circuiting callbacks does
+        **not** cover this.
       - `internal/notification/watcher.go` — a **second, independent** producer: a
         background scanner over `models.JobRun` that emits `run_timed_out` /
         `sla_missed` events (`emitTimeoutEvent`/`emitSLAEvent` →
@@ -432,12 +450,16 @@ write, lineage emit, or callback.
         fix; "skip authoritative lineage emission" in the executor is not enough
         because emission happens here, on the bus, not in the executor.
       - **Observability surfaces** (`api/rest/service/stats`, the
-        `internal/metrics` run/task counters + duration histograms, run-list
-        payloads) — **exclude** quarantined runs from the existing production
+        `internal/metrics` run/task counters + duration histograms, the
+        **alert-facing `internal/notification/metrics.go` counters**
+        (`TaskFailuresTotal`/`RunFailuresTotal`/`RunTimeoutsTotal`/`SLAMissesTotal`/
+        `NotificationSendsTotal`), the lineage emit metrics, and run-list payloads)
+        — **exclude** quarantined runs from the existing production
         aggregates/counters (not label-only — existing PromQL would still sum a
         labelled series); emit separate `*_replay_*` series if per-replay accounting
-        is wanted. So a slow/failed what-if cannot dent success rates, dashboards,
-        or alerts.
+        is wanted. Suppression happens **before** the metric increment, not just
+        before the send. So a slow/failed what-if cannot dent success rates,
+        dashboards, or alerts.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
@@ -546,7 +568,14 @@ write, lineage emit, or callback.
       `TaskCache` entry / lineage emission (deterministic, no cluster needed). If a
       true end-to-end distributed tier is stood up (the optional **H-4**:
       `CAESIUM_EXECUTION_MODE=distributed` + worker wiring in the k8s CI path), also
-      run B6 there — but the direct worker test is the load-bearing gate. **(8) The replay-safe gate (the
+      run B6 there — but the direct worker test is the load-bearing gate. **(7b)
+      Propagation test (separate from honor):** the worker-path test above proves
+      the worker *honors* an already-quarantined `TaskRun`; it does **not** prove the
+      replay path *sets* `Quarantine=true` on the `TaskRun` rows it materializes. A
+      missed copy passes both the local and worker tests yet ships `Quarantine=false`
+      to a real worker. So also drive replay **construction/dispatch** (B3) and
+      assert **every** materialized `TaskRun` row carries `Quarantine=true` — the
+      honor-vs-propagate pair is mandatory. **(8) The replay-safe gate (the
       core safety test):** a job/step **not** marked replay-safe (per B1's
       containment contract) is **refused** — assert the REST `POST …/replay` returns
       an error and `caesium run replay` exits non-zero with a clear message; a
@@ -565,12 +594,14 @@ write, lineage emit, or callback.
       **one** replay run and **one** task execution — proving the atomic
       unique-index reservation, not a check-then-create. **(11) No observability
       pollution:** a quarantined replay does not change `GET /v1/stats/summary`
-      success/failure counts, the production run-list, **or the existing
-      `caesium_job_runs_total`/`caesium_task_runs_total` counter values** (scrape
-      `/metrics` before/after) — assert all unchanged by a deliberately-failing
-      quarantined replay, since exclusion is mandatory and a label would leave the
-      existing counters dirty. Flip the design doc's `Quarantined what-if replay`
-      feature-table row to shipped.
+      success/failure counts, the production run-list, the existing
+      `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
+      alert-facing notification counters** `TaskFailuresTotal`/`RunFailuresTotal`/
+      `RunTimeoutsTotal`/`SLAMissesTotal`/`NotificationSendsTotal` and the lineage
+      emit metrics (scrape `/metrics` before/after) — assert **all** unchanged by a
+      deliberately-failing, deliberately-slow (timeout/SLA) quarantined replay,
+      since suppression is mandatory and precedes the metric increment. Flip the
+      design doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
