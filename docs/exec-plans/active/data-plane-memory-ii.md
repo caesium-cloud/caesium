@@ -238,7 +238,13 @@ back to a *weaker* record; now authority is **split by topic**, with this plan +
 B1 **authoritative and non-overridable** for the replay safety invariants; (ii)
 idempotency keyed on the **scoped fingerprint** `(job, baseline, actor, overrides,
 key)`, not the raw `Idempotency-Key` (a global raw-key index would collide
-unrelated replays); B6(10) adds the negative-collision test.
+unrelated replays); B6(10) adds the negative-collision test. Round 16 (correctness
+details): (i) the `Idempotency-Key` is now **required non-empty** (missing → 400;
+the CLI generates+reuses one across its retry loop) — an absent key has no safe
+meaning; (ii) the quarantine bool columns must be **`not null;default:false`** with
+`IS NOT TRUE` filters, or a bare `= false` against the additive nullable column
+would hide historical non-quarantined runs/events post-migration; B6(13) is the
+migration-visibility regression.
 
 ### Stream Status
 
@@ -528,9 +534,17 @@ write, lineage emit, or callback.
         is wanted. Suppression happens **before** the metric increment, not just
         before the send. So a slow/failed what-if cannot dent success rates,
         dashboards, or alerts.
-      AutoMigrate picks up the additive columns; no `hotTables` change (no new
-      table). The flag is internal-only — set by the replay path (B3), never from a
-      request body (see B4).
+      **Migration safety:** the `quarantine` bools on `JobRun`, `TaskRun`, and
+      `ExecutionEvent` must be `gorm:"not null;default:false"` (and AutoMigrate
+      should backfill existing rows to `false`); every default-stream/stats/run-list
+      filter uses `quarantine IS NOT TRUE` (or the backfilled `= false`), **never a
+      bare `= false` against a possibly-NULL column** — a plain additive nullable
+      bool leaves pre-existing rows NULL, and `quarantine = false` would then hide
+      all historical (non-quarantined) runs/events from SSE backlog, run-lists, and
+      aggregates after migration. (`ReplayFingerprint` stays nullable — only replay
+      runs carry one.) Otherwise AutoMigrate picks up the additive columns; no
+      `hotTables` change (no new table). The flag is internal-only — set by the
+      replay path (B3), never from a request body (see B4).
       Files: `internal/models/run.go` (`JobRun` + `TaskRun` additive columns),
       `internal/run/store.go`, `internal/job/job.go`,
       `internal/worker/runtime_executor.go`, the dispatch path that builds
@@ -571,7 +585,11 @@ write, lineage emit, or callback.
       request attempting to disable it is rejected (the invariant cannot be turned
       off over the wire). **Idempotent creation — atomic, not check-then-create
       (per B1's contract):** a retry after a timeout/5xx must not spawn a second
-      what-if (and a second round of real container side effects). Derive a
+      what-if (and a second round of real container side effects). **A non-empty
+      `Idempotency-Key` is required** — reject a missing/blank key with `400` (an
+      absent key has no safe meaning: treat-as-none double-dispatches on retry,
+      treat-as-empty collapses distinct intentional replays). The CLI (B5) generates
+      one per invocation and **reuses it across its own retry loop**. Derive a
       **scoped fingerprint** over `(job_id=:id, baseline_run_id=:run_id,
       actor/principal, normalized overrides, Idempotency-Key)` — **not the raw key
       alone**, or two unrelated replays reusing a common key collide globally and
@@ -608,8 +626,11 @@ write, lineage emit, or callback.
       CLI needs the job id to build the URL — a run-id-only lookup would require a
       global scan that breaks under scoped keys. With `--diff`, awaits the replay's
       terminal state and renders the run-diff vs the baseline via the Stream A
-      endpoint (also job-scoped — same `--job-id`). `cmd.OutOrStdout()` stdout
-      discipline as in A3.
+      endpoint (also job-scoped — same `--job-id`). **Generates a non-empty
+      `Idempotency-Key` once per invocation and reuses it across its own retry/poll
+      loop** (so a CLI-level retry after a transient failure dedupes to the same
+      replay, never a second side-effecting run), per B4's required-key contract.
+      `cmd.OutOrStdout()` stdout discipline as in A3.
       Files: new `cmd/run/replay.go` (its own `func init()` calling
       `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
@@ -674,7 +695,9 @@ write, lineage emit, or callback.
       collision** — the **same `Idempotency-Key`** sent with a *different* job,
       baseline run, actor, or overrides creates **distinct** runs (proving the
       reservation key is the scoped fingerprint, not the raw key — a global raw-key
-      index would wrongly block/return the unrelated run). **(11) No observability
+      index would wrongly block/return the unrelated run). **And (c) missing key:** a
+      `POST …/replay` with no/blank `Idempotency-Key` is rejected `400` (not silently
+      treated as none/empty). **(11) No observability
       pollution:** a quarantined replay does not change `GET /v1/stats/summary`
       success/failure counts, the production run-list, the existing
       `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
@@ -690,8 +713,13 @@ write, lineage emit, or callback.
       runner can follow its own replay via the run-scoped subscription, but is
       **denied** an unfiltered global `/v1/events` stream and cannot see another
       job's events — proving the queryable event-row marker excludes what-if events
-      from the default stream **and** the scoped-auth contract holds. Flip the design
-      doc's `Quarantined what-if replay` feature-table row to shipped.
+      from the default stream **and** the scoped-auth contract holds. **(13) Normal
+      runs stay visible (migration regression):** a plain non-quarantined run's
+      events, run-list entry, and stats counts are **present** after the quarantine
+      columns land — proving the default filters use `IS NOT TRUE`/backfilled-`false`
+      and don't hide non-quarantined (incl. historical NULL-backfilled) rows; pair
+      with a unit test asserting the column default is `false`, not NULL. Flip the
+      design doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
