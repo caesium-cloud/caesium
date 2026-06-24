@@ -30,8 +30,9 @@ assembly + one runtime mode, not new persistence:
   net-new runtime mode and the only genuinely under-specified verb, so its stream
   opens with a short design memo.
 - **`caesium blame` over commit ranges** walks the append-only `dag_snapshot`
-  history and attributes each task/edge to the provenance commit (+ author/ref)
-  that introduced it — version-aware EXPLAIN without `git checkout`.
+  history and attributes each task/edge to the provenance **commit/snapshot** that
+  introduced it — version-aware EXPLAIN without `git checkout`. (Commit-only:
+  `DagSnapshot` does not persist historical author/ref — see Stream C.)
 
 **Strategic frame.** This is the *Retain* layer of
 [`differentiation-strategy.md`](../../differentiation-strategy.md) — the
@@ -178,7 +179,15 @@ aggregates + Prometheus counters + run-lists, or a slow/failed what-if dents
 production dashboards/alerts (B1 audit + B2 + B6(11)); (ii) **idempotency**: a
 side-effecting replay POST needs an idempotency key/fingerprint so a client retry
 doesn't run the what-if twice (B1 + B4 + B6(10)). All these gaps are **latent** —
-pre-alpha, no users — so nothing is broken in production today.
+pre-alpha, no users — so nothing is broken in production today. Round 10:
+tightened the round-9 additions into correct form — (i) the replay-safe gate has
+**no inline `--force` bypass** (durable annotation/alternate-namespace only;
+break-glass is a separate admin-only audited workflow); (ii) idempotency is an
+**atomic unique-index reservation** in the same transaction as the `JobRun`, not a
+race-prone check-then-create (B6(10) is now a concurrent-POST test); (iii) metrics
+isolation is **mandatory exclusion** from existing counters, not a label (which
+existing PromQL would still sum); and (iv) fixed a plan-overview contradiction
+(blame is commit-only, matching Stream C — the intro had stale "author/ref").
 
 ### Stream Status
 
@@ -308,13 +317,18 @@ write, lineage emit, or callback.
       (replay-vs-baseline via Stream A); (d) the honest-scope boundary (no data
       resurrection; degraded over unpinned tags); and the **fail-closed safety
       contract** the review made load-bearing:
-      - **Side-effect honesty.** State plainly that a re-executed task runs its
-        real command; replay is not a sandbox. Decide and specify the containment
-        mechanism — a `replaySafe`/`idempotent` opt-in on the job/step schema,
-        and/or replay against an alternate env namespace (reusing the
-        volumes/workload-identity BYO-env abstraction) — and what replay does when
-        a job is **not** marked safe (default: refuse, or require an explicit
-        `--force-side-effects` acknowledgement).
+      - **Side-effect honesty + no inline bypass.** State plainly that a
+        re-executed task runs its real command; replay is not a sandbox. The
+        containment mechanism is a **durable** `replaySafe` annotation on the
+        job/step schema and/or replay against an **alternate env namespace** (reuse
+        the volumes/workload-identity BYO-env abstraction). A job **not** marked
+        replay-safe is **refused, full stop** — the initial surface carries **no**
+        `--force`/acknowledgement flag, because an inline "I know it's risky" toggle
+        is a first-class path for a scoped runner to re-run an unreviewed
+        deploy/delete against prod under the what-if banner. Any future break-glass
+        ("replay this unmarked job anyway") is a **separate, admin-only, audited**
+        workflow — out of scope for this plan, named here only so the bypass is not
+        smuggled into v1.
       - **No external side effects — audit every producer, don't whack-a-mole.**
         Quarantined runs must reach **no** outward channel. Four review rounds have
         each surfaced a different producer, so the memo must include an
@@ -344,15 +358,21 @@ write, lineage emit, or callback.
         the standard Prometheus run/task counters + duration histograms, and the
         run-list/UI payloads. A failed or slow what-if would otherwise dent success
         rates, top-failing-jobs, dashboards, and alerts. Rule: quarantined runs are
-        **excluded from production aggregates/metrics or emitted only under an
-        explicit `quarantine`/replay label** — decide which in the memo; either way
-        the default production view excludes them.
-      - **Idempotent creation.** Because replay re-executes real container commands,
-        a client retry after a timeout/5xx must **not** spawn a second what-if (and
-        a second round of side effects). The memo defines an idempotency contract: a
-        required `Idempotency-Key` header and/or a request fingerprint over
-        `(baseline run, overrides, actor, job)`; a repeat returns the **existing**
-        replay run rather than creating a new one.
+        **excluded from the existing production counters/aggregates — mandatory, not
+        a label.** A `quarantine` label on `caesium_job_runs_total` etc. does *not*
+        suffice, because existing PromQL (`sum(caesium_job_runs_total)`) includes
+        the labelled series unless every dashboard/alert is rewritten. If per-replay
+        accounting is wanted, emit **separate** `*_replay_*` metric series; the
+        existing ones never see a quarantined run.
+      - **Idempotent creation, atomically.** Because replay re-executes real
+        container commands, a client retry after a timeout/5xx must **not** spawn a
+        second what-if (and a second round of side effects). The memo defines an
+        idempotency contract enforced by a **durable unique reservation** (a
+        persisted idempotency record / replay-run column with a unique index over
+        the `Idempotency-Key`/fingerprint of `(baseline run, overrides, actor,
+        job)`), inserted in the **same transaction** as the `JobRun` before
+        dispatch — a check-then-create races under concurrent retries. A
+        duplicate-key collision returns the existing replay run.
       - **Fail-closed on missing baseline.** If an "unchanged" task's baseline
         cache/result is pruned or absent, replay **fails** rather than silently
         re-executing it (an unannounced re-run could have side effects).
@@ -369,7 +389,9 @@ write, lineage emit, or callback.
       An additive `Quarantine bool` (and a captured override-params blob) on
       `JobRun`, **plus a `Quarantine bool` on `TaskRun`** threaded scheduler→worker
       the same way `ResolvedImageDigest` is (so the distributed worker sees it
-      without re-deriving it). Both executors must, when quarantined, honor cache
+      without re-deriving it), **plus a nullable `ReplayIdempotencyKey` column on
+      `JobRun` with a unique index** (the durable reservation B4's atomic
+      idempotency depends on). Both executors must, when quarantined, honor cache
       **reads** for unchanged tasks but skip cache-authoritative **writes**,
       authoritative lineage emission, **and external callbacks/notifications**:
       - `internal/job/job.go` — the in-process scheduler path.
@@ -405,9 +427,11 @@ write, lineage emit, or callback.
         because emission happens here, on the bus, not in the executor.
       - **Observability surfaces** (`api/rest/service/stats`, the
         `internal/metrics` run/task counters + duration histograms, run-list
-        payloads) — exclude quarantined runs from production aggregates/metrics (or
-        label them) per B1's decision, so a slow/failed what-if does not dent
-        success rates, dashboards, or alerts.
+        payloads) — **exclude** quarantined runs from the existing production
+        aggregates/counters (not label-only — existing PromQL would still sum a
+        labelled series); emit separate `*_replay_*` series if per-replay accounting
+        is wanted. So a slow/failed what-if cannot dent success rates, dashboards,
+        or alerts.
       AutoMigrate picks up the additive columns; no `hotTables` change (no new
       table). The flag is internal-only — set by the replay path (B3), never from a
       request body (see B4).
@@ -429,11 +453,13 @@ write, lineage emit, or callback.
       cache entry / result is unavailable (pruned/expired), abort the replay with a
       clear error rather than silently re-executing it; and (b) **the replay-safe
       gate** — a job/step that is **not** marked replay-safe (per B1's containment
-      contract) is **refused by default**; re-execution proceeds only for a marked
-      job or under an explicit operator acknowledgement, and that acknowledgement
-      never disables quarantine. This refusal is the primary guard against running a
-      production `deploy`/`delete` as a what-if; it is surfaced by B4 (REST error)
-      and B5 (CLI non-zero exit) and tested in B6(8). Re-execution is
+      contract) is **refused, with no inline bypass**: re-execution proceeds only
+      for a durably-marked job (or under the alternate-namespace mode), never via a
+      `--force`/acknowledgement flag (that would be a first-class deploy/delete
+      footgun; break-glass is a separate admin-only audited workflow, out of scope).
+      This refusal is the primary guard against running a production
+      `deploy`/`delete` as a what-if; it is surfaced by B4 (REST error) and B5 (CLI
+      non-zero exit) and tested in B6(8). Re-execution is
       identical-code-against-pinned-digests — it does not resurrect overwritten
       source data.
       Files: new `internal/replay/` (the replay constructor over `run.Store` +
@@ -443,11 +469,17 @@ write, lineage emit, or callback.
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a
       request attempting to disable it is rejected (the invariant cannot be turned
-      off over the wire). **Idempotent creation (per B1's contract):** a retry after
-      a timeout/5xx must not spawn a second what-if (and a second round of real
-      container side effects) — honor an `Idempotency-Key` header and/or a request
-      fingerprint over `(baseline run, overrides, actor, :id)`, returning the
-      **existing** replay run on a repeat instead of creating a new one. **Handler-side ownership check (security boundary):**
+      off over the wire). **Idempotent creation — atomic, not check-then-create
+      (per B1's contract):** a retry after a timeout/5xx must not spawn a second
+      what-if (and a second round of real container side effects). Honor an
+      `Idempotency-Key` header and/or a fingerprint over `(baseline run, overrides,
+      actor, :id)`, but enforce it with a **durable unique reservation** — a
+      persisted idempotency record / replay-run column with a **unique index** on
+      key/fingerprint, inserted **in the same transaction as the `JobRun`** before
+      dispatch. A check-then-create has a TOCTOU race: two concurrent identical
+      POSTs after a client timeout can both observe "no existing replay" and both
+      dispatch. On a duplicate-key collision, return the **existing** replay run
+      rather than creating a second. (Tested by B6(10)'s concurrent-POST case.) **Handler-side ownership check (security boundary):**
       validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
       constructing or dispatching the replay. This is load-bearing: the scope
       middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning
@@ -511,14 +543,18 @@ write, lineage emit, or callback.
       `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
       404/403 and create **no** replay run — and the inverse — proving the B4
       handler check, not just the middleware, enforces the boundary (the H-2 matrix
-      alone passes an impl that omits it). **(10) Idempotent creation:** two
-      identical replay requests (same key/fingerprint) create **one** replay run and
-      **one** task execution, not two. **(11) No observability pollution:** a
-      quarantined replay does not change `GET /v1/stats/summary` success/failure
-      counts or the production run-list (and Prometheus run/task counters are
-      excluded or quarantine-labelled) — assert the stats/run-list before/after are
-      unchanged by a (deliberately failing) quarantined replay. Flip the design
-      doc's `Quarantined what-if replay` feature-table row to shipped.
+      alone passes an impl that omits it). **(10) Idempotent creation under
+      concurrency:** two **concurrent** identical replay POSTs (same
+      key/fingerprint, fired in parallel to exercise the TOCTOU race) create
+      **one** replay run and **one** task execution — proving the atomic
+      unique-index reservation, not a check-then-create. **(11) No observability
+      pollution:** a quarantined replay does not change `GET /v1/stats/summary`
+      success/failure counts, the production run-list, **or the existing
+      `caesium_job_runs_total`/`caesium_task_runs_total` counter values** (scrape
+      `/metrics` before/after) — assert all unchanged by a deliberately-failing
+      quarantined replay, since exclusion is mandatory and a label would leave the
+      existing counters dirty. Flip the design doc's `Quarantined what-if replay`
+      feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
