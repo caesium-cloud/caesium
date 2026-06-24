@@ -97,8 +97,11 @@ scope and must survive into the shipped surfaces:
   one needs a *queryable* event-row marker, not just a payload flag. B1's audit
   enumerates the full set and the single marker-based suppression rule. Replay also
   fails rather than silently re-running a task whose baseline result is
-  unavailable, and gates side-effecting replay behind explicit opt-in (a
-  replay-safe job/step annotation and/or an alternate env namespace).
+  unavailable, and gates side-effecting replay behind **one** explicit opt-in: a
+  durable, baseline-scoped `replaySafe` job/step mark. (An "alternate env
+  namespace" mode was considered and **cut from v1** — it was an underspecified
+  second bypass that didn't actually prove secrets/volumes/identity are redirected
+  off production; deferred to its own fully-contracted future design.)
   The quarantine invariant is **non-bypassable** — there is no API/CLI knob to
   produce an authoritative what-if run — **and it must hold in distributed mode**:
   the flag propagates on `TaskRun` to the worker (`runtime_executor.go`), which
@@ -197,8 +200,8 @@ side-effecting replay POST needs an idempotency key/fingerprint so a client retr
 doesn't run the what-if twice (B1 + B4 + B6(10)). All these gaps are **latent** —
 pre-alpha, no users — so nothing is broken in production today. Round 10:
 tightened the round-9 additions into correct form — (i) the replay-safe gate has
-**no inline `--force` bypass** (durable annotation/alternate-namespace only;
-break-glass is a separate admin-only audited workflow); (ii) idempotency is an
+**no inline `--force` bypass** (durable `replaySafe` mark only; break-glass is a
+separate admin-only audited workflow); (ii) idempotency is an
 **atomic unique-index reservation** in the same transaction as the `JobRun`, not a
 race-prone check-then-create (B6(10) is now a concurrent-POST test); (iii) metrics
 isolation is **mandatory exclusion** from existing counters, not a label (which
@@ -258,7 +261,15 @@ command only; the `HashInput` blob redacts env + is diffing-oriented). A
 behavior-only apply (env/mounts/secrets) would make replay run the *current*
 definition under the what-if banner. B2 now persists an **immutable per-`TaskRun`
 execution descriptor at exec time**, B3 reconstructs from it (fail-closed if
-absent), and B6(8c) tests a post-baseline behavior-only apply. Round 19: that
+absent), and B6(8c) tests a post-baseline behavior-only apply. Round 20: three
+hardenings, two of them closing escapes I'd introduced — (i) secret-version
+mismatch / missing descriptor is now a **hard pre-dispatch abort**, not "or
+degraded" (a degraded-but-executing replay runs with current credentials);
+(ii) the **"alternate env namespace" mode is cut from v1** — it was an
+underspecified second bypass of the `replaySafe` gate (the durable mark is now the
+*only* gate); (iii) idempotency is now **recoverable** — a crash between
+reservation and dispatch resumes a `pending` reservation instead of dedup'ing a
+retry to a run that never ran (B6(10) injected-failure test). Round 19: that
 descriptor was enumerated **partially** (the same reactive-omission trap as the
 producer audit) — it missed `retries`/timeouts/schemas/cache/trigger-rules/full
 k8s-spec+workload-identity, and the secret-rotation case (replay *re-resolves*
@@ -395,14 +406,19 @@ write, lineage emit, or callback.
       (replay-vs-baseline via Stream A); (d) the honest-scope boundary (no data
       resurrection; degraded over unpinned tags); and the **fail-closed safety
       contract** the review made load-bearing:
-      - **Side-effect honesty + no inline bypass.** State plainly that a
-        re-executed task runs its real command; replay is not a sandbox. The
-        containment mechanism is a **durable** `replaySafe` annotation on the
-        job/step schema and/or replay against an **alternate env namespace** (reuse
-        the volumes/workload-identity BYO-env abstraction). A job **not** marked
-        replay-safe is **refused, full stop** — the initial surface carries **no**
-        `--force`/acknowledgement flag, because an inline "I know it's risky" toggle
-        is a first-class path for a scoped runner to re-run an unreviewed
+      - **Side-effect honesty + a single gate, no bypass.** State plainly that a
+        re-executed task runs its real command; replay is not a sandbox. The **only**
+        containment mechanism in v1 is a **durable, baseline-scoped** `replaySafe`
+        mark on the job/step schema. The "alternate env namespace" idea is **cut from
+        v1** (it had no schema/API/RBAC/test contract and didn't actually prove
+        secrets/volumes/workload-identity/external refs are redirected off
+        production — an unspecified second bypass); if pursued later it is its own
+        fully-contracted design (YAML+importer+model, REST/CLI, RBAC, and tests
+        proving every external ref is isolated *before* dispatch), out of scope here.
+        A job **not** marked replay-safe is **refused, full stop** — the initial
+        surface carries **no** `--force`/acknowledgement flag, because an inline "I
+        know it's risky" toggle is a first-class path for a scoped runner to re-run
+        an unreviewed
         deploy/delete against prod under the what-if banner. Any future break-glass
         ("replay this unmarked job anyway") is a **separate, admin-only, audited**
         workflow — out of scope for this plan, named here only so the bypass is not
@@ -496,8 +512,11 @@ write, lineage emit, or callback.
       (`serviceAccountName` etc.), and a **baseline secret digest/version** per
       `secret://` ref. Secrets stay **refs, not values**, but because replay
       *re-resolves* them, a rotated secret would silently change behavior — so
-      capture the baseline secret version/digest and **fail closed (or mark the
-      replay degraded)** if it no longer matches at replay time. This descriptor is
+      capture the baseline secret version/digest and, if it no longer matches at
+      replay time (or the exact baseline version can't be resolved), **abort
+      pre-dispatch — a hard error, no task runs.** "Degraded" is **reporting-only**
+      and never grants permission to execute with drifted inputs; a missing baseline
+      descriptor is likewise a hard abort, not a degraded run. This descriptor is
       **distinct from** the redacted/diffing `HashInput` blob (which can't
       re-execute — env values are redacted, blobs may be degraded) and from the live
       `Job`/`Atom` rows (overwritten on apply). It is the only immutable source that
@@ -609,10 +628,10 @@ write, lineage emit, or callback.
       contract) is **refused, with no inline bypass**: re-execution proceeds only
       for a task whose **baseline run recorded `replay_safe = true` at the time it
       ran** (the recorded field from B7 — **not** the current live definition, which
-      a later apply could have flipped; see B7's baseline-scoped note), or under the
-      alternate-namespace mode, never via a
-      `--force`/acknowledgement flag (that would be a first-class deploy/delete
-      footgun; break-glass is a separate admin-only audited workflow, out of scope).
+      a later apply could have flipped; see B7's baseline-scoped note). That recorded
+      mark is the **only** gate — never a `--force`/acknowledgement flag and never an
+      "alternate namespace" (both cut from v1 as unspecified bypasses; break-glass is
+      a separate admin-only audited workflow, out of scope).
       This refusal is the primary guard against running a production
       `deploy`/`delete` as a what-if; it is surfaced by B4 (REST error) and B5 (CLI
       non-zero exit) and tested in B6(8). And (c) **reconstruct from the immutable
@@ -653,11 +672,18 @@ write, lineage emit, or callback.
       TOCTOU race: two concurrent identical POSTs after a client timeout can both
       observe "no existing replay" and both dispatch. On a duplicate-fingerprint
       collision, return the **existing** replay run rather than creating a second.
-      (Tested by B6(10): concurrent identical → one run; and same key with a
-      *different* job/baseline/actor/overrides → *distinct* runs.) **Handler-side ownership check (security boundary):**
-      validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
-      constructing or dispatching the replay. This is load-bearing: the scope
-      middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning **Handler-side ownership check (security boundary):**
+      **Recoverable creation (not reserve-then-vanish):** reservation alone doesn't
+      finish the job — a 5xx/crash *after* the reservation commits but *before* the
+      replay work is durably materialized/dispatched would leave a fingerprint that
+      dedupes future retries to a run that never (or only partly) ran. So model
+      replay creation as a **recoverable state machine / outbox**: the reservation
+      + materialized replay work commit durably in a **`pending`** state, dispatch
+      happens from `pending`, and a retry (or a sweeper) **resumes** a `pending`
+      reservation rather than returning a dead one — never a silent no-op. (Tested
+      by B6(10): concurrent identical → one run; same key with a *different*
+      job/baseline/actor/overrides → *distinct* runs; **and an injected failure
+      between reservation and dispatch → the retry resumes to a single completed
+      replay, not a stuck/lost one**.) **Handler-side ownership check (security boundary):**
       validate `baselineRun.JobID == :id` and **404/403 on mismatch** *before*
       constructing or dispatching the replay. This is load-bearing: the scope
       middleware authorizes `/runs/:run_id` routes by resolving the **run's** owning
@@ -732,9 +758,10 @@ write, lineage emit, or callback.
       core safety test):** a job/step **not** marked replay-safe (per B1's
       containment contract) is **refused** — assert the REST `POST …/replay` returns
       an error and `caesium run replay` exits non-zero with a clear message; a
-      **durably `replaySafe`-marked** job (or the alternate-namespace mode) proceeds;
-      and **any `--force`/acknowledgement field or flag is rejected** (there is no
-      inline bypass — that is the round-10 invariant). **(8b) Baseline-scoped gate
+      **durably `replaySafe`-marked** job proceeds; and **any `--force`/
+      acknowledgement field or flag — or an "alternate namespace" request — is
+      rejected** (the durable mark is the only gate; no bypass — the round-10/20
+      invariant). **(8b) Baseline-scoped gate
       (round 17):** the gate reads the *baseline run's recorded* `replay_safe`, not
       the live definition — assert two cases: replaying a run created **before** the
       mark existed is **refused**; and after marking a job safe + running it, a
@@ -750,9 +777,9 @@ write, lineage emit, or callback.
       changed **`retries`/timeout**, **k8s spec / `serviceAccountName`**, and
       **schema/cache/trigger-rule** edit after the baseline. **(8d) Secret rotation:**
       rotate a `secret://` value after the baseline, then replay; assert replay
-      either pins the baseline secret version or **fails closed / marks the run
-      degraded** — never silently re-runs with the new secret while claiming
-      identical-code. This is the core identical-code/audit guarantee; without it
+      either pins the exact baseline secret version or **aborts pre-dispatch with
+      no task run** — never executes (degraded or otherwise) with the rotated
+      secret while claiming identical-code. This is the core identical-code/audit guarantee; without it
       replay silently runs current production behavior under the what-if banner.
       Without (8)–(8d) an implementation could pass (1)–(7) while still letting
       replay run a production `deploy`/`delete` as a "what-if."
@@ -1199,8 +1226,9 @@ The plan is done when **all** of these hold:
    **reconstructs each re-executed task from an immutable baseline execution
    descriptor capturing the full runtime envelope** (env/command/mounts **plus**
    retries/timeouts/schemas/cache/trigger-rules/k8s-spec+workload-identity and a
-   baseline secret version — not the live, possibly-mutated definition; fail-closed
-   or degraded on a missing descriptor or rotated secret), and
+   baseline secret version — not the live, possibly-mutated definition; a missing
+   descriptor or rotated/unresolvable baseline secret is a **hard pre-dispatch
+   abort, never a degraded-but-executing run**), and
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
    **no external side effects from any producer** — callbacks, the lifecycle-event
@@ -1210,12 +1238,15 @@ The plan is done when **all** of these hold:
    default `/events` subscriber sees none of the what-if's events), the
    **replay-safe gate** built on a **durable, baseline-scoped `replaySafe` field**
    (B7 — only a mark that was persisted **at baseline-run time** enables replay, so
-   a later apply can't authorize replaying an older unsafe run; no `--force`/ack
-   bypass; the guard against running a prod `deploy`/`delete` as a what-if), a
-   **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
-   is rejected and creates no run), **atomic idempotency over a scoped fingerprint**
+   a later apply can't authorize replaying an older unsafe run; **the durable mark
+   is the only gate — no `--force`/ack flag and no "alternate namespace" bypass**;
+   the guard against running a prod `deploy`/`delete` as a what-if), a **cross-job
+   ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay` is rejected
+   and creates no run), **atomic, recoverable idempotency over a scoped fingerprint**
    (concurrent identical POSTs make one run; the same key with a different
-   job/baseline/actor/overrides makes distinct runs), **no observability pollution**
+   job/baseline/actor/overrides makes distinct runs; an injected crash between
+   reservation and dispatch resumes to one completed run, not a stuck/lost one),
+   **no observability pollution**
    (stats/run-list + existing Prometheus counters unchanged by a failing quarantined
    replay), **and**
    a **direct worker-path** assertion that no `TaskCache` entry is written from a
