@@ -269,7 +269,13 @@ degraded" (a degraded-but-executing replay runs with current credentials);
 underspecified second bypass of the `replaySafe` gate (the durable mark is now the
 *only* gate); (iii) idempotency is now **recoverable** — a crash between
 reservation and dispatch resumes a `pending` reservation instead of dedup'ing a
-retry to a run that never ran (B6(10) injected-failure test). Round 19: that
+retry to a run that never ran (B6(10) injected-failure test). Round 21: (i) the
+secret-rotation abort needs an identity the resolver doesn't expose — added a
+provider-aware `ResolveWithIdentity` (vault version / k8s `resourceVersion` /
+env = un-verifiable; **never a reusable plain hash of the value**); (ii) the
+metric-exclusion list missed `caesium_jobs_active` + cache hit/short-circuit +
+`task_retries_total` (replay does cache reads + can retry) — B1's audit now owns
+the exhaustive metric list and B6(11) scrapes them. Round 19: that
 descriptor was enumerated **partially** (the same reactive-omission trap as the
 producer audit) — it missed `retries`/timeouts/schemas/cache/trigger-rules/full
 k8s-spec+workload-identity, and the secret-rotation case (replay *re-resolves*
@@ -512,11 +518,19 @@ write, lineage emit, or callback.
       (`serviceAccountName` etc.), and a **baseline secret digest/version** per
       `secret://` ref. Secrets stay **refs, not values**, but because replay
       *re-resolves* them, a rotated secret would silently change behavior — so
-      capture the baseline secret version/digest and, if it no longer matches at
-      replay time (or the exact baseline version can't be resolved), **abort
-      pre-dispatch — a hard error, no task runs.** "Degraded" is **reporting-only**
-      and never grants permission to execute with drifted inputs; a missing baseline
-      descriptor is likewise a hard abort, not a degraded run. This descriptor is
+      capture the baseline secret **identity** and, if it no longer matches at
+      replay time (or can't be resolved), **abort pre-dispatch — a hard error, no
+      task runs.** This needs a **provider-aware secret identity API** the current
+      `internal/jobdef/secret.Resolver` lacks (it returns only a value): add e.g.
+      `ResolveWithIdentity(ctx, ref) (value, identity)` where `identity` is
+      **non-secret version metadata or a keyed (HMAC, server-key) fingerprint — never
+      a plain reusable hash of the secret value** (offline-guessable for low-entropy
+      secrets, and itself sensitive). Specify per provider: **vault** → secret
+      version; **k8s** → `resourceVersion`; **env** → has no version, so env-sourced
+      secrets **cannot be rotation-verified** — a documented limitation (replay of a
+      task using an env secret either fails closed or is flagged un-verifiable, per
+      B1). "Degraded" is **reporting-only** and never grants permission to execute
+      with drifted inputs; a missing baseline descriptor is likewise a hard abort. This descriptor is
       **distinct from** the redacted/diffing `HashInput` blob (which can't
       re-execute — env values are redacted, blobs may be degraded) and from the live
       `Job`/`Atom` rows (overwritten on apply). It is the only immutable source that
@@ -586,13 +600,18 @@ write, lineage emit, or callback.
         `internal/metrics` run/task counters + duration histograms, the
         **alert-facing `internal/notification/metrics.go` counters**
         (`TaskFailuresTotal`/`RunFailuresTotal`/`RunTimeoutsTotal`/`SLAMissesTotal`/
-        `NotificationSendsTotal`), the lineage emit metrics, and run-list payloads)
-        — **exclude** quarantined runs from the existing production
-        aggregates/counters (not label-only — existing PromQL would still sum a
-        labelled series); emit separate `*_replay_*` series if per-replay accounting
-        is wanted. Suppression happens **before** the metric increment, not just
-        before the send. So a slow/failed what-if cannot dent success rates,
-        dashboards, or alerts.
+        `NotificationSendsTotal`), the lineage emit metrics, **and the run/cache/
+        retry series replay actually touches** — `caesium_jobs_active` (run start),
+        `caesium_task_cache_hits_total`/`…_misses_total`/`…_short_circuits_total`
+        (replay does cache reads + short-circuits), `caesium_task_retries_total`
+        (replay can retry) — and run-list payloads) — **exclude** quarantined runs
+        from the existing production aggregates/counters (not label-only — existing
+        PromQL would still sum a labelled series); emit separate `*_replay_*` series
+        if per-replay accounting is wanted. **B1's audit owns the exhaustive list of
+        `internal/metrics` series replay touches** (don't enumerate reactively —
+        same trap as the producer/envelope audits). Suppression happens **before**
+        the metric increment, not just before the send. So a slow/failed what-if
+        cannot dent success rates, cache/active/retry dashboards, or alerts.
       **Migration safety:** the `quarantine` bools on `JobRun`, `TaskRun`, and
       `ExecutionEvent` must be `gorm:"not null;default:false"` (and AutoMigrate
       should backfill existing rows to `false`); every default-stream/stats/run-list
@@ -615,8 +634,10 @@ write, lineage emit, or callback.
       `internal/models/execution_event.go` + the `/events` controller/store
       (queryable `quarantine` column; exclude from default stream + backlog), and
       `api/rest/service/stats/` + `internal/metrics/` + `internal/notification/metrics.go`
-      (exclude quarantined runs from existing counters; suppress before increment).
-      The complete surface comes from B1's audit.
+      (exclude quarantined runs from existing counters incl. active/cache/retry/
+      short-circuit; suppress before increment), and
+      `internal/jobdef/secret/` (the `ResolveWithIdentity` provider-aware identity
+      API + env/k8s/vault impls). The complete surface comes from B1's audit.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -776,9 +797,10 @@ write, lineage emit, or callback.
       **non-obvious envelope fields**, not just env/command: separate cases for a
       changed **`retries`/timeout**, **k8s spec / `serviceAccountName`**, and
       **schema/cache/trigger-rule** edit after the baseline. **(8d) Secret rotation:**
-      rotate a `secret://` value after the baseline, then replay; assert replay
-      either pins the exact baseline secret version or **aborts pre-dispatch with
-      no task run** — never executes (degraded or otherwise) with the rotated
+      rotate a `secret://` value after the baseline (per provider — at least a vault
+      version bump and/or a k8s secret update), then replay; assert replay either
+      pins the exact baseline secret identity or **aborts pre-dispatch with no
+      `TaskRun` created** — never executes (degraded or otherwise) with the rotated
       secret while claiming identical-code. This is the core identical-code/audit guarantee; without it
       replay silently runs current production behavior under the what-if banner.
       Without (8)–(8d) an implementation could pass (1)–(7) while still letting
@@ -802,10 +824,13 @@ write, lineage emit, or callback.
       success/failure counts, the production run-list, the existing
       `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
       alert-facing notification counters** `TaskFailuresTotal`/`RunFailuresTotal`/
-      `RunTimeoutsTotal`/`SLAMissesTotal`/`NotificationSendsTotal` and the lineage
-      emit metrics (scrape `/metrics` before/after) — assert **all** unchanged by a
-      deliberately-failing, deliberately-slow (timeout/SLA) quarantined replay,
-      since suppression is mandatory and precedes the metric increment. **(12) No
+      `RunTimeoutsTotal`/`SLAMissesTotal`/`NotificationSendsTotal`, the lineage emit
+      metrics, **and the run/cache/retry series replay actually touches** —
+      `caesium_jobs_active`, `caesium_task_cache_hits_total`/`…_short_circuits_total`,
+      `caesium_task_retries_total` (scrape `/metrics` before/after) — assert **all**
+      unchanged by a deliberately-failing, deliberately-slow (timeout/SLA),
+      cache-reading/retrying quarantined replay, since suppression is mandatory and
+      precedes the metric increment. **(12) No
       SSE/event-stream leak + scoped auth:** a default `GET /v1/events` subscriber
       (and the backlog query) sees **none** of the quarantined replay's lifecycle
       events, while the initiating client's explicit **`run_id`-scoped**
