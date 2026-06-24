@@ -87,12 +87,13 @@ scope and must survive into the shipped surfaces:
   independent* side-effect producers (the callback subsystem `internal/callback/`;
   the notification subscriber `internal/notification/subscriber.go` on lifecycle
   events; the notification watcher `internal/notification/watcher.go` on
-  timeout/SLA; and the **OpenLineage subscriber** `internal/lineage/subscriber.go`,
-  which both emits to the transport *and* persists `lineage_datasets`), so
-  suppressing any one is not enough — and the lineage one is the most dangerous,
-  because emitting it would make a what-if run *lineage-authoritative* and pollute
-  the impact graph. B1's audit enumerates the full set and the single marker-based
-  suppression rule. Replay also
+  timeout/SLA; the **OpenLineage subscriber** `internal/lineage/subscriber.go`,
+  which both emits to the transport *and* persists `lineage_datasets`; and the
+  **`/events` SSE stream + `execution_events` backlog**), so suppressing any one is
+  not enough — the lineage one is the most dangerous (emitting it would make a
+  what-if run *lineage-authoritative* and pollute the impact graph), and the SSE
+  one needs a *queryable* event-row marker, not just a payload flag. B1's audit
+  enumerates the full set and the single marker-based suppression rule. Replay also
   fails rather than silently re-running a task whose baseline result is
   unavailable, and gates side-effecting replay behind explicit opt-in (a
   replay-safe job/step annotation and/or an alternate env namespace).
@@ -200,14 +201,22 @@ asserts replay construction sets `Quarantine=true` on **every** materialized
 **alert-facing notification counters** (`TaskFailuresTotal`/`RunFailuresTotal`/
 `RunTimeoutsTotal`/`SLAMissesTotal`) the subscriber bumps via `recordEventMetric`
 *before* dispatch — suppression must precede the metric increment, and B6(11)
-scrapes them.
+scrapes them. Round 13: two structural gaps — (i) the replay-safe gate had **no
+item building the durable mark** (`replaySafe` doesn't exist in
+`pkg/jobdef/definition.go`), so an implementer couldn't build the positive path;
+added **B7** (schema + importer + persistence + hash-exclusion), and B3 now depends
+on it; (ii) the producer audit missed the **`/events` SSE stream +
+`execution_events` backlog** — a what-if would leak lifecycle events to default
+UI/SSE clients, and a payload-only marker can't filter (store filters by
+job/run/type), so B1/B2 require a **queryable event-row `quarantine` column** with
+default-stream exclusion, tested in B6(12).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
-| B | Quarantined what-if replay — fail-closed, distributed-safe | P2 | Not started |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Not started |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Not started |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Not started |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
@@ -356,7 +365,15 @@ write, lineage emit, or callback.
         `transport.Emit`), which also **persists `lineage_datasets`** — so a
         quarantined replay would not only emit externally but make its what-if
         output **lineage-authoritative**, corrupting the very impact graph that
-        Stream C and `/v1/lineage/impact` read. The rule: a quarantined
+        Stream C and `/v1/lineage/impact` read; (5) the **`/events` SSE stream +
+        `execution_events` store** (`g.GET("/events")` → live event bus; backlog
+        from `internal/models/execution_event.go`) — replay lifecycle events would
+        stream to default UI/SSE clients + automation and persist in the backlog.
+        **A payload-only marker is insufficient here**: the event-store/backlog
+        filters are by job/run/type, so the marker must be a **queryable column** on
+        the event rows, the default `/events` stream + backlog query must **exclude**
+        quarantined events, and the initiating client gets an explicit replay-scoped
+        subscription to follow its own replay. The rule: a quarantined
         run is **stamped on its `JobRun`/`TaskRun` and on every event it emits**,
         and **every** external consumer/producer checks that marker
         (fail-closed-suppress) — subscribers skip marked events, the watcher
@@ -449,6 +466,15 @@ write, lineage emit, or callback.
         it pollutes the impact graph). This is the load-bearing lineage-isolation
         fix; "skip authoritative lineage emission" in the executor is not enough
         because emission happens here, on the bus, not in the executor.
+      - **The `/events` SSE stream + `execution_events` backlog** — add a
+        **queryable `quarantine` column** on `execution_events`
+        (`internal/models/execution_event.go`), not just a payload marker (the
+        store/backlog filters are by job/run/type and a payload field isn't
+        filterable). Exclude quarantined events from the default `/events` live
+        stream + backlog query (`api/rest/controller/event`/the event store), and
+        give the replay's initiating client an explicit replay-scoped subscription
+        to follow its own run. Otherwise a what-if leaks lifecycle events to every
+        default UI/SSE client and persists them in the backlog.
       - **Observability surfaces** (`api/rest/service/stats`, the
         `internal/metrics` run/task counters + duration histograms, the
         **alert-facing `internal/notification/metrics.go` counters**
@@ -470,9 +496,12 @@ write, lineage emit, or callback.
       the event-emission path that stamps the marker,
       `internal/notification/watcher.go` (exclude quarantined runs from
       timeout/SLA scans), `internal/lineage/subscriber.go` + `mapper.go` (drop
-      marked events before transport emit and `lineage_datasets` persist), and
-      `api/rest/service/stats/` + `internal/metrics/` (exclude/label quarantined
-      runs in aggregates + counters). The complete surface comes from B1's audit.
+      marked events before transport emit and `lineage_datasets` persist),
+      `internal/models/execution_event.go` + the `/events` controller/store
+      (queryable `quarantine` column; exclude from default stream + backlog), and
+      `api/rest/service/stats/` + `internal/metrics/` + `internal/notification/metrics.go`
+      (exclude quarantined runs from existing counters; suppress before increment).
+      The complete surface comes from B1's audit.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
@@ -482,7 +511,8 @@ write, lineage emit, or callback.
       clear error rather than silently re-executing it; and (b) **the replay-safe
       gate** — a job/step that is **not** marked replay-safe (per B1's containment
       contract) is **refused, with no inline bypass**: re-execution proceeds only
-      for a durably-marked job (or under the alternate-namespace mode), never via a
+      for a job whose **persisted `replaySafe` mark** (the durable field built in
+      B7) is set (or under the alternate-namespace mode), never via a
       `--force`/acknowledgement flag (that would be a first-class deploy/delete
       footgun; break-glass is a separate admin-only audited workflow, out of scope).
       This refusal is the primary guard against running a production
@@ -492,7 +522,7 @@ write, lineage emit, or callback.
       source data.
       Files: new `internal/replay/` (the replay constructor over `run.Store` +
       dispatch; the fail-closed guards), `internal/run/store.go`.
-      Depends on: B2.
+      Depends on: B2 + B7 (the `replaySafe` schema the gate reads).
 - [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a
@@ -600,11 +630,39 @@ write, lineage emit, or callback.
       `RunTimeoutsTotal`/`SLAMissesTotal`/`NotificationSendsTotal` and the lineage
       emit metrics (scrape `/metrics` before/after) — assert **all** unchanged by a
       deliberately-failing, deliberately-slow (timeout/SLA) quarantined replay,
-      since suppression is mandatory and precedes the metric increment. Flip the
-      design doc's `Quarantined what-if replay` feature-table row to shipped.
+      since suppression is mandatory and precedes the metric increment. **(12) No
+      SSE/event-stream leak:** a default `GET /v1/events` subscriber (and the
+      backlog query) sees **none** of the quarantined replay's lifecycle events,
+      while the initiating client's explicit replay-scoped subscription still
+      receives them — proving the queryable event-row marker excludes what-if events
+      from the default stream, not just suppresses notifications. Flip the design
+      doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
+- [ ] B7. **Build the durable `replaySafe` job/step contract (schema + persistence)
+      — lands before B3.** The replay-safe gate (B3/B6(8)) refuses unmarked jobs and
+      lets a *durably-marked* job proceed, but **no field exists yet** (`grep`
+      confirms no `replaySafe` in `pkg/jobdef/definition.go` or the models). Without
+      this item there is no GitOps way to mark a job replay-safe, so an implementer
+      can't build the positive path (or invents an ad-hoc non-GitOps bypass — the
+      exact deploy/delete footgun the gate is meant to stop). Add a `replaySafe`
+      boolean on the job and/or step: the dual `Step`/`rawStep` decls + `Validate()`
+      + `UnmarshalYAML` in `pkg/jobdef/definition.go`, `pkg/jobdef/schema.go`,
+      regenerated `docs/job-schema-reference.md` (via `caesium job schema --doc`) +
+      `docs/caesium-job-llm-reference.md`, importer + model persistence
+      (`internal/jobdef/importer.go`, `internal/models/job.go`/`atom.go`), and
+      validation. **Cache-correctness:** `replaySafe` is a control-plane flag, not an
+      execution input — it must be **excluded from the identity hash**
+      (`internal/cache/hash.go`), like the Kueue `queueName`, so toggling it is not a
+      cache miss; add a unit test asserting the hash is unchanged by it. Integration
+      coverage: only a job whose **persisted YAML** carries the mark can be replayed
+      (B6(8)'s positive path drives this).
+      Files: `pkg/jobdef/definition.go`, `pkg/jobdef/schema.go`,
+      `docs/job-schema-reference.md`, `docs/caesium-job-llm-reference.md`,
+      `internal/jobdef/importer.go`, `internal/models/job.go` (+ `atom.go`),
+      `internal/cache/hash.go` (exclusion + test), `docs/examples/*.job.yaml`.
+      Depends on: B1 (the memo fixes the field's exact shape + job-vs-step scope).
 
 ### Stream C — `caesium blame` over commit ranges
 
@@ -818,8 +876,9 @@ behavior must be deliberate, not an accident of the fall-through.
 **Within-stream order.**
 
 - A: `A1 → A2 → A3 → A4` (strictly linear; each layer wraps the prior).
-- B: `B1 (design memo, hard barrier) → B2 → B3 → B4 → B5 → B6`; B5 additionally
-  needs A2.
+- B: `B1 (design memo, hard barrier) → (B2, B7 in parallel) → B3 → B4 → B5 → B6`;
+  B3 needs both B2 (quarantine plumbing) and **B7** (the `replaySafe` schema its
+  gate reads); B5 additionally needs A2.
 - C: `C1 → C2 → C3 → C4` (strictly linear).
 - H: `H-1 (full backfill) → (H-2 completeness/scope guard, H-3 lineage-impact
   scope) in parallel`.
@@ -943,11 +1002,13 @@ The plan is done when **all** of these hold:
    `test/replay_test.go` asserts in CI the field-level diff on clean stdout, the
    safety invariants (quarantine non-bypassable, fail-closed on missing baseline,
    **no external side effects from any producer** — callbacks, the lifecycle-event
-   subscriber, the timeout/SLA watcher, and the OpenLineage subscriber all
-   suppressed, asserted via real notification policies on both a lifecycle and a
-   `run_timed_out`/`sla_missed` event **and** zero new `lineage_datasets` rows),
-   the **replay-safe gate** (an unmarked job is refused — no `--force`/ack bypass;
-   the guard against running a prod `deploy`/`delete` as a what-if), a
+   subscriber, the timeout/SLA watcher, the OpenLineage subscriber, **and the
+   `/events` SSE stream** all suppressed (real notification policies on a lifecycle
+   and a `run_timed_out`/`sla_missed` event; zero new `lineage_datasets` rows; a
+   default `/events` subscriber sees none of the what-if's events), the
+   **replay-safe gate** built on a **durable `replaySafe` YAML field** (B7 — only a
+   persisted mark enables replay; no `--force`/ack bypass; the guard against running
+   a prod `deploy`/`delete` as a what-if), a
    **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
    is rejected and creates no run), **atomic idempotency** (concurrent identical
    POSTs make one run, not two), **no observability pollution** (stats/run-list +
