@@ -31,8 +31,10 @@ assembly + one runtime mode, not new persistence:
   opens with a short design memo.
 - **`caesium blame` over commit ranges** walks the append-only `dag_snapshot`
   history and attributes each task/edge to the provenance **commit/snapshot** that
-  introduced it — version-aware EXPLAIN without `git checkout`. (Commit-only:
-  `DagSnapshot` does not persist historical author/ref — see Stream C.)
+  introduced it — version-aware EXPLAIN without `git checkout`. Honestly scoped to
+  what the snapshot stores: **topology + image + command, commit-only** (no
+  author/ref, and `env`/`spec`/`retries`/`cache`/schema/`sla` edits are untracked —
+  see Stream C).
 
 **Strategic frame.** This is the *Retain* layer of
 [`differentiation-strategy.md`](../../differentiation-strategy.md) — the
@@ -209,7 +211,14 @@ on it; (ii) the producer audit missed the **`/events` SSE stream +
 `execution_events` backlog** — a what-if would leak lifecycle events to default
 UI/SSE clients, and a payload-only marker can't filter (store filters by
 job/run/type), so B1/B2 require a **queryable event-row `quarantine` column** with
-default-stream exclusion, tested in B6(12).
+default-stream exclusion, tested in B6(12). Round 14: (i) that replay-scoped SSE
+subscription needed a **scoped-auth contract** (`/v1/events` is global; scoped keys
+are `/v1/jobs…`-only) — B2 now authorizes a `run_id`-scoped subscription + denies
+unfiltered global scoped streams (sibling of H-3), B6(12) tests it; (ii) **blame is
+honestly scoped to topology+image+command** — the snapshot `ContentHash` excludes
+`env`/`spec`/`retries`/`cache`/schema/`sla`/`triggerRules`, so those edits create no
+snapshot; C1/C3 now emit a coverage caveat and C4(c) tests a behavior-only `env`
+change isn't misattributed (full-descriptor blame deferred).
 
 ### Stream Status
 
@@ -474,7 +483,15 @@ write, lineage emit, or callback.
         stream + backlog query (`api/rest/controller/event`/the event store), and
         give the replay's initiating client an explicit replay-scoped subscription
         to follow its own run. Otherwise a what-if leaks lifecycle events to every
-        default UI/SSE client and persists them in the backlog.
+        default UI/SSE client and persists them in the backlog. **Scoped-auth
+        contract (the replay-scoped subscription needs one):** `/v1/events` is a
+        *global* route, and `auth_scope.go` denies scoped keys everywhere outside
+        `/v1/jobs…`, so a scoped runner could trigger a replay yet not observe it —
+        or `/v1/events` gets loosened and leaks every job's events. Resolve it like
+        the other path/owner cases: authorize a **`run_id`-scoped** subscription
+        (`/v1/events?run_id=…` resolving the run owner, or `/v1/jobs/:id/events`) and
+        **deny scoped keys an unfiltered global stream**. This is the SSE analogue
+        of H-3's `/lineage/impact` scope decision — coordinate the two.
       - **Observability surfaces** (`api/rest/service/stats`, the
         `internal/metrics` run/task counters + duration histograms, the
         **alert-facing `internal/notification/metrics.go` counters**
@@ -631,11 +648,14 @@ write, lineage emit, or callback.
       emit metrics (scrape `/metrics` before/after) — assert **all** unchanged by a
       deliberately-failing, deliberately-slow (timeout/SLA) quarantined replay,
       since suppression is mandatory and precedes the metric increment. **(12) No
-      SSE/event-stream leak:** a default `GET /v1/events` subscriber (and the
-      backlog query) sees **none** of the quarantined replay's lifecycle events,
-      while the initiating client's explicit replay-scoped subscription still
-      receives them — proving the queryable event-row marker excludes what-if events
-      from the default stream, not just suppresses notifications. Flip the design
+      SSE/event-stream leak + scoped auth:** a default `GET /v1/events` subscriber
+      (and the backlog query) sees **none** of the quarantined replay's lifecycle
+      events, while the initiating client's explicit **`run_id`-scoped**
+      subscription still receives them. Assert with **scoped keys** too: a scoped
+      runner can follow its own replay via the run-scoped subscription, but is
+      **denied** an unfiltered global `/v1/events` stream and cannot see another
+      job's events — proving the queryable event-row marker excludes what-if events
+      from the default stream **and** the scoped-auth contract holds. Flip the design
       doc's `Quarantined what-if replay` feature-table row to shipped.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
@@ -683,6 +703,21 @@ attributes to **commit + snapshot identity only**; surfacing author/ref is a
 deferred enhancement requiring an additive `DagSnapshot` change (capture
 author/ref at write time) and is recorded as out of scope here, not promised.
 
+**Blame is topology + image/command only — and must say so** (adversarial review
+round 14). The snapshot descriptor and its `ContentHash` capture **only**
+`{name, image, command}` + edges. Behavior-changing manifest fields — `env`,
+`spec`/node-selectors, `retries`, `triggerRules`, `cache` config, `inputSchema`/
+`outputSchema`, `timeout`, `sla` — are **not** in the snapshot, so editing them
+changes runtime behavior **without** creating a new `dag_snapshot`. Blame must
+therefore **not** claim to attribute those: a task whose only change was `env` or
+`retries` will (correctly, given the substrate) still point at the older snapshot,
+and the CLI/REST/docs must state plainly that blame covers topology + image +
+command, with the other fields **untracked** (an honest degraded note, never a
+silent misattribution). Full behavior-descriptor blame is a **deferred substrate
+enhancement** (broaden the snapshot descriptor + `ContentHash` to the full
+behavior-affecting step spec, then test `env`/`cache`/`triggerRules` mutations) —
+recorded here, out of scope, not promised.
+
 - [ ] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
       order and attribute each task/edge to its **most recent introduction** — the
       snapshot at which its *current descriptor* transitioned from absent → present
@@ -695,7 +730,10 @@ author/ref at write time) and is recorded as out of scope here, not promised.
       and a `[from, to]` range that begins after the original introduction is
       computed relative to the range. Surface the introducing snapshot's
       `GitCommit` and the per-edge `provenance_commit` (commit-only — no author/ref,
-      per the scope note above). Support a single-task filter.
+      per the scope note above). **Emit an explicit `coverage: "topology+image+command"`
+      field (or equivalent caveat)** in the result so consumers know `env`/`spec`/
+      `retries`/`cache`/schema/`sla`/`triggerRules` edits are not attributed — the
+      substrate doesn't snapshot them. Support a single-task filter.
       Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`
       (cover delete/readd, **same-name image/command mutation**, and
       range-start-after-introduction explicitly).
@@ -709,9 +747,13 @@ author/ref at write time) and is recorded as out of scope here, not promised.
       Depends on: C1.
 - [ ] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
       [--json]` top-level command: per-element table by default, machine JSON with
-      `--json` via `cmd.OutOrStdout()`.
+      `--json` via `cmd.OutOrStdout()`. The table/help text and the
+      `docs/caesium-job-llm-reference.md`/blame docs must **state the coverage
+      limit** — blame attributes topology + image + command; `env`/`spec`/`retries`/
+      `cache`/schema/`sla`/`triggerRules` changes are not tracked (so it never reads
+      as full behavior blame).
       Files: new `cmd/blame/`, append `blame.Cmd` to the `cmds` slice in
-      `cmd/execute.go`.
+      `cmd/execute.go`, blame coverage note in the docs.
       Depends on: C2.
 - [ ] C4. Add an integration scenario: apply a job, then apply a topology change
       (add an edge/step) that writes a second `dag_snapshot`, then drive
@@ -722,7 +764,11 @@ author/ref at write time) and is recorded as out of scope here, not promised.
       change a step's image (fifth snapshot) and assert blame attributes it to the
       mutating snapshot, not the original; and (b) a **delete-and-readd** — remove
       an edge/step then re-add it, and assert blame attributes it to the re-adding
-      snapshot.
+      snapshot. Add (c) a **behavior-only-change** case: change a step's `env` (or
+      `retries`) and **nothing** in `{name,image,command}`; assert **no** new
+      `dag_snapshot` is written and blame still points at the prior snapshot **with
+      the coverage caveat present** — i.e. the limitation is surfaced honestly, not
+      a silent misattribution.
       Files: new `test/blame_test.go` (`//go:build integration`).
       Depends on: C3.
       Note: whether the integration apply path stamps a distinct `GitCommit`
@@ -827,6 +873,11 @@ behavior must be deliberate, not an accident of the fall-through.
       `internal/lineage/impact.go` + `api/rest/service/lineage/` (alias filtering),
       `internal/auth/` tests, `test/` scoped integration assertion.
       Depends on: H-1.
+      Sibling: `/v1/events` (the SSE stream Stream B's replay-scoped subscription
+      uses) is the **same** class of global route needing a scoped contract —
+      authorize a `run_id`-scoped subscription, deny scoped keys an unfiltered global
+      stream. Resolve it with the same `authorizeScope`-case approach; B2 owns the
+      runtime change and B6(12) the test, but the scope decision is coordinated here.
 - [ ] H-4. **(Optional, nice-to-have)** Stand up a true **distributed** integration
       tier so B6's worker-isolation assertion can also run end-to-end, not only as
       the B6(7) direct `internal/worker` unit test. Add a CI/justfile target (or
@@ -1020,11 +1071,15 @@ The plan is done when **all** of these hold:
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
    that introduced its current descriptor (keyed by `name+image+command`, not name
-   alone; no historical author/ref, which `DagSnapshot` does not persist), the
-   `caesium blame --json` command emits clean stdout, and `test/blame_test.go`
-   asserts in CI an ordinary addition **plus** the two descriptor-keyed regressions
-   — a same-name image/command mutation and a delete-and-readd, each attributed to
-   the mutating/re-adding snapshot, not the original.
+   alone; no historical author/ref, which `DagSnapshot` does not persist), **and
+   honestly scoped to topology + image + command** — the result carries a coverage
+   caveat and the CLI/docs state that `env`/`spec`/`retries`/`cache`/schema/`sla`/
+   `triggerRules` edits are untracked (they don't snapshot). The `caesium blame
+   --json` command emits clean stdout, and `test/blame_test.go` asserts in CI an
+   ordinary addition **plus** three regressions — a same-name image/command
+   mutation, a delete-and-readd (each attributed to the mutating/re-adding
+   snapshot), and a behavior-only `env` change (no new snapshot, caveat surfaced,
+   not misattributed).
 4. **Stream H — RBAC + scope** is closed: H-1 has backfilled `endpointPolicy` for
    **all** previously-unpolicied `Protected()` routes (data-plane + stats/summary +
    system/* + notifications/* + jobdefs/lint+diff) with the roles in the H-1
