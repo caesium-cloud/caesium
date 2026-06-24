@@ -188,6 +188,12 @@ race-prone check-then-create (B6(10) is now a concurrent-POST test); (iii) metri
 isolation is **mandatory exclusion** from existing counters, not a label (which
 existing PromQL would still sum); and (iv) fixed a plan-overview contradiction
 (blame is commit-only, matching Stream C — the intro had stale "author/ref").
+Round 11 (consistency follow-through): (i) the "distributed regression" was hollow
+— `CAESIUM_TEST_ENGINE=kubernetes` selects the k8s *engine* but the distributed
+worker only starts under `CAESIUM_EXECUTION_MODE=distributed`, so B6(7) is now a
+**direct `internal/worker` test** (with optional end-to-end tier H-4); (ii) B6(8)
+still referenced the acknowledgement path round 10 banned — now it asserts any
+`--force`/ack field is **rejected** and only a durable `replaySafe` mark proceeds.
 
 ### Stream Status
 
@@ -196,7 +202,7 @@ existing PromQL would still sum); and (iv) fixed a plan-overview contradiction
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
 | B | Quarantined what-if replay — fail-closed, distributed-safe | P2 | Not started |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Not started |
-| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) | P2 | Not started |
+| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Not started |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
 
 ## Streams
@@ -528,17 +534,27 @@ write, lineage emit, or callback.
       `CAESIUM_OPEN_LINEAGE_ENABLED`), assert the quarantined replay emits **no**
       OpenLineage transport event **and** writes **no** new `lineage_datasets` rows
       (query the table before/after) — i.e. the impact graph is unchanged, so the
-      what-if run never becomes lineage-authoritative. **(7) Distributed regression:** run the cache-isolation assertion under
-      the distributed/k8s tier (`CAESIUM_TEST_ENGINE=kubernetes`, where tasks
-      execute via `runtime_executor.go`) and assert no `TaskCache` entry is written
-      from a quarantined replay — the local-mode assertion alone would miss the
-      worker bypass. **(8) The replay-safe gate (the core safety test):** a job/step
-      **not** marked replay-safe (per B1's containment contract) is **refused by
-      default** — assert the REST `POST …/replay` returns an error and `caesium run
-      replay` exits non-zero with a clear message; a marked/explicitly-acknowledged
-      job proceeds; and the acknowledgement path still cannot disable quarantine
-      (compose with (4)). Without this an implementation could pass (1)–(7) while
-      still letting replay run a production `deploy`/`delete` as a "what-if."
+      what-if run never becomes lineage-authoritative. **(7) Distributed-worker
+      regression — must actually run the worker:** `CAESIUM_TEST_ENGINE=kubernetes`
+      only selects the k8s task *engine*; the distributed worker
+      (`runtime_executor.go`) starts **only** under `CAESIUM_EXECUTION_MODE=distributed`
+      + `WorkerEnabled` (`cmd/start/start.go:460`), which the normal k8s integration
+      path does **not** set — so an engine-only run exercises the *local* executor
+      and the gate would be hollow. Cover it the reliable way: a **direct
+      worker-path test** in `internal/worker` that drives `runtime_executor.go`'s
+      success/cache-write path with a quarantined `TaskRun` and asserts **no**
+      `TaskCache` entry / lineage emission (deterministic, no cluster needed). If a
+      true end-to-end distributed tier is stood up (the optional **H-4**:
+      `CAESIUM_EXECUTION_MODE=distributed` + worker wiring in the k8s CI path), also
+      run B6 there — but the direct worker test is the load-bearing gate. **(8) The replay-safe gate (the
+      core safety test):** a job/step **not** marked replay-safe (per B1's
+      containment contract) is **refused** — assert the REST `POST …/replay` returns
+      an error and `caesium run replay` exits non-zero with a clear message; a
+      **durably `replaySafe`-marked** job (or the alternate-namespace mode) proceeds;
+      and **any `--force`/acknowledgement field or flag is rejected** (there is no
+      inline bypass — that is the round-10 invariant). Without this an implementation
+      could pass (1)–(7) while still letting replay run a production
+      `deploy`/`delete` as a "what-if."
       **(9) Cross-job ownership (security):** a scoped runner for job A calling
       `POST /v1/jobs/<jobB>/runs/<runA>/replay` (path job ≠ run's owner) must get
       404/403 and create **no** replay run — and the inverse — proving the B4
@@ -722,6 +738,16 @@ behavior must be deliberate, not an accident of the fall-through.
       `internal/lineage/impact.go` + `api/rest/service/lineage/` (alias filtering),
       `internal/auth/` tests, `test/` scoped integration assertion.
       Depends on: H-1.
+- [ ] H-4. **(Optional, nice-to-have)** Stand up a true **distributed** integration
+      tier so B6's worker-isolation assertion can also run end-to-end, not only as
+      the B6(7) direct `internal/worker` unit test. Add a CI/justfile target (or
+      extend the k8s tier) that runs the server with `CAESIUM_EXECUTION_MODE=distributed`
+      + `WorkerEnabled` and the run-owner/worker wiring, so the distributed worker
+      (`runtime_executor.go`) actually executes tasks. The direct worker test in
+      B6(7) is the **required** gate; H-4 is the higher-fidelity end-to-end backstop.
+      Files: `justfile`, `.github/workflows/ci.yml`, `helm/caesium/ci/test-values-k8s.yaml`
+      (set the execution-mode env), `test/` (a distributed-tier replay assertion).
+      Depends on: B5 (the replay surface must exist to exercise it).
 
 ## Navigational / Organizational Improvements
 
@@ -846,11 +872,12 @@ Per-stream conditional gates:
   **B6 additionally** (a) integration-tests that a real notification policy/channel
   receives nothing for a quarantined replay on **both** a lifecycle event and a
   watcher-produced `run_timed_out`/`sla_missed` event, that the impact graph gains
-  no `lineage_datasets` rows, and (b) runs the cache-isolation assertion under the
-  distributed tier
-  (`CAESIUM_TEST_ENGINE=kubernetes`), because the worker (`runtime_executor.go`)
-  writes cache independently — a docker-only assertion would miss the worker
-  bypass.
+  no `lineage_datasets` rows, and (b) covers the worker bypass with a **direct
+  `internal/worker` test** driving `runtime_executor.go` against a quarantined
+  `TaskRun` (asserting no `TaskCache`/lineage write) — because the worker starts
+  only under `CAESIUM_EXECUTION_MODE=distributed`, not the engine-only
+  `CAESIUM_TEST_ENGINE=kubernetes`, so an engine-only e2e run would hit the local
+  executor and miss it.
 - **RBAC + scope (every new route — A2, B4, C2 — plus Stream H):** each new route
   has an `endpointPolicy` entry with a `RequiredRole` assertion; H-1 backfills all
   unpolicied `Protected()` routes; H-2's completeness guard (excluding `/hooks/*`
@@ -888,14 +915,16 @@ The plan is done when **all** of these hold:
    subscriber, the timeout/SLA watcher, and the OpenLineage subscriber all
    suppressed, asserted via real notification policies on both a lifecycle and a
    `run_timed_out`/`sla_missed` event **and** zero new `lineage_datasets` rows),
-   the **replay-safe gate** (an unmarked job is refused by default via REST and CLI
-   — the guard against running a prod `deploy`/`delete` as a what-if), a
+   the **replay-safe gate** (an unmarked job is refused — no `--force`/ack bypass;
+   the guard against running a prod `deploy`/`delete` as a what-if), a
    **cross-job ownership** check (a scoped `POST /v1/jobs/<jobB>/runs/<runA>/replay`
-   is rejected and creates no run), **idempotent creation** (a retried request makes
-   one run, not two), **no observability pollution** (stats/run-list unchanged by a
-   failing quarantined replay), **and** a distributed-tier assertion that no
-   `TaskCache` entry is written from a quarantined run. The design doc's
-   `Quarantined what-if replay` feature-table row reads shipped.
+   is rejected and creates no run), **atomic idempotency** (concurrent identical
+   POSTs make one run, not two), **no observability pollution** (stats/run-list +
+   existing Prometheus counters unchanged by a failing quarantined replay), **and**
+   a **direct worker-path** assertion that no `TaskCache` entry is written from a
+   quarantined run (the worker starts only under `CAESIUM_EXECUTION_MODE=distributed`,
+   so an engine-only e2e run can't cover it). The design doc's `Quarantined what-if
+   replay` feature-table row reads shipped.
 3. **Stream C — `caesium blame`** is a runtime feature scoped to the substrate:
    `GET /v1/jobs/:id/blame` attributes each task/edge to the **commit/snapshot**
    that introduced its current descriptor (keyed by `name+image+command`, not name
