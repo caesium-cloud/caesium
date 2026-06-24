@@ -280,7 +280,14 @@ was process-local — a re-run after a CLI exit minted a fresh key → second re
 added an operator-supplied `--idempotency-key` (printed when auto-generated) +
 B6(10d) CLI-restart test; (ii) `caesium_jobs_active` is a **gauge** that a replay
 could bump *during* the run and reset before the final scrape — B6(11) now scrapes
-*during* the active replay, asserting gauges unchanged throughout. Round 19: that
+*during* the active replay, asserting gauges unchanged throughout. Round 23
+(checklist completeness — making prose/acceptance requirements actionable): (i) the
+reserve-then-crash recovery (in B4's prose + acceptance) was missing from the
+B6(10) test list — added **B6(10e)** failure-injection (reserve+pending → crash
+before dispatch → retry resumes one completed run); (ii) C4 let a snapshot-only
+fallback close the commit-range gate, leaving `blame --from/--to` parsing/filtering
++ the git-sync→`dag_snapshot` path unproven — a **commit-stamped fixture is now
+mandatory** (C4d), resolving round 14's open question. Round 19: that
 descriptor was enumerated **partially** (the same reactive-omission trap as the
 producer audit) — it missed `retries`/timeouts/schemas/cache/trigger-rules/full
 k8s-spec+workload-identity, and the secret-rotation case (replay *re-resolves*
@@ -832,7 +839,14 @@ write, lineage emit, or callback.
       treated as none/empty). **(d) CLI restart (round 22):** re-invoke `caesium run
       replay` a second time with the **same `--idempotency-key`** (simulating an
       operator re-run after a CLI exit/timeout) and assert **no second replay run**
-      is created — the server dedupes on the fingerprint. **(11) No observability
+      is created — the server dedupes on the fingerprint. **(e) Reserve-then-crash
+      recovery (round 23):** commit the fingerprint reservation + materialized
+      `pending` replay, then **inject a failure before dispatch**; retry with the
+      **same** `Idempotency-Key` and assert **exactly one** replay reaches
+      completion — the retry **resumes** the pending reservation (one real task
+      execution), never dedupes to a dead/stuck `pending` run nor starts a second.
+      (B4 calls this out; without an explicit case here an impl could mark B6
+      complete with reserve-then-crash unrecovered.) **(11) No observability
       pollution:** a quarantined replay does not change `GET /v1/stats/summary`
       success/failure counts, the production run-list, the existing
       `caesium_job_runs_total`/`caesium_task_runs_total` counters, **or the
@@ -983,14 +997,24 @@ recorded here, out of scope, not promised.
       `retries`) and **nothing** in `{name,image,command}`; assert **no** new
       `dag_snapshot` is written and blame still points at the prior snapshot **with
       the coverage caveat present** — i.e. the limitation is surfaced honestly, not
-      a silent misattribution.
-      Files: new `test/blame_test.go` (`//go:build integration`).
+      a silent misattribution. Add (d) a **mandatory commit-range case (round 23)**:
+      the CLI exposes `blame --from <commit> --to <commit>`, so a snapshot-only test
+      would leave the operator-facing commit parsing/range filtering + the
+      git-sync→`dag_snapshot` provenance path unproven. Stamp **distinct
+      `GitCommit`s** on the successive applies (via git-sync or a test apply helper
+      — see the harness note), then assert through the CLI/REST that `--from`/`--to`
+      **include and exclude** the expected snapshots (e.g. a range covering only the
+      later commit returns only the new element). A snapshot-id/`created_at` fallback
+      may *supplement* but **must not** close this commit-range gate.
+      Files: new `test/blame_test.go` (`//go:build integration`); a commit-stamping
+      test apply helper if git-sync provenance isn't drivable in the suite.
       Depends on: C3.
-      Note: whether the integration apply path stamps a distinct `GitCommit`
-      (provenance is normally set by git-sync) is an open harness question — see
-      `## Sequencing & Dependencies`. If apply cannot stamp a commit, the assertion
-      falls back to per-snapshot attribution (snapshot id/`created_at`) rather than
-      commit SHA — which is fine, since snapshot identity is the attribution key.
+      Note (resolved from round 14's open question): a commit-stamped fixture is now
+      **required**, not optional — if the integration apply path can't stamp a
+      distinct `GitCommit` via git-sync, add a small test helper that sets
+      `provenance.commit` on apply so `--from`/`--to` are exercised end-to-end. The
+      snapshot-identity attribution still holds internally, but the commit-range
+      *surface* must be proven.
 
 ## Harness Strengthening
 
@@ -1187,13 +1211,15 @@ behavior must be deliberate, not an accident of the fall-through.
   `replay_test.go`, `blame_test.go`) on the same suite type; Go permits methods on
   one suite across files, so they reuse the shared helpers without conflict.
 
-**Open harness question (flag for the wave that picks up C4).** The integration
-apply path may not stamp a distinct `GitCommit` the way git-sync does. If it
-cannot, C4 attributes by snapshot identity/`created_at` rather than commit SHA —
-which is acceptable, since snapshot identity (not the commit) is blame's
-attribution key; the commit is a display detail. No author/ref is involved
-(`DagSnapshot` does not persist them). Confirm the apply path's commit stamping
-before implementing C4 rather than fabricating a provenance-threading item now.
+**Resolved harness item (was an open question; round 23).** The integration apply
+path may not stamp a distinct `GitCommit` the way git-sync does — but C4's
+commit-range case (`blame --from/--to`) is now **mandatory**, so the wave **must**
+make commits stampable: drive git-sync provenance in the suite, or add a small
+test apply helper that sets `provenance.commit`. A snapshot-id/`created_at`
+fallback no longer closes the commit-range gate (it would leave the operator-facing
+commit parsing/range filtering + the git-sync→`dag_snapshot` path unproven).
+Snapshot identity remains blame's internal attribution key; no author/ref is
+involved (`DagSnapshot` does not persist them).
 
 ## Verification (Run For Every PR)
 
@@ -1306,7 +1332,8 @@ The plan is done when **all** of these hold:
    ordinary addition **plus** three regressions — a same-name image/command
    mutation, a delete-and-readd (each attributed to the mutating/re-adding
    snapshot), and a behavior-only `env` change (no new snapshot, caveat surfaced,
-   not misattributed).
+   not misattributed) — **and a mandatory commit-stamped `--from`/`--to` case**
+   proving the operator-facing commit-range path (not a snapshot-only fallback).
 4. **Stream H — RBAC + scope** is closed: H-1 has backfilled `endpointPolicy` for
    **all** previously-unpolicied `Protected()` routes (data-plane + stats/summary +
    system/* + notifications/* + jobdefs/lint+diff) with the roles in the H-1
