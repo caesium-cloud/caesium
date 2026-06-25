@@ -146,13 +146,15 @@ The scope deferral that spawned this plan lives in
 Stream B's full quarantine semantics are fixed by item B1's memo before any
 runtime code (B2+) lands.
 
-## Progress (as of 2026-06-20)
+## Progress (as of 2026-06-25)
 
-No implementation waves have shipped yet. The plan was published as the
-pre-named follow-on to the completed data-plane-memory substrate plan (streams
-A–D, #213–#222); the first wave is the next eligible run of the
-`exec-plan-wave` skill against this doc. Leaf items eligible for Wave 1:
-**A1**, **B1** (design memo), **C1**, **H-1** (independent RBAC backfill).
+**Wave 1 (2026-06-25) shipped the four leaf items** — A1, B1, C1, H-1 — via PRs
+#230–#233 (per-stream detail in the Wave 1 subsection below). The B1 design memo
+(the Stream B hard barrier) has landed, so Stream B's runtime items (B2+) are now
+unblocked. Next eligible (Wave 2): **A2** (run-diff REST endpoint), **B2** + **B7**
+(quarantine plumbing + the `replaySafe` schema), **C2** (blame REST endpoint), and
+**H-2** + **H-3** (RBAC completeness guard + lineage-impact scope) — each gated on
+its Wave 1 predecessor per `## Sequencing & Dependencies`.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -299,15 +301,50 @@ k8s-spec+workload-identity, and the secret-rotation case (replay *re-resolves*
 version/digest** (fail-closed/degrade on mismatch), and B6(8c/8d) test the
 non-obvious fields + secret rotation.
 
+### Wave 1 (2026-06-25)
+
+Four leaf items shipped. Each was codex-implemented in an isolated worktree,
+gated by a multi-lens Opus adversarial review before publish, then verified
+(`just lint` + `just unit-test`) and CI-green (incl. the integration suite)
+before an admin-merge. All gemini + greptile review threads were addressed
+(greptile confidence 5/5 on #231/#232/#233, 4/5 on #230).
+
+- **W1-α — A1 (causal `run diff` read-side core)** — PR #231, merged `a5365bc`.
+  New `internal/run/rundiff.go` (`Store.DiffRuns`) reusing the `whydiff.go`
+  differ; per-task RERAN/WOULD_CACHE_HIT/DEGRADED verdicts + run-level
+  param/trigger deltas + tasks added/removed. Review fixes: degrade (not abort)
+  on a corrupt per-task blob; corrupt-blob + trigger-delta tests; `tasks` emits
+  `[]` not `null`.
+- **W1-β — B1 (quarantined-replay design memo)** — PR #233, merged `6204034`.
+  New `docs/design-quarantined-replay.md` (the Stream B hard barrier) + README
+  index + a guardrail durably enforcing its Status banner. Two Opus review rounds
+  resolved 4 blockers (live-bus/SSE marker carrier, cron-watermark corruption,
+  run-health-metric mis-mapping, unsound Vault identity gate) + a greptile P1
+  (HMAC key-rotation safety). Also corrected the plan's selective-re-run claim to
+  honest v1 wholesale-hash behavior (any `--set` re-runs the full DAG).
+- **W1-γ — C1 (`caesium blame` query)** — PR #232, merged `4986168`. New
+  `internal/blame` package: descriptor-keyed (`{name,image,command}`)
+  most-recent-introduction attribution over `dag_snapshot`, commit-only, with a
+  `coverage: "topology+image+command"` caveat. Review fixes: ctx cancellation in
+  the walk; edge-provenance-drift godoc; ambiguous-match guard in the test
+  helper. Tiebreak-determinism on `CreatedAt` collision documented as a deferred
+  substrate follow-up (no monotonic column on `dag_snapshot`).
+- **W1-δ — H-1 (RBAC policy backfill)** — PR #230, merged `94389cd`. Backfills
+  `endpointPolicy` for every previously-unpolicied `Protected()` route (the whole
+  group, pre-satisfying H-2's completeness guard) + `RequiredRole` assertions.
+  Opus review: clean. (Open follow-up: audit-log entries for the operator-level
+  notification mutations — out of scope for the RBAC backfill, shared with the
+  pre-existing trigger/atom gap.)
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Not started |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Not started |
-| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Not started |
-| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Not started |
-| N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started |
+| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Wave 1: **A1 shipped** (#231); A2–A4 pending |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Wave 1: **B1 memo shipped** (#233), barrier cleared; B2–B7 pending |
+| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Wave 1: **C1 shipped** (#232); C2–C4 pending |
+| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Wave 1: **H-1 shipped** (#230); H-2/H-3 pending, H-4 optional |
+| N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (depends on A4+B6+C4) |
 
 ## Streams
 
