@@ -86,7 +86,7 @@ func (w *Watcher) scanRunningRuns(ctx context.Context, now time.Time) {
 	var runs []models.JobRun
 	if err := w.db.WithContext(ctx).
 		Preload("Job").
-		Where("status = ?", "running").
+		Where("status = ? AND quarantine IS NOT TRUE", "running").
 		Find(&runs).Error; err != nil {
 		log.Error("notification watcher: failed to query running runs", "error", err)
 		return
@@ -210,7 +210,7 @@ func (w *Watcher) scanCompletedBySLA(ctx context.Context, now time.Time) {
 	if err := w.db.WithContext(ctx).
 		Model(&models.JobRun{}).
 		Select("job_id, MAX(completed_at) AS latest_compl").
-		Where("job_id IN ? AND status = ? AND completed_at >= ?",
+		Where("job_id IN ? AND status = ? AND completed_at >= ? AND quarantine IS NOT TRUE",
 			jobIDs, "succeeded", earliestWindow).
 		Group("job_id").
 		Find(&rows).Error; err != nil {

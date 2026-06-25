@@ -52,39 +52,53 @@ func NewKubernetesResolverWithClient(client kubernetes.Interface, namespace stri
 
 // Resolve implements the Resolver interface.
 func (r *KubernetesResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := r.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+// ResolveWithIdentity implements the Resolver interface.
+func (r *KubernetesResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error) {
 	reference, err := Parse(ref)
 	if err != nil {
-		return "", err
+		return "", Identity{}, err
 	}
 	if reference.Provider != providerKubernetes && reference.Provider != "kubernetes" {
-		return "", fmt.Errorf("kubernetes resolver cannot handle provider %q", reference.Provider)
+		return "", Identity{}, fmt.Errorf("kubernetes resolver cannot handle provider %q", reference.Provider)
 	}
 
 	namespace, name, key, err := r.parseReference(reference)
 	if err != nil {
-		return "", err
+		return "", Identity{}, err
 	}
 
 	client, err := r.clientset()
 	if err != nil {
-		return "", err
+		return "", Identity{}, err
 	}
 
 	secret, err := client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
-		return "", fmt.Errorf("load kubernetes secret %s/%s: %w", namespace, name, err)
+		return "", Identity{}, fmt.Errorf("load kubernetes secret %s/%s: %w", namespace, name, err)
 	}
 
 	if secret.Data == nil {
-		return "", fmt.Errorf("kubernetes secret %s/%s has no data", namespace, name)
+		return "", Identity{}, fmt.Errorf("kubernetes secret %s/%s has no data", namespace, name)
 	}
 
 	value, ok := secret.Data[key]
 	if !ok {
-		return "", fmt.Errorf("kubernetes secret %s/%s missing key %s", namespace, name, key)
+		return "", Identity{}, fmt.Errorf("kubernetes secret %s/%s missing key %s", namespace, name, key)
 	}
 
-	return string(value), nil
+	return string(value), Identity{
+		Provider:        providerKubernetes,
+		Ref:             ref,
+		Namespace:       namespace,
+		Name:            name,
+		Key:             key,
+		ResourceVersion: secret.ResourceVersion,
+		Verifiable:      secret.ResourceVersion != "",
+	}, nil
 }
 
 func (r *KubernetesResolver) parseReference(ref *Reference) (namespace, name, key string, err error) {

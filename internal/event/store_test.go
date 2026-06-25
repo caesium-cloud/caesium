@@ -70,6 +70,33 @@ func TestAppendTxMarksEventPendingBusDispatch(t *testing.T) {
 	require.NoError(t, s.db.First(&row, "sequence = ?", evt.Sequence).Error)
 	require.True(t, row.BusDispatchPending)
 	require.Nil(t, row.BusDispatchedAt)
+	require.False(t, row.Quarantine)
+}
+
+func TestListSinceExcludesQuarantineByDefault(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	runID := uuid.New()
+
+	events := []Event{
+		{Type: TypeRunStarted, JobID: uuid.New(), RunID: runID},
+		{Type: TypeTaskStarted, JobID: uuid.New(), RunID: runID, Quarantine: true},
+	}
+	for i := range events {
+		tx := s.db.Begin()
+		require.NoError(t, s.AppendTx(tx, &events[i]))
+		require.NoError(t, tx.Commit().Error)
+	}
+
+	defaultRows, err := s.ListSince(ctx, 0, 10, Filter{RunID: runID})
+	require.NoError(t, err)
+	require.Len(t, defaultRows, 1)
+	require.False(t, defaultRows[0].Quarantine)
+
+	includeRows, err := s.ListSince(ctx, 0, 10, Filter{RunID: runID, IncludeQuarantine: true})
+	require.NoError(t, err)
+	require.Len(t, includeRows, 2)
+	require.True(t, includeRows[1].Quarantine)
 }
 
 func TestPublishAndMarkBusDispatchedPublishesAndMarksEvent(t *testing.T) {

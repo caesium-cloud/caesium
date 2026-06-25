@@ -25,9 +25,9 @@ var notifiableTypes = []event.Type{
 // Subscriber listens to the event bus and dispatches notifications
 // through matching policies and channels.
 type Subscriber struct {
-	bus      event.Bus
-	db       *gorm.DB
-	senders  map[models.ChannelType]Sender
+	bus     event.Bus
+	db      *gorm.DB
+	senders map[models.ChannelType]Sender
 }
 
 // NewSubscriber creates a notification subscriber.
@@ -77,6 +77,15 @@ func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) 
 }
 
 func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
+	if evt.Quarantine {
+		log.Debug("notification: dropping quarantined event",
+			"event_type", string(evt.Type),
+			"run_id", evt.RunID,
+			"task_id", evt.TaskID,
+		)
+		return
+	}
+
 	// Record failure/alert metrics.
 	recordEventMetric(evt)
 
@@ -380,4 +389,3 @@ func ChannelConfigMap(ch models.NotificationChannel) (map[string]interface{}, er
 	}
 	return m, nil
 }
-

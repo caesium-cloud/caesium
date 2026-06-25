@@ -18,13 +18,19 @@ func NewEnvResolver() *EnvResolver {
 }
 
 // Resolve implements the Resolver interface.
-func (r *EnvResolver) Resolve(_ context.Context, ref string) (string, error) {
+func (r *EnvResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := r.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+// ResolveWithIdentity implements the Resolver interface.
+func (r *EnvResolver) ResolveWithIdentity(_ context.Context, ref string) (string, Identity, error) {
 	reference, err := Parse(ref)
 	if err != nil {
-		return "", err
+		return "", Identity{}, err
 	}
 	if reference.Provider != providerEnv {
-		return "", fmt.Errorf("env resolver cannot handle provider %q", reference.Provider)
+		return "", Identity{}, fmt.Errorf("env resolver cannot handle provider %q", reference.Provider)
 	}
 
 	name := reference.Query.Get("name")
@@ -34,13 +40,19 @@ func (r *EnvResolver) Resolve(_ context.Context, ref string) (string, error) {
 
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return "", fmt.Errorf("env secret %q requires a name", ref)
+		return "", Identity{}, fmt.Errorf("env secret %q requires a name", ref)
 	}
 
 	value, ok := os.LookupEnv(name)
 	if !ok {
-		return "", fmt.Errorf("environment variable %s not set", name)
+		return "", Identity{}, fmt.Errorf("environment variable %s not set", name)
 	}
 
-	return value, nil
+	return value, Identity{
+		Provider:           providerEnv,
+		Ref:                ref,
+		Name:               name,
+		Verifiable:         false,
+		UnverifiableReason: "environment variables have no provider version identity",
+	}, nil
 }

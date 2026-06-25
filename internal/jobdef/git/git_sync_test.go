@@ -17,6 +17,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	jobdiff "github.com/caesium-cloud/caesium/internal/jobdef/diff"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/go-git/go-git/v5"
@@ -520,10 +521,15 @@ func (s *GitSyncSuite) commit(repoDir string, files map[string]string) {
 type staticResolver map[string]string
 
 func (sr staticResolver) Resolve(_ context.Context, ref string) (string, error) {
+	value, _, err := sr.ResolveWithIdentity(context.Background(), ref)
+	return value, err
+}
+
+func (sr staticResolver) ResolveWithIdentity(_ context.Context, ref string) (string, secret.Identity, error) {
 	if val, ok := sr[ref]; ok {
-		return val, nil
+		return val, secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 	}
-	return "", fmt.Errorf("secret %q not found", ref)
+	return "", secret.Identity{}, fmt.Errorf("secret %q not found", ref)
 }
 
 func mustGeneratePrivateKey(tb testing.TB) string {

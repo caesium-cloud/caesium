@@ -95,6 +95,10 @@ func newMapper(namespace string, db *gorm.DB) *mapper {
 }
 
 func (m *mapper) mapEvent(evt event.Event) (*RunEvent, error) {
+	if evt.Quarantine {
+		return nil, nil
+	}
+
 	switch evt.Type {
 	case event.TypeRunStarted:
 		return m.mapRunStart(evt)

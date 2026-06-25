@@ -3,30 +3,37 @@ package models
 import (
 	"time"
 
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 )
 
 type JobRun struct {
-	ID            uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
-	JobID         uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
-	Job           Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	BackfillID    *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
-	Backfill      *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
-	TriggerID     uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
-	TriggerType   string         `gorm:"type:text" json:"trigger_type"`
-	TriggerAlias  string         `gorm:"type:text" json:"trigger_alias"`
-	Status        string         `gorm:"type:text;index;not null" json:"status"`
-	Error         string         `json:"error,omitempty"`
-	Params        datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
-	StartedAt     time.Time      `gorm:"not null" json:"started_at"`
-	CompletedAt   *time.Time     `json:"completed_at,omitempty"`
-	CreatedAt     time.Time      `gorm:"not null" json:"created_at"`
-	UpdatedAt     time.Time      `gorm:"not null" json:"updated_at"`
-	Tasks         []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
-	CacheHits     int            `gorm:"-" json:"cache_hits"`
-	ExecutedTasks int            `gorm:"-" json:"executed_tasks"`
-	TotalTasks    int            `gorm:"-" json:"total_tasks"`
+	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
+	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`
+	Job          Job            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	BackfillID   *uuid.UUID     `gorm:"type:uuid;index" json:"backfill_id,omitempty"`
+	Backfill     *Backfill      `gorm:"constraint:OnDelete:SET NULL" json:"-"`
+	TriggerID    uuid.UUID      `gorm:"type:uuid;index" json:"trigger_id"`
+	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
+	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`
+	Status       string         `gorm:"type:text;index;not null" json:"status"`
+	Error        string         `json:"error,omitempty"`
+	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
+	Quarantine   bool           `gorm:"not null;default:false;index" json:"quarantine"`
+	// ReplayFingerprint is the scoped, server-derived idempotency fingerprint
+	// for quarantined replay creation. It is nullable so ordinary runs do not
+	// participate in the unique index.
+	ReplayFingerprint *string        `gorm:"type:text;uniqueIndex:idx_job_runs_replay_fingerprint" json:"replay_fingerprint,omitempty"`
+	ReplayOverrides   datatypes.JSON `gorm:"type:json" json:"replay_overrides,omitempty"`
+	StartedAt         time.Time      `gorm:"not null" json:"started_at"`
+	CompletedAt       *time.Time     `json:"completed_at,omitempty"`
+	CreatedAt         time.Time      `gorm:"not null" json:"created_at"`
+	UpdatedAt         time.Time      `gorm:"not null" json:"updated_at"`
+	Tasks             []*TaskRun     `gorm:"foreignKey:JobRunID;constraint:OnDelete:CASCADE" json:"tasks,omitempty"`
+	CacheHits         int            `gorm:"-" json:"cache_hits"`
+	ExecutedTasks     int            `gorm:"-" json:"executed_tasks"`
+	TotalTasks        int            `gorm:"-" json:"total_tasks"`
 }
 
 type TaskRun struct {
@@ -62,6 +69,7 @@ type TaskRun struct {
 	Result           string         `json:"result,omitempty"`
 	Output           datatypes.JSON `gorm:"type:json" json:"output,omitempty"`
 	BranchSelections datatypes.JSON `gorm:"type:json" json:"branch_selections,omitempty"`
+	Quarantine       bool           `gorm:"not null;default:false;index" json:"quarantine"`
 	CacheHit         bool           `gorm:"not null;default:false" json:"cache_hit"`
 	CacheEnabled     bool           `gorm:"not null;default:false" json:"-"`
 	CacheTTL         time.Duration  `gorm:"not null;default:0" json:"-"`
@@ -100,6 +108,7 @@ type TaskRun struct {
 	SchemaValidation string `gorm:"type:text;not null;default:''" json:"-"`
 	// SchemaViolations stores any output schema violations detected at runtime.
 	SchemaViolations        datatypes.JSON `gorm:"type:json" json:"schema_violations,omitempty"`
+	ExecutionDescriptor     datatypes.JSON `gorm:"type:json" json:"-"`
 	LogText                 string         `gorm:"type:text" json:"-"`
 	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`
 	Error                   string         `json:"error,omitempty"`
@@ -123,6 +132,125 @@ type TaskRun struct {
 	CompletedAt      *time.Time `json:"completed_at,omitempty"`
 	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
+}
+
+const TaskExecutionDescriptorSchemaVersion = 1
+
+// TaskExecutionDescriptor is the immutable, per-TaskRun runtime envelope used
+// by quarantined replay. Secret values are never stored; secret refs are
+// recorded with provider identity metadata. Large object/reference capture is
+// out of scope for descriptor schema v1 and must be added explicitly in a later
+// schema version before replay can depend on those refs.
+type TaskExecutionDescriptor struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	CapturedAt    time.Time `json:"capturedAt"`
+
+	Baseline TaskExecutionBaseline `json:"baseline"`
+	DAG      TaskExecutionDAG      `json:"dag"`
+	Run      TaskExecutionRun      `json:"run"`
+	Runtime  TaskExecutionRuntime  `json:"runtime"`
+	Timing   TaskExecutionTiming   `json:"timing"`
+	Cache    TaskExecutionCache    `json:"cache"`
+	Schema   TaskExecutionSchema   `json:"schema"`
+	Job      TaskExecutionJob      `json:"job"`
+
+	ContainerSpec  container.Spec            `json:"containerSpec"`
+	KubernetesSpec *container.KubernetesSpec `json:"kubernetesSpec,omitempty"`
+	SecretRefs     []TaskExecutionSecretRef  `json:"secretRefs,omitempty"`
+}
+
+type TaskExecutionBaseline struct {
+	JobID               uuid.UUID `json:"jobId"`
+	JobAlias            string    `json:"jobAlias"`
+	TaskID              uuid.UUID `json:"taskId"`
+	TaskName            string    `json:"taskName"`
+	AtomID              uuid.UUID `json:"atomId"`
+	BaselineRunID       uuid.UUID `json:"baselineRunId"`
+	TriggerID           uuid.UUID `json:"triggerId,omitempty"`
+	TriggerType         string    `json:"triggerType,omitempty"`
+	TriggerAlias        string    `json:"triggerAlias,omitempty"`
+	ReplaySafe          bool      `json:"replaySafe"`
+	Quarantine          bool      `json:"quarantine"`
+	ComputedHash        string    `json:"computedHash,omitempty"`
+	EffectiveHash       string    `json:"effectiveHash,omitempty"`
+	HashInputBlobStored bool      `json:"hashInputBlobStored,omitempty"`
+}
+
+type TaskExecutionDAG struct {
+	Predecessors               []TaskExecutionEdgeRef          `json:"predecessors,omitempty"`
+	Successors                 []TaskExecutionEdgeRef          `json:"successors,omitempty"`
+	TriggerRule                string                          `json:"triggerRule,omitempty"`
+	BranchBehavior             string                          `json:"branchBehavior,omitempty"`
+	EdgeMode                   string                          `json:"edgeMode,omitempty"`
+	TaskPosition               int                             `json:"taskPosition"`
+	OutstandingPredecessors    int                             `json:"outstandingPredecessors"`
+	PredecessorOutputs         map[uuid.UUID]map[string]string `json:"predecessorOutputs,omitempty"`
+	PredecessorEffectiveHashes map[uuid.UUID]string            `json:"predecessorEffectiveHashes,omitempty"`
+}
+
+type TaskExecutionEdgeRef struct {
+	TaskID   uuid.UUID `json:"taskId"`
+	TaskName string    `json:"taskName,omitempty"`
+}
+
+type TaskExecutionRun struct {
+	Params map[string]string `json:"params,omitempty"`
+}
+
+type TaskExecutionRuntime struct {
+	Engine              AtomEngine        `json:"engine"`
+	Image               string            `json:"image"`
+	ResolvedImageDigest string            `json:"resolvedImageDigest,omitempty"`
+	Command             []string          `json:"command,omitempty"`
+	CommandRaw          string            `json:"commandRaw,omitempty"`
+	WorkDir             string            `json:"workdir,omitempty"`
+	TaskType            string            `json:"taskType,omitempty"`
+	NodeSelector        map[string]string `json:"nodeSelector,omitempty"`
+	RetryCount          int               `json:"retryCount"`
+	RetryDelay          time.Duration     `json:"retryDelay"`
+	RetryBackoff        bool              `json:"retryBackoff"`
+}
+
+type TaskExecutionTiming struct {
+	TaskTimeout time.Duration `json:"taskTimeout"`
+	RunTimeout  time.Duration `json:"runTimeout"`
+}
+
+type TaskExecutionCache struct {
+	Enabled             bool          `json:"enabled"`
+	TTL                 time.Duration `json:"ttl"`
+	Version             int           `json:"version"`
+	PinDigests          bool          `json:"pinDigests"`
+	DigestTTL           time.Duration `json:"digestTTL"`
+	ComputedHash        string        `json:"computedHash,omitempty"`
+	EffectiveHash       string        `json:"effectiveHash,omitempty"`
+	HashInputBlobStored bool          `json:"hashInputBlobStored,omitempty"`
+}
+
+type TaskExecutionSchema struct {
+	InputSchema  datatypes.JSON `json:"inputSchema,omitempty"`
+	OutputSchema datatypes.JSON `json:"outputSchema,omitempty"`
+	// ValidationMode fully determines violation behavior in descriptor schema v1.
+	ValidationMode string `json:"validationMode,omitempty"`
+}
+
+type TaskExecutionJob struct {
+	MaxParallelTasks int               `json:"maxParallelTasks"`
+	Labels           map[string]string `json:"labels,omitempty"`
+	Annotations      map[string]string `json:"annotations,omitempty"`
+	SLA              datatypes.JSON    `json:"sla,omitempty"`
+	CacheDefaults    datatypes.JSON    `json:"cacheDefaults,omitempty"`
+	TriggerConfig    datatypes.JSONMap `json:"triggerConfig,omitempty"`
+}
+
+type TaskExecutionSecretRef struct {
+	Ref                string            `json:"ref"`
+	EnvKey             string            `json:"envKey,omitempty"`
+	Provider           string            `json:"provider,omitempty"`
+	Identity           datatypes.JSONMap `json:"identity,omitempty"`
+	Verifiable         bool              `json:"verifiable"`
+	UnverifiableReason string            `json:"unverifiableReason,omitempty"`
+	IdentityCapturedAt *time.Time        `json:"identityCapturedAt,omitempty"`
 }
 
 // TaskCache stores cached task results keyed by identity hash.

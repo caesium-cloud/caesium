@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/stretchr/testify/suite"
 )
@@ -61,8 +62,13 @@ type fakeResolver struct {
 }
 
 func (f *fakeResolver) Resolve(_ context.Context, ref string) (string, error) {
+	value, _, err := f.ResolveWithIdentity(context.Background(), ref)
+	return value, err
+}
+
+func (f *fakeResolver) ResolveWithIdentity(_ context.Context, ref string) (string, secret.Identity, error) {
 	if err, ok := f.responses[ref]; ok {
-		return "", err
+		return "", secret.Identity{}, err
 	}
-	return "", nil
+	return "", secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }

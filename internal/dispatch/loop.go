@@ -228,12 +228,14 @@ func (l *DispatchLoop) tick(ctx context.Context) {
 		log.Warn("dispatch loop: peer discovery failed", "error", err)
 		// Distinct from no_peers (empty list = normal bootstrap) so dashboards
 		// can alert on real RPC failures separately.
+		// This run-set-wide control-plane metric has no per-task quarantine context.
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonPeerDiscoveryError).Inc()
 		return
 	}
 	// Normalise peers to {nodeID, baseURL} pairs; include self in the rotation.
 	peers := l.buildPeers(rawPeers)
 	if len(peers) == 0 {
+		// This run-set-wide control-plane metric has no per-task quarantine context.
 		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNoPeers).Inc()
 		return
 	}
@@ -332,7 +334,7 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			l.postOne(ctx, runID, p, req)
+			l.postOne(ctx, runID, p, req, task.Quarantine)
 		}(p, req)
 	}
 	wg.Wait()
@@ -390,14 +392,14 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			l.postOne(ctx, runID, p, req)
+			l.postOne(ctx, runID, p, req, false)
 		}(p, req)
 	}
 	wg.Wait()
 }
 
 // postOne does the actual HTTP call + metric/log accounting for one dispatch.
-func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest) {
+func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req DispatchRequest, quarantined bool) {
 	dispatchURL := p.baseURL + "/internal/dispatch"
 	accepted, postErr := PostDispatch(ctx, dispatchURL, l.cfg.Token, req)
 	if postErr != nil {
@@ -414,7 +416,9 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 			"cooldown", peerBenchCooldown,
 			"error", postErr,
 		)
-		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNetworkError).Inc()
+		if !quarantined {
+			metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonNetworkError).Inc()
+		}
 		return
 	}
 	if !accepted {
@@ -423,10 +427,14 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 			"task_id", req.TaskID,
 			"peer", p.nodeID,
 		)
-		metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonWorkerRejected).Inc()
+		if !quarantined {
+			metrics.DispatchRejectedTotal.WithLabelValues(DispatchReasonWorkerRejected).Inc()
+		}
 		return
 	}
-	metrics.DispatchSentTotal.Inc()
+	if !quarantined {
+		metrics.DispatchSentTotal.Inc()
+	}
 	// In-memory mode: record the dispatch in the owner's RunState so the task
 	// leaves the ready queue and becomes running (re-dispatched on lease expiry).
 	if l.cfg.OwnerManager != nil {

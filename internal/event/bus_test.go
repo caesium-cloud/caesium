@@ -116,6 +116,25 @@ func TestFilterByRunID(t *testing.T) {
 	noRecv(t, ch)
 }
 
+func TestQuarantinedEventsExcludedByDefault(t *testing.T) {
+	b := New()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	defaultCh, err := b.Subscribe(ctx, Filter{})
+	require.NoError(t, err)
+	includeCh, err := b.Subscribe(ctx, Filter{IncludeQuarantine: true})
+	require.NoError(t, err)
+
+	evt := Event{Type: TypeRunStarted, RunID: uuid.New(), Quarantine: true, Timestamp: time.Now()}
+	b.Publish(evt)
+
+	noRecv(t, defaultCh)
+	got := recv(t, includeCh)
+	assert.True(t, got.Quarantine)
+	assert.Equal(t, evt.RunID, got.RunID)
+}
+
 func TestFilterCombination(t *testing.T) {
 	b := New()
 	ctx, cancel := context.WithCancel(context.Background())

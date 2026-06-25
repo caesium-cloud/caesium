@@ -14,11 +14,16 @@ type stubResolver struct {
 }
 
 func (s *stubResolver) Resolve(_ context.Context, ref string) (string, error) {
+	value, _, err := s.ResolveWithIdentity(context.Background(), ref)
+	return value, err
+}
+
+func (s *stubResolver) ResolveWithIdentity(_ context.Context, ref string) (string, Identity, error) {
 	s.ref = ref
 	if s.err != nil {
-		return "", s.err
+		return "", Identity{}, s.err
 	}
-	return s.value, nil
+	return s.value, Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }
 
 type MultiResolverSuite struct {

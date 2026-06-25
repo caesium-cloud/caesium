@@ -78,6 +78,26 @@ func TestMapRunStart(t *testing.T) {
 	}
 }
 
+func TestMapQuarantinedEventReturnsNil(t *testing.T) {
+	m := newMapper("caesium-test", nil)
+	payload := testJobRunPayload()
+
+	olEvent, err := m.mapEvent(event.Event{
+		Type:       event.TypeRunStarted,
+		JobID:      payload.JobID,
+		RunID:      payload.ID,
+		Timestamp:  time.Now().UTC(),
+		Payload:    mustMarshal(t, payload),
+		Quarantine: true,
+	})
+	if err != nil {
+		t.Fatalf("mapEvent: %v", err)
+	}
+	if olEvent != nil {
+		t.Fatalf("quarantined event mapped to OpenLineage event: %+v", olEvent)
+	}
+}
+
 func TestMapRunComplete(t *testing.T) {
 	m := newMapper("caesium-test", nil)
 	payload := testJobRunPayload()

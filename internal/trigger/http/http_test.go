@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -24,6 +25,14 @@ type stubSecretResolver struct {
 
 func (s stubSecretResolver) Resolve(ctx context.Context, ref string) (string, error) {
 	return s.resolve(ctx, ref)
+}
+
+func (s stubSecretResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, secret.Identity, error) {
+	value, err := s.resolve(ctx, ref)
+	if err != nil {
+		return "", secret.Identity{}, err
+	}
+	return value, secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }
 
 func TestNewParsesConfiguration(t *testing.T) {

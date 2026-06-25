@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math/rand/v2"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -118,6 +120,7 @@ type TaskRun struct {
 	Output                  map[string]string         `json:"output,omitempty"`
 	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
 	BranchSelections        []string                  `json:"branch_selections,omitempty"`
+	Quarantine              bool                      `json:"quarantine"`
 	CacheHit                bool                      `json:"cache_hit"`
 	ReplaySafe              bool                      `json:"replay_safe"`
 	CacheOriginRunID        *uuid.UUID                `json:"cache_origin_run_id,omitempty"`
@@ -141,6 +144,7 @@ type JobRun struct {
 	TriggerAlias  string            `json:"trigger_alias,omitempty"`
 	Status        Status            `json:"status"`
 	Params        map[string]string `json:"params,omitempty"`
+	Quarantine    bool              `json:"quarantine"`
 	StartedAt     time.Time         `json:"started_at"`
 	CompletedAt   *time.Time        `json:"completed_at,omitempty"`
 	CreatedAt     time.Time         `json:"created_at"`
@@ -235,7 +239,34 @@ func (s *Store) RecordEventTx(tx *gorm.DB, evt *event.Event) error {
 	if evt == nil || s.eventStore == nil {
 		return nil
 	}
+	if err := s.stampEventQuarantineTx(tx, evt); err != nil {
+		return err
+	}
 	return s.eventStore.AppendTx(tx, evt)
+}
+
+func (s *Store) stampEventQuarantineTx(tx *gorm.DB, evt *event.Event) error {
+	if tx == nil || evt == nil || evt.RunID == uuid.Nil {
+		return nil
+	}
+	// Event quarantine stamping is deliberately fail-closed: a missing marker
+	// aborts the transaction instead of leaking an outward event as production.
+	if evt.TaskID != uuid.Nil {
+		var taskRun models.TaskRun
+		if err := tx.Select("quarantine").
+			Where("job_run_id = ? AND task_id = ?", evt.RunID, evt.TaskID).
+			First(&taskRun).Error; err != nil {
+			return fmt.Errorf("run: stamp event quarantine from task run: %w", err)
+		}
+		evt.Quarantine = taskRun.Quarantine
+		return nil
+	}
+	var jobRun models.JobRun
+	if err := tx.Select("quarantine").First(&jobRun, "id = ?", evt.RunID).Error; err != nil {
+		return fmt.Errorf("run: stamp event quarantine from job run: %w", err)
+	}
+	evt.Quarantine = jobRun.Quarantine
+	return nil
 }
 
 func (s *Store) DB() *gorm.DB {
@@ -309,6 +340,41 @@ func (s *Store) SetTaskHashWithBlob(runID, taskID uuid.UUID, hash, resolvedImage
 		Updates(updates).Error
 }
 
+func (s *Store) UpdateTaskExecutionDescriptorInputs(runID, taskID uuid.UUID, predecessorOutputs map[uuid.UUID]map[string]string, predecessorHashes map[uuid.UUID]string, computedHash, resolvedImageDigest string, hashInputBlob []byte) error {
+	return s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+		desc.CapturedAt = time.Now().UTC()
+		if desc.SchemaVersion == 0 {
+			desc.SchemaVersion = models.TaskExecutionDescriptorSchemaVersion
+		}
+		desc.DAG.PredecessorOutputs = predecessorOutputs
+		desc.DAG.PredecessorEffectiveHashes = predecessorHashes
+		if computedHash != "" {
+			desc.Baseline.ComputedHash = computedHash
+			desc.Cache.ComputedHash = computedHash
+		}
+		if resolvedImageDigest != "" {
+			desc.Runtime.ResolvedImageDigest = resolvedImageDigest
+		}
+		if len(hashInputBlob) > 0 {
+			desc.Baseline.HashInputBlobStored = true
+			desc.Cache.HashInputBlobStored = true
+		}
+	})
+}
+
+func (s *Store) UpdateTaskExecutionDescriptorSecretRefs(runID, taskID uuid.UUID, refs []models.TaskExecutionSecretRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	return s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+		desc.CapturedAt = time.Now().UTC()
+		if desc.SchemaVersion == 0 {
+			desc.SchemaVersion = models.TaskExecutionDescriptorSchemaVersion
+		}
+		desc.SecretRefs = mergeDescriptorSecretRefs(desc.SecretRefs, refs)
+	})
+}
+
 // SetTaskEffectiveHash records the proven-equivalent prior identity a task
 // presents to its downstream consumers when a value-verified short-circuit was
 // proven (design Component 5 / D2). It writes ONLY the effective_hash column;
@@ -322,9 +388,81 @@ func (s *Store) SetTaskEffectiveHash(runID, taskID uuid.UUID, effectiveHash stri
 	if effectiveHash == "" {
 		return nil
 	}
+	if err := s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+		desc.Baseline.EffectiveHash = effectiveHash
+		desc.Cache.EffectiveHash = effectiveHash
+	}); err != nil {
+		log.Warn("failed to update task execution descriptor effective hash", "run_id", runID, "task_id", taskID, "error", err)
+	}
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
 		Update("effective_hash", effectiveHash).Error
+}
+
+func (s *Store) TaskQuarantine(ctx context.Context, runID, taskID uuid.UUID) (bool, error) {
+	var row struct {
+		TaskQuarantine bool
+		RunQuarantine  bool
+	}
+	err := s.db.WithContext(ctx).
+		Table("task_runs").
+		Select("task_runs.quarantine AS task_quarantine, job_runs.quarantine AS run_quarantine").
+		Joins("join job_runs on job_runs.id = task_runs.job_run_id").
+		Where("task_runs.job_run_id = ? AND task_runs.task_id = ?", runID, taskID).
+		Take(&row).Error
+	if err != nil {
+		return false, err
+	}
+	return row.TaskQuarantine || row.RunQuarantine, nil
+}
+
+func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
+	if mutate == nil {
+		return nil
+	}
+
+	var taskRun models.TaskRun
+	if err := s.db.Select("execution_descriptor").Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+		return err
+	}
+	desc := models.TaskExecutionDescriptor{
+		SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
+		CapturedAt:    time.Now().UTC(),
+	}
+	if len(taskRun.ExecutionDescriptor) > 0 {
+		if err := json.Unmarshal(taskRun.ExecutionDescriptor, &desc); err != nil {
+			return fmt.Errorf("run: decode task execution descriptor: %w", err)
+		}
+	}
+	mutate(&desc)
+	encoded, err := json.Marshal(&desc)
+	if err != nil {
+		return fmt.Errorf("run: encode task execution descriptor: %w", err)
+	}
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("execution_descriptor", datatypes.JSON(encoded)).Error
+}
+
+func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef) []models.TaskExecutionSecretRef {
+	if len(existing) == 0 {
+		return append([]models.TaskExecutionSecretRef(nil), updates...)
+	}
+	merged := append([]models.TaskExecutionSecretRef(nil), existing...)
+	index := make(map[string]int, len(merged))
+	for i, ref := range merged {
+		index[ref.EnvKey+"\x00"+ref.Ref] = i
+	}
+	for _, ref := range updates {
+		key := ref.EnvKey + "\x00" + ref.Ref
+		if i, ok := index[key]; ok {
+			merged[i] = ref
+			continue
+		}
+		index[key] = len(merged)
+		merged = append(merged, ref)
+	}
+	return merged
 }
 
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
@@ -369,11 +507,12 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 				}
 
 				evt := event.Event{
-					Type:      event.TypeRunStarted,
-					JobID:     jobID,
-					RunID:     model.ID,
-					Timestamp: time.Now().UTC(),
-					Payload:   payload,
+					Type:       event.TypeRunStarted,
+					JobID:      jobID,
+					RunID:      model.ID,
+					Timestamp:  time.Now().UTC(),
+					Payload:    payload,
+					Quarantine: model.Quarantine,
 				}
 				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 					return err
@@ -415,10 +554,12 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 		}
 	}
 
-	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
-	s.startedMu.Lock()
-	s.startedRuns[model.ID] = struct{}{}
-	s.startedMu.Unlock()
+	if !model.Quarantine {
+		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+		s.startedMu.Lock()
+		s.startedRuns[model.ID] = struct{}{}
+		s.startedMu.Unlock()
+	}
 
 	run, err := s.loadRun(model.ID)
 	return run, err
@@ -467,11 +608,12 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 				}
 
 				evt := event.Event{
-					Type:      event.TypeRunStarted,
-					JobID:     jobID,
-					RunID:     model.ID,
-					Timestamp: time.Now().UTC(),
-					Payload:   payload,
+					Type:       event.TypeRunStarted,
+					JobID:      jobID,
+					RunID:      model.ID,
+					Timestamp:  time.Now().UTC(),
+					Payload:    payload,
+					Quarantine: model.Quarantine,
 				}
 				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 					return err
@@ -507,10 +649,12 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 		}
 	}
 
-	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
-	s.startedMu.Lock()
-	s.startedRuns[model.ID] = struct{}{}
-	s.startedMu.Unlock()
+	if !model.Quarantine {
+		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+		s.startedMu.Lock()
+		s.startedRuns[model.ID] = struct{}{}
+		s.startedMu.Unlock()
+	}
 
 	return s.loadRun(model.ID)
 }
@@ -524,8 +668,8 @@ func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.At
 }
 
 func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error {
-	metrics.TaskRegisterBatchSize.Observe(float64(len(inputs)))
 	if len(inputs) == 0 {
+		metrics.TaskRegisterBatchSize.Observe(0)
 		return nil
 	}
 
@@ -543,14 +687,17 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	}
 
 	var jobRun models.JobRun
-	if err := s.db.Select("job_id").First(&jobRun, "id = ?", runID).Error; err != nil {
+	if err := s.db.Select("id", "job_id", "params", "trigger_id", "trigger_type", "trigger_alias", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
 		return fmt.Errorf("run: job run %s not found: %w", runID, err)
 	}
 	jobID := jobRun.JobID
+	if !jobRun.Quarantine {
+		metrics.TaskRegisterBatchSize.Observe(float64(len(inputs)))
+	}
 
 	var job models.Job
 	jobFound := true
-	if err := s.db.Select("id", "schema_validation", "cache_config", "replay_safe").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := s.db.Select("id", "alias", "labels", "annotations", "schema_validation", "cache_config", "replay_safe", "max_parallel_tasks", "task_timeout", "run_timeout", "sla").First(&job, "id = ?", jobID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -627,6 +774,20 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 				if jobFound && job.ReplaySafe {
 					replaySafe = true
 				}
+				descriptor, descriptorErr := s.initialTaskExecutionDescriptorTx(
+					tx,
+					jobRun,
+					job,
+					jobFound,
+					task,
+					atom,
+					input.OutstandingPredecessors,
+					resolvedCache,
+					replaySafe,
+				)
+				if descriptorErr != nil {
+					return descriptorErr
+				}
 
 				records = append(records, models.TaskRun{
 					ID:                      uuid.New(),
@@ -649,15 +810,18 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					CacheDigestTTL:          resolvedCache.DigestTTL,
 					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
 					SchemaValidation:        schemaValidation,
+					Quarantine:              jobRun.Quarantine,
+					ExecutionDescriptor:     descriptor,
 				})
 
 				if input.OutstandingPredecessors == 0 && s.eventStore != nil {
 					readyEvents = append(readyEvents, event.Event{
-						Type:      event.TypeTaskReady,
-						JobID:     jobID,
-						RunID:     runID,
-						TaskID:    task.ID,
-						Timestamp: time.Now().UTC(),
+						Type:       event.TypeTaskReady,
+						JobID:      jobID,
+						RunID:      runID,
+						TaskID:     task.ID,
+						Timestamp:  time.Now().UTC(),
+						Quarantine: jobRun.Quarantine,
 					})
 				}
 			}
@@ -706,6 +870,7 @@ func executionEventRecord(evt event.Event) models.ExecutionEvent {
 	record := models.ExecutionEvent{
 		Type:               string(evt.Type),
 		Payload:            []byte(evt.Payload),
+		Quarantine:         evt.Quarantine,
 		BusDispatchPending: true,
 		CreatedAt:          evt.Timestamp,
 	}
@@ -722,6 +887,262 @@ func executionEventRecord(evt event.Event) models.ExecutionEvent {
 		record.TaskID = &taskID
 	}
 	return record
+}
+
+func (s *Store) initialTaskExecutionDescriptorTx(
+	tx *gorm.DB,
+	jobRun models.JobRun,
+	job models.Job,
+	jobFound bool,
+	task *models.Task,
+	atom *models.Atom,
+	outstanding int,
+	cacheCfg jobdefschema.CacheConfig,
+	replaySafe bool,
+) (datatypes.JSON, error) {
+	if task == nil || atom == nil {
+		return nil, errors.New("run: descriptor requires task and atom")
+	}
+
+	spec := atom.ContainerSpec()
+	trigger := models.Trigger{}
+	if jobRun.TriggerID != uuid.Nil {
+		_ = tx.Select("id", "type", "alias", "configuration").First(&trigger, "id = ?", jobRun.TriggerID).Error
+	}
+
+	predecessors, successors, edgeMode, err := s.taskDescriptorEdgesTx(tx, *task)
+	if err != nil {
+		return nil, err
+	}
+
+	triggerRule := normalizedTriggerRule(task.TriggerRule)
+	taskType := task.Type
+	if taskType == "" {
+		taskType = "task"
+	}
+
+	runParams := decodeRunParams(jobRun.Params)
+	command := atom.Cmd()
+	if len(command) == 0 && atom.Command != "" {
+		command = []string{atom.Command}
+	}
+
+	jobAlias := ""
+	jobLabels := map[string]string(nil)
+	jobAnnotations := map[string]string(nil)
+	var jobSLA datatypes.JSON
+	var jobCache datatypes.JSON
+	var triggerConfig datatypes.JSONMap
+	maxParallel := 0
+	taskTimeout := time.Duration(0)
+	runTimeout := time.Duration(0)
+	schemaValidation := ""
+	if jobFound {
+		jobAlias = job.Alias
+		jobLabels = jsonmap.ToStringMap(job.Labels)
+		jobAnnotations = jsonmap.ToStringMap(job.Annotations)
+		jobSLA = append(datatypes.JSON(nil), job.SLA...)
+		jobCache = append(datatypes.JSON(nil), job.CacheConfig...)
+		maxParallel = job.MaxParallelTasks
+		taskTimeout = job.TaskTimeout
+		runTimeout = job.RunTimeout
+		schemaValidation = job.SchemaValidation
+	}
+	if strings.TrimSpace(trigger.Configuration) != "" {
+		_ = json.Unmarshal([]byte(trigger.Configuration), &triggerConfig)
+	}
+
+	descriptor := models.TaskExecutionDescriptor{
+		SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
+		CapturedAt:    time.Now().UTC(),
+		Baseline: models.TaskExecutionBaseline{
+			JobID:         jobRun.JobID,
+			JobAlias:      jobAlias,
+			TaskID:        task.ID,
+			TaskName:      task.Name,
+			AtomID:        atom.ID,
+			BaselineRunID: jobRun.ID,
+			TriggerID:     jobRun.TriggerID,
+			TriggerType:   firstNonEmpty(jobRun.TriggerType, string(trigger.Type)),
+			TriggerAlias:  firstNonEmpty(jobRun.TriggerAlias, trigger.Alias),
+			ReplaySafe:    replaySafe,
+			Quarantine:    jobRun.Quarantine,
+		},
+		DAG: models.TaskExecutionDAG{
+			Predecessors:            predecessors,
+			Successors:              successors,
+			TriggerRule:             triggerRule,
+			BranchBehavior:          taskType,
+			EdgeMode:                edgeMode,
+			TaskPosition:            task.Position,
+			OutstandingPredecessors: outstanding,
+		},
+		Run: models.TaskExecutionRun{
+			Params: runParams,
+		},
+		Runtime: models.TaskExecutionRuntime{
+			Engine:       atom.Engine,
+			Image:        atom.Image,
+			Command:      command,
+			CommandRaw:   atom.Command,
+			WorkDir:      spec.WorkDir,
+			TaskType:     taskType,
+			NodeSelector: jsonmap.ToStringMap(task.NodeSelector),
+			RetryCount:   task.Retries,
+			RetryDelay:   task.RetryDelay,
+			RetryBackoff: task.RetryBackoff,
+		},
+		Timing: models.TaskExecutionTiming{
+			TaskTimeout: taskTimeout,
+			RunTimeout:  runTimeout,
+		},
+		Cache: models.TaskExecutionCache{
+			Enabled:    cacheCfg.Enabled,
+			TTL:        cacheCfg.TTL,
+			Version:    cacheCfg.Version,
+			PinDigests: cacheCfg.PinDigests,
+			DigestTTL:  cacheCfg.DigestTTL,
+		},
+		Schema: models.TaskExecutionSchema{
+			InputSchema:    append(datatypes.JSON(nil), task.InputSchema...),
+			OutputSchema:   append(datatypes.JSON(nil), task.OutputSchema...),
+			ValidationMode: schemaValidation,
+		},
+		Job: models.TaskExecutionJob{
+			MaxParallelTasks: maxParallel,
+			Labels:           jobLabels,
+			Annotations:      jobAnnotations,
+			SLA:              jobSLA,
+			CacheDefaults:    jobCache,
+			TriggerConfig:    triggerConfig,
+		},
+		ContainerSpec:  spec,
+		KubernetesSpec: spec.Kubernetes,
+		SecretRefs:     descriptorSecretRefs(spec),
+	}
+
+	encoded, err := json.Marshal(&descriptor)
+	if err != nil {
+		return nil, fmt.Errorf("run: marshal task execution descriptor: %w", err)
+	}
+	return datatypes.JSON(encoded), nil
+}
+
+func (s *Store) taskDescriptorEdgesTx(tx *gorm.DB, task models.Task) ([]models.TaskExecutionEdgeRef, []models.TaskExecutionEdgeRef, string, error) {
+	var edgeCount int64
+	if err := tx.Model(&models.TaskEdge{}).Where("job_id = ?", task.JobID).Count(&edgeCount).Error; err != nil {
+		return nil, nil, "", err
+	}
+	mode := "explicit"
+	if edgeCount == 0 {
+		mode = "implicit_sequential"
+	}
+
+	predecessors := make([]models.TaskExecutionEdgeRef, 0)
+	successors := make([]models.TaskExecutionEdgeRef, 0)
+	if mode == "explicit" {
+		var predEdges []models.TaskEdge
+		if err := tx.Where("to_task_id = ?", task.ID).Find(&predEdges).Error; err != nil {
+			return nil, nil, "", err
+		}
+		for _, edge := range predEdges {
+			ref, err := taskEdgeRefTx(tx, edge.FromTaskID)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			predecessors = append(predecessors, ref)
+		}
+		var succEdges []models.TaskEdge
+		if err := tx.Where("from_task_id = ?", task.ID).Find(&succEdges).Error; err != nil {
+			return nil, nil, "", err
+		}
+		for _, edge := range succEdges {
+			ref, err := taskEdgeRefTx(tx, edge.ToTaskID)
+			if err != nil {
+				return nil, nil, "", err
+			}
+			successors = append(successors, ref)
+		}
+		return predecessors, successors, mode, nil
+	}
+
+	var prev models.Task
+	if err := tx.
+		Where("job_id = ? AND (position < ? OR (position = ? AND created_at < ?))", task.JobID, task.Position, task.Position, task.CreatedAt).
+		Order("position DESC").
+		Order("created_at DESC").
+		First(&prev).Error; err == nil {
+		predecessors = append(predecessors, models.TaskExecutionEdgeRef{TaskID: prev.ID, TaskName: prev.Name})
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, "", err
+	}
+	var next models.Task
+	if err := tx.
+		Where("job_id = ? AND (position > ? OR (position = ? AND created_at > ?))", task.JobID, task.Position, task.Position, task.CreatedAt).
+		Order("position ASC").
+		Order("created_at ASC").
+		First(&next).Error; err == nil {
+		successors = append(successors, models.TaskExecutionEdgeRef{TaskID: next.ID, TaskName: next.Name})
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil, "", err
+	}
+	return predecessors, successors, mode, nil
+}
+
+func taskEdgeRefTx(tx *gorm.DB, taskID uuid.UUID) (models.TaskExecutionEdgeRef, error) {
+	var task models.Task
+	if err := tx.Select("id", "name").First(&task, "id = ?", taskID).Error; err != nil {
+		return models.TaskExecutionEdgeRef{}, err
+	}
+	return models.TaskExecutionEdgeRef{TaskID: task.ID, TaskName: task.Name}, nil
+}
+
+func decodeRunParams(raw datatypes.JSON) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var params map[string]string
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil
+	}
+	return params
+}
+
+func descriptorSecretRefs(spec container.Spec) []models.TaskExecutionSecretRef {
+	if len(spec.Env) == 0 {
+		return nil
+	}
+	refs := make([]models.TaskExecutionSecretRef, 0)
+	keys := make([]string, 0, len(spec.Env))
+	for key := range spec.Env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		ref := strings.TrimSpace(spec.Env[key])
+		if !strings.HasPrefix(ref, "secret://") {
+			continue
+		}
+		refs = append(refs, models.TaskExecutionSecretRef{
+			Ref:        ref,
+			EnvKey:     key,
+			Verifiable: false,
+			// The pre-exec descriptor only knows the secret reference; the
+			// provider identity is finalized after executeAtom/executeTask
+			// resolves the value at container-create time.
+			UnverifiableReason: "secret identity not resolved yet",
+		})
+	}
+	return refs
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
@@ -1332,6 +1753,9 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 		TaskID:    taskID,
 		Timestamp: time.Now().UTC(),
 	}
+	if err := s.stampEventQuarantineTx(tx, &evt); err != nil {
+		return err
+	}
 	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 		return err
 	}
@@ -1367,6 +1791,11 @@ func (s *Store) batchDecrementPredecessorsTx(tx *gorm.DB, runID uuid.UUID, succe
 func (s *Store) appendBatchEventsTx(tx *gorm.DB, evts []*event.Event, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
 	if s.eventStore == nil || len(evts) == 0 {
 		return nil
+	}
+	for _, evt := range evts {
+		if err := s.stampEventQuarantineTx(tx, evt); err != nil {
+			return err
+		}
 	}
 	if err := s.eventStore.AppendBatchTx(tx, evts); err != nil {
 		return err
@@ -1530,12 +1959,14 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			if err := taskQuery.First(&taskRun).Error; err == nil {
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
-					jobID := jobRun.JobID.String()
-					engine := string(taskRun.Engine)
-					metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
-					if taskRun.StartedAt != nil {
-						duration := now.Sub(*taskRun.StartedAt).Seconds()
-						metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).Observe(duration)
+					if !taskRun.Quarantine && !jobRun.Quarantine {
+						jobID := jobRun.JobID.String()
+						engine := string(taskRun.Engine)
+						metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
+						if taskRun.StartedAt != nil {
+							duration := now.Sub(*taskRun.StartedAt).Seconds()
+							metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).Observe(duration)
+						}
 					}
 				}
 			} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1802,12 +2233,14 @@ func (s *Store) CompleteTaskOwner(
 			if err := tq.First(&taskRun).Error; err == nil {
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
-					jobID := jobRun.JobID.String()
-					engine := string(taskRun.Engine)
-					metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
-					if taskRun.StartedAt != nil {
-						metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).
-							Observe(now.Sub(*taskRun.StartedAt).Seconds())
+					if !taskRun.Quarantine && !jobRun.Quarantine {
+						jobID := jobRun.JobID.String()
+						engine := string(taskRun.Engine)
+						metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(status)).Inc()
+						if taskRun.StartedAt != nil {
+							metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(status)).
+								Observe(now.Sub(*taskRun.StartedAt).Seconds())
+						}
 					}
 				}
 			} else if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -2051,12 +2484,14 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 	if err := taskQuery.First(&taskRun).Error; err == nil {
 		var jobRun models.JobRun
 		if err := s.db.First(&jobRun, "id = ?", runID).Error; err == nil {
-			jobID := jobRun.JobID.String()
-			engine := string(taskRun.Engine)
-			metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusFailed)).Inc()
-			if taskRun.StartedAt != nil {
-				duration := now.Sub(*taskRun.StartedAt).Seconds()
-				metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusFailed)).Observe(duration)
+			if !taskRun.Quarantine && !jobRun.Quarantine {
+				jobID := jobRun.JobID.String()
+				engine := string(taskRun.Engine)
+				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusFailed)).Inc()
+				if taskRun.StartedAt != nil {
+					duration := now.Sub(*taskRun.StartedAt).Seconds()
+					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusFailed)).Observe(duration)
+				}
 			}
 		}
 	} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
@@ -2266,12 +2701,14 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		pendingEvents []event.Event
 		jobID         uuid.UUID
 		startedAt     time.Time
+		quarantine    bool
 	)
 	err := withStoreBusyRetry(func() error {
 		attemptEvents := make([]event.Event, 0, 2)
 		var (
-			attemptJobID     uuid.UUID
-			attemptStartedAt time.Time
+			attemptJobID      uuid.UUID
+			attemptStartedAt  time.Time
+			attemptQuarantine bool
 		)
 		txErr := s.db.Transaction(func(tx *gorm.DB) error {
 			// Idempotency guard: skip if the run is already terminal.  Run-owner
@@ -2296,11 +2733,12 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			// Read jobID + startedAt inside the same retried transaction so the
 			// post-commit metrics/gauge bookkeeping always has them.
 			var jr models.JobRun
-			if err := tx.Select("job_id", "started_at").First(&jr, "id = ?", runID).Error; err != nil {
+			if err := tx.Select("job_id", "started_at", "quarantine").First(&jr, "id = ?", runID).Error; err != nil {
 				return err
 			}
 			attemptJobID = jr.JobID
 			attemptStartedAt = jr.StartedAt
+			attemptQuarantine = jr.Quarantine
 
 			if s.eventStore != nil {
 				loaded, loadErr := s.loadRunWithDB(tx, runID)
@@ -2318,11 +2756,12 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 				}
 
 				completionEvent := event.Event{
-					Type:      eventType,
-					JobID:     loaded.JobID,
-					RunID:     runID,
-					Timestamp: now,
-					Payload:   payload,
+					Type:       eventType,
+					JobID:      loaded.JobID,
+					RunID:      runID,
+					Timestamp:  now,
+					Payload:    payload,
+					Quarantine: loaded.Quarantine || attemptQuarantine,
 				}
 				if err := s.eventStore.AppendTx(tx, &completionEvent); err != nil {
 					return err
@@ -2330,11 +2769,12 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 				attemptEvents = append(attemptEvents, completionEvent)
 
 				terminalEvent := event.Event{
-					Type:      event.TypeRunTerminal,
-					JobID:     loaded.JobID,
-					RunID:     runID,
-					Timestamp: now,
-					Payload:   payload,
+					Type:       event.TypeRunTerminal,
+					JobID:      loaded.JobID,
+					RunID:      runID,
+					Timestamp:  now,
+					Payload:    payload,
+					Quarantine: loaded.Quarantine || attemptQuarantine,
 				}
 				if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
 					return err
@@ -2348,6 +2788,7 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			pendingEvents = attemptEvents
 			jobID = attemptJobID
 			startedAt = attemptStartedAt
+			quarantine = attemptQuarantine
 		}
 		return txErr
 	})
@@ -2364,7 +2805,6 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	// completion write has committed, so retries don't double-count. jobID and
 	// startedAt are guaranteed populated because the transaction succeeded.
 	jobIDStr := jobID.String()
-	metrics.JobRunsTotal.WithLabelValues(jobIDStr, string(status)).Inc()
 	// Only decrement the active gauge if this process incremented it.
 	s.startedMu.Lock()
 	_, started := s.startedRuns[runID]
@@ -2372,10 +2812,13 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 		delete(s.startedRuns, runID)
 	}
 	s.startedMu.Unlock()
-	if started {
-		metrics.JobsActive.WithLabelValues(jobIDStr).Dec()
+	if !quarantine {
+		metrics.JobRunsTotal.WithLabelValues(jobIDStr, string(status)).Inc()
+		if started {
+			metrics.JobsActive.WithLabelValues(jobIDStr).Dec()
+		}
+		metrics.JobRunDurationSeconds.WithLabelValues(jobIDStr, string(status)).Observe(now.Sub(startedAt).Seconds())
 	}
-	metrics.JobRunDurationSeconds.WithLabelValues(jobIDStr, string(status)).Observe(now.Sub(startedAt).Seconds())
 
 	s.publishEvents(pendingEvents...)
 	return nil
@@ -2402,7 +2845,7 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 
 func (s *Store) FindRunning(jobID uuid.UUID) (*JobRun, error) {
 	var model models.JobRun
-	err := s.db.Where("job_id = ? AND status = ?", jobID, string(StatusRunning)).
+	err := s.db.Where("job_id = ? AND status = ? AND quarantine IS NOT TRUE", jobID, string(StatusRunning)).
 		Order("started_at DESC").
 		First(&model).Error
 	if err != nil {
@@ -2427,7 +2870,7 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 		Select("job_runs.*, jobs.alias as job_alias, triggers.type as trigger_type, triggers.alias as trigger_alias").
 		Joins("join jobs on jobs.id = job_runs.job_id").
 		Joins("left join triggers on triggers.id = job_runs.trigger_id").
-		Where("job_runs.job_id = ?", jobID).
+		Where("job_runs.job_id = ? AND job_runs.quarantine IS NOT TRUE", jobID).
 		Order("job_runs.started_at ASC").
 		Preload("Tasks").
 		Scan(&results).Error
@@ -2453,7 +2896,7 @@ func (s *Store) List(jobID uuid.UUID) ([]*JobRun, error) {
 
 func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 	var model models.JobRun
-	err := s.db.Where("job_id = ?", jobID).
+	err := s.db.Where("job_id = ? AND quarantine IS NOT TRUE", jobID).
 		Order("started_at DESC").
 		First(&model).Error
 	if err != nil {
@@ -2468,7 +2911,7 @@ func (s *Store) Latest(jobID uuid.UUID) (*JobRun, error) {
 func (s *Store) LatestSuccessfulCronRun(jobID uuid.UUID) (*JobRun, error) {
 	var model models.JobRun
 	err := s.db.
-		Where("job_id = ? AND status = ? AND trigger_type = ?", jobID, string(StatusSucceeded), "cron").
+		Where("job_id = ? AND status = ? AND trigger_type = ? AND quarantine IS NOT TRUE", jobID, string(StatusSucceeded), "cron").
 		Order("started_at DESC").
 		First(&model).Error
 	if err != nil {
@@ -2535,6 +2978,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 		JobID:      model.JobID,
 		BackfillID: model.BackfillID,
 		Status:     Status(model.Status),
+		Quarantine: model.Quarantine,
 		StartedAt:  model.StartedAt,
 		CreatedAt:  model.CreatedAt,
 		UpdatedAt:  model.UpdatedAt,
@@ -2604,6 +3048,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		CreatedAt:               model.CreatedAt,
 		UpdatedAt:               model.UpdatedAt,
 		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
+		Quarantine:              model.Quarantine,
 		ReplaySafe:              model.ReplaySafe,
 	}
 
@@ -2731,12 +3176,13 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 	}
 
 	evt := event.Event{
-		Type:      eventType,
-		JobID:     jobRun.JobID,
-		RunID:     runID,
-		TaskID:    taskID,
-		Timestamp: time.Now().UTC(),
-		Payload:   payload,
+		Type:       eventType,
+		JobID:      jobRun.JobID,
+		RunID:      runID,
+		TaskID:     taskID,
+		Timestamp:  time.Now().UTC(),
+		Payload:    payload,
+		Quarantine: taskRun.Quarantine || jobRun.Quarantine,
 	}
 	if s.eventStore != nil {
 		if err := s.eventStore.AppendTx(db, &evt); err != nil {
@@ -2934,6 +3380,52 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
+// PredecessorDescriptorInputs returns predecessor outputs and effective hashes
+// keyed by predecessor task id for immutable execution-descriptor capture.
+func (s *Store) PredecessorDescriptorInputs(runID, taskID uuid.UUID) (map[uuid.UUID]map[string]string, map[uuid.UUID]string, error) {
+	var edges []models.TaskEdge
+	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		return nil, nil, err
+	}
+	if len(edges) == 0 {
+		return nil, nil, nil
+	}
+
+	predTaskIDs := make([]uuid.UUID, len(edges))
+	for i, edge := range edges {
+		predTaskIDs[i] = edge.FromTaskID
+	}
+
+	var taskRuns []models.TaskRun
+	if err := s.db.
+		Select("task_id", "output", "hash", "effective_hash", "status").
+		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
+		Find(&taskRuns).Error; err != nil {
+		return nil, nil, err
+	}
+
+	outputs := make(map[uuid.UUID]map[string]string, len(taskRuns))
+	hashes := make(map[uuid.UUID]string, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		if len(taskRun.Output) > 0 {
+			var output map[string]string
+			if err := json.Unmarshal(taskRun.Output, &output); err == nil && len(output) > 0 {
+				outputs[taskRun.TaskID] = output
+			}
+		}
+		if taskRun.Status == string(TaskStatusSucceeded) || taskRun.Status == string(TaskStatusCached) {
+			hash := taskRun.Hash
+			if taskRun.EffectiveHash != "" {
+				hash = taskRun.EffectiveHash
+			}
+			if hash != "" {
+				hashes[taskRun.TaskID] = hash
+			}
+		}
+	}
+	return outputs, hashes, nil
+}
+
 // PredecessorHashes returns the execution hashes recorded on predecessor task
 // runs that completed successfully in the current run. This keeps distributed
 // cache hashing aligned with local execution, including transitive cache hits.
@@ -3006,6 +3498,7 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 	pendingEvents := make([]event.Event, 0, 2)
 	var jobID uuid.UUID
+	var quarantine bool
 	var counts dbWriteCounts
 
 	err := s.db.Transaction(func(tx *gorm.DB) error {
@@ -3018,6 +3511,7 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 			return fmt.Errorf("can only retry runs in terminal state, current: %s", jobRun.Status)
 		}
 		jobID = jobRun.JobID
+		quarantine = jobRun.Quarantine
 
 		// 2. Reset the job run status to running.
 		if err := tx.Model(&jobRun).Updates(map[string]interface{}{
@@ -3112,11 +3606,12 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 				return marshalErr
 			}
 			evt := event.Event{
-				Type:      event.TypeRunRetried,
-				JobID:     jobRun.JobID,
-				RunID:     runID,
-				Timestamp: time.Now().UTC(),
-				Payload:   payload,
+				Type:       event.TypeRunRetried,
+				JobID:      jobRun.JobID,
+				RunID:      runID,
+				Timestamp:  time.Now().UTC(),
+				Payload:    payload,
+				Quarantine: jobRun.Quarantine,
 			}
 			if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 				return err
@@ -3133,11 +3628,13 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 	counts.commit()
 	s.publishEvents(pendingEvents...)
 
-	// Track this run in the active set so Complete() will decrement the gauge.
-	s.startedMu.Lock()
-	s.startedRuns[runID] = struct{}{}
-	s.startedMu.Unlock()
-	metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	if !quarantine {
+		// Track this run in the active set so Complete() will decrement the gauge.
+		s.startedMu.Lock()
+		s.startedRuns[runID] = struct{}{}
+		s.startedMu.Unlock()
+		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	}
 
 	return s.loadRun(runID)
 }

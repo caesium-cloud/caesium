@@ -1,14 +1,19 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
+	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/mattn/go-sqlite3"
@@ -16,6 +21,308 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+type recordingLineageTransport struct {
+	mu     sync.Mutex
+	events []lineage.RunEvent
+}
+
+func (t *recordingLineageTransport) Emit(_ context.Context, evt lineage.RunEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.events = append(t.events, evt)
+	return nil
+}
+
+func (t *recordingLineageTransport) Close() error {
+	return nil
+}
+
+func (t *recordingLineageTransport) Count() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.events)
+}
+
+func TestStartQuarantinedRunStartedEventCarriesMarker(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	bus := event.New()
+	store.SetBus(bus)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	published, err := bus.Subscribe(ctx, event.Filter{
+		Types:             []event.Type{event.TypeRunStarted},
+		IncludeQuarantine: true,
+	})
+	require.NoError(t, err)
+
+	transport := &recordingLineageTransport{}
+	lineageReady := make(chan struct{})
+	lineageDone := make(chan error, 1)
+	go func() {
+		lineageDone <- lineage.NewSubscriber(bus, transport, "caesium-test", db).StartWithReady(ctx, lineageReady)
+	}()
+	select {
+	case <-lineageReady:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for lineage subscriber")
+	}
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-lineageDone:
+			require.NoError(t, err)
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for lineage subscriber shutdown")
+		}
+	})
+
+	const callbackName = "test:quarantine_job_run_before_create"
+	require.NoError(t, db.Callback().Create().Before("gorm:create").Register(callbackName, func(tx *gorm.DB) {
+		if tx.Statement.Schema != nil && tx.Statement.Schema.Table == "job_runs" {
+			tx.Statement.SetColumn("Quarantine", true)
+		}
+	}))
+	t.Cleanup(func() {
+		_ = db.Callback().Create().Remove(callbackName)
+	})
+
+	runRecord, err := store.Start(uuid.New(), nil)
+	require.NoError(t, err)
+	require.True(t, runRecord.Quarantine)
+
+	var persisted models.ExecutionEvent
+	require.NoError(t, db.First(&persisted, "run_id = ? AND type = ?", runRecord.ID, string(event.TypeRunStarted)).Error)
+	require.True(t, persisted.Quarantine)
+
+	select {
+	case got := <-published:
+		require.Equal(t, event.TypeRunStarted, got.Type)
+		require.Equal(t, runRecord.ID, got.RunID)
+		require.True(t, got.Quarantine)
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for published run_started event")
+	}
+
+	require.Equal(t, 0, transport.Count(), "lineage transport must not receive quarantined run_started")
+}
+
+func TestTaskExecutionDescriptorCaptureCoversContainerSpecFields(t *testing.T) {
+	descriptorType := reflect.TypeOf(models.TaskExecutionDescriptor{})
+
+	containerField, ok := descriptorType.FieldByName("ContainerSpec")
+	require.True(t, ok, "descriptor must carry the runtime container spec")
+	require.Equal(t, reflect.TypeOf(container.Spec{}), containerField.Type)
+
+	kubernetesField, ok := descriptorType.FieldByName("KubernetesSpec")
+	require.True(t, ok, "descriptor must carry the Kubernetes workload identity spec")
+	require.Equal(t, reflect.TypeOf((*container.KubernetesSpec)(nil)), kubernetesField.Type)
+
+	// These explicit lists intentionally force a descriptor review when either
+	// container carrier grows, even though v1 currently stores the structs whole.
+	require.ElementsMatch(t,
+		[]string{"Env", "WorkDir", "Mounts", "ResolvedVolumeMounts", "Kubernetes"},
+		exportedFieldNames(reflect.TypeOf(container.Spec{})),
+	)
+	require.ElementsMatch(t,
+		[]string{"ServiceAccountName", "PodAnnotations", "AutomountServiceAccountToken", "QueueName"},
+		exportedFieldNames(reflect.TypeOf(container.KubernetesSpec{})),
+	)
+}
+
+func exportedFieldNames(rt reflect.Type) []string {
+	names := make([]string, 0, rt.NumField())
+	for i := 0; i < rt.NumField(); i++ {
+		field := rt.Field(i)
+		if field.IsExported() {
+			names = append(names, field.Name)
+		}
+	}
+	return names
+}
+
+func TestRegisterTaskPersistsInitialExecutionDescriptorEnvelope(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	now := time.Now().UTC()
+
+	trigger := &models.Trigger{
+		ID:            uuid.New(),
+		Alias:         "descriptor-trigger",
+		Type:          models.TriggerTypeCron,
+		Configuration: `{"cron":"0 * * * *","timezone":"UTC"}`,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{
+		ID:               uuid.New(),
+		Alias:            "descriptor-job",
+		TriggerID:        trigger.ID,
+		Labels:           datatypes.JSONMap{"team": "data"},
+		Annotations:      datatypes.JSONMap{"owner": "etl"},
+		MaxParallelTasks: 4,
+		TaskTimeout:      2 * time.Minute,
+		RunTimeout:       10 * time.Minute,
+		SLA:              datatypes.JSON(`{"completedBy":"09:00"}`),
+		SchemaValidation: jobdef.SchemaValidationFail,
+		ReplaySafe:       true,
+		CacheConfig:      datatypes.JSON(`{"ttl":"1h","version":3,"pinDigests":true,"digestTTL":"5m"}`),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+	require.NoError(t, db.Create(job).Error)
+
+	runRecord, err := store.Start(job.ID, &trigger.ID, map[string]string{"logical_date": "2026-06-25"})
+	require.NoError(t, err)
+
+	automount := false
+	spec := container.Spec{
+		Env: map[string]string{
+			"API_TOKEN": "secret://env/API_TOKEN",
+			"MODE":      "batch",
+		},
+		WorkDir: "/workspace",
+		Mounts: []container.Mount{{
+			Type:     container.MountTypeBind,
+			Source:   "/data/in",
+			Target:   "/input",
+			ReadOnly: true,
+		}},
+		ResolvedVolumeMounts: []container.VolumeMount{{
+			Name:     "scratch",
+			Type:     container.VolumeMountTypePVC,
+			Source:   "scratch-pvc",
+			Target:   "/scratch",
+			ReadOnly: false,
+			SubPath:  "runs",
+		}},
+		Kubernetes: &container.KubernetesSpec{
+			ServiceAccountName:           "replay-runner",
+			PodAnnotations:               map[string]string{"sidecar.istio.io/inject": "false"},
+			AutomountServiceAccountToken: &automount,
+			QueueName:                    "etl-high",
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineKubernetes,
+		Image:     "busybox:1.36.1",
+		Command:   `["sh","-c","echo hi"]`,
+		Spec:      specJSON,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	task := &models.Task{
+		ID:           uuid.New(),
+		JobID:        job.ID,
+		AtomID:       atom.ID,
+		Name:         "load",
+		Position:     7,
+		Type:         "task",
+		NodeSelector: datatypes.JSONMap{"disk": "ssd"},
+		Retries:      2,
+		RetryDelay:   30 * time.Second,
+		RetryBackoff: true,
+		InputSchema:  datatypes.JSON(`{"extract":{"type":"object","required":["path"]}}`),
+		OutputSchema: datatypes.JSON(`{"type":"object","required":["rows"]}`),
+		ReplaySafe:   true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, db.Create(task).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 1))
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).Error)
+
+	var descriptor models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(persisted.ExecutionDescriptor, &descriptor))
+
+	require.Equal(t, models.TaskExecutionDescriptorSchemaVersion, descriptor.SchemaVersion)
+	require.Equal(t, job.ID, descriptor.Baseline.JobID)
+	require.Equal(t, job.Alias, descriptor.Baseline.JobAlias)
+	require.Equal(t, task.ID, descriptor.Baseline.TaskID)
+	require.Equal(t, task.Name, descriptor.Baseline.TaskName)
+	require.Equal(t, atom.ID, descriptor.Baseline.AtomID)
+	require.Equal(t, runRecord.ID, descriptor.Baseline.BaselineRunID)
+	require.Equal(t, trigger.ID, descriptor.Baseline.TriggerID)
+	require.Equal(t, string(models.TriggerTypeCron), descriptor.Baseline.TriggerType)
+	require.Equal(t, trigger.Alias, descriptor.Baseline.TriggerAlias)
+	require.True(t, descriptor.Baseline.ReplaySafe)
+	require.False(t, descriptor.Baseline.Quarantine)
+	require.Equal(t, map[string]string{"logical_date": "2026-06-25"}, descriptor.Run.Params)
+
+	require.Equal(t, models.AtomEngineKubernetes, descriptor.Runtime.Engine)
+	require.Equal(t, atom.Image, descriptor.Runtime.Image)
+	require.Equal(t, []string{"sh", "-c", "echo hi"}, descriptor.Runtime.Command)
+	require.Equal(t, atom.Command, descriptor.Runtime.CommandRaw)
+	require.Equal(t, "/workspace", descriptor.Runtime.WorkDir)
+	require.Equal(t, "task", descriptor.Runtime.TaskType)
+	require.Equal(t, map[string]string{"disk": "ssd"}, descriptor.Runtime.NodeSelector)
+	require.Equal(t, 2, descriptor.Runtime.RetryCount)
+	require.Equal(t, 30*time.Second, descriptor.Runtime.RetryDelay)
+	require.True(t, descriptor.Runtime.RetryBackoff)
+
+	require.Equal(t, 2*time.Minute, descriptor.Timing.TaskTimeout)
+	require.Equal(t, 10*time.Minute, descriptor.Timing.RunTimeout)
+	require.True(t, descriptor.Cache.Enabled)
+	require.Equal(t, time.Hour, descriptor.Cache.TTL)
+	require.Equal(t, 3, descriptor.Cache.Version)
+	require.True(t, descriptor.Cache.PinDigests)
+	require.Equal(t, 5*time.Minute, descriptor.Cache.DigestTTL)
+
+	require.JSONEq(t, string(task.InputSchema), string(descriptor.Schema.InputSchema))
+	require.JSONEq(t, string(task.OutputSchema), string(descriptor.Schema.OutputSchema))
+	require.Equal(t, jobdef.SchemaValidationFail, descriptor.Schema.ValidationMode)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(persisted.ExecutionDescriptor, &raw))
+	schemaRaw, ok := raw["schema"].(map[string]any)
+	require.True(t, ok)
+	require.NotContains(t, schemaRaw, "violationBehavior")
+
+	require.Equal(t, 4, descriptor.Job.MaxParallelTasks)
+	require.Equal(t, map[string]string{"team": "data"}, descriptor.Job.Labels)
+	require.Equal(t, map[string]string{"owner": "etl"}, descriptor.Job.Annotations)
+	require.JSONEq(t, string(job.SLA), string(descriptor.Job.SLA))
+	require.JSONEq(t, string(job.CacheConfig), string(descriptor.Job.CacheDefaults))
+	require.Equal(t, "UTC", descriptor.Job.TriggerConfig["timezone"])
+
+	require.Equal(t, spec.Env, descriptor.ContainerSpec.Env)
+	require.Equal(t, spec.WorkDir, descriptor.ContainerSpec.WorkDir)
+	require.Equal(t, spec.Mounts, descriptor.ContainerSpec.Mounts)
+	require.Equal(t, spec.ResolvedVolumeMounts, descriptor.ContainerSpec.ResolvedVolumeMounts)
+	require.NotNil(t, descriptor.KubernetesSpec)
+	require.Equal(t, "replay-runner", descriptor.KubernetesSpec.ServiceAccountName)
+	require.Equal(t, map[string]string{"sidecar.istio.io/inject": "false"}, descriptor.KubernetesSpec.PodAnnotations)
+	require.NotNil(t, descriptor.KubernetesSpec.AutomountServiceAccountToken)
+	require.False(t, *descriptor.KubernetesSpec.AutomountServiceAccountToken)
+	require.Equal(t, "etl-high", descriptor.KubernetesSpec.QueueName)
+
+	require.Len(t, descriptor.SecretRefs, 1)
+	require.Equal(t, "API_TOKEN", descriptor.SecretRefs[0].EnvKey)
+	require.Equal(t, "secret://env/API_TOKEN", descriptor.SecretRefs[0].Ref)
+	require.False(t, descriptor.SecretRefs[0].Verifiable)
+	require.Contains(t, descriptor.SecretRefs[0].UnverifiableReason, "not resolved yet")
+}
 
 func TestStorePersistsRunState(t *testing.T) {
 	db := testutil.OpenTestDB(t)

@@ -2,6 +2,7 @@ package event
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -9,20 +10,29 @@ import (
 	"sync"
 	"time"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
+	"gorm.io/gorm"
 )
 
 type Controller struct {
 	bus       event.Bus
 	storeOnce sync.Once
 	store     *event.Store
+	authSvc   *iauth.Service
 }
 
 func New(bus event.Bus) *Controller {
 	return &Controller{bus: bus}
+}
+
+func (ctrl *Controller) WithAuthService(svc *iauth.Service) *Controller {
+	ctrl.authSvc = svc
+	return ctrl
 }
 
 func (ctrl *Controller) persistentStore() *event.Store {
@@ -35,7 +45,7 @@ func (ctrl *Controller) persistentStore() *event.Store {
 func (ctrl *Controller) Stream(c *echo.Context) error {
 	ctx := c.Request().Context()
 
-	filter, err := buildFilter(c)
+	filter, err := ctrl.buildFilter(c)
 	if err != nil {
 		return err
 	}
@@ -135,7 +145,7 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 	}
 }
 
-func buildFilter(c *echo.Context) (event.Filter, error) {
+func (ctrl *Controller) buildFilter(c *echo.Context) (event.Filter, error) {
 	filter := event.Filter{}
 
 	if jobIDStr := c.QueryParam("job_id"); jobIDStr != "" {
@@ -152,6 +162,10 @@ func buildFilter(c *echo.Context) (event.Filter, error) {
 			return filter, echo.NewHTTPError(http.StatusBadRequest, "invalid run_id")
 		}
 		filter.RunID = id
+		if err := ctrl.authorizeRunQuarantineAccess(c, id); err != nil {
+			return filter, err
+		}
+		filter.IncludeQuarantine = true
 	}
 
 	if typesStr := c.QueryParam("types"); typesStr != "" {
@@ -165,6 +179,29 @@ func buildFilter(c *echo.Context) (event.Filter, error) {
 	}
 
 	return filter, nil
+}
+
+func (ctrl *Controller) authorizeRunQuarantineAccess(c *echo.Context, runID uuid.UUID) error {
+	principal := authmw.GetPrincipal(c)
+	if principal == nil {
+		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+	}
+
+	svc := ctrl.authSvc
+	if svc == nil {
+		svc = iauth.NewService(db.Connection())
+	}
+	jobAlias, err := svc.JobAliasByRunID(c.Request().Context(), runID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return echo.ErrNotFound
+		}
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+	if !iauth.CheckScope(principal.Scope, jobAlias) {
+		return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	}
+	return nil
 }
 
 func parseLastSequence(c *echo.Context) (uint64, error) {

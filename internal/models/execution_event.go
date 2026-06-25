@@ -13,6 +13,7 @@ type ExecutionEvent struct {
 	RunID              *uuid.UUID `gorm:"type:uuid;index" json:"run_id,omitempty"`
 	TaskID             *uuid.UUID `gorm:"type:uuid;index" json:"task_id,omitempty"`
 	Payload            []byte     `gorm:"type:json" json:"payload,omitempty"`
+	Quarantine         bool       `gorm:"not null;default:false;index" json:"quarantine"`
 	BusDispatchPending bool       `gorm:"not null;default:false;index" json:"bus_dispatch_pending"`
 	BusDispatchedAt    *time.Time `gorm:"index" json:"bus_dispatched_at,omitempty"`
 	CreatedAt          time.Time  `gorm:"not null;index" json:"created_at"`
