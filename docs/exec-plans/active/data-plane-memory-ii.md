@@ -1175,7 +1175,7 @@ behavior must be deliberate, not an accident of the fall-through.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
       convenient — see the cover note on PR #229.
-- [ ] H-3. Resolve `/v1/lineage/impact` scope semantics — the cross-job leak. The
+- [x] H-3. Resolve `/v1/lineage/impact` scope semantics — the cross-job leak. The
       impact query is **global and intentionally cross-job** (it traverses dataset
       edges across jobs), but scope enforcement currently 403s every scoped
       principal on it (fall-through). A role-only backfill therefore leaves scoped
@@ -1197,6 +1197,11 @@ behavior must be deliberate, not an accident of the fall-through.
       authorize a `run_id`-scoped subscription, deny scoped keys an unfiltered global
       stream. Resolve it with the same `authorizeScope`-case approach; B2 owns the
       runtime change and B6(12) the test, but the scope decision is coordinated here.
+      Note (W2-gamma): Implemented option (a), requiring an unscoped principal for
+      the global impact traversal. Scoped keys now hit an explicit
+      `authorizeScope` deny for `GET /v1/lineage/impact` with the message
+      "lineage impact is a global cross-job query and requires an unscoped
+      principal"; unscoped viewer-or-higher principals continue to the controller.
 - [ ] H-4. **(Optional, nice-to-have)** Stand up a true **distributed** integration
       tier so B6's worker-isolation assertion can also run end-to-end, not only as
       the B6(7) direct `internal/worker` unit test. Add a CI/justfile target (or
