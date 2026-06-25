@@ -342,6 +342,7 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 		"docs/design-database-locking-fix.md",
 		"docs/design-event-triggers.md",
 		"docs/design-incremental-execution.md",
+		"docs/design-quarantined-replay.md",
 		"docs/design-scaling-job-execution.md",
 		"docs/design-sla-management.md",
 		"docs/design-task-templates.md",
