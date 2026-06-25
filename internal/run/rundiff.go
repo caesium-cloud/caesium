@@ -126,6 +126,7 @@ func (s *Store) DiffRuns(ctx context.Context, jobID, leftRunID, rightRunID uuid.
 		RightTrigger:   rightTrigger,
 		TriggerChanges: diffRunTriggers(leftTrigger, rightTrigger),
 		ParamChanges:   diffStringMap("params", leftTrigger.Params, rightTrigger.Params),
+		Tasks:          make([]RunDiffTask, 0),
 		GeneratedAt:    time.Now().UTC(),
 	}
 
@@ -260,6 +261,10 @@ func diffRunTask(taskName string, left, right models.TaskRun) RunDiffTask {
 		RightHash:      right.Hash,
 	}
 
+	// DiffHashInputBlobs(subject, baseline): right is the subject (newer/after),
+	// left the baseline (older/before), so the resulting FieldChanges read
+	// Before=left, After=right — matching RunDiff's left→right framing. Do not
+	// swap these to match the left,right parameter order.
 	diff, err := DiffHashInputBlobs(right.HashInputBlob, left.HashInputBlob)
 	if err != nil {
 		// A decode failure on one task's persisted blob must not abort the

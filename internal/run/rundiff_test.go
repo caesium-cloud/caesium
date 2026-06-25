@@ -284,6 +284,7 @@ func seedRunDiffTask(t *testing.T, db *gorm.DB, jobID uuid.UUID, name string) uu
 func seedRunDiffTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, attempt int, input cache.HashInput, status string, blobOverride []byte) uuid.UUID {
 	t.Helper()
 
+	id := uuid.New()
 	now := time.Now().UTC().Add(time.Duration(attempt) * time.Second)
 	blob := blobOverride
 	if blob == nil {
@@ -291,7 +292,7 @@ func seedRunDiffTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, atte
 	}
 	hash := input.Compute()
 	require.NoError(t, db.Create(&models.TaskRun{
-		ID:               uuid.New(),
+		ID:               id,
 		JobRunID:         runID,
 		TaskID:           taskID,
 		AtomID:           uuid.New(),
@@ -310,7 +311,7 @@ func seedRunDiffTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, atte
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}).Error)
-	return taskID
+	return id
 }
 
 func mustJSON(t *testing.T, v any) datatypes.JSON {
