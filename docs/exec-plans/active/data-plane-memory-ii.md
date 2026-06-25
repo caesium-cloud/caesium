@@ -148,17 +148,17 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–2 (2026-06-25) shipped nine items.** Wave 1 (#230–#233): A1, B1, C1,
-H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7 (per-stream detail in the wave
-subsections below). The run-diff and blame REST endpoints, the RBAC completeness
-guard + lineage-impact scope deny, and the durable `replaySafe` schema (with
-cache-hash exclusion verified) are all in. With the B1 hard barrier and the B7
-schema landed, Stream B's replay runtime is now fully unblocked. **Remaining:**
-the CLIs (A3, C3) + their integration scenarios (A4, C4); the replay runtime core
-— **B2** (quarantine plumbing, deferred to its own wave as the largest, most
-security-critical item) → B3 → B4 → B5 → B6; and the plan-level cross-links (N-1).
-Next eligible leaf items: **A3**, **C3** (CLIs over the shipped endpoints) and
-**B2** (the deferred replay-runtime wave).
+**Waves 1–3 (2026-06-25) shipped 13 of 20 items — Streams A, C, and H (minus the
+optional H-4) are now COMPLETE.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2
+(#234–#237): A2, C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff`
+CLI + e2e), C3+C4 (`caesium blame` CLI + commit-range e2e). Wave 3 also added a
+small **apply-provenance API** (REST `provenance` block + `caesium job apply
+--provenance-*`) so a commit is stampable through the server — required for C4's
+commit-range gate, and useful for non-git-sync CI/CD applies (client-asserted,
+documented as advisory at that trust boundary). **Remaining: the replay runtime
+core — B2 (quarantine plumbing, the largest, most security-critical item, deferred
+to its own wave) → B3 → B4 → B5 → B6** — plus N-1 (plan-level cross-links, gated
+on B6) and the optional H-4 distributed CI tier. Next eligible leaf item: **B2**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -371,15 +371,43 @@ shipping `replaySafe: true`; all fixed before merge.
   on the baseline `TaskRun` at exec time for B3's gate, and **excluded from the
   cache identity hash** (verified — toggling it is not a cache miss).
 
+### Wave 3 (2026-06-25)
+
+The read-side CLIs, completing Streams A and C. Same pipeline (codex implement →
+multi-lens Opus adversarial review → orchestrator verify + publish → twice-run
+greptile/gemini sweep → admin-merge). The **integration gate** earned its keep
+here: it caught a real C4d harness bug (the commit-stamping helper applied to the
+test process's own dqlite, not the server's) — fixed by the apply-provenance API
+below; and greptile caught two real CLI **P1s** the Opus review missed (the
+`--json` path emitting raw bytes + exit-0 on a non-JSON response), now fixed.
+
+- **W3-α — A3 + A4 (`caesium run diff` CLI + e2e)** — PR #238, merged `8a26f76`.
+  `caesium run diff <left> <right> --job-id <id> [--json]` over the A2 endpoint
+  (`--job-id` required; clean `--json` via `cmd.OutOrStdout()`). Integration
+  scenario drives the real CLI `--json` via `runCLIStdout` (asserts `json.Valid` +
+  the discriminating field). Error handling hardened (non-JSON → non-zero exit;
+  `io.ReadAll` checked; job-id path-escaped).
+- **W3-β — C3 + C4 (`caesium blame` CLI + commit-range e2e)** — PR #239, merged
+  `d6cd94d`. `caesium blame <job> [--task] [--from] [--to] [--json]` over the C2
+  endpoint, with the topology+image+command coverage caveat in help/docs/output.
+  Integration: ordinary addition, same-name image/command mutation,
+  delete-and-readd, behavior-only `env` change (no new snapshot + caveat), and the
+  **mandatory commit-range gate** proven end-to-end via distinct commits stamped
+  through the server. Added a small **apply-provenance API** (REST `provenance` +
+  `caesium job apply --provenance-*`) to make that stamping possible (the importer
+  + git-sync already supported provenance; this exposes it to a manual apply) —
+  Opus-security-reviewed: client-asserted/advisory at that boundary, partial
+  provenance rejected.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Waves 1–2: **A1+A2 shipped** (#231, #236); A3 (CLI), A4 (e2e) pending |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Waves 1–2: **B1 memo + B7 schema shipped** (#233, #235), barrier cleared; B2–B6 pending |
-| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Waves 1–2: **C1+C2 shipped** (#232, #236); C3 (CLI), C4 (e2e) pending |
-| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Waves 1–2: **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
-| N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (depends on A4+B6+C4) |
+| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Waves 1–2: **B1 memo + B7 schema shipped** (#233, #235), barrier cleared; **B2–B6 (the replay runtime) remain** — B2 is the next eligible leaf |
+| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
+| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
+| N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
 
 ## Streams
 
