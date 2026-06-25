@@ -296,7 +296,7 @@ Confirmed Caesium-controlled outward producers:
 | OpenLineage subscriber and dataset persistence | `internal/lineage/subscriber.go` subscribes to run/task lifecycle events and calls `transport.Emit`; `internal/lineage/mapper.go` persists `lineage_datasets` for task events before returning the OpenLineage event. Transports include HTTP, file, and console. | Drop quarantined events before mapper side effects. No transport emit, no lineage metric, and no `lineage_datasets` row. |
 | `/events` SSE live stream and backlog | `api/rest/bind/bind.go` registers `GET /events`; `api/rest/controller/event/stream.go` subscribes to the live bus and reads backlog through `internal/event/store.go`; `internal/models/execution_event.go` has `Sequence`, `Type`, `JobID`, `RunID`, `TaskID`, `Payload`, `BusDispatchPending`, `BusDispatchedAt`, `CreatedAt` — but NO queryable quarantine column, and `Payload` JSON is not filterable by the store/backlog (which filter by job/run/type). | Add `execution_events.quarantine` alongside the existing `BusDispatchPending` backlog column. Default live stream and backlog exclude quarantined events. The live loop in `stream.go` has no drop logic today, so the controller (or the bus `Filter`) must check the marker before `writeEvent`. The initiating client uses an explicit replay-scoped subscription authorized by run owner. |
 | Event bus backlog dispatcher | `internal/event/bus_dispatch.go` republishes pending `ExecutionEvent` rows to the bus. | Preserve and honor the event quarantine column when replaying pending rows, and stamp the republished `event.Event.Quarantine` from the column so the live carrier matches. Do not leak quarantined rows into default subscribers after restart. |
-| Cron catchup watermark | `internal/run/store.go` `LatestSuccessfulCronRun` (filters `job_id` / `status = succeeded` / `trigger_type = cron` ONLY, no quarantine predicate, store.go ~2462); consumed by `internal/trigger/cron/cron.go` `fireCatchup` (~163) as `since := latest.StartedAt`, the missed-run watermark. | Add `quarantine IS NOT TRUE` to `LatestSuccessfulCronRun` (and any watermark/baseline-selection query), OR guarantee replay runs never carry `trigger_type = cron`. A quarantined replay that inherits `trigger_type = cron` and succeeds would become the latest successful cron run, advancing the watermark and silently suppressing real scheduled production runs — a scheduling corruption from a what-if. |
+| Cron catchup watermark | `internal/run/store.go` `LatestSuccessfulCronRun` (filters `job_id` / `status = succeeded` / `trigger_type = cron` ONLY, no quarantine predicate, store.go ~2462); consumed by `internal/trigger/cron/cron.go` `fireCatchup` (~163) as `since := latest.StartedAt`, the missed-run watermark. | Add `quarantine IS NOT TRUE` to `LatestSuccessfulCronRun` (and any watermark/baseline-selection query) — this query predicate is the **mandatory** fix, not one option of two. Replay runs should *additionally* never carry `trigger_type = cron` as defense-in-depth, but that is an implicit invariant with no schema/API/RBAC enforcement, so relying on it alone is rejected: a future change routing cron catch-up through replay would silently re-introduce the corruption. A quarantined replay that inherits `trigger_type = cron` and succeeds would otherwise become the latest successful cron run, advancing the watermark and silently suppressing real scheduled production runs — a scheduling corruption from a what-if. |
 
 The audit did not find another independent authoritative producer beyond these
 surfaces. It did find concrete notification sender transports and OpenLineage
@@ -466,7 +466,12 @@ they record any other REST request.
 ## Idempotency & Recoverable Creation
 
 Replay creation is idempotent because it can run real side effects. The REST
-endpoint requires a non-empty `Idempotency-Key`; missing or blank is `400`.
+endpoint requires a non-empty `Idempotency-Key` supplied as an **HTTP request
+header** (`Idempotency-Key: <value>`), not a JSON body field — matching the
+standard idempotency-key convention and keeping request metadata out of the
+payload; missing or blank is `400`. The CLI sends the same header value across
+its retry loop (and accepts `--idempotency-key` so a re-run after a process exit
+reuses it).
 
 The durable identity is `JobRun.ReplayFingerprint`, a nullable column with a
 unique index. It is not the raw key. It is a scoped fingerprint over:
