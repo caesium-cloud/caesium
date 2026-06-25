@@ -90,7 +90,7 @@ var diffCmd = &cobra.Command{
 		params := url.Values{}
 		params.Set("left", leftRunID)
 		params.Set("right", rightRunID)
-		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/diff?%s", server, diffJobID, params.Encode())
+		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/diff?%s", server, url.PathEscape(diffJobID), params.Encode())
 
 		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, reqURL, nil)
 		if err != nil {
@@ -106,7 +106,10 @@ var diffCmd = &cobra.Command{
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		body, _ := io.ReadAll(resp.Body)
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("reading run diff response: %w", err)
+		}
 		if resp.StatusCode >= http.StatusBadRequest {
 			return fmt.Errorf("run diff failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
@@ -115,8 +118,7 @@ var diffCmd = &cobra.Command{
 		if diffJSON {
 			var out interface{}
 			if err := json.Unmarshal(body, &out); err != nil {
-				_, _ = fmt.Fprint(stdout, string(body))
-				return nil
+				return fmt.Errorf("run diff response was not valid JSON (status %d): %w", resp.StatusCode, err)
 			}
 			pretty, _ := json.MarshalIndent(out, "", "  ")
 			_, _ = fmt.Fprintln(stdout, string(pretty))
@@ -125,8 +127,7 @@ var diffCmd = &cobra.Command{
 
 		var diff runDiffResponse
 		if err := json.Unmarshal(body, &diff); err != nil {
-			_, _ = fmt.Fprint(stdout, string(body))
-			return nil
+			return fmt.Errorf("run diff response was not valid JSON (status %d): %w", resp.StatusCode, err)
 		}
 		renderRunDiffTable(cmd, &diff)
 		return nil
