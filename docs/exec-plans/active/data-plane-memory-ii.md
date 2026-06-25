@@ -319,7 +319,7 @@ substrate that shipped in data-plane-memory A2. It also unblocks Stream B's
 `--diff` output. Honest scope, enforced in the rendered output: cache-bust
 attribution only — hand value-level row/column diffs to dbt/Datafold.
 
-- [ ] A1. Add the run-diff read-side core: given two run IDs of the same job,
+- [x] A1. Add the run-diff read-side core: given two run IDs of the same job,
       pair terminal (latest-attempt) task-runs by task name and diff each pair's
       persisted `HashInput` blob via `DiffHashInputBlobs`, assembling a `RunDiff`
       (per-task verdict + `[]FieldChange` + run-level param/trigger deltas and a
@@ -329,6 +329,11 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       struct.
       Files: new `internal/run/rundiff.go`, new `internal/run/rundiff_test.go`;
       reuses `internal/run/whydiff.go` (read-only).
+      Note: W1-alpha landed `Store.DiffRuns` with JSON-ready `RunDiff`/task
+      verdict structs, latest-terminal-attempt pairing by task name, run-level
+      trigger/param deltas, added/removed task sets, and focused run-package
+      unit coverage for changed params, identical inputs, topology drift, and
+      degraded blobs.
 - [ ] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
       `RunDiff` as JSON. **Validate both `left` and `right` belong to `:id` — this
       is the security boundary, not just input hygiene.** Scope middleware only
