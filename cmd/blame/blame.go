@@ -87,6 +87,9 @@ var Cmd = &cobra.Command{
 		if blameTask != "" {
 			params.Set("task", blameTask)
 		}
+		if blameTo != "" && blameFrom == "" {
+			return fmt.Errorf("--to requires --from")
+		}
 		if blameFrom != "" {
 			params.Set("from", blameFrom)
 		}
@@ -107,13 +110,11 @@ var Cmd = &cobra.Command{
 		if blameJSON {
 			var out any
 			if err := json.Unmarshal(body, &out); err != nil {
-				_, writeErr := stdout.Write(body)
-				return writeErr
+				return fmt.Errorf("blame response was not valid JSON: %w", err)
 			}
 			pretty, err := json.MarshalIndent(out, "", "  ")
 			if err != nil {
-				_, writeErr := stdout.Write(body)
-				return writeErr
+				return fmt.Errorf("re-encoding blame JSON: %w", err)
 			}
 			_, _ = stdout.Write(pretty)
 			_, _ = fmt.Fprintln(stdout)
@@ -122,8 +123,7 @@ var Cmd = &cobra.Command{
 
 		var res result
 		if err := json.Unmarshal(body, &res); err != nil {
-			_, writeErr := stdout.Write(body)
-			return writeErr
+			return fmt.Errorf("blame response was not valid JSON: %w", err)
 		}
 		renderTable(cmd, &res)
 		return nil
@@ -169,7 +169,10 @@ func get(cmd *cobra.Command, reqURL, label string) ([]byte, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s response: %w", label, err)
+	}
 	if resp.StatusCode >= http.StatusBadRequest {
 		return nil, fmt.Errorf("%s failed (%d): %s", label, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
