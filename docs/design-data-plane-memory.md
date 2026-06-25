@@ -81,7 +81,7 @@ Caesium uniquely computes a transitive content hash that folds in the **typed da
 | `caesium why` (field-level) | C2 (+ C3 for graph-change causation) | Scope to cache hit/miss, predecessor-hash change, param change — call it that, not "data causality" |
 | Reproducibility receipt / `verify` | **C1 first**, then C2 | **Shipped** (C1+C2 landed): `caesium receipt get` / `caesium verify` re-derive a content-addressed receipt and flag drift. An unpinned-tag task is marked **degraded/unverifiable** and never attested as reproducible — the silent-failure mode is surfaced, not suppressed. |
 | Quarantined what-if replay | C1, C2 (+ C5 for data-diff) | Re-run only hash-changed tasks; unchanged = provably-identical cache hits |
-| `caesium run diff` (causal) | C2 | Cache-bust attribution only; hand off value diffs to dbt/Datafold |
+| `caesium run diff` (causal) | C2 | **Shipped**: cache-bust attribution only; hand off value diffs to dbt/Datafold |
 | `caesium blame` (topology attribution) | C3 | **Shipped**: commit/snapshot blame over `dag_snapshot` for topology + image + command only; `env`/`spec`/`retries`/`cache`/schema/`sla`/`triggerRules` edits are intentionally untracked until the snapshot descriptor expands. |
 | Value-verified skip ("Bazel for data") | C5 (+ C1) | Metadata-only skip exists today (shipped cache); value-verification needs C5 |
 | Cross-job impact analysis | C4 (+ C3) | Intra-DAG only until lineage datasets are populated |

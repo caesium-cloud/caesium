@@ -113,6 +113,40 @@ func (s *IntegrationTestSuite) parseWhy(jobID, runID, task string) whyExplanatio
 	return exp
 }
 
+// TestRunDiffAttributesChangedField verifies the causal run-diff CLI
+// end-to-end: the command drives the live REST endpoint, emits clean parseable
+// JSON on stdout, and names the changed run param as a task-level
+// discriminating field.
+func (s *IntegrationTestSuite) TestRunDiffAttributesChangedField() {
+	alias := fmt.Sprintf("e2e-rundiff-cli-%d", time.Now().UnixNano())
+	dir := s.writeJobManifest(runDiffManifest(alias))
+	defer os.RemoveAll(dir)
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	s.Require().NotNil(job)
+
+	run1 := s.triggerRunWithParams(job.ID, map[string]string{"flavor": "vanilla"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, run1, runTimeout).Status)
+	run2 := s.triggerRunWithParams(job.ID, map[string]string{"flavor": "chocolate"})
+	s.Require().Equal("succeeded", s.awaitRun(job.ID, run2, runTimeout).Status)
+
+	out, err := s.runCLIStdout("run", "diff", run1, run2, "--job-id", job.ID, "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err, "caesium run diff failed:\n%s", out)
+	s.Require().True(json.Valid([]byte(out)), "caesium run diff --json stdout was not valid JSON (log contamination?):\n%s", out)
+
+	var diff runDiffRESTResponse
+	s.Require().NoError(json.Unmarshal([]byte(out), &diff))
+	s.Equal(job.ID, diff.JobID)
+	s.Equal(run1, diff.LeftRunID)
+	s.Equal(run2, diff.RightRunID)
+	s.True(hasRunDiffChange(diff.ParamChanges, "params.flavor", "vanilla", "chocolate"),
+		"run-level param diff should include params.flavor, got %+v", diff.ParamChanges)
+	task := requireRunDiffTask(s, diff.Tasks, "render")
+	s.Equal("RERAN", task.Verdict)
+	s.True(hasRunDiffChange(task.Changes, "runParams.flavor", "vanilla", "chocolate"),
+		"task diff should include runParams.flavor, got %+v", task.Changes)
+}
+
 // TestReproducibilityReceiptRoundTrip verifies the REPRODUCE feature end-to-end
 // AND guards the documented `receipt get > file` → `verify file` workflow: the
 // receipt printed to stdout must be clean JSON (no leaked log lines), and the
