@@ -36,10 +36,12 @@ type runDiffFieldChange struct {
 }
 
 type blameRESTResponse struct {
-	JobID    string            `json:"job_id"`
-	Coverage string            `json:"coverage"`
-	Tasks    []blameTaskResult `json:"tasks"`
-	Edges    []blameEdgeResult `json:"edges"`
+	JobID      string            `json:"job_id"`
+	Coverage   string            `json:"coverage"`
+	FromCommit string            `json:"from_commit,omitempty"`
+	ToCommit   string            `json:"to_commit,omitempty"`
+	Tasks      []blameTaskResult `json:"tasks"`
+	Edges      []blameEdgeResult `json:"edges"`
 }
 
 type blameTaskResult struct {

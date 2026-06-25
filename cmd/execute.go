@@ -3,6 +3,7 @@ package cmd
 import (
 	"github.com/caesium-cloud/caesium/cmd/auth"
 	"github.com/caesium-cloud/caesium/cmd/backfill"
+	"github.com/caesium-cloud/caesium/cmd/blame"
 	"github.com/caesium-cloud/caesium/cmd/cache"
 	"github.com/caesium-cloud/caesium/cmd/dev"
 	"github.com/caesium-cloud/caesium/cmd/job"
@@ -18,6 +19,7 @@ import (
 var cmds = []*cobra.Command{
 	auth.Cmd,
 	backfill.Cmd,
+	blame.Cmd,
 	cache.Cmd,
 	dev.Cmd,
 	job.Cmd,
