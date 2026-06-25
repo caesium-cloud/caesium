@@ -5,6 +5,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
+	blamectrl "github.com/caesium-cloud/caesium/api/rest/controller/blame"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
@@ -16,6 +17,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/node"
 	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	receiptctrl "github.com/caesium-cloud/caesium/api/rest/controller/receipt"
+	rundiffctrl "github.com/caesium-cloud/caesium/api/rest/controller/rundiff"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/system"
 	"github.com/caesium-cloud/caesium/api/rest/controller/topology"
@@ -72,6 +74,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id/tasks", job.Tasks)
 		g.GET("/jobs/:id/dag", job.DAG)
 		g.GET("/jobs/:id/runs", run.List)
+		g.GET("/jobs/:id/runs/diff", rundiffctrl.Get)
 		g.GET("/jobs/:id/runs/:run_id", run.Get)
 		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
 		// causal explainer (data-plane-memory A3): why a task ran/hit cache/re-ran
@@ -87,6 +90,9 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		// historical DAG topology (data-plane-memory B2)
 		g.GET("/jobs/:id/topology", topology.Get)
 		g.GET("/jobs/:id/topology/history", topology.History)
+
+		// DAG element attribution (data-plane-memory C2)
+		g.GET("/jobs/:id/blame", blamectrl.Get)
 
 		// reproducibility receipt + verify (data-plane-memory A4)
 		g.GET("/jobs/:id/runs/:run_id/receipt", receiptctrl.Get)

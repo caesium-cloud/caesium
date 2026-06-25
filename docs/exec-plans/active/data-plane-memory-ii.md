@@ -374,7 +374,7 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       trigger/param deltas, added/removed task sets, and focused run-package
       unit coverage for changed params, identical inputs, topology drift, and
       degraded blobs.
-- [ ] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
+- [x] A2. Expose `GET /v1/jobs/:id/runs/diff?left=<run>&right=<run>` returning the
       `RunDiff` as JSON. **Validate both `left` and `right` belong to `:id` — this
       is the security boundary, not just input hygiene.** Scope middleware only
       authorizes the *path* job (`:id`); the run ids are query params it does not
@@ -390,6 +390,13 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go`
       (policy entry) + `internal/auth/rbac_test.go` (RoleViewer assertion).
       Depends on: A1.
+      Note: W2-alpha added the REST controller/service, explicit left/right run
+      ownership checks before diffing, the `RoleViewer` endpoint policy/assertion,
+      and registered `/jobs/:id/runs/diff` before `/jobs/:id/runs/:run_id`.
+      Review follow-up: `test/rundiff_blame_e2e_test.go` now drives the REST
+      endpoint against the live integration server, covering the happy diff body,
+      missing-param 400s, static-route ordering, and both cross-job 404
+      permutations for the handler-level run ownership boundary.
 - [ ] A3. Add the `caesium run diff <left-run> <right-run> --job-id <id> [--json]`
       subcommand. **`--job-id` is required** (matching `caesium why`): the REST
       endpoint is job-scoped (`/v1/jobs/:id/runs/diff`), so the CLI cannot construct
@@ -1031,7 +1038,7 @@ recorded here, out of scope, not promised.
       Note: Implemented in `internal/blame` with snapshot-query-backed attribution,
       descriptor-keyed task blame, edge provenance commits, task filtering, commit
       range filtering, and the explicit `coverage: "topology+image+command"` caveat.
-- [ ] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
+- [x] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
       returning per-element attribution as JSON. Register the route in
       `endpointPolicy` (`GET /v1/jobs/:id/blame` → `RoleViewer`) or the middleware
       denies it `unknown_route` (403) under auth; add an RBAC assertion.
@@ -1039,6 +1046,13 @@ recorded here, out of scope, not promised.
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleViewer assertion).
       Depends on: C1.
+      Note: W2-alpha added the REST controller/service over `internal/blame`,
+      query-param mapping for `task`/`from`/`to`, job existence validation, and
+      the `RoleViewer` endpoint policy/assertion.
+      Review follow-up: `test/rundiff_blame_e2e_test.go` now drives the REST
+      endpoint against the live integration server, covering topology-change
+      attribution, task filtering, job scoping, unknown-task empty results, and
+      unknown-commit 404 handling.
 - [ ] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
       [--json]` top-level command: per-element table by default, machine JSON with
       `--json` via `cmd.OutOrStdout()`. The table/help text and the
