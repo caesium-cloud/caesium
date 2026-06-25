@@ -726,9 +726,15 @@ write, lineage emit, or callback.
       check stops a cross-job replay dispatch. This is the same path/owner mismatch
       class as A2's run-diff query-param guard; **every** job-scoped resource
       handler in this plan (A2, B4) must verify path-job == resource-owner, not rely
-      on the middleware alone. Register the route in `endpointPolicy`
-      (`POST /v1/jobs/:id/runs/:id/replay` → `RoleRunner`, matching `run`/`retry`)
-      or the middleware denies it `unknown_route` (403) under auth.
+      on the middleware alone. Register the route in `endpointPolicy`. **Mind the
+      param-name normalization:** the echo route is registered with the real param
+      name (`POST /v1/jobs/:id/runs/:run_id/replay`, as in `bind.go`), but the
+      `endpointPolicy` **key** uses the middleware's normalized form where *every*
+      parametric segment becomes `:id` — so the policy entry is
+      `"POST /v1/jobs/:id/runs/:id/replay" → RoleRunner` (matching `run`/`retry`'s
+      two-`:id` keys). Using `:run_id` in the policy key would miss the lookup and
+      return `unknown_route` (403) for every replay; using `:id` in the echo route
+      would shadow the wrong param. Keep route=`:run_id`, policy-key=`:id`.
       Files: new `api/rest/controller/replay/`, new `api/rest/service/replay/`,
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
