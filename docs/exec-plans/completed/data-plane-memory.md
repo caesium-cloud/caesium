@@ -255,6 +255,11 @@ under-specified for this substrate plan (they consume A2/B1/C1/D1 but each needs
 its own design pass). Draft a follow-on once A–D land; do not fabricate items
 below the design level here.
 
+**Follow-on drafted (2026-06-20):** now scoped as
+[`../active/data-plane-memory-ii.md`](../active/data-plane-memory-ii.md)
+("Data-Plane Memory II — The Causal Query Layer"), Streams A (`run diff`),
+B (quarantined `replay`), C (`blame`). A–D have shipped (#213–#222).
+
 ### Stream B — DAG topology versioning (design C3)
 
 Stop destroying pipeline history so "the DAG as of commit X" is reconstructable
