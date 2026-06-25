@@ -12,17 +12,22 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
+	jobdefsvc "github.com/caesium-cloud/caesium/api/rest/service/jobdef"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
 var (
-	applyPaths  []string
-	applyServer string
-	applyForce  bool
-	applyPrune  bool
+	applyPaths              []string
+	applyServer             string
+	applyForce              bool
+	applyPrune              bool
+	applyProvenanceSourceID string
+	applyProvenanceRepo     string
+	applyProvenanceRef      string
+	applyProvenanceCommit   string
+	applyProvenancePath     string
 )
 
 var applyCmd = &cobra.Command{
@@ -40,7 +45,7 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune); err != nil {
+		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune, applyProvenanceFromFlags()); err != nil {
 			return err
 		}
 
@@ -56,6 +61,11 @@ func init() {
 	applyCmd.Flags().StringVar(&applyServer, "server", "http://localhost:8080", "Caesium server base URL")
 	applyCmd.Flags().BoolVar(&applyForce, "force", false, "Override provenance ownership checks when applying definitions")
 	applyCmd.Flags().BoolVar(&applyPrune, "prune", false, "Retire active jobs that are missing from the supplied path set")
+	applyCmd.Flags().StringVar(&applyProvenanceSourceID, "provenance-source-id", "", "Record the source ID that produced the applied definitions")
+	applyCmd.Flags().StringVar(&applyProvenanceRepo, "provenance-repo", "", "Record the repository URL that produced the applied definitions")
+	applyCmd.Flags().StringVar(&applyProvenanceRef, "provenance-ref", "", "Record the repository ref that produced the applied definitions")
+	applyCmd.Flags().StringVar(&applyProvenanceCommit, "provenance-commit", "", "Record the commit that produced the applied definitions")
+	applyCmd.Flags().StringVar(&applyProvenancePath, "provenance-path", "", "Record the manifest path that produced the applied definitions")
 	Cmd.AddCommand(applyCmd)
 }
 
@@ -124,11 +134,26 @@ func appendDefinitions(path string, defs *[]schema.Definition) error {
 	return nil
 }
 
-func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool) error {
-	reqBody := jobdef.ApplyRequest{
+func applyProvenanceFromFlags() *jobdefsvc.ApplyProvenance {
+	prov := &jobdefsvc.ApplyProvenance{
+		SourceID: strings.TrimSpace(applyProvenanceSourceID),
+		Repo:     strings.TrimSpace(applyProvenanceRepo),
+		Ref:      strings.TrimSpace(applyProvenanceRef),
+		Commit:   strings.TrimSpace(applyProvenanceCommit),
+		Path:     strings.TrimSpace(applyProvenancePath),
+	}
+	if prov.SourceID == "" && prov.Repo == "" && prov.Ref == "" && prov.Commit == "" && prov.Path == "" {
+		return nil
+	}
+	return prov
+}
+
+func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool, provenance *jobdefsvc.ApplyProvenance) error {
+	reqBody := jobdefsvc.ApplyRequest{
 		Definitions: defs,
 		Force:       force,
 		Prune:       prune,
+		Provenance:  provenance,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {

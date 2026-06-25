@@ -318,9 +318,15 @@ caesium dev --once --path job.yaml      # Run job locally against Docker
 caesium dev --path job.yaml             # Watch mode — re-run on file save
 caesium job diff --path jobs/           # Preview creates/updates/deletes vs server
 caesium job apply --path jobs/          # Deploy definitions to running server
+caesium blame <job-id-or-alias>          # Attribute topology/image/command changes to commits/snapshots
 caesium test --path jobs/               # Full validation suite
 caesium test --scenario harness/        # Execute harness scenarios against the local runtime
 ```
+
+`caesium blame` is intentionally scoped to the data stored in `dag_snapshot`:
+topology, step image, and step command. It does not track behavior-only changes
+to `env`, `spec`/node selectors, `retries`, `cache`, schemas, `sla`, or
+`triggerRules`, so do not describe it as full behavior blame.
 
 ---
 

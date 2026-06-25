@@ -1101,7 +1101,7 @@ recorded here, out of scope, not promised.
       endpoint against the live integration server, covering topology-change
       attribution, task filtering, job scoping, unknown-task empty results, and
       unknown-commit 404 handling.
-- [ ] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
+- [x] C3. Add the `caesium blame <job-id-or-alias> [--task t] [--from c] [--to c]
       [--json]` top-level command: per-element table by default, machine JSON with
       `--json` via `cmd.OutOrStdout()`. The table/help text and the
       `docs/caesium-job-llm-reference.md`/blame docs must **state the coverage
@@ -1111,7 +1111,11 @@ recorded here, out of scope, not promised.
       Files: new `cmd/blame/`, append `blame.Cmd` to the `cmds` slice in
       `cmd/execute.go`, blame coverage note in the docs.
       Depends on: C2.
-- [ ] C4. Add an integration scenario: apply a job, then apply a topology change
+      Note: W3-beta added top-level `caesium blame`, alias/UUID resolution,
+      task/from/to/json flags, stdout-only JSON/table rendering via
+      `cmd.OutOrStdout()`, and the topology+image+command coverage caveat in
+      help, table output, and docs.
+- [x] C4. Add an integration scenario: apply a job, then apply a topology change
       (add an edge/step) that writes a second `dag_snapshot`, then drive
       `caesium blame --json` and assert the new element is attributed to the later
       snapshot/commit while the unchanged elements stay attributed to the first;
@@ -1142,6 +1146,14 @@ recorded here, out of scope, not promised.
       `provenance.commit` on apply so `--from`/`--to` are exercised end-to-end. The
       snapshot-identity attribution still holds internally, but the commit-range
       *surface* must be proven.
+      Note: W3-beta added `test/blame_test.go`; commit stamping now goes through
+      the apply API's optional `provenance` block (driven by
+      `caesium job apply --provenance-commit`, not an in-process importer) so the
+      server stamps distinct `dag_snapshot.git_commit` values before
+      `caesium blame --json` is driven via `runCLIStdout`. The scenario covers
+      addition, same-name image+command mutation, delete-and-readd, env-only
+      no-snapshot behavior, and commit-range include/exclude assertions through
+      `--from`/`--to`.
 
 ## Harness Strengthening
 
