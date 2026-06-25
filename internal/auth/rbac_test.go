@@ -86,7 +86,9 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		path   string
 		role   models.Role
 	}{
+		{"GET", "/v1/jobs/:id/runs/diff", models.RoleViewer},
 		{"GET", "/v1/jobs/:id/runs/:id/why", models.RoleViewer},
+		{"GET", "/v1/jobs/:id/blame", models.RoleViewer},
 		{"GET", "/v1/jobs/:id/runs/:id/receipt", models.RoleViewer},
 		{"POST", "/v1/jobs/:id/runs/:id/receipt/verify", models.RoleViewer},
 		{"GET", "/v1/jobs/:id/topology", models.RoleViewer},
