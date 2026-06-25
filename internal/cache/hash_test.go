@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -509,6 +510,81 @@ func TestCanonicalJSON_EmptyInput(t *testing.T) {
 	assert.Equal(t, HashInput{}.Compute(), blob.Hash)
 	assert.Nil(t, blob.Env)
 	assert.Nil(t, blob.Oversized)
+}
+
+// --- Replay safety (control-plane metadata, excluded from identity) ---
+
+func TestCompute_ReplaySafeExcludedFromDefinitionHash(t *testing.T) {
+	base := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: replay-cache
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+`
+	jobLevel := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: replay-cache
+  replaySafe: true
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+`
+	stepLevel := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: replay-cache
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    replaySafe: true
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+`
+
+	baseHash := taskHashFromDefinition(t, base)
+	assert.Equal(t, baseHash, taskHashFromDefinition(t, jobLevel),
+		"job-level replaySafe is a replay gate, not an execution input")
+	assert.Equal(t, baseHash, taskHashFromDefinition(t, stepLevel),
+		"step-level replaySafe is a replay gate, not an execution input")
+}
+
+func taskHashFromDefinition(t *testing.T, src string) string {
+	t.Helper()
+
+	def, err := schema.Parse([]byte(src))
+	require.NoError(t, err)
+	require.Len(t, def.Steps, 1)
+	step := &def.Steps[0]
+	spec, err := def.RuntimeSpecForStep(step)
+	require.NoError(t, err)
+
+	return HashInput{
+		JobAlias:             def.Metadata.Alias,
+		TaskName:             step.Name,
+		Image:                step.Image,
+		Command:              step.Command,
+		Env:                  spec.Env,
+		WorkDir:              spec.WorkDir,
+		Mounts:               spec.Mounts,
+		ResolvedVolumeMounts: spec.ResolvedVolumeMounts,
+		Kubernetes:           spec.Kubernetes,
+	}.Compute()
 }
 
 // --- Kueue queue name (scheduling metadata, excluded from identity) ---

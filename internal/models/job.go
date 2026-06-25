@@ -28,6 +28,7 @@ type Job struct {
 	// SchemaValidation controls runtime output schema validation for this job's tasks.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
 	SchemaValidation string         `gorm:"type:text;not null;default:''" json:"schema_validation,omitempty"`
+	ReplaySafe       bool           `gorm:"not null;default:false" json:"replay_safe"`
 	CacheConfig      datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
 	Paused           bool           `gorm:"not null;default:false" json:"paused"`
 	DeletedAt        gorm.DeletedAt `gorm:"index" json:"-"`

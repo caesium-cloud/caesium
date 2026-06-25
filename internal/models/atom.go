@@ -24,6 +24,7 @@ type Atom struct {
 	Image              string         `gorm:"index;not null" json:"image"`
 	Command            string         `gorm:"command" json:"command"`
 	Spec               datatypes.JSON `gorm:"type:jsonb" json:"spec"`
+	ReplaySafe         bool           `gorm:"not null;default:false" json:"replay_safe"`
 	ProvenanceSourceID string         `gorm:"index" json:"provenance_source_id"`
 	ProvenanceRepo     string         `json:"provenance_repo"`
 	ProvenanceRef      string         `json:"provenance_ref"`

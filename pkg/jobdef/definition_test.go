@@ -162,6 +162,35 @@ func TestParseRepositoryExamples(t *testing.T) {
 	}
 }
 
+func TestReplaySafeJobAndStepEffectiveValue(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: replay-markers
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: unsafe-by-default
+    image: alpine:3.23
+  - name: step-safe
+    replaySafe: true
+    image: alpine:3.23
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	require.False(t, def.Metadata.ReplaySafe)
+	require.False(t, def.Steps[0].ReplaySafe)
+	require.True(t, def.Steps[1].ReplaySafe)
+	require.False(t, def.EffectiveReplaySafeForStep(&def.Steps[0]))
+	require.True(t, def.EffectiveReplaySafeForStep(&def.Steps[1]))
+
+	def.Metadata.ReplaySafe = true
+	require.True(t, def.EffectiveReplaySafeForStep(&def.Steps[0]))
+	require.True(t, def.EffectiveReplaySafeForStep(&def.Steps[1]))
+}
+
 func TestParseInvalidDefinitions(t *testing.T) {
 	cases := map[string]string{
 		"bad version": `apiVersion: v2

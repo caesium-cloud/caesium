@@ -99,7 +99,10 @@ type Metadata struct {
 	SLA *SLAConfig `yaml:"sla,omitempty" json:"sla,omitempty"`
 	// SchemaValidation controls runtime output schema validation.
 	// Values: "" (disabled), "warn" (log violations), "fail" (fail task on violation).
-	SchemaValidation             string            `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
+	SchemaValidation string `yaml:"schemaValidation,omitempty" json:"schemaValidation,omitempty"`
+	// ReplaySafe marks every step in this job as eligible for quarantined replay.
+	// The effective per-step value is snapshotted onto TaskRun when the task runs.
+	ReplaySafe                   bool              `yaml:"replaySafe,omitempty" json:"replaySafe,omitempty"`
 	Cache                        interface{}       `yaml:"cache,omitempty" json:"cache"`
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
@@ -177,18 +180,21 @@ type Kueue struct {
 
 // Step defines an execution step.
 type Step struct {
-	Name                         string            `yaml:"name" json:"name"`
-	Type                         string            `yaml:"type,omitempty" json:"type,omitempty"`
-	Engine                       string            `yaml:"engine,omitempty" json:"engine,omitempty"`
-	Image                        string            `yaml:"image" json:"image"`
-	Command                      []string          `yaml:"command,omitempty" json:"command,omitempty"`
-	NodeSelector                 map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
-	Next                         []string          `yaml:"next,omitempty" json:"next,omitempty"`
-	DependsOn                    []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
-	Retries                      int               `yaml:"retries,omitempty" json:"retries,omitempty"`
-	RetryDelay                   time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
-	RetryBackoff                 bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
-	TriggerRule                  string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	Name         string            `yaml:"name" json:"name"`
+	Type         string            `yaml:"type,omitempty" json:"type,omitempty"`
+	Engine       string            `yaml:"engine,omitempty" json:"engine,omitempty"`
+	Image        string            `yaml:"image" json:"image"`
+	Command      []string          `yaml:"command,omitempty" json:"command,omitempty"`
+	NodeSelector map[string]string `yaml:"nodeSelector,omitempty" json:"nodeSelector,omitempty"`
+	Next         []string          `yaml:"next,omitempty" json:"next,omitempty"`
+	DependsOn    []string          `yaml:"dependsOn,omitempty" json:"dependsOn,omitempty"`
+	Retries      int               `yaml:"retries,omitempty" json:"retries,omitempty"`
+	RetryDelay   time.Duration     `yaml:"retryDelay,omitempty" json:"retryDelay,omitempty"`
+	RetryBackoff bool              `yaml:"retryBackoff,omitempty" json:"retryBackoff,omitempty"`
+	TriggerRule  string            `yaml:"triggerRule,omitempty" json:"triggerRule,omitempty"`
+	// ReplaySafe marks this step as eligible for quarantined replay. It is
+	// control-plane metadata, not a runtime input or cache identity field.
+	ReplaySafe                   bool              `yaml:"replaySafe,omitempty" json:"replaySafe,omitempty"`
 	VolumeMounts                 []VolumeMount     `yaml:"volumeMounts,omitempty" json:"volumeMounts,omitempty"`
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
@@ -220,6 +226,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		RetryDelay                   time.Duration             `yaml:"retryDelay"`
 		RetryBackoff                 bool                      `yaml:"retryBackoff"`
 		TriggerRule                  string                    `yaml:"triggerRule"`
+		ReplaySafe                   bool                      `yaml:"replaySafe"`
 		VolumeMounts                 []VolumeMount             `yaml:"volumeMounts"`
 		ServiceAccountName           string                    `yaml:"serviceAccountName"`
 		PodAnnotations               map[string]string         `yaml:"podAnnotations"`
@@ -264,6 +271,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
+	s.ReplaySafe = rs.ReplaySafe
 	s.VolumeMounts = rs.VolumeMounts
 	s.ServiceAccountName = rs.ServiceAccountName
 	s.PodAnnotations = rs.PodAnnotations
@@ -293,6 +301,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		RetryDelay                   time.Duration             `json:"retryDelay"`
 		RetryBackoff                 bool                      `json:"retryBackoff"`
 		TriggerRule                  string                    `json:"triggerRule"`
+		ReplaySafe                   bool                      `json:"replaySafe"`
 		VolumeMounts                 []VolumeMount             `json:"volumeMounts"`
 		ServiceAccountName           string                    `json:"serviceAccountName"`
 		PodAnnotations               map[string]string         `json:"podAnnotations"`
@@ -327,6 +336,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.RetryDelay = rs.RetryDelay
 	s.RetryBackoff = rs.RetryBackoff
 	s.TriggerRule = rs.TriggerRule
+	s.ReplaySafe = rs.ReplaySafe
 	s.VolumeMounts = rs.VolumeMounts
 	s.ServiceAccountName = rs.ServiceAccountName
 	s.PodAnnotations = rs.PodAnnotations
@@ -728,6 +738,16 @@ func (v *Volume) sourceForEngine(engine string) (VolumeSource, error) {
 		return VolumeSource{}, fmt.Errorf("volume %q has no source for engine %q", v.Name, engine)
 	}
 	return source, nil
+}
+
+// EffectiveReplaySafeForStep returns the per-task replay safety value that must
+// be snapshotted when the task run is created. A job-level mark applies to every
+// step; a step-level mark applies only to that step.
+func (d *Definition) EffectiveReplaySafeForStep(step *Step) bool {
+	if d == nil || step == nil {
+		return false
+	}
+	return d.Metadata.ReplaySafe || step.ReplaySafe
 }
 
 // RuntimeSpecForStep resolves definition-level fields into the container spec

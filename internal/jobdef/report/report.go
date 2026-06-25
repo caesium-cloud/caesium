@@ -80,6 +80,7 @@ func Markdown() string {
 	b.WriteString("| `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |\n")
 	b.WriteString("| `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |\n")
 	b.WriteString("| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |\n")
+	b.WriteString("| `replaySafe` | boolean | optional | Marks every step in this job as eligible for quarantined what-if replay. Recorded on each baseline task run; excluded from the cache identity hash. |\n")
 	b.WriteString("| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true`, `{ttl: \"24h\"}`, or `{pinDigests: true}`. Step-level `cache` overrides these defaults. |\n")
 	b.WriteString("| `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |\n")
 	b.WriteString("| `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |\n")
@@ -137,6 +138,7 @@ func Markdown() string {
 	b.WriteString("| `podAnnotations` | map[string]string | optional | Kubernetes pod annotations for this step. |\n")
 	b.WriteString("| `automountServiceAccountToken` | boolean | optional | Kubernetes pod service-account token setting for this step. |\n")
 	b.WriteString("| `kueue` | object | optional | Delegate this step's admission to a Kueue LocalQueue (kubernetes engine only). See [Kueue](#kueue) below. Excluded from the cache identity hash — it is scheduling metadata, not an execution input. |\n")
+	b.WriteString("| `replaySafe` | boolean | optional | Marks this step as eligible for quarantined what-if replay. The effective value (`metadata.replaySafe` or this field) is recorded on the baseline task run and excluded from the cache identity hash. |\n")
 	b.WriteString("| `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |\n")
 	b.WriteString("| `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |\n")
 	b.WriteString("| `retries` | integer | optional | Number of retry attempts after the initial failure. |\n")
@@ -154,6 +156,9 @@ func Markdown() string {
 	b.WriteString("| `version` | integer | optional | Bump to invalidate existing cache entries without changing task definition. |\n")
 	b.WriteString("| `pinDigests` | boolean | optional | Resolve each step's image tag to its content digest (`sha256:…`) and fold the digest, not the mutable tag, into the cache key. A tag that moves to new content (e.g. a re-pushed `:latest`) then produces a cache **miss** instead of serving a stale hit. Defaults to `CAESIUM_CACHE_PIN_DIGESTS`. Set at job (`metadata.cache`) or step level; a step value overrides the job default. Resolution is opt-in because it costs a registry round-trip on first sight; the resolved tag→digest mapping is cached for `digestTTL` so steady-state runs pay no network cost. |\n")
 	b.WriteString("| `digestTTL` | duration string or 0 | optional | How long a resolved tag→digest mapping is reused before re-resolution (a **perf cache**). Within the window a moved tag is **not** re-detected — the prior digest is served. `0` re-resolves on every check, so a moved tag is detected immediately at the cost of a registry round-trip per check. Defaults to `CAESIUM_CACHE_DIGEST_TTL` (5m). Only meaningful with `pinDigests`. |\n\n")
+
+	b.WriteString("### Replay Safety\n\n")
+	b.WriteString("`replaySafe` is the durable operator mark required before quarantined what-if replay can re-execute a task. Set `metadata.replaySafe: true` to mark every step in the job, or `steps[].replaySafe: true` to mark a single step. Caesium records the effective value on the baseline `TaskRun` when the task runs; later applies cannot retroactively authorize an older unsafe baseline. This flag is control-plane metadata, not an execution input, so it is excluded from the cache identity hash.\n\n")
 
 	b.WriteString("### Kueue\n\n")
 	b.WriteString("`kueue` delegates a step's scheduling to [Kueue](https://kueue.sigs.k8s.io/), the Kubernetes-native job-queueing controller. Caesium does not bin-pack, prioritize, or gang-schedule — when `kueue` is set on a `kubernetes` step, Caesium stamps the `kueue.x-k8s.io/queue-name` label on the created pod and Kueue gates admission against the named LocalQueue's quota, holding the pod (via the `kueue.x-k8s.io/admission` scheduling gate its webhook injects) until capacity is available. This is only valid on the `kubernetes` engine; `docker`/`podman` reject it.\n\n")

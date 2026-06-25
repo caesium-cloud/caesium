@@ -261,6 +261,8 @@ func sortedVolumeMounts(mounts []container.VolumeMount) []container.VolumeMount 
 }
 
 // HashInput contains all fields that contribute to a task's identity hash.
+// Control-plane flags such as replaySafe are deliberately absent: they gate
+// orchestration decisions but are not execution inputs and must not bust cache.
 type HashInput struct {
 	JobAlias string
 	TaskName string
