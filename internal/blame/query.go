@@ -60,7 +60,13 @@ type EdgeAttribution struct {
 	Element           EdgeElement `json:"element"`
 	IntroducingCommit string      `json:"introducing_commit"`
 	SnapshotID        uuid.UUID   `json:"snapshot_id"`
-	ProvenanceCommit  string      `json:"provenance_commit,omitempty"`
+	// ProvenanceCommit is the edge's provenance_commit as recorded at its
+	// *introducing* snapshot. provenance_commit is excluded from the snapshot
+	// ContentHash, so a later apply can change an edge's provenance without
+	// writing a new snapshot row; when that happens this reflects the
+	// introducing snapshot's value, not the current one — the same honest
+	// limitation as the topology+image+command coverage caveat.
+	ProvenanceCommit string `json:"provenance_commit,omitempty"`
 }
 
 func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Result, error) {
@@ -96,6 +102,11 @@ func (q *Query) Blame(ctx context.Context, jobID uuid.UUID, opts Options) (*Resu
 	var currentTasks []models.DagSnapshotTask
 	var currentEdges []models.DagSnapshotEdge
 	for i := 0; i <= toIdx; i++ {
+		// Honor the request deadline: a job with a long snapshot history
+		// should not keep walking after the caller's context is cancelled.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		tasks, edges, err := parseSnapshot(snaps[i])
 		if err != nil {
 			return nil, err

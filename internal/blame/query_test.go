@@ -244,14 +244,19 @@ func edge(from, to, provenanceCommit string) models.DagSnapshotEdge {
 func requireTaskIntro(t *testing.T, result *Result, name, image, commit string, snapshotID uuid.UUID) {
 	t.Helper()
 
+	var matches []TaskAttribution
 	for _, got := range result.Tasks {
 		if got.Element.Name == name && got.Element.Image == image {
-			require.Equal(t, commit, got.IntroducingCommit)
-			require.Equal(t, snapshotID, got.SnapshotID)
-			return
+			matches = append(matches, got)
 		}
 	}
-	t.Fatalf("task %s with image %s not found in result: %#v", name, image, result.Tasks)
+	// Blame keys tasks by the full {name,image,command} descriptor, so several
+	// result entries can share a name+image (differing only in command). Require
+	// an unambiguous match here rather than silently taking the first, which
+	// could mask a mis-attribution.
+	require.Lenf(t, matches, 1, "expected exactly one task %s/%s in result: %#v", name, image, result.Tasks)
+	require.Equal(t, commit, matches[0].IntroducingCommit)
+	require.Equal(t, snapshotID, matches[0].SnapshotID)
 }
 
 func requireEdgeIntro(t *testing.T, result *Result, from, to, commit string, snapshotID uuid.UUID, provenanceCommit string) {
