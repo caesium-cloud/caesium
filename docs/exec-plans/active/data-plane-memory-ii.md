@@ -1138,12 +1138,14 @@ recorded here, out of scope, not promised.
       `provenance.commit` on apply so `--from`/`--to` are exercised end-to-end. The
       snapshot-identity attribution still holds internally, but the commit-range
       *surface* must be proven.
-      Note: W3-beta added `test/blame_test.go`, using a test apply helper over
-      `Importer.ApplyWithOptions` to stamp distinct `Provenance.Commit` values
-      into `dag_snapshot.git_commit`, then driving `caesium blame --json` via
-      `runCLIStdout`. The scenario covers addition, same-name image+command
-      mutation, delete-and-readd, env-only no-snapshot behavior, and commit-range
-      include/exclude assertions through `--from`/`--to`.
+      Note: W3-beta added `test/blame_test.go`; commit stamping now goes through
+      the apply API's optional `provenance` block (driven by
+      `caesium job apply --provenance-commit`, not an in-process importer) so the
+      server stamps distinct `dag_snapshot.git_commit` values before
+      `caesium blame --json` is driven via `runCLIStdout`. The scenario covers
+      addition, same-name image+command mutation, delete-and-readd, env-only
+      no-snapshot behavior, and commit-range include/exclude assertions through
+      `--from`/`--to`.
 
 ## Harness Strengthening
 

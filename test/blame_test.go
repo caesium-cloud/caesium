@@ -3,15 +3,10 @@
 package test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"os"
 	"time"
-
-	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
-	"github.com/caesium-cloud/caesium/pkg/db"
-	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 )
 
 func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
@@ -25,8 +20,8 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 		commit6 = "blame-cli-commit-6"
 	)
 
-	jobID := s.applyBlameManifestWithCommit(blameCLIV1(alias), commit1)
-	s.applyBlameManifestWithCommit(blameCLIV2(alias), commit2)
+	jobID := s.applyBlameManifestWithCommit(alias, blameCLIV1(alias), commit1)
+	s.applyBlameManifestWithCommit(alias, blameCLIV2(alias), commit2)
 
 	history := s.blameTopologyHistory(jobID)
 	s.Require().Len(history.Snapshots, 2, "topology addition should write a second dag_snapshot")
@@ -54,7 +49,7 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 	// Behavior-only edits are outside blame coverage. They update live runtime
 	// behavior but must not write a dag_snapshot or silently move attribution.
 	beforeBehaviorOnly := len(history.Snapshots)
-	s.applyBlameManifestWithCommit(blameCLIBehaviorOnly(alias), commit3)
+	s.applyBlameManifestWithCommit(alias, blameCLIBehaviorOnly(alias), commit3)
 	afterBehaviorOnly := s.blameTopologyHistory(jobID)
 	s.Len(afterBehaviorOnly.Snapshots, beforeBehaviorOnly, "env-only change must not write a dag_snapshot")
 	afterBehavior := s.runBlameJSON(alias)
@@ -68,8 +63,8 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 
 	// Delete-and-readd: the current descriptor is blamed on the re-adding
 	// snapshot, not its earliest-ever appearance.
-	s.applyBlameManifestWithCommit(blameCLIDeletePublish(alias), commit4)
-	s.applyBlameManifestWithCommit(blameCLIV2(alias), commit5)
+	s.applyBlameManifestWithCommit(alias, blameCLIDeletePublish(alias), commit4)
+	s.applyBlameManifestWithCommit(alias, blameCLIV2(alias), commit5)
 	afterReadd := s.runBlameJSON(alias)
 	s.Equal(commit5, requireBlameTask(s, afterReadd.Tasks, "publish").IntroducingCommit)
 	s.Equal(commit5, requireBlameEdge(s, afterReadd.Edges, "load", "publish").IntroducingCommit)
@@ -81,7 +76,7 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 
 	// Same-name descriptor mutation: changing load's image+command produces a
 	// new descriptor and must be blamed on the mutating commit.
-	s.applyBlameManifestWithCommit(blameCLIMutatedLoad(alias), commit6)
+	s.applyBlameManifestWithCommit(alias, blameCLIMutatedLoad(alias), commit6)
 	finalHistory := s.blameTopologyHistory(jobID)
 	s.Require().Len(finalHistory.Snapshots, 5, "addition, delete, re-add, and image/command mutation should produce five snapshots total")
 	mutated := s.runBlameJSON(alias)
@@ -92,28 +87,25 @@ func (s *IntegrationTestSuite) TestBlameCLIAttributionAndCommitRanges() {
 	s.Equal(commit1, requireBlameTask(s, mutated.Tasks, "extract").IntroducingCommit)
 }
 
-func (s *IntegrationTestSuite) applyBlameManifestWithCommit(manifest, commit string) string {
+func (s *IntegrationTestSuite) applyBlameManifestWithCommit(alias, manifest, commit string) string {
 	s.T().Helper()
 	time.Sleep(10 * time.Millisecond)
 
-	def, err := schema.Parse([]byte(strings.TrimSpace(s.injectEngine(manifest))))
-	s.Require().NoError(err)
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
 
-	job, err := internaljobdef.NewImporter(db.Connection()).ApplyWithOptions(
-		context.Background(),
-		def,
-		&internaljobdef.ApplyOptions{
-			Provenance: &internaljobdef.Provenance{
-				SourceID: "integration-blame-cli",
-				Repo:     "https://example.invalid/caesium-integration.git",
-				Ref:      "refs/heads/integration",
-				Commit:   commit,
-				Path:     "jobs/" + def.Metadata.Alias + ".job.yaml",
-			},
-		},
+	s.runCLI(
+		"job", "apply",
+		"--path", dir,
+		"--server", s.caesiumURL,
+		"--provenance-source-id", "integration-blame-cli",
+		"--provenance-repo", "https://example.invalid/caesium-integration.git",
+		"--provenance-ref", "refs/heads/integration",
+		"--provenance-commit", commit,
+		"--provenance-path", "jobs/"+alias+".job.yaml",
 	)
-	s.Require().NoError(err)
-	return job.ID.String()
+
+	return s.requireJobByAlias(alias).ID
 }
 
 func (s *IntegrationTestSuite) runBlameJSON(job string, extraArgs ...string) blameRESTResponse {
