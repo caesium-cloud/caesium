@@ -794,14 +794,25 @@ write, lineage emit, or callback.
       Review-fix note (W4-alpha, 2026-06-25): closed the security review blockers:
       `run_started` now carries the quarantine marker through both `Start` paths;
       Vault KV-v2 version pinning uses `ReadWithDataWithContext` query data instead
-      of appending `?version=` to the logical path; dispatch metric visibility reads
-      the already-loaded `TaskRun.Quarantine` and defaults to emit when marker
-      context is unavailable; empty task-registration batches observe zero; the v1
+      of appending `?version=` to the logical path; dispatch metric visibility
+      defaults to emit when marker context is unavailable; empty task-registration
+      batches observe zero; the v1
       descriptor no longer exposes unpopulated large-ref or redundant violation
       behavior fields; `/events?run_id=...` authorizes the run owner before
       including quarantined events; and descriptor/quarantine/notification guard
       tests were added. Side-effect/event/cache/lineage/callback suppression remains
       fail-closed.
+      Review-fix note (W4-alpha, 2026-06-25, perf/concurrency): made dispatch
+      completion metric quarantine checks lazy and memoized, with missing task rows
+      intentionally defaulting to metric emit only; collapsed batch event
+      quarantine stamping from per-event SELECTs into per-run/per-task grouped
+      lookups that still abort the transaction on lookup errors; removed the
+      redundant Vault KV-v2 current-version re-read while preserving version-N
+      HMAC identity capture with canonical integer version strings; and made
+      `execution_descriptor` mutations compare-and-swap against the prior JSON so
+      concurrent descriptor writers retry instead of clobbering each other. No
+      side-effect, event, cache, lineage, callback, or notification suppression was
+      made fail-open.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the

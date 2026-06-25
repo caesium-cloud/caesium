@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -83,9 +84,7 @@ func (s *VaultResolverSuite) TestResolveWithIdentityKVv2PinsVersionAndHMACsValue
 	s.Require().NoError(err)
 	s.Equal("abc", value)
 	s.Equal([]string{"secret/data/path"}, rest.paths)
-	s.Require().Len(rest.dataRequests, 1)
-	s.Equal("secret/data/path", rest.dataRequests[0].path)
-	s.Equal([]string{"7"}, rest.dataRequests[0].data["version"])
+	s.Empty(rest.dataRequests, "current-version identity must use the first Vault read instead of re-reading version N")
 	s.True(identity.Verifiable)
 	s.Equal("vault", identity.Provider)
 	s.Equal("7", identity.Version)
@@ -94,6 +93,21 @@ func (s *VaultResolverSuite) TestResolveWithIdentityKVv2PinsVersionAndHMACsValue
 	mac := hmac.New(sha256.New, []byte("server-key"))
 	_, _ = mac.Write([]byte("abc"))
 	s.Equal(hex.EncodeToString(mac.Sum(nil)), identity.HMACSHA256)
+}
+
+func (s *VaultResolverSuite) TestResolveWithIdentityCanonicalizesNumericVersion() {
+	keyring, err := NewIdentityKeyring("k1", map[string][]byte{"k1": []byte("server-key")})
+	s.Require().NoError(err)
+	rest := &fakeLogical{response: &vault.Secret{Data: map[string]any{
+		"data":     map[string]any{"token": "abc"},
+		"metadata": map[string]any{"version": json.Number("7.0")},
+	}}}
+	r := NewVaultResolverWithLogicalAndKeyring(rest, keyring)
+
+	_, identity, err := r.ResolveWithIdentity(context.Background(), "secret://vault/secret/data/path?field=token")
+	s.Require().NoError(err)
+	s.Equal("7", identity.Version)
+	s.Empty(rest.dataRequests)
 }
 
 func (s *VaultResolverSuite) TestResolveFieldAsSegment() {

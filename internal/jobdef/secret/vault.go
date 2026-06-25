@@ -2,9 +2,12 @@ package secret
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
+	"strconv"
 	"strings"
 
 	vault "github.com/hashicorp/vault/api"
@@ -121,14 +124,7 @@ func (r *VaultResolver) ResolveWithIdentity(ctx context.Context, ref string) (st
 		return "", Identity{}, fmt.Errorf("vault secret %s missing field %s", path, field)
 	}
 
-	versionedSecret, err := r.logical.ReadWithDataWithContext(ctx, path, map[string][]string{"version": {version}})
-	if err != nil {
-		return "", Identity{}, fmt.Errorf("read vault secret %s version %s: %w", path, version, err)
-	}
-	if versionedSecret == nil {
-		return "", Identity{}, fmt.Errorf("vault secret %s version %s not found", path, version)
-	}
-	value, ok := extractVaultField(versionedSecret, field)
+	value, ok := extractVaultField(secret, field)
 	if !ok {
 		return "", Identity{}, fmt.Errorf("vault secret %s version %s missing field %s", path, version, field)
 	}
@@ -200,7 +196,67 @@ func vaultKVv2Version(secret *vault.Secret) string {
 		return ""
 	}
 	if version, ok := metadata["version"]; ok {
-		return strings.TrimSpace(fmt.Sprintf("%v", version))
+		return canonicalVaultVersionString(version)
 	}
 	return ""
+}
+
+func canonicalVaultVersionString(version any) string {
+	switch v := version.(type) {
+	case json.Number:
+		if i, err := v.Int64(); err == nil {
+			return strconv.FormatInt(i, 10)
+		}
+		if f, err := v.Float64(); err == nil {
+			return canonicalVaultFloatVersion(f)
+		}
+	case float64:
+		return canonicalVaultFloatVersion(v)
+	case float32:
+		return canonicalVaultFloatVersion(float64(v))
+	case int:
+		return strconv.Itoa(v)
+	case int8:
+		return strconv.FormatInt(int64(v), 10)
+	case int16:
+		return strconv.FormatInt(int64(v), 10)
+	case int32:
+		return strconv.FormatInt(int64(v), 10)
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case uint:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(v), 10)
+	case uint64:
+		return strconv.FormatUint(v, 10)
+	case string:
+		return canonicalVaultStringVersion(v)
+	}
+	return ""
+}
+
+func canonicalVaultStringVersion(version string) string {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return ""
+	}
+	if i, err := strconv.ParseInt(version, 10, 64); err == nil {
+		return strconv.FormatInt(i, 10)
+	}
+	if f, err := strconv.ParseFloat(version, 64); err == nil {
+		return canonicalVaultFloatVersion(f)
+	}
+	return ""
+}
+
+func canonicalVaultFloatVersion(version float64) string {
+	if math.IsNaN(version) || math.IsInf(version, 0) || math.Trunc(version) != version {
+		return ""
+	}
+	return strconv.FormatInt(int64(version), 10)
 }

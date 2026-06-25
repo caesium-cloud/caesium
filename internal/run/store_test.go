@@ -324,6 +324,53 @@ func TestRegisterTaskPersistsInitialExecutionDescriptorEnvelope(t *testing.T) {
 	require.Contains(t, descriptor.SecretRefs[0].UnverifiableReason, "not resolved yet")
 }
 
+func TestTaskExecutionDescriptorMutationRetriesConcurrentChange(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	runID, taskID := registerSingleTaskRun(t, store, db)
+
+	// mutateTaskExecutionDescriptor uses optimistic CAS-with-retry (no enclosing
+	// transaction). Under real concurrency, two writers adding distinct secret
+	// refs must BOTH survive: when one writer's conditional UPDATE misses (the
+	// row changed since its read), it re-reads and re-merges rather than
+	// clobbering. Drive that with two goroutines released together to maximize
+	// interleaving — a synthetic re-entrant callback would deadlock SQLite's
+	// single writer.
+	refs := []models.TaskExecutionSecretRef{
+		{Ref: "secret://env/API_TOKEN", EnvKey: "API_TOKEN", Provider: "env", Verifiable: false},
+		{Ref: "secret://env/DB_PASSWORD", EnvKey: "DB_PASSWORD", Provider: "env", Verifiable: false},
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, len(refs))
+	start := make(chan struct{})
+	for i := range refs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			errs[i] = store.UpdateTaskExecutionDescriptorSecretRefs(runID, taskID, []models.TaskExecutionSecretRef{refs[i]})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+
+	var persisted models.TaskRun
+	require.NoError(t, db.Select("execution_descriptor").First(&persisted, "job_run_id = ? AND task_id = ?", runID, taskID).Error)
+	var descriptor models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(persisted.ExecutionDescriptor, &descriptor))
+	envKeys := make(map[string]bool)
+	for _, r := range descriptor.SecretRefs {
+		envKeys[r.EnvKey] = true
+	}
+	require.True(t, envKeys["API_TOKEN"], "API_TOKEN ref lost to a concurrent descriptor write")
+	require.True(t, envKeys["DB_PASSWORD"], "DB_PASSWORD ref lost to a concurrent descriptor write")
+}
+
 func TestStorePersistsRunState(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {
@@ -780,6 +827,52 @@ func TestRegisterTasksReturnsMissingJobRunError(t *testing.T) {
 	})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "job run")
+}
+
+func TestBatchEventQuarantineStampUsesRunAndTaskMarkers(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+
+	runID, taskA := registerSingleTaskRun(t, store, db)
+	var taskRunA models.TaskRun
+	require.NoError(t, db.First(&taskRunA, "job_run_id = ? AND task_id = ?", runID, taskA).Error)
+	var jobRun models.JobRun
+	require.NoError(t, db.First(&jobRun, "id = ?", runID).Error)
+
+	now := time.Now().UTC()
+	atom := &models.Atom{ID: uuid.New(), Engine: models.AtomEngineDocker, Image: "alpine:3.23", Command: `["echo","b"]`, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(atom).Error)
+	taskB := &models.Task{ID: uuid.New(), JobID: jobRun.JobID, AtomID: atom.ID, Name: "batch-b", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(taskB).Error)
+	require.NoError(t, store.RegisterTask(runID, taskB, atom, 0))
+
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", runID).Update("quarantine", true).Error)
+	runMarked := []*event.Event{
+		{Type: event.TypeRunStarted, RunID: runID},
+		{Type: event.TypeTaskReady, RunID: runID, TaskID: taskA},
+		{Type: event.TypeTaskReady, RunID: runID, TaskID: taskB.ID},
+	}
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return store.stampBatchEventQuarantineTx(tx, runMarked)
+	}))
+	for _, evt := range runMarked {
+		require.True(t, evt.Quarantine, "run-level quarantine should mark every batch event")
+	}
+
+	require.NoError(t, db.Model(&models.JobRun{}).Where("id = ?", runID).Update("quarantine", false).Error)
+	require.NoError(t, db.Model(&models.TaskRun{}).Where("job_run_id = ? AND task_id = ?", runID, taskA).Update("quarantine", true).Error)
+	taskMarked := []*event.Event{
+		{Type: event.TypeRunStarted, RunID: runID},
+		{Type: event.TypeTaskReady, RunID: runID, TaskID: taskA},
+		{Type: event.TypeTaskReady, RunID: runID, TaskID: taskB.ID},
+	}
+	require.NoError(t, db.Transaction(func(tx *gorm.DB) error {
+		return store.stampBatchEventQuarantineTx(tx, taskMarked)
+	}))
+	require.False(t, taskMarked[0].Quarantine)
+	require.True(t, taskMarked[1].Quarantine)
+	require.False(t, taskMarked[2].Quarantine)
 }
 
 func TestWithStoreBusyRetryRetriesSQLiteContention(t *testing.T) {

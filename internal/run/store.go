@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -252,21 +253,37 @@ func (s *Store) stampEventQuarantineTx(tx *gorm.DB, evt *event.Event) error {
 	// Event quarantine stamping is deliberately fail-closed: a missing marker
 	// aborts the transaction instead of leaking an outward event as production.
 	if evt.TaskID != uuid.Nil {
-		var taskRun models.TaskRun
-		if err := tx.Select("quarantine").
-			Where("job_run_id = ? AND task_id = ?", evt.RunID, evt.TaskID).
-			First(&taskRun).Error; err != nil {
+		quarantined, err := s.taskEventQuarantineTx(tx, evt.RunID, evt.TaskID)
+		if err != nil {
 			return fmt.Errorf("run: stamp event quarantine from task run: %w", err)
 		}
-		evt.Quarantine = taskRun.Quarantine
+		evt.Quarantine = quarantined
 		return nil
 	}
-	var jobRun models.JobRun
-	if err := tx.Select("quarantine").First(&jobRun, "id = ?", evt.RunID).Error; err != nil {
+	quarantined, err := s.runEventQuarantineTx(tx, evt.RunID)
+	if err != nil {
 		return fmt.Errorf("run: stamp event quarantine from job run: %w", err)
 	}
-	evt.Quarantine = jobRun.Quarantine
+	evt.Quarantine = quarantined
 	return nil
+}
+
+func (s *Store) runEventQuarantineTx(tx *gorm.DB, runID uuid.UUID) (bool, error) {
+	var jobRun models.JobRun
+	if err := tx.Select("quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
+		return false, err
+	}
+	return jobRun.Quarantine, nil
+}
+
+func (s *Store) taskEventQuarantineTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, error) {
+	var taskRun models.TaskRun
+	if err := tx.Select("quarantine").
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		First(&taskRun).Error; err != nil {
+		return false, err
+	}
+	return taskRun.Quarantine, nil
 }
 
 func (s *Store) DB() *gorm.DB {
@@ -421,27 +438,46 @@ func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate fu
 		return nil
 	}
 
-	var taskRun models.TaskRun
-	if err := s.db.Select("execution_descriptor").Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
-		return err
-	}
-	desc := models.TaskExecutionDescriptor{
-		SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
-		CapturedAt:    time.Now().UTC(),
-	}
-	if len(taskRun.ExecutionDescriptor) > 0 {
-		if err := json.Unmarshal(taskRun.ExecutionDescriptor, &desc); err != nil {
-			return fmt.Errorf("run: decode task execution descriptor: %w", err)
+	for attempt := 0; attempt <= len(storeBusyRetryBackoffs); attempt++ {
+		var taskRun models.TaskRun
+		if err := s.db.Select("execution_descriptor").Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+			return err
+		}
+		previous := append([]byte(nil), taskRun.ExecutionDescriptor...)
+		desc := models.TaskExecutionDescriptor{
+			SchemaVersion: models.TaskExecutionDescriptorSchemaVersion,
+			CapturedAt:    time.Now().UTC(),
+		}
+		if len(previous) > 0 {
+			if err := json.Unmarshal(previous, &desc); err != nil {
+				return fmt.Errorf("run: decode task execution descriptor: %w", err)
+			}
+		}
+		mutate(&desc)
+		encoded, err := json.Marshal(&desc)
+		if err != nil {
+			return fmt.Errorf("run: encode task execution descriptor: %w", err)
+		}
+		if bytes.Equal(previous, encoded) {
+			return nil
+		}
+
+		update := s.db.Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+		if len(previous) == 0 {
+			update = update.Where("(execution_descriptor IS NULL OR execution_descriptor = '')")
+		} else {
+			update = update.Where("execution_descriptor = ?", string(previous))
+		}
+		result := update.Update("execution_descriptor", datatypes.JSON(encoded))
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			return nil
 		}
 	}
-	mutate(&desc)
-	encoded, err := json.Marshal(&desc)
-	if err != nil {
-		return fmt.Errorf("run: encode task execution descriptor: %w", err)
-	}
-	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		Update("execution_descriptor", datatypes.JSON(encoded)).Error
+	return fmt.Errorf("run: update task execution descriptor: concurrent mutation did not settle")
 }
 
 func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef) []models.TaskExecutionSecretRef {
@@ -1792,10 +1828,8 @@ func (s *Store) appendBatchEventsTx(tx *gorm.DB, evts []*event.Event, pendingEve
 	if s.eventStore == nil || len(evts) == 0 {
 		return nil
 	}
-	for _, evt := range evts {
-		if err := s.stampEventQuarantineTx(tx, evt); err != nil {
-			return err
-		}
+	if err := s.stampBatchEventQuarantineTx(tx, evts); err != nil {
+		return err
 	}
 	if err := s.eventStore.AppendBatchTx(tx, evts); err != nil {
 		return err
@@ -1805,6 +1839,92 @@ func (s *Store) appendBatchEventsTx(tx *gorm.DB, evts []*event.Event, pendingEve
 		*pendingEvents = append(*pendingEvents, *e)
 	}
 	return nil
+}
+
+type eventQuarantineKey struct {
+	runID  uuid.UUID
+	taskID uuid.UUID
+}
+
+func (s *Store) stampBatchEventQuarantineTx(tx *gorm.DB, evts []*event.Event) error {
+	runIDs := make(map[uuid.UUID]struct{})
+	taskIDsByRun := make(map[uuid.UUID]map[uuid.UUID]struct{})
+	for _, evt := range evts {
+		if tx == nil || evt == nil || evt.RunID == uuid.Nil {
+			continue
+		}
+		runIDs[evt.RunID] = struct{}{}
+		if evt.TaskID == uuid.Nil {
+			continue
+		}
+		if taskIDsByRun[evt.RunID] == nil {
+			taskIDsByRun[evt.RunID] = make(map[uuid.UUID]struct{})
+		}
+		taskIDsByRun[evt.RunID][evt.TaskID] = struct{}{}
+	}
+	if len(runIDs) == 0 {
+		return nil
+	}
+
+	runQuarantine := make(map[uuid.UUID]bool, len(runIDs))
+	var runRows []struct {
+		ID         uuid.UUID
+		Quarantine bool
+	}
+	if err := tx.Model(&models.JobRun{}).
+		Select("id", "quarantine").
+		Where("id IN ?", uuidSetValues(runIDs)).
+		Find(&runRows).Error; err != nil {
+		return fmt.Errorf("run: stamp event quarantine from job run batch: %w", err)
+	}
+	for _, row := range runRows {
+		runQuarantine[row.ID] = row.Quarantine
+	}
+	if len(runQuarantine) != len(runIDs) {
+		return fmt.Errorf("run: stamp event quarantine from job run batch: %w", gorm.ErrRecordNotFound)
+	}
+
+	taskQuarantine := make(map[eventQuarantineKey]bool)
+	for runID, taskIDs := range taskIDsByRun {
+		ids := uuidSetValues(taskIDs)
+		var taskRows []struct {
+			JobRunID   uuid.UUID
+			TaskID     uuid.UUID
+			Quarantine bool
+		}
+		if err := tx.Model(&models.TaskRun{}).
+			Select("job_run_id", "task_id", "quarantine").
+			Where("job_run_id = ? AND task_id IN ?", runID, ids).
+			Find(&taskRows).Error; err != nil {
+			return fmt.Errorf("run: stamp event quarantine from task run batch: %w", err)
+		}
+		for _, row := range taskRows {
+			taskQuarantine[eventQuarantineKey{runID: row.JobRunID, taskID: row.TaskID}] = row.Quarantine
+		}
+		if len(taskRows) != len(ids) {
+			return fmt.Errorf("run: stamp event quarantine from task run batch: %w", gorm.ErrRecordNotFound)
+		}
+	}
+
+	for _, evt := range evts {
+		if evt == nil || evt.RunID == uuid.Nil {
+			continue
+		}
+		quarantined := runQuarantine[evt.RunID]
+		if evt.TaskID != uuid.Nil {
+			quarantined = quarantined || taskQuarantine[eventQuarantineKey{runID: evt.RunID, taskID: evt.TaskID}]
+		}
+		evt.Quarantine = quarantined
+	}
+	return nil
+}
+
+func uuidSetValues(set map[uuid.UUID]struct{}) []uuid.UUID {
+	values := make([]uuid.UUID, 0, len(set))
+	for id := range set {
+		values = append(values, id)
+	}
+	return values
 }
 
 func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {

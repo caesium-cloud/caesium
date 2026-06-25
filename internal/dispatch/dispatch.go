@@ -34,6 +34,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Rejection reason labels for caesium_complete_rejected_total.
@@ -431,9 +432,11 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	metricQuarantined := h.completeMetricQuarantined(ctx, req.RunID, req.TaskID)
+	metricQuarantined := sync.OnceValue(func() bool {
+		return h.completeMetricQuarantined(ctx, req.RunID, req.TaskID)
+	})
 	recordRejected := func(reason string) {
-		if !metricQuarantined {
+		if !metricQuarantined() {
 			metrics.CompleteRejectedTotal.WithLabelValues(reason).Inc()
 		}
 	}
@@ -487,7 +490,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		)
 		if omErr != nil {
 			if dqlite.IsContentionError(omErr) {
-				h.rejectRetryable(w, req, omErr, metricQuarantined)
+				h.rejectRetryable(w, req, omErr, metricQuarantined())
 				return
 			}
 			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
@@ -535,7 +538,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		if applyErr != nil {
 			if dqlite.IsContentionError(applyErr) {
-				h.rejectRetryable(w, req, applyErr, metricQuarantined)
+				h.rejectRetryable(w, req, applyErr, metricQuarantined())
 				return
 			}
 			log.Error("complete: apply failed",
@@ -564,7 +567,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		if applyErr != nil {
 			if dqlite.IsContentionError(applyErr) {
-				h.rejectRetryable(w, req, applyErr, metricQuarantined)
+				h.rejectRetryable(w, req, applyErr, metricQuarantined())
 				return
 			}
 			log.Error("complete: CacheHitTaskClaimed failed",
@@ -589,11 +592,18 @@ func (h *Handler) completeMetricQuarantined(ctx context.Context, runID, taskID u
 	}
 	quarantined, err := h.store.TaskQuarantine(ctx, runID, taskID)
 	if err != nil {
-		log.Warn("complete: failed to read task quarantine marker; emitting complete metrics",
-			"run_id", runID,
-			"task_id", taskID,
-			"error", err,
-		)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Debug("complete: task quarantine marker not found; emitting complete metrics",
+				"run_id", runID,
+				"task_id", taskID,
+			)
+		} else {
+			log.Warn("complete: failed to read task quarantine marker; emitting complete metrics",
+				"run_id", runID,
+				"task_id", taskID,
+				"error", err,
+			)
+		}
 		return false
 	}
 	return quarantined
