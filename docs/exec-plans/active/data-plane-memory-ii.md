@@ -1144,7 +1144,7 @@ behavior must be deliberate, not an accident of the fall-through.
       `DELETE /v1/notifications/policies/:id`, `POST /v1/jobdefs/lint`, and
       `POST /v1/jobdefs/diff`; `GET /v1/lineage/impact` has only its Viewer
       role backfilled here and remains pending H-3 scope semantics.
-- [ ] H-2. Add the **completeness guard**: a test asserting every route registered
+- [x] H-2. Add the **completeness guard**: a test asserting every route registered
       under `bind.go`'s `Protected()` group has an `endpointPolicy` entry, so a new
       authenticated route without a policy fails CI instead of 403-ing at runtime.
       This is what makes A2/B4/C2's entries non-optional. It must land **after**
@@ -1175,6 +1175,9 @@ behavior must be deliberate, not an accident of the fall-through.
       Note: H-1+H-2 fix shipped code and are independent of A/B/C; given no users
       this is low-urgency, but they can land as a small standalone PR whenever
       convenient — see the cover note on PR #229.
+      Note (W2-β): guard covers all authed routes (Protected + auth, minus
+      public); shared normalization helper; comprehensive scope integration
+      tests deferred to the auth-enabled integration harness.
 - [ ] H-3. Resolve `/v1/lineage/impact` scope semantics — the cross-job leak. The
       impact query is **global and intentionally cross-job** (it traverses dataset
       edges across jobs), but scope enforcement currently 403s every scoped

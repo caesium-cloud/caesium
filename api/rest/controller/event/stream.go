@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -15,15 +16,20 @@ import (
 )
 
 type Controller struct {
-	bus   event.Bus
-	store *event.Store
+	bus       event.Bus
+	storeOnce sync.Once
+	store     *event.Store
 }
 
 func New(bus event.Bus) *Controller {
-	return &Controller{
-		bus:   bus,
-		store: event.NewStore(db.Connection()),
-	}
+	return &Controller{bus: bus}
+}
+
+func (ctrl *Controller) persistentStore() *event.Store {
+	ctrl.storeOnce.Do(func() {
+		ctrl.store = event.NewStore(db.Connection())
+	})
+	return ctrl.store
 }
 
 func (ctrl *Controller) Stream(c *echo.Context) error {
@@ -62,14 +68,14 @@ func (ctrl *Controller) Stream(c *echo.Context) error {
 	}
 	flusher.Flush()
 
-	if ctrl.store != nil {
-		latestBeforeCatchup, err := ctrl.store.LatestSequence(ctx)
+	if store := ctrl.persistentStore(); store != nil {
+		latestBeforeCatchup, err := store.LatestSequence(ctx)
 		if err != nil {
 			return echo.NewHTTPError(http.StatusInternalServerError, "failed to read event cursor").Wrap(err)
 		}
 
 		for {
-			backlog, err := ctrl.store.ListSince(ctx, lastSent, 500, filter)
+			backlog, err := store.ListSince(ctx, lastSent, 500, filter)
 			if err != nil {
 				return echo.NewHTTPError(http.StatusInternalServerError, "failed to read event backlog").Wrap(err)
 			}

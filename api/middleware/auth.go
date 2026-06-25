@@ -29,6 +29,20 @@ var skipPaths = map[string]bool{
 	"/health": true,
 }
 
+var publicAuthPaths = map[string]bool{
+	"/auth/status":            true,
+	"/auth/sso/oidc/login":    true,
+	"/auth/sso/oidc/callback": true,
+	"/auth/sso/saml/login":    true,
+	"/auth/sso/saml/acs":      true,
+	"/auth/sso/saml/metadata": true,
+	"/auth/sso/ldap/login":    true,
+}
+
+var publicAuthPathPrefixes = []string{
+	"/v1/hooks/",
+}
+
 // AuthDeps bundles the dependencies the auth middleware needs.
 type AuthDeps struct {
 	Service    *auth.Service
@@ -46,7 +60,7 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			path := c.Request().URL.Path
 
 			// Skip auth for explicitly public paths.
-			if skipPaths[path] {
+			if IsPublicAuthPath(path) {
 				return next(c)
 			}
 
@@ -163,16 +177,37 @@ func extractBearerToken(c *echo.Context) (string, bool) {
 	return token, false
 }
 
+// IsPublicAuthPath reports whether path is intentionally reachable without the
+// Auth middleware enforcing credentials. Keep RBAC completeness tests on this
+// helper so their public-route exclusions match the middleware.
+func IsPublicAuthPath(path string) bool {
+	if skipPaths[path] || publicAuthPaths[path] {
+		return true
+	}
+	for _, prefix := range publicAuthPathPrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// NormalizeRoutePath returns the policy lookup path used by RBAC for Echo route
+// patterns or raw request paths.
+func NormalizeRoutePath(path string) string {
+	path = uuidPattern.ReplaceAllString(path, ":id")
+	return namedParamPattern.ReplaceAllString(path, ":id")
+}
+
 // normalisePath returns the Echo route pattern (with :param placeholders)
-// so RBAC policy lookup works for parametric routes. Falls back to replacing
+// so RBAC policy lookup works for parametric routes. Falls back to normalising
 // UUID segments in the raw path.
 func normalisePath(c *echo.Context) string {
-	ri := c.RouteInfo()
-	path := ri.Path
+	path := c.RouteInfo().Path
 	if path == "" {
-		path = uuidPattern.ReplaceAllString(c.Request().URL.Path, ":id")
+		path = c.Request().URL.Path
 	}
-	return namedParamPattern.ReplaceAllString(path, ":id")
+	return NormalizeRoutePath(path)
 }
 
 // tokenPrefix returns a safe display prefix for logging, never the full key.
