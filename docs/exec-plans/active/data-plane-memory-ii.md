@@ -432,7 +432,7 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       endpoint against the live integration server, covering the happy diff body,
       missing-param 400s, static-route ordering, and both cross-job 404
       permutations for the handler-level run ownership boundary.
-- [ ] A3. Add the `caesium run diff <left-run> <right-run> --job-id <id> [--json]`
+- [x] A3. Add the `caesium run diff <left-run> <right-run> --job-id <id> [--json]`
       subcommand. **`--job-id` is required** (matching `caesium why`): the REST
       endpoint is job-scoped (`/v1/jobs/:id/runs/diff`), so the CLI cannot construct
       the URL from run ids alone without a brittle global jobs/runs scan — and that
@@ -444,7 +444,10 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       Files: new `cmd/run/diff.go` (its own `func init()` calling
       `Cmd.AddCommand(diffCmd)` on the existing `run.Cmd`).
       Depends on: A2.
-- [ ] A4. Add an integration scenario driving `caesium run diff --json` end-to-end
+      Note: W3-alpha added `cmd/run/diff.go`, requiring `--job-id`, calling the
+      job-scoped REST endpoint, emitting clean JSON with `--json`, and rendering a
+      per-task human table through `cmd.OutOrStdout()` without cobra `cmd.Print*`.
+- [x] A4. Add an integration scenario driving `caesium run diff --json` end-to-end
       against the live server: two runs of a cacheable job differing by one run
       param, asserting the discriminating `runParams.*` field appears in the diff
       and that stdout is clean parseable JSON (captured via `runCLIStdout`, not the
@@ -460,6 +463,11 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
       Files: `test/data_plane_e2e_test.go` (add `TestRunDiffAttributesChangedField`
       + `TestRunDiffRejectsCrossScopeRunIDs`), `docs/design-data-plane-memory.md`.
       Depends on: A3.
+      Note: W3-alpha added `TestRunDiffAttributesChangedField` against the live CLI
+      and flipped the design-table row to shipped. The scoped-key cross-scope CLI
+      assertion is deferred to the auth-enabled integration harness; W2's
+      `test/rundiff_blame_e2e_test.go` already covers the handler-level cross-job
+      404 boundary under the current auth-disabled CI harness.
 
 ### Stream B — Quarantined what-if replay
 
