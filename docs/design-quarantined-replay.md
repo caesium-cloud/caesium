@@ -477,10 +477,14 @@ unique index. It is not the raw key. It is a scoped fingerprint over:
 - normalized overrides
 - `Idempotency-Key`
 
-The normalized tuple should be encoded deterministically and then stored as a
-fixed-length digest, preferably an HMAC with a server key if the tuple may include
-sensitive operator context. Two unrelated replays that reuse `retry-1` must not
-collide globally.
+The normalized tuple is encoded deterministically and stored as a fixed-length
+digest. When the tuple may include sensitive operator context (actor/principal,
+normalized overrides) it MUST be a keyed HMAC with a versioned server key — not a
+plain reusable hash — for the same offline-guessability reason as the secret
+identity. (Idempotency reservations are short-lived, so a server-key rotation can
+at most fail to dedup a retry that spans the rotation, never an unbounded
+historical window.) Two unrelated replays that reuse `retry-1` must not collide
+globally.
 
 Creation is atomic:
 
@@ -583,13 +587,17 @@ rotate between the identity check and the value used.
 
 | Provider | Baseline identity | Replay rule |
 |---|---|---|
-| Vault | KV-v2: `metadata.version` (from `secret.Data["metadata"]`) PLUS a server-keyed HMAC of the resolved bytes. KV-v1 / any mount where `metadata.version` is absent: a hard no-identity sentinel (fail-closed). Never a plain value hash. | KV-v2: re-read the BASELINE version explicitly with `?version=<N>` (NOT latest — the current `VaultResolver.Resolve` calls `ReadWithContext` with no version pin and always returns latest, vault.go ~98), then HMAC the resolved bytes with the server key and require an EXACT match. Version number alone is insufficient — rollback/destroy yield a matching number with different/absent value. KV-v1 and absent-version mounts FAIL CLOSED for that ref (same posture as env). |
+| Vault | KV-v2: `metadata.version` (from `secret.Data["metadata"]`) PLUS a server-keyed HMAC of the resolved bytes. KV-v1 / any mount where `metadata.version` is absent: a hard no-identity sentinel (fail-closed). Never a plain value hash. | KV-v2: re-read the BASELINE version explicitly with `?version=<N>` (NOT latest — the current `VaultResolver.Resolve` calls `ReadWithContext` with no version pin and always returns latest, vault.go ~98), then HMAC the resolved bytes with the **versioned** server key and require an EXACT match. The stored identity records the HMAC **key id**; verification selects that key from a server keyring (current + retired keys), so a routine server HMAC-key rotation does NOT invalidate historical baselines (rotation-safe, the same way KV-v2 versioning is for the secret value). If the recorded key id is absent from the keyring (fully retired), that ref fails closed — operators retain retired keys for the replay-eligibility window. Version number alone is insufficient — rollback/destroy yield a matching number with different/absent value. KV-v1 and absent-version mounts FAIL CLOSED for that ref (same posture as env). |
 | Kubernetes | Secret `resourceVersion` plus namespace/name/key (`kubernetes.go`). | Re-resolve and require matching `resourceVersion` for that namespace/name/key. Mismatch or missing secret aborts. |
 | Env | No durable version exists (`env.go`). | v1 fails closed for env-sourced `secret://env/...` refs in replay because rotation cannot be verified. `ResolveWithIdentity` returns the un-verifiable sentinel that forces fail-closed. A future un-verifiable/degraded mode needs its own explicit contract. |
 
 Identity metadata must be non-secret provider version data or a keyed HMAC using a
 server-held key. Do not store a plain reusable hash of a secret value; it is
-offline-guessable for low-entropy secrets and becomes sensitive itself.
+offline-guessable for low-entropy secrets and becomes sensitive itself. Any
+server-held HMAC key is itself **versioned**: the identity records the key id and
+verification resolves it against a keyring of current + retired keys, so rotating
+the server key — routine security hygiene — does not silently abort every
+historical replay. A key-id-less HMAC scheme is rejected for exactly this reason.
 
 Hard aborts before TaskRun creation:
 
