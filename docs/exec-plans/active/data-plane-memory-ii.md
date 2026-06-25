@@ -24,9 +24,12 @@ assembly + one runtime mode, not new persistence:
   predecessor outputs, "what data changed" and "why did this task re-run" collapse
   into one diff.
 - **Quarantined what-if replay (`caesium run replay --set … --diff`)** re-runs a
-  baseline run under overridden inputs, re-executing only hash-changed tasks while
-  unchanged tasks resolve as provably-identical cache hits, in an isolated run
-  whose results never become cache- or lineage-authoritative. This is the one
+  baseline run under overridden inputs in an isolated run whose results never
+  become cache- or lineage-authoritative. A no-override replay cache-hits all
+  unchanged tasks; because `RunParams` is folded wholesale into every task hash
+  (B1 memo), ANY `--set` param override re-runs the full DAG in v1 (selective
+  per-task re-run is a deferred per-step param-dependency enhancement). This is the
+  one
   net-new runtime mode and the only genuinely under-specified verb, so its stream
   opens with a short design memo.
 - **`caesium blame` over commit ranges** walks the append-only `dag_snapshot`
@@ -382,9 +385,11 @@ attribution only — hand value-level row/column diffs to dbt/Datafold.
 ### Stream B — Quarantined what-if replay
 
 Ship `caesium run replay <run-id> --set k=v [--diff]`: re-run a baseline run
-under overridden inputs in an **isolated** run that re-executes only hash-changed
-tasks (unchanged tasks resolve as provably-identical cache hits) and whose
-results never become cache- or lineage-authoritative. This is the only net-new
+under overridden inputs in an **isolated** run whose results never become cache-
+or lineage-authoritative. A no-override replay cache-hits all unchanged tasks;
+because `RunParams` folds wholesale into every task hash (B1 memo), ANY `--set`
+param override re-runs the full DAG in v1 — selective per-task re-run is a
+deferred per-step param-dependency enhancement, not v1. This is the only net-new
 runtime mode in the plan and the one verb the substrate plan flagged as
 "under-specified … needs its own design pass," so the stream opens with a focused
 design memo before any runtime code. Replay reuses Stream A's diff for its
@@ -419,7 +424,7 @@ predecessor-cache fields are already threaded scheduler→worker (the design's
 "distributed parity" constraint) — and the worker must honor it before any cache
 write, lineage emit, or callback.
 
-- [ ] B1. Author the replay design memo, which must resolve the safety model
+- [x] B1. Author the replay design memo, which must resolve the safety model
       **before** B2–B6 implement anything. Nail: (a) **quarantine isolation** — how
       a quarantined run reuses the cache for hash-unchanged tasks yet is excluded
       from becoming cache-authoritative and from authoritative lineage emission;
@@ -517,6 +522,9 @@ write, lineage emit, or callback.
       `TestDocsREADMEIndexesEveryTopLevelDoc` requires every `docs/*.md` to be
       linked from the README; the `> Status:` banner satisfies
       `TestPlanningAndHistoricalDocsCarryStatusBanner`).
+      Note (W1-beta): Added `docs/design-quarantined-replay.md` with the
+      fail-closed replay safety model, producer/metric/envelope audits grounded in
+      source grep, plus the required top-level README index entry.
 - [ ] B2. Add quarantine to the run model **and propagate it to both executors**.
       An additive `Quarantine bool` (and a captured override-params blob) on
       `JobRun`, **plus a `Quarantine bool` on `TaskRun`** threaded scheduler→worker
@@ -658,7 +666,9 @@ write, lineage emit, or callback.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
-      executor so only hash-changed tasks re-run and the rest are cache hits.
+      executor so hash-changed tasks re-run and hash-unchanged tasks cache-hit
+      (in v1 any `--set` override re-runs the full DAG — run params fold wholesale
+      into every task's hash; see B1's Override→Hash consequence note).
       **Fail-closed, two ways**: (a) if a task is hash-unchanged but its baseline
       cache entry / result is unavailable (pruned/expired), abort the replay with a
       clear error rather than silently re-executing it; and (b) **the replay-safe
@@ -764,8 +774,12 @@ write, lineage emit, or callback.
       `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
 - [ ] B6. Add an integration scenario: replay a completed run with a changed
-      `--set` param; assert (1) only the affected task re-ran while unchanged tasks
-      report cache hits, (2) `--diff --json` reports the discriminating field on
+      `--set` param; assert (1) the honest v1 hashing behavior — a **no-override**
+      replay cache-hits all unchanged tasks, and a replay with **any `--set` param
+      override** re-runs the full DAG (because `RunParams` folds wholesale into
+      every task hash per B1; do NOT assert selective per-task re-run, which is
+      unsatisfiable in v1 and tempts hiding the override from the hash — forbidden),
+      (2) `--diff --json` reports the discriminating field on
       clean stdout (`runCLIStdout`), and (3) the quarantined run did **not** mutate
       the baseline's cache entry or authoritative lineage. Add **safety
       regression** assertions: (4) a `POST …/replay` body attempting `quarantine:
@@ -1317,7 +1331,10 @@ The plan is done when **all** of these hold:
 2. **Stream B — quarantined replay** is a runtime feature that is **fail-closed
    and distributed-safe**: the replay design memo
    (`docs/design-quarantined-replay.md`) has landed, `caesium run replay --set …
-   --diff` re-runs only hash-changed tasks in an isolated run that leaves the
+   --diff` re-runs the baseline in an isolated run (a no-override replay cache-hits
+   all unchanged tasks; any `--set` param override re-runs the full DAG, since
+   `RunParams` folds wholesale into every task hash — selective per-task re-run is
+   a deferred enhancement) that leaves the
    baseline's cache/lineage authority untouched **in both the local and distributed
    executors** (the `Quarantine` flag propagates on `TaskRun` to the worker),
    **reconstructs each re-executed task from an immutable baseline execution
