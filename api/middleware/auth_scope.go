@@ -17,6 +17,8 @@ import (
 // ContextKeyAllowedJobAliases stores the scoped job aliases available to list endpoints.
 const ContextKeyAllowedJobAliases = "auth.allowed_job_aliases"
 
+const lineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
+
 type scopeAuditContext struct {
 	jobAliases []string
 }
@@ -77,6 +79,10 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 		}
 		state.jobAliases = aliases
 		return state, nil
+	case "/v1/lineage/impact":
+		if c.Request().Method == http.MethodGet {
+			return nil, echo.NewHTTPError(http.StatusForbidden, lineageImpactScopedDenyMessage)
+		}
 	}
 
 	if strings.HasPrefix(routePath, "/v1/jobs/:id") {

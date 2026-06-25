@@ -18,6 +18,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const lineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
+
 func setupAuth(t *testing.T) (*gorm.DB, *auth.Service, *auth.AuditLogger, *auth.RateLimiter, string) {
 	t.Helper()
 
@@ -753,6 +755,50 @@ func TestMiddlewareScopedGlobalRouteRejected(t *testing.T) {
 	he, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusForbidden, he.Code)
+}
+
+func TestMiddlewareLineageImpactAllowsUnscopedViewer(t *testing.T) {
+	_, svc, auditor, limiter, _ := setupAuth(t)
+	key := createKey(t, svc, models.RoleViewer, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/lineage/impact", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec, err := callMiddleware(
+		t,
+		svc,
+		auditor,
+		limiter,
+		req,
+		&echo.RouteInfo{Path: "/v1/lineage/impact", Method: http.MethodGet},
+		nil,
+		nil,
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestMiddlewareLineageImpactRejectsScopedViewerWithSpecificMessage(t *testing.T) {
+	_, svc, auditor, limiter, _ := setupAuth(t)
+	key := createKey(t, svc, models.RoleViewer, &models.KeyScope{Jobs: []string{"alpha"}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/lineage/impact", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	_, err := callMiddleware(
+		t,
+		svc,
+		auditor,
+		limiter,
+		req,
+		&echo.RouteInfo{Path: "/v1/lineage/impact", Method: http.MethodGet},
+		nil,
+		nil,
+	)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+	require.Equal(t, lineageImpactScopedDenyMessage, he.Message)
 }
 
 func TestGetAuthKeyReturnsNilWhenNotSet(t *testing.T) {

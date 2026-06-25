@@ -64,6 +64,8 @@ Run-level events (DAG start/complete/fail) continue to emit empty `Inputs`/`Outp
 
 A bounded summary of each task's dataset graph is also persisted in dqlite via the `lineage_datasets` table (namespace, name, direction, and a small facet digest) to support future cross-job impact queries — full facets are emitted only to the configured transport backend.
 
+`GET /v1/lineage/impact` is a global cross-job traversal over that persisted graph. In v1, job-scoped API keys are denied on this endpoint; use an unscoped API key with viewer-or-higher role until alias-filtered impact traversal is implemented.
+
 ## Configuration
 
 The integration is controlled entirely via environment variables. It is disabled by default.
