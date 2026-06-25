@@ -137,7 +137,7 @@ func Auth(d AuthDeps) echo.MiddlewareFunc {
 			scopeContext, err := authorizeScope(c, d.Service, principal.Scope, routePath)
 			if err != nil {
 				if he, ok := err.(*echo.HTTPError); ok && he.Code == http.StatusForbidden {
-					return denyAccess(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_scope", required)
+					return denyAccessWithMessage(c, d.Auditor, principal.Subject, principal.Role, routePath, "insufficient_scope", required, forbiddenMessage(he))
 				}
 				return err
 			}
@@ -281,6 +281,19 @@ func denyAccess(
 	reason string,
 	required models.Role,
 ) error {
+	return denyAccessWithMessage(c, auditor, actor, keyRole, routePath, reason, required, "insufficient permissions")
+}
+
+func denyAccessWithMessage(
+	c *echo.Context,
+	auditor *auth.AuditLogger,
+	actor string,
+	keyRole models.Role,
+	routePath string,
+	reason string,
+	required models.Role,
+	message string,
+) error {
 	metrics.AuthRequestsTotal.WithLabelValues("denied", string(keyRole), c.Request().Method, routePath).Inc()
 
 	metadata := map[string]interface{}{
@@ -301,7 +314,16 @@ func denyAccess(
 		Outcome:  auth.OutcomeDenied,
 		Metadata: metadata,
 	}))
-	return echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	return echo.NewHTTPError(http.StatusForbidden, message)
+}
+
+func forbiddenMessage(err *echo.HTTPError) string {
+	// echo/v5 HTTPError.Message is a concrete string (not interface{} as in v4),
+	// so read it directly rather than type-asserting.
+	if err != nil && err.Message != "" {
+		return err.Message
+	}
+	return "insufficient permissions"
 }
 
 func logSuccessfulAction(
