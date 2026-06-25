@@ -80,6 +80,44 @@ func TestRequiredRoleKnownEndpoints(t *testing.T) {
 	require.Equal(t, models.RoleAdmin, role)
 }
 
+func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
+	tests := []struct {
+		method string
+		path   string
+		role   models.Role
+	}{
+		{"GET", "/v1/jobs/:id/runs/:id/why", models.RoleViewer},
+		{"GET", "/v1/jobs/:id/runs/:id/receipt", models.RoleViewer},
+		{"POST", "/v1/jobs/:id/runs/:id/receipt/verify", models.RoleViewer},
+		{"GET", "/v1/jobs/:id/topology", models.RoleViewer},
+		{"GET", "/v1/jobs/:id/topology/history", models.RoleViewer},
+		{"GET", "/v1/lineage/impact", models.RoleViewer},
+		{"GET", "/v1/stats/summary", models.RoleViewer},
+		{"GET", "/v1/system/features", models.RoleViewer},
+		{"GET", "/v1/system/nodes", models.RoleViewer},
+		{"GET", "/v1/notifications/channels", models.RoleViewer},
+		{"GET", "/v1/notifications/channels/:id", models.RoleViewer},
+		{"GET", "/v1/notifications/policies", models.RoleViewer},
+		{"GET", "/v1/notifications/policies/:id", models.RoleViewer},
+		{"POST", "/v1/jobdefs/lint", models.RoleViewer},
+		{"POST", "/v1/jobdefs/diff", models.RoleViewer},
+		{"POST", "/v1/notifications/channels", models.RoleOperator},
+		{"PATCH", "/v1/notifications/channels/:id", models.RoleOperator},
+		{"DELETE", "/v1/notifications/channels/:id", models.RoleOperator},
+		{"POST", "/v1/notifications/policies", models.RoleOperator},
+		{"PATCH", "/v1/notifications/policies/:id", models.RoleOperator},
+		{"DELETE", "/v1/notifications/policies/:id", models.RoleOperator},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			role, ok := RequiredRole(tt.method, tt.path)
+			require.True(t, ok)
+			require.Equal(t, tt.role, role)
+		})
+	}
+}
+
 func TestRequiredRoleUnknownEndpoint(t *testing.T) {
 	_, ok := RequiredRole("GET", "/v1/unknown")
 	require.False(t, ok)

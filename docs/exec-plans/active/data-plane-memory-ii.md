@@ -1038,7 +1038,7 @@ on any route that is not `/v1/jobs`, `/v1/jobdefs/apply`, or `/v1/jobs/:id…`. 
 backfilling roles alone is **not sufficient** for global routes — the scope
 behavior must be deliberate, not an accident of the fall-through.
 
-- [ ] H-1. **Full RBAC policy backfill** for every currently-unpolicied route in
+- [x] H-1. **Full RBAC policy backfill** for every currently-unpolicied route in
       `bind.go`'s `Protected()` group, with the trust boundary made explicit. The
       adversarial review (2026-06-20) found that `api/middleware/auth.go`'s
       `RequiredRole` returns `!ok` for any route absent from `endpointPolicy` and
@@ -1070,6 +1070,21 @@ behavior must be deliberate, not an accident of the fall-through.
       The one exception that needs real work is `/v1/lineage/impact` — see H-3.
       Files: `internal/auth/rbac.go` (backfill entries), `internal/auth/rbac_test.go`
       (assertions).
+      Note (W1-delta): backfilled 21 normalized policy keys. Job-scoped routes
+      now enforce alias scope through the existing `/v1/jobs/:id...` case:
+      `GET /v1/jobs/:id/runs/:id/why`, `GET /v1/jobs/:id/runs/:id/receipt`,
+      `POST /v1/jobs/:id/runs/:id/receipt/verify`, `GET /v1/jobs/:id/topology`,
+      `GET /v1/jobs/:id/topology/history`. Global backfills intentionally keep
+      scoped principals denied by the current scope fall-through:
+      `GET /v1/stats/summary`, `GET /v1/system/features`, `GET /v1/system/nodes`,
+      `GET /v1/notifications/channels`, `GET /v1/notifications/channels/:id`,
+      `POST /v1/notifications/channels`, `PATCH /v1/notifications/channels/:id`,
+      `DELETE /v1/notifications/channels/:id`, `GET /v1/notifications/policies`,
+      `GET /v1/notifications/policies/:id`, `POST /v1/notifications/policies`,
+      `PATCH /v1/notifications/policies/:id`,
+      `DELETE /v1/notifications/policies/:id`, `POST /v1/jobdefs/lint`, and
+      `POST /v1/jobdefs/diff`; `GET /v1/lineage/impact` has only its Viewer
+      role backfilled here and remains pending H-3 scope semantics.
 - [ ] H-2. Add the **completeness guard**: a test asserting every route registered
       under `bind.go`'s `Protected()` group has an `endpointPolicy` entry, so a new
       authenticated route without a policy fails CI instead of 403-ing at runtime.
