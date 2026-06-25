@@ -18,8 +18,6 @@ import (
 	"gorm.io/gorm"
 )
 
-const lineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
-
 func setupAuth(t *testing.T) (*gorm.DB, *auth.Service, *auth.AuditLogger, *auth.RateLimiter, string) {
 	t.Helper()
 
@@ -798,7 +796,7 @@ func TestMiddlewareLineageImpactRejectsScopedViewerWithSpecificMessage(t *testin
 	he, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusForbidden, he.Code)
-	require.Equal(t, lineageImpactScopedDenyMessage, he.Message)
+	require.Equal(t, authmw.LineageImpactScopedDenyMessage, he.Message)
 }
 
 func TestGetAuthKeyReturnsNilWhenNotSet(t *testing.T) {

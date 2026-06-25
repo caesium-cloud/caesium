@@ -22,8 +22,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const lineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
-
 func TestLineageImpactScopeRequiresUnscopedPrincipal(t *testing.T) {
 	t.Setenv("CAESIUM_DATABASE_PATH", t.TempDir())
 	t.Setenv("CAESIUM_DATABASE_SHARDS", "1")
@@ -66,7 +64,7 @@ func TestLineageImpactScopeRequiresUnscopedPrincipal(t *testing.T) {
 
 	status, body := getWithBearer(t, target, scoped.Plaintext)
 	require.Equal(t, http.StatusForbidden, status, body)
-	require.Contains(t, body, lineageImpactScopedDenyMessage)
+	require.Contains(t, body, authmw.LineageImpactScopedDenyMessage)
 
 	status, body = getWithBearer(t, target, unscoped.Plaintext)
 	require.Equal(t, http.StatusOK, status, body)
