@@ -148,13 +148,17 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Wave 1 (2026-06-25) shipped the four leaf items** — A1, B1, C1, H-1 — via PRs
-#230–#233 (per-stream detail in the Wave 1 subsection below). The B1 design memo
-(the Stream B hard barrier) has landed, so Stream B's runtime items (B2+) are now
-unblocked. Next eligible (Wave 2): **A2** (run-diff REST endpoint), **B2** + **B7**
-(quarantine plumbing + the `replaySafe` schema), **C2** (blame REST endpoint), and
-**H-2** + **H-3** (RBAC completeness guard + lineage-impact scope) — each gated on
-its Wave 1 predecessor per `## Sequencing & Dependencies`.
+**Waves 1–2 (2026-06-25) shipped nine items.** Wave 1 (#230–#233): A1, B1, C1,
+H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7 (per-stream detail in the wave
+subsections below). The run-diff and blame REST endpoints, the RBAC completeness
+guard + lineage-impact scope deny, and the durable `replaySafe` schema (with
+cache-hash exclusion verified) are all in. With the B1 hard barrier and the B7
+schema landed, Stream B's replay runtime is now fully unblocked. **Remaining:**
+the CLIs (A3, C3) + their integration scenarios (A4, C4); the replay runtime core
+— **B2** (quarantine plumbing, deferred to its own wave as the largest, most
+security-critical item) → B3 → B4 → B5 → B6; and the plan-level cross-links (N-1).
+Next eligible leaf items: **A3**, **C3** (CLIs over the shipped endpoints) and
+**B2** (the deferred replay-runtime wave).
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -336,14 +340,45 @@ before an admin-merge. All gemini + greptile review threads were addressed
   notification mutations — out of scope for the RBAC backfill, shared with the
   pre-existing trigger/atom gap.)
 
+### Wave 2 (2026-06-25)
+
+Five items shipped via the same pipeline (codex implement → multi-lens Opus
+adversarial review → orchestrator verify + publish → twice-run greptile/gemini
+sweep → admin-merge). The review caught a compile blocker (an `echo.HTTPError`
+type assertion against echo v5's concrete-string field), a non-hermetic
+completeness guard (eager DB connection at route registration), and an example
+shipping `replaySafe: true`; all fixed before merge.
+
+- **W2-α — A2 + C2 (run-diff + blame REST endpoints)** — PR #236, merged `3e9a94e`.
+  `GET /v1/jobs/:id/runs/diff` (over `Store.DiffRuns`) and `GET /v1/jobs/:id/blame`
+  (over `blame.Query`), both `RoleViewer`. The run-diff handler validates both
+  `left`/`right` runs belong to `:id` — the cross-job 404 boundary scope middleware
+  can't enforce on query-param run ids; an integration scenario drives that boundary
+  over real HTTP.
+- **W2-β — H-2 (RBAC completeness guard)** — PR #237, merged `450cc26`. Registers
+  the full router and asserts every auth-middleware-mounted route (Protected +
+  `/v1/auth/*`) has an `endpointPolicy` entry; adds shared
+  `NormalizeRoutePath`/`IsPublicAuthPath` middleware helpers; made the `/events`
+  controller's store lazy so route registration is DB-free. The scoped allow/deny
+  integration matrix is deferred to an auth-enabled integration harness (A4/C4/B6
+  need it too).
+- **W2-γ — H-3 (lineage-impact scope)** — PR #234, merged `6aeb5cf`. An explicit
+  `authorizeScope` deny for scoped principals on the global cross-job
+  `/v1/lineage/impact` (option a — the honest pre-alpha choice), with a clear
+  message, documented limitation, and scope tests.
+- **W2-δ — B7 (replaySafe schema)** — PR #235, merged `3605507`. The durable
+  `replaySafe` job/step flag (dual decl + validate + importer + models), recorded
+  on the baseline `TaskRun` at exec time for B3's gate, and **excluded from the
+  cache identity hash** (verified — toggling it is not a cache miss).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Wave 1: **A1 shipped** (#231); A2–A4 pending |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Wave 1: **B1 memo shipped** (#233), barrier cleared; B2–B7 pending |
-| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Wave 1: **C1 shipped** (#232); C2–C4 pending |
-| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Wave 1: **H-1 shipped** (#230); H-2/H-3 pending, H-4 optional |
+| A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | Waves 1–2: **A1+A2 shipped** (#231, #236); A3 (CLI), A4 (e2e) pending |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Waves 1–2: **B1 memo + B7 schema shipped** (#233, #235), barrier cleared; B2–B6 pending |
+| C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | Waves 1–2: **C1+C2 shipped** (#232, #236); C3 (CLI), C4 (e2e) pending |
+| H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | Waves 1–2: **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (depends on A4+B6+C4) |
 
 ## Streams
