@@ -3,6 +3,7 @@ apiVersion: v1
 kind: Job
 metadata:
   alias: nightly-etl
+  # replaySafe: true   # opt-in: authorizes quarantined what-if replay of this job's steps (default false)
 trigger:
   type: cron
   configuration:

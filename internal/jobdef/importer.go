@@ -364,6 +364,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 			RunTimeout:       def.Metadata.RunTimeout,
 			SLA:              marshalSLA(def.Metadata.SLA),
 			SchemaValidation: def.Metadata.SchemaValidation,
+			ReplaySafe:       def.Metadata.ReplaySafe,
 			CacheConfig:      cacheConfig,
 		}
 		applyJobProvenance(jobModel, opts)
@@ -382,6 +383,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	existing.RunTimeout = def.Metadata.RunTimeout
 	existing.SLA = marshalSLA(def.Metadata.SLA)
 	existing.SchemaValidation = def.Metadata.SchemaValidation
+	existing.ReplaySafe = def.Metadata.ReplaySafe
 	existing.CacheConfig = cacheConfig
 	applyJobProvenance(existing, opts)
 
@@ -395,6 +397,7 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 		"run_timeout":          existing.RunTimeout,
 		"sla":                  existing.SLA,
 		"schema_validation":    existing.SchemaValidation,
+		"replay_safe":          existing.ReplaySafe,
 		"cache_config":         existing.CacheConfig,
 		"provenance_source_id": existing.ProvenanceSourceID,
 		"provenance_repo":      existing.ProvenanceRepo,
@@ -502,6 +505,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("step %s: %w", step.Name, err)
 		}
+		effectiveReplaySafe := def.EffectiveReplaySafeForStep(step)
 
 		var atomModel *models.Atom
 		if taskModel != nil && taskModel.AtomID != uuid.Nil {
@@ -522,6 +526,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 		atomModel.Image = step.Image
 		atomModel.Command = command
 		atomModel.Spec = datatypes.JSON(specJSON)
+		atomModel.ReplaySafe = effectiveReplaySafe
 		applyAtomProvenance(atomModel, step.Name, opts)
 
 		if atomModel.CreatedAt.IsZero() {
@@ -534,6 +539,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 				"image":                atomModel.Image,
 				"command":              atomModel.Command,
 				"spec":                 atomModel.Spec,
+				"replay_safe":          atomModel.ReplaySafe,
 				"provenance_source_id": atomModel.ProvenanceSourceID,
 				"provenance_repo":      atomModel.ProvenanceRepo,
 				"provenance_ref":       atomModel.ProvenanceRef,
@@ -549,7 +555,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 		if taskModel == nil {
 			taskModel = &models.Task{ID: uuid.New(), JobID: jobModel.ID}
 		}
-		if err := populateTaskFromStep(taskModel, atomModel.ID, step); err != nil {
+		if err := populateTaskFromStep(taskModel, atomModel.ID, step, effectiveReplaySafe); err != nil {
 			return nil, nil, nil, err
 		}
 		taskModel.Position = idx
@@ -568,6 +574,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 				"retry_delay":   taskModel.RetryDelay,
 				"retry_backoff": taskModel.RetryBackoff,
 				"trigger_rule":  taskModel.TriggerRule,
+				"replay_safe":   taskModel.ReplaySafe,
 				"cache_config":  taskModel.CacheConfig,
 				"output_schema": taskModel.OutputSchema,
 				"input_schema":  taskModel.InputSchema,
@@ -927,7 +934,7 @@ func (i *Importer) retireJobsTx(tx *gorm.DB, jobs []*models.Job) error {
 	return tx.Delete(&models.Job{}, jobIDs).Error
 }
 
-func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema.Step) error {
+func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema.Step, replaySafe bool) error {
 	triggerRule := strings.TrimSpace(step.TriggerRule)
 	if triggerRule == "" {
 		triggerRule = schema.TriggerRuleAllSuccess
@@ -959,6 +966,7 @@ func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema
 	taskModel.RetryDelay = step.RetryDelay
 	taskModel.RetryBackoff = step.RetryBackoff
 	taskModel.TriggerRule = triggerRule
+	taskModel.ReplaySafe = replaySafe
 	taskModel.CacheConfig = cacheConfig
 	taskModel.OutputSchema = outputSchema
 	taskModel.InputSchema = inputSchema

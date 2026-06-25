@@ -30,23 +30,23 @@ type JobRun struct {
 }
 
 type TaskRun struct {
-	ID               uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
-	JobRunID         uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
-	JobRun           JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	TaskID           uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
-	Task             Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	AtomID           uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
-	Engine           AtomEngine        `gorm:"type:text;not null" json:"engine"`
-	Image            string            `gorm:"not null" json:"image"`
-	Command          string            `gorm:"not null" json:"command"`
-	Status           string            `gorm:"type:text;index;not null" json:"status"`
-	ClaimedBy        string            `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
-	ClaimExpiresAt   *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
-	ClaimAttempt     int               `gorm:"not null;default:0" json:"claim_attempt"`
-	Attempt          int               `gorm:"not null;default:1" json:"attempt"`
-	MaxAttempts      int               `gorm:"not null;default:1" json:"max_attempts"`
-	NodeSelector     datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
-	Hash             string            `gorm:"type:text;index" json:"-"`
+	ID             uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
+	JobRunID       uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
+	JobRun         JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TaskID         uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
+	Task           Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	AtomID         uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
+	Engine         AtomEngine        `gorm:"type:text;not null" json:"engine"`
+	Image          string            `gorm:"not null" json:"image"`
+	Command        string            `gorm:"not null" json:"command"`
+	Status         string            `gorm:"type:text;index;not null" json:"status"`
+	ClaimedBy      string            `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
+	ClaimExpiresAt *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
+	ClaimAttempt   int               `gorm:"not null;default:0" json:"claim_attempt"`
+	Attempt        int               `gorm:"not null;default:1" json:"attempt"`
+	MaxAttempts    int               `gorm:"not null;default:1" json:"max_attempts"`
+	NodeSelector   datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
+	Hash           string            `gorm:"type:text;index" json:"-"`
 	// EffectiveHash is the identity this task presents to its DOWNSTREAM
 	// consumers when a value-verified short-circuit was proven (design Component
 	// 5 / D2). Nullable: empty means "use Hash" — the common case. When this
@@ -58,14 +58,18 @@ type TaskRun struct {
 	// not heuristic. Hash itself is left untouched so this task's own receipt /
 	// `caesium why` still reflect its true identity. See
 	// cache.EquivalentPriorHash for the proof and its default-to-rerun guards.
-	EffectiveHash    string            `gorm:"type:text" json:"-"`
-	Result           string            `json:"result,omitempty"`
-	Output           datatypes.JSON    `gorm:"type:json" json:"output,omitempty"`
-	BranchSelections datatypes.JSON    `gorm:"type:json" json:"branch_selections,omitempty"`
-	CacheHit         bool              `gorm:"not null;default:false" json:"cache_hit"`
-	CacheEnabled     bool              `gorm:"not null;default:false" json:"-"`
-	CacheTTL         time.Duration     `gorm:"not null;default:0" json:"-"`
-	CacheVersion     int               `gorm:"not null;default:0" json:"-"`
+	EffectiveHash    string         `gorm:"type:text" json:"-"`
+	Result           string         `json:"result,omitempty"`
+	Output           datatypes.JSON `gorm:"type:json" json:"output,omitempty"`
+	BranchSelections datatypes.JSON `gorm:"type:json" json:"branch_selections,omitempty"`
+	CacheHit         bool           `gorm:"not null;default:false" json:"cache_hit"`
+	CacheEnabled     bool           `gorm:"not null;default:false" json:"-"`
+	CacheTTL         time.Duration  `gorm:"not null;default:0" json:"-"`
+	CacheVersion     int            `gorm:"not null;default:0" json:"-"`
+	// ReplaySafe snapshots the effective job/step replaySafe mark when this
+	// task run is materialized. Replay authorization reads this baseline value,
+	// not the mutable live job definition.
+	ReplaySafe bool `gorm:"not null;default:false" json:"replay_safe"`
 	// CachePinDigests snapshots whether image-digest pinning is in effect for
 	// this task. Like CacheEnabled/CacheTTL/CacheVersion it is scheduler-set on
 	// the row so distributed workers behave identically to local execution

@@ -948,7 +948,7 @@ write, lineage emit, or callback.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
-- [ ] B7. **Build the durable `replaySafe` job/step contract (schema + persistence)
+- [x] B7. **Build the durable `replaySafe` job/step contract (schema + persistence)
       — lands before B3.** The replay-safe gate (B3/B6(8)) refuses unmarked jobs and
       lets a *durably-marked* job proceed, but **no field exists yet** (`grep`
       confirms no `replaySafe` in `pkg/jobdef/definition.go` or the models). Without
@@ -981,6 +981,11 @@ write, lineage emit, or callback.
       `internal/models/run.go` (recorded `replay_safe` on `TaskRun` at exec time),
       `internal/cache/hash.go` (exclusion + test), `docs/examples/*.job.yaml`.
       Depends on: B1 (the memo fixes the field's exact shape + job-vs-step scope).
+      W2-delta note (2026-06-25): implemented both `metadata.replaySafe` and
+      `steps[].replaySafe`; the effective per-task value is job-level OR
+      step-level and is snapshotted onto `TaskRun.replay_safe` in `RegisterTasks`.
+      `replaySafe` remains absent from `HashInput`, with a definition-driven hash
+      test proving job/step toggles do not change the cache identity.
 
 ### Stream C — `caesium blame` over commit ranges
 

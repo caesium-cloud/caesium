@@ -22,6 +22,7 @@ type Task struct {
 	RetryDelay   time.Duration     `gorm:"not null;default:0" json:"retry_delay"`
 	RetryBackoff bool              `gorm:"not null;default:false" json:"retry_backoff"`
 	TriggerRule  string            `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
+	ReplaySafe   bool              `gorm:"not null;default:false" json:"replay_safe"`
 	CacheConfig  datatypes.JSON    `gorm:"type:json" json:"cache_config,omitempty"`
 	// OutputSchema is a JSON Schema describing this task's expected output keys.
 	OutputSchema datatypes.JSON `gorm:"type:json" json:"output_schema,omitempty"`

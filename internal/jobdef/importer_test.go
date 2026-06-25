@@ -93,6 +93,66 @@ func (s *ImporterTestSuite) TestApplyCreatesRecords() {
 	s.Len(edges, 2)
 }
 
+func (s *ImporterTestSuite) TestApplyPersistsReplaySafeMarkers() {
+	const stepOnly = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: replay-markers
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+  - name: transform
+    replaySafe: true
+    image: alpine:3.23
+`
+	def, err := schema.Parse([]byte(stepOnly))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	var jobModel models.Job
+	s.Require().NoError(s.db.First(&jobModel, "id = ?", job.ID).Error)
+	s.False(jobModel.ReplaySafe)
+
+	var tasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&tasks).Error)
+	s.Require().Len(tasks, 2)
+	s.False(tasks[0].ReplaySafe)
+	s.True(tasks[1].ReplaySafe)
+
+	atoms := make([]models.Atom, len(tasks))
+	for idx := range tasks {
+		s.Require().NoError(s.db.First(&atoms[idx], "id = ?", tasks[idx].AtomID).Error)
+	}
+	s.False(atoms[0].ReplaySafe)
+	s.True(atoms[1].ReplaySafe)
+
+	jobLevel := strings.Replace(stepOnly, "metadata:\n  alias: replay-markers", "metadata:\n  alias: replay-markers\n  replaySafe: true", 1)
+	def, err = schema.Parse([]byte(jobLevel))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	s.Require().NoError(s.db.First(&jobModel, "id = ?", job.ID).Error)
+	s.True(jobModel.ReplaySafe)
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&tasks).Error)
+	s.Require().Len(tasks, 2)
+	s.True(tasks[0].ReplaySafe)
+	s.True(tasks[1].ReplaySafe)
+	atoms = make([]models.Atom, len(tasks))
+	for idx := range tasks {
+		s.Require().NoError(s.db.First(&atoms[idx], "id = ?", tasks[idx].AtomID).Error)
+	}
+	s.True(atoms[0].ReplaySafe)
+	s.True(atoms[1].ReplaySafe)
+}
+
 func (s *ImporterTestSuite) TestApplyPersistsResolvedVolumeAndIdentitySpec() {
 	def, err := schema.Parse([]byte(`
 apiVersion: v1

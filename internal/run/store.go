@@ -119,6 +119,7 @@ type TaskRun struct {
 	SchemaViolations        []pkgtask.SchemaViolation `json:"schema_violations,omitempty"`
 	BranchSelections        []string                  `json:"branch_selections,omitempty"`
 	CacheHit                bool                      `json:"cache_hit"`
+	ReplaySafe              bool                      `json:"replay_safe"`
 	CacheOriginRunID        *uuid.UUID                `json:"cache_origin_run_id,omitempty"`
 	CacheCreatedAt          *time.Time                `json:"cache_created_at,omitempty"`
 	CacheExpiresAt          *time.Time                `json:"cache_expires_at,omitempty"`
@@ -549,7 +550,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 
 	var job models.Job
 	jobFound := true
-	if err := s.db.Select("id", "schema_validation", "cache_config").First(&job, "id = ?", jobID).Error; err != nil {
+	if err := s.db.Select("id", "schema_validation", "cache_config", "replay_safe").First(&job, "id = ?", jobID).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
@@ -622,6 +623,10 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					envCache.PinDigests,
 					envCache.DigestTTL,
 				)
+				replaySafe := task.ReplaySafe || atom.ReplaySafe
+				if jobFound && job.ReplaySafe {
+					replaySafe = true
+				}
 
 				records = append(records, models.TaskRun{
 					ID:                      uuid.New(),
@@ -639,6 +644,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					CacheEnabled:            resolvedCache.Enabled,
 					CacheTTL:                resolvedCache.TTL,
 					CacheVersion:            resolvedCache.Version,
+					ReplaySafe:              replaySafe,
 					CachePinDigests:         resolvedCache.PinDigests,
 					CacheDigestTTL:          resolvedCache.DigestTTL,
 					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
@@ -2598,6 +2604,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		CreatedAt:               model.CreatedAt,
 		UpdatedAt:               model.UpdatedAt,
 		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
+		ReplaySafe:              model.ReplaySafe,
 	}
 
 	if len(model.Output) > 0 {

@@ -45,7 +45,7 @@ steps:
 ### Structure at a glance
 
 - `apiVersion: v1` and `kind: Job` (both required)
-- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
+- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
 - `trigger` (required): `type` (`cron` | `http`) + `configuration` + optional `defaultParams` — see the snippets below
 - `volumes` (optional): named BYO storage sources mounted by steps
 - `steps` (required, ≥1): see the step quick-reference below
@@ -91,12 +91,34 @@ trigger:
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
+| `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
 | `volumeMounts` | array | no | Mount a declared job volume: `{volume, path, readOnly?, subPath?}` |
 | `serviceAccountName` / `podAnnotations` / `automountServiceAccountToken` | string / map / bool | no | Kubernetes workload-identity passthrough |
 | `kueue` | object | no | Delegate admission to a [Kueue](https://kueue.sigs.k8s.io/) LocalQueue (kubernetes engine only): `{queueName: <local-queue>}`. Caesium stamps `kueue.x-k8s.io/queue-name` on the pod; Kueue gates scheduling against the queue's quota. Pure scheduling metadata — excluded from the cache hash. See [Delegating scheduling to Kueue](#delegating-scheduling-to-kueue) |
+
+### Marking Replay-Safe Tasks
+
+`replaySafe` is an operator-reviewed mark for quarantined what-if replay. Set it only on jobs or steps whose real command is safe to re-execute under replay. A job-level mark applies to every step:
+
+```yaml
+metadata:
+  alias: backfill-preview
+  replaySafe: true
+```
+
+A step-level mark applies to one task:
+
+```yaml
+steps:
+  - name: summarize
+    replaySafe: true
+    image: alpine:3.23
+```
+
+Caesium records the effective value on the baseline `TaskRun` when that task runs. Later applies cannot retroactively authorize an older unsafe baseline, and `replaySafe` is excluded from the cache identity hash because it is control-plane metadata, not an execution input.
 
 ### Delegating scheduling to Kueue
 

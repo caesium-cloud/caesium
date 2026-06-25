@@ -311,6 +311,71 @@ func TestRegisterTaskPersistsSchemaValidationConfig(t *testing.T) {
 	require.Equal(t, job.SchemaValidation, persisted.SchemaValidation)
 }
 
+func TestRegisterTaskPersistsReplaySafeSnapshot(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	now := time.Now().UTC()
+
+	trigger := &models.Trigger{
+		ID:        uuid.New(),
+		Alias:     "replay-safe-trigger",
+		Type:      models.TriggerTypeCron,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{
+		ID:        uuid.New(),
+		Alias:     "replay-safe-job",
+		TriggerID: trigger.ID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(job).Error)
+
+	runRecord, err := store.Start(job.ID, &trigger.ID)
+	require.NoError(t, err)
+
+	atom := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine:3.23",
+		Command:   `["echo","test"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atom).Error)
+
+	unsafeTask := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "unsafe", CreatedAt: now, UpdatedAt: now}
+	safeTask := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atom.ID, Name: "safe", ReplaySafe: true, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create([]*models.Task{unsafeTask, safeTask}).Error)
+
+	require.NoError(t, store.RegisterTasks(runRecord.ID, []RegisterTaskInput{
+		{Task: unsafeTask, Atom: atom, OutstandingPredecessors: 0},
+		{Task: safeTask, Atom: atom, OutstandingPredecessors: 0},
+	}))
+
+	var unsafeRun, safeRun models.TaskRun
+	require.NoError(t, db.First(&unsafeRun, "job_run_id = ? AND task_id = ?", runRecord.ID, unsafeTask.ID).Error)
+	require.NoError(t, db.First(&safeRun, "job_run_id = ? AND task_id = ?", runRecord.ID, safeTask.ID).Error)
+	require.False(t, unsafeRun.ReplaySafe)
+	require.True(t, safeRun.ReplaySafe)
+
+	require.NoError(t, db.Model(job).Update("replay_safe", true).Error)
+	secondRun, err := store.Start(job.ID, &trigger.ID)
+	require.NoError(t, err)
+	require.NoError(t, store.RegisterTask(secondRun.ID, unsafeTask, atom, 0))
+
+	var jobLevelRun models.TaskRun
+	require.NoError(t, db.First(&jobLevelRun, "job_run_id = ? AND task_id = ?", secondRun.ID, unsafeTask.ID).Error)
+	require.True(t, jobLevelRun.ReplaySafe)
+}
+
 func TestRegisterTasksBatchesReadyEventsAndSkipsExisting(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {
