@@ -958,7 +958,7 @@ enhancement** (broaden the snapshot descriptor + `ContentHash` to the full
 behavior-affecting step spec, then test `env`/`cache`/`triggerRules` mutations) —
 recorded here, out of scope, not promised.
 
-- [ ] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
+- [x] C1. Add the blame query: walk `dag_snapshot` rows for a job in commit/time
       order and attribute each task/edge to its **most recent introduction** — the
       snapshot at which its *current descriptor* transitioned from absent → present
       — not the earliest-ever containment. **Key identity by the full descriptor,
@@ -977,6 +977,9 @@ recorded here, out of scope, not promised.
       Files: new `internal/blame/` (query package), new `internal/blame/*_test.go`
       (cover delete/readd, **same-name image/command mutation**, and
       range-start-after-introduction explicitly).
+      Note: Implemented in `internal/blame` with snapshot-query-backed attribution,
+      descriptor-keyed task blame, edge provenance commits, task filtering, commit
+      range filtering, and the explicit `coverage: "topology+image+command"` caveat.
 - [ ] C2. Expose `GET /v1/jobs/:id/blame[?task=<name>&from=<commit>&to=<commit>]`
       returning per-element attribution as JSON. Register the route in
       `endpointPolicy` (`GET /v1/jobs/:id/blame` → `RoleViewer`) or the middleware
