@@ -375,6 +375,48 @@ func TestUniqueReplayFingerprintClassifierUsesDriverError(t *testing.T) {
 	require.True(t, isUniqueReplayFingerprintError(err), "actual duplicate insert error was not classified: %v", err)
 }
 
+func TestReplayUniqueViolationWithoutFingerprintMatchReturnsInsertError(t *testing.T) {
+	f := newServiceReplayFixture(t)
+	f.seedTask(t, true, "success")
+
+	require.NoError(t, f.db.Create(&models.JobRun{
+		ID:           uuid.New(),
+		JobID:        f.jobID,
+		Status:       string(runstorage.StatusSucceeded),
+		Quarantine:   true,
+		TriggerType:  "replay",
+		TriggerAlias: "quarantined-replay",
+		StartedAt:    f.now,
+		CompletedAt:  servicePtr(f.now),
+		CreatedAt:    f.now,
+		UpdatedAt:    f.now,
+	}).Error)
+	require.NoError(t, f.db.Exec("CREATE UNIQUE INDEX idx_test_job_runs_trigger_alias ON job_runs(trigger_alias)").Error)
+
+	key := "non-fingerprint-unique"
+	fingerprint, err := Fingerprint(f.jobID, f.runID, f.principal, nil, key)
+	require.NoError(t, err)
+
+	_, err = (&Service{
+		ctx:        context.Background(),
+		store:      f.store,
+		dispatcher: &recordingDispatcher{},
+	}).WithExecutionMode("local").Replay(Request{
+		JobID:          f.jobID,
+		BaselineRunID:  f.runID,
+		IdempotencyKey: key,
+		Principal:      f.principal,
+	})
+	require.Error(t, err)
+	require.True(t, isUniqueReplayFingerprintError(err), "non-fingerprint unique violation must surface as the insert failure: %v", err)
+	require.False(t, errors.Is(err, gorm.ErrRecordNotFound), "non-fingerprint unique violation must not be reported as a missing reservation")
+	require.NotContains(t, err.Error(), "load existing idempotency reservation")
+
+	var replayRuns int64
+	require.NoError(t, f.db.Model(&models.JobRun{}).Where("replay_fingerprint = ?", fingerprint).Count(&replayRuns).Error)
+	require.Zero(t, replayRuns)
+}
+
 type serviceReplayFixture struct {
 	db        *gorm.DB
 	store     *runstorage.Store

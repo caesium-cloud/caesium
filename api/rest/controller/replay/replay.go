@@ -33,7 +33,6 @@ type PostRequest struct {
 
 // PostResponse returns the materialized replay run id.
 type PostResponse struct {
-	ID         uuid.UUID `json:"id"`
 	RunID      uuid.UUID `json:"run_id"`
 	Status     string    `json:"status"`
 	Quarantine bool      `json:"quarantine"`
@@ -96,7 +95,6 @@ func Post(c *echo.Context) error {
 	}
 
 	return c.JSON(http.StatusAccepted, PostResponse{
-		ID:         result.Run.ID,
 		RunID:      result.Run.ID,
 		Status:     string(result.Run.Status),
 		Quarantine: result.Run.Quarantine,
@@ -138,10 +136,10 @@ func validatePostRequest(req PostRequest) error {
 		if strings.TrimSpace(key) == "" {
 			return errors.New("set keys must be non-empty")
 		}
-		if len([]byte(key)) > maxReplaySetKeyBytes {
+		if len(key) > maxReplaySetKeyBytes {
 			return fmt.Errorf("set key %q exceeds %d bytes", key, maxReplaySetKeyBytes)
 		}
-		if len([]byte(value)) > maxReplaySetValueBytes {
+		if len(value) > maxReplaySetValueBytes {
 			return fmt.Errorf("set value for %q exceeds %d bytes", key, maxReplaySetValueBytes)
 		}
 	}

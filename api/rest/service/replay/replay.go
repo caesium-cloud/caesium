@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -121,7 +122,7 @@ func (s *Service) Replay(req Request) (*Result, error) {
 		return nil, ErrMissingIdempotencyKey
 	}
 
-	overrides := cloneSet(req.Set)
+	overrides := maps.Clone(req.Set)
 	fingerprint, err := Fingerprint(req.JobID, req.BaselineRunID, req.Principal, overrides, key)
 	if err != nil {
 		return nil, err
@@ -155,10 +156,13 @@ func (s *Service) Replay(req Request) (*Result, error) {
 	}
 
 	existing, loadErr := s.findByFingerprint(fingerprint)
-	if loadErr != nil {
-		return nil, fmt.Errorf("replay: load existing idempotency reservation: %w", loadErr)
+	if loadErr == nil {
+		return s.returnExisting(req.JobID, existing.ID, fingerprint)
 	}
-	return s.returnExisting(req.JobID, existing.ID, fingerprint)
+	if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+		return nil, fmt.Errorf("replay: materialize idempotency reservation: %w", err)
+	}
+	return nil, fmt.Errorf("replay: load existing idempotency reservation: %w", loadErr)
 }
 
 func (s *Service) returnExisting(jobID, runID uuid.UUID, fingerprint string) (*Result, error) {
@@ -308,17 +312,6 @@ func normalizeOverrides(overrides map[string]string) []overridePair {
 	return normalized
 }
 
-func cloneSet(set map[string]string) map[string]string {
-	if len(set) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(set))
-	for k, v := range set {
-		out[k] = v
-	}
-	return out
-}
-
 func isUniqueReplayFingerprintError(err error) bool {
 	return sqlerr.IsUniqueConstraint(err)
 }
@@ -360,6 +353,11 @@ func (d *AsyncDispatcher) DispatchReplay(ctx context.Context, runID uuid.UUID) e
 	}
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Error("replay dispatch panic", "job_id", runModel.JobID, "run_id", runID, "recover", r)
+			}
+		}()
 		runCtx := runstorage.WithContext(context.Background(), runID)
 		err := jobrunner.New(
 			&jobModel,

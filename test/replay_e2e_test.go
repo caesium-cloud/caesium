@@ -16,7 +16,6 @@ import (
 )
 
 type replayResponse struct {
-	ID         string `json:"id"`
 	RunID      string `json:"run_id"`
 	Status     string `json:"status"`
 	Quarantine bool   `json:"quarantine"`
@@ -175,11 +174,11 @@ func (s *IntegrationTestSuite) mustPostReplay(jobID, runID string, key *string, 
 	s.T().Helper()
 	observed := s.postReplay(jobID, runID, key, payload)
 	s.Require().Equal(http.StatusAccepted, observed.status, observed.body)
+	var fields map[string]json.RawMessage
+	s.Require().NoError(json.Unmarshal([]byte(observed.body), &fields))
+	s.NotContains(fields, "id")
 	var decoded replayResponse
 	s.Require().NoError(json.Unmarshal([]byte(observed.body), &decoded))
-	if decoded.RunID == "" {
-		decoded.RunID = decoded.ID
-	}
 	s.Require().NotEmpty(decoded.RunID)
 	return decoded
 }
