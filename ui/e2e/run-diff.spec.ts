@@ -61,7 +61,7 @@ test("operator can compare runs and see changed versus cache-hit tasks", async (
   await expect(page.getByTestId("run-diff-container")).toBeVisible({ timeout: 30_000 });
 
   const changedRow = page.getByTestId("run-diff-task-row").filter({ hasText: "render" });
-  await expect(changedRow.getByTestId("run-diff-verdict")).toContainText("RERAN");
+  await expect(changedRow.getByTestId("run-diff-verdict")).toContainText("Reran");
   await expect(changedRow.getByTestId("run-diff-discriminating-field")).toContainText("command");
 
   const unchangedRow = page.getByTestId("run-diff-task-row").filter({ hasText: "stable-source" });
