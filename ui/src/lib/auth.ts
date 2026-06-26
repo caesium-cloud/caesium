@@ -6,6 +6,8 @@
  * tab is closed or the user logs out.
  */
 
+import { useSyncExternalStore } from "react";
+
 type AuthChangeListener = () => void;
 
 export interface AuthMethod {
@@ -29,10 +31,30 @@ export type CredentialLoginResult =
   | "denied"
   | "error"
   | "network";
+export type ApiKeyLoginResult = CredentialLoginResult;
+export type PrincipalRole = "viewer" | "runner" | "operator" | "admin";
+
+export interface PrincipalState {
+  kind: string | null;
+  subject: string | null;
+  role: PrincipalRole | null;
+  canRunner: boolean;
+  isScoped: boolean;
+  scopeKnown: boolean;
+}
 
 let apiKey: string | null = null;
 let cookieSession = false;
 let csrfToken: string | null = null;
+const anonymousPrincipal: PrincipalState = Object.freeze({
+  kind: null,
+  subject: null,
+  role: null,
+  canRunner: false,
+  isScoped: false,
+  scopeKnown: false,
+});
+let principal: PrincipalState = anonymousPrincipal;
 const listeners: Set<AuthChangeListener> = new Set();
 
 function notifyAuthChange(): void {
@@ -52,9 +74,113 @@ function cloneHeaders(headers?: HeadersInit): Record<string, string> {
   return { ...headers };
 }
 
+function roleLevel(role: PrincipalRole | null): number {
+  switch (role) {
+    case "admin":
+      return 40;
+    case "operator":
+      return 30;
+    case "runner":
+      return 20;
+    case "viewer":
+      return 10;
+    default:
+      return 0;
+  }
+}
+
+function normalizeRole(value: unknown): PrincipalRole | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const role = value.trim().toLowerCase();
+  switch (role) {
+    case "viewer":
+    case "runner":
+    case "operator":
+    case "admin":
+      return role;
+    default:
+      return null;
+  }
+}
+
+function scopeFromWhoami(
+  body: Record<string, unknown>,
+  kind: string | null,
+): Pick<PrincipalState, "isScoped" | "scopeKnown"> {
+  const explicitScoped = body.is_scoped ?? body.isScoped ?? body.scoped;
+  if (typeof explicitScoped === "boolean") {
+    return { isScoped: explicitScoped, scopeKnown: true };
+  }
+
+  const scope = body.scope;
+  if (scope && typeof scope === "object" && !Array.isArray(scope)) {
+    const jobs = (scope as { jobs?: unknown }).jobs;
+    if (Array.isArray(jobs)) {
+      return {
+        isScoped: jobs.some((job) => typeof job === "string" && job.trim() !== ""),
+        scopeKnown: true,
+      };
+    }
+  }
+
+  // Current /auth/whoami serializes kind/subject/role only. User principals are
+  // unscoped by construction; API-key scope cannot be inferred until the backend
+  // exposes a scope marker, so leave isScoped false and scopeKnown false.
+  if (kind === "user") {
+    return { isScoped: false, scopeKnown: true };
+  }
+
+  return { isScoped: false, scopeKnown: false };
+}
+
+function principalFromWhoami(body: unknown): PrincipalState | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return null;
+  }
+
+  const obj = body as Record<string, unknown>;
+  const role = normalizeRole(obj.role);
+  if (!role) {
+    return null;
+  }
+
+  const kind =
+    typeof obj.kind === "string" && obj.kind.trim() !== "" ? obj.kind.trim() : null;
+  const subject =
+    typeof obj.subject === "string" && obj.subject.trim() !== ""
+      ? obj.subject.trim()
+      : null;
+  const scope = scopeFromWhoami(obj, kind);
+  return {
+    kind,
+    subject,
+    role,
+    canRunner: roleLevel(role) >= roleLevel("runner"),
+    isScoped: scope.isScoped,
+    scopeKnown: scope.scopeKnown,
+  };
+}
+
+function clearPrincipal(): void {
+  principal = anonymousPrincipal;
+}
+
+function setPrincipal(nextPrincipal: PrincipalState): void {
+  principal = nextPrincipal;
+}
+
+async function readWhoami(response: Response): Promise<PrincipalState | null> {
+  return principalFromWhoami(await response.json());
+}
+
 /** Store the API key in memory (never persisted to disk). */
 export function setApiKey(key: string): void {
   apiKey = key;
+  cookieSession = false;
+  csrfToken = null;
+  clearPrincipal();
   notifyAuthChange();
 }
 
@@ -63,13 +189,17 @@ export function clearApiKey(): void {
   apiKey = null;
   cookieSession = false;
   csrfToken = null;
+  clearPrincipal();
   notifyAuthChange();
 }
 
 function clearCookieSession(): void {
-  if (cookieSession || csrfToken) {
+  if (cookieSession || csrfToken || (apiKey === null && principal !== anonymousPrincipal)) {
     cookieSession = false;
     csrfToken = null;
+    if (apiKey === null) {
+      clearPrincipal();
+    }
     notifyAuthChange();
   }
 }
@@ -82,6 +212,16 @@ export function isAuthenticated(): boolean {
 /** Return the cached CSRF header for cookie-session requests. */
 export function csrfHeader(): Record<string, string> {
   return csrfToken ? { "X-CSRF-Token": csrfToken } : {};
+}
+
+/** Return the current principal snapshot for non-React call sites. */
+export function getPrincipal(): PrincipalState {
+  return principal;
+}
+
+/** React accessor for the current principal and derived affordance flags. */
+export function usePrincipal(): PrincipalState {
+  return useSyncExternalStore(onAuthChange, getPrincipal, getPrincipal);
 }
 
 /** Return the same-origin path the SSO callback should send the user back to. */
@@ -169,17 +309,22 @@ export async function checkSession(): Promise<boolean> {
       return false;
     }
 
-    const body = (await response.json()) as { csrf_token?: unknown };
+    const body = (await response.json()) as Record<string, unknown>;
     if (typeof body.csrf_token !== "string" || body.csrf_token.length === 0) {
+      clearCookieSession();
+      return false;
+    }
+    const nextPrincipal = principalFromWhoami(body);
+    if (!nextPrincipal) {
       clearCookieSession();
       return false;
     }
 
     csrfToken = body.csrf_token;
-    if (!cookieSession) {
-      cookieSession = true;
-      notifyAuthChange();
-    }
+    cookieSession = true;
+    apiKey = null;
+    setPrincipal(nextPrincipal);
+    notifyAuthChange();
     return true;
   } catch {
     clearCookieSession();
@@ -227,6 +372,41 @@ export async function credentialLogin(
     }
 
     return (await checkSession()) ? "success" : "error";
+  } catch {
+    return "network";
+  }
+}
+
+/** Verify an API key via /auth/whoami, then cache the key and principal. */
+export async function apiKeyLogin(key: string): Promise<ApiKeyLoginResult> {
+  try {
+    const response = await fetch("/auth/whoami", {
+      credentials: "include",
+      headers: { Authorization: `Bearer ${key}` },
+    });
+
+    if (response.status === 401) {
+      return "invalid";
+    }
+    if (response.status === 403) {
+      return "denied";
+    }
+    if (!response.ok) {
+      return "error";
+    }
+
+    const nextPrincipal = await readWhoami(response);
+    if (!nextPrincipal) {
+      clearApiKey();
+      return "error";
+    }
+
+    apiKey = key;
+    cookieSession = false;
+    csrfToken = null;
+    setPrincipal(nextPrincipal);
+    notifyAuthChange();
+    return "success";
   } catch {
     return "network";
   }
