@@ -148,17 +148,20 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–3 (2026-06-25) shipped 13 of 20 items — Streams A, C, and H (minus the
-optional H-4) are now COMPLETE.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2
-(#234–#237): A2, C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff`
-CLI + e2e), C3+C4 (`caesium blame` CLI + commit-range e2e). Wave 3 also added a
-small **apply-provenance API** (REST `provenance` block + `caesium job apply
---provenance-*`) so a commit is stampable through the server — required for C4's
-commit-range gate, and useful for non-git-sync CI/CD applies (client-asserted,
-documented as advisory at that trust boundary). **Remaining: the replay runtime
-core — B2 (quarantine plumbing, the largest, most security-critical item, deferred
-to its own wave) → B3 → B4 → B5 → B6** — plus N-1 (plan-level cross-links, gated
-on B6) and the optional H-4 distributed CI tier. Next eligible leaf item: **B2**.
+**Waves 1–4 (2026-06-25) shipped 14 of 20 items — Streams A, C, and H (minus the
+optional H-4) are COMPLETE, and Stream B's safety substrate (B1 memo, B7 schema,
+B2 runtime) is in.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2,
+C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4
+(`caesium blame` CLI + commit-range e2e) + a small **apply-provenance API** so a
+commit is stampable through the server. Wave 4 (#240): **B2 — the quarantine
+runtime plumbing** (the keystone safety item: 3 marker carriers, both-executor
+cache/lineage/callback suppression, every side-effect producer fail-closed, the
+cron-watermark + observability isolation, the immutable execution descriptor, and
+provider-aware secret identity). **Remaining: the replay activation + diff core —
+B3 (reconstruct + activate replay from the descriptor) → B4 (idempotent
+reservation/dispatch) → B5 (value-diff) → B6 (the full quarantine integration
+scenarios)** — plus N-1 (plan-level cross-links, gated on B6) and the optional H-4
+distributed CI tier. Next eligible leaf item: **B3**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -399,12 +402,37 @@ below; and greptile caught two real CLI **P1s** the Opus review missed (the
   Opus-security-reviewed: client-asserted/advisory at that boundary, partial
   provenance rejected.
 
+### Wave 4 (2026-06-25)
+
+The keystone safety item, on its own (B2 is the only eligible leaf; B3–B6 depend on
+it). Same pipeline (codex xhigh implement → **deep 6-lens adversarial security
+review** with independent per-finding verification → orchestrator verify + publish →
+twice-run greptile/gemini sweep → admin-merge), with the most scrutiny of any item.
+
+- **W4-α — B2 (quarantine runtime plumbing)** — PR #240, merged `53be4f6`. Makes a
+  what-if replay run non-authoritative (no cache/lineage writes) and side-effect-free
+  (no outward channel) across **both** the local scheduler and the distributed worker:
+  3 marker carriers (JobRun/TaskRun `Quarantine` + `event.Event` + `execution_events`),
+  both-executor cache-write/lineage/callback suppression, every producer fail-closed
+  (notification subscriber/watcher, OpenLineage, /events SSE + backlog), observability
+  isolation (run.Store health metrics, notif counters, stats, the cron catch-up
+  watermark), the immutable per-TaskRun execution descriptor, and provider-aware secret
+  `ResolveWithIdentity` (vault KV-v2 version + keyring-versioned HMAC; k8s
+  resourceVersion; env fail-closed). The review + unit run caught and fixed two serious
+  defects a green-CI-only process would have shipped: a **production-breaking Vault
+  KV-v2 regression** (`?version=` concatenated into the path → 404 for every versioned
+  secret at container-create) and a **`run_started` lineage leak** past the suppression
+  chokepoint — plus dispatch-metric over-suppression, a `BaselineRunID` descriptor gap,
+  and the bots' hot-path perf findings (lazy metric eval, batch N+1, redundant Vault
+  read, descriptor CAS). Full chain green; quarantine **activation** is B3, full
+  integration scenarios are B6.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | Waves 1–2: **B1 memo + B7 schema shipped** (#233, #235), barrier cleared; **B2–B6 (the replay runtime) remain** — B2 is the next eligible leaf |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime shipped** (#233, #235, #240); safety substrate in. **B3–B6 remain** (B3 = replay reconstruct + activate, the next eligible leaf) |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
