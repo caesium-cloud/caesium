@@ -228,6 +228,7 @@ integration-up: build-test
         -e CAESIUM_DATABASE_SHARDS=4 \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 lint: builder-full

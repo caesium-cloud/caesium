@@ -535,6 +535,10 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 		}, nil
 	}
 
+	if task.descriptor.Cache.Enabled {
+		return cacheSource{}, fmt.Errorf("%w: step %q hash %s cache entry is unavailable or expired", ErrUnavailableBaselineProof, task.taskName, shortHash(replayHash))
+	}
+
 	if strings.TrimSpace(task.row.Result) != "" {
 		created := task.row.CreatedAt
 		if task.row.CompletedAt != nil {

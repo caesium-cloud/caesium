@@ -544,8 +544,9 @@ func (f serviceReplayFixture) seedTask(t *testing.T, replaySafe bool, result str
 	desc.Cache.ComputedHash = hash
 	desc.Baseline.ComputedHash = hash
 
+	taskRunID := uuid.New()
 	require.NoError(t, f.db.Create(&models.TaskRun{
-		ID:                  uuid.New(),
+		ID:                  taskRunID,
 		JobRunID:            f.runID,
 		TaskID:              taskID,
 		AtomID:              atomID,
@@ -566,6 +567,20 @@ func (f serviceReplayFixture) seedTask(t *testing.T, replaySafe bool, result str
 		CreatedAt:           f.now,
 		UpdatedAt:           f.now,
 	}).Error)
+	// A cache-enabled baseline task must have its TaskCache entry present, or the
+	// replay fails closed (the B6 cache-pruned guard). Seed it so the no-override
+	// replay cache-hits.
+	if result != "" && runstorage.IsSuccessfulTaskResult(result) {
+		require.NoError(t, f.db.Create(&models.TaskCache{
+			Hash:      hash,
+			JobID:     f.jobID,
+			TaskName:  "deploy",
+			Result:    result,
+			RunID:     f.runID,
+			TaskRunID: taskRunID,
+			CreatedAt: f.now,
+		}).Error)
+	}
 	return taskID
 }
 

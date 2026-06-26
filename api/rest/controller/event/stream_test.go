@@ -38,6 +38,18 @@ func TestBuildFilterIncludesQuarantineOnlyForAccessibleRun(t *testing.T) {
 	require.True(t, filter.IncludeQuarantine)
 }
 
+func TestBuildFilterAllowsRunScopedQuarantineWhenAuthDisabled(t *testing.T) {
+	runID := uuid.New()
+	req := httptest.NewRequest(http.MethodGet, "/v1/events?run_id="+runID.String(), nil)
+	rec := httptest.NewRecorder()
+	c := echo.New().NewContext(req, rec)
+
+	filter, err := New(nil).buildFilter(c)
+	require.NoError(t, err)
+	require.Equal(t, runID, filter.RunID)
+	require.True(t, filter.IncludeQuarantine)
+}
+
 func TestBuildFilterRejectsQuarantineForOutOfScopeRun(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() {

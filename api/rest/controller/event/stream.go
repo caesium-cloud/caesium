@@ -14,6 +14,7 @@ import (
 	iauth "github.com/caesium-cloud/caesium/internal/auth"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
@@ -184,7 +185,14 @@ func (ctrl *Controller) buildFilter(c *echo.Context) (event.Filter, error) {
 func (ctrl *Controller) authorizeRunQuarantineAccess(c *echo.Context, runID uuid.UUID) error {
 	principal := authmw.GetPrincipal(c)
 	if principal == nil {
-		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+		// In auth-enabled mode the auth middleware rejects nil-principal requests
+		// before this handler runs, so reaching here means auth is disabled (the
+		// whole server is intentionally open). Defense-in-depth: if auth IS enabled,
+		// still reject rather than relying solely on the middleware.
+		if vars := env.Variables(); vars.AuthMode == "api-key" || vars.SSOEnabled() {
+			return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+		}
+		return nil
 	}
 
 	svc := ctrl.authSvc
