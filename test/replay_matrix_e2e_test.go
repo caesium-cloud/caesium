@@ -79,7 +79,7 @@ func (s *IntegrationTestSuite) TestReplayMatrixSuppressesSideEffectsAndObservabi
 	time.Sleep(2 * time.Second)
 	s.Empty(notifications.Drain(), "quarantined replay must not invoke lifecycle or watcher notification policies")
 	s.False(hasAnyEventForRun(defaultEvents.Drain(), replay.RunID), "default live SSE stream must not leak quarantined replay events")
-	backlog := s.readSSEBacklog(fmt.Sprintf("/v1/events?cursor=%d", cursorBefore), 2*time.Second)
+	backlog := s.readSSEBacklog(fmt.Sprintf("/v1/events?cursor=%d", cursorBefore), 5*time.Second)
 	s.False(hasAnyEventForRun(backlog, replay.RunID), "default SSE backlog must not leak quarantined replay events")
 
 	// Keep this e2e on job-scoped observables; global counters drift on the shared integration server.
