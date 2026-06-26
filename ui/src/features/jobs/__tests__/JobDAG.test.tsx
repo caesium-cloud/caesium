@@ -149,6 +149,38 @@ describe("JobDAG", () => {
     expect(onNodeClick).toHaveBeenCalledWith("task-1");
   });
 
+  it("labels nodes with the resolved task name", () => {
+    const dag: JobDAGResponse = {
+      job_id: "job-1",
+      nodes: [{ id: "task-1", atom_id: "atom-1" }],
+      edges: [],
+    };
+
+    render(
+      <JobDAG
+        dag={dag}
+        atoms={atoms}
+        taskDefinitions={{
+          "task-1": {
+            id: "task-1",
+            job_id: "job-1",
+            atom_id: "atom-1",
+            name: "extract",
+            node_selector: {},
+            retries: 0,
+            retry_delay: 0,
+            retry_backoff: false,
+            trigger_rule: "all_success",
+            created_at: "",
+            updated_at: "",
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByTestId("node-task-1")).toHaveTextContent("extract");
+  });
+
   it("marks output-bearing contract edges and skipped branch paths", () => {
     const dag: JobDAGResponse = {
       job_id: "job-1",

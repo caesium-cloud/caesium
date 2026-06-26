@@ -121,6 +121,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
         if (!dag.nodes) return [];
         return dag.nodes.map(n => {
             const atom = atoms[n.atom_id];
+            const taskDefinition = taskDefinitions?.[n.id];
             const meta = taskMetadata?.[n.id];
             const status = resolvedTaskStatus[n.id] || 'pending';
 
@@ -130,7 +131,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
                 id: n.id,
                 type: nodeType,
                 data: {
-                  label: n.id,
+                  label: taskDefinition?.name || n.id,
                   atom: atom,
                   status: status,
                   isSelected: selectedTaskId === n.id,
@@ -142,7 +143,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, atoms, resolvedTaskStatus, taskMetadata, selectedTaskId]);
+    }, [dag, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, selectedTaskId]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];

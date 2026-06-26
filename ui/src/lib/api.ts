@@ -131,6 +131,24 @@ export interface JobTask {
   updated_at: string;
 }
 
+type RawJobTask = Partial<JobTask> & {
+  ID?: string;
+  JobID?: string;
+  AtomID?: string;
+  Name?: string;
+  NextID?: string;
+  NodeSelector?: Record<string, unknown>;
+  Retries?: number;
+  RetryDelay?: number;
+  RetryBackoff?: boolean;
+  TriggerRule?: string;
+  CacheConfig?: CacheConfigValue;
+  OutputSchema?: Record<string, unknown>;
+  InputSchema?: Record<string, Record<string, unknown>>;
+  CreatedAt?: string;
+  UpdatedAt?: string;
+};
+
 export type CacheConfigValue =
   | boolean
   | {
@@ -737,6 +755,52 @@ export interface JobRunsQuery {
   offset?: number;
 }
 
+function pickDefined<T>(...values: Array<T | undefined>): T | undefined {
+  return values.find((value) => value !== undefined);
+}
+
+function normalizeJobTask(raw: RawJobTask): JobTask {
+  const task: JobTask = {
+    id: pickDefined(raw.id, raw.ID) ?? "",
+    job_id: pickDefined(raw.job_id, raw.JobID) ?? "",
+    atom_id: pickDefined(raw.atom_id, raw.AtomID) ?? "",
+    name: pickDefined(raw.name, raw.Name) ?? "",
+    node_selector: pickDefined(raw.node_selector, raw.NodeSelector) ?? {},
+    retries: pickDefined(raw.retries, raw.Retries) ?? 0,
+    retry_delay: pickDefined(raw.retry_delay, raw.RetryDelay) ?? 0,
+    retry_backoff: pickDefined(raw.retry_backoff, raw.RetryBackoff) ?? false,
+    trigger_rule: pickDefined(raw.trigger_rule, raw.TriggerRule) ?? "all_success",
+    created_at: pickDefined(raw.created_at, raw.CreatedAt) ?? "",
+    updated_at: pickDefined(raw.updated_at, raw.UpdatedAt) ?? "",
+  };
+
+  const nextId = pickDefined(raw.next_id, raw.NextID);
+  if (nextId !== undefined) {
+    task.next_id = nextId;
+  }
+
+  const cacheConfig = pickDefined(raw.cache_config, raw.CacheConfig);
+  if (cacheConfig !== undefined) {
+    task.cache_config = cacheConfig;
+  }
+
+  const outputSchema = pickDefined(raw.output_schema, raw.OutputSchema);
+  if (outputSchema !== undefined) {
+    task.output_schema = outputSchema;
+  }
+
+  const inputSchema = pickDefined(raw.input_schema, raw.InputSchema);
+  if (inputSchema !== undefined) {
+    task.input_schema = inputSchema;
+  }
+
+  return task;
+}
+
+function normalizeJobTasks(raw: RawJobTask[]): JobTask[] {
+  return raw.map(normalizeJobTask);
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
@@ -779,7 +843,7 @@ export const api = {
       },
     ),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
-  getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
+  getJobTasks: async (jobId: string) => normalizeJobTasks(await request<RawJobTask[]>(`/jobs/${jobId}/tasks`)),
   getJobCache: (jobId: string) => request<JobCacheResponse>(`/jobs/${jobId}/cache`),
   deleteJobCache: (jobId: string) => request<void>(`/jobs/${jobId}/cache`, { method: "DELETE" }),
   deleteTaskCache: (jobId: string, taskName: string) =>
