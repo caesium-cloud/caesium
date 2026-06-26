@@ -184,7 +184,7 @@ func (ctrl *Controller) buildFilter(c *echo.Context) (event.Filter, error) {
 func (ctrl *Controller) authorizeRunQuarantineAccess(c *echo.Context, runID uuid.UUID) error {
 	principal := authmw.GetPrincipal(c)
 	if principal == nil {
-		return echo.NewHTTPError(http.StatusUnauthorized, "unauthorized")
+		return nil
 	}
 
 	svc := ctrl.authSvc

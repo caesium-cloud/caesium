@@ -1106,7 +1106,7 @@ write, lineage emit, or callback.
       required `--job-id`, local-mode replay refusal, and no-override `--diff`,
       plus unit tests for `--set` parsing and generated-key stderr behavior.
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
-- [ ] B6. Add an integration scenario: replay a completed run with a changed
+- [x] B6. Add an integration scenario: replay a completed run with a changed
       `--set` param; assert (1) the honest v1 hashing behavior — a **no-override**
       replay cache-hits all unchanged tasks, and a replay with **any `--set` param
       override** re-runs the full DAG (because `RunParams` folds wholesale into
@@ -1237,6 +1237,34 @@ write, lineage emit, or callback.
       Files: new `test/replay_test.go` (`//go:build integration`; reuses the
       existing suite helpers), `docs/design-data-plane-memory.md`.
       Depends on: B5.
+      W8-alpha note (2026-06-26): added the B6 acceptance matrix without faking
+      local-mode distributed behavior. Inventory:
+      | Scenario | Covered by / added |
+      | --- | --- |
+      | 1 no-override cache hits; override re-runs full DAG | Existing `internal/replay.TestReplayOverrideRerunsFullDAGNoOverrideCacheHits`; REST/CLI local override refusal remains in `test/replay_e2e_test.go` and `test/replay_cli_e2e_test.go` because local re-exec is fail-closed. |
+      | 2 clean `replay --diff --json` stdout | Existing `test/replay_cli_e2e_test.go::TestRunReplayCLIJSONStdoutIdempotencyAndDiff` via separated stdout/stderr. |
+      | 3 no cache/lineage mutation | Added `test/replay_matrix_e2e_test.go::TestReplayMatrixSuppressesSideEffectsAndObservability` for unchanged stats/run-list/metrics and unchanged lineage impact/emit metrics; existing `internal/worker.TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite`; added `internal/lineage.TestSubscriberDropsQuarantinedEventBeforeTransportAndDatasetWrites`. Direct DB row count in the server container is not exposed to the public integration harness, so row-write proof is direct + public impact/metric proof. |
+      | 4 quarantine override rejected | Existing `test/replay_e2e_test.go::TestReplayRESTEndpointIdempotencyAndSafety`. |
+      | 5 cache-pruned fail-closed | Added `internal/replay.TestReplayAbortsUnchangedCacheEnabledTaskWhenCacheExpired`, tightened cache-enabled replay to require a live cache entry, and added `test/replay_matrix_e2e_test.go::TestReplayMatrixCachePrunedFailsClosed`. |
+      | 6 callbacks / lifecycle notifications suppressed | Lifecycle notification sender path added in `TestReplayMatrixSuppressesSideEffectsAndObservability` with real webhook channel + policy; callback suppression remains covered by B2 plumbing. |
+      | 6b no notifications from any producer | Lifecycle producer covered e2e by `TestReplayMatrixSuppressesSideEffectsAndObservability`; watcher producer covered directly by added `internal/notification.TestWatcherSkipsQuarantinedRunningRunsBeforeEmitting` because a local all-cache-hit replay is terminal too quickly to honestly trigger `run_timed_out`/`sla_missed`. |
+      | 6c no OpenLineage | Existing mapper drop plus added subscriber no-transport/no-row direct test; e2e matrix asserts unchanged `/lineage/impact` and unchanged `caesium_lineage_events_emitted_total`. |
+      | 7 distributed worker honors quarantine | Existing `internal/worker.TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite` direct worker-path test. |
+      | 7b replay propagates quarantine | Existing `internal/replay.TestReplayQuarantinesRunAndTaskRows`. |
+      | 8 replay-safe gate / no bypass | Existing `internal/replay.TestReplayRefusesTaskNotRecordedReplaySafe`, REST unsafe refusal in `test/replay_e2e_test.go`, CLI refusal in `test/replay_cli_e2e_test.go`; strict request-body rejection covers wire bypass. |
+      | 8b baseline-scoped gate | Added `test/replay_matrix_e2e_test.go::TestReplayMatrixBaselineScopedReplaySafeGate` (unsafe baseline remains refused after safe apply; safe baseline still replays after later unmark on cache-hit lane). |
+      | 8c immutable execution envelope | Existing descriptor capture completeness in `internal/run/store_test.go`; existing `TestReplayMaterializesDescriptorInsteadOfLiveRows`; added `TestReplayMaterializesNonObviousDescriptorEnvelopeInsteadOfLiveRows` for retries/timeout, k8s serviceAccountName, schema/cache/trigger-rule. |
+      | 8d secret rotation | Existing `internal/replay.TestReplayPinnedVaultSecretUsesResolvedValueWithoutSecondRead` and `TestReplayPinnedVaultSecretAbortsOnVersionDriftWithoutSecondRead`; k8s secret rotation remains deferred until a provider identity test seam exists. |
+      | 9 cross-job ownership | Existing `test/replay_e2e_test.go::TestReplayRESTEndpointIdempotencyAndSafety` cross-job POST rejection/no-run assertions. |
+      | 10a concurrent identical idempotency | Existing `api/rest/service/replay.TestReplayConcurrentIdenticalRequestsReturnSingleReservation` and `test/replay_e2e_test.go::TestReplayRESTEndpointConcurrentIdempotency`. |
+      | 10b negative collision | Existing `api/rest/service/replay.TestFingerprintScopesAndSortsOverrides`; unrelated e2e negative collision is still partial. |
+      | 10c missing/blank idempotency key | Existing `test/replay_e2e_test.go::TestReplayRESTEndpointIdempotencyAndSafety`. |
+      | 10d CLI restart with same key | Existing `test/replay_cli_e2e_test.go::TestRunReplayCLIJSONStdoutIdempotencyAndDiff`. |
+      | 10e reserve-then-crash recovery | Existing `api/rest/service/replay.TestReplayRetryResumesAfterDispatchFailure` and `TestReplayResumesPendingReservation`. |
+      | 11 no observability pollution | Added `TestReplayMatrixSuppressesSideEffectsAndObservability` for stats, run-list, production metrics, notification counters, lineage emit metrics, and cache-hit replay metrics; active-gauge proof for a deliberately slow/failing/retrying replay is H-4-deferred because local mode cannot run a re-executing replay. |
+      | 12 no SSE leak + scoped auth | Added default live/backlog suppression and run-scoped visibility in `TestReplayMatrixSuppressesSideEffectsAndObservability`; added auth-disabled run-scoped controller regression. Scoped API-key global deny / other-job visibility remains deferred to an auth-enabled integration harness. |
+      | 13 normal runs remain visible | Added `TestReplayMatrixSuppressesSideEffectsAndObservability` normal-run stats/run-list/SSE assertions; model defaults already assert non-null false quarantine columns. |
+      H-4 deferred sub-assertions: any successful re-executing replay (changed-field `--diff` from overrides, deliberately slow/failing/retrying replay, active-gauge scrape while replay is running, and end-to-end distributed worker replay) requires `CAESIUM_EXECUTION_MODE=distributed` worker wiring. The single-server local executor correctly refuses those with 409, so B6 uses no-override cache-hit replays for local completion and direct tests for worker/watcher/lineage producers.
 - [x] B7. **Build the durable `replaySafe` job/step contract (schema + persistence)
       — lands before B3.** The replay-safe gate (B3/B6(8)) refuses unmarked jobs and
       lets a *durably-marked* job proceed, but **no field exists yet** (`grep`

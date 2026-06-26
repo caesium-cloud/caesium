@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -120,6 +121,19 @@ func TestReplayAbortsUnchangedTaskWithoutCacheOrBaselineResult(t *testing.T) {
 	require.Contains(t, err.Error(), `step "extract"`)
 }
 
+func TestReplayAbortsUnchangedCacheEnabledTaskWhenCacheExpired(t *testing.T) {
+	f := newReplayFixture(t)
+	taskID := f.seedTask(t, seedTaskConfig{name: "extract", replaySafe: true, result: "success"})
+	require.NoError(t, f.db.Model(&models.TaskCache{}).
+		Where("run_id = ? AND task_run_id IN (SELECT id FROM task_runs WHERE job_run_id = ? AND task_id = ?)", f.runID, f.runID, taskID).
+		Update("expires_at", f.now.Add(-time.Minute)).Error)
+
+	_, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.ErrorIs(t, err, ErrUnavailableBaselineProof)
+	require.Contains(t, err.Error(), `step "extract"`)
+	require.Contains(t, err.Error(), "cache entry is unavailable or expired")
+}
+
 func TestReplayBaselineWithoutTaskRunsIsUnavailableProof(t *testing.T) {
 	f := newReplayFixture(t)
 
@@ -200,6 +214,91 @@ func TestReplayMaterializesDescriptorInsteadOfLiveRows(t *testing.T) {
 	require.Equal(t, "/baseline", desc.ContainerSpec.WorkDir)
 	require.Equal(t, "baseline", desc.ContainerSpec.Env["MODE"])
 	require.Equal(t, "/baseline/in", desc.ContainerSpec.Mounts[0].Source)
+}
+
+func TestReplayMaterializesNonObviousDescriptorEnvelopeInsteadOfLiveRows(t *testing.T) {
+	f := newReplayFixture(t)
+	automount := false
+	taskID := f.seedTask(t, seedTaskConfig{
+		name:       "transform",
+		replaySafe: true,
+		result:     "success",
+		spec: container.Spec{
+			Env: map[string]string{"MODE": "baseline"},
+			Kubernetes: &container.KubernetesSpec{
+				ServiceAccountName:           "baseline-sa",
+				AutomountServiceAccountToken: &automount,
+				QueueName:                    "baseline-queue",
+			},
+		},
+	})
+
+	var baselineTask models.TaskRun
+	require.NoError(t, f.db.First(&baselineTask, "job_run_id = ? AND task_id = ?", f.runID, taskID).Error)
+	var desc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(baselineTask.ExecutionDescriptor, &desc))
+	desc.Runtime.RetryCount = 3
+	desc.Runtime.RetryDelay = 7 * time.Second
+	desc.Runtime.RetryBackoff = true
+	desc.Timing.TaskTimeout = 11 * time.Second
+	desc.Timing.RunTimeout = time.Minute
+	desc.Cache.Enabled = true
+	desc.Cache.TTL = 2 * time.Hour
+	desc.Cache.Version = 9
+	desc.Schema.InputSchema = datatypes.JSON(`{"extract":{"type":"object"}}`)
+	desc.Schema.OutputSchema = datatypes.JSON(`{"type":"object","required":["clean"]}`)
+	desc.Schema.ValidationMode = "fail"
+	desc.DAG.TriggerRule = "all_done"
+	desc.Job.TriggerConfig = datatypes.JSONMap{"cron": "0 2 * * *", "timezone": "UTC"}
+	require.NoError(t, f.db.Model(&models.TaskRun{}).
+		Where("id = ?", baselineTask.ID).
+		Update("execution_descriptor", mustJSON(t, desc)).Error)
+
+	require.NoError(t, f.db.Model(&models.Task{}).Where("id = ?", taskID).Updates(map[string]any{
+		"retries":       0,
+		"retry_delay":   time.Second,
+		"retry_backoff": false,
+		"trigger_rule":  "live_only",
+		"output_schema": datatypes.JSON(`{"type":"object","required":["live"]}`),
+		"input_schema":  datatypes.JSON(`{"live":{"type":"object"}}`),
+		"replay_safe":   false,
+	}).Error)
+	require.NoError(t, f.db.Model(&models.Atom{}).Where("id IN (SELECT atom_id FROM tasks WHERE id = ?)", taskID).
+		Update("spec", mustJSON(t, container.Spec{
+			Env: map[string]string{"MODE": "live"},
+			Kubernetes: &container.KubernetesSpec{
+				ServiceAccountName: "live-sa",
+				QueueName:          "live-queue",
+			},
+		})).Error)
+
+	result, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{
+		BaselineRunID: f.runID,
+		Set:           map[string]string{"mode": "what-if"},
+	})
+	require.NoError(t, err)
+
+	var replayTask models.TaskRun
+	require.NoError(t, f.db.First(&replayTask, "job_run_id = ? AND task_id = ?", result.Run.ID, taskID).Error)
+	require.Equal(t, 4, replayTask.MaxAttempts)
+	require.True(t, replayTask.CacheEnabled)
+	require.Equal(t, 2*time.Hour, replayTask.CacheTTL)
+	require.Equal(t, 9, replayTask.CacheVersion)
+	require.JSONEq(t, `{"type":"object","required":["clean"]}`, string(replayTask.OutputSchema))
+	require.Equal(t, "fail", replayTask.SchemaValidation)
+	require.True(t, replayTask.Quarantine)
+
+	var replayDesc models.TaskExecutionDescriptor
+	require.NoError(t, json.Unmarshal(replayTask.ExecutionDescriptor, &replayDesc))
+	require.Equal(t, "all_done", replayDesc.DAG.TriggerRule)
+	require.Equal(t, 11*time.Second, replayDesc.Timing.TaskTimeout)
+	require.Equal(t, "UTC", replayDesc.Job.TriggerConfig["timezone"])
+	require.NotNil(t, replayDesc.KubernetesSpec)
+	require.Equal(t, "baseline-sa", replayDesc.KubernetesSpec.ServiceAccountName)
+	require.NotNil(t, replayDesc.KubernetesSpec.AutomountServiceAccountToken)
+	require.False(t, *replayDesc.KubernetesSpec.AutomountServiceAccountToken)
+	require.Equal(t, "baseline-queue", replayDesc.KubernetesSpec.QueueName)
+	require.Equal(t, "baseline-sa", replayDesc.ContainerSpec.Kubernetes.ServiceAccountName)
 }
 
 func TestReplayFailsClosedWhenDescriptorMissing(t *testing.T) {
@@ -557,9 +656,10 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 			Enabled: true,
 			Version: 1,
 		},
-		Schema:        models.TaskExecutionSchema{ValidationMode: "warn"},
-		ContainerSpec: cfg.spec,
-		SecretRefs:    cfg.secretRefs,
+		Schema:         models.TaskExecutionSchema{ValidationMode: "warn"},
+		ContainerSpec:  cfg.spec,
+		KubernetesSpec: cfg.spec.Kubernetes,
+		SecretRefs:     cfg.secretRefs,
 	}
 	hash := computeDescriptorHash(desc, map[string]string{"mode": "baseline"}, nil, nil)
 	desc.Cache.ComputedHash = hash
@@ -593,6 +693,19 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		row.Output = mustJSON(t, cfg.output)
 	}
 	require.NoError(t, f.db.Create(&row).Error)
+	if strings.TrimSpace(row.Result) != "" && run.IsSuccessfulTaskResult(row.Result) {
+		require.NoError(t, f.db.Create(&models.TaskCache{
+			Hash:             hash,
+			JobID:            f.jobID,
+			TaskName:         cfg.name,
+			Result:           row.Result,
+			Output:           row.Output,
+			BranchSelections: row.BranchSelections,
+			RunID:            f.runID,
+			TaskRunID:        row.ID,
+			CreatedAt:        f.now,
+		}).Error)
+	}
 	return taskID
 }
 
@@ -634,6 +747,7 @@ func (f replayFixture) linkDescriptors(t *testing.T, from, to uuid.UUID) {
 		"hash":                 toHash,
 		"execution_descriptor": mustJSON(t, toDesc),
 	}).Error)
+	require.NoError(t, f.db.Model(&models.TaskCache{}).Where("task_run_id = ?", toRun.ID).Update("hash", toHash).Error)
 }
 
 type replayVaultLogical struct {
