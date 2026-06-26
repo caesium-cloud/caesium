@@ -83,7 +83,7 @@ H-2/H-3.
 all the new methods into ONE item keeps the feature streams from colliding on that
 shared file. This item adds typed client methods + response types only — no UI.
 
-- [ ] H-1. Add the data-verb client surface to `ui/src/lib/api.ts`, mirroring the
+- [x] H-1. Add the data-verb client surface to `ui/src/lib/api.ts`, mirroring the
       existing `request<T>` / `requestURL<T>` + `withAuthHeaders` pattern (no new
       backend). **All six endpoints are confirmed to exist as REST controllers** (codex
       round-1 verification) — derive each exact path + response type from the controller
@@ -119,6 +119,7 @@ shared file. This item adds typed client methods + response types only — no UI
       Add the TypeScript response types next to the existing ones, and a vitest unit
       asserting the URL/headers/error-mapping each method builds.
       Files: `ui/src/lib/api.ts`.
+      Note: Landed getRunDiff (`/jobs/:id/runs/diff`), postReplay (`/jobs/:id/runs/:run_id/replay`), getTaskWhy (`/jobs/:id/runs/:run_id/why`), getBlame (`/jobs/:id/blame`), getReceipt (`/jobs/:id/runs/:run_id/receipt`), postVerify (`/jobs/:id/runs/:run_id/receipt/verify`), and getLineageImpact (`/lineage/impact`) with `ApiError.kind` typed 403/replay refusals.
 - [ ] H-2. Retain the principal's **role + scope** for affordance-gating. The UI already
       calls `GET /auth/whoami` (`ui/src/lib/auth.ts:166`; the endpoint returns `role`,
       `api/rest/controller/auth/sso.go`) but discards the role — capture it (and any scope
