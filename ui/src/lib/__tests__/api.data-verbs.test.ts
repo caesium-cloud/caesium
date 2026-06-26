@@ -218,4 +218,21 @@ describe("data verb api methods", () => {
 
     await expect(api.postReplay("job-1", "run-1", { set: {} }, "idem-123")).rejects.toBeInstanceOf(ApiError);
   });
+
+  it("clears the API key and throws authentication_required on 401", async () => {
+    setApiKey("csk_test_secret");
+    mockFetch.mockResolvedValue(errorResponse(401, { message: "unauthorized" }));
+
+    await expect(api.getRunDiff("job-1", "left", "right")).rejects.toMatchObject({
+      status: 401,
+      kind: "authentication_required",
+    });
+
+    // The 401 cleared the key: a subsequent call carries no Authorization header.
+    mockFetch.mockResolvedValue(okResponse({}, 200));
+    await api.getReceipt("job-1", "run-1");
+    const [, init] = mockFetch.mock.calls.at(-1) as [string, RequestInit];
+    const headers = (init.headers ?? {}) as Record<string, string>;
+    expect(headers.Authorization).toBeUndefined();
+  });
 });

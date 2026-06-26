@@ -648,12 +648,17 @@ function parseErrorMessage(text: string): string {
   }
 
   try {
-    const body = JSON.parse(text) as { message?: unknown; error?: unknown };
-    if (typeof body.message === "string" && body.message.trim() !== "") {
-      return body.message.trim();
-    }
-    if (typeof body.error === "string" && body.error.trim() !== "") {
-      return body.error.trim();
+    const body = JSON.parse(text) as unknown;
+    // Guard: JSON.parse can yield null or a non-object primitive (e.g. body "null");
+    // only index into it when it is actually an object.
+    if (body && typeof body === "object") {
+      const obj = body as { message?: unknown; error?: unknown };
+      if (typeof obj.message === "string" && obj.message.trim() !== "") {
+        return obj.message.trim();
+      }
+      if (typeof obj.error === "string" && obj.error.trim() !== "") {
+        return obj.error.trim();
+      }
     }
   } catch {
     // Non-JSON error bodies are common in older handlers; keep the raw text.
@@ -746,9 +751,9 @@ export const api = {
       },
       replayErrorKind,
     ),
-  getTaskWhy: (jobId: string, runId: string, taskId: string) =>
+  getTaskWhy: (jobId: string, runId: string, taskName: string) =>
     request<WhyExplanation>(
-      `/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/why?${queryString({ task: taskId })}`,
+      `/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/why?${queryString({ task: taskName })}`,
     ),
   getBlame: (jobId: string, options: BlameOptions = {}) => {
     const query = queryString({ from: options.from, to: options.to, task: options.task });
