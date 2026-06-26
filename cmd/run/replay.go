@@ -55,62 +55,72 @@ var replayCmd = &cobra.Command{
 		"Dedup is scoped per API key/principal: a retry must reuse the same key AND " +
 		"the same credentials to resolve to the existing replay.",
 	Args: cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		baselineRunID := strings.TrimSpace(args[0])
-		jobID := strings.TrimSpace(replayJobID)
-		if jobID == "" {
-			return fmt.Errorf("--job-id is required")
-		}
+	RunE: runReplay,
+}
 
-		set, err := parseReplaySet(replaySets)
+func runReplay(cmd *cobra.Command, args []string) error {
+	baselineRunID := strings.TrimSpace(args[0])
+	jobID := strings.TrimSpace(replayJobID)
+	if jobID == "" {
+		return fmt.Errorf("--job-id is required")
+	}
+
+	set, err := parseReplaySet(replaySets)
+	if err != nil {
+		return err
+	}
+
+	key, err := resolveReplayIdempotencyKey(cmd, replayIdempotencyKey, cmd.Flags().Changed("idempotency-key"), generateReplayIdempotencyKey)
+	if err != nil {
+		return err
+	}
+
+	resp, err := postReplay(cmd, jobID, baselineRunID, key, set)
+	if err != nil {
+		return err
+	}
+
+	if replayDiff {
+		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "awaiting replay run %s\n", resp.RunID)
+		run, err := awaitReplayRun(cmd, jobID, resp.RunID, replayAwaitTimeout)
 		if err != nil {
 			return err
 		}
-
-		key, err := resolveReplayIdempotencyKey(cmd, replayIdempotencyKey, cmd.Flags().Changed("idempotency-key"), generateReplayIdempotencyKey)
+		replayFailed := strings.EqualFold(strings.TrimSpace(run.Status), "failed")
+		diff, err := fetchReplayDiff(cmd, jobID, baselineRunID, resp.RunID)
 		if err != nil {
 			return err
 		}
-
-		resp, err := postReplay(cmd, jobID, baselineRunID, key, set)
-		if err != nil {
-			return err
-		}
-
-		if replayDiff {
-			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "awaiting replay run %s\n", resp.RunID)
-			if _, err := awaitReplayRun(cmd, jobID, resp.RunID, replayAwaitTimeout); err != nil {
-				return err
-			}
-			diff, err := fetchReplayDiff(cmd, jobID, baselineRunID, resp.RunID)
-			if err != nil {
-				return err
-			}
-			if replayJSON {
-				var out interface{}
-				if err := json.Unmarshal(diff, &out); err != nil {
-					return fmt.Errorf("run diff response was not valid JSON: %w", err)
-				}
-				pretty, _ := json.MarshalIndent(out, "", "  ")
-				_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
-				return nil
-			}
-			var rendered runDiffResponse
-			if err := json.Unmarshal(diff, &rendered); err != nil {
+		if replayJSON {
+			var out interface{}
+			if err := json.Unmarshal(diff, &out); err != nil {
 				return fmt.Errorf("run diff response was not valid JSON: %w", err)
 			}
-			renderRunDiffTable(cmd, &rendered)
-			return nil
-		}
-
-		if replayJSON {
-			pretty, _ := json.MarshalIndent(resp, "", "  ")
+			pretty, _ := json.MarshalIndent(out, "", "  ")
 			_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
+			if replayFailed {
+				return fmt.Errorf("replay run %s failed", resp.RunID)
+			}
 			return nil
 		}
-		_, _ = fmt.Fprintln(cmd.OutOrStdout(), resp.RunID)
+		var rendered runDiffResponse
+		if err := json.Unmarshal(diff, &rendered); err != nil {
+			return fmt.Errorf("run diff response was not valid JSON: %w", err)
+		}
+		renderRunDiffTable(cmd, &rendered)
+		if replayFailed {
+			return fmt.Errorf("replay run %s failed", resp.RunID)
+		}
 		return nil
-	},
+	}
+
+	if replayJSON {
+		pretty, _ := json.MarshalIndent(resp, "", "  ")
+		_, _ = fmt.Fprintln(cmd.OutOrStdout(), string(pretty))
+		return nil
+	}
+	_, _ = fmt.Fprintln(cmd.OutOrStdout(), resp.RunID)
+	return nil
 }
 
 func parseReplaySet(values []string) (map[string]string, error) {
@@ -185,6 +195,8 @@ func postReplay(cmd *cobra.Command, jobID, baselineRunID, idempotencyKey string,
 
 func awaitReplayRun(cmd *cobra.Command, jobID, runID string, timeout time.Duration) (*replayRunStatusResponse, error) {
 	deadline := time.Now().Add(timeout)
+	ticker := time.NewTicker(replayPollInterval)
+	defer ticker.Stop()
 	var lastStatus string
 	for {
 		run, err := fetchReplayRunStatus(cmd, jobID, runID)
@@ -202,7 +214,7 @@ func awaitReplayRun(cmd *cobra.Command, jobID, runID string, timeout time.Durati
 		select {
 		case <-cmd.Context().Done():
 			return nil, cmd.Context().Err()
-		case <-time.After(replayPollInterval):
+		case <-ticker.C:
 		}
 	}
 }

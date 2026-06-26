@@ -26,7 +26,14 @@ func (s *IntegrationTestSuite) TestRunReplayCLIJSONStdoutIdempotencyAndDiff() {
 	s.Require().True(json.Valid([]byte(stdout)), "caesium run replay --json stdout was not clean JSON:\n%s", stdout)
 	s.Contains(stderr, "replay idempotency key: ")
 	s.NotContains(stdout, "replay idempotency key", "idempotency guidance must stay off stdout")
-	generatedKey := strings.TrimSpace(strings.TrimPrefix(stderr, "replay idempotency key: "))
+	generatedKey := ""
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "replay idempotency key: ") {
+			generatedKey = strings.TrimSpace(strings.TrimPrefix(line, "replay idempotency key: "))
+			break
+		}
+	}
 	s.Require().NotEmpty(generatedKey)
 	s.NotContains(stdout, generatedKey, "generated idempotency key must stay off stdout")
 	var auto replayResponse
