@@ -148,21 +148,23 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–7 (2026-06-25/26) shipped 17 of 20 items — Streams A, C, H (minus optional
-H-4) COMPLETE; Stream B's safety substrate + replay activation + REST trigger + CLI
-(B1–B5, B7) all in — only B6 (integration scenarios) remains.** Wave 1 (#230–#233):
-A1, B1, C1, H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4
-(`caesium run diff`), C3+C4 (`caesium blame`) + a small **apply-provenance API**. Wave
-4 (#240): **B2 — the quarantine runtime plumbing**. Wave 5 (#241): **B3 — replay
-construction + dispatch**. Wave 6 (#242): **B4 — the REST replay endpoint** (atomic
-idempotent reservation, cross-job ownership guard). Wave 7 (#243): **B5 — the
-`caesium run replay` CLI** (`--set`, restart-safe `--idempotency-key`, `--diff` value
-diff, `--json`; refusals → non-zero exit). **Scope: replay executes via the
-descriptor-aware DISTRIBUTED worker; the local in-process executor fail-closed REFUSES
-(full local-executor reconstruction is a tracked follow-up under Stream B).**
-**Remaining: B6 (the full quarantine/replay integration scenarios — the next eligible
-leaf)** — plus N-1 (cross-links, gated on B6), the deferred local-executor replay
-reconstruction, and the optional H-4 distributed CI tier. Next eligible leaf item: **B6**.
+**Waves 1–8 (2026-06-25/26) shipped 18 of 20 items — Streams A, B, C, and H (minus
+optional H-4) are ALL COMPLETE.** The entire Retain/causal layer is built: `caesium
+run diff`, `caesium blame`, and the full quarantined what-if replay (CLI → REST →
+descriptor-reconstructed, gated, side-effect-free run via the distributed worker).
+Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7. Wave 3
+(#238–#239): A3+A4 (`caesium run diff`), C3+C4 (`caesium blame`) + a small
+**apply-provenance API**. Wave 4 (#240): **B2 — quarantine runtime plumbing**. Wave 5
+(#241): **B3 — replay construction + dispatch**. Wave 6 (#242): **B4 — REST replay
+endpoint**. Wave 7 (#243): **B5 — `caesium run replay` CLI**. Wave 8 (#244): **B6 —
+the full integration matrix** (the final acceptance gate: suppression of every
+producer, the replay-safe gate, immutable-baseline execution, idempotency, cross-job
+ownership, no observability/SSE/lineage pollution — green on all CI tiers). **Scope:
+replay executes via the descriptor-aware DISTRIBUTED worker; the local in-process
+executor fail-closed REFUSES (full local-executor reconstruction is a tracked
+follow-up).** **Remaining: only N-1 (plan-level cross-links — roadmap/README/strategy
+doc, the next eligible leaf), the deferred local-executor replay reconstruction, and
+the optional H-4 distributed CI tier.** Next eligible leaf item: **N-1**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -499,12 +501,34 @@ The operator-facing replay CLI — the human entry point to the B4 endpoint.
   separation both verified). `test/replay_cli_e2e_test.go` drives the real CLI binary
   with stdout captured separately from stderr.
 
+### Wave 8 (2026-06-26)
+
+The final acceptance gate — the comprehensive integration matrix proving the whole
+quarantine/replay model holds end to end. Completes Stream B.
+
+- **W8-α — B6 (full quarantine/replay integration matrix)** — PR #244, merged
+  `8336441`. New `test/replay_matrix_e2e_test.go` + `internal/notification/watcher_test.go`
+  + `internal/lineage/subscriber_test.go` + `event/stream_test.go`, building on the
+  B2–B5 coverage. Proves: no notifications from BOTH producers (subscriber + watcher),
+  no OpenLineage (transport + `lineage_datasets`), no cache/lineage mutation,
+  cache-pruned fail-closed, the worker honor + propagate pair, the baseline-scoped
+  replay-safe gate, full-envelope immutable execution, secret rotation pin-or-abort,
+  cross-job 404, idempotency (concurrent/collision/missing-key/CLI-restart/reserve-
+  then-crash), no observability pollution, no SSE leak, and normal-run-still-visible.
+  Two small production fixes (Opus-reviewed CLEAN): the cache-pruned fail-closed guard,
+  and the `/events` nil-principal handling hardened to defense-in-depth (401 in
+  auth-enabled mode). **Green on every CI tier** (docker, arm64, podman, helm/k8s) —
+  the notification-webhook scenario is docker-gated (host-reachability), with the
+  podman/k8s suppression covered by the engine-agnostic unit tests. H-4-gated
+  sub-assertions (active-gauge-during scrape, distributed re-exec, scoped-key
+  global-deny) honestly deferred.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1–B5 + B7 shipped** (#233, #235, #240, #241, #242, #243); replay fully usable (CLI → REST → quarantined run via the distributed worker). **Only B6 remains** (the full integration scenarios, the next eligible leaf) + deferred local-executor reconstruction |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **COMPLETE** — B1–B7 shipped (#233, #235, #240–#244); replay fully usable end-to-end (CLI → REST → descriptor-reconstructed quarantined run via the distributed worker), with the full integration matrix green on all CI tiers. Follow-up (deferred): local-executor replay reconstruction |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
