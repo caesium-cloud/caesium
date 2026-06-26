@@ -1,6 +1,6 @@
 # Data-Plane Memory II — The Causal Query Layer
 
-Last updated: 2026-06-20
+Last updated: 2026-06-26 · **Status: COMPLETE** — all stream items (A, B, C, H minus the optional H-4) shipped across Waves 1–8 (#230–#244); see the `## Progress` dashboard. Archived here from `active/`. Remaining beyond this plan: the optional H-4 distributed CI tier and the deferred local-executor replay-reconstruction follow-up.
 
 This plan ships the three higher-order EXPLAIN verbs that the
 [data-plane-memory](../completed/data-plane-memory.md) substrate plan deferred to
