@@ -32,7 +32,7 @@ const committedReceipt: Receipt = {
     {
       task_name: "extract",
       identity_hash: "task-hash",
-      image: "alpine@sha256:abc",
+      image: "ghcr.io/acme/etl@sha256:abc",
       resolved_image_digest: "sha256:abc",
       digest_pinned: true,
       degraded: false,
