@@ -713,7 +713,7 @@ func (j *job) Run(ctx context.Context) error {
 		if err != nil {
 			return "", nil, nil, nil, err
 		}
-		if len(secretIdentities) > 0 && !taskQuarantined {
+		if len(secretIdentities) > 0 {
 			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
 			for _, resolved := range secretIdentities {
 				refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))

@@ -7,11 +7,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/google/uuid"
+	vault "github.com/hashicorp/vault/api"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -91,13 +93,22 @@ func TestReplayRefusesTaskNotRecordedReplaySafe(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func TestReplayRefusesUnchangedTaskNotRecordedReplaySafe(t *testing.T) {
+func TestReplayCacheHitsUnchangedTaskNotRecordedReplaySafe(t *testing.T) {
 	f := newReplayFixture(t)
-	f.seedTask(t, seedTaskConfig{name: "deploy", replaySafe: false, result: "success"})
+	taskID := f.seedTask(t, seedTaskConfig{name: "deploy", replaySafe: false, result: "success"})
 
-	_, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{BaselineRunID: f.runID})
-	require.ErrorIs(t, err, ErrReplayUnsafe)
-	require.Contains(t, err.Error(), `step "deploy"`)
+	dispatcher := &recordingDispatcher{}
+	result, err := New(f.store, dispatcher).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.NoError(t, err)
+	require.Empty(t, dispatcher.calls)
+	require.Len(t, result.Decisions, 1)
+	require.True(t, result.Decisions[0].CacheHit)
+	require.False(t, result.Decisions[0].Reexecute)
+
+	var replayTask models.TaskRun
+	require.NoError(t, f.db.First(&replayTask, "job_run_id = ? AND task_id = ?", result.Run.ID, taskID).Error)
+	require.True(t, replayTask.CacheHit)
+	require.False(t, replayTask.ReplaySafe)
 }
 
 func TestReplayAbortsUnchangedTaskWithoutCacheOrBaselineResult(t *testing.T) {
@@ -289,6 +300,158 @@ func TestReplayOverrideRerunsFullDAGNoOverrideCacheHits(t *testing.T) {
 	require.Equal(t, 1, loadTask.OutstandingPredecessors)
 }
 
+func TestReplayPlansDescriptorDAGTopologicallyWhenYAMLOrderReversed(t *testing.T) {
+	f := newReplayFixture(t)
+	successorID := f.seedTask(t, seedTaskConfig{
+		name:       "deploy",
+		replaySafe: false,
+		result:     "success",
+		position:   0,
+	})
+	predecessorID := f.seedTask(t, seedTaskConfig{
+		name:       "build",
+		replaySafe: false,
+		result:     "success",
+		output:     map[string]string{"artifact": "one"},
+		position:   1,
+	})
+	f.linkDescriptors(t, predecessorID, successorID)
+
+	dispatcher := &recordingDispatcher{}
+	result, err := New(f.store, dispatcher).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.NoError(t, err)
+	require.Empty(t, dispatcher.calls)
+	require.Len(t, result.Decisions, 2)
+	require.Equal(t, "build", result.Decisions[0].TaskName)
+	require.Equal(t, "deploy", result.Decisions[1].TaskName)
+	for _, decision := range result.Decisions {
+		require.True(t, decision.CacheHit, decision.TaskName)
+		require.False(t, decision.Reexecute, decision.TaskName)
+	}
+
+	var replayTasks []models.TaskRun
+	require.NoError(t, f.db.Order("created_at ASC").Find(&replayTasks, "job_run_id = ?", result.Run.ID).Error)
+	require.Len(t, replayTasks, 2)
+	for _, task := range replayTasks {
+		require.Equal(t, string(run.TaskStatusCached), task.Status)
+		require.True(t, task.CacheHit)
+		require.False(t, task.ReplaySafe)
+	}
+}
+
+func TestReplayFailsClosedOnDescriptorDAGCycle(t *testing.T) {
+	f := newReplayFixture(t)
+	firstID := f.seedTask(t, seedTaskConfig{
+		name:       "first",
+		replaySafe: true,
+		result:     "success",
+		output:     map[string]string{"first": "ok"},
+		position:   0,
+	})
+	secondID := f.seedTask(t, seedTaskConfig{
+		name:       "second",
+		replaySafe: true,
+		result:     "success",
+		output:     map[string]string{"second": "ok"},
+		position:   1,
+	})
+	f.linkDescriptors(t, firstID, secondID)
+	f.linkDescriptors(t, secondID, firstID)
+
+	_, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.ErrorIs(t, err, ErrUnsupportedDescriptor)
+	require.Contains(t, err.Error(), "descriptor DAG cycle")
+}
+
+func TestReplayPinnedVaultSecretUsesResolvedValueWithoutSecondRead(t *testing.T) {
+	f := newReplayFixture(t)
+	ref := "secret://vault/secret/data/path?field=token"
+	keyring, err := secret.NewIdentityKeyring("k2", map[string][]byte{
+		"k1": []byte("baseline-key"),
+		"k2": []byte("current-key"),
+	})
+	require.NoError(t, err)
+	baselineDigest, ok := keyring.HMACWithKeyID("k1", []byte("abc"))
+	require.True(t, ok)
+
+	f.seedTask(t, seedTaskConfig{
+		name:       "deploy",
+		replaySafe: true,
+		result:     "success",
+		spec:       container.Spec{Env: map[string]string{"TOKEN": ref}},
+		secretRefs: []models.TaskExecutionSecretRef{
+			run.SecretIdentityDescriptorRef("TOKEN", ref, secret.Identity{
+				Provider:   "vault",
+				Ref:        ref,
+				Version:    "7",
+				KeyID:      "k1",
+				HMACSHA256: baselineDigest,
+				Verifiable: true,
+			}),
+		},
+	})
+	logical := &replayVaultLogical{response: &vault.Secret{Data: map[string]any{
+		"data":     map[string]any{"token": "abc"},
+		"metadata": map[string]any{"version": 7},
+	}}}
+	resolver := secret.NewVaultResolverWithLogicalAndKeyring(logical, keyring)
+
+	dispatcher := &recordingDispatcher{}
+	_, err = New(f.store, dispatcher, WithSecretResolver(resolver)).Replay(context.Background(), Request{
+		BaselineRunID: f.runID,
+		Set:           map[string]string{"mode": "what-if"},
+	})
+	require.NoError(t, err)
+	require.Len(t, dispatcher.calls, 1)
+	require.Equal(t, []string{"secret/data/path"}, logical.paths)
+	require.Empty(t, logical.dataRequests)
+}
+
+func TestReplayPinnedVaultSecretAbortsOnVersionDriftWithoutSecondRead(t *testing.T) {
+	f := newReplayFixture(t)
+	ref := "secret://vault/secret/data/path?field=token"
+	keyring, err := secret.NewIdentityKeyring("k2", map[string][]byte{
+		"k1": []byte("baseline-key"),
+		"k2": []byte("current-key"),
+	})
+	require.NoError(t, err)
+	baselineDigest, ok := keyring.HMACWithKeyID("k1", []byte("abc"))
+	require.True(t, ok)
+
+	f.seedTask(t, seedTaskConfig{
+		name:       "deploy",
+		replaySafe: true,
+		result:     "success",
+		spec:       container.Spec{Env: map[string]string{"TOKEN": ref}},
+		secretRefs: []models.TaskExecutionSecretRef{
+			run.SecretIdentityDescriptorRef("TOKEN", ref, secret.Identity{
+				Provider:   "vault",
+				Ref:        ref,
+				Version:    "7",
+				KeyID:      "k1",
+				HMACSHA256: baselineDigest,
+				Verifiable: true,
+			}),
+		},
+	})
+	logical := &replayVaultLogical{response: &vault.Secret{Data: map[string]any{
+		"data":     map[string]any{"token": "abc"},
+		"metadata": map[string]any{"version": 8},
+	}}}
+	resolver := secret.NewVaultResolverWithLogicalAndKeyring(logical, keyring)
+
+	dispatcher := &recordingDispatcher{}
+	_, err = New(f.store, dispatcher, WithSecretResolver(resolver)).Replay(context.Background(), Request{
+		BaselineRunID: f.runID,
+		Set:           map[string]string{"mode": "what-if"},
+	})
+	require.ErrorIs(t, err, ErrSecretIdentity)
+	require.Contains(t, err.Error(), "version changed from 7 to 8")
+	require.Empty(t, dispatcher.calls)
+	require.Equal(t, []string{"secret/data/path"}, logical.paths)
+	require.Empty(t, logical.dataRequests)
+}
+
 func TestReplaySurfacesDispatchFailureAfterDurableMaterialization(t *testing.T) {
 	f := newReplayFixture(t)
 	f.seedTask(t, seedTaskConfig{name: "safe", replaySafe: true, result: "success"})
@@ -310,6 +473,7 @@ type seedTaskConfig struct {
 	predecessors []models.TaskExecutionEdgeRef
 	successors   []models.TaskExecutionEdgeRef
 	spec         container.Spec
+	secretRefs   []models.TaskExecutionSecretRef
 	image        string
 	command      []string
 }
@@ -387,6 +551,7 @@ func (f replayFixture) seedTask(t *testing.T, cfg seedTaskConfig) uuid.UUID {
 		},
 		Schema:        models.TaskExecutionSchema{ValidationMode: "warn"},
 		ContainerSpec: cfg.spec,
+		SecretRefs:    cfg.secretRefs,
 	}
 	hash := computeDescriptorHash(desc, map[string]string{"mode": "baseline"}, nil, nil)
 	desc.Cache.ComputedHash = hash
@@ -441,8 +606,8 @@ func (f replayFixture) linkDescriptors(t *testing.T, from, to uuid.UUID) {
 	var fromDesc, toDesc models.TaskExecutionDescriptor
 	require.NoError(t, json.Unmarshal(fromRun.ExecutionDescriptor, &fromDesc))
 	require.NoError(t, json.Unmarshal(toRun.ExecutionDescriptor, &toDesc))
-	fromDesc.DAG.Successors = []models.TaskExecutionEdgeRef{{TaskID: to, TaskName: "load"}}
-	toDesc.DAG.Predecessors = []models.TaskExecutionEdgeRef{{TaskID: from, TaskName: "extract"}}
+	fromDesc.DAG.Successors = []models.TaskExecutionEdgeRef{{TaskID: to, TaskName: toDesc.Baseline.TaskName}}
+	toDesc.DAG.Predecessors = []models.TaskExecutionEdgeRef{{TaskID: from, TaskName: fromDesc.Baseline.TaskName}}
 	toDesc.DAG.OutstandingPredecessors = 1
 
 	var fromOutput map[string]string
@@ -450,7 +615,7 @@ func (f replayFixture) linkDescriptors(t *testing.T, from, to uuid.UUID) {
 	toHash := computeDescriptorHash(
 		toDesc,
 		map[string]string{"mode": "baseline"},
-		map[string]map[string]string{"extract": fromOutput},
+		map[string]map[string]string{fromDesc.Baseline.TaskName: fromOutput},
 		[]string{fromRun.Hash},
 	)
 	toDesc.Cache.ComputedHash = toHash
@@ -461,6 +626,31 @@ func (f replayFixture) linkDescriptors(t *testing.T, from, to uuid.UUID) {
 		"hash":                 toHash,
 		"execution_descriptor": mustJSON(t, toDesc),
 	}).Error)
+}
+
+type replayVaultLogical struct {
+	response     *vault.Secret
+	paths        []string
+	dataRequests []replayVaultDataRequest
+}
+
+type replayVaultDataRequest struct {
+	path string
+	data map[string][]string
+}
+
+func (f *replayVaultLogical) ReadWithContext(_ context.Context, path string) (*vault.Secret, error) {
+	f.paths = append(f.paths, path)
+	return f.response, nil
+}
+
+func (f *replayVaultLogical) ReadWithDataWithContext(_ context.Context, path string, data map[string][]string) (*vault.Secret, error) {
+	copied := make(map[string][]string, len(data))
+	for key, values := range data {
+		copied[key] = append([]string(nil), values...)
+	}
+	f.dataRequests = append(f.dataRequests, replayVaultDataRequest{path: path, data: copied})
+	return f.response, nil
 }
 
 func mustJSON(t *testing.T, v any) datatypes.JSON {

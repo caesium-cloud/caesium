@@ -187,6 +187,30 @@ func (r *VaultResolver) VerifyIdentity(ctx context.Context, ref string, expected
 	if !ok {
 		return Identity{}, fmt.Errorf("vault secret %s version %s missing field %s", path, version, field)
 	}
+	return r.verifyResolvedVaultIdentity(ref, path, field, expected, value)
+}
+
+func (r *VaultResolver) VerifyResolvedIdentity(_ context.Context, ref string, expected Identity, resolvedValue string) (Identity, error) {
+	reference, err := Parse(ref)
+	if err != nil {
+		return Identity{}, err
+	}
+	if reference.Provider != providerVault {
+		return Identity{}, fmt.Errorf("vault resolver cannot handle provider %q", reference.Provider)
+	}
+	path, field, err := parseVaultPathField(reference)
+	if err != nil {
+		return Identity{}, err
+	}
+	return r.verifyResolvedVaultIdentity(ref, path, field, expected, resolvedValue)
+}
+
+func (r *VaultResolver) verifyResolvedVaultIdentity(ref, path, field string, expected Identity, value string) (Identity, error) {
+	version := strings.TrimSpace(expected.Version)
+	keyID := strings.TrimSpace(expected.KeyID)
+	if version == "" || keyID == "" || strings.TrimSpace(expected.HMACSHA256) == "" {
+		return Identity{}, errors.New("vault baseline identity requires version, key id, and hmac")
+	}
 	digest, ok := r.identityKeyring.HMACWithKeyID(keyID, []byte(value))
 	if !ok {
 		return Identity{}, fmt.Errorf("vault identity HMAC key %q is not configured", keyID)

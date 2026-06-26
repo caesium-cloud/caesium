@@ -72,6 +72,18 @@ func (m *MultiResolver) VerifyIdentity(ctx context.Context, ref string, expected
 	return verifier.VerifyIdentity(ctx, ref, expected)
 }
 
+func (m *MultiResolver) VerifyResolvedIdentity(ctx context.Context, ref string, expected Identity, resolvedValue string) (Identity, error) {
+	resolver, err := m.providerForRef(ref)
+	if err != nil {
+		return Identity{}, err
+	}
+	verifier, ok := resolver.(ResolvedIdentityVerifier)
+	if !ok {
+		return Identity{}, fmt.Errorf("secret provider %q does not support resolved baseline identity verification", expected.Provider)
+	}
+	return verifier.VerifyResolvedIdentity(ctx, ref, expected, resolvedValue)
+}
+
 func (m *MultiResolver) providerForRef(ref string) (Resolver, error) {
 	if strings.TrimSpace(ref) == "" {
 		return nil, errors.New("secret reference is empty")

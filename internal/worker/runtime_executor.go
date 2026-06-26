@@ -19,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/replay"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -479,7 +480,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return err
 	}
 	if descriptor != nil && taskRun.Quarantine {
-		if err := verifyReplaySecretIdentities(taskCtx, e.secretResolver, descriptor.SecretRefs, secretIdentities); err != nil {
+		if err := replay.VerifyReplaySecretIdentities(taskCtx, e.secretResolver, descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
 			return err
 		}
 	}
@@ -592,184 +593,6 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		return nil
 	}
 	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
-}
-
-func verifyReplaySecretIdentities(ctx context.Context, resolver secret.Resolver, expected []models.TaskExecutionSecretRef, actual []jobdefruntime.ResolvedSecretIdentity) error {
-	expectedByKey, err := expectedReplaySecretRefMap(expected)
-	if err != nil {
-		return err
-	}
-	actualByKey := make(map[string]jobdefruntime.ResolvedSecretIdentity, len(actual))
-	for _, resolved := range actual {
-		key := replaySecretRefKey(resolved.EnvKey, resolved.Ref)
-		ref, ok := expectedByKey[key]
-		if !ok {
-			return fmt.Errorf("replay secret %s for env %s has no baseline identity", resolved.Ref, resolved.EnvKey)
-		}
-		actualByKey[key] = resolved
-		if err := verifyResolvedReplaySecretIdentity(ctx, resolver, ref, resolved.Identity); err != nil {
-			return fmt.Errorf("replay secret %s for env %s %v", ref.Ref, ref.EnvKey, err)
-		}
-	}
-	for _, ref := range expected {
-		if strings.TrimSpace(ref.Ref) == "" {
-			continue
-		}
-		_, ok := actualByKey[replaySecretRefKey(ref.EnvKey, ref.Ref)]
-		if !ok {
-			return fmt.Errorf("replay secret %s for env %s was not resolved", ref.Ref, ref.EnvKey)
-		}
-	}
-	return nil
-}
-
-func expectedReplaySecretRefMap(refs []models.TaskExecutionSecretRef) (map[string]models.TaskExecutionSecretRef, error) {
-	expected := make(map[string]models.TaskExecutionSecretRef)
-	for _, ref := range refs {
-		if strings.TrimSpace(ref.Ref) == "" {
-			continue
-		}
-		key := replaySecretRefKey(ref.EnvKey, ref.Ref)
-		if _, exists := expected[key]; exists {
-			return nil, fmt.Errorf("duplicate replay secret identity for env %s ref %s", ref.EnvKey, ref.Ref)
-		}
-		expected[key] = ref
-	}
-	return expected, nil
-}
-
-func replaySecretRefKey(envKey, ref string) string {
-	return strings.TrimSpace(envKey) + "\x00" + strings.TrimSpace(ref)
-}
-
-func verifyResolvedReplaySecretIdentity(ctx context.Context, resolver secret.Resolver, ref models.TaskExecutionSecretRef, identity secret.Identity) error {
-	if !ref.Verifiable {
-		return fmt.Errorf("is not verifiable: %s", ref.UnverifiableReason)
-	}
-	if !identity.Verifiable {
-		return fmt.Errorf("resolved to unverifiable identity: %s", identity.UnverifiableReason)
-	}
-	if ref.Provider != "" && ref.Provider != identity.Provider {
-		return fmt.Errorf("provider changed from %s to %s", ref.Provider, identity.Provider)
-	}
-	if replaySecretRequiresPinnedVaultVerification(ref) {
-		if replayDescriptorIdentityString(ref, "version") != identity.Version {
-			return fmt.Errorf("version changed from %s to %s", replayDescriptorIdentityString(ref, "version"), identity.Version)
-		}
-		verifier, ok := resolver.(secret.IdentityVerifier)
-		if !ok {
-			return fmt.Errorf("provider %s does not support baseline identity verification", ref.Provider)
-		}
-		pinned, err := verifier.VerifyIdentity(ctx, ref.Ref, replaySecretIdentityFromDescriptor(ref))
-		if err != nil {
-			return fmt.Errorf("baseline identity verification failed: %w", err)
-		}
-		if !pinned.Verifiable {
-			return fmt.Errorf("baseline identity is not verifiable: %s", pinned.UnverifiableReason)
-		}
-		if !replaySecretIdentityMatches(ref, pinned) {
-			return fmt.Errorf("baseline identity changed")
-		}
-		return nil
-	}
-	if !replaySecretIdentityMatches(ref, identity) {
-		return fmt.Errorf("identity changed")
-	}
-	return nil
-}
-
-func replaySecretRequiresPinnedVaultVerification(ref models.TaskExecutionSecretRef) bool {
-	return strings.EqualFold(ref.Provider, "vault") &&
-		replayDescriptorIdentityString(ref, "version") != "" &&
-		replayDescriptorIdentityString(ref, "keyId") != ""
-}
-
-func replaySecretIdentityFromDescriptor(ref models.TaskExecutionSecretRef) secret.Identity {
-	return secret.Identity{
-		Provider:        ref.Provider,
-		Ref:             ref.Ref,
-		Version:         replayDescriptorIdentityString(ref, "version"),
-		ResourceVersion: replayDescriptorIdentityString(ref, "resourceVersion"),
-		Namespace:       replayDescriptorIdentityString(ref, "namespace"),
-		Name:            replayDescriptorIdentityString(ref, "name"),
-		Key:             replayDescriptorIdentityString(ref, "key"),
-		KeyID:           replayDescriptorIdentityString(ref, "keyId"),
-		HMACSHA256:      replayDescriptorIdentityString(ref, "hmacSha256"),
-		Verifiable:      ref.Verifiable,
-	}
-}
-
-func replaySecretIdentityMatches(ref models.TaskExecutionSecretRef, identity secret.Identity) bool {
-	if ref.Provider != "" && ref.Provider != identity.Provider {
-		return false
-	}
-	if !replaySecretHasRequiredDiscriminator(ref) {
-		return false
-	}
-	actualIdentity := resolvedSecretIdentityMap(identity)
-	for key, expectedValue := range ref.Identity {
-		if fmt.Sprint(expectedValue) != fmt.Sprint(actualIdentity[key]) {
-			return false
-		}
-	}
-	return true
-}
-
-func replaySecretHasRequiredDiscriminator(ref models.TaskExecutionSecretRef) bool {
-	if len(ref.Identity) == 0 {
-		return false
-	}
-	if strings.EqualFold(ref.Provider, "vault") {
-		return replayDescriptorIdentityString(ref, "version") != "" &&
-			replayDescriptorIdentityString(ref, "keyId") != "" &&
-			replayDescriptorIdentityString(ref, "hmacSha256") != ""
-	}
-	for _, value := range ref.Identity {
-		if strings.TrimSpace(fmt.Sprint(value)) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-func replayDescriptorIdentityString(ref models.TaskExecutionSecretRef, key string) string {
-	if len(ref.Identity) == 0 {
-		return ""
-	}
-	value, ok := ref.Identity[key]
-	if !ok || value == nil {
-		return ""
-	}
-	return strings.TrimSpace(fmt.Sprint(value))
-}
-
-func resolvedSecretIdentityMap(identity secret.Identity) map[string]string {
-	out := make(map[string]string)
-	if identity.Version != "" {
-		out["version"] = identity.Version
-	}
-	if identity.ResourceVersion != "" {
-		out["resourceVersion"] = identity.ResourceVersion
-	}
-	if identity.Namespace != "" {
-		out["namespace"] = identity.Namespace
-	}
-	if identity.Name != "" {
-		out["name"] = identity.Name
-	}
-	if identity.Key != "" {
-		out["key"] = identity.Key
-	}
-	if identity.KeyID != "" {
-		out["keyId"] = identity.KeyID
-	}
-	if identity.HMACSHA256 != "" {
-		out["hmacSha256"] = identity.HMACSHA256
-	}
-	for k, v := range identity.Metadata {
-		out[k] = v
-	}
-	return out
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

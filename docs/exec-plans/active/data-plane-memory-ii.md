@@ -881,15 +881,19 @@ write, lineage emit, or callback.
 	      W5-alpha note (2026-06-25): added `internal/replay.New(...).Replay(ctx,
 	      replay.Request{BaselineRunID, Set, ReplayFingerprint})`, returning the
 	      quarantined replay run plus per-task decisions for B4/B5. Guards are
-	      fail-closed: a quarantined baseline is rejected; every baseline task must
-	      have recorded `TaskRun.replay_safe=true` before planning, even if
-	      hash-unchanged; descriptor/row `ReplaySafe` mismatches abort; unchanged
-	      fallback hits require a successful baseline status/result; empty result +
-	      non-empty output aborts as corruption; and all-cached materialization only
-	      stamps the replay succeeded when every cached result is successful.
-	      Re-execution verifies `secret://` coverage in both directions, refuses
-	      unverifiable/empty identities, pins Vault KV-v2 baseline-version reads and
-	      the recorded HMAC key ID, and never overwrites descriptor secret evidence
+	      fail-closed: a quarantined baseline is rejected; descriptor/row
+	      `ReplaySafe` mismatches abort; tasks are planned in descriptor-DAG
+	      topological order (with YAML position only as a ready-task tie-breaker) so
+	      YAML order cannot falsely force a successor to re-execute; any task that
+	      genuinely re-executes must have recorded `TaskRun.replay_safe=true`;
+	      unchanged fallback hits require a successful baseline status/result; empty
+	      result + non-empty output aborts as corruption; and all-cached
+	      materialization only stamps the replay succeeded when every cached result
+	      is successful. Re-execution verifies `secret://` coverage in both
+	      directions, refuses unverifiable/empty identities, verifies Vault KV-v2
+	      baseline-version HMACs with the recorded HMAC key ID against the
+	      already-resolved value when the current version is the baseline version,
+	      aborts on version drift, and never overwrites descriptor secret evidence
 	      on quarantined execution. Reconstruction reads the B2
 	      `TaskRun.ExecutionDescriptor` only (runtime image/digest, command,
 	      env/spec/mounts, cache, schema, retry, DAG, params/predecessor context) in

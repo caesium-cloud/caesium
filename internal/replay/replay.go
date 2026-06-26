@@ -12,6 +12,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
+	jobdefruntime "github.com/caesium-cloud/caesium/internal/jobdef/runtime"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -206,13 +207,11 @@ func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models
 		}
 		tasks = append(tasks, task)
 	}
-	sort.SliceStable(tasks, func(i, j int) bool {
-		if tasks[i].descriptor.DAG.TaskPosition != tasks[j].descriptor.DAG.TaskPosition {
-			return tasks[i].descriptor.DAG.TaskPosition < tasks[j].descriptor.DAG.TaskPosition
-		}
-		return tasks[i].row.CreatedAt.Before(tasks[j].row.CreatedAt)
-	})
-	return baseline, tasks, nil
+	ordered, err := topologicalBaselineTasks(runID, tasks)
+	if err != nil {
+		return models.JobRun{}, nil, err
+	}
+	return baseline, ordered, nil
 }
 
 func decodeBaselineTask(row models.TaskRun) (*baselineTask, error) {
@@ -258,15 +257,111 @@ func decodeBaselineTask(row models.TaskRun) (*baselineTask, error) {
 	}, nil
 }
 
-func (c *Constructor) planTasks(ctx context.Context, tasks []*baselineTask, params map[string]string, forceReexecute bool) ([]plannedTask, error) {
+func topologicalBaselineTasks(runID uuid.UUID, tasks []*baselineTask) ([]*baselineTask, error) {
 	byID := make(map[uuid.UUID]*baselineTask, len(tasks))
-	plannedByID := make(map[uuid.UUID]int, len(tasks))
+	indegree := make(map[uuid.UUID]int, len(tasks))
+	successors := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
+	edges := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(tasks))
+
 	for _, task := range tasks {
-		byID[task.row.TaskID] = task
-		if !task.row.ReplaySafe {
-			return nil, fmt.Errorf("%w: step %q has replay_safe=false", ErrReplayUnsafe, task.taskName)
+		if task == nil {
+			return nil, fmt.Errorf("%w: nil baseline task in run %s", ErrUnsupportedDescriptor, runID)
+		}
+		taskID := task.row.TaskID
+		if taskID == uuid.Nil {
+			return nil, fmt.Errorf("%w: step %q has empty task id", ErrUnsupportedDescriptor, task.taskName)
+		}
+		if _, exists := byID[taskID]; exists {
+			return nil, fmt.Errorf("%w: duplicate task %s in baseline run %s", ErrUnsupportedDescriptor, taskID, runID)
+		}
+		byID[taskID] = task
+		indegree[taskID] = 0
+	}
+
+	addEdge := func(from, to uuid.UUID, stepName, relation string) error {
+		if from == uuid.Nil || to == uuid.Nil {
+			return fmt.Errorf("%w: step %q has empty %s edge", ErrUnsupportedDescriptor, stepName, relation)
+		}
+		if _, ok := byID[from]; !ok {
+			return fmt.Errorf("%w: step %q references missing %s %s", ErrUnsupportedDescriptor, stepName, relation, from)
+		}
+		if _, ok := byID[to]; !ok {
+			return fmt.Errorf("%w: step %q references missing %s %s", ErrUnsupportedDescriptor, stepName, relation, to)
+		}
+		if edges[from] == nil {
+			edges[from] = make(map[uuid.UUID]struct{})
+		}
+		if _, exists := edges[from][to]; exists {
+			return nil
+		}
+		edges[from][to] = struct{}{}
+		if successors[from] == nil {
+			successors[from] = make(map[uuid.UUID]struct{})
+		}
+		successors[from][to] = struct{}{}
+		indegree[to]++
+		return nil
+	}
+
+	for _, task := range tasks {
+		taskID := task.row.TaskID
+		for _, pred := range task.descriptor.DAG.Predecessors {
+			if err := addEdge(pred.TaskID, taskID, task.taskName, "predecessor"); err != nil {
+				return nil, err
+			}
+		}
+		for _, succ := range task.descriptor.DAG.Successors {
+			if err := addEdge(taskID, succ.TaskID, task.taskName, "successor"); err != nil {
+				return nil, err
+			}
 		}
 	}
+
+	ready := make([]*baselineTask, 0, len(tasks))
+	for _, task := range tasks {
+		if indegree[task.row.TaskID] == 0 {
+			ready = append(ready, task)
+		}
+	}
+	sortBaselineReady(ready)
+
+	ordered := make([]*baselineTask, 0, len(tasks))
+	for len(ready) > 0 {
+		task := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, task)
+		for successorID := range successors[task.row.TaskID] {
+			indegree[successorID]--
+			if indegree[successorID] == 0 {
+				ready = append(ready, byID[successorID])
+			}
+		}
+		sortBaselineReady(ready)
+	}
+
+	if len(ordered) != len(tasks) {
+		return nil, fmt.Errorf("%w: descriptor DAG cycle while ordering baseline run %s", ErrUnsupportedDescriptor, runID)
+	}
+	return ordered, nil
+}
+
+func sortBaselineReady(tasks []*baselineTask) {
+	sort.SliceStable(tasks, func(i, j int) bool {
+		if tasks[i].descriptor.DAG.TaskPosition != tasks[j].descriptor.DAG.TaskPosition {
+			return tasks[i].descriptor.DAG.TaskPosition < tasks[j].descriptor.DAG.TaskPosition
+		}
+		if !tasks[i].row.CreatedAt.Equal(tasks[j].row.CreatedAt) {
+			return tasks[i].row.CreatedAt.Before(tasks[j].row.CreatedAt)
+		}
+		if tasks[i].taskName != tasks[j].taskName {
+			return tasks[i].taskName < tasks[j].taskName
+		}
+		return tasks[i].row.TaskID.String() < tasks[j].row.TaskID.String()
+	})
+}
+
+func (c *Constructor) planTasks(ctx context.Context, tasks []*baselineTask, params map[string]string, forceReexecute bool) ([]plannedTask, error) {
+	plannedByID := make(map[uuid.UUID]int, len(tasks))
 
 	plans := make([]plannedTask, 0, len(tasks))
 	for _, task := range tasks {
@@ -276,10 +371,6 @@ func (c *Constructor) planTasks(ctx context.Context, tasks []*baselineTask, para
 		for _, pred := range task.descriptor.DAG.Predecessors {
 			plannedIdx, ok := plannedByID[pred.TaskID]
 			if !ok {
-				if _, ok := byID[pred.TaskID]; ok {
-					pendingPredecessors++
-					continue
-				}
 				return nil, fmt.Errorf("%w: step %q references missing predecessor %s", ErrUnsupportedDescriptor, task.taskName, pred.TaskID)
 			}
 			plannedPred := &plans[plannedIdx]
@@ -302,7 +393,9 @@ func (c *Constructor) planTasks(ctx context.Context, tasks []*baselineTask, para
 			base:          task,
 			replayHash:    replayHash,
 			effectiveHash: replayHash,
-			descriptor:    replayDescriptor(task.descriptor),
+			// The replay TaskRun stores the baseline descriptor unchanged; its
+			// Baseline fields are the audit reference for what was replayed.
+			descriptor: task.descriptor,
 		}
 
 		if unchanged && pendingPredecessors == 0 {
@@ -411,7 +504,7 @@ func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTa
 		return fmt.Errorf("%w: step %q would re-execute but baseline task_run replay_safe=false", ErrReplayUnsafe, task.taskName)
 	}
 
-	expectedByKey, err := expectedSecretRefMap(task.descriptor.SecretRefs)
+	expectedByKey, err := ExpectedReplaySecretRefMap(task.descriptor.SecretRefs)
 	if err != nil {
 		return fmt.Errorf("%w: step %q: %v", ErrSecretIdentity, task.taskName, err)
 	}
@@ -421,7 +514,7 @@ func (c *Constructor) authorizeReexecution(ctx context.Context, task *baselineTa
 		if !strings.HasPrefix(refValue, "secret://") {
 			continue
 		}
-		key := secretRefKey(envKey, refValue)
+		key := ReplaySecretRefKey(envKey, refValue)
 		ref, ok := expectedByKey[key]
 		if !ok {
 			return fmt.Errorf("%w: step %q env %s secret %s has no baseline identity", ErrSecretIdentity, task.taskName, envKey, refValue)
@@ -449,36 +542,75 @@ func (c *Constructor) verifyReplaySecretIdentity(ctx context.Context, taskName s
 	if c.secretResolver == nil {
 		return fmt.Errorf("%w: step %q secret %s requires a configured resolver", ErrSecretIdentity, taskName, ref.Ref)
 	}
-	_, identity, err := c.secretResolver.ResolveWithIdentity(ctx, ref.Ref)
+	value, identity, err := c.secretResolver.ResolveWithIdentity(ctx, ref.Ref)
 	if err != nil {
 		return fmt.Errorf("%w: step %q secret %s re-resolve failed: %v", ErrSecretIdentity, taskName, ref.Ref, err)
 	}
-	if err := verifyResolvedSecretIdentity(ctx, c.secretResolver, ref, identity); err != nil {
+	if err := VerifyResolvedReplaySecretIdentity(ctx, c.secretResolver, ref, value, identity); err != nil {
 		return fmt.Errorf("%w: step %q secret %s %v", ErrSecretIdentity, taskName, ref.Ref, err)
 	}
 	return nil
 }
 
-func expectedSecretRefMap(refs []models.TaskExecutionSecretRef) (map[string]models.TaskExecutionSecretRef, error) {
+// VerifyReplaySecretIdentities verifies descriptor-captured replay secret
+// identities against the identities and values resolved for a quarantined task.
+func VerifyReplaySecretIdentities(ctx context.Context, resolver secret.Resolver, expected []models.TaskExecutionSecretRef, actual []jobdefruntime.ResolvedSecretIdentity, resolvedEnv map[string]string) error {
+	expectedByKey, err := ExpectedReplaySecretRefMap(expected)
+	if err != nil {
+		return err
+	}
+	actualByKey := make(map[string]jobdefruntime.ResolvedSecretIdentity, len(actual))
+	for _, resolved := range actual {
+		key := ReplaySecretRefKey(resolved.EnvKey, resolved.Ref)
+		ref, ok := expectedByKey[key]
+		if !ok {
+			return fmt.Errorf("replay secret %s for env %s has no baseline identity", resolved.Ref, resolved.EnvKey)
+		}
+		actualByKey[key] = resolved
+		value, ok := resolvedEnv[resolved.EnvKey]
+		if !ok {
+			return fmt.Errorf("replay secret %s for env %s resolved value unavailable", ref.Ref, ref.EnvKey)
+		}
+		if err := VerifyResolvedReplaySecretIdentity(ctx, resolver, ref, value, resolved.Identity); err != nil {
+			return fmt.Errorf("replay secret %s for env %s %v", ref.Ref, ref.EnvKey, err)
+		}
+	}
+	for _, ref := range expected {
+		if strings.TrimSpace(ref.Ref) == "" {
+			continue
+		}
+		_, ok := actualByKey[ReplaySecretRefKey(ref.EnvKey, ref.Ref)]
+		if !ok {
+			return fmt.Errorf("replay secret %s for env %s was not resolved", ref.Ref, ref.EnvKey)
+		}
+	}
+	return nil
+}
+
+// ExpectedReplaySecretRefMap keys descriptor secret refs by env key and ref.
+func ExpectedReplaySecretRefMap(refs []models.TaskExecutionSecretRef) (map[string]models.TaskExecutionSecretRef, error) {
 	expected := make(map[string]models.TaskExecutionSecretRef)
 	for _, ref := range refs {
 		if strings.TrimSpace(ref.Ref) == "" {
 			continue
 		}
-		key := secretRefKey(ref.EnvKey, ref.Ref)
+		key := ReplaySecretRefKey(ref.EnvKey, ref.Ref)
 		if _, exists := expected[key]; exists {
-			return nil, fmt.Errorf("duplicate baseline secret identity for env %s ref %s", ref.EnvKey, ref.Ref)
+			return nil, fmt.Errorf("duplicate replay secret identity for env %s ref %s", ref.EnvKey, ref.Ref)
 		}
 		expected[key] = ref
 	}
 	return expected, nil
 }
 
-func secretRefKey(envKey, ref string) string {
+// ReplaySecretRefKey returns the canonical map key for an env secret ref.
+func ReplaySecretRefKey(envKey, ref string) string {
 	return strings.TrimSpace(envKey) + "\x00" + strings.TrimSpace(ref)
 }
 
-func verifyResolvedSecretIdentity(ctx context.Context, resolver secret.Resolver, ref models.TaskExecutionSecretRef, identity secret.Identity) error {
+// VerifyResolvedReplaySecretIdentity verifies one descriptor secret identity
+// against the value and identity returned by the resolver.
+func VerifyResolvedReplaySecretIdentity(ctx context.Context, resolver secret.Resolver, ref models.TaskExecutionSecretRef, resolvedValue string, identity secret.Identity) error {
 	if !ref.Verifiable {
 		return fmt.Errorf("is not verifiable: %s", ref.UnverifiableReason)
 	}
@@ -488,49 +620,53 @@ func verifyResolvedSecretIdentity(ctx context.Context, resolver secret.Resolver,
 	if ref.Provider != "" && ref.Provider != identity.Provider {
 		return fmt.Errorf("provider changed from %s to %s", ref.Provider, identity.Provider)
 	}
-	if requiresPinnedVaultVerification(ref) {
-		if descriptorIdentityString(ref, "version") != identity.Version {
-			return fmt.Errorf("version changed from %s to %s", descriptorIdentityString(ref, "version"), identity.Version)
+	if ReplaySecretRequiresPinnedVaultVerification(ref) {
+		if ReplayDescriptorIdentityString(ref, "version") != identity.Version {
+			return fmt.Errorf("version changed from %s to %s", ReplayDescriptorIdentityString(ref, "version"), identity.Version)
 		}
-		verifier, ok := resolver.(secret.IdentityVerifier)
+		verifier, ok := resolver.(secret.ResolvedIdentityVerifier)
 		if !ok {
 			return fmt.Errorf("provider %s does not support baseline identity verification", ref.Provider)
 		}
-		pinned, err := verifier.VerifyIdentity(ctx, ref.Ref, secretIdentityFromDescriptor(ref))
+		pinned, err := verifier.VerifyResolvedIdentity(ctx, ref.Ref, ReplaySecretIdentityFromDescriptor(ref), resolvedValue)
 		if err != nil {
 			return fmt.Errorf("baseline identity verification failed: %w", err)
 		}
 		if !pinned.Verifiable {
 			return fmt.Errorf("baseline identity is not verifiable: %s", pinned.UnverifiableReason)
 		}
-		if !secretIdentityMatches(ref, pinned) {
+		if !ReplaySecretIdentityMatches(ref, pinned) {
 			return fmt.Errorf("baseline identity changed")
 		}
 		return nil
 	}
-	if !secretIdentityMatches(ref, identity) {
+	if !ReplaySecretIdentityMatches(ref, identity) {
 		return fmt.Errorf("identity changed")
 	}
 	return nil
 }
 
-func requiresPinnedVaultVerification(ref models.TaskExecutionSecretRef) bool {
+// ReplaySecretRequiresPinnedVaultVerification reports whether a descriptor ref
+// carries the Vault version and HMAC key needed for baseline identity pinning.
+func ReplaySecretRequiresPinnedVaultVerification(ref models.TaskExecutionSecretRef) bool {
 	return strings.EqualFold(ref.Provider, "vault") &&
-		descriptorIdentityString(ref, "version") != "" &&
-		descriptorIdentityString(ref, "keyId") != ""
+		ReplayDescriptorIdentityString(ref, "version") != "" &&
+		ReplayDescriptorIdentityString(ref, "keyId") != ""
 }
 
-func secretIdentityFromDescriptor(ref models.TaskExecutionSecretRef) secret.Identity {
+// ReplaySecretIdentityFromDescriptor converts a descriptor secret ref back to
+// the captured identity shape used for verification.
+func ReplaySecretIdentityFromDescriptor(ref models.TaskExecutionSecretRef) secret.Identity {
 	return secret.Identity{
 		Provider:        ref.Provider,
 		Ref:             ref.Ref,
-		Version:         descriptorIdentityString(ref, "version"),
-		ResourceVersion: descriptorIdentityString(ref, "resourceVersion"),
-		Namespace:       descriptorIdentityString(ref, "namespace"),
-		Name:            descriptorIdentityString(ref, "name"),
-		Key:             descriptorIdentityString(ref, "key"),
-		KeyID:           descriptorIdentityString(ref, "keyId"),
-		HMACSHA256:      descriptorIdentityString(ref, "hmacSha256"),
+		Version:         ReplayDescriptorIdentityString(ref, "version"),
+		ResourceVersion: ReplayDescriptorIdentityString(ref, "resourceVersion"),
+		Namespace:       ReplayDescriptorIdentityString(ref, "namespace"),
+		Name:            ReplayDescriptorIdentityString(ref, "name"),
+		Key:             ReplayDescriptorIdentityString(ref, "key"),
+		KeyID:           ReplayDescriptorIdentityString(ref, "keyId"),
+		HMACSHA256:      ReplayDescriptorIdentityString(ref, "hmacSha256"),
 		Verifiable:      ref.Verifiable,
 	}
 }
@@ -690,10 +826,6 @@ func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time) (models.
 	return record, nil
 }
 
-func replayDescriptor(desc models.TaskExecutionDescriptor) models.TaskExecutionDescriptor {
-	return desc
-}
-
 func replayEvents(jobID, runID uuid.UUID, records []models.TaskRun, allCached bool, now time.Time) []event.Event {
 	events := []event.Event{{
 		Type:       event.TypeRunStarted,
@@ -766,15 +898,17 @@ func hashMatchesBaseline(replayHash, computed, effective string) bool {
 	return replayHash != "" && (replayHash == computed || (effective != "" && replayHash == effective))
 }
 
-func secretIdentityMatches(ref models.TaskExecutionSecretRef, identity secret.Identity) bool {
+// ReplaySecretIdentityMatches compares a descriptor ref's recorded identity
+// fields with a resolved or verified identity.
+func ReplaySecretIdentityMatches(ref models.TaskExecutionSecretRef, identity secret.Identity) bool {
 	if ref.Provider != "" && ref.Provider != identity.Provider {
 		return false
 	}
-	if !hasRequiredSecretDiscriminator(ref) {
+	if !ReplaySecretHasRequiredDiscriminator(ref) {
 		return false
 	}
 	expected := ref.Identity
-	actual := identityMap(identity)
+	actual := ReplaySecretIdentityMap(identity)
 	for key, expectedValue := range expected {
 		if fmt.Sprint(expectedValue) != fmt.Sprint(actual[key]) {
 			return false
@@ -783,14 +917,16 @@ func secretIdentityMatches(ref models.TaskExecutionSecretRef, identity secret.Id
 	return true
 }
 
-func hasRequiredSecretDiscriminator(ref models.TaskExecutionSecretRef) bool {
+// ReplaySecretHasRequiredDiscriminator confirms a descriptor ref has enough
+// provider-specific identity material to fail closed on mismatch.
+func ReplaySecretHasRequiredDiscriminator(ref models.TaskExecutionSecretRef) bool {
 	if len(ref.Identity) == 0 {
 		return false
 	}
 	if strings.EqualFold(ref.Provider, "vault") {
-		return descriptorIdentityString(ref, "version") != "" &&
-			descriptorIdentityString(ref, "keyId") != "" &&
-			descriptorIdentityString(ref, "hmacSha256") != ""
+		return ReplayDescriptorIdentityString(ref, "version") != "" &&
+			ReplayDescriptorIdentityString(ref, "keyId") != "" &&
+			ReplayDescriptorIdentityString(ref, "hmacSha256") != ""
 	}
 	for _, value := range ref.Identity {
 		if strings.TrimSpace(fmt.Sprint(value)) != "" {
@@ -800,7 +936,9 @@ func hasRequiredSecretDiscriminator(ref models.TaskExecutionSecretRef) bool {
 	return false
 }
 
-func descriptorIdentityString(ref models.TaskExecutionSecretRef, key string) string {
+// ReplayDescriptorIdentityString returns a trimmed string identity field from a
+// descriptor ref.
+func ReplayDescriptorIdentityString(ref models.TaskExecutionSecretRef, key string) string {
 	if len(ref.Identity) == 0 {
 		return ""
 	}
@@ -811,7 +949,9 @@ func descriptorIdentityString(ref models.TaskExecutionSecretRef, key string) str
 	return strings.TrimSpace(fmt.Sprint(value))
 }
 
-func identityMap(identity secret.Identity) datatypes.JSONMap {
+// ReplaySecretIdentityMap returns the descriptor-comparable fields for an
+// identity.
+func ReplaySecretIdentityMap(identity secret.Identity) datatypes.JSONMap {
 	out := datatypes.JSONMap{}
 	if identity.Version != "" {
 		out["version"] = identity.Version

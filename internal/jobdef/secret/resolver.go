@@ -31,3 +31,10 @@ type Resolver interface {
 type IdentityVerifier interface {
 	VerifyIdentity(ctx context.Context, ref string, expected Identity) (Identity, error)
 }
+
+// ResolvedIdentityVerifier verifies a captured identity against a value already
+// returned by ResolveWithIdentity. Replay uses it to avoid re-reading a pinned
+// provider version when the latest version is the baseline version.
+type ResolvedIdentityVerifier interface {
+	VerifyResolvedIdentity(ctx context.Context, ref string, expected Identity, resolvedValue string) (Identity, error)
+}
