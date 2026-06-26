@@ -1060,7 +1060,7 @@ write, lineage emit, or callback.
       (`metadata.cache.ttl: "1h"`), so the no-override replay proves every task
       unchanged and materializes as all-cache-hit instead of re-executing.
       Depends on: B3.
-- [ ] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--idempotency-key
+- [x] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--idempotency-key
       <k>] [--diff] [--json]`: fires a quarantined replay. **`--job-id` is required**
       (same reason as A3 and `caesium why`): the endpoint is
       `POST /v1/jobs/:id/runs/:run_id/replay`, so the CLI needs the job id to build
@@ -1078,6 +1078,17 @@ write, lineage emit, or callback.
       stdout discipline as in A3.
       Files: new `cmd/run/replay.go` (its own `func init()` calling
       `Cmd.AddCommand(replayCmd)` on `run.Cmd`).
+      B5 implementation note (2026-06-26): `cmd/run/replay.go` now posts the B4
+      request with repeated `--set k=v`, requires `--job-id`, sends the
+      `Idempotency-Key` header, maps B4 refusals to clear non-zero CLI errors,
+      prints auto-generated keys to stderr before dispatch while keeping operator
+      keys verbatim, and keeps stdout reserved for the replay run JSON/id or the
+      `--diff` render. `--diff` waits for the replay run to reach a terminal
+      state via `GET /v1/jobs/:id/runs/:run_id`, then reuses the A2 job-scoped
+      run-diff endpoint and renderer. Added CLI integration coverage with
+      separate stdout/stderr capture for clean JSON, restart-safe key reuse,
+      required `--job-id`, local-mode replay refusal, and no-override `--diff`,
+      plus unit tests for `--set` parsing and generated-key stderr behavior.
       Depends on: B4 + A2 (the `--diff` path consumes the run-diff endpoint).
 - [ ] B6. Add an integration scenario: replay a completed run with a changed
       `--set` param; assert (1) the honest v1 hashing behavior — a **no-override**

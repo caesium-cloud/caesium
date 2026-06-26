@@ -30,16 +30,26 @@ import (
 // drop).
 func (s *IntegrationTestSuite) runCLIStdout(args ...string) (string, error) {
 	s.T().Helper()
+	stdout, stderr, err := s.runCLISeparate(args...)
+	if err != nil {
+		return stdout, fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr))
+	}
+	return stdout, nil
+}
+
+// runCLISeparate runs the CLI while keeping stdout and stderr separate. Use it
+// when a test must prove machine-readable stdout is not contaminated by cobra
+// diagnostics, logs, or operator guidance printed to stderr.
+func (s *IntegrationTestSuite) runCLISeparate(args ...string) (string, string, error) {
+	s.T().Helper()
 	cmd := exec.CommandContext(s.T().Context(), s.cliPath, args...)
 	cmd.Dir = s.projectRoot
 	cmd.Env = os.Environ()
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return stdout.String(), fmt.Errorf("%w: %s", err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.String(), nil
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
 }
 
 // whyExplanation mirrors the fields of the `caesium why --json` output that the
