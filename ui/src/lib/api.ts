@@ -355,23 +355,260 @@ export interface DatabaseQueryResponse {
   rows: unknown[][];
 }
 
+export type ApiErrorKind =
+  | "unknown"
+  | "authentication_required"
+  | "insufficient_access"
+  | "replay_missing_idempotency_key"
+  | "replay_bad_request"
+  | "replay_target_not_found"
+  | "replay_requires_distributed_execution"
+  | "replay_conflict"
+  | "replay_request_too_large"
+  | "replay_safe_refusal"
+  | "replay_refused";
+
+export interface FieldChange {
+  field: string;
+  kind: "scalar" | "map_entry" | "structural" | string;
+  before?: string;
+  after?: string;
+  added?: boolean;
+  removed?: boolean;
+  redacted?: boolean;
+}
+
+export interface WhyTrigger {
+  type?: string;
+  alias?: string;
+  params?: Record<string, string>;
+  firedAt?: string;
+}
+
+export interface BlobDiff {
+  hashEqual: boolean;
+  subjectHash?: string;
+  baselineHash?: string;
+  changes?: FieldChange[];
+  degraded?: string;
+}
+
+export type RunDiffVerdict = "WOULD_CACHE_HIT" | "RERAN" | "DEGRADED";
+
+export interface RunDiffTask {
+  taskName: string;
+  leftTaskRunId: string;
+  rightTaskRunId: string;
+  leftTaskId: string;
+  rightTaskId: string;
+  leftStatus: string;
+  rightStatus: string;
+  leftAttempt: number;
+  rightAttempt: number;
+  leftHash?: string;
+  rightHash?: string;
+  verdict: RunDiffVerdict;
+  hashEqual: boolean;
+  changes?: FieldChange[];
+  degraded?: string;
+}
+
+export interface RunDiff {
+  jobId: string;
+  leftRunId: string;
+  rightRunId: string;
+  leftStatus: string;
+  rightStatus: string;
+  leftTrigger: WhyTrigger;
+  rightTrigger: WhyTrigger;
+  triggerChanges?: FieldChange[];
+  paramChanges?: FieldChange[];
+  tasks: RunDiffTask[];
+  tasksAdded?: string[];
+  tasksRemoved?: string[];
+  generatedAt: string;
+}
+
+export interface ReplayRequest {
+  set?: Record<string, string>;
+}
+
+export interface ReplayResponse {
+  run_id: string;
+  status: string;
+  quarantine: boolean;
+}
+
+export interface WhyBaseline {
+  kind: string;
+  runId?: string;
+  taskRunId?: string;
+  startedAt?: string;
+}
+
+export type WhyVerdict = "CACHE_HIT" | "CACHE_MISS" | "CACHE_DISABLED" | "UNKNOWN";
+
+export interface WhyExplanation {
+  runId: string;
+  jobId: string;
+  taskId: string;
+  taskName: string;
+  taskRunId: string;
+  verdict: WhyVerdict;
+  status: string;
+  cacheEnabled: boolean;
+  hash?: string;
+  summary: string;
+  trigger: WhyTrigger;
+  baseline: WhyBaseline;
+  diff?: BlobDiff;
+}
+
+export interface BlameOptions {
+  from?: string;
+  to?: string;
+  task?: string;
+}
+
+export interface BlameTaskElement {
+  name: string;
+  image: string;
+  command?: string[];
+}
+
+export interface BlameTaskAttribution {
+  element: BlameTaskElement;
+  introducing_commit: string;
+  snapshot_id: string;
+}
+
+export interface BlameEdgeElement {
+  from: string;
+  to: string;
+}
+
+export interface BlameEdgeAttribution {
+  element: BlameEdgeElement;
+  introducing_commit: string;
+  snapshot_id: string;
+  provenance_commit?: string;
+}
+
+export interface BlameResult {
+  job_id: string;
+  coverage: string;
+  from_commit?: string;
+  to_commit?: string;
+  tasks: BlameTaskAttribution[];
+  edges: BlameEdgeAttribution[];
+}
+
+export interface ReceiptTaskEntry {
+  task_name: string;
+  identity_hash: string;
+  image: string;
+  resolved_image_digest?: string;
+  digest_pinned: boolean;
+  degraded: boolean;
+  degraded_reason?: string;
+}
+
+export interface Receipt {
+  receipt_version: number;
+  run_id: string;
+  job_id: string;
+  job_alias?: string;
+  git_commit?: string;
+  manifest_content_hash?: string;
+  tasks: ReceiptTaskEntry[];
+  degraded: boolean;
+  degraded_tasks?: string[];
+  receipt_digest: string;
+}
+
+export type ReceiptDriftKind =
+  | "receipt_digest_mismatch"
+  | "image_digest_mismatch"
+  | "identity_hash_mismatch"
+  | "manifest_changed"
+  | "git_commit_changed"
+  | "task_missing"
+  | "task_added"
+  | "receipt_version_mismatch";
+
+export interface ReceiptDrift {
+  kind: ReceiptDriftKind;
+  task?: string;
+  expected?: string;
+  actual?: string;
+  detail: string;
+}
+
+export interface VerifyResult {
+  run_id: string;
+  match: boolean;
+  degraded: boolean;
+  degraded_tasks?: string[];
+  expected_digest: string;
+  actual_digest: string;
+  drifts?: ReceiptDrift[];
+  rederived: Receipt | null;
+}
+
+export interface LineageImpactQuery {
+  namespace: string;
+  name: string;
+  maxDepth?: number;
+}
+
+export interface ImpactNode {
+  dataset_namespace: string;
+  dataset_name: string;
+  direction: string;
+  producing_step?: string;
+  job_id: string;
+  job_alias: string;
+  provenance_commit?: string;
+  provenance_repo?: string;
+  last_seen: string;
+  depth: number;
+}
+
+export interface ImpactResult {
+  root_namespace: string;
+  root_name: string;
+  downstream: ImpactNode[];
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/v1";
 
 export class ApiError extends Error {
   public status: number;
-  constructor(status: number, message: string) {
+  public kind: ApiErrorKind;
+  constructor(status: number, message: string, kind: ApiErrorKind = "unknown") {
     super(message);
     this.status = status;
+    this.kind = kind;
     this.name = "ApiError";
   }
 }
 
-async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
+type ErrorKindMapper = (status: number, message: string) => ApiErrorKind | undefined;
+
+async function request<T>(
+  endpoint: string,
+  options?: RequestInit,
+  errorKindForStatus?: ErrorKindMapper,
+): Promise<T> {
   const url = `${API_BASE_URL}${endpoint}`;
-  return requestURL<T>(url, options);
+  return requestURL<T>(url, options, errorKindForStatus);
 }
 
-async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
+async function requestURL<T>(
+  url: string,
+  options?: RequestInit,
+  errorKindForStatus?: ErrorKindMapper,
+): Promise<T> {
   const headers = withAuthHeaders({
     "Content-Type": "application/json",
     ...(options?.headers as Record<string, string>),
@@ -385,11 +622,12 @@ async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
 
   if (response.status === 401) {
     clearApiKey();
-    throw new ApiError(401, "Authentication required");
+    throw new ApiError(401, "Authentication required", "authentication_required");
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, await response.text());
+    const message = parseErrorMessage(await response.text());
+    throw new ApiError(response.status, message, classifyApiError(response.status, message, errorKindForStatus));
   }
 
   if (response.status === 204) {
@@ -402,6 +640,79 @@ async function requestURL<T>(url: string, options?: RequestInit): Promise<T> {
   }
 
   return JSON.parse(text) as T;
+}
+
+function parseErrorMessage(text: string): string {
+  if (!text) {
+    return "";
+  }
+
+  try {
+    const body = JSON.parse(text) as { message?: unknown; error?: unknown };
+    if (typeof body.message === "string" && body.message.trim() !== "") {
+      return body.message.trim();
+    }
+    if (typeof body.error === "string" && body.error.trim() !== "") {
+      return body.error.trim();
+    }
+  } catch {
+    // Non-JSON error bodies are common in older handlers; keep the raw text.
+  }
+
+  return text.trim();
+}
+
+function classifyApiError(
+  status: number,
+  message: string,
+  errorKindForStatus?: ErrorKindMapper,
+): ApiErrorKind {
+  if (status === 403) {
+    return "insufficient_access";
+  }
+  return errorKindForStatus?.(status, message) ?? "unknown";
+}
+
+// The replay controller overloads several status codes across distinct service
+// errors (api/rest/controller/replay/replay.go), emitting err.Error() as the body.
+// Classify by status AND a stable substring of that body so the UI does not assert
+// a single cause for an overloaded code (e.g. 409 is also returned for a quarantined
+// or non-terminal baseline, not only "requires distributed execution").
+function replayErrorKind(status: number, message: string): ApiErrorKind | undefined {
+  const body = message.toLowerCase();
+  switch (status) {
+    case 400:
+      // Missing key emits a literal message; malformed ids / body-decode emit "bad request".
+      return body.includes("idempotency-key")
+        ? "replay_missing_idempotency_key"
+        : "replay_bad_request";
+    case 404:
+      return "replay_target_not_found";
+    case 409:
+      // ErrReplayRequiresDistributedMode vs unavailable-proof / quarantined / not-terminal baseline.
+      return body.includes("distributed execution mode")
+        ? "replay_requires_distributed_execution"
+        : "replay_conflict";
+    case 413:
+      return "replay_request_too_large";
+    case 422:
+      // ErrReplayUnsafe vs missing/unsupported descriptor or secret-identity refusal.
+      return body.includes("not replay safe")
+        ? "replay_safe_refusal"
+        : "replay_refused";
+    default:
+      return undefined;
+  }
+}
+
+function queryString(params: Record<string, string | number | undefined>): string {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined) {
+      query.set(key, String(value));
+    }
+  });
+  return query.toString();
 }
 
 function parseJobDefinitions(yaml: string) {
@@ -421,6 +732,38 @@ export const api = {
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
   getJobRuns: (jobId: string) => request<JobRun[]>(`/jobs/${jobId}/runs`),
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
+  getRunDiff: (jobId: string, left: string, right: string) =>
+    request<RunDiff>(
+      `/jobs/${encodeURIComponent(jobId)}/runs/diff?${queryString({ left, right })}`,
+    ),
+  postReplay: (jobId: string, runId: string, body: ReplayRequest, idempotencyKey: string) =>
+    request<ReplayResponse>(
+      `/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/replay`,
+      {
+        method: "POST",
+        headers: { "Idempotency-Key": idempotencyKey },
+        body: JSON.stringify(body),
+      },
+      replayErrorKind,
+    ),
+  getTaskWhy: (jobId: string, runId: string, taskId: string) =>
+    request<WhyExplanation>(
+      `/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/why?${queryString({ task: taskId })}`,
+    ),
+  getBlame: (jobId: string, options: BlameOptions = {}) => {
+    const query = queryString({ from: options.from, to: options.to, task: options.task });
+    return request<BlameResult>(`/jobs/${encodeURIComponent(jobId)}/blame${query ? `?${query}` : ""}`);
+  },
+  getReceipt: (jobId: string, runId: string) =>
+    request<Receipt>(`/jobs/${encodeURIComponent(jobId)}/runs/${encodeURIComponent(runId)}/receipt`),
+  postVerify: (committedReceiptBody: Receipt) =>
+    request<VerifyResult>(
+      `/jobs/${encodeURIComponent(committedReceiptBody.job_id)}/runs/${encodeURIComponent(committedReceiptBody.run_id)}/receipt/verify`,
+      {
+        method: "POST",
+        body: JSON.stringify(committedReceiptBody),
+      },
+    ),
   getJobDAG: (jobId: string) => request<JobDAGResponse>(`/jobs/${jobId}/dag`),
   getJobTasks: (jobId: string) => request<JobTask[]>(`/jobs/${jobId}/tasks`),
   getJobCache: (jobId: string) => request<JobCacheResponse>(`/jobs/${jobId}/cache`),
@@ -469,6 +812,14 @@ export const api = {
   deleteAtom: (id: string) => request<void>(`/atoms/${id}`, { method: "DELETE" }),
   getStats: () => request<StatsResponse>("/stats"),
   getStatsSummary: (window: string = "7d") => request<StatsResponse>(`/stats/summary?window=${window}`),
+  getLineageImpact: (query: LineageImpactQuery) =>
+    request<ImpactResult>(
+      `/lineage/impact?${queryString({
+        namespace: query.namespace,
+        name: query.name,
+        max_depth: query.maxDepth,
+      })}`,
+    ),
   getHealth: () => requestURL<HealthResponse>("/health"),
   /**
    * Like `getHealth` but reads the response body on any non-401 status code.
@@ -483,7 +834,7 @@ export const api = {
     const response = await fetch("/health", { credentials: "include", headers });
     if (response.status === 401) {
       clearApiKey();
-      throw new ApiError(401, "Authentication required");
+      throw new ApiError(401, "Authentication required", "authentication_required");
     }
     const text = await response.text();
     if (!text) throw new ApiError(response.status, "Empty health response");
