@@ -302,7 +302,11 @@ DOWNSTREAM only** (`api/rest/controller/lineage/impact.go`; `internal/lineage/im
       timeline/step-through replay surface" with the shipped UI verbs — and add this plan
       to `docs/README.md`'s index + a forward note in the completed data-plane-memory
       plans. Concentrate all roadmap/README edits here so the feature streams don't collide
-      on those shared docs.
+      on those shared docs. **When referencing this plan in `docs/README.md`, use
+      backtick/inline-code form** (`` `exec-plans/active/...` ``) — NOT a clickable `(….md)`
+      link: the `TestDocsREADMEIndexesEveryTopLevelDoc` guardrail requires every README
+      markdown-link basename to be a top-level `docs/*.md` file, so a subdirectory link
+      fails the build (PR #245 hit exactly this).
       Files: `docs/roadmap.md`, `docs/README.md`. Depends on: A–F (runs last).
 
 ## Sequencing & Dependencies
