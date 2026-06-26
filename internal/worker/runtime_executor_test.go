@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	jobdeftestutil "github.com/caesium-cloud/caesium/internal/jobdef/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
@@ -303,6 +304,81 @@ func TestRuntimeExecutorAppliesAtomSpecSecretsParamsAndOutputs(t *testing.T) {
 	require.Equal(t, "/work/tf.plan", got.Env["CAESIUM_OUTPUT_EXTRACT_PLAN"])
 }
 
+func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	store := run.NewStore(db)
+	now := time.Now().UTC()
+	trigger := &models.Trigger{ID: uuid.New(), Alias: "trigger", Type: models.TriggerTypeCron, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(trigger).Error)
+	job := &models.Job{ID: uuid.New(), Alias: "worker-quarantine-job", TriggerID: trigger.ID, CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(job).Error)
+	atomModel := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine:3.23",
+		Command:   `["sh","-c","true"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atomModel).Error)
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "deploy", CreatedAt: now, UpdatedAt: now}
+	require.NoError(t, db.Create(task).Error)
+	jobRun := &models.JobRun{
+		ID:          uuid.New(),
+		JobID:       job.ID,
+		TriggerID:   trigger.ID,
+		TriggerType: string(trigger.Type),
+		Status:      string(run.StatusRunning),
+		Quarantine:  true,
+		StartedAt:   now,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	require.NoError(t, db.Create(jobRun).Error)
+	taskRun := &models.TaskRun{
+		ID:           uuid.New(),
+		JobRunID:     jobRun.ID,
+		TaskID:       task.ID,
+		AtomID:       atomModel.ID,
+		Engine:       atomModel.Engine,
+		Image:        atomModel.Image,
+		Command:      atomModel.Command,
+		Status:       string(run.TaskStatusRunning),
+		ClaimedBy:    "node-a",
+		Attempt:      1,
+		MaxAttempts:  1,
+		CacheEnabled: true,
+		CacheVersion: 1,
+		Quarantine:   true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	require.NoError(t, db.Create(taskRun).Error)
+
+	engine := &captureCreateEngine{}
+	executor := &runtimeExecutor{
+		store:     store,
+		localSink: NewLocalSink(store),
+		engineFactory: func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return engine, nil
+		},
+	}
+	executor.Execute(context.Background(), taskRun)
+
+	var cacheRows int64
+	require.NoError(t, db.Model(&models.TaskCache{}).Count(&cacheRows).Error)
+	require.Zero(t, cacheRows)
+
+	var persisted models.TaskRun
+	require.NoError(t, db.First(&persisted, "job_run_id = ? AND task_id = ?", jobRun.ID, task.ID).Error)
+	require.Equal(t, string(run.TaskStatusSucceeded), persisted.Status)
+	require.NotEmpty(t, persisted.Hash)
+}
+
 func seedSchemaValidationTaskRun(t *testing.T, schemaValidation string) (*models.TaskRun, *gorm.DB) {
 	t.Helper()
 
@@ -409,11 +485,16 @@ func persistedSchemaViolations(t *testing.T, db *gorm.DB, runID, taskID uuid.UUI
 type staticSecretResolver map[string]string
 
 func (r staticSecretResolver) Resolve(_ context.Context, ref string) (string, error) {
+	value, _, err := r.ResolveWithIdentity(context.Background(), ref)
+	return value, err
+}
+
+func (r staticSecretResolver) ResolveWithIdentity(_ context.Context, ref string) (string, secret.Identity, error) {
 	value, ok := r[ref]
 	if !ok {
-		return "", errors.New("missing secret")
+		return "", secret.Identity{}, errors.New("missing secret")
 	}
-	return value, nil
+	return value, secret.Identity{Provider: "env", Ref: ref, Verifiable: false, UnverifiableReason: "test stub"}, nil
 }
 
 type captureCreateEngine struct {

@@ -20,14 +20,19 @@ func TestKubernetesResolverSuite(t *testing.T) {
 
 func (s *KubernetesResolverSuite) TestResolveDefaultNamespace() {
 	client := fake.NewClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "jobs"},
+		ObjectMeta: metav1.ObjectMeta{Name: "git-creds", Namespace: "jobs", ResourceVersion: "42"},
 		Data:       map[string][]byte{"password": []byte("hunter2")},
 	})
 
 	r := NewKubernetesResolverWithClient(client, "jobs")
-	value, err := r.Resolve(context.Background(), "secret://k8s/git-creds/password")
+	value, identity, err := r.ResolveWithIdentity(context.Background(), "secret://k8s/git-creds/password")
 	s.Require().NoError(err)
 	s.Equal("hunter2", value)
+	s.True(identity.Verifiable)
+	s.Equal("42", identity.ResourceVersion)
+	s.Equal("jobs", identity.Namespace)
+	s.Equal("git-creds", identity.Name)
+	s.Equal("password", identity.Key)
 }
 
 func (s *KubernetesResolverSuite) TestResolveExplicitNamespace() {

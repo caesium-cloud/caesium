@@ -527,8 +527,12 @@ func (w *Worker) renewRunLeasesNow(ctx context.Context) {
 	// Always publish the current owned-run count, even when zero, so the
 	// gauge accurately reflects the state instead of holding the last
 	// non-zero value indefinitely.
+	// Control-plane node-load series: intentionally includes replay work and is
+	// not a run-health input.
 	metrics.RunLeasesOwned.Set(float64(rowsAffected))
 	if rowsAffected > 0 {
+		// Control-plane node-load series: intentionally includes replay work and
+		// is not a run-health input.
 		metrics.RunLeaseRenewalsTotal.Inc()
 	}
 }

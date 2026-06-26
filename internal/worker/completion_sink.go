@@ -175,7 +175,9 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 				// The owner fenced the completion (stale generation, wrong
 				// worker, etc.).  This is not a transport error; the owner
 				// deliberately rejected it.
-				metrics.CompleteReportFailedTotal.WithLabelValues("owner_rejected").Inc()
+				if !taskRun.Quarantine {
+					metrics.CompleteReportFailedTotal.WithLabelValues("owner_rejected").Inc()
+				}
 				log.Warn("dispatched task: owner rejected completion",
 					"run_id", req.RunID,
 					"task_id", req.TaskID,
@@ -205,7 +207,9 @@ func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispa
 		if errors.Is(err, dispatch.ErrOwnerBusy) {
 			reason = "owner_busy"
 		}
-		metrics.CompleteReportFailedTotal.WithLabelValues(reason).Inc()
+		if !taskRun.Quarantine {
+			metrics.CompleteReportFailedTotal.WithLabelValues(reason).Inc()
+		}
 		log.Error("dispatched task: failed to report completion to owner",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,

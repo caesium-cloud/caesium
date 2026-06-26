@@ -167,6 +167,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if predHashErr != nil {
 			log.Warn("cache: failed to query predecessor hashes", "task_id", taskRun.TaskID, "error", predHashErr)
 		}
+		descriptorPredOutputs, descriptorPredHashes, descriptorErr := e.store.PredecessorDescriptorInputs(taskRun.JobRunID, taskRun.TaskID)
+		if descriptorErr != nil {
+			log.Warn("cache: failed to query predecessor descriptor inputs", "task_id", taskRun.TaskID, "error", descriptorErr)
+		}
 
 		// Build merged env for hashing, excluding volatile per-run vars.
 		mergedEnv := make(map[string]string, len(atomSpec.Env))
@@ -219,6 +223,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.TaskID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
+		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.TaskID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+			log.Warn("cache: failed to persist task execution descriptor inputs", "task_id", taskRun.TaskID, "error", err)
+		}
 
 		if cacheStore != nil {
 			entry, found, getErr := cacheStore.Get(cacheHash)
@@ -238,7 +245,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 					log.Error("cache: failed to persist cache hit", "task_id", taskRun.TaskID, "error", err)
 					// Fall through to normal execution on persistence failure.
 				} else {
-					metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskName).Inc()
+					if !taskRun.Quarantine {
+						metrics.TaskCacheHitsTotal.WithLabelValues(cacheJobAlias, taskName).Inc()
+					}
 					return
 				}
 			}
@@ -259,8 +268,10 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias())
 		if execErr == nil {
 			// Store successful result in cache.
-			if cacheStore != nil && cacheHash != "" {
+			if cacheStore != nil && cacheHash != "" && !taskRun.Quarantine {
 				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun, resolveJobAlias())
+			} else if taskRun.Quarantine && cacheStore != nil && cacheHash != "" {
+				log.Info("quarantined worker task skipped cache publication", "task_id", taskRun.TaskID, "hash", cacheHash)
 			}
 			return
 		}
@@ -293,7 +304,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 		log.Info("retrying worker task", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 
-		metrics.TaskRetriesTotal.WithLabelValues(resolveJobAlias(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
+		if !taskRun.Quarantine {
+			metrics.TaskRetriesTotal.WithLabelValues(resolveJobAlias(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
+		}
 
 		if retryErr := e.store.RetryTaskClaimed(taskRun.JobRunID, taskRun.TaskID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
 			if errors.Is(retryErr, run.ErrTaskClaimMismatch) {
@@ -417,9 +430,18 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		atomName = fmt.Sprintf("%s-attempt%d", atomName, taskRun.ClaimAttempt)
 	}
 
-	spec, err := jobdefruntime.ResolveContainerSpecSecrets(taskCtx, e.secretResolver, atomSpec)
+	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, e.secretResolver, atomSpec)
 	if err != nil {
 		return err
+	}
+	if len(secretIdentities) > 0 {
+		refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
+		for _, resolved := range secretIdentities {
+			refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
+		}
+		if err := e.store.UpdateTaskExecutionDescriptorSecretRefs(taskRun.JobRunID, taskRun.TaskID, refs); err != nil {
+			log.Warn("failed to persist worker task execution descriptor secret identity", "task_id", taskRun.TaskID, "error", err)
+		}
 	}
 
 	predOutputs, predErr := e.store.PredecessorOutputs(taskRun.JobRunID, taskRun.TaskID)
@@ -525,6 +547,11 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
 func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun, jobAlias string) {
+	if taskRun.Quarantine {
+		log.Info("quarantined worker task suppressed cache store entry", "task_id", taskRun.TaskID, "hash", hash)
+		return
+	}
+
 	// Read back the completed task run to get output and result.
 	var completed models.TaskRun
 	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {

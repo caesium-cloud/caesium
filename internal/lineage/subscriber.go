@@ -71,6 +71,15 @@ func (s *Subscriber) StartWithReady(ctx context.Context, ready chan<- struct{}) 
 }
 
 func (s *Subscriber) handleEvent(ctx context.Context, evt event.Event) {
+	if evt.Quarantine {
+		log.Debug("lineage: dropping quarantined event",
+			"event_type", string(evt.Type),
+			"run_id", evt.RunID,
+			"task_id", evt.TaskID,
+		)
+		return
+	}
+
 	olEvent, err := s.mapper.mapEvent(evt)
 	if err != nil {
 		log.Error("lineage: failed to map event",

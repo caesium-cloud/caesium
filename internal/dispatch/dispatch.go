@@ -34,6 +34,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // Rejection reason labels for caesium_complete_rejected_total.
@@ -431,10 +432,18 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	metricQuarantined := sync.OnceValue(func() bool {
+		return h.completeMetricQuarantined(ctx, req.RunID, req.TaskID)
+	})
+	recordRejected := func(reason string) {
+		if !metricQuarantined() {
+			metrics.CompleteRejectedTotal.WithLabelValues(reason).Inc()
+		}
+	}
 
 	// Rule 5: validate status vocabulary.
 	if !ValidCompleteStatuses[req.Status] {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonInvalidStatus).Inc()
+		recordRejected(ReasonInvalidStatus)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonInvalidStatus,
 			Message: fmt.Sprintf("invalid status %q; must be one of {succeeded, failed, cached}", req.Status),
@@ -446,7 +455,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	// ownership (owner_node, expiry) and generation in memory.
 	lease, err := h.leaseStore.GetLease(ctx, req.RunID)
 	if err != nil {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonMissingRun).Inc()
+		recordRejected(ReasonMissingRun)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonMissingRun,
 			Message: "run lease not found",
@@ -454,7 +463,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.OwnerNode != h.nodeID || lease.LeaseExpiresAt.Before(time.Now().UTC()) {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonNotOwner).Inc()
+		recordRejected(ReasonNotOwner)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonNotOwner,
 			Message: "this node does not currently own the run",
@@ -462,7 +471,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if lease.Generation != req.OwnerGeneration {
-		metrics.CompleteRejectedTotal.WithLabelValues(ReasonStaleGeneration).Inc()
+		recordRejected(ReasonStaleGeneration)
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Code:    ReasonStaleGeneration,
 			Message: fmt.Sprintf("owner generation mismatch: expected %d, got %d", lease.Generation, req.OwnerGeneration),
@@ -481,11 +490,11 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		)
 		if omErr != nil {
 			if dqlite.IsContentionError(omErr) {
-				h.rejectRetryable(w, req, omErr)
+				h.rejectRetryable(w, req, omErr, metricQuarantined())
 				return
 			}
 			if errors.Is(omErr, run.ErrTaskClaimMismatch) {
-				metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
+				recordRejected(ReasonWrongWorker)
 				writeJSON(w, http.StatusConflict, ErrorResponse{
 					Code:    ReasonWrongWorker,
 					Message: "task claimed_by mismatch or task not in running state",
@@ -520,7 +529,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			applyErr = h.store.FailTaskClaimed(req.RunID, req.TaskID, fmt.Errorf("%s", req.Error), req.WorkerNode)
 		}
 		if applyErr == run.ErrTaskClaimMismatch {
-			metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
+			recordRejected(ReasonWrongWorker)
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonWrongWorker,
 				Message: "task claimed_by mismatch or task not in running state",
@@ -529,7 +538,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		if applyErr != nil {
 			if dqlite.IsContentionError(applyErr) {
-				h.rejectRetryable(w, req, applyErr)
+				h.rejectRetryable(w, req, applyErr, metricQuarantined())
 				return
 			}
 			log.Error("complete: apply failed",
@@ -549,7 +558,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		source := run.CacheHitSource{RunID: req.RunID}
 		applyErr := h.store.CacheHitTaskClaimed(req.RunID, req.TaskID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
 		if applyErr == run.ErrTaskClaimMismatch {
-			metrics.CompleteRejectedTotal.WithLabelValues(ReasonWrongWorker).Inc()
+			recordRejected(ReasonWrongWorker)
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonWrongWorker,
 				Message: "task claimed_by mismatch or task not in running state",
@@ -558,7 +567,7 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		if applyErr != nil {
 			if dqlite.IsContentionError(applyErr) {
-				h.rejectRetryable(w, req, applyErr)
+				h.rejectRetryable(w, req, applyErr, metricQuarantined())
 				return
 			}
 			log.Error("complete: CacheHitTaskClaimed failed",
@@ -577,13 +586,38 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, CompleteResponse{Accepted: true})
 }
 
+func (h *Handler) completeMetricQuarantined(ctx context.Context, runID, taskID uuid.UUID) bool {
+	if h.store == nil {
+		return false
+	}
+	quarantined, err := h.store.TaskQuarantine(ctx, runID, taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			log.Debug("complete: task quarantine marker not found; emitting complete metrics",
+				"run_id", runID,
+				"task_id", taskID,
+			)
+		} else {
+			log.Warn("complete: failed to read task quarantine marker; emitting complete metrics",
+				"run_id", runID,
+				"task_id", taskID,
+				"error", err,
+			)
+		}
+		return false
+	}
+	return quarantined
+}
+
 // rejectRetryable answers a completion the owner could not apply because of
 // transient dqlite contention.  It returns 503 (not 409) so the worker knows
 // the request is safe to re-send once the leader's contention clears, and logs
 // at warn rather than error because this is expected under burst load and is
 // not a lost completion unless the worker exhausts its own retries.
-func (h *Handler) rejectRetryable(w http.ResponseWriter, req CompleteRequest, applyErr error) {
-	metrics.CompleteRetryableTotal.WithLabelValues(ReasonContention).Inc()
+func (h *Handler) rejectRetryable(w http.ResponseWriter, req CompleteRequest, applyErr error, quarantined bool) {
+	if !quarantined {
+		metrics.CompleteRetryableTotal.WithLabelValues(ReasonContention).Inc()
+	}
 	log.Warn("complete: transient contention, asking worker to retry",
 		"run_id", req.RunID,
 		"task_id", req.TaskID,

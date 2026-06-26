@@ -19,7 +19,11 @@ type Watch struct {
 
 // BuildSecretResolver constructs the resolver chain based on environment variables.
 func BuildSecretResolver(vars env.Environment) (*secret.MultiResolver, error) {
-	cfg := secret.Config{EnableEnv: vars.JobdefSecretsEnableEnv}
+	cfg := secret.Config{
+		EnableEnv:           vars.JobdefSecretsEnableEnv,
+		IdentityHMACKeys:    vars.JobdefSecretsIdentityHMACKeys,
+		IdentityHMACCurrent: vars.JobdefSecretsIdentityHMACKeyID,
+	}
 
 	if vars.JobdefSecretsEnableKubernetes || vars.JobdefSecretsKubeConfig != "" || vars.JobdefSecretsKubeNamespace != "default" {
 		cfg.Kubernetes = &secret.KubernetesConfig{

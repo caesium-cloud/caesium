@@ -41,6 +41,7 @@ func (s *Store) AppendTx(tx *gorm.DB, evt *Event) error {
 		RunID:              uuidPtr(evt.RunID),
 		TaskID:             uuidPtr(evt.TaskID),
 		Payload:            []byte(evt.Payload),
+		Quarantine:         evt.Quarantine,
 		BusDispatchPending: true,
 		CreatedAt:          evt.Timestamp,
 	}
@@ -81,6 +82,7 @@ func (s *Store) AppendBatchTx(tx *gorm.DB, evts []*Event) error {
 			RunID:              uuidPtr(evt.RunID),
 			TaskID:             uuidPtr(evt.TaskID),
 			Payload:            []byte(evt.Payload),
+			Quarantine:         evt.Quarantine,
 			BusDispatchPending: true,
 			CreatedAt:          ts,
 		}
@@ -118,6 +120,9 @@ func (s *Store) ListSince(ctx context.Context, after uint64, limit int, filter F
 		Where("sequence > ?", after).
 		Order("sequence ASC").
 		Limit(limit)
+	if !filter.IncludeQuarantine {
+		query = query.Where("quarantine IS NOT TRUE")
+	}
 
 	if filter.JobID != uuid.Nil {
 		query = query.Where("job_id = ?", filter.JobID)
@@ -165,12 +170,13 @@ func modelToEvent(row models.ExecutionEvent) Event {
 		payload = json.RawMessage(row.Payload)
 	}
 	return Event{
-		Sequence:  row.Sequence,
-		Type:      Type(row.Type),
-		JobID:     derefUUID(row.JobID),
-		RunID:     derefUUID(row.RunID),
-		TaskID:    derefUUID(row.TaskID),
-		Timestamp: row.CreatedAt,
-		Payload:   payload,
+		Sequence:   row.Sequence,
+		Type:       Type(row.Type),
+		JobID:      derefUUID(row.JobID),
+		RunID:      derefUUID(row.RunID),
+		TaskID:     derefUUID(row.TaskID),
+		Timestamp:  row.CreatedAt,
+		Payload:    payload,
+		Quarantine: row.Quarantine,
 	}
 }

@@ -47,22 +47,28 @@ func (m *MultiResolver) Providers() []string {
 
 // Resolve locates the provider-specific resolver and delegates the call.
 func (m *MultiResolver) Resolve(ctx context.Context, ref string) (string, error) {
+	value, _, err := m.ResolveWithIdentity(ctx, ref)
+	return value, err
+}
+
+// ResolveWithIdentity locates the provider-specific resolver and delegates the call.
+func (m *MultiResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error) {
 	if strings.TrimSpace(ref) == "" {
-		return "", errors.New("secret reference is empty")
+		return "", Identity{}, errors.New("secret reference is empty")
 	}
 	if m == nil {
-		return "", errors.New("secret resolver is not configured")
+		return "", Identity{}, errors.New("secret resolver is not configured")
 	}
 
 	refInfo, err := Parse(ref)
 	if err != nil {
-		return "", err
+		return "", Identity{}, err
 	}
 
 	resolver, ok := m.providers[refInfo.Provider]
 	if !ok || resolver == nil {
-		return "", fmt.Errorf("secret provider %q not configured", refInfo.Provider)
+		return "", Identity{}, fmt.Errorf("secret provider %q not configured", refInfo.Provider)
 	}
 
-	return resolver.Resolve(ctx, ref)
+	return resolver.ResolveWithIdentity(ctx, ref)
 }

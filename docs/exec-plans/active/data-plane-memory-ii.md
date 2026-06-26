@@ -640,7 +640,7 @@ write, lineage emit, or callback.
       Note (W1-beta): Added `docs/design-quarantined-replay.md` with the
       fail-closed replay safety model, producer/metric/envelope audits grounded in
       source grep, plus the required top-level README index entry.
-- [ ] B2. Add quarantine to the run model **and propagate it to both executors**.
+- [x] B2. Add quarantine to the run model **and propagate it to both executors**.
       An additive `Quarantine bool` (and a captured override-params blob) on
       `JobRun`, **plus a `Quarantine bool` on `TaskRun`** threaded scheduler→worker
       the same way `ResolvedImageDigest` is (so the distributed worker sees it
@@ -778,6 +778,41 @@ write, lineage emit, or callback.
       short-circuit; suppress before increment), and
       `internal/jobdef/secret/` (the `ResolveWithIdentity` provider-aware identity
       API + env/k8s/vault impls). The complete surface comes from B1's audit.
+      Note (W4-alpha): Landed the additive `JobRun`/`TaskRun`/`ExecutionEvent`
+      quarantine markers, nullable unique `ReplayFingerprint`, replay override blob,
+      event-bus marker/filtering, default `quarantine IS NOT TRUE` stats/run/event
+      filters, run-level propagation to task rows, per-TaskRun execution descriptors,
+      provider-aware `ResolveWithIdentity`, and quarantine suppression across local
+      executor callbacks/cache publication, distributed worker cache publication,
+      notification subscriber/watcher, OpenLineage subscriber/mapper, `/events`
+      backlog/live stream, dispatch/complete/worker metrics, and run/task/cache/retry
+      metrics. B3 still owns constructing quarantined replay runs, replay-safe
+      pre-dispatch enforcement, baseline-cache-absent failure, descriptor-based
+      replay reconstruction, and user-facing replay errors; B4 still owns the durable
+      reservation state machine around `ReplayFingerprint`; B6 still owns the full
+      end-to-end notification/SLA/lineage integration scenarios.
+      Review-fix note (W4-alpha, 2026-06-25): closed the security review blockers:
+      `run_started` now carries the quarantine marker through both `Start` paths;
+      Vault KV-v2 version pinning uses `ReadWithDataWithContext` query data instead
+      of appending `?version=` to the logical path; dispatch metric visibility
+      defaults to emit when marker context is unavailable; empty task-registration
+      batches observe zero; the v1
+      descriptor no longer exposes unpopulated large-ref or redundant violation
+      behavior fields; `/events?run_id=...` authorizes the run owner before
+      including quarantined events; and descriptor/quarantine/notification guard
+      tests were added. Side-effect/event/cache/lineage/callback suppression remains
+      fail-closed.
+      Review-fix note (W4-alpha, 2026-06-25, perf/concurrency): made dispatch
+      completion metric quarantine checks lazy and memoized, with missing task rows
+      intentionally defaulting to metric emit only; collapsed batch event
+      quarantine stamping from per-event SELECTs into per-run/per-task grouped
+      lookups that still abort the transaction on lookup errors; removed the
+      redundant Vault KV-v2 current-version re-read while preserving version-N
+      HMAC identity capture with canonical integer version strings; and made
+      `execution_descriptor` mutations compare-and-swap against the prior JSON so
+      concurrent descriptor writers retry instead of clobbering each other. No
+      side-effect, event, cache, lineage, callback, or notification suppression was
+      made fail-open.
       Depends on: B1.
 - [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the

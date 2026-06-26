@@ -27,6 +27,17 @@ func (s *EnvResolverSuite) TestResolveDirectVariable() {
 	s.Equal("abc123", value)
 }
 
+func (s *EnvResolverSuite) TestResolveWithIdentityIsUnverifiable() {
+	s.T().Setenv("EXAMPLE_TOKEN", "abc123")
+	value, identity, err := s.resolver.ResolveWithIdentity(context.Background(), "secret://env/EXAMPLE_TOKEN")
+	s.Require().NoError(err)
+	s.Equal("abc123", value)
+	s.False(identity.Verifiable)
+	s.Equal("env", identity.Provider)
+	s.Equal("EXAMPLE_TOKEN", identity.Name)
+	s.NotEmpty(identity.UnverifiableReason)
+}
+
 func (s *EnvResolverSuite) TestResolveSegmentsJoin() {
 	s.T().Setenv("APP_DB_PASSWORD", "s3cr3t")
 	value, err := s.resolver.Resolve(context.Background(), "secret://env/APP/DB/PASSWORD")

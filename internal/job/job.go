@@ -392,12 +392,16 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	runID := snapshot.ID
+	runQuarantined := snapshot.Quarantine
 	ctx = run.WithContext(ctx, runID)
 
 	var runErr error
 	defer func() {
 		if err := store.Complete(runID, runErr); err != nil {
 			log.Error("run completion persistence failure", "run_id", runID, "error", err)
+		}
+		if runQuarantined {
+			return
 		}
 		dispatchCtx := context.WithoutCancel(ctx)
 		if err := j.dispatchRunCallbacks(dispatchCtx, j.id, runID, runErr); err != nil {
@@ -575,9 +579,11 @@ func (j *job) Run(ctx context.Context) error {
 	taskOutcomes := make(map[uuid.UUID]run.TaskStatus, len(tasks))
 	taskOutputs := make(map[uuid.UUID]map[string]string, len(tasks))
 	taskHashes := make(map[uuid.UUID]string, len(tasks))
+	taskQuarantine := make(map[uuid.UUID]bool, len(tasks))
 	terminalTasks := 0
 
 	for _, taskState := range currentRun.Tasks {
+		taskQuarantine[taskState.ID] = taskState.Quarantine || runQuarantined
 		indegree[taskState.ID] = taskState.OutstandingPredecessors
 		switch taskState.Status {
 		case run.TaskStatusSucceeded, run.TaskStatusCached:
@@ -691,9 +697,18 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
-		spec, err := jobdefruntime.ResolveContainerSpecSecrets(taskCtx, secretResolver, spec)
+		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
 			return "", nil, nil, nil, err
+		}
+		if len(secretIdentities) > 0 {
+			refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
+			for _, resolved := range secretIdentities {
+				refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
+			}
+			if err := store.UpdateTaskExecutionDescriptorSecretRefs(runID, taskID, refs); err != nil {
+				log.Warn("failed to persist task execution descriptor secret identity", "task_id", taskID, "error", err)
+			}
 		}
 		if len(paramEnv) > 0 || len(extraEnv) > 0 {
 			merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(extraEnv))
@@ -799,8 +814,10 @@ func (j *job) Run(ctx context.Context) error {
 
 		// Build predecessor output env vars for this task.
 		predOutputs := make(map[string]map[string]string)
+		predOutputsByID := make(map[uuid.UUID]map[string]string)
 		for _, predID := range predecessors[taskID] {
 			if outputs, ok := taskOutputs[predID]; ok && len(outputs) > 0 {
+				predOutputsByID[predID] = outputs
 				stepName := ""
 				if t := tasksByID[predID]; t != nil {
 					stepName = t.Name
@@ -814,6 +831,7 @@ func (j *job) Run(ctx context.Context) error {
 		outputEnv := pkgtask.BuildOutputEnv(predOutputs)
 
 		taskModel := tasksByID[taskID]
+		taskQuarantined := taskQuarantine[taskID] || runQuarantined
 
 		// Cache check — attempt to bypass container execution.
 		var cacheCfg jobdefschema.CacheConfig
@@ -852,9 +870,11 @@ func (j *job) Run(ctx context.Context) error {
 
 			// Collect predecessor hashes.
 			var predHashes []string
+			predHashByID := make(map[uuid.UUID]string)
 			for _, predID := range predecessors[taskID] {
 				if h, ok := taskHashes[predID]; ok {
 					predHashes = append(predHashes, h)
+					predHashByID[predID] = h
 				}
 			}
 
@@ -902,13 +922,18 @@ func (j *job) Run(ctx context.Context) error {
 			if err := store.SetTaskHashWithBlob(runID, taskID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
 				log.Warn("failed to persist task hash", "task", taskName, "error", err)
 			}
+			if err := store.UpdateTaskExecutionDescriptorInputs(runID, taskID, predOutputsByID, predHashByID, inputHash, resolvedImageDigest, hashInputBlob); err != nil {
+				log.Warn("failed to persist task execution descriptor inputs", "task", taskName, "error", err)
+			}
 
 			entry, found, err := cacheStore.Get(inputHash)
 			switch {
 			case err != nil:
 				log.Warn("cache lookup failed", "task", taskName, "error", err)
 			case found:
-				metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
+				if !taskQuarantined {
+					metrics.TaskCacheHitsTotal.WithLabelValues(j.alias, taskName).Inc()
+				}
 				log.Info("cache hit", "task", taskName, "hash", inputHash[:12])
 
 				cacheResult, cacheErr := store.CacheHitTask(runID, taskID, run.CacheHitSource{
@@ -934,7 +959,9 @@ func (j *job) Run(ctx context.Context) error {
 					return skipped, nil
 				}
 			default:
-				metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
+				if !taskQuarantined {
+					metrics.TaskCacheMissesTotal.WithLabelValues(j.alias, taskName).Inc()
+				}
 			}
 		}
 
@@ -983,55 +1010,60 @@ func (j *job) Run(ctx context.Context) error {
 						taskName = taskModel.Name
 					}
 
-					// Value-verified short-circuit (D2): this task re-executed
-					// because its OWN identity hash (inputHash) changed. If it
-					// produced output byte-identical to a prior successful run,
-					// present that prior run's identity to downstream consumers so
-					// a downstream whose only changed input was this step stays a
-					// cache hit instead of re-running. The substitution only
-					// happens when content equality is PROVEN (see
-					// cache.EquivalentPriorHash); on any uncertainty it returns
-					// inputHash unchanged (re-run downstream — always safe). The
-					// proof reads priors filtered to exclude inputHash, so the
-					// order relative to the Put below does not matter.
-					effectiveHash := inputHash
-					if priors, priorErr := cacheStore.PriorEntriesByTask(j.id, taskName, inputHash); priorErr != nil {
-						log.Warn("short-circuit: failed to load prior entries", "task", taskName, "error", priorErr)
+					if taskQuarantined {
+						taskHashes[taskID] = inputHash
+						log.Info("quarantined task skipped cache publication", "task", taskName, "hash", inputHash[:12])
 					} else {
-						effectiveHash = cache.EquivalentPriorHash(inputHash, output, priors)
-					}
-					// taskHashes drives the in-memory predHashes a downstream task
-					// folds into its own key; storing the effective (possibly
-					// prior) identity is what stops the cascade locally.
-					taskHashes[taskID] = effectiveHash
-					if effectiveHash != inputHash {
-						metrics.TaskCacheShortCircuitsTotal.WithLabelValues(j.alias, taskName).Inc()
-						log.Info("value-verified short-circuit", "task", taskName, "new_hash", inputHash[:12], "effective_hash", effectiveHash[:12])
-						if scErr := store.SetTaskEffectiveHash(runID, taskID, effectiveHash); scErr != nil {
-							log.Warn("short-circuit: failed to persist effective hash", "task", taskName, "error", scErr)
+						// Value-verified short-circuit (D2): this task re-executed
+						// because its OWN identity hash (inputHash) changed. If it
+						// produced output byte-identical to a prior successful run,
+						// present that prior run's identity to downstream consumers so
+						// a downstream whose only changed input was this step stays a
+						// cache hit instead of re-running. The substitution only
+						// happens when content equality is PROVEN (see
+						// cache.EquivalentPriorHash); on any uncertainty it returns
+						// inputHash unchanged (re-run downstream — always safe). The
+						// proof reads priors filtered to exclude inputHash, so the
+						// order relative to the Put below does not matter.
+						effectiveHash := inputHash
+						if priors, priorErr := cacheStore.PriorEntriesByTask(j.id, taskName, inputHash); priorErr != nil {
+							log.Warn("short-circuit: failed to load prior entries", "task", taskName, "error", priorErr)
+						} else {
+							effectiveHash = cache.EquivalentPriorHash(inputHash, output, priors)
 						}
-					}
+						// taskHashes drives the in-memory predHashes a downstream task
+						// folds into its own key; storing the effective (possibly
+						// prior) identity is what stops the cascade locally.
+						taskHashes[taskID] = effectiveHash
+						if effectiveHash != inputHash {
+							metrics.TaskCacheShortCircuitsTotal.WithLabelValues(j.alias, taskName).Inc()
+							log.Info("value-verified short-circuit", "task", taskName, "new_hash", inputHash[:12], "effective_hash", effectiveHash[:12])
+							if scErr := store.SetTaskEffectiveHash(runID, taskID, effectiveHash); scErr != nil {
+								log.Warn("short-circuit: failed to persist effective hash", "task", taskName, "error", scErr)
+							}
+						}
 
-					var expiresAt *time.Time
-					if cacheCfg.TTL > 0 {
-						t := time.Now().Add(cacheCfg.TTL)
-						expiresAt = &t
-					}
-					if putErr := cacheStore.Put(&cache.Entry{
-						Hash:                inputHash,
-						JobID:               j.id,
-						TaskName:            taskName,
-						Result:              result,
-						Output:              output,
-						BranchSelections:    branchNames,
-						RunID:               runID,
-						TaskRunID:           taskID,
-						ResolvedImageDigest: resolvedImageDigest,
-						HashInputBlob:       hashInputBlob,
-						CreatedAt:           time.Now(),
-						ExpiresAt:           expiresAt,
-					}); putErr != nil {
-						log.Warn("failed to store cache entry", "task", taskName, "error", putErr)
+						var expiresAt *time.Time
+						if cacheCfg.TTL > 0 {
+							t := time.Now().Add(cacheCfg.TTL)
+							expiresAt = &t
+						}
+						if putErr := cacheStore.Put(&cache.Entry{
+							Hash:                inputHash,
+							JobID:               j.id,
+							TaskName:            taskName,
+							Result:              result,
+							Output:              output,
+							BranchSelections:    branchNames,
+							RunID:               runID,
+							TaskRunID:           taskID,
+							ResolvedImageDigest: resolvedImageDigest,
+							HashInputBlob:       hashInputBlob,
+							CreatedAt:           time.Now(),
+							ExpiresAt:           expiresAt,
+						}); putErr != nil {
+							log.Warn("failed to store cache entry", "task", taskName, "error", putErr)
+						}
 					}
 				}
 
@@ -1056,7 +1088,9 @@ func (j *job) Run(ctx context.Context) error {
 
 			log.Info("retrying task", "job_id", j.id, "task_id", taskID, "attempt", attempt, "next_attempt", attempt+1, "delay", delay, "error", lastErr)
 
-			metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
+			if !taskQuarantined {
+				metrics.TaskRetriesTotal.WithLabelValues(j.alias, taskID.String(), strconv.Itoa(attempt)).Inc()
+			}
 
 			if err := store.RetryTask(runID, taskID, attempt+1); err != nil {
 				log.Error("failed to persist task retry state", "run_id", runID, "task_id", taskID, "error", err)

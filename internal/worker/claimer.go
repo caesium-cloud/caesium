@@ -151,7 +151,9 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 		return nil, err
 	}
 	if claimed != nil {
-		metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
+		if !claimed.Quarantine {
+			metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
+		}
 		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		counts.commit()
@@ -355,11 +357,13 @@ func nodeSelectorIteratorSQL(dialect, jsonExpr string) string {
 func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 	start := time.Now()
 	defer func() {
+		// Control-plane node-load series: intentionally includes replay work and
+		// is not a run-health input.
 		metrics.ReclaimDurationSeconds.Observe(time.Since(start).Seconds())
 	}()
 
 	pendingEvents := make([]event.Event, 0, 8)
-	var reclaimedCount int64
+	var productionReclaimedCount int64
 	var counts dbWriteCounts
 	err := withBusyRetry(ctx, c.busyRetryBackoffs, func() error {
 		if err := ctx.Err(); err != nil {
@@ -369,7 +373,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 		now := time.Now().UTC()
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
-		var attemptReclaimedCount int64
+		var attemptProductionReclaimedCount int64
 
 		err := c.store.DB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 			runningRunIDs := tx.Model(&models.JobRun{}).
@@ -425,7 +429,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 						continue
 					}
 					var jobRun models.JobRun
-					if err := tx.Select("job_id").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
+					if err := tx.Select("job_id", "quarantine").First(&jobRun, "id = ?", taskRun.JobRunID).Error; err != nil {
 						return err
 					}
 					jobRunByID[taskRun.JobRunID] = jobRun
@@ -435,6 +439,10 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				eventRecords := make([]models.ExecutionEvent, 0, len(expired)*2)
 				for _, taskRun := range expired {
 					jobRun := jobRunByID[taskRun.JobRunID]
+					quarantined := taskRun.Quarantine || jobRun.Quarantine
+					if !quarantined {
+						attemptProductionReclaimedCount++
+					}
 					jobIDPtr := &jobRun.JobID
 					runIDCopy := taskRun.JobRunID
 					taskIDCopy := taskRun.TaskID
@@ -444,6 +452,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 							JobID:              jobIDPtr,
 							RunID:              &runIDCopy,
 							TaskID:             &taskIDCopy,
+							Quarantine:         quarantined,
 							BusDispatchPending: true,
 							CreatedAt:          now,
 						},
@@ -452,6 +461,7 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 							JobID:              jobIDPtr,
 							RunID:              &runIDCopy,
 							TaskID:             &taskIDCopy,
+							Quarantine:         quarantined,
 							BusDispatchPending: true,
 							CreatedAt:          now,
 						},
@@ -466,28 +476,28 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 				for i := range eventRecords {
 					rec := &eventRecords[i]
 					attemptEvents = append(attemptEvents, event.Event{
-						Sequence:  rec.Sequence,
-						Type:      event.Type(rec.Type),
-						JobID:     derefUUID(rec.JobID),
-						RunID:     derefUUID(rec.RunID),
-						TaskID:    derefUUID(rec.TaskID),
-						Timestamp: rec.CreatedAt,
+						Sequence:   rec.Sequence,
+						Type:       event.Type(rec.Type),
+						JobID:      derefUUID(rec.JobID),
+						RunID:      derefUUID(rec.RunID),
+						TaskID:     derefUUID(rec.TaskID),
+						Quarantine: rec.Quarantine,
+						Timestamp:  rec.CreatedAt,
 					})
 				}
 			}
-			attemptReclaimedCount = result.RowsAffected
 			return nil
 		})
 		if err == nil {
 			pendingEvents = attemptEvents
-			reclaimedCount = attemptReclaimedCount
+			productionReclaimedCount = attemptProductionReclaimedCount
 		}
 		return err
 	}, c.observeBusyRetry)
 	if err == nil {
 		counts.commit()
-		if reclaimedCount > 0 {
-			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(reclaimedCount))
+		if productionReclaimedCount > 0 {
+			metrics.WorkerLeaseExpirationsTotal.WithLabelValues(c.nodeID).Add(float64(productionReclaimedCount))
 		}
 		c.store.PublishEvents(pendingEvents...)
 	}
@@ -495,6 +505,8 @@ func (c *Claimer) ReclaimExpired(ctx context.Context) error {
 }
 
 func (c *Claimer) observeBusyRetry(error) {
+	// Control-plane node-load series: intentionally includes replay work and is
+	// not a run-health input.
 	metrics.WorkerClaimContentionTotal.WithLabelValues(c.nodeID).Inc()
 }
 

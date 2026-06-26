@@ -2,14 +2,20 @@ package secret
 
 // Config defines which providers should be available in a MultiResolver.
 type Config struct {
-	EnableEnv  bool
-	Kubernetes *KubernetesConfig
-	Vault      *VaultConfig
+	EnableEnv           bool
+	Kubernetes          *KubernetesConfig
+	Vault               *VaultConfig
+	IdentityHMACKeys    string
+	IdentityHMACCurrent string
 }
 
 // NewConfiguredResolver builds a MultiResolver using the supplied provider configuration.
 func NewConfiguredResolver(cfg Config) (*MultiResolver, error) {
 	providers := map[string]Resolver{}
+	keyring, err := ParseIdentityKeyring(cfg.IdentityHMACCurrent, cfg.IdentityHMACKeys)
+	if err != nil {
+		return nil, err
+	}
 
 	if cfg.EnableEnv {
 		providers[providerEnv] = NewEnvResolver()
@@ -23,6 +29,7 @@ func NewConfiguredResolver(cfg Config) (*MultiResolver, error) {
 	}
 
 	if cfg.Vault != nil {
+		cfg.Vault.IdentityKeyring = keyring
 		resolver, err := NewVaultResolver(*cfg.Vault)
 		if err != nil {
 			return nil, err

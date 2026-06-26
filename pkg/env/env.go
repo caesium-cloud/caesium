@@ -66,59 +66,61 @@ func Variables() Environment {
 // Environment defines the environment variables used
 // by caesium.
 type Environment struct {
-	LogLevel                      string        `default:"info" split_words:"true"`
-	LogFormat                     string        `default:"json" split_words:"true"`
-	LogConsoleEnabled             bool          `default:"true" split_words:"true"`
-	Port                          int           `default:"8080"`
-	DockerHost                    string        `default:"" split_words:"true"`
-	KubernetesConfig              string        `default:"" split_words:"true"`
-	KubernetesNamespace           string        `default:"default" split_words:"true"`
-	PodmanURI                     string        `default:"" split_words:"true"`
-	NodeAddress                   string        `default:"127.0.0.1:9001" split_words:"true"`
-	NodeLabels                    string        `default:"" split_words:"true"`
-	DatabaseNodes                 []string      `default:"" split_words:"true"`
-	APIExternalURL                string        `envconfig:"API_EXTERNAL_URL" default:""`
-	DatabasePath                  string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
-	DatabaseType                  string        `default:"internal" split_words:"true"`
-	DatabaseDSN                   string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
-	DatabaseMaxOpenConns          int           `default:"4" split_words:"true"`
-	DatabaseMaxIdleConns          int           `default:"2" split_words:"true"`
-	DatabaseShards                int           `default:"1" split_words:"true"`
-	DatabaseVoters                int           `default:"3" split_words:"true"`
-	DatabaseStandbys              int           `default:"3" split_words:"true"`
-	DatabaseConsoleEnabled        bool          `default:"false" split_words:"true"`
-	ManualTriggerAPIKey           string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
-	MaxParallelTasks              int           `split_words:"true"`
-	TaskFailurePolicy             string        `default:"halt" split_words:"true"`
-	TaskTimeout                   time.Duration `default:"0" split_words:"true"`
-	ExecutionMode                 string        `default:"local" split_words:"true"`
-	WorkerEnabled                 bool          `default:"true" split_words:"true"`
-	WorkerPollInterval            time.Duration `default:"15s" split_words:"true"`
-	WorkerReclaimInterval         time.Duration `default:"30s" split_words:"true"`
-	WorkerLeaseTTL                time.Duration `default:"5m" split_words:"true"`
-	WorkerLeaseRenewInterval      time.Duration `default:"0" split_words:"true"`
-	WorkerPoolSize                int           `default:"4" split_words:"true"`
-	ShutdownGracePeriod           time.Duration `envconfig:"SHUTDOWN_GRACE_PERIOD" default:"30s"`
-	InternalWakeupToken           string        `default:"" split_words:"true"`
-	WakeupFanoutMode              string        `default:"full" split_words:"true"`
-	AtomPollInterval              time.Duration `default:"1s" split_words:"true"`
-	JobdefGitEnabled              bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
-	JobdefGitOnce                 bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
-	JobdefGitInterval             time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`
-	JobdefGitSources              GitSources    `envconfig:"JOBDEF_GIT_SOURCES"`
-	JobdefSecretsEnableEnv        bool          `envconfig:"JOBDEF_SECRETS_ENABLE_ENV" default:"true"`
-	JobdefSecretsEnableKubernetes bool          `envconfig:"JOBDEF_SECRETS_ENABLE_KUBERNETES" default:"false"`
-	JobdefSecretsKubeConfig       string        `envconfig:"JOBDEF_SECRETS_KUBECONFIG"`
-	JobdefSecretsKubeNamespace    string        `envconfig:"JOBDEF_SECRETS_KUBE_NAMESPACE" default:"default"`
-	JobdefSecretsVaultAddress     string        `envconfig:"JOBDEF_SECRETS_VAULT_ADDRESS"`
-	JobdefSecretsVaultToken       string        `envconfig:"JOBDEF_SECRETS_VAULT_TOKEN"`
-	JobdefSecretsVaultNamespace   string        `envconfig:"JOBDEF_SECRETS_VAULT_NAMESPACE"`
-	JobdefSecretsVaultCACert      string        `envconfig:"JOBDEF_SECRETS_VAULT_CA_CERT"`
-	JobdefSecretsVaultSkipVerify  bool          `envconfig:"JOBDEF_SECRETS_VAULT_SKIP_VERIFY" default:"false"`
-	CacheEnabled                  bool          `default:"false" split_words:"true"`
-	CacheTTL                      time.Duration `default:"24h" split_words:"true"`
-	CachePruneInterval            time.Duration `default:"1h" split_words:"true"`
-	CacheMaxEntries               int           `default:"10000" split_words:"true"`
+	LogLevel                       string        `default:"info" split_words:"true"`
+	LogFormat                      string        `default:"json" split_words:"true"`
+	LogConsoleEnabled              bool          `default:"true" split_words:"true"`
+	Port                           int           `default:"8080"`
+	DockerHost                     string        `default:"" split_words:"true"`
+	KubernetesConfig               string        `default:"" split_words:"true"`
+	KubernetesNamespace            string        `default:"default" split_words:"true"`
+	PodmanURI                      string        `default:"" split_words:"true"`
+	NodeAddress                    string        `default:"127.0.0.1:9001" split_words:"true"`
+	NodeLabels                     string        `default:"" split_words:"true"`
+	DatabaseNodes                  []string      `default:"" split_words:"true"`
+	APIExternalURL                 string        `envconfig:"API_EXTERNAL_URL" default:""`
+	DatabasePath                   string        `default:"/var/lib/caesium/dqlite" split_words:"true"`
+	DatabaseType                   string        `default:"internal" split_words:"true"`
+	DatabaseDSN                    string        `default:"host=postgres user=postgres password=postgres dbname=caesium port=5432 sslmode=disable" split_words:"true"`
+	DatabaseMaxOpenConns           int           `default:"4" split_words:"true"`
+	DatabaseMaxIdleConns           int           `default:"2" split_words:"true"`
+	DatabaseShards                 int           `default:"1" split_words:"true"`
+	DatabaseVoters                 int           `default:"3" split_words:"true"`
+	DatabaseStandbys               int           `default:"3" split_words:"true"`
+	DatabaseConsoleEnabled         bool          `default:"false" split_words:"true"`
+	ManualTriggerAPIKey            string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
+	MaxParallelTasks               int           `split_words:"true"`
+	TaskFailurePolicy              string        `default:"halt" split_words:"true"`
+	TaskTimeout                    time.Duration `default:"0" split_words:"true"`
+	ExecutionMode                  string        `default:"local" split_words:"true"`
+	WorkerEnabled                  bool          `default:"true" split_words:"true"`
+	WorkerPollInterval             time.Duration `default:"15s" split_words:"true"`
+	WorkerReclaimInterval          time.Duration `default:"30s" split_words:"true"`
+	WorkerLeaseTTL                 time.Duration `default:"5m" split_words:"true"`
+	WorkerLeaseRenewInterval       time.Duration `default:"0" split_words:"true"`
+	WorkerPoolSize                 int           `default:"4" split_words:"true"`
+	ShutdownGracePeriod            time.Duration `envconfig:"SHUTDOWN_GRACE_PERIOD" default:"30s"`
+	InternalWakeupToken            string        `default:"" split_words:"true"`
+	WakeupFanoutMode               string        `default:"full" split_words:"true"`
+	AtomPollInterval               time.Duration `default:"1s" split_words:"true"`
+	JobdefGitEnabled               bool          `envconfig:"JOBDEF_GIT_ENABLED" default:"false"`
+	JobdefGitOnce                  bool          `envconfig:"JOBDEF_GIT_ONCE" default:"false"`
+	JobdefGitInterval              time.Duration `envconfig:"JOBDEF_GIT_INTERVAL" default:"1m"`
+	JobdefGitSources               GitSources    `envconfig:"JOBDEF_GIT_SOURCES"`
+	JobdefSecretsEnableEnv         bool          `envconfig:"JOBDEF_SECRETS_ENABLE_ENV" default:"true"`
+	JobdefSecretsEnableKubernetes  bool          `envconfig:"JOBDEF_SECRETS_ENABLE_KUBERNETES" default:"false"`
+	JobdefSecretsKubeConfig        string        `envconfig:"JOBDEF_SECRETS_KUBECONFIG"`
+	JobdefSecretsKubeNamespace     string        `envconfig:"JOBDEF_SECRETS_KUBE_NAMESPACE" default:"default"`
+	JobdefSecretsVaultAddress      string        `envconfig:"JOBDEF_SECRETS_VAULT_ADDRESS"`
+	JobdefSecretsVaultToken        string        `envconfig:"JOBDEF_SECRETS_VAULT_TOKEN"`
+	JobdefSecretsVaultNamespace    string        `envconfig:"JOBDEF_SECRETS_VAULT_NAMESPACE"`
+	JobdefSecretsVaultCACert       string        `envconfig:"JOBDEF_SECRETS_VAULT_CA_CERT"`
+	JobdefSecretsVaultSkipVerify   bool          `envconfig:"JOBDEF_SECRETS_VAULT_SKIP_VERIFY" default:"false"`
+	JobdefSecretsIdentityHMACKeys  string        `envconfig:"JOBDEF_SECRETS_IDENTITY_HMAC_KEYS" default:""`
+	JobdefSecretsIdentityHMACKeyID string        `envconfig:"JOBDEF_SECRETS_IDENTITY_HMAC_KEY_ID" default:""`
+	CacheEnabled                   bool          `default:"false" split_words:"true"`
+	CacheTTL                       time.Duration `default:"24h" split_words:"true"`
+	CachePruneInterval             time.Duration `default:"1h" split_words:"true"`
+	CacheMaxEntries                int           `default:"10000" split_words:"true"`
 	// CachePinDigests is the global default for resolving image tags to content
 	// digests and folding the digest (not the mutable tag) into the cache key.
 	// Off by default so steady-state runs pay no registry round-trip; a job or

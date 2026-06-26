@@ -22,6 +22,11 @@ const ContextKeyAllowedJobAliases = "auth.allowed_job_aliases"
 // integration tests assert against the single source of truth.
 const LineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
 
+// EventsScopedDenyMessage is returned when a scoped principal attempts to open
+// the global event stream without a run_id filter. Scoped event subscriptions
+// must resolve to one run owner before any events are streamed.
+const EventsScopedDenyMessage = "event stream requires an in-scope run_id for scoped principals"
+
 type scopeAuditContext struct {
 	jobAliases []string
 }
@@ -85,6 +90,29 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	case "/v1/lineage/impact":
 		if c.Request().Method == http.MethodGet {
 			return nil, echo.NewHTTPError(http.StatusForbidden, LineageImpactScopedDenyMessage)
+		}
+	case "/v1/events":
+		if c.Request().Method == http.MethodGet {
+			runIDRaw := strings.TrimSpace(c.QueryParam("run_id"))
+			if runIDRaw == "" {
+				return nil, echo.NewHTTPError(http.StatusForbidden, EventsScopedDenyMessage)
+			}
+			runID, err := uuid.Parse(runIDRaw)
+			if err != nil {
+				return nil, echo.NewHTTPError(http.StatusBadRequest, "invalid run_id")
+			}
+			jobAlias, err := svc.JobAliasByRunID(c.Request().Context(), runID)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, echo.ErrNotFound
+				}
+				return nil, echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+			}
+			if !auth.CheckScope(scopeJSON, jobAlias) {
+				return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+			}
+			state.jobAliases = []string{jobAlias}
+			return state, nil
 		}
 	}
 

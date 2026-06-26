@@ -109,17 +109,17 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	// Recent runs (always 24h as per spec KPI)
 	recentSince := time.Now().UTC().Add(-24 * time.Hour)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("started_at >= ?", recentSince).
+		Where("started_at >= ? AND quarantine IS NOT TRUE", recentSince).
 		Count(&resp.Jobs.RecentRuns)
 
 	// Success rate in window
 	var totalCompleted int64
 	var totalSucceeded int64
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("status IN ? AND started_at >= ?", []string{"succeeded", "failed"}, since).
+		Where("status IN ? AND started_at >= ? AND quarantine IS NOT TRUE", []string{"succeeded", "failed"}, since).
 		Count(&totalCompleted)
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Where("status = ? AND started_at >= ?", "succeeded", since).
+		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "succeeded", since).
 		Count(&totalSucceeded)
 	if totalCompleted > 0 {
 		resp.Jobs.SuccessRate = float64(totalSucceeded) / float64(totalCompleted)
@@ -128,8 +128,8 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	// Average duration in window
 	var avgResult struct{ Avg float64 }
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("AVG(" + durExpr + ") as avg").
-		Where("completed_at IS NOT NULL AND started_at >= ?", since).
+		Select("AVG("+durExpr+") as avg").
+		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
 		Scan(&avgResult)
 	resp.Jobs.AvgDurationSeconds = avgResult.Avg
 
@@ -142,7 +142,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	var failRows []failRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select("job_id, COUNT(*) as failure_count, MAX(completed_at) as last_failure").
-		Where("status = ? AND started_at >= ?", "failed", since).
+		Where("status = ? AND started_at >= ? AND quarantine IS NOT TRUE", "failed", since).
 		Group("job_id").
 		Order("failure_count DESC").
 		Limit(5).
@@ -168,7 +168,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 		Select("job_runs.job_id, tasks.name as atom_name, COUNT(*) as failure_count").
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
 		Joins("JOIN tasks ON tasks.id = task_runs.task_id").
-		Where("task_runs.status = ? AND job_runs.started_at >= ?", "failed", since).
+		Where("task_runs.status = ? AND job_runs.started_at >= ? AND task_runs.quarantine IS NOT TRUE AND job_runs.quarantine IS NOT TRUE", "failed", since).
 		Group("job_runs.job_id, tasks.name").
 		Order("failure_count DESC").
 		Limit(5).
@@ -191,8 +191,8 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 	}
 	var slowRows []slowRow
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
-		Select("job_id, AVG(" + durExpr + ") as avg").
-		Where("completed_at IS NOT NULL AND started_at >= ?", since).
+		Select("job_id, AVG("+durExpr+") as avg").
+		Where("completed_at IS NOT NULL AND started_at >= ? AND quarantine IS NOT TRUE", since).
 		Group("job_id").
 		Order("avg DESC").
 		Limit(5).
@@ -229,7 +229,7 @@ func (s *Service) Summary(window string) (*StatsResponse, error) {
 
 	s.db.WithContext(s.ctx).Model(&models.JobRun{}).
 		Select(pointExpr+" as point, COUNT(*) as run_count, SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) as succ").
-		Where("started_at >= ? AND status IN ?", since, []string{"succeeded", "failed"}).
+		Where("started_at >= ? AND status IN ? AND quarantine IS NOT TRUE", since, []string{"succeeded", "failed"}).
 		Group("point").
 		Order("point ASC").
 		Scan(&trendData)

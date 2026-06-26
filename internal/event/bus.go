@@ -42,20 +42,22 @@ const (
 
 // Event represents a system event.
 type Event struct {
-	Sequence  uint64          `json:"sequence,omitempty"`
-	Type      Type            `json:"type"`
-	JobID     uuid.UUID       `json:"job_id,omitempty"`
-	RunID     uuid.UUID       `json:"run_id,omitempty"`
-	TaskID    uuid.UUID       `json:"task_id,omitempty"`
-	Timestamp time.Time       `json:"timestamp"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
+	Sequence   uint64          `json:"sequence,omitempty"`
+	Type       Type            `json:"type"`
+	JobID      uuid.UUID       `json:"job_id,omitempty"`
+	RunID      uuid.UUID       `json:"run_id,omitempty"`
+	TaskID     uuid.UUID       `json:"task_id,omitempty"`
+	Timestamp  time.Time       `json:"timestamp"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+	Quarantine bool            `json:"quarantine,omitempty"`
 }
 
 // Filter defines criteria for receiving events.
 type Filter struct {
-	JobID uuid.UUID
-	RunID uuid.UUID
-	Types []Type
+	JobID             uuid.UUID
+	RunID             uuid.UUID
+	Types             []Type
+	IncludeQuarantine bool
 }
 
 // Bus defines the event bus interface.
@@ -110,6 +112,9 @@ func (b *bus) Subscribe(ctx context.Context, filter Filter) (<-chan Event, error
 }
 
 func (b *bus) matches(filter Filter, e Event) bool {
+	if e.Quarantine && !filter.IncludeQuarantine {
+		return false
+	}
 	if filter.JobID != uuid.Nil && filter.JobID != e.JobID {
 		return false
 	}
