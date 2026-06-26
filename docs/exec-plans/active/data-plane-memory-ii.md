@@ -148,24 +148,23 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–5 (2026-06-25) shipped 15 of 20 items — Streams A, C, H (minus optional
-H-4) COMPLETE; Stream B's safety substrate + replay activation (B1, B2, B3, B7) in.**
-Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7. Wave
-3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4 (`caesium blame` CLI +
-commit-range e2e) + a small **apply-provenance API**. Wave 4 (#240): **B2 — the
-quarantine runtime plumbing** (3 marker carriers, both-executor suppression, every
-producer fail-closed, observability isolation, the immutable execution descriptor,
-provider-aware secret identity). Wave 5 (#241): **B3 — replay construction +
-dispatch** (reconstruct each task from the B2 descriptor, set `Quarantine=true`,
-dispatch; three fail-closed guards: cache-unavailable abort, the no-bypass
-baseline-replay-safe gate as a pre-plan pass, descriptor-or-refuse). **Scope:
-replay executes via the descriptor-aware DISTRIBUTED worker; the local in-process
-executor fail-closed REFUSES a quarantined run (full local-executor reconstruction
-is a tracked follow-up under Stream B).** **Remaining: B4 (REST
-`POST …/replay` + idempotent reservation) → B5 (`caesium run replay` CLI + value-diff)
-→ B6 (the full quarantine/replay integration scenarios)** — plus N-1 (cross-links,
-gated on B6), the deferred local-executor replay reconstruction, and the optional
-H-4 distributed CI tier. Next eligible leaf item: **B4**.
+**Waves 1–6 (2026-06-25/26) shipped 16 of 20 items — Streams A, C, H (minus optional
+H-4) COMPLETE; Stream B's safety substrate + replay activation + REST trigger (B1,
+B2, B3, B4, B7) in.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2,
+C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4
+(`caesium blame` CLI + commit-range e2e) + a small **apply-provenance API**. Wave 4
+(#240): **B2 — the quarantine runtime plumbing**. Wave 5 (#241): **B3 — replay
+construction + dispatch** (reconstruct each task from the B2 descriptor, set
+`Quarantine=true`; three fail-closed guards). Wave 6 (#242): **B4 — the REST replay
+endpoint** (`POST /v1/jobs/:id/runs/:run_id/replay`, always-quarantined, atomic
+idempotent reservation over a scoped `ReplayFingerprint`, handler-side cross-job
+ownership guard, recoverable resume; a clean 409 in local mode). **Scope: replay
+executes via the descriptor-aware DISTRIBUTED worker; the local in-process executor
+fail-closed REFUSES (full local-executor reconstruction is a tracked follow-up under
+Stream B).** **Remaining: B5 (`caesium run replay` CLI + value-diff) → B6 (the full
+quarantine/replay integration scenarios)** — plus N-1 (cross-links, gated on B6), the
+deferred local-executor replay reconstruction, and the optional H-4 distributed CI
+tier. Next eligible leaf item: **B5**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -463,12 +462,33 @@ ReplayUnsupported`); making it descriptor-driven (mirroring the distributed work
 so single-node deployments can run replay is a tracked follow-up — a capability gap,
 not a security gap.
 
+### Wave 6 (2026-06-26)
+
+The external trigger for replay — the REST endpoint wiring the B3 constructor to the
+wire. Same pipeline (codex xhigh → deep 6-lens security review → verify + publish →
+twice-run sweep → admin-merge).
+
+- **W6-α — B4 (REST replay endpoint + idempotent reservation)** — PR #242, merged
+  `192e9f4`. `POST /v1/jobs/:id/runs/:run_id/replay` (`{set:{k:v}}`), new
+  `api/rest/{controller,service}/replay/`. The review confirmed the five hard
+  invariants hold (no blockers): always-quarantined (`quarantine:false` → 400 via
+  `DisallowUnknownFields`); atomic idempotent creation (required `Idempotency-Key`,
+  scoped `ReplayFingerprint` reserved via the unique index in-tx, return-existing on
+  collision, recoverable resume); handler-side cross-job ownership guard
+  (`baselineRun.JobID == :id` → 404, same class as A2); no replay-safe bypass (422);
+  route policy normalized (`:id` key → RoleRunner). Pre-publish + bot fixes: bounded
+  body + set-map caps (DoS); zero-task baseline → 4xx; a typed `pkg/sqlerr.IsUnique
+  Constraint` helper with a fingerprint-lookup specificity guard; goroutine panic
+  recovery; parallel-idempotency + crash-resume unit tests; and a clean 409 for a
+  re-executing replay in local mode (instead of 202-then-async-fail). `test/`
+  integration scenario drives the real endpoint end-to-end.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime + B3 activation shipped** (#233, #235, #240, #241); replay runs via the distributed worker. **B4–B6 remain** (B4 = REST `…/replay` + idempotent reservation, the next eligible leaf) + deferred local-executor reconstruction |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime + B3 activation + B4 REST endpoint shipped** (#233, #235, #240, #241, #242); replay triggerable + runs via the distributed worker. **B5–B6 remain** (B5 = `caesium run replay` CLI + value-diff, the next eligible leaf) + deferred local-executor reconstruction |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
