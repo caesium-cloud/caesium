@@ -102,11 +102,26 @@ func (k *IdentityKeyring) CurrentHMAC(value []byte) (keyID, digest string, ok bo
 	if k == nil || k.currentKeyID == "" {
 		return "", "", false
 	}
-	key, ok := k.keys[k.currentKeyID]
-	if !ok || len(key) == 0 {
+	digest, ok = k.HMACWithKeyID(k.currentKeyID, value)
+	if !ok {
 		return "", "", false
+	}
+	return k.currentKeyID, digest, true
+}
+
+func (k *IdentityKeyring) HMACWithKeyID(keyID string, value []byte) (digest string, ok bool) {
+	if k == nil {
+		return "", false
+	}
+	keyID = strings.TrimSpace(keyID)
+	if keyID == "" {
+		return "", false
+	}
+	key, ok := k.keys[keyID]
+	if !ok || len(key) == 0 {
+		return "", false
 	}
 	mac := hmac.New(sha256.New, key)
 	_, _ = mac.Write(value)
-	return k.currentKeyID, hex.EncodeToString(mac.Sum(nil)), true
+	return hex.EncodeToString(mac.Sum(nil)), true
 }

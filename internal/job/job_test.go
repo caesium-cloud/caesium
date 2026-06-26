@@ -234,6 +234,55 @@ func TestRunLocalFailedAtomResultFailsRun(t *testing.T) {
 	require.Equal(t, run.TaskStatusFailed, status[taskID])
 }
 
+func TestRunLocalRefusesQuarantinedReplay(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })
+
+	store := run.NewStore(db)
+	engine := newFakeEngine()
+	now := time.Now().UTC()
+
+	jobID := uuid.New()
+	runID := uuid.New()
+	taskID := uuid.New()
+	atomID := uuid.New()
+	require.NoError(t, db.Create(&models.Job{ID: jobID, Alias: "quarantined-local", CreatedAt: now, UpdatedAt: now}).Error)
+	require.NoError(t, db.Create(&models.JobRun{
+		ID:         runID,
+		JobID:      jobID,
+		Status:     string(run.StatusRunning),
+		Quarantine: true,
+		StartedAt:  now,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}).Error)
+
+	taskSvc := &fakeTaskService{tasks: models.Tasks{
+		{ID: taskID, JobID: jobID, AtomID: atomID},
+	}}
+	atomSvc := &fakeAtomService{atoms: map[uuid.UUID]*models.Atom{
+		atomID: {
+			ID:      atomID,
+			Engine:  models.AtomEngineDocker,
+			Image:   "current/image:latest",
+			Command: `["sh","-c","echo current"]`,
+		},
+	}}
+	opts := withTestDeps(store, env.Environment{
+		MaxParallelTasks:  1,
+		TaskFailurePolicy: taskFailurePolicyHalt,
+		ExecutionMode:     executionModeLocal,
+	}, taskSvc, atomSvc, &fakeTaskEdgeService{}, engine)
+
+	err := New(&models.Job{ID: jobID, Alias: "quarantined-local"}, opts...).Run(run.WithContext(context.Background(), runID))
+	require.ErrorIs(t, err, ErrLocalQuarantinedReplayUnsupported)
+	require.Zero(t, engine.maxConcurrent(), "local quarantined replay must not create a container from live rows")
+
+	snapshot := latestRunSnapshot(t, store, jobID)
+	require.Equal(t, run.StatusFailed, snapshot.Status)
+	require.Contains(t, snapshot.Error, ErrLocalQuarantinedReplayUnsupported.Error())
+}
+
 func TestRunLocalUsesJobLevelOverrides(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() { jobdeftestutil.CloseDB(db) })

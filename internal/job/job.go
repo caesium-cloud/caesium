@@ -56,6 +56,10 @@ var runStartReadBackoffs = []time.Duration{
 	320 * time.Millisecond,
 }
 
+// ErrLocalQuarantinedReplayUnsupported is returned when a quarantined replay
+// reaches the in-process executor, which is not descriptor-aware.
+var ErrLocalQuarantinedReplayUnsupported = errors.New("replay requires the descriptor-aware executor")
+
 // retryOnContention runs fn, retrying only on transient dqlite contention.
 //
 // The global connection-pool retry (pkg/db) covers a contended statement at
@@ -408,6 +412,10 @@ func (j *job) Run(ctx context.Context) error {
 			log.Error("callback dispatch failure", "job_id", j.id, "run_id", runID, "error", err)
 		}
 	}()
+	if runQuarantined && executionMode != executionModeDistributed {
+		runErr = ErrLocalQuarantinedReplayUnsupported
+		return runErr
+	}
 
 	var tasks models.Tasks
 	if err := retryOnContention(ctx, func() error {
@@ -697,6 +705,10 @@ func (j *job) Run(ctx context.Context) error {
 		log.Info("running atom", "job_id", j.id, "task_id", taskID, "image", runner.image, "cmd", runner.command, "attempt", attempt)
 
 		spec := runner.spec
+		taskQuarantined := taskQuarantine[taskID] || runQuarantined
+		if taskQuarantined {
+			return "", nil, nil, nil, ErrLocalQuarantinedReplayUnsupported
+		}
 		spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, secretResolver, spec)
 		if err != nil {
 			return "", nil, nil, nil, err

@@ -14,11 +14,11 @@ import (
 //
 //   - Adopt(runID)   — seed a fresh RunState for a run this node just created.
 //   - Recover(runID) — rebuild a run's state from checkpoint + terminal tail on
-//                      lease takeover.
+//     lease takeover.
 //   - Ready(runID)   — the ready queue the dispatch loop pulls from.
 //   - MarkDispatched — record a task pushed to a worker.
 //   - Complete(...)  — apply a worker completion: advance the DAG in memory,
-//                      durably write only terminal rows, and checkpoint.
+//     durably write only terminal rows, and checkpoint.
 //   - Drop(runID)    — release a run on completion or lease loss.
 //
 // Concurrency: the global mu guards only the runs map (brief lookups / inserts /
@@ -222,7 +222,7 @@ func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, resu
 
 	var branchSkips []uuid.UUID
 	if len(branchSelections) > 0 {
-		skips, err := m.store.ResolveBranchSkips(taskID, branchSelections)
+		skips, err := m.store.ResolveBranchSkips(runID, taskID, branchSelections)
 		if err != nil {
 			or.mu.Unlock()
 			return CompleteResult{Owned: true}, err

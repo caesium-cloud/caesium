@@ -842,7 +842,7 @@ write, lineage emit, or callback.
       side-effect, event, cache, lineage, callback, or notification suppression was
       made fail-open.
       Depends on: B1.
-- [ ] B3. Implement the replay construction + dispatch path: from a baseline run +
+- [x] B3. Implement the replay construction + dispatch path: from a baseline run +
       `--set` overrides, build a quarantined `JobRun` and dispatch it through the
       executor so hash-changed tasks re-run and hash-unchanged tasks cache-hit
       (in v1 any `--set` override re-runs the full DAG — run params fold wholesale
@@ -878,6 +878,34 @@ write, lineage emit, or callback.
       dispatch; the fail-closed guards; reconstruct from the B2 descriptor),
       `internal/run/store.go`.
       Depends on: B2 + B7 (the `replaySafe` schema the gate reads).
+	      W5-alpha note (2026-06-25): added `internal/replay.New(...).Replay(ctx,
+	      replay.Request{BaselineRunID, Set, ReplayFingerprint})`, returning the
+	      quarantined replay run plus per-task decisions for B4/B5. Guards are
+	      fail-closed: a quarantined baseline is rejected; descriptor/row
+	      `ReplaySafe` mismatches abort; tasks are planned in descriptor-DAG
+	      topological order (with YAML position only as a ready-task tie-breaker) so
+	      YAML order cannot falsely force a successor to re-execute; any task that
+	      genuinely re-executes must have recorded `TaskRun.replay_safe=true`;
+	      unchanged fallback hits require a successful baseline status/result; empty
+	      result + non-empty output aborts as corruption; and all-cached
+	      materialization only stamps the replay succeeded when every cached result
+	      is successful. Re-execution verifies `secret://` coverage in both
+	      directions, refuses unverifiable/empty identities, verifies Vault KV-v2
+	      baseline-version HMACs with the recorded HMAC key ID against the
+	      already-resolved value when the current version is the baseline version,
+	      aborts on version drift, and never overwrites descriptor secret evidence
+	      on quarantined execution. Reconstruction reads the B2
+	      `TaskRun.ExecutionDescriptor` only (runtime image/digest, command,
+	      env/spec/mounts, cache, schema, retry, DAG, params/predecessor context) in
+	      the distributed worker/store/owner paths; local mode now refuses
+	      quarantined replay with `replay requires the descriptor-aware executor`
+	      rather than executing from live rows. Deferred to B4: REST
+	      idempotency/fingerprint reservation and job-scope path validation; deferred
+	      to B5: CLI flags/output/diff polling; deferred to B6: full
+	      container/REST/CLI side-effect integration coverage. Follow-up: local
+	      executor replay reconstruction remains deferred; the distributed worker
+	      reconstructs, and local mode fails closed until it has descriptor-aware
+	      reconstruction.
 - [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a

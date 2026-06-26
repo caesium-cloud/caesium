@@ -325,7 +325,7 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		UpdatedAt: now,
 	}
 	require.NoError(t, db.Create(atomModel).Error)
-	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "deploy", CreatedAt: now, UpdatedAt: now}
+	task := &models.Task{ID: uuid.New(), JobID: job.ID, AtomID: atomModel.ID, Name: "deploy", ReplaySafe: true, CreatedAt: now, UpdatedAt: now}
 	require.NoError(t, db.Create(task).Error)
 	jobRun := &models.JobRun{
 		ID:          uuid.New(),
@@ -339,25 +339,21 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 		UpdatedAt:   now,
 	}
 	require.NoError(t, db.Create(jobRun).Error)
-	taskRun := &models.TaskRun{
-		ID:           uuid.New(),
-		JobRunID:     jobRun.ID,
-		TaskID:       task.ID,
-		AtomID:       atomModel.ID,
-		Engine:       atomModel.Engine,
-		Image:        atomModel.Image,
-		Command:      atomModel.Command,
-		Status:       string(run.TaskStatusRunning),
-		ClaimedBy:    "node-a",
-		Attempt:      1,
-		MaxAttempts:  1,
-		CacheEnabled: true,
-		CacheVersion: 1,
-		Quarantine:   true,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-	}
-	require.NoError(t, db.Create(taskRun).Error)
+	require.NoError(t, store.RegisterTasks(jobRun.ID, []run.RegisterTaskInput{{
+		Task:                    task,
+		Atom:                    atomModel,
+		OutstandingPredecessors: 0,
+	}}))
+	require.NoError(t, db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", jobRun.ID, task.ID).
+		Updates(map[string]any{
+			"status":        string(run.TaskStatusRunning),
+			"claimed_by":    "node-a",
+			"cache_enabled": true,
+			"cache_version": 1,
+		}).Error)
+	var taskRun models.TaskRun
+	require.NoError(t, db.First(&taskRun, "job_run_id = ? AND task_id = ?", jobRun.ID, task.ID).Error)
 
 	engine := &captureCreateEngine{}
 	executor := &runtimeExecutor{
@@ -367,7 +363,7 @@ func TestRuntimeExecutorQuarantinedTaskSkipsCacheWrite(t *testing.T) {
 			return engine, nil
 		},
 	}
-	executor.Execute(context.Background(), taskRun)
+	executor.Execute(context.Background(), &taskRun)
 
 	var cacheRows int64
 	require.NoError(t, db.Model(&models.TaskCache{}).Count(&cacheRows).Error)
