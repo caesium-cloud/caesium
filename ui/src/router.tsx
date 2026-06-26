@@ -7,6 +7,7 @@ import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
 import { JobsPage } from "./features/jobs/JobsPage";
 import { JobDetailPage } from "./features/jobs/JobDetailPage";
 import { RunDetailPage } from "./features/jobs/RunDetailPage";
+import { RunDiffRoutePage } from "./features/jobs/RunDiffView";
 import { StatsPage } from "./features/stats/StatsPage";
 import { SystemPage } from "./features/system/SystemPage";
 import { TriggersPage } from "./features/triggers/TriggersPage";
@@ -37,6 +38,15 @@ const runDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId/runs/$runId",
   component: RunDetailPage,
+});
+
+const runDiffRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/runs/$runId/diff",
+  validateSearch: (search: Record<string, unknown>) => ({
+    to: typeof search.to === "string" ? search.to : undefined,
+  }),
+  component: RunDiffRoutePage,
 });
 
 const statsRoute = createRoute({
@@ -91,6 +101,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
   jobDetailRoute,
+  runDiffRoute,
   runDetailRoute,
   statsRoute,
   triggersRoute,

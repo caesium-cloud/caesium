@@ -150,7 +150,7 @@ surface. Honest scoping (from the design): this is **cache-bust attribution**
 (which step/output changed + why a task re-ran) — full row/column **value** diffs
 are explicitly handed off to dbt/Datafold; the UI says so.
 
-- [ ] A1. Build the run-diff view: a "Compare to run…" affordance in the
+- [x] A1. Build the run-diff view: a "Compare to run…" affordance in the
       `RunDetailPage` header (a picker over the job's other runs) that opens a diff
       view rendering `getRunDiff` — per-task changed vs. cache-hit, the discriminating
       cache-bust field, and a one-line "value diffs → dbt/Datafold" note. Read-only;
@@ -160,10 +160,12 @@ are explicitly handed off to dbt/Datafold; the UI says so.
       Files: new `ui/src/features/jobs/RunDiffView.tsx` (+ a `TaskDiffRow`),
       `ui/src/features/jobs/RunDetailPage.tsx` (the affordance), `ui/src/router.tsx`.
       Depends on: H-1.
-- [ ] A2. Playwright e2e: apply a job, trigger two runs differing by a `--set`/param,
+      Note: W2-beta added the linkable `RunDiffView`, route, and run-header compare picker against the existing run-diff endpoint.
+- [x] A2. Playwright e2e: apply a job, trigger two runs differing by a `--set`/param,
       open the diff, assert the changed task renders the discriminating field and an
       unchanged task renders as cache-hit. Assert on `data-testid` DOM, not internals.
       Files: `ui/e2e/run-diff.spec.ts`. Depends on: A1.
+      Note: W2-beta added a Playwright spec that creates one command-changed task plus one unchanged cached task because v1 hashes run params into every task.
 
 ### Stream B — Replay (quarantined what-if)
 
