@@ -22,6 +22,16 @@ import (
 )
 
 func (s *IntegrationTestSuite) TestReplayMatrixSuppressesSideEffectsAndObservability() {
+	// This scenario captures notifications via a webhook bound on the TEST HOST, which
+	// the server must call back into. That host-reachability holds under the docker
+	// tier but not under the podman/kubernetes integration tiers (container/pod → host
+	// networking differs), so the webhook positive-control can't fire there. The
+	// notification suppression itself is covered engine-agnostically by the unit tests
+	// (internal/notification/watcher_test.go + subscriber_test.go), and the lineage/SSE
+	// suppression by internal/lineage/subscriber_test.go + the event stream tests.
+	if s.engineType == "podman" || s.engineType == "kubernetes" {
+		s.T().Skipf("notification-webhook capture is not host-reachable under CAESIUM_TEST_ENGINE=%s; suppression is covered by the engine-agnostic unit tests", s.engineType)
+	}
 	alias := fmt.Sprintf("e2e-replay-matrix-%d", time.Now().UnixNano())
 	dir := s.writeJobManifest(replayLineageManifest(alias, "1h"))
 	defer os.RemoveAll(dir)
