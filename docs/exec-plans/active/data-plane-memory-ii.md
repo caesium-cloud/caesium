@@ -148,20 +148,24 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–4 (2026-06-25) shipped 14 of 20 items — Streams A, C, and H (minus the
-optional H-4) are COMPLETE, and Stream B's safety substrate (B1 memo, B7 schema,
-B2 runtime) is in.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2,
-C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4
-(`caesium blame` CLI + commit-range e2e) + a small **apply-provenance API** so a
-commit is stampable through the server. Wave 4 (#240): **B2 — the quarantine
-runtime plumbing** (the keystone safety item: 3 marker carriers, both-executor
-cache/lineage/callback suppression, every side-effect producer fail-closed, the
-cron-watermark + observability isolation, the immutable execution descriptor, and
-provider-aware secret identity). **Remaining: the replay activation + diff core —
-B3 (reconstruct + activate replay from the descriptor) → B4 (idempotent
-reservation/dispatch) → B5 (value-diff) → B6 (the full quarantine integration
-scenarios)** — plus N-1 (plan-level cross-links, gated on B6) and the optional H-4
-distributed CI tier. Next eligible leaf item: **B3**.
+**Waves 1–5 (2026-06-25) shipped 15 of 20 items — Streams A, C, H (minus optional
+H-4) COMPLETE; Stream B's safety substrate + replay activation (B1, B2, B3, B7) in.**
+Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7. Wave
+3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4 (`caesium blame` CLI +
+commit-range e2e) + a small **apply-provenance API**. Wave 4 (#240): **B2 — the
+quarantine runtime plumbing** (3 marker carriers, both-executor suppression, every
+producer fail-closed, observability isolation, the immutable execution descriptor,
+provider-aware secret identity). Wave 5 (#241): **B3 — replay construction +
+dispatch** (reconstruct each task from the B2 descriptor, set `Quarantine=true`,
+dispatch; three fail-closed guards: cache-unavailable abort, the no-bypass
+baseline-replay-safe gate as a pre-plan pass, descriptor-or-refuse). **Scope:
+replay executes via the descriptor-aware DISTRIBUTED worker; the local in-process
+executor fail-closed REFUSES a quarantined run (full local-executor reconstruction
+is a tracked follow-up under Stream B).** **Remaining: B4 (REST
+`POST …/replay` + idempotent reservation) → B5 (`caesium run replay` CLI + value-diff)
+→ B6 (the full quarantine/replay integration scenarios)** — plus N-1 (cross-links,
+gated on B6), the deferred local-executor replay reconstruction, and the optional
+H-4 distributed CI tier. Next eligible leaf item: **B4**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -427,12 +431,44 @@ twice-run greptile/gemini sweep → admin-merge), with the most scrutiny of any 
   read, descriptor CAS). Full chain green; quarantine **activation** is B3, full
   integration scenarios are B6.
 
+### Wave 5 (2026-06-25)
+
+The replay activation — the item that turns the B2 plumbing on. Same pipeline (codex
+xhigh → **deep 6-lens adversarial security review** with independent verification →
+verify + publish → twice-run sweep → admin-merge). The deepest review of the wave;
+it caught a fundamental gap green CI would have shipped.
+
+- **W5-α — B3 (replay construction + dispatch)** — PR #241, merged `b8b21e3`. New
+  `internal/replay/` package: from a baseline run + `--set` overrides, build a
+  quarantined `JobRun` and dispatch it so hash-changed tasks re-run (topologically
+  planned, with cycle detection) and hash-unchanged tasks cache-hit. Three
+  fail-closed guards: cache-unavailable abort; the **no-bypass baseline-replay-safe
+  gate** (a pre-plan pass refusing any task whose baseline recorded `replay_safe !=
+  true` — the B7 field, not the live def); reconstruct each task from the **B2
+  immutable descriptor, never live rows**, fail-closed if missing/corrupt/version-
+  mismatched. The review caught and fixed **3 blockers**: a fabrication path (a
+  replay of a *failed* baseline reported SUCCEEDED → now a cache hit requires a
+  successful baseline result); **reconstruction-from-live-rows in BOTH executors**
+  (the worker reconstructs from the descriptor; the **local in-process executor
+  fail-closed REFUSES** a quarantined run rather than run the current definition);
+  and the baseline secret-identity gate (vault re-reads the baseline version + HMACs
+  with the baseline KeyID, bidirectional coverage). Replay-of-replay rejected;
+  descriptor↔row `replay_safe` mismatch aborts. **Scope: replay runs via the
+  distributed worker; local mode refuses (safe). Full local-executor reconstruction
+  is a tracked follow-up below.**
+
+**Stream B follow-up (deferred):** *local-executor replay reconstruction.* B3's local
+in-process executor fail-closed refuses a quarantined replay (`ErrLocalQuarantined
+ReplayUnsupported`); making it descriptor-driven (mirroring the distributed worker)
+so single-node deployments can run replay is a tracked follow-up — a capability gap,
+not a security gap.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime shipped** (#233, #235, #240); safety substrate in. **B3–B6 remain** (B3 = replay reconstruct + activate, the next eligible leaf) |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime + B3 activation shipped** (#233, #235, #240, #241); replay runs via the distributed worker. **B4–B6 remain** (B4 = REST `…/replay` + idempotent reservation, the next eligible leaf) + deferred local-executor reconstruction |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
