@@ -148,23 +148,21 @@ runtime code (B2+) lands.
 
 ## Progress (as of 2026-06-25)
 
-**Waves 1–6 (2026-06-25/26) shipped 16 of 20 items — Streams A, C, H (minus optional
-H-4) COMPLETE; Stream B's safety substrate + replay activation + REST trigger (B1,
-B2, B3, B4, B7) in.** Wave 1 (#230–#233): A1, B1, C1, H-1. Wave 2 (#234–#237): A2,
-C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4 (`caesium run diff` CLI + e2e), C3+C4
-(`caesium blame` CLI + commit-range e2e) + a small **apply-provenance API**. Wave 4
-(#240): **B2 — the quarantine runtime plumbing**. Wave 5 (#241): **B3 — replay
-construction + dispatch** (reconstruct each task from the B2 descriptor, set
-`Quarantine=true`; three fail-closed guards). Wave 6 (#242): **B4 — the REST replay
-endpoint** (`POST /v1/jobs/:id/runs/:run_id/replay`, always-quarantined, atomic
-idempotent reservation over a scoped `ReplayFingerprint`, handler-side cross-job
-ownership guard, recoverable resume; a clean 409 in local mode). **Scope: replay
-executes via the descriptor-aware DISTRIBUTED worker; the local in-process executor
-fail-closed REFUSES (full local-executor reconstruction is a tracked follow-up under
-Stream B).** **Remaining: B5 (`caesium run replay` CLI + value-diff) → B6 (the full
-quarantine/replay integration scenarios)** — plus N-1 (cross-links, gated on B6), the
-deferred local-executor replay reconstruction, and the optional H-4 distributed CI
-tier. Next eligible leaf item: **B5**.
+**Waves 1–7 (2026-06-25/26) shipped 17 of 20 items — Streams A, C, H (minus optional
+H-4) COMPLETE; Stream B's safety substrate + replay activation + REST trigger + CLI
+(B1–B5, B7) all in — only B6 (integration scenarios) remains.** Wave 1 (#230–#233):
+A1, B1, C1, H-1. Wave 2 (#234–#237): A2, C2, H-2, H-3, B7. Wave 3 (#238–#239): A3+A4
+(`caesium run diff`), C3+C4 (`caesium blame`) + a small **apply-provenance API**. Wave
+4 (#240): **B2 — the quarantine runtime plumbing**. Wave 5 (#241): **B3 — replay
+construction + dispatch**. Wave 6 (#242): **B4 — the REST replay endpoint** (atomic
+idempotent reservation, cross-job ownership guard). Wave 7 (#243): **B5 — the
+`caesium run replay` CLI** (`--set`, restart-safe `--idempotency-key`, `--diff` value
+diff, `--json`; refusals → non-zero exit). **Scope: replay executes via the
+descriptor-aware DISTRIBUTED worker; the local in-process executor fail-closed REFUSES
+(full local-executor reconstruction is a tracked follow-up under Stream B).**
+**Remaining: B6 (the full quarantine/replay integration scenarios — the next eligible
+leaf)** — plus N-1 (cross-links, gated on B6), the deferred local-executor replay
+reconstruction, and the optional H-4 distributed CI tier. Next eligible leaf item: **B6**.
 
 This plan was revised across three Codex adversarial review rounds on 2026-06-20.
 Round 1: Stream B made fail-closed (non-bypassable quarantine, callbacks-off,
@@ -483,12 +481,30 @@ twice-run sweep → admin-merge).
   re-executing replay in local mode (instead of 202-then-async-fail). `test/`
   integration scenario drives the real endpoint end-to-end.
 
+### Wave 7 (2026-06-26)
+
+The operator-facing replay CLI — the human entry point to the B4 endpoint.
+
+- **W7-α — B5 (`caesium run replay` CLI + value-diff)** — PR #243, merged `b8bbf97`.
+  New `cmd/run/replay.go`: `caesium run replay <run-id> --job-id <id> --set k=v
+  [--idempotency-key <k>] [--diff] [--json]`. `--job-id` required (job-scoped, path-
+  escaped). **Restart-safe idempotency:** an operator key is passed verbatim (a re-run
+  with the same key + same principal dedupes to the existing replay); when omitted, a
+  UUIDv4 key is generated and printed to **stderr** before dispatch so a manual retry
+  can reuse it. `--diff` awaits the replay's terminal state (bounded, single ticker)
+  then renders the run-diff vs the baseline via the A2 endpoint — and exits non-zero if
+  the replay failed. Refusals (422/409/404/400) → clear stderr + non-zero exit; `--json`
+  machine output is clean on stdout (the cobra usage-on-error goes to stderr). An Opus
+  review came back **CLEAN** (the restart-safe key handling + the stdout/stderr
+  separation both verified). `test/replay_cli_e2e_test.go` drives the real CLI binary
+  with stdout captured separately from stderr.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Causal `caesium run diff` — read-side blob-diff across two runs | **P1** | **COMPLETE** — A1–A4 shipped (#231, #236, #238) |
-| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1 memo + B7 schema + B2 runtime + B3 activation + B4 REST endpoint shipped** (#233, #235, #240, #241, #242); replay triggerable + runs via the distributed worker. **B5–B6 remain** (B5 = `caesium run replay` CLI + value-diff, the next eligible leaf) + deferred local-executor reconstruction |
+| B | Quarantined what-if replay — fail-closed, distributed-safe, `replaySafe` schema (B7) | P2 | **B1–B5 + B7 shipped** (#233, #235, #240, #241, #242, #243); replay fully usable (CLI → REST → quarantined run via the distributed worker). **Only B6 remains** (the full integration scenarios, the next eligible leaf) + deferred local-executor reconstruction |
 | C | `caesium blame` — commit/snapshot attribution, descriptor-keyed | **P1** | **COMPLETE** — C1–C4 shipped (#232, #236, #239) |
 | H | RBAC backfill (H-1) + completeness/scope guard (H-2) + lineage-impact scope (H-3) + optional distributed CI tier (H-4) | P2 | **H-1+H-2+H-3 shipped** (#230, #237, #234); H-4 optional |
 | N | Plan-level cross-links (roadmap §3.4, README, strategy doc) | — | Not started (A4✓+C4✓ done; gated on B6) |
