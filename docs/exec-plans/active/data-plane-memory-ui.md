@@ -65,7 +65,7 @@ foundation chain is H-1 → H-2 → H-3; feature streams unlock as their H deps 
   message-aware replay error classification so overloaded 400/409/422 codes aren't
   mislabeled; `BlameOptions.task`; per-verb response round-trip assertion) + 3 bot fixes
   (null-body guard, `getTaskWhy` taskName, 401 test). Caught a real image-pin guardrail
-  miss (an `alpine` test fixture), not a flake.
+  miss (a bare base-image name in a test fixture), not a flake.
 
 ### Stream Status
 
