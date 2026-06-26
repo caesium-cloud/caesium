@@ -54,7 +54,7 @@ The pivot is **invert the ranking**, not discard the data work. All three differ
 |---|---|---|---|
 | **Hook** — reason to clone | DX over raw k8s | *"Why not hand-roll Argo/Kueue?"* | Strong, but a taste argument; needs marketing to win |
 | **Close** — reason to adopt | **Operational sovereignty** | *"Why not Airflow/Dagster/Flyte?"* | **100% built, un-copyable, sells by constraint** |
-| **Retain** — reason to stay | Content-addressed data-plane memory | *"Why not the other zero-dep schedulers (Argo/Kueue/Cronicle)?"* | Second act; ~40% to build (see spec) |
+| **Retain** — reason to stay | Content-addressed data-plane memory | *"Why not the other zero-dep schedulers (Argo/Kueue/Cronicle)?"* | Second act; substrate + the causal query layer (`caesium run diff` / `blame` / quarantined `replay --set … --diff`) **shipped** (see spec + the completed [data-plane-memory](exec-plans/completed/data-plane-memory.md) / [data-plane-memory-ii](exec-plans/completed/data-plane-memory-ii.md) plans) |
 
 **Lead with sovereignty. Hook with DX. Retain with data-plane memory** — explicitly demoted from north-star to *"the killer differentiator within sovereignty"*: it is what makes Caesium more than "Argo with a nicer binary," once a user is already inside.
 

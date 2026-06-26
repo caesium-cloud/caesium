@@ -3,7 +3,7 @@
 > Status: Design - authoritative for replay safety invariants (data-plane-memory-ii B1).
 
 This memo is the B1 design gate for
-[`data-plane-memory-ii`](exec-plans/active/data-plane-memory-ii.md). It fixes the
+[`data-plane-memory-ii`](exec-plans/completed/data-plane-memory-ii.md). It fixes the
 replay safety model before B2-B6 add runtime code. It complements
 [`design-data-plane-memory.md`](design-data-plane-memory.md): that older design is
 authoritative for the shipped substrate and honest-scope rules, while this memo

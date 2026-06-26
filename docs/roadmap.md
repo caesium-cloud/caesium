@@ -184,7 +184,7 @@ steps:
 
 ### 3.4 Live DAG Debugging & Run Diff
 
-**Status**: Partially shipped via the [data-plane-memory](design-data-plane-memory.md) substrate. `caesium why <run> --task <t>` reimagines the causal half of this item — a field-level, machine-checkable explanation of why a task ran/skipped/re-ran (the discriminating `HashInput` field + trigger causation), reconstructed from the persisted decomposed hash + event store rather than a UI state-viewer. A git-committable reproducibility receipt + `caesium verify` and append-only DAG-topology history also land here. The remaining causal verbs — `caesium run diff`, the quarantined what-if `caesium run replay --set … --diff`, and `caesium blame` over commit ranges — are the active build plan [Exec Plan: Data-Plane Memory II](exec-plans/active/data-plane-memory-ii.md). Remaining beyond that: the UI timeline/step-through replay surface.
+**Status**: Partially shipped via the [data-plane-memory](design-data-plane-memory.md) substrate. `caesium why <run> --task <t>` reimagines the causal half of this item — a field-level, machine-checkable explanation of why a task ran/skipped/re-ran (the discriminating `HashInput` field + trigger causation), reconstructed from the persisted decomposed hash + event store rather than a UI state-viewer. A git-committable reproducibility receipt + `caesium verify` and append-only DAG-topology history also land here. The remaining causal verbs have now **shipped** ([Exec Plan: Data-Plane Memory II](exec-plans/completed/data-plane-memory-ii.md)): `caesium run diff` (causal cache-bust attribution across two runs), `caesium blame` (commit/snapshot topology attribution over `dag_snapshot`), and the quarantined what-if `caesium run replay --set … --diff` (a descriptor-reconstructed, replay-safe-gated, side-effect-free run via the distributed worker). Remaining beyond that: the UI timeline/step-through replay surface.
 
 **Current state**: Debugging failed runs requires manual log inspection. No way to compare two runs side-by-side.
 
@@ -244,7 +244,7 @@ Features that were previously on the roadmap and are now shipped:
 - [Exec Plan: Sovereignty Execution](exec-plans/completed/sovereignty-execution.md) — operationalizes the positioning pivot (README repositioning + Kueue delegation); shipped
 - [Design: Data-Plane Memory](design-data-plane-memory.md) — the second-act substrate enabling explain/reproduce/skip
 - [Exec Plan: Data-Plane Memory](exec-plans/completed/data-plane-memory.md) — the substrate build plan (streams A–D); shipped (#213–#222)
-- [Exec Plan: Data-Plane Memory II](exec-plans/active/data-plane-memory-ii.md) — the active follow-on: causal `run diff`, quarantined `replay`, and `blame`
+- [Exec Plan: Data-Plane Memory II](exec-plans/completed/data-plane-memory-ii.md) — the completed follow-on: causal `run diff`, quarantined `replay`, and `blame` (all shipped)
 - [Brainstorm: Killer Features Beyond Airflow Parity](archive/brainstorm-differentiators.md) — original idea backlog
 - [Design: Smart Incremental Execution](design-incremental-execution.md) — shipped cache system
 - [Design: Event-Driven Triggers](design-event-triggers.md) — P0 trigger overhaul
