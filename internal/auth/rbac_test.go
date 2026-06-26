@@ -109,6 +109,7 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		{"POST", "/v1/notifications/policies", models.RoleOperator},
 		{"PATCH", "/v1/notifications/policies/:id", models.RoleOperator},
 		{"DELETE", "/v1/notifications/policies/:id", models.RoleOperator},
+		{"POST", "/v1/jobs/:id/runs/:id/replay", models.RoleRunner},
 	}
 
 	for _, tt := range tests {

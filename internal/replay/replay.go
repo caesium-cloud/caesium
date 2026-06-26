@@ -85,6 +85,23 @@ type Result struct {
 	Decisions []TaskDecision
 }
 
+// PreparedReplay is a validated replay plan that has not yet been materialized.
+type PreparedReplay struct {
+	baseline    models.JobRun
+	params      map[string]string
+	overrides   map[string]string
+	fingerprint string
+	plans       []plannedTask
+}
+
+// RequiresDispatch reports whether this replay has tasks that must re-execute.
+func (p *PreparedReplay) RequiresDispatch() bool {
+	if p == nil {
+		return false
+	}
+	return hasPending(p.plans)
+}
+
 type TaskDecision struct {
 	TaskID       uuid.UUID
 	TaskName     string
@@ -132,6 +149,20 @@ func (c *Constructor) Replay(ctx context.Context, req Request) (*Result, error) 
 		return nil, ErrDispatchRequired
 	}
 
+	prepared, err := c.Prepare(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	return c.Materialize(ctx, prepared)
+}
+
+// Prepare validates the baseline and computes replay task decisions without
+// inserting the replay run. Callers may inspect the plan before materialization.
+func (c *Constructor) Prepare(ctx context.Context, req Request) (*PreparedReplay, error) {
+	if c == nil || c.store == nil {
+		return nil, errors.New("replay: run store is required")
+	}
+
 	baseline, tasks, err := c.loadBaseline(ctx, req.BaselineRunID)
 	if err != nil {
 		return nil, err
@@ -161,12 +192,33 @@ func (c *Constructor) Replay(ctx context.Context, req Request) (*Result, error) 
 		return nil, err
 	}
 
-	runID, err := c.materialize(ctx, baseline, replayParams, req.Set, req.ReplayFingerprint, plans)
+	return &PreparedReplay{
+		baseline:    baseline,
+		params:      replayParams,
+		overrides:   maps.Clone(req.Set),
+		fingerprint: req.ReplayFingerprint,
+		plans:       plans,
+	}, nil
+}
+
+// Materialize commits a prepared replay run and dispatches pending replay work.
+func (c *Constructor) Materialize(ctx context.Context, prepared *PreparedReplay) (*Result, error) {
+	if c == nil || c.store == nil {
+		return nil, errors.New("replay: run store is required")
+	}
+	if c.dispatcher == nil {
+		return nil, ErrDispatchRequired
+	}
+	if prepared == nil {
+		return nil, errors.New("replay: prepared replay is required")
+	}
+
+	runID, err := c.materialize(ctx, prepared.baseline, prepared.params, prepared.overrides, prepared.fingerprint, prepared.plans)
 	if err != nil {
 		return nil, err
 	}
 
-	if hasPending(plans) {
+	if hasPending(prepared.plans) {
 		if err := c.dispatcher.DispatchReplay(ctx, runID); err != nil {
 			return nil, err
 		}
@@ -176,7 +228,7 @@ func (c *Constructor) Replay(ctx context.Context, req Request) (*Result, error) 
 	if err != nil {
 		return nil, err
 	}
-	return &Result{Run: created, Decisions: decisions(plans)}, nil
+	return &Result{Run: created, Decisions: decisions(prepared.plans)}, nil
 }
 
 func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models.JobRun, []*baselineTask, error) {
@@ -196,7 +248,7 @@ func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models
 		return models.JobRun{}, nil, err
 	}
 	if len(rows) == 0 {
-		return models.JobRun{}, nil, fmt.Errorf("replay: baseline run %s has no task runs", runID)
+		return models.JobRun{}, nil, fmt.Errorf("%w: baseline run %s has no task runs", ErrUnavailableBaselineProof, runID)
 	}
 
 	tasks := make([]*baselineTask, 0, len(rows))

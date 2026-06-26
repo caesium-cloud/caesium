@@ -942,7 +942,7 @@ write, lineage emit, or callback.
 	      executor replay reconstruction remains deferred; the distributed worker
 	      reconstructs, and local mode fails closed until it has descriptor-aware
 	      reconstruction.
-- [ ] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
+- [x] B4. Expose `POST /v1/jobs/:id/runs/:run_id/replay` (body: `{ "set": {k:v} }`
       only) returning the new run id. **Replay is always quarantined** — the body
       carries no `quarantine` field; the handler sets quarantine internally and a
       request attempting to disable it is rejected (the invariant cannot be turned
@@ -995,6 +995,50 @@ write, lineage emit, or callback.
       Files: new `api/rest/controller/replay/`, new `api/rest/service/replay/`,
       route + import in `api/rest/bind/bind.go`, `internal/auth/rbac.go` (policy
       entry) + `internal/auth/rbac_test.go` (RoleRunner assertion).
+      W6-alpha note (2026-06-26): implemented `POST
+      /v1/jobs/:id/runs/:run_id/replay` with a strict `{set}`-only body and
+      required non-blank `Idempotency-Key`; the service derives a scoped
+      SHA-256 fingerprint over path job id, baseline run id, principal, sorted
+      overrides, and the key, then relies on B3's same-transaction
+      `JobRun.ReplayFingerprint` unique insert for the durable reservation. On
+      duplicate/previously-materialized fingerprints it reloads the existing
+      replay run and resumes any `running` reservation with pending task rows
+      through the dispatcher, while treating an empty materialization as corrupt
+      instead of returning a silent no-op. The controller mirrors A2's security
+      boundary by loading the baseline run and rejecting
+      `baselineRun.JobID != :id` with not-found before constructing or
+      dispatching replay. B3 typed refusals are mapped to expected 4xx statuses
+      (`ErrReplayUnsafe`/descriptor/secret issues to 422, unavailable
+      proof/quarantined/non-terminal baseline to 409, missing baseline to 404),
+      and the route is registered as `/jobs/:id/runs/:run_id/replay` with
+      endpointPolicy key `POST /v1/jobs/:id/runs/:id/replay` → `RoleRunner`.
+      W6-alpha follow-up note (2026-06-26): tightened the endpoint without
+      changing the hard invariants. The controller now caps replay request bodies
+      at 64 KiB, rejects oversized/over-cap `set` payloads, rejects empty or
+      overlong override keys/values, and still uses `DisallowUnknownFields` so
+      quarantine remains non-wire-settable. Baselines with no task runs now wrap
+      `ErrUnavailableBaselineProof` and map to a 4xx instead of falling through
+      as 500. Replay fingerprint unique-collision detection now uses the shared
+      sqlite/dqlite typed unique-constraint classifier instead of depending on
+      the `replay_fingerprint` column name in the error string. The REST service
+      prepares the replay plan before materialization and, in local execution
+      mode, refuses any replay that would re-execute pending tasks with a clean
+      409 while still allowing no-override all-cache-hit replays. Existing
+      running reservations with pending rows are resumed only in distributed
+      mode; unexpected non-terminal reservation statuses are treated as corrupt
+      rather than returned as dead runs. The replay e2e now verifies quarantined
+      replay runs via `GET /v1/jobs/:id/runs/:run_id` because the default run
+      list intentionally excludes quarantine, and uses distinct no-override
+      idempotency keys for successful local-mode replays. Deferred follow-ups:
+      J2 dispatcher single-flight remains low priority because downstream guards
+      cover duplicate dispatch; J4 service-boundary ownership defense-in-depth is
+      fix-when-touched; J5 cross-job coverage under the auth-enabled harness
+      stays with B6(9); J7 reservation-corrupt sentinel controller cases remain
+      optional.
+      B4 integration repair note (2026-06-26): the replay e2e now exercises the
+      full successful local-mode path by making the baseline manifest cacheable
+      (`metadata.cache.ttl: "1h"`), so the no-override replay proves every task
+      unchanged and materializes as all-cache-hit instead of re-executing.
       Depends on: B3.
 - [ ] B5. Add `caesium run replay <run-id> --job-id <id> --set k=v [--idempotency-key
       <k>] [--diff] [--json]`: fires a quarantined replay. **`--job-id` is required**
