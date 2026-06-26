@@ -108,6 +108,8 @@ function WhyError({ error }: { error: Error }) {
 }
 
 function WhyContent({ explanation }: { explanation: WhyExplanation }) {
+  const discriminatingChange = getDiscriminatingChange(explanation);
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center gap-2">
@@ -131,8 +133,14 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
         </p>
       </div>
 
-      <DiscriminatingField explanation={explanation} />
-      <DiffDetails diff={explanation.diff} />
+      <DiscriminatingField
+        explanation={explanation}
+        discriminatingChange={discriminatingChange}
+      />
+      <DiffDetails
+        diff={explanation.diff}
+        skipFirstChange={Boolean(discriminatingChange)}
+      />
       <BaselineDetails
         baseline={explanation.baseline}
         jobId={explanation.jobId}
@@ -144,13 +152,25 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
   );
 }
 
-function DiscriminatingField({ explanation }: { explanation: WhyExplanation }) {
-  const change = explanation.diff?.changes?.[0];
-  if (change) {
+function getDiscriminatingChange(explanation: WhyExplanation) {
+  if (explanation.verdict !== "CACHE_MISS") {
+    return undefined;
+  }
+  return explanation.diff?.changes?.[0];
+}
+
+function DiscriminatingField({
+  explanation,
+  discriminatingChange,
+}: {
+  explanation: WhyExplanation;
+  discriminatingChange?: FieldChange;
+}) {
+  if (discriminatingChange) {
     return (
       <div>
         <SectionLabel>Discriminating hash input</SectionLabel>
-        <FieldChangeRow change={change} highlighted />
+        <FieldChangeRow change={discriminatingChange} highlighted />
       </div>
     );
   }
@@ -192,12 +212,21 @@ function DiscriminatingField({ explanation }: { explanation: WhyExplanation }) {
   return null;
 }
 
-function DiffDetails({ diff }: { diff?: BlobDiff }) {
+function DiffDetails({
+  diff,
+  skipFirstChange = false,
+}: {
+  diff?: BlobDiff;
+  skipFirstChange?: boolean;
+}) {
   if (!diff) {
     return null;
   }
 
   const changes = diff.changes ?? [];
+  const visibleChanges = changes
+    .map((change, index) => ({ change, index }))
+    .slice(skipFirstChange ? 1 : 0);
   return (
     <div className="space-y-2">
       {diff.degraded ? (
@@ -210,13 +239,15 @@ function DiffDetails({ diff }: { diff?: BlobDiff }) {
         </div>
       ) : null}
 
-      {changes.length > 1 ? (
+      {visibleChanges.length > 0 ? (
         <div>
-          <SectionLabel>Additional changed fields</SectionLabel>
+          <SectionLabel>
+            {skipFirstChange ? "Additional changed fields" : "Changed fields"}
+          </SectionLabel>
           <div className="space-y-2">
-            {changes.slice(1).map((change) => (
+            {visibleChanges.map(({ change, index }) => (
               <FieldChangeRow
-                key={`${change.field}:${change.before}:${change.after}`}
+                key={`${change.field}:${index}`}
                 change={change}
               />
             ))}
@@ -232,7 +263,7 @@ function BaselineDetails({
   jobId,
   isCacheHit,
 }: {
-  baseline: WhyBaseline;
+  baseline?: WhyBaseline | null;
   jobId: string;
   isCacheHit: boolean;
 }) {
@@ -240,10 +271,10 @@ function BaselineDetails({
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Baseline</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Kind" value={baseline.kind || "none"} mono />
+        <DetailRow label="Kind" value={baseline?.kind || "none"} mono />
         <div className="grid grid-cols-[96px_1fr] gap-2">
           <span className="text-muted-foreground">Run</span>
-          {baseline.runId ? (
+          {baseline?.runId ? (
             <Link
               to="/jobs/$jobId/runs/$runId"
               params={{ jobId, runId: baseline.runId }}
@@ -265,29 +296,29 @@ function BaselineDetails({
         </div>
         <DetailRow
           label="Task run"
-          value={baseline.taskRunId ? shortId(baseline.taskRunId) : "none"}
+          value={baseline?.taskRunId ? shortId(baseline.taskRunId) : "none"}
           mono
         />
         <DetailRow
           label="Started"
-          value={baseline.startedAt ? formatDateTime(baseline.startedAt) : "unknown"}
+          value={baseline?.startedAt ? formatDateTime(baseline.startedAt) : "unknown"}
         />
       </div>
     </div>
   );
 }
 
-function TriggerDetails({ trigger }: { trigger: WhyTrigger }) {
-  const params = Object.entries(trigger.params ?? {});
+function TriggerDetails({ trigger }: { trigger?: WhyTrigger | null }) {
+  const params = Object.entries(trigger?.params ?? {});
   return (
     <div className="rounded-md border border-border/50 bg-background/40 p-3">
       <SectionLabel>Trigger causation</SectionLabel>
       <div className="grid gap-2 text-xs">
-        <DetailRow label="Type" value={trigger.type || "unknown"} mono />
-        <DetailRow label="Alias" value={trigger.alias || "none"} mono />
+        <DetailRow label="Type" value={trigger?.type || "unknown"} mono />
+        <DetailRow label="Alias" value={trigger?.alias || "none"} mono />
         <DetailRow
           label="Fired"
-          value={trigger.firedAt ? formatDateTime(trigger.firedAt) : "unknown"}
+          value={trigger?.firedAt ? formatDateTime(trigger.firedAt) : "unknown"}
         />
         <div className="grid grid-cols-[96px_1fr] gap-2">
           <span className="text-muted-foreground">Params</span>
@@ -416,7 +447,13 @@ function verdictBadgeVariant(
       return "secondary";
     case "UNKNOWN":
       return "default";
+    default:
+      return assertNever(verdict);
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled why verdict: ${value}`);
 }
 
 function formatVerdict(verdict: WhyVerdict) {

@@ -48,9 +48,11 @@ test("task details explain cache miss and cache hit causation", async ({ page, r
   await waitForSucceededRun(request, job.id, cachedRun.id);
 
   await openFirstTaskDetails(page, job.id, changedRun.id);
+  await expect(page.getByTestId("task-why-container")).toContainText("CACHE MISS", {
+    timeout: 30_000,
+  });
   await expect(page.getByTestId("task-why-discriminating-field")).toContainText(
     "runParams.scenario",
-    { timeout: 30_000 },
   );
 
   await openFirstTaskDetails(page, job.id, cachedRun.id);
@@ -65,7 +67,7 @@ test("task details explain cache miss and cache hit causation", async ({ page, r
   await expect(sourceRunLink).toBeVisible();
   await expect(sourceRunLink).toHaveAttribute(
     "href",
-    new RegExp(`/jobs/${job.id}/runs/${changedRun.id}$`),
+    `/jobs/${job.id}/runs/${changedRun.id}`,
   );
 });
 
