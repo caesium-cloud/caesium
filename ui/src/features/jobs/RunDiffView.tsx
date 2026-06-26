@@ -178,7 +178,7 @@ export function TaskDiffRow({ task }: { task: RunDiffTask }) {
                 <span data-testid="run-diff-verdict">
                   <StatusBadge
                     status={verdictStatus(task.verdict)}
-                    label={task.verdict}
+                    label={verdictLabel(task.verdict)}
                     size="sm"
                   />
                 </span>
@@ -351,7 +351,10 @@ function formatValue(value: string | undefined, change: FieldChange): string {
   return change.redacted ? `${rendered} (redacted)` : rendered;
 }
 
-function formatTrigger(trigger: WhyTrigger): string {
+function formatTrigger(trigger?: WhyTrigger | null): string {
+  if (!trigger) {
+    return "None";
+  }
   const parts = [trigger.type, trigger.alias].filter(Boolean);
   if (trigger.firedAt) {
     parts.push(trigger.firedAt);
@@ -375,6 +378,17 @@ function verdictStatus(verdict: RunDiffVerdict): string {
       return "running";
     case "DEGRADED":
       return "failed";
+  }
+}
+
+function verdictLabel(verdict: RunDiffVerdict): string {
+  switch (verdict) {
+    case "WOULD_CACHE_HIT":
+      return "Cache reusable";
+    case "RERAN":
+      return "Reran";
+    case "DEGRADED":
+      return "Degraded";
   }
 }
 

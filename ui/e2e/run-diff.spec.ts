@@ -31,8 +31,8 @@ type RunDiffFixture = FixtureDefinition & {
     image: string;
     cache?: boolean;
     command: string[];
-    next?: string | string[];
-    dependsOn?: string;
+    next?: string[];
+    dependsOn?: string[];
   }>;
 };
 
@@ -89,14 +89,14 @@ function buildRunDiffDefinition(alias: string, variant: string): RunDiffFixture 
         engine: "docker",
         image: neutralShellImage,
         command: ["sh", "-c", "echo '##caesium::output {\"rows\": \"42\"}'"],
-        next: "render",
+        next: ["render"],
       },
       {
         name: "render",
         engine: "docker",
         image: neutralShellImage,
         command: ["sh", "-c", `echo render-${variant}`],
-        dependsOn: "stable-source",
+        dependsOn: ["stable-source"],
       },
     ],
   };

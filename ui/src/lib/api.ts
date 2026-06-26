@@ -732,10 +732,19 @@ function parseJobDefinitions(yaml: string) {
     .filter((doc): doc is Record<string, unknown> => !!doc && typeof doc === "object");
 }
 
+export interface JobRunsQuery {
+  limit?: number;
+  offset?: number;
+}
+
 export const api = {
   getJobs: () => request<Job[]>("/jobs"),
   getJob: (id: string) => request<Job>(`/jobs/${id}`),
-  getJobRuns: (jobId: string) => request<JobRun[]>(`/jobs/${jobId}/runs`),
+  getJobRuns: (jobId: string, query?: JobRunsQuery) => {
+    const params = queryString({ limit: query?.limit, offset: query?.offset });
+    const suffix = params ? `?${params}` : "";
+    return request<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
+  },
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getRunDiff: (jobId: string, left: string, right: string) =>
     request<RunDiff>(

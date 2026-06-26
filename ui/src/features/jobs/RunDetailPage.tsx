@@ -24,6 +24,8 @@ import { RunCacheSummary } from "./RunCacheSummary";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
+const COMPARE_RUN_PICKER_LIMIT = 50;
+
 export function RunDetailPage() {
   const { jobId, runId } = useParams({ strict: false }) as { jobId: string; runId: string };
   const navigate = useNavigate();
@@ -49,8 +51,8 @@ export function RunDetailPage() {
   });
 
   const { data: jobRuns, isLoading: isLoadingJobRuns } = useQuery({
-    queryKey: ["job", jobId, "runs"],
-    queryFn: () => api.getJobRuns(jobId),
+    queryKey: ["job", jobId, "runs", { limit: COMPARE_RUN_PICKER_LIMIT }],
+    queryFn: () => api.getJobRuns(jobId, { limit: COMPARE_RUN_PICKER_LIMIT }),
   });
 
   const { data: atoms, isLoading: isLoadingAtoms } = useQuery({
@@ -195,10 +197,12 @@ export function RunDetailPage() {
     return (jobRuns ?? [])
       .filter((candidate) => candidate.id !== runId)
       .sort((a, b) => {
-        const aTime = new Date(a.started_at || a.created_at).getTime();
-        const bTime = new Date(b.started_at || b.created_at).getTime();
-        return bTime - aTime;
-      });
+        const aTime = runSortTimestamp(a);
+        const bTime = runSortTimestamp(b);
+        if (aTime !== bTime) return bTime - aTime;
+        return b.id.localeCompare(a.id);
+      })
+      .slice(0, COMPARE_RUN_PICKER_LIMIT);
   }, [jobRuns, runId]);
 
   const triggerMutation = useMutation({
@@ -227,6 +231,11 @@ export function RunDetailPage() {
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? runTasks[selectedTaskId] : undefined;
   const isLive = run.status === "running";
+  const compareDisabledReason = isLoadingJobRuns
+    ? "Loading runs to compare"
+    : compareRuns.length === 0
+      ? "No other runs to compare"
+      : undefined;
 
   return (
     <div className="space-y-5">
@@ -271,7 +280,7 @@ export function RunDetailPage() {
                 className="h-8 text-xs"
                 disabled={isLoadingJobRuns || compareRuns.length === 0}
                 data-testid="run-compare-trigger"
-                title={compareRuns.length === 0 ? "No other runs to compare" : undefined}
+                title={compareDisabledReason}
               >
                 <ArrowLeftRight className="mr-1.5 h-3.5 w-3.5" />
                 Compare to run…
@@ -294,7 +303,7 @@ export function RunDetailPage() {
                   <div className="min-w-0">
                     <div className="truncate font-mono text-xs">Run {shortId(candidate.id)}</div>
                     <div className="truncate text-[10px] text-text-3">
-                      {new Date(candidate.started_at || candidate.created_at).toLocaleString()}
+                      {formatRunTimestamp(candidate)}
                     </div>
                   </div>
                   <StatusBadge status={candidate.status} size="sm" />
@@ -426,4 +435,20 @@ export function RunDetailPage() {
       </div>
     </div>
   );
+}
+
+function runSortTimestamp(run: JobRun): number {
+  const parsed = parseTimestamp(run.started_at) ?? parseTimestamp(run.created_at);
+  return parsed ?? Number.NEGATIVE_INFINITY;
+}
+
+function formatRunTimestamp(run: JobRun): string {
+  const parsed = parseTimestamp(run.started_at) ?? parseTimestamp(run.created_at);
+  return parsed !== undefined ? new Date(parsed).toLocaleString() : "Unknown start time";
+}
+
+function parseTimestamp(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const timestamp = new Date(value).getTime();
+  return Number.isFinite(timestamp) ? timestamp : undefined;
 }
