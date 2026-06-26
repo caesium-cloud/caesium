@@ -8,6 +8,7 @@ import {
   clearApiKey,
   credentialLogin,
   currentReturnTo,
+  getPrincipal,
   isCredentialAuthMethod,
   isRedirectAuthMethod,
   isAuthenticated,
@@ -86,6 +87,42 @@ describe("auth", () => {
       "X-CSRF-Token": "csrf-secret",
     });
     expect(withAuthHeaders()).not.toHaveProperty("Authorization");
+  });
+
+  it.each([
+    {
+      label: "missing role",
+      body: {
+        kind: "user",
+        subject: "ops@example.com",
+        csrf_token: "csrf-secret",
+      },
+    },
+    {
+      label: "unrecognized role",
+      body: {
+        kind: "user",
+        subject: "ops@example.com",
+        role: "future-operator",
+        csrf_token: "csrf-secret",
+      },
+    },
+  ])("keeps a valid cookie session when whoami has a $label", async ({ body }) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => body,
+    });
+
+    await expect(checkSession()).resolves.toBe(true);
+
+    expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      "X-CSRF-Token": "csrf-secret",
+    });
+    expect(getPrincipal()).toMatchObject({
+      role: "viewer",
+      canRunner: false,
+    });
   });
 
   it("fails closed when a cookie session response omits the csrf token", async () => {
@@ -247,6 +284,29 @@ describe("auth", () => {
 
     expect(mockFetch).toHaveBeenCalledTimes(1);
     expect(isAuthenticated()).toBe(false);
+  });
+
+  it("does not clear current auth state when pending api key verification is malformed", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => whoami("runner"),
+    });
+    await expect(apiKeyLogin("csk_live_current")).resolves.toBe("success");
+    expect(getPrincipal()).toMatchObject({ role: "runner", canRunner: true });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => null,
+    });
+    await expect(apiKeyLogin("csk_live_candidate")).resolves.toBe("error");
+
+    expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      Authorization: "Bearer csk_live_current",
+    });
+    expect(getPrincipal()).toMatchObject({ role: "runner", canRunner: true });
   });
 
   it("falls back to SSO labels for malformed auth methods", () => {

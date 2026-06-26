@@ -10,12 +10,16 @@ interface InsufficientAccessProps {
 
 export function InsufficientAccess({
   error,
-  message = "Your key does not have permission for this action.",
+  message,
   className,
 }: InsufficientAccessProps) {
-  if (!isInsufficientAccessError(error)) {
+  const hasExplicitMessage = typeof message === "string" && message.trim() !== "";
+  if (!isInsufficientAccessError(error) && !hasExplicitMessage) {
     return null;
   }
+  const displayMessage = hasExplicitMessage
+    ? message
+    : "Your key does not have permission for this action.";
 
   return (
     <div
@@ -26,7 +30,7 @@ export function InsufficientAccess({
       )}
     >
       <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-      <span>{message}</span>
+      <span>{displayMessage}</span>
     </div>
   );
 }

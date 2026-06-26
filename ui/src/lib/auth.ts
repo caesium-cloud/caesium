@@ -141,10 +141,7 @@ function principalFromWhoami(body: unknown): PrincipalState | null {
   }
 
   const obj = body as Record<string, unknown>;
-  const role = normalizeRole(obj.role);
-  if (!role) {
-    return null;
-  }
+  const role = normalizeRole(obj.role) ?? "viewer";
 
   const kind =
     typeof obj.kind === "string" && obj.kind.trim() !== "" ? obj.kind.trim() : null;
@@ -314,6 +311,8 @@ export async function checkSession(): Promise<boolean> {
       clearCookieSession();
       return false;
     }
+    // Authentication is proven by the successful whoami response and CSRF token.
+    // Missing or future roles fall back to viewer so UI affordances stay fail-closed.
     const nextPrincipal = principalFromWhoami(body);
     if (!nextPrincipal) {
       clearCookieSession();
@@ -397,7 +396,6 @@ export async function apiKeyLogin(key: string): Promise<ApiKeyLoginResult> {
 
     const nextPrincipal = await readWhoami(response);
     if (!nextPrincipal) {
-      clearApiKey();
       return "error";
     }
 
