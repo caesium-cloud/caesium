@@ -212,7 +212,7 @@ execution mode"). Exposing execution-mode for a pre-emptive affordance is a
 
 Answer "why did this task run / skip / re-run / cache-hit" inline on the task.
 
-- [ ] C1. Add a "Why this status?" section to the `TaskDetailPanel` **Details** tab
+- [x] C1. Add a "Why this status?" section to the `TaskDetailPanel` **Details** tab
       driving `getTaskWhy`: render the `WhyExplanation` (cache/hash/trigger/baseline) and
       the discriminating `HashInput` field for why the task ran/skipped/re-ran/cache-hit.
       Render ONLY the backend-provided state — when `BlobDiff.degraded` is set, show the
@@ -222,9 +222,11 @@ Answer "why did this task run / skip / re-run / cache-hit" inline on the task.
       For a cache-hit, link to the source run/task.
       Files: new `ui/src/features/jobs/TaskWhyView.tsx`,
       `ui/src/features/jobs/TaskDetailPanel.tsx`. Depends on: H-1.
-- [ ] C2. Playwright e2e: run a job, open a re-run task and a cache-hit task, assert the
+      Note: Added `TaskWhyView` in the Details tab, rendering verdict, trigger, baseline, diff/degraded reason, hash values, and cache-hit source run/task from `getTaskWhy`.
+- [x] C2. Playwright e2e: run a job, open a re-run task and a cache-hit task, assert the
       "why" section renders the discriminating field for each (and the source-run link for
       the cache-hit). Files: `ui/e2e/why.spec.ts`. Depends on: C1.
+      Note: Added an e2e that enables cache on an existing fixture, runs changed params for a `runParams.scenario` miss, then reruns matching params for a cache hit.
 
 ### Stream D — Blame (topology attribution)
 
