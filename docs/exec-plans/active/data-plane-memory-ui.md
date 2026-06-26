@@ -125,7 +125,7 @@ shared file. This item adds typed client methods + response types only — no UI
       asserting the URL/headers/error-mapping each method builds.
       Files: `ui/src/lib/api.ts`.
       Note: Landed getRunDiff (`/jobs/:id/runs/diff`), postReplay (`/jobs/:id/runs/:run_id/replay`), getTaskWhy (`/jobs/:id/runs/:run_id/why`), getBlame (`/jobs/:id/blame`), getReceipt (`/jobs/:id/runs/:run_id/receipt`), postVerify (`/jobs/:id/runs/:run_id/receipt/verify`), and getLineageImpact (`/lineage/impact`) with `ApiError.kind` typed 403/replay refusals.
-- [ ] H-2. Retain the principal's **role + scope** for affordance-gating. The UI already
+- [x] H-2. Retain the principal's **role + scope** for affordance-gating. The UI already
       calls `GET /auth/whoami` (`ui/src/lib/auth.ts:166`; the endpoint returns `role`,
       `api/rest/controller/auth/sso.go`) but discards the role — capture it (and any scope
       marker) into the auth store and expose a `usePrincipal()` accessor (`role`,
@@ -133,6 +133,7 @@ shared file. This item adds typed client methods + response types only — no UI
       renders the typed **403** (insufficient role / scoped-principal-denied) as an inline
       explanation, not a raw error. This is what B/F gate on. Files: `ui/src/lib/auth.ts`,
       `ui/src/features/auth/` (+ a small shared component). Depends on: H-1.
+      Note: Retained `whoami` role/principal state in `usePrincipal()`; current `whoami` has no scope/jobs marker, so API-key scopedness remains unknown without backend support.
 - [ ] H-3. Add an **auth-enabled ui-e2e lane** so the RBAC gating is actually exercised
       (today `just ui-e2e` runs auth-disabled — `justfile`/`.github/workflows/ci.yml` — so a
       viewer-sees-Replay or scoped-sees-lineage bug would never be caught). Add a Playwright

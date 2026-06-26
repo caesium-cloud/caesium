@@ -92,7 +92,12 @@ describe("LoginPage", () => {
       .mockResolvedValueOnce({ status: 204, ok: true })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ csrf_token: "csrf-secret" }),
+        json: async () => ({
+          kind: "user",
+          subject: "ops@example.com",
+          role: "viewer",
+          csrf_token: "csrf-secret",
+        }),
       });
 
     render(
@@ -192,7 +197,15 @@ describe("LoginPage", () => {
 
   it("stores the api key and calls onLogin on success", async () => {
     const onLogin = vi.fn();
-    mockFetch.mockResolvedValue({ status: 200 });
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        kind: "api_key",
+        subject: "csk_live_good",
+        role: "runner",
+      }),
+    });
 
     render(<LoginPage onLogin={onLogin} />);
 
@@ -205,7 +218,8 @@ describe("LoginPage", () => {
       expect(onLogin).toHaveBeenCalledTimes(1);
     });
 
-    expect(mockFetch).toHaveBeenCalledWith("/v1/jobs?limit=1", {
+    expect(mockFetch).toHaveBeenCalledWith("/auth/whoami", {
+      credentials: "include",
       headers: { Authorization: "Bearer csk_live_good" },
     });
     expect(isAuthenticated()).toBe(true);

@@ -1,13 +1,13 @@
 import { useState, useCallback } from "react";
 import { LogIn } from "lucide-react";
 import {
+  apiKeyLogin,
   type AuthMethod,
   authMethodKey,
   authMethodLabel,
   credentialLogin,
   isCredentialAuthMethod,
   isRedirectAuthMethod,
-  setApiKey,
   ssoLoginUrl,
 } from "@/lib/auth";
 
@@ -70,24 +70,20 @@ export function LoginPage({
       setLoading(true);
 
       try {
-        // Verify the key against a viewer-level REST endpoint so scoped keys can log in.
-        const response = await fetch("/v1/jobs?limit=1", {
-          headers: { Authorization: `Bearer ${trimmed}` },
-        });
-
-        if (response.status === 401) {
+        const result = await apiKeyLogin(trimmed);
+        if (result === "success") {
+          onLogin();
+          return;
+        }
+        if (result === "invalid") {
           setError("Invalid or expired API key");
           return;
         }
-
-        if (response.status === 403) {
+        if (result === "denied") {
           setError("API key does not have sufficient permissions");
           return;
         }
-
-        // Key is valid — store in memory and proceed.
-        setApiKey(trimmed);
-        onLogin();
+        setError("Unable to reach the server");
       } catch {
         setError("Unable to reach the server");
       } finally {

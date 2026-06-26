@@ -191,7 +191,13 @@ describe("AuthGate", () => {
       })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ kind: "user", email: "ops@example.com", csrf_token: "csrf-secret" }),
+        json: async () => ({
+          kind: "user",
+          subject: "ops@example.com",
+          email: "ops@example.com",
+          role: "viewer",
+          csrf_token: "csrf-secret",
+        }),
       });
 
     render(

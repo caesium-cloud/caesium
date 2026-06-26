@@ -1,24 +1,38 @@
+import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  apiKeyLogin,
   authMethodKey,
   authMethodLabel,
   checkSession,
   clearApiKey,
   credentialLogin,
   currentReturnTo,
+  getPrincipal,
   isCredentialAuthMethod,
   isRedirectAuthMethod,
   isAuthenticated,
   logout,
   onAuthChange,
+  type PrincipalRole,
   type RedirectAuthMethod,
   setApiKey,
   ssoLoginUrl,
+  usePrincipal,
   withAuthHeaders,
 } from "@/lib/auth";
 
 const mockFetch = vi.fn();
 globalThis.fetch = mockFetch;
+
+function whoami(role: PrincipalRole, extra: Record<string, unknown> = {}) {
+  return {
+    kind: "api_key",
+    subject: "csk_live_good",
+    role,
+    ...extra,
+  };
+}
 
 describe("auth", () => {
   beforeEach(() => {
@@ -57,7 +71,12 @@ describe("auth", () => {
   it("checks cookie sessions with credentials and caches the csrf token", async () => {
     mockFetch.mockResolvedValue({
       ok: true,
-      json: async () => ({ csrf_token: "csrf-secret" }),
+      json: async () =>
+        whoami("viewer", {
+          kind: "user",
+          subject: "ops@example.com",
+          csrf_token: "csrf-secret",
+        }),
     });
 
     await expect(checkSession()).resolves.toBe(true);
@@ -70,11 +89,52 @@ describe("auth", () => {
     expect(withAuthHeaders()).not.toHaveProperty("Authorization");
   });
 
+  it.each([
+    {
+      label: "missing role",
+      body: {
+        kind: "user",
+        subject: "ops@example.com",
+        csrf_token: "csrf-secret",
+      },
+    },
+    {
+      label: "unrecognized role",
+      body: {
+        kind: "user",
+        subject: "ops@example.com",
+        role: "future-operator",
+        csrf_token: "csrf-secret",
+      },
+    },
+  ])("keeps a valid cookie session when whoami has a $label", async ({ body }) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => body,
+    });
+
+    await expect(checkSession()).resolves.toBe(true);
+
+    expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      "X-CSRF-Token": "csrf-secret",
+    });
+    expect(getPrincipal()).toMatchObject({
+      role: "viewer",
+      canRunner: false,
+    });
+  });
+
   it("fails closed when a cookie session response omits the csrf token", async () => {
     mockFetch
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ csrf_token: "csrf-secret" }),
+        json: async () =>
+          whoami("viewer", {
+            kind: "user",
+            subject: "ops@example.com",
+            csrf_token: "csrf-secret",
+          }),
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -141,7 +201,12 @@ describe("auth", () => {
       .mockResolvedValueOnce({ status: 204, ok: true })
       .mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ csrf_token: "csrf-secret" }),
+        json: async () =>
+          whoami("viewer", {
+            kind: "user",
+            subject: "ops@example.com",
+            csrf_token: "csrf-secret",
+          }),
       });
 
     await expect(credentialLogin("/auth/sso/ldap/login", "ada", "secret")).resolves.toBe("success");
@@ -162,7 +227,12 @@ describe("auth", () => {
   it("posts logout with the csrf header and clears local state on 401", async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ csrf_token: "csrf-secret" }),
+      json: async () =>
+        whoami("viewer", {
+          kind: "user",
+          subject: "ops@example.com",
+          csrf_token: "csrf-secret",
+        }),
     });
 
     await expect(checkSession()).resolves.toBe(true);
@@ -216,6 +286,29 @@ describe("auth", () => {
     expect(isAuthenticated()).toBe(false);
   });
 
+  it("does not clear current auth state when pending api key verification is malformed", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => whoami("runner"),
+    });
+    await expect(apiKeyLogin("csk_live_current")).resolves.toBe("success");
+    expect(getPrincipal()).toMatchObject({ role: "runner", canRunner: true });
+
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => null,
+    });
+    await expect(apiKeyLogin("csk_live_candidate")).resolves.toBe("error");
+
+    expect(isAuthenticated()).toBe(true);
+    expect(withAuthHeaders()).toMatchObject({
+      Authorization: "Bearer csk_live_current",
+    });
+    expect(getPrincipal()).toMatchObject({ role: "runner", canRunner: true });
+  });
+
   it("falls back to SSO labels for malformed auth methods", () => {
     const missingType = { loginUrl: "/auth/sso/custom/login" } as unknown as RedirectAuthMethod;
     const objectType = {
@@ -238,5 +331,117 @@ describe("auth", () => {
 
     expect(isAuthenticated()).toBe(false);
     expect(withAuthHeaders()).not.toHaveProperty("X-CSRF-Token");
+  });
+
+  it.each([
+    { role: "viewer" as const, canRunner: false },
+    { role: "runner" as const, canRunner: true },
+    { role: "operator" as const, canRunner: true },
+    { role: "admin" as const, canRunner: true },
+  ])("usePrincipal reflects a $role whoami response", async ({ role, canRunner }) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => whoami(role),
+    });
+    const { result } = renderHook(() => usePrincipal());
+
+    await act(async () => {
+      await expect(apiKeyLogin("csk_live_secret")).resolves.toBe("success");
+    });
+
+    expect(mockFetch).toHaveBeenCalledWith("/auth/whoami", {
+      credentials: "include",
+      headers: { Authorization: "Bearer csk_live_secret" },
+    });
+    expect(result.current).toMatchObject({
+      kind: "api_key",
+      subject: "csk_live_good",
+      role,
+      canRunner,
+      isScoped: false,
+      scopeKnown: false,
+    });
+  });
+
+  it.each([
+    {
+      label: "explicit is_scoped true",
+      extra: { is_scoped: true },
+      isScoped: true,
+      scopeKnown: true,
+    },
+    {
+      label: "non-empty scope.jobs",
+      extra: { scope: { jobs: ["billing"] } },
+      isScoped: true,
+      scopeKnown: true,
+    },
+    {
+      label: "empty scope.jobs",
+      extra: { scope: { jobs: [] } },
+      isScoped: false,
+      scopeKnown: true,
+    },
+  ])(
+    "usePrincipal derives scope from whoami ($label)",
+    async ({ extra, isScoped, scopeKnown }) => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => whoami("runner", extra),
+      });
+      const { result } = renderHook(() => usePrincipal());
+
+      await act(async () => {
+        await expect(apiKeyLogin("csk_live_secret")).resolves.toBe("success");
+      });
+
+      expect(result.current).toMatchObject({ role: "runner", isScoped, scopeKnown });
+    },
+  );
+
+  it("clears the retained principal role on logout", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => whoami("runner"),
+    });
+    const { result } = renderHook(() => usePrincipal());
+
+    await act(async () => {
+      await expect(apiKeyLogin("csk_live_secret")).resolves.toBe("success");
+    });
+    expect(result.current).toMatchObject({ role: "runner", canRunner: true });
+
+    mockFetch.mockResolvedValueOnce({ ok: true, status: 200 });
+    await act(async () => {
+      await expect(logout()).resolves.toBeUndefined();
+    });
+    expect(result.current).toMatchObject({ role: null, canRunner: false });
+  });
+
+  it("clears the principal snapshot when auth state is cleared", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => whoami("runner"),
+    });
+    const { result } = renderHook(() => usePrincipal());
+
+    await act(async () => {
+      await apiKeyLogin("csk_live_secret");
+    });
+    expect(result.current.role).toBe("runner");
+
+    act(() => {
+      clearApiKey();
+    });
+
+    expect(result.current).toMatchObject({
+      role: null,
+      canRunner: false,
+      isScoped: false,
+    });
   });
 });
