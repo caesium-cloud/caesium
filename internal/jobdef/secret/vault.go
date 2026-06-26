@@ -2,6 +2,7 @@ package secret
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -147,6 +148,62 @@ func (r *VaultResolver) ResolveWithIdentity(ctx context.Context, ref string) (st
 		identity.UnverifiableReason = "vault identity HMAC keyring is not configured"
 	}
 	return value, identity, nil
+}
+
+func (r *VaultResolver) VerifyIdentity(ctx context.Context, ref string, expected Identity) (Identity, error) {
+	reference, err := Parse(ref)
+	if err != nil {
+		return Identity{}, err
+	}
+	if reference.Provider != providerVault {
+		return Identity{}, fmt.Errorf("vault resolver cannot handle provider %q", reference.Provider)
+	}
+	if r.logical == nil {
+		return Identity{}, errors.New("vault logical client not configured")
+	}
+
+	path, field, err := parseVaultPathField(reference)
+	if err != nil {
+		return Identity{}, err
+	}
+	version := strings.TrimSpace(expected.Version)
+	keyID := strings.TrimSpace(expected.KeyID)
+	if version == "" || keyID == "" || strings.TrimSpace(expected.HMACSHA256) == "" {
+		return Identity{}, errors.New("vault baseline identity requires version, key id, and hmac")
+	}
+
+	secret, err := r.logical.ReadWithDataWithContext(ctx, path, map[string][]string{"version": {version}})
+	if err != nil {
+		return Identity{}, fmt.Errorf("read vault secret %s version %s: %w", path, version, err)
+	}
+	if secret == nil {
+		return Identity{}, fmt.Errorf("vault secret %s version %s not found", path, version)
+	}
+	readVersion := vaultKVv2Version(secret)
+	if readVersion != "" && readVersion != version {
+		return Identity{}, fmt.Errorf("vault secret %s returned version %s, expected %s", path, readVersion, version)
+	}
+	value, ok := extractVaultField(secret, field)
+	if !ok {
+		return Identity{}, fmt.Errorf("vault secret %s version %s missing field %s", path, version, field)
+	}
+	digest, ok := r.identityKeyring.HMACWithKeyID(keyID, []byte(value))
+	if !ok {
+		return Identity{}, fmt.Errorf("vault identity HMAC key %q is not configured", keyID)
+	}
+	if !hmac.Equal([]byte(digest), []byte(strings.TrimSpace(expected.HMACSHA256))) {
+		return Identity{}, fmt.Errorf("vault secret %s version %s HMAC did not match baseline identity", path, version)
+	}
+
+	return Identity{
+		Provider:   providerVault,
+		Ref:        ref,
+		Version:    version,
+		KeyID:      keyID,
+		HMACSHA256: digest,
+		Verifiable: true,
+		Metadata:   map[string]string{"path": path, "field": field},
+	}, nil
 }
 
 func parseVaultPathField(reference *Reference) (path, field string, err error) {

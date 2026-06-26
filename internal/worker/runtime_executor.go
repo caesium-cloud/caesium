@@ -111,6 +111,31 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		return jobAlias
 	}
 
+	var descriptor *models.TaskExecutionDescriptor
+	if taskRun.Quarantine {
+		if !taskRun.ReplaySafe {
+			err := fmt.Errorf("quarantined replay task is not replay safe: task %s", taskRun.TaskID)
+			log.Error("refusing unsafe quarantined worker task", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
+			if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+				log.Error("failed to persist replay-safe guard failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+			}
+			return
+		}
+		loaded, descErr := e.store.TaskExecutionDescriptor(ctx, taskRun.JobRunID, taskRun.TaskID)
+		if descErr != nil {
+			err := fmt.Errorf("replay descriptor unavailable for quarantined task: %w", descErr)
+			log.Error("failed to load replay descriptor for worker task", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID, "error", err)
+			if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+				log.Error("failed to persist replay descriptor failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+			}
+			return
+		}
+		descriptor = loaded
+		if descriptor.Baseline.JobAlias != "" {
+			jobAlias = descriptor.Baseline.JobAlias
+		}
+	}
+
 	// Load the task model to get retry configuration.
 	var taskModel models.Task
 	hasTaskModel := e.store.DB().First(&taskModel, "id = ?", taskRun.TaskID).Error == nil
@@ -118,14 +143,26 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 	if hasTaskModel && taskModel.Name != "" {
 		taskName = taskModel.Name
 	}
+	if descriptor != nil && descriptor.Baseline.TaskName != "" {
+		taskName = descriptor.Baseline.TaskName
+	}
 
-	atomSpec, err := e.loadAtomSpec(taskRun.AtomID)
-	if err != nil {
-		log.Error("failed to load atom spec for worker task", "task_id", taskRun.TaskID, "atom_id", taskRun.AtomID, "error", err)
-		if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
-			log.Error("failed to persist atom spec load failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+	var atomSpec container.Spec
+	if descriptor != nil {
+		atomSpec = descriptor.ContainerSpec
+		if atomSpec.Kubernetes == nil && descriptor.KubernetesSpec != nil {
+			atomSpec.Kubernetes = descriptor.KubernetesSpec
 		}
-		return
+	} else {
+		var err error
+		atomSpec, err = e.loadAtomSpec(taskRun.AtomID)
+		if err != nil {
+			log.Error("failed to load atom spec for worker task", "task_id", taskRun.TaskID, "atom_id", taskRun.AtomID, "error", err)
+			if persistErr := sink.Failed(ctx, taskRun, err); persistErr != nil && !errors.Is(persistErr, run.ErrTaskClaimMismatch) {
+				log.Error("failed to persist atom spec load failure", "run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "error", persistErr)
+			}
+			return
+		}
 	}
 	runParams, err := e.loadRunParams(taskRun.JobRunID)
 	if err != nil {
@@ -186,7 +223,9 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// When digest pinning is on, resolve the image tag to its content
 		// digest and fold the digest into the cache key. A resolution failure
 		// falls back to the literal tag — a cache miss is always safe.
-		if cacheCfg.PinDigests {
+		if descriptor != nil && descriptor.Runtime.ResolvedImageDigest != "" {
+			resolvedImageDigest = descriptor.Runtime.ResolvedImageDigest
+		} else if cacheCfg.PinDigests {
 			if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
 				resolvedImageDigest = digest
 			}
@@ -265,7 +304,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias())
+		execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor)
 		if execErr == nil {
 			// Store successful result in cache.
 			if cacheStore != nil && cacheHash != "" && !taskRun.Quarantine {
@@ -295,7 +334,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 		// Compute retry delay (retryDelay * 2^(attempt-1) if backoff, else retryDelay).
 		var delay time.Duration
-		if hasTaskModel && taskModel.RetryDelay > 0 {
+		if descriptor != nil && descriptor.Runtime.RetryDelay > 0 {
+			delay = descriptor.Runtime.RetryDelay
+			if descriptor.Runtime.RetryBackoff {
+				delay = descriptor.Runtime.RetryDelay * (1 << uint(attempt-1))
+			}
+		} else if hasTaskModel && taskModel.RetryDelay > 0 {
 			delay = taskModel.RetryDelay
 			if taskModel.RetryBackoff {
 				delay = taskModel.RetryDelay * (1 << uint(attempt-1))
@@ -407,7 +451,7 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 	return env
 }
 
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string) error {
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor) error {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -434,7 +478,12 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	if err != nil {
 		return err
 	}
-	if len(secretIdentities) > 0 {
+	if descriptor != nil && taskRun.Quarantine {
+		if err := verifyReplaySecretIdentities(taskCtx, e.secretResolver, descriptor.SecretRefs, secretIdentities); err != nil {
+			return err
+		}
+	}
+	if len(secretIdentities) > 0 && !taskRun.Quarantine {
 		refs := make([]models.TaskExecutionSecretRef, 0, len(secretIdentities))
 		for _, resolved := range secretIdentities {
 			refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
@@ -543,6 +592,184 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 		return nil
 	}
 	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
+}
+
+func verifyReplaySecretIdentities(ctx context.Context, resolver secret.Resolver, expected []models.TaskExecutionSecretRef, actual []jobdefruntime.ResolvedSecretIdentity) error {
+	expectedByKey, err := expectedReplaySecretRefMap(expected)
+	if err != nil {
+		return err
+	}
+	actualByKey := make(map[string]jobdefruntime.ResolvedSecretIdentity, len(actual))
+	for _, resolved := range actual {
+		key := replaySecretRefKey(resolved.EnvKey, resolved.Ref)
+		ref, ok := expectedByKey[key]
+		if !ok {
+			return fmt.Errorf("replay secret %s for env %s has no baseline identity", resolved.Ref, resolved.EnvKey)
+		}
+		actualByKey[key] = resolved
+		if err := verifyResolvedReplaySecretIdentity(ctx, resolver, ref, resolved.Identity); err != nil {
+			return fmt.Errorf("replay secret %s for env %s %v", ref.Ref, ref.EnvKey, err)
+		}
+	}
+	for _, ref := range expected {
+		if strings.TrimSpace(ref.Ref) == "" {
+			continue
+		}
+		_, ok := actualByKey[replaySecretRefKey(ref.EnvKey, ref.Ref)]
+		if !ok {
+			return fmt.Errorf("replay secret %s for env %s was not resolved", ref.Ref, ref.EnvKey)
+		}
+	}
+	return nil
+}
+
+func expectedReplaySecretRefMap(refs []models.TaskExecutionSecretRef) (map[string]models.TaskExecutionSecretRef, error) {
+	expected := make(map[string]models.TaskExecutionSecretRef)
+	for _, ref := range refs {
+		if strings.TrimSpace(ref.Ref) == "" {
+			continue
+		}
+		key := replaySecretRefKey(ref.EnvKey, ref.Ref)
+		if _, exists := expected[key]; exists {
+			return nil, fmt.Errorf("duplicate replay secret identity for env %s ref %s", ref.EnvKey, ref.Ref)
+		}
+		expected[key] = ref
+	}
+	return expected, nil
+}
+
+func replaySecretRefKey(envKey, ref string) string {
+	return strings.TrimSpace(envKey) + "\x00" + strings.TrimSpace(ref)
+}
+
+func verifyResolvedReplaySecretIdentity(ctx context.Context, resolver secret.Resolver, ref models.TaskExecutionSecretRef, identity secret.Identity) error {
+	if !ref.Verifiable {
+		return fmt.Errorf("is not verifiable: %s", ref.UnverifiableReason)
+	}
+	if !identity.Verifiable {
+		return fmt.Errorf("resolved to unverifiable identity: %s", identity.UnverifiableReason)
+	}
+	if ref.Provider != "" && ref.Provider != identity.Provider {
+		return fmt.Errorf("provider changed from %s to %s", ref.Provider, identity.Provider)
+	}
+	if replaySecretRequiresPinnedVaultVerification(ref) {
+		if replayDescriptorIdentityString(ref, "version") != identity.Version {
+			return fmt.Errorf("version changed from %s to %s", replayDescriptorIdentityString(ref, "version"), identity.Version)
+		}
+		verifier, ok := resolver.(secret.IdentityVerifier)
+		if !ok {
+			return fmt.Errorf("provider %s does not support baseline identity verification", ref.Provider)
+		}
+		pinned, err := verifier.VerifyIdentity(ctx, ref.Ref, replaySecretIdentityFromDescriptor(ref))
+		if err != nil {
+			return fmt.Errorf("baseline identity verification failed: %w", err)
+		}
+		if !pinned.Verifiable {
+			return fmt.Errorf("baseline identity is not verifiable: %s", pinned.UnverifiableReason)
+		}
+		if !replaySecretIdentityMatches(ref, pinned) {
+			return fmt.Errorf("baseline identity changed")
+		}
+		return nil
+	}
+	if !replaySecretIdentityMatches(ref, identity) {
+		return fmt.Errorf("identity changed")
+	}
+	return nil
+}
+
+func replaySecretRequiresPinnedVaultVerification(ref models.TaskExecutionSecretRef) bool {
+	return strings.EqualFold(ref.Provider, "vault") &&
+		replayDescriptorIdentityString(ref, "version") != "" &&
+		replayDescriptorIdentityString(ref, "keyId") != ""
+}
+
+func replaySecretIdentityFromDescriptor(ref models.TaskExecutionSecretRef) secret.Identity {
+	return secret.Identity{
+		Provider:        ref.Provider,
+		Ref:             ref.Ref,
+		Version:         replayDescriptorIdentityString(ref, "version"),
+		ResourceVersion: replayDescriptorIdentityString(ref, "resourceVersion"),
+		Namespace:       replayDescriptorIdentityString(ref, "namespace"),
+		Name:            replayDescriptorIdentityString(ref, "name"),
+		Key:             replayDescriptorIdentityString(ref, "key"),
+		KeyID:           replayDescriptorIdentityString(ref, "keyId"),
+		HMACSHA256:      replayDescriptorIdentityString(ref, "hmacSha256"),
+		Verifiable:      ref.Verifiable,
+	}
+}
+
+func replaySecretIdentityMatches(ref models.TaskExecutionSecretRef, identity secret.Identity) bool {
+	if ref.Provider != "" && ref.Provider != identity.Provider {
+		return false
+	}
+	if !replaySecretHasRequiredDiscriminator(ref) {
+		return false
+	}
+	actualIdentity := resolvedSecretIdentityMap(identity)
+	for key, expectedValue := range ref.Identity {
+		if fmt.Sprint(expectedValue) != fmt.Sprint(actualIdentity[key]) {
+			return false
+		}
+	}
+	return true
+}
+
+func replaySecretHasRequiredDiscriminator(ref models.TaskExecutionSecretRef) bool {
+	if len(ref.Identity) == 0 {
+		return false
+	}
+	if strings.EqualFold(ref.Provider, "vault") {
+		return replayDescriptorIdentityString(ref, "version") != "" &&
+			replayDescriptorIdentityString(ref, "keyId") != "" &&
+			replayDescriptorIdentityString(ref, "hmacSha256") != ""
+	}
+	for _, value := range ref.Identity {
+		if strings.TrimSpace(fmt.Sprint(value)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func replayDescriptorIdentityString(ref models.TaskExecutionSecretRef, key string) string {
+	if len(ref.Identity) == 0 {
+		return ""
+	}
+	value, ok := ref.Identity[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func resolvedSecretIdentityMap(identity secret.Identity) map[string]string {
+	out := make(map[string]string)
+	if identity.Version != "" {
+		out["version"] = identity.Version
+	}
+	if identity.ResourceVersion != "" {
+		out["resourceVersion"] = identity.ResourceVersion
+	}
+	if identity.Namespace != "" {
+		out["namespace"] = identity.Namespace
+	}
+	if identity.Name != "" {
+		out["name"] = identity.Name
+	}
+	if identity.Key != "" {
+		out["key"] = identity.Key
+	}
+	if identity.KeyID != "" {
+		out["keyId"] = identity.KeyID
+	}
+	if identity.HMACSHA256 != "" {
+		out["hmacSha256"] = identity.HMACSHA256
+	}
+	for k, v := range identity.Metadata {
+		out[k] = v
+	}
+	return out
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

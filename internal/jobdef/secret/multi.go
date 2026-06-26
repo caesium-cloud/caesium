@@ -53,22 +53,42 @@ func (m *MultiResolver) Resolve(ctx context.Context, ref string) (string, error)
 
 // ResolveWithIdentity locates the provider-specific resolver and delegates the call.
 func (m *MultiResolver) ResolveWithIdentity(ctx context.Context, ref string) (string, Identity, error) {
+	resolver, err := m.providerForRef(ref)
+	if err != nil {
+		return "", Identity{}, err
+	}
+	return resolver.ResolveWithIdentity(ctx, ref)
+}
+
+func (m *MultiResolver) VerifyIdentity(ctx context.Context, ref string, expected Identity) (Identity, error) {
+	resolver, err := m.providerForRef(ref)
+	if err != nil {
+		return Identity{}, err
+	}
+	verifier, ok := resolver.(IdentityVerifier)
+	if !ok {
+		return Identity{}, fmt.Errorf("secret provider %q does not support baseline identity verification", expected.Provider)
+	}
+	return verifier.VerifyIdentity(ctx, ref, expected)
+}
+
+func (m *MultiResolver) providerForRef(ref string) (Resolver, error) {
 	if strings.TrimSpace(ref) == "" {
-		return "", Identity{}, errors.New("secret reference is empty")
+		return nil, errors.New("secret reference is empty")
 	}
 	if m == nil {
-		return "", Identity{}, errors.New("secret resolver is not configured")
+		return nil, errors.New("secret resolver is not configured")
 	}
 
 	refInfo, err := Parse(ref)
 	if err != nil {
-		return "", Identity{}, err
+		return nil, err
 	}
 
 	resolver, ok := m.providers[refInfo.Provider]
 	if !ok || resolver == nil {
-		return "", Identity{}, fmt.Errorf("secret provider %q not configured", refInfo.Provider)
+		return nil, fmt.Errorf("secret provider %q not configured", refInfo.Provider)
 	}
 
-	return resolver.ResolveWithIdentity(ctx, ref)
+	return resolver, nil
 }

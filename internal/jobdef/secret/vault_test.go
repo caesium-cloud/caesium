@@ -110,6 +110,39 @@ func (s *VaultResolverSuite) TestResolveWithIdentityCanonicalizesNumericVersion(
 	s.Empty(rest.dataRequests)
 }
 
+func (s *VaultResolverSuite) TestVerifyIdentityPinsBaselineVersionAndKeyID() {
+	keyring, err := NewIdentityKeyring("k2", map[string][]byte{
+		"k1": []byte("baseline-key"),
+		"k2": []byte("current-key"),
+	})
+	s.Require().NoError(err)
+	rest := &fakeLogical{response: &vault.Secret{Data: map[string]any{
+		"data":     map[string]any{"token": "abc"},
+		"metadata": map[string]any{"version": 7},
+	}}}
+	r := NewVaultResolverWithLogicalAndKeyring(rest, keyring)
+
+	mac := hmac.New(sha256.New, []byte("baseline-key"))
+	_, _ = mac.Write([]byte("abc"))
+	expectedDigest := hex.EncodeToString(mac.Sum(nil))
+
+	identity, err := r.VerifyIdentity(context.Background(), "secret://vault/secret/data/path?field=token", Identity{
+		Provider:   "vault",
+		Ref:        "secret://vault/secret/data/path?field=token",
+		Version:    "7",
+		KeyID:      "k1",
+		HMACSHA256: expectedDigest,
+		Verifiable: true,
+	})
+	s.Require().NoError(err)
+	s.Equal("7", identity.Version)
+	s.Equal("k1", identity.KeyID)
+	s.Equal(expectedDigest, identity.HMACSHA256)
+	s.Require().Len(rest.dataRequests, 1)
+	s.Equal("secret/data/path", rest.dataRequests[0].path)
+	s.Equal([]string{"7"}, rest.dataRequests[0].data["version"])
+}
+
 func (s *VaultResolverSuite) TestResolveFieldAsSegment() {
 	rest := &fakeLogical{response: &vault.Secret{Data: map[string]any{"password": "hunter2"}}}
 	r := NewVaultResolverWithLogical(rest)

@@ -433,6 +433,69 @@ func (s *Store) TaskQuarantine(ctx context.Context, runID, taskID uuid.UUID) (bo
 	return row.TaskQuarantine || row.RunQuarantine, nil
 }
 
+func (s *Store) TaskExecutionDescriptor(ctx context.Context, runID, taskID uuid.UUID) (*models.TaskExecutionDescriptor, error) {
+	var taskRun models.TaskRun
+	err := s.db.WithContext(ctx).
+		Select("execution_descriptor").
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Take(&taskRun).Error
+	if err != nil {
+		return nil, err
+	}
+	if len(taskRun.ExecutionDescriptor) == 0 {
+		return nil, fmt.Errorf("run: task execution descriptor missing for run %s task %s", runID, taskID)
+	}
+	var descriptor models.TaskExecutionDescriptor
+	if err := json.Unmarshal(taskRun.ExecutionDescriptor, &descriptor); err != nil {
+		return nil, fmt.Errorf("run: decode task execution descriptor for run %s task %s: %w", runID, taskID, err)
+	}
+	if descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion {
+		return nil, fmt.Errorf("run: unsupported task execution descriptor version %d for run %s task %s", descriptor.SchemaVersion, runID, taskID)
+	}
+	return &descriptor, nil
+}
+
+func (s *Store) replayTaskExecutionDescriptorTx(tx *gorm.DB, runID, taskID uuid.UUID) (*models.TaskExecutionDescriptor, bool, error) {
+	var row struct {
+		TaskQuarantine      bool
+		RunQuarantine       bool
+		ExecutionDescriptor datatypes.JSON
+	}
+	err := tx.Table("task_runs").
+		Select("task_runs.quarantine AS task_quarantine, job_runs.quarantine AS run_quarantine, task_runs.execution_descriptor AS execution_descriptor").
+		Joins("join job_runs on job_runs.id = task_runs.job_run_id").
+		Where("task_runs.job_run_id = ? AND task_runs.task_id = ?", runID, taskID).
+		Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if !row.TaskQuarantine && !row.RunQuarantine {
+		return nil, false, nil
+	}
+	if len(row.ExecutionDescriptor) == 0 {
+		return nil, true, fmt.Errorf("run: replay task execution descriptor missing for run %s task %s", runID, taskID)
+	}
+	var descriptor models.TaskExecutionDescriptor
+	if err := json.Unmarshal(row.ExecutionDescriptor, &descriptor); err != nil {
+		return nil, true, fmt.Errorf("run: decode replay task execution descriptor for run %s task %s: %w", runID, taskID, err)
+	}
+	if descriptor.SchemaVersion != models.TaskExecutionDescriptorSchemaVersion {
+		return nil, true, fmt.Errorf("run: unsupported replay task execution descriptor version %d for run %s task %s", descriptor.SchemaVersion, runID, taskID)
+	}
+	return &descriptor, true, nil
+}
+
+func (s *Store) replayPredecessorRefsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]models.TaskExecutionEdgeRef, bool, error) {
+	descriptor, replay, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
+	if err != nil || !replay {
+		return nil, replay, err
+	}
+	return descriptor.DAG.Predecessors, true, nil
+}
+
 func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
 	if mutate == nil {
 		return nil
@@ -1540,33 +1603,35 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			}
 			counts.addTaskRunStatus(1)
 
-			// Load the task model for edge traversal and branch detection.
-			var taskModel models.Task
-			if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+			descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
+			if err != nil {
 				return err
 			}
 
-			edges, err := s.successorEdgesTx(tx, taskModel)
+			// Load the task model for edge fallback and branch detection.
+			var taskModel models.Task
+			taskType := ""
+			if replayTask {
+				taskModel = models.Task{ID: taskID}
+				taskType = firstNonEmpty(descriptor.Runtime.TaskType, descriptor.DAG.BranchBehavior, "task")
+			} else {
+				if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+					return err
+				}
+				taskType = taskModel.Type
+			}
+
+			edges, err := s.successorEdgesForRunTx(tx, runID, taskID, taskModel)
 			if err != nil {
 				return err
 			}
 
 			// Determine branch filtering if this is a branch-type task.
 			var branchSelectedIDs map[uuid.UUID]bool
-			if len(edges) > 0 && taskModel.Type == "branch" {
-				successorIDs := make([]uuid.UUID, 0, len(edges))
-				for _, edge := range edges {
-					successorIDs = append(successorIDs, edge.ToTaskID)
-				}
-				var successorTasks []models.Task
-				if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+			if len(edges) > 0 && taskType == "branch" {
+				successorNameToID, _, err := s.successorNameMapTx(tx, replayTask, descriptor, edges)
+				if err != nil {
 					return err
-				}
-				successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
-				for _, st := range successorTasks {
-					if st.Name != "" {
-						successorNameToID[st.Name] = st.ID
-					}
 				}
 
 				branchSelectedIDs = make(map[uuid.UUID]bool, len(branchSelections))
@@ -1729,6 +1794,64 @@ func (s *Store) GetTaskLogSnapshot(runID, taskID uuid.UUID) (*TaskLogSnapshot, e
 		Text:      task.LogText,
 		Truncated: task.LogTruncated,
 	}, nil
+}
+
+func (s *Store) successorEdgesForRunTx(tx *gorm.DB, runID, taskID uuid.UUID, task models.Task) ([]models.TaskEdge, error) {
+	descriptor, replay, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
+	if err != nil {
+		return nil, err
+	}
+	if replay {
+		edges := make([]models.TaskEdge, 0, len(descriptor.DAG.Successors))
+		for _, successor := range descriptor.DAG.Successors {
+			if successor.TaskID == uuid.Nil {
+				continue
+			}
+			edges = append(edges, models.TaskEdge{
+				FromTaskID: taskID,
+				ToTaskID:   successor.TaskID,
+			})
+		}
+		return edges, nil
+	}
+	return s.successorEdgesTx(tx, task)
+}
+
+func (s *Store) successorNameMapTx(tx *gorm.DB, replayTask bool, descriptor *models.TaskExecutionDescriptor, edges []models.TaskEdge) (map[string]uuid.UUID, []string, error) {
+	if replayTask {
+		successorNameToID := make(map[string]uuid.UUID, len(edges))
+		validTargets := make([]string, 0, len(edges))
+		if descriptor == nil {
+			return successorNameToID, validTargets, nil
+		}
+		for _, successor := range descriptor.DAG.Successors {
+			if successor.TaskID == uuid.Nil {
+				continue
+			}
+			name := firstNonEmpty(successor.TaskName, successor.TaskID.String())
+			successorNameToID[name] = successor.TaskID
+			validTargets = append(validTargets, name)
+		}
+		return successorNameToID, validTargets, nil
+	}
+
+	successorIDs := make([]uuid.UUID, 0, len(edges))
+	for _, edge := range edges {
+		successorIDs = append(successorIDs, edge.ToTaskID)
+	}
+	var successorTasks []models.Task
+	if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+		return nil, nil, err
+	}
+	successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
+	validTargets := make([]string, 0, len(successorTasks))
+	for _, st := range successorTasks {
+		if st.Name != "" {
+			successorNameToID[st.Name] = st.ID
+			validTargets = append(validTargets, st.Name)
+		}
+	}
+	return successorNameToID, validTargets, nil
 }
 
 func (s *Store) successorEdgesTx(tx *gorm.DB, task models.Task) ([]models.TaskEdge, error) {
@@ -1959,6 +2082,32 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 }
 
 func (s *Store) predecessorStatusesTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]TaskStatus, error) {
+	if refs, replay, err := s.replayPredecessorRefsTx(tx, runID, taskID); err != nil {
+		return nil, err
+	} else if replay {
+		if len(refs) == 0 {
+			return nil, nil
+		}
+		predIDs := make([]uuid.UUID, 0, len(refs))
+		for _, ref := range refs {
+			if ref.TaskID != uuid.Nil {
+				predIDs = append(predIDs, ref.TaskID)
+			}
+		}
+		if len(predIDs) == 0 {
+			return nil, nil
+		}
+		var taskRuns []models.TaskRun
+		if err := tx.Select("status").Where("job_run_id = ? AND task_id IN ?", runID, predIDs).Find(&taskRuns).Error; err != nil {
+			return nil, err
+		}
+		statuses := make([]TaskStatus, 0, len(taskRuns))
+		for _, taskRun := range taskRuns {
+			statuses = append(statuses, TaskStatus(taskRun.Status))
+		}
+		return statuses, nil
+	}
+
 	var edges []models.TaskEdge
 	if err := tx.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
 		return nil, err
@@ -2043,6 +2192,17 @@ func normalizedTriggerRule(rule string) string {
 }
 
 func (s *Store) shouldRunTaskTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, string, error) {
+	if descriptor, replay, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID); err != nil {
+		return false, "", err
+	} else if replay {
+		rule := normalizedTriggerRule(descriptor.DAG.TriggerRule)
+		predStatuses, err := s.predecessorStatusesTx(tx, runID, taskID)
+		if err != nil {
+			return false, "", err
+		}
+		return satisfiesTriggerRule(rule, predStatuses), rule, nil
+	}
+
 	var task models.Task
 	if err := tx.Select("trigger_rule").First(&task, "id = ?", taskID).Error; err != nil {
 		return false, "", err
@@ -2159,37 +2319,36 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 				return nil
 			}
 
-			// Load the task model once — needed for both edge fallback and branch
-			// type detection.
-			var taskModel models.Task
-			if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+			descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
+			if err != nil {
 				return err
 			}
 
-			edges, err := s.successorEdgesTx(tx, taskModel)
+			// Load the task model once — needed for both edge fallback and branch
+			// type detection.
+			var taskModel models.Task
+			taskType := ""
+			if replayTask {
+				taskModel = models.Task{ID: taskID}
+				taskType = firstNonEmpty(descriptor.Runtime.TaskType, descriptor.DAG.BranchBehavior, "task")
+			} else {
+				if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+					return err
+				}
+				taskType = taskModel.Type
+			}
+
+			edges, err := s.successorEdgesForRunTx(tx, runID, taskID, taskModel)
 			if err != nil {
 				return err
 			}
 
 			// Determine branch filtering if this is a branch-type task.
 			var branchSelectedIDs map[uuid.UUID]bool
-			if len(edges) > 0 && taskModel.Type == "branch" {
-				// Build valid target names from successor tasks.
-				successorIDs := make([]uuid.UUID, 0, len(edges))
-				for _, edge := range edges {
-					successorIDs = append(successorIDs, edge.ToTaskID)
-				}
-				var successorTasks []models.Task
-				if err := tx.Where("id IN ?", successorIDs).Find(&successorTasks).Error; err != nil {
+			if len(edges) > 0 && taskType == "branch" {
+				successorNameToID, validTargets, err := s.successorNameMapTx(tx, replayTask, descriptor, edges)
+				if err != nil {
 					return err
-				}
-				successorNameToID := make(map[string]uuid.UUID, len(successorTasks))
-				validTargets := make([]string, 0, len(successorTasks))
-				for _, st := range successorTasks {
-					if st.Name != "" {
-						successorNameToID[st.Name] = st.ID
-						validTargets = append(validTargets, st.Name)
-					}
 				}
 
 				// Validate selections.
@@ -2522,12 +2681,21 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 
 		skipped = append(skipped, current.taskID)
 
-		var task models.Task
-		if err := tx.First(&task, "id = ?", current.taskID).Error; err != nil {
+		descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, current.taskID)
+		if err != nil {
 			return skipped, err
 		}
+		var task models.Task
+		if replayTask {
+			task = models.Task{ID: current.taskID}
+			_ = descriptor
+		} else {
+			if err := tx.First(&task, "id = ?", current.taskID).Error; err != nil {
+				return skipped, err
+			}
+		}
 
-		edges, err := s.successorEdgesTx(tx, task)
+		edges, err := s.successorEdgesForRunTx(tx, runID, current.taskID, task)
 		if err != nil {
 			return skipped, err
 		}
@@ -3434,6 +3602,12 @@ func isStoreContentionErr(err error) bool {
 // predecessors of the given task within a run.  This is used by the distributed
 // executor to inject CAESIUM_OUTPUT_* env vars before starting a task.
 func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[string]string, error) {
+	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
+		return nil, err
+	} else if replay {
+		return s.predecessorOutputsFromRefsTx(s.db, runID, refs)
+	}
+
 	// Find predecessor task IDs via edges.
 	var edges []models.TaskEdge
 	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
@@ -3500,9 +3674,59 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
+func (s *Store) predecessorOutputsFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) (map[string]map[string]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	predTaskIDs := make([]uuid.UUID, 0, len(refs))
+	nameByID := make(map[uuid.UUID]string, len(refs))
+	for _, ref := range refs {
+		if ref.TaskID == uuid.Nil {
+			continue
+		}
+		predTaskIDs = append(predTaskIDs, ref.TaskID)
+		nameByID[ref.TaskID] = firstNonEmpty(ref.TaskName, ref.TaskID.String())
+	}
+	if len(predTaskIDs) == 0 {
+		return nil, nil
+	}
+
+	var taskRuns []models.TaskRun
+	if err := tx.Select("task_id", "output").
+		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
+		Find(&taskRuns).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[string]map[string]string, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		if len(taskRun.Output) == 0 {
+			continue
+		}
+		var output map[string]string
+		if err := json.Unmarshal(taskRun.Output, &output); err != nil {
+			log.Warn("failed to unmarshal replay predecessor task output", "run_id", runID, "predecessor_task_id", taskRun.TaskID, "error", err)
+			continue
+		}
+		if len(output) == 0 {
+			continue
+		}
+		result[nameByID[taskRun.TaskID]] = output
+	}
+	if len(result) == 0 {
+		return nil, nil
+	}
+	return result, nil
+}
+
 // PredecessorDescriptorInputs returns predecessor outputs and effective hashes
 // keyed by predecessor task id for immutable execution-descriptor capture.
 func (s *Store) PredecessorDescriptorInputs(runID, taskID uuid.UUID) (map[uuid.UUID]map[string]string, map[uuid.UUID]string, error) {
+	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
+		return nil, nil, err
+	} else if replay {
+		return s.predecessorDescriptorInputsFromRefsTx(s.db, runID, refs)
+	}
+
 	var edges []models.TaskEdge
 	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
 		return nil, nil, err
@@ -3546,6 +3770,43 @@ func (s *Store) PredecessorDescriptorInputs(runID, taskID uuid.UUID) (map[uuid.U
 	return outputs, hashes, nil
 }
 
+func (s *Store) predecessorDescriptorInputsFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) (map[uuid.UUID]map[string]string, map[uuid.UUID]string, error) {
+	if len(refs) == 0 {
+		return nil, nil, nil
+	}
+	predTaskIDs := make([]uuid.UUID, 0, len(refs))
+	for _, ref := range refs {
+		if ref.TaskID != uuid.Nil {
+			predTaskIDs = append(predTaskIDs, ref.TaskID)
+		}
+	}
+	if len(predTaskIDs) == 0 {
+		return nil, nil, nil
+	}
+	var taskRuns []models.TaskRun
+	if err := tx.Select("task_id", "output", "hash", "effective_hash", "status").
+		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
+		Find(&taskRuns).Error; err != nil {
+		return nil, nil, err
+	}
+	outputs := make(map[uuid.UUID]map[string]string, len(taskRuns))
+	hashes := make(map[uuid.UUID]string, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		if len(taskRun.Output) > 0 {
+			var output map[string]string
+			if err := json.Unmarshal(taskRun.Output, &output); err == nil && len(output) > 0 {
+				outputs[taskRun.TaskID] = output
+			}
+		}
+		if taskRun.Status == string(TaskStatusSucceeded) || taskRun.Status == string(TaskStatusCached) {
+			if hash := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); hash != "" {
+				hashes[taskRun.TaskID] = hash
+			}
+		}
+	}
+	return outputs, hashes, nil
+}
+
 // PredecessorHashes returns the execution hashes recorded on predecessor task
 // runs that completed successfully in the current run. This keeps distributed
 // cache hashing aligned with local execution, including transitive cache hits.
@@ -3560,6 +3821,12 @@ func (s *Store) PredecessorDescriptorInputs(runID, taskID uuid.UUID) (map[uuid.U
 // hash and cache-hits. Falling back to hash (effective_hash empty) is the
 // common case and is byte-identical to the pre-D2 behavior.
 func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
+	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
+		return nil, err
+	} else if replay {
+		return s.predecessorHashesFromRefsTx(s.db, runID, refs)
+	}
+
 	var edges []models.TaskEdge
 	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
 		return nil, err
@@ -3590,6 +3857,42 @@ func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
 		return nil, nil
 	}
 
+	hashes := make([]string, 0, len(taskRuns))
+	for _, taskRun := range taskRuns {
+		if h := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); h != "" {
+			hashes = append(hashes, h)
+		}
+	}
+	if len(hashes) == 0 {
+		return nil, nil
+	}
+	sort.Strings(hashes)
+	return hashes, nil
+}
+
+func (s *Store) predecessorHashesFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	predTaskIDs := make([]uuid.UUID, 0, len(refs))
+	for _, ref := range refs {
+		if ref.TaskID != uuid.Nil {
+			predTaskIDs = append(predTaskIDs, ref.TaskID)
+		}
+	}
+	if len(predTaskIDs) == 0 {
+		return nil, nil
+	}
+	var taskRuns []models.TaskRun
+	if err := tx.Select("hash", "effective_hash").
+		Where("job_run_id = ? AND task_id IN ? AND status IN ? AND hash <> ''",
+			runID,
+			predTaskIDs,
+			[]string{string(TaskStatusSucceeded), string(TaskStatusCached)},
+		).
+		Find(&taskRuns).Error; err != nil {
+		return nil, err
+	}
 	hashes := make([]string, 0, len(taskRuns))
 	for _, taskRun := range taskRuns {
 		if h := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); h != "" {
