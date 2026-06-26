@@ -72,6 +72,7 @@ var endpointPolicy = map[string]models.Role{
 
 	// Runner
 	"POST /v1/jobs/:id/run":                      models.RoleRunner,
+	"POST /v1/jobs/:id/runs/:id/replay":          models.RoleRunner,
 	"POST /v1/jobs/:id/runs/:id/retry":           models.RoleRunner,
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry": models.RoleRunner,
 	"POST /v1/jobs/:id/backfill":                 models.RoleRunner,

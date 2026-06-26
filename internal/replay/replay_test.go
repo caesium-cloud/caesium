@@ -120,6 +120,14 @@ func TestReplayAbortsUnchangedTaskWithoutCacheOrBaselineResult(t *testing.T) {
 	require.Contains(t, err.Error(), `step "extract"`)
 }
 
+func TestReplayBaselineWithoutTaskRunsIsUnavailableProof(t *testing.T) {
+	f := newReplayFixture(t)
+
+	_, err := New(f.store, &recordingDispatcher{}).Replay(context.Background(), Request{BaselineRunID: f.runID})
+	require.ErrorIs(t, err, ErrUnavailableBaselineProof)
+	require.Contains(t, err.Error(), "has no task runs")
+}
+
 func TestReplayAbortsUnchangedFailedBaselineResult(t *testing.T) {
 	f := newReplayFixture(t)
 	taskID := f.seedTask(t, seedTaskConfig{name: "extract", replaySafe: true, result: "exit_code:1"})

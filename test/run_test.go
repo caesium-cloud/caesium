@@ -14,12 +14,13 @@ import (
 // runResponse matches the JSON returned by POST /v1/jobs/:id/run and
 // GET /v1/jobs/:id/runs/:run_id.
 type runResponse struct {
-	ID     string            `json:"id"`
-	JobID  string            `json:"job_id"`
-	Status string            `json:"status"`
-	Error  string            `json:"error,omitempty"`
-	Params map[string]string `json:"params,omitempty"`
-	Tasks  []runTaskResponse `json:"tasks"`
+	ID         string            `json:"id"`
+	JobID      string            `json:"job_id"`
+	Status     string            `json:"status"`
+	Error      string            `json:"error,omitempty"`
+	Quarantine bool              `json:"quarantine"`
+	Params     map[string]string `json:"params,omitempty"`
+	Tasks      []runTaskResponse `json:"tasks"`
 }
 
 type runTaskResponse struct {
