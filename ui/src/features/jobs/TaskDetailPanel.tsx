@@ -16,6 +16,7 @@ import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { api, type JobTask, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
+import { TaskWhyView } from "./TaskWhyView";
 import { isTaskCached } from "./cache-utils";
 
 interface TaskDetailPanelProps {
@@ -300,6 +301,12 @@ export function TaskDetailPanel({
                   mono
                 />
               </div>
+
+              <TaskWhyView
+                jobId={jobId}
+                runId={runId}
+                taskName={task?.name}
+              />
 
               {/* Outputs */}
               {runTask?.output && Object.keys(runTask.output).length > 0 && (

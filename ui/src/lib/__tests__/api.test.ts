@@ -74,6 +74,42 @@ describe('api', () => {
     expect(mockFetch).toHaveBeenCalledWith('/v1/jobs/job-42/cache', expect.anything());
   });
 
+  it('getJobTasks normalizes task IDs from Go model casing', async () => {
+    mockFetch.mockResolvedValue(okResponse([
+      {
+        ID: 'task-1',
+        JobID: 'job-1',
+        AtomID: 'atom-1',
+        name: 'extract',
+        node_selector: { disk: 'ssd' },
+        retries: 2,
+        retry_delay: 1000,
+        retry_backoff: true,
+        trigger_rule: 'all_success',
+        cache_config: null,
+        CreatedAt: '2026-06-26T00:00:00Z',
+        UpdatedAt: '2026-06-26T00:00:01Z',
+      },
+    ]));
+
+    await expect(api.getJobTasks('job-1')).resolves.toEqual([
+      {
+        id: 'task-1',
+        job_id: 'job-1',
+        atom_id: 'atom-1',
+        name: 'extract',
+        node_selector: { disk: 'ssd' },
+        retries: 2,
+        retry_delay: 1000,
+        retry_backoff: true,
+        trigger_rule: 'all_success',
+        cache_config: null,
+        created_at: '2026-06-26T00:00:00Z',
+        updated_at: '2026-06-26T00:00:01Z',
+      },
+    ]);
+  });
+
   it('applyJobDef preserves volume and workload identity fields in the request payload', async () => {
     mockFetch.mockResolvedValue(okResponse({ applied: 1 }));
 
