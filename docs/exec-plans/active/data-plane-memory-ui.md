@@ -53,20 +53,25 @@ the authoritative contract for the `ui/src/lib/api.ts` methods.
 
 ## Progress (as of 2026-06-26)
 
-No implementation waves have shipped yet. The plan was published as the UI
-follow-on to the completed Data-Plane Memory I + II plans (run-diff/blame/replay
-shipped CLI+REST-only); the first wave is the next eligible run of the
-`exec-plan-wave` skill against this doc. The eligible first-wave leaf is **H-1**
-(the shared `api.ts` client surface every feature consumes); **H-2** (principal role/scope
-retention) and **H-3** (the auth-enabled e2e lane) follow as the foundation chain. The
-feature streams unlock as their H deps land: A/C/D/E need only H-1; B and F also need
-H-2/H-3.
+**Wave 1 shipped the foundation (H-1).** Wave 2 fans out to H-2 + A1 + C1. The
+foundation chain is H-1 → H-2 → H-3; feature streams unlock as their H deps land
+(A/C/D/E need only H-1; B and F also need H-2/H-3).
+
+### Wave 1 — H-1 shipped (the shared API client)
+
+- **Stream α (H-1):** the typed `ui/src/lib/api.ts` data-verb client for all six verbs
+  (run-diff, replay, why, blame, receipt/verify, lineage-impact) + a vitest unit —
+  PR #247, merged `712db52`. Opus adversarial review (0 blockers, 4 should-fix applied:
+  message-aware replay error classification so overloaded 400/409/422 codes aren't
+  mislabeled; `BlameOptions.task`; per-verb response round-trip assertion) + 3 bot fixes
+  (null-body guard, `getTaskWhy` taskName, 401 test). Caught a real image-pin guardrail
+  miss (an `alpine` test fixture), not a flake.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| H | Shared `api.ts` client methods + types (H-1), principal role/scope retention for gating (H-2), auth-enabled ui-e2e lane (H-3) | **P0** | Not started — the foundation all feature streams depend on |
+| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1 shipped** (#247); H-2 in W2, H-3 pending |
 | A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | Not started |
 | B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | Not started |
 | C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | Not started |
