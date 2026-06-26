@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ChevronDown, ChevronRight, RotateCcw, Square, History } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, RotateCcw, Square, History } from "lucide-react";
 import { toast } from "sonner";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useDagHeight } from "@/hooks/useDagHeight";
@@ -40,6 +46,11 @@ export function RunDetailPage() {
   const { data: tasks, isLoading: isLoadingTasks } = useQuery({
     queryKey: ["job", jobId, "tasks"],
     queryFn: () => api.getJobTasks(jobId),
+  });
+
+  const { data: jobRuns, isLoading: isLoadingJobRuns } = useQuery({
+    queryKey: ["job", jobId, "runs"],
+    queryFn: () => api.getJobRuns(jobId),
   });
 
   const { data: atoms, isLoading: isLoadingAtoms } = useQuery({
@@ -180,6 +191,16 @@ export function RunDetailPage() {
     return map;
   }, [run?.tasks]);
 
+  const compareRuns = useMemo(() => {
+    return (jobRuns ?? [])
+      .filter((candidate) => candidate.id !== runId)
+      .sort((a, b) => {
+        const aTime = new Date(a.started_at || a.created_at).getTime();
+        const bTime = new Date(b.started_at || b.created_at).getTime();
+        return bTime - aTime;
+      });
+  }, [jobRuns, runId]);
+
   const triggerMutation = useMutation({
     mutationFn: () => api.triggerJob(jobId),
     onSuccess: (newRun) => {
@@ -242,6 +263,45 @@ export function RunDetailPage() {
 
         {/* Action cluster */}
         <div className="flex items-center gap-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                disabled={isLoadingJobRuns || compareRuns.length === 0}
+                data-testid="run-compare-trigger"
+                title={compareRuns.length === 0 ? "No other runs to compare" : undefined}
+              >
+                <ArrowLeftRight className="mr-1.5 h-3.5 w-3.5" />
+                Compare to run…
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-72">
+              {compareRuns.map((candidate) => (
+                <DropdownMenuItem
+                  key={candidate.id}
+                  data-testid="run-compare-option"
+                  className="flex items-center justify-between gap-3"
+                  onSelect={() =>
+                    navigate({
+                      to: "/jobs/$jobId/runs/$runId/diff",
+                      params: { jobId, runId },
+                      search: { to: candidate.id },
+                    })
+                  }
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-mono text-xs">Run {shortId(candidate.id)}</div>
+                    <div className="truncate text-[10px] text-text-3">
+                      {new Date(candidate.started_at || candidate.created_at).toLocaleString()}
+                    </div>
+                  </div>
+                  <StatusBadge status={candidate.status} size="sm" />
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button
             variant="ghost"
             size="sm"
