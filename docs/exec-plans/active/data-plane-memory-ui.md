@@ -53,9 +53,10 @@ the authoritative contract for the `ui/src/lib/api.ts` methods.
 
 ## Progress (as of 2026-06-26)
 
-**Wave 1 shipped the foundation (H-1).** Wave 2 fans out to H-2 + A1 + C1. The
-foundation chain is H-1 → H-2 → H-3; feature streams unlock as their H deps land
-(A/C/D/E need only H-1; B and F also need H-2/H-3).
+**Waves 1–2 shipped:** the foundation (H-1), principal role/scope retention (H-2),
+the run-diff view (A), and the per-task `why` explainer (C). Remaining: B (replay),
+D (blame), E (receipt/verify), F (lineage-impact), H-3 (auth-enabled e2e lane), and
+N (roadmap flip). The foundation chain is H-1 → H-2 → H-3; B and F still need H-3.
 
 ### Wave 1 — H-1 shipped (the shared API client)
 
@@ -67,14 +68,31 @@ foundation chain is H-1 → H-2 → H-3; feature streams unlock as their H deps 
   (null-body guard, `getTaskWhy` taskName, 401 test). Caught a real image-pin guardrail
   miss (a bare base-image name in a test fixture), not a flake.
 
+### Wave 2 — H-2 + run-diff + why shipped
+
+- **Stream α (H-2):** principal role/scope retention from the existing `/auth/whoami`
+  + `usePrincipal()` + `InsufficientAccess` — PR #248, merged. Opus review (2 test
+  should-fixes) + bot fixes (clearApiKey ordering; session-validity decoupled from role
+  presence).
+- **Stream β (A1/A2):** the run-diff view + Playwright e2e — PR #249, merged. The live
+  e2e exposed an invalid job fixture (JSON apply needs array `next`/`dependsOn`) and a
+  verdict label-case mismatch, both fixed.
+- **Stream γ (C1/C2):** the per-task `why` explainer + e2e — PR #250, merged. Live API
+  debugging found the real blocker: `/v1/jobs/:id/tasks` serializes the task id as
+  capital `ID` (no JSON tag), so the UI's `taskDefinitions[task.id]` keying missed and
+  `selectedTask` was undefined ("Task name unavailable"). Fixed by normalizing
+  `getJobTasks` in the client (plus the cache-miss discriminating-field rendering + bot
+  null-guards). **Backend follow-up: add JSON tags to the task model so `/v1/jobs/:id/tasks`
+  is consistent with the rest of the API.**
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1 shipped** (#247); H-2 in W2, H-3 pending |
-| A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | Not started |
+| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1, H-2 shipped** (#247, #248); H-3 pending |
+| A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | **Shipped** (#249) — view + e2e |
 | B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | Not started |
-| C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | Not started |
+| C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | **Shipped** (#250) — explainer + e2e |
 | D | Blame view (commit/snapshot topology attribution) | P2 | Not started |
 | E | Receipt display + `verify` of a user-supplied **committed** receipt (drift / degraded) | P2 | Not started |
 | F | Dataset-keyed **downstream** lineage-impact graph (ReactFlow) + ui-e2e lineage enable | P2 | Not started |
