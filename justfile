@@ -278,7 +278,49 @@ ui-e2e: build-release
         cd ui; \
         npm ci; \
         npx playwright install chromium; \
-        npm run test:e2e'
+        npm run test:e2e -- --project=default'
+
+ui-e2e-auth: build-release
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{ container_cli }} rm -f caesium-server-auth >/dev/null 2>&1 || true
+    cleanup() {
+        {{ container_cli }} rm -f caesium-server-auth >/dev/null 2>&1 || true
+    }
+    trap cleanup EXIT
+    {{ container_cli }} run --platform {{ platform }} -d --name caesium-server-auth -p {{ port }}:8080 \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_AUTH_KEY_HASH_SECRET=ui-e2e-auth-key-hash-secret-000001 \
+        -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
+    tries=0
+    until node -e "fetch('http://127.0.0.1:{{ port }}/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 30 ]; then
+            echo "Auth-enabled Caesium did not become ready in time" >&2
+            {{ container_cli }} logs caesium-server-auth >&2 || true
+            exit 1
+        fi
+        sleep 1
+    done
+    admin_key=""
+    tries=0
+    until admin_key="$({{ container_cli }} logs caesium-server-auth 2>&1 | awk '/csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; exit } }')" && [ -n "$admin_key" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 30 ]; then
+            echo "Auth bootstrap admin key did not appear in server logs" >&2
+            {{ container_cli }} logs caesium-server-auth >&2 || true
+            exit 1
+        fi
+        sleep 1
+    done
+    cd ui
+    npm ci
+    npx playwright install chromium
+    CAESIUM_E2E_AUTH_ADMIN_KEY="$admin_key" npm run test:e2e -- --project=auth
 
 helm-lint:
     helm lint ./helm/caesium

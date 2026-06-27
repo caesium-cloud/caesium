@@ -171,7 +171,7 @@ shared file. This item adds typed client methods + response types only — no UI
       explanation, not a raw error. This is what B/F gate on. Files: `ui/src/lib/auth.ts`,
       `ui/src/features/auth/` (+ a small shared component). Depends on: H-1.
       Note: Retained `whoami` role/principal state in `usePrincipal()`; current `whoami` has no scope/jobs marker, so API-key scopedness remains unknown without backend support.
-- [ ] H-3. Add an **auth-enabled ui-e2e lane** so the RBAC gating is actually exercised
+- [x] H-3. Add an **auth-enabled ui-e2e lane** so the RBAC gating is actually exercised
       (today `just ui-e2e` runs auth-disabled — `justfile`/`.github/workflows/ci.yml` — so a
       viewer-sees-Replay or scoped-sees-lineage bug would never be caught). Add a Playwright
       project (or a dedicated server instance) started with auth enabled and **seeded
@@ -179,6 +179,10 @@ shared file. This item adds typed client methods + response types only — no UI
       lane stays auth-disabled for the happy-path specs. Files: `justfile`,
       `.github/workflows/ci.yml`, `ui/playwright.config.ts`, `ui/e2e/helpers/auth.ts`.
       Depends on: H-2.
+      Note: Added default/auth Playwright projects, `just ui-e2e-auth`, a CI `ui-e2e-auth`
+      job, auth key seeding/login helpers, and a viewer-vs-runner whoami smoke through the
+      real UI login flow; the default lane remains auth-disabled and selects the default
+      Playwright project only.
 
 ### Stream A — Run Diff (causal cache-bust attribution)
 
