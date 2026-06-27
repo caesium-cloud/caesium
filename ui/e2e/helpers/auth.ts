@@ -39,11 +39,15 @@ export async function loginAsScoped(page: Page, keys: AuthLaneKeys): Promise<Who
 }
 
 export async function loginWithApiKey(page: Page, key: string): Promise<WhoamiPrincipal> {
-  const whoami = page.waitForResponse(isSuccessfulWhoamiResponse);
-
   await page.goto("/");
   await expect(page.getByPlaceholder("csk_live_...")).toBeVisible();
   await page.getByPlaceholder("csk_live_...").fill(key);
+
+  // Register the matcher only for the whoami the Sign In click triggers — NOT
+  // before goto, where the page's own session-check whoami could be matched
+  // (or its absence could exhaust the wait). The login verifies the key with a
+  // GET /auth/whoami once the key is submitted.
+  const whoami = page.waitForResponse(isSuccessfulWhoamiResponse);
   await page.getByRole("button", { name: "Sign In" }).click();
 
   const principal = await readWhoami(await whoami);
