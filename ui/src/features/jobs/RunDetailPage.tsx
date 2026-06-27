@@ -16,11 +16,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
+import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
 import { getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
+import { ReplayDialog } from "./ReplayDialog";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
@@ -34,6 +36,8 @@ export function RunDetailPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [timelineOpen, setTimelineOpen] = useState(true);
+  const [replayDialogOpen, setReplayDialogOpen] = useState(false);
+  const principal = usePrincipal();
 
   const { data: run, isLoading: isLoadingRun } = useQuery({
     queryKey: ["job", jobId, "runs", runId],
@@ -232,6 +236,8 @@ export function RunDetailPage() {
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? runTasks[selectedTaskId] : undefined;
   const isLive = run.status === "running";
+  const canLaunchReplay = principal.role === null || principal.canRunner;
+  const replayGateReason = principal.role !== null && !principal.canRunner ? "Requires runner role" : undefined;
   const compareDisabledReason = isLoadingJobRuns
     ? "Loading runs to compare"
     : compareRuns.length === 0
@@ -321,6 +327,40 @@ export function RunDetailPage() {
             <History className="mr-1.5 h-3.5 w-3.5" />
             All runs
           </Button>
+          {canLaunchReplay ? (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs"
+              onClick={() => setReplayDialogOpen(true)}
+              data-testid="run-replay-trigger"
+            >
+              <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+              Replay…
+            </Button>
+          ) : (
+            <div className="flex flex-col items-start gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                disabled
+                title={replayGateReason}
+                aria-describedby="run-replay-gate-reason"
+                data-testid="run-replay-trigger"
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Replay…
+              </Button>
+              <span
+                id="run-replay-gate-reason"
+                className="text-[10px] text-text-3"
+                data-testid="run-replay-gate-reason"
+              >
+                {replayGateReason}
+              </span>
+            </div>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -345,6 +385,15 @@ export function RunDetailPage() {
           )}
         </div>
       </div>
+
+      {replayDialogOpen ? (
+        <ReplayDialog
+          jobId={jobId}
+          baselineRunId={runId}
+          open={replayDialogOpen}
+          onOpenChange={setReplayDialogOpen}
+        />
+      ) : null}
 
       {/* Cache summary */}
       <div className="flex items-center gap-4">

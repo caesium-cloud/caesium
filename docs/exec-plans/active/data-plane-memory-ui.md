@@ -221,14 +221,14 @@ and surfaces the backend's typed refusal** (the 409 carries "requires distribute
 execution mode"). Exposing execution-mode for a pre-emptive affordance is a
 **backend follow-up, out of scope** for this frontend plan (record it, don't build it here).
 
-- [ ] B1. Build the replay action: a "Replay…" button in the `RunDetailPage` header
+- [x] B1. Build the replay action: a "Replay…" button in the `RunDetailPage` header
       opening a `ReplayDialog` (key/value rows for `--set` overrides + an optional
       idempotency key; auto-generate + display one if omitted) that calls `postReplay`,
       shows the returned **quarantined** run (a `Quarantine` badge), and offers a
       "show diff vs baseline" that reuses Stream A's `RunDiffView`.
       Files: new `ui/src/features/jobs/ReplayDialog.tsx`,
       `ui/src/features/jobs/RunDetailPage.tsx`. Depends on: H-1 (A1 soft, for the diff reuse).
-- [ ] B2. Role-gate + refusal surfacing (no pre-emptive *mode*-gate): replay requires
+- [x] B2. Role-gate + refusal surfacing (no pre-emptive *mode*-gate): replay requires
       `RoleRunner` — via H-2's `usePrincipal()`, show the Replay action only for runner+
       (a viewer sees it disabled with an explanation, not a dead button). Then map H-1's
       typed errors to clear inline messages — **403** → insufficient role (defense-in-depth
@@ -238,7 +238,7 @@ execution mode"). Exposing execution-mode for a pre-emptive affordance is a
       silent success-shaped result for a refusal. (A no-override cache-hit replay succeeds
       and shows its quarantined run.)
       Files: `ui/src/features/jobs/ReplayDialog.tsx`. Depends on: B1, H-2.
-- [ ] B3. Playwright e2e: on the **default (auth-disabled) lane** — submit a **no-override**
+- [x] B3. Playwright e2e: on the **default (auth-disabled) lane** — submit a **no-override**
       replay (cache-hits → succeeds), assert the quarantined run appears AND is excluded from
       the normal run list; submit a `--set` override (dispatch-requiring) and assert the
       **409** renders as an inline error with no run-shaped success; assert a non-replay-safe
@@ -246,7 +246,9 @@ execution mode"). Exposing execution-mode for a pre-emptive affordance is a
       sees + can launch the no-override replay, and a *viewer* key does NOT get an actionable
       Replay (gated affordance, no 403 round-trip-as-success). (Mirror the B4/B5 constraint:
       only the no-override path can succeed locally.)
-      Files: `ui/e2e/replay.spec.ts`. Depends on: B1, B2, H-3.
+      Files: `ui/e2e/replay.spec.ts`, `ui/e2e/auth/replay-gating.spec.ts`. Depends on: B1, B2, H-3.
+      Note: W4-alpha added the frontend-only replay dialog, typed inline refusal rendering,
+      default-lane cache-hit/409/422 e2e coverage, and auth-lane runner/viewer gating coverage.
 
 ### Stream C — Causal explainer (`why`)
 
