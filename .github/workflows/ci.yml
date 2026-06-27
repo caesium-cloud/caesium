@@ -237,7 +237,7 @@ jobs:
           done
       - name: Run Playwright E2E
         run: |
-          if ! (cd ui && npm run test:e2e); then
+          if ! (cd ui && npm run test:e2e -- --project=default); then
             docker logs caesium-server || true
             docker ps -a || true
             exit 1
@@ -245,6 +245,75 @@ jobs:
       - name: Stop Caesium server
         if: always()
         run: docker rm -f caesium-server >/dev/null 2>&1 || true
+
+  ui-e2e-auth:
+    needs: [ui-test, build-and-integration-test]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-amd64
+          path: /tmp
+      - name: Load release image
+        run: gunzip -c /tmp/release-amd64.tar.gz | docker load
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install UI dependencies and browsers
+        run: |
+          cd ui
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Start auth-enabled Caesium server
+        run: |
+          docker rm -f caesium-server-auth >/dev/null 2>&1 || true
+          docker run -d --name caesium-server-auth \
+            -p 8080:8080 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e DOCKER_HOST=unix:///var/run/docker.sock \
+            -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
+            -e CAESIUM_AUTH_MODE=api-key \
+            -e CAESIUM_AUTH_KEY_HASH_SECRET=ui-e2e-auth-key-hash-secret-000001 \
+            -e CAESIUM_AUTH_REQUIRE_TLS=false \
+            --user 0:0 \
+            caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
+          tries=0
+          until node -e "fetch('http://127.0.0.1:8080/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 30 ]; then
+              echo "Auth-enabled Caesium did not become ready in time"
+              docker logs caesium-server-auth || true
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Capture auth bootstrap admin key
+        run: |
+          admin_key=""
+          tries=0
+          until admin_key="$(docker logs caesium-server-auth 2>&1 | awk '/csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; exit } }')" && [ -n "$admin_key" ]; do
+            tries=$((tries + 1))
+            if [ "$tries" -gt 30 ]; then
+              echo "Auth bootstrap admin key did not appear in server logs"
+              docker logs caesium-server-auth || true
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::add-mask::$admin_key"
+          echo "CAESIUM_E2E_AUTH_ADMIN_KEY=$admin_key" >> "$GITHUB_ENV"
+      - name: Run auth-enabled Playwright E2E
+        run: |
+          if ! (cd ui && npm run test:e2e -- --project=auth); then
+            docker logs caesium-server-auth || true
+            docker ps -a || true
+            exit 1
+          fi
+      - name: Stop auth-enabled Caesium server
+        if: always()
+        run: docker rm -f caesium-server-auth >/dev/null 2>&1 || true
 
   helm-integration-test:
     needs: [build-and-integration-test, helm-lint]
@@ -413,6 +482,7 @@ jobs:
       - unit-test-arm64
       - ui-test
       - ui-e2e
+      - ui-e2e-auth
       - build-and-integration-test
       - build-and-integration-test-arm64
       - helm-lint
