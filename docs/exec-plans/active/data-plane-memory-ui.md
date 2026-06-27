@@ -268,13 +268,18 @@ freshly re-derived state (`cmd/verify/verify.go`; `api/rest/controller/receipt/`
 tautology (current-vs-current → always passes) and would NOT detect drift. So the UI
 must let the user **provide the committed receipt** to verify against.
 
-- [ ] E1. Receipt display: a run-level panel on `RunDetailPage` driving `getReceipt` —
+- [x] E1. Receipt display: a run-level panel on `RunDetailPage` driving `getReceipt` —
       render the current content-addressed receipt (atoms/digests/inputs), with the
       **unverifiable markers the backend emits** (an unpinned mutable-tag task shown
       unverifiable, never silently presented as reproducible). Display only; no verify yet.
       Files: new `ui/src/features/jobs/ReceiptPanel.tsx`,
       `ui/src/features/jobs/RunDetailPage.tsx`. Depends on: H-1.
-- [ ] E2. Verify action: in the receipt panel, accept a **committed receipt** as input
+      Note (W3-beta): `ReceiptPanel` renders the exact receipt fields from `getReceipt`
+      (`receipt_version`, run/job identity, `git_commit`, `manifest_content_hash`,
+      `receipt_digest`, per-task `identity_hash`/image digest/pinning/degraded reason)
+      and mounts once on `RunDetailPage`; unpinned/degraded tasks are surfaced as
+      `degraded-unverifiable`, not as reproducible.
+- [x] E2. Verify action: in the receipt panel, accept a **committed receipt** as input
       (paste JSON / upload a receipt file — mirroring how `caesium verify` reads a committed
       receipt from disk), `postVerify` it, and render the **actual `VerifyResult.drifts`
       kinds the backend returns** (`internal/receipt/verify.go`) — reproducible /
@@ -285,11 +290,21 @@ must let the user **provide the committed receipt** to verify against.
       a UI re-apply (it needs the run's task rows to differ) — do NOT promise it; per-field
       image/command attribution is a **backend follow-up**, out of scope here.
       Files: `ui/src/features/jobs/ReceiptPanel.tsx`. Depends on: E1.
-- [ ] E3. Playwright e2e: run a job, assert the receipt renders (incl. an unpinned-tag job
+      Note (W3-beta): Verify accepts pasted JSON or uploaded `.receipt`/JSON, validates that
+      the committed receipt targets the current run, posts it through `postVerify`, and renders
+      `match`, degraded tasks, expected/actual digest, plus backend drift `kind`/detail without
+      promising field-level image/command drift from a UI re-apply.
+- [x] E3. Playwright e2e: run a job, assert the receipt renders (incl. an unpinned-tag job
       → unverifiable markers); capture the committed receipt from `getReceipt`; verify it
       against UNCHANGED state → reproducible; then re-apply a changed definition and verify
       again → assert the **reachable** drift kind (`manifest_changed` / `git_commit_changed`),
       NOT a field-level image/command field. Files: `ui/e2e/receipt-verify.spec.ts`. Depends on: E2.
+      Note (W3-beta): `receipt-verify.spec.ts` mirrors the operator-flow pattern with
+      `test.slow()`, captures the committed receipt via REST, pastes it into the panel,
+      asserts unchanged verification as `reproducible`, then re-applies a changed definition
+      and asserts displayed `manifest_changed`/`git_commit_changed` drift while rejecting
+      image/identity drift; a separate unpinned-tag run asserts the displayed unverifiable
+      marker and degraded reason.
 
 ### Stream F — Lineage / impact graph
 
