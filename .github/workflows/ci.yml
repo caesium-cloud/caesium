@@ -215,6 +215,7 @@ jobs:
       - name: Pre-pull job images
         run: |
           docker pull alpine:3.23
+          docker pull debian:12-slim
       - name: Start Caesium server
         run: |
           docker rm -f caesium-server >/dev/null 2>&1 || true
@@ -223,6 +224,8 @@ jobs:
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
+            -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+            -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
           tries=0
@@ -277,6 +280,8 @@ jobs:
             -e CAESIUM_AUTH_MODE=api-key \
             -e CAESIUM_AUTH_KEY_HASH_SECRET=ui-e2e-auth-key-hash-secret-000001 \
             -e CAESIUM_AUTH_REQUIRE_TLS=false \
+            -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+            -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
           tries=0

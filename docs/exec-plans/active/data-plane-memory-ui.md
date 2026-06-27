@@ -342,7 +342,7 @@ DOWNSTREAM only** (`api/rest/controller/lineage/impact.go`; `internal/lineage/im
 — there is no run-scoped or upstream graph API, and no lineage CLI. So Stream F is a
 **dataset-keyed downstream-impact** view, not a run-scoped bidirectional one.
 
-- [ ] F1. Build a dataset-impact view (route `/lineage?namespace=&name=`) driving
+- [x] F1. Build a dataset-impact view (route `/lineage?namespace=&name=`) driving
       `getLineageImpact`: a ReactFlow graph **reusing the dagre layout from `JobDAG.tsx`**
       rendering the root dataset + its DOWNSTREAM impact (the actual response shape; no
       upstream). **Codex round 2 constraints:** (a) `ImpactNode` carries `job_id`/`job_alias`
@@ -356,17 +356,24 @@ DOWNSTREAM only** (`api/rest/controller/lineage/impact.go`; `internal/lineage/im
       (lineage datasets populate as jobs declare/consume outputs)" when downstream is empty.
       Files: new `ui/src/features/jobs/LineageGraph.tsx`, `ui/src/router.tsx`.
       Depends on: H-1, H-2.
-- [ ] F2. Enable lineage on the ui-e2e backend so F's success path is actually exercised:
+- [x] F2. Enable lineage on the ui-e2e backend so F's success path is actually exercised:
       add `CAESIUM_OPEN_LINEAGE_ENABLED=true` (+ a console transport) to the `ui-e2e` server
       startup in the `justfile` and the CI `ui-e2e` job — today neither sets it, so an
       empty-state-only test would go green without ever rendering a real impact graph.
       Files: `justfile`, `.github/workflows/ci.yml`. Depends on: (none; can land with F1).
-- [ ] F3. Playwright e2e (lineage enabled per F2): run jobs that declare/consume a dataset,
+- [x] F3. Playwright e2e (lineage enabled per F2): run jobs that declare/consume a dataset,
       open the impact view for that dataset (namespace/name), assert the **downstream** graph
       renders nodes/edges with **job-level** click-through; assert the honest empty state for a
       dataset with no downstream. On the **auth-enabled lane (H-3)**: assert a *scoped* key
       gets the "requires an unscoped key" explanation, not a raw 403.
-      Files: `ui/e2e/lineage.spec.ts`. Depends on: F1, F2, H-3.
+      Files: `ui/e2e/lineage.spec.ts`, `ui/e2e/auth/lineage-scope.spec.ts`. Depends on: F1,
+      F2, H-3.
+      W4-β note: scoped keys cannot complete UI login because `GET /auth/whoami` is denied by
+      the scope middleware, so the scoped lineage denial is asserted API-level only in
+      `ui/e2e/auth/lineage-scope.spec.ts` with a 403 from `/v1/lineage/impact`.
+      Backend follow-up: lineage facet shape mismatch — `persistTaskDatasets` writes a flat
+      `caesium_dataset` facet, but `stepNameFromFacet` reads nested
+      `{"caesium_dataset":{"step_name":...}}`, so `producing_step` never resolves.
 
 ## Navigational / Organizational Improvements — Stream N
 
