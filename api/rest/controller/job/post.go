@@ -118,6 +118,9 @@ func Post(c *echo.Context) error {
 		log.Error("failed to apply job", "alias", req.Alias, "error", err)
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
+	if err := trigger.NotifyMutation(c.Request().Context()); err != nil {
+		log.Warn("event trigger router reload failed after job create", "alias", req.Alias, "error", err)
+	}
 
 	return c.JSON(http.StatusCreated, created)
 }
