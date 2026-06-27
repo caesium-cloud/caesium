@@ -339,7 +339,7 @@ export function RunDetailPage() {
               Replay…
             </Button>
           ) : (
-            <div className="flex flex-col items-start gap-1">
+            <span className="inline-flex" title={replayGateReason}>
               <Button
                 variant="outline"
                 size="sm"
@@ -354,12 +354,12 @@ export function RunDetailPage() {
               </Button>
               <span
                 id="run-replay-gate-reason"
-                className="text-[10px] text-text-3"
+                className="sr-only"
                 data-testid="run-replay-gate-reason"
               >
                 {replayGateReason}
               </span>
-            </div>
+            </span>
           )}
           <Button
             variant="outline"

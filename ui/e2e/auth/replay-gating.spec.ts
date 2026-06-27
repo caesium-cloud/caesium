@@ -1,8 +1,7 @@
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext } from "@playwright/test";
 import {
   authHeaders,
-  loginAsRunner,
-  loginAsViewer,
+  loginAtUrl,
   obtainAuthKeys,
   type AuthLaneKeys,
 } from "../helpers/auth";
@@ -59,10 +58,12 @@ test("runner sees replay and can launch a no-override quarantined replay", async
   test.slow();
 
   const { job, baseline } = await seedReplayBaseline(request, keys, `replay-auth-runner-${Date.now().toString(36)}`);
-  const principal = await loginAsRunner(page, keys);
+  // Navigate to the run-detail URL FIRST, then log in there. The api-key session
+  // is in-memory only, so a goto AFTER login would drop it — see loginAtUrl.
+  const principal = await loginAtUrl(page, `/jobs/${job.id}/runs/${baseline.id}`, keys.runner);
   expect(principal.role).toBe("runner");
 
-  await openRunDetail(page, job.id, baseline.id);
+  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("run-replay-trigger")).toBeEnabled();
   await expect(page.getByTestId("run-replay-gate-reason")).toHaveCount(0);
 
@@ -70,9 +71,11 @@ test("runner sees replay and can launch a no-override quarantined replay", async
   await expect(page.getByTestId("replay-dialog")).toBeVisible();
   await page.getByTestId("replay-submit").click();
 
-  await expect(page.getByTestId("replay-result")).toContainText("Quarantine", { timeout: 30_000 });
+  await expect(page.getByTestId("replay-result")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("replay-quarantine-badge")).toBeVisible();
   await expect(page.getByTestId("replay-result-status")).toContainText("succeeded");
   const replayRunId = (await page.getByTestId("replay-result-run-id").innerText()).trim();
+  expect(replayRunId).not.toHaveLength(0);
   await expect.poll(async () => {
     const run = await getRun(request, job.id, replayRunId, authHeaders(keys.runner));
     return `${run.status}:${String(run.quarantine)}`;
@@ -86,10 +89,10 @@ test("viewer gets a gated non-actionable replay affordance", async ({ page, requ
   test.slow();
 
   const { job, baseline } = await seedReplayBaseline(request, keys, `replay-auth-viewer-${Date.now().toString(36)}`);
-  const principal = await loginAsViewer(page, keys);
+  const principal = await loginAtUrl(page, `/jobs/${job.id}/runs/${baseline.id}`, keys.viewer);
   expect(principal.role).toBe("viewer");
 
-  await openRunDetail(page, job.id, baseline.id);
+  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("run-replay-trigger")).toBeVisible();
   await expect(page.getByTestId("run-replay-trigger")).toBeDisabled();
   await expect(page.getByTestId("run-replay-gate-reason")).toContainText("Requires runner role");
@@ -173,11 +176,6 @@ async function applyDefinition(
     }
     throw new Error(`failed to apply fixture: ${response.status()} ${await response.text()}`);
   }
-}
-
-async function openRunDetail(page: Page, jobId: string, runId: string): Promise<void> {
-  await page.goto(`/jobs/${jobId}/runs/${runId}`);
-  await expect(page.getByRole("heading", { name: /Run / })).toBeVisible({ timeout: 30_000 });
 }
 
 async function findJobByAlias(

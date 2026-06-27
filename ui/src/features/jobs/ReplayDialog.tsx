@@ -1,4 +1,4 @@
-import { type FormEvent, useMemo, useState } from "react";
+import { type FormEvent, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeftRight, Plus, RotateCcw, Trash2 } from "lucide-react";
@@ -80,10 +80,6 @@ export function ReplayDialog({
   const hasSubmittedKey = Boolean(submittedKey);
   const resultStatus = replayRun?.status ?? replayResponse?.status ?? "pending";
   const resultQuarantined = Boolean(replayResponse?.quarantine || replayRun?.quarantine);
-  const normalizedRows = useMemo(
-    () => overrideRows.map((row) => ({ ...row, key: row.key.trim() })),
-    [overrideRows],
-  );
 
   function updateOverrideRow(id: string, patch: Partial<Pick<OverrideRow, "key" | "value">>) {
     setOverrideRows((rows) => rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
@@ -95,6 +91,8 @@ export function ReplayDialog({
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setReplayResponse(null);
+    setShowDiff(false);
     setInlineError(null);
     setLastError(null);
 
@@ -152,7 +150,7 @@ export function ReplayDialog({
             </div>
 
             <div className="space-y-2" data-testid="replay-set-rows">
-              {normalizedRows.map((row, index) => (
+              {overrideRows.map((row, index) => (
                 <div
                   key={row.id}
                   className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
@@ -160,7 +158,7 @@ export function ReplayDialog({
                 >
                   <input
                     type="text"
-                    value={overrideRows[index].key}
+                    value={row.key}
                     onChange={(event) => updateOverrideRow(row.id, { key: event.target.value })}
                     placeholder="key"
                     disabled={mutation.isPending}
@@ -384,7 +382,6 @@ function isTerminalStatus(status?: string): boolean {
   const normalized = status?.toLowerCase();
   return (
     normalized === "succeeded" ||
-    normalized === "completed" ||
     normalized === "failed" ||
     normalized === "cancelled"
   );
