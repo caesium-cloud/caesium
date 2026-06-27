@@ -329,11 +329,14 @@ plan against the Stream B endpoints.
       boundary; see the Source-Of-Truth Note); document the `event` trigger fields
       (events/patterns/filter/paramMapping) in `docs/job-schema-reference.md`,
       `docs/job-definitions.md`, and `docs/caesium-job-llm-reference.md`; add an
-      `event`-trigger and a chaining example under `docs/examples/`; index this plan
-      in `docs/README.md`. **Use backtick/inline-code form for any
-      `exec-plans/...` reference in `docs/README.md`** — the
-      `TestDocsREADMEIndexesEveryTopLevelDoc` guardrail rejects clickable
-      subdirectory links (PR #245 hit exactly this). Runs last.
+      `event`-trigger and a chaining example under `docs/examples/`; in
+      `docs/README.md`, **UPDATE the existing backtick reference** (the plan PR
+      already added `exec-plans/active/event-trigger-routing.md` to the
+      `design-event-triggers.md` bullet) — repoint it `active/` → `completed/` when
+      this plan archives. Do NOT add a second/duplicate entry, and keep it
+      backtick/inline-code form (the `TestDocsREADMEIndexesEveryTopLevelDoc`
+      guardrail rejects clickable subdirectory links — PR #245 hit exactly this).
+      Runs last.
       Files: `docs/roadmap.md`, `docs/design-event-triggers.md`,
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
