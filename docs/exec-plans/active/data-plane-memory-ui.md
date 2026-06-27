@@ -53,10 +53,11 @@ the authoritative contract for the `ui/src/lib/api.ts` methods.
 
 ## Progress (as of 2026-06-26)
 
-**Waves 1–2 shipped:** the foundation (H-1), principal role/scope retention (H-2),
-the run-diff view (A), and the per-task `why` explainer (C). Remaining: B (replay),
-D (blame), E (receipt/verify), F (lineage-impact), H-3 (auth-enabled e2e lane), and
-N (roadmap flip). The foundation chain is H-1 → H-2 → H-3; B and F still need H-3.
+**Waves 1–3 shipped:** the foundation (H-1), H-2 (role/scope), run-diff (A), `why`
+(C), blame (D), and receipt/verify (E). Remaining: B (replay) and F (lineage-impact)
+— both need H-3 (the auth-enabled e2e lane, **deferred** in W3 with #253 open: its
+login-flow e2e needs the branch-built UI to debug, though the backend auth itself is
+verified working), plus N (roadmap flip).
 
 ### Wave 1 — H-1 shipped (the shared API client)
 
@@ -85,16 +86,31 @@ N (roadmap flip). The foundation chain is H-1 → H-2 → H-3; B and F still nee
   null-guards). **Backend follow-up: add JSON tags to the task model so `/v1/jobs/:id/tasks`
   is consistent with the rest of the API.**
 
+### Wave 3 — blame + receipt/verify shipped; auth-lane deferred
+
+- **Stream α (D1/D2):** the blame view over `dag_snapshot` + e2e — PR #251, merged. Opus
+  review (1 should-fix: widened the inter-apply gap so blame's CreatedAt ordering can't
+  flip under CI clock granularity) + bot fixes (typed route API, `findJobByAlias` retry,
+  human-readable command rendering).
+- **Stream β (E1/E2/E3):** the receipt panel + verify of a user-supplied committed receipt
+  + e2e — PR #252, merged. Bot fixes (`receipt.tasks` null-guards for Go nil slices,
+  degraded-task separators, clear input error on edit).
+- **Stream γ (H-3):** the auth-enabled ui-e2e lane — PR #253, **deferred (still open)**. The
+  lane's `ui-e2e-auth` check fails on the e2e login-flow whoami capture; the backend auth
+  chain is verified working (seed key → whoami → 200/role), so the bug is in the e2e/UI
+  login flow and needs the branch-built embedded UI to debug. Only B/F depend on H-3, so it
+  is deferred to when those streams need it (PR #253 carries the lane + the diagnosis).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1, H-2 shipped** (#247, #248); H-3 pending |
+| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1, H-2 shipped** (#247, #248); **H-3 deferred** (#253 open — auth-lane e2e login flow) |
 | A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | **Shipped** (#249) — view + e2e |
 | B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | Not started |
 | C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | **Shipped** (#250) — explainer + e2e |
-| D | Blame view (commit/snapshot topology attribution) | P2 | Not started |
-| E | Receipt display + `verify` of a user-supplied **committed** receipt (drift / degraded) | P2 | Not started |
+| D | Blame view (commit/snapshot topology attribution) | P2 | **Shipped** (#251) — view + e2e |
+| E | Receipt display + `verify` of a user-supplied **committed** receipt (drift / degraded) | P2 | **Shipped** (#252) — display + verify + e2e |
 | F | Dataset-keyed **downstream** lineage-impact graph (ReactFlow) + ui-e2e lineage enable | P2 | Not started |
 | N | Roadmap §3.4 flip + cross-links (runs last) | — | Not started |
 
