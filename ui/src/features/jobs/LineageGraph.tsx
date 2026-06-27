@@ -47,6 +47,19 @@ type LineageNodeData = {
   depth?: number;
 };
 
+type LineageEdgeData = {
+  depth: number;
+  testId: string;
+  sourceName: string;
+  targetName: string;
+};
+
+type GraphNodeRef = {
+  id: string;
+  name: string;
+  depth: number;
+};
+
 export function LineageRoutePage() {
   const search = lineageRouteApi.useSearch() as LineageSearch;
   const initialNamespace = search.namespace ?? "";
@@ -214,6 +227,10 @@ function lineageImpactNodeTestId(namespace: string, name: string, jobId?: string
   return `lineage-impact-node:${namespace}:${name}:${jobId ?? "unknown-job"}`;
 }
 
+function lineageImpactEdgeTestId(sourceName: string, targetName: string, index: number) {
+  return `lineage-edge:${sourceName}:${targetName}:${index}`;
+}
+
 function LineageHeader() {
   return (
     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
@@ -347,6 +364,7 @@ function MetadataCell({ label, value }: { label: string; value: string }) {
 
 function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactNode[]) {
   const rootId = `root:${rootNamespace}:${rootName}`;
+  const rootRef: GraphNodeRef = { id: rootId, name: rootName, depth: -1 };
   const initialNodes: Node<LineageNodeData>[] = [
     {
       id: rootId,
@@ -360,9 +378,17 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
     },
   ];
 
-  const initialEdges: Edge[] = [];
+  const initialEdges: Edge<LineageEdgeData>[] = [];
+  const nodesByDepth = new Map<number, GraphNodeRef[]>();
+  const impactRefs: GraphNodeRef[] = [];
+
   downstream.forEach((node, index) => {
     const nodeId = `impact:${node.dataset_namespace}:${node.dataset_name}:${node.job_id}:${index}`;
+    const nodeRef = {
+      id: nodeId,
+      name: node.dataset_name,
+      depth: node.depth,
+    };
     initialNodes.push({
       id: nodeId,
       type: "lineage",
@@ -378,31 +404,52 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
       },
       position: { x: 0, y: 0 },
     });
-    initialEdges.push({
-      id: `lineage-edge-${index}`,
-      source: rootId,
-      target: nodeId,
-      type: "lineage",
-      data: {
-        depth: node.depth,
-      },
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        width: 20,
-        height: 20,
-        color: "hsl(var(--running))",
-      },
-      style: {
-        strokeWidth: 2,
-        stroke: "hsl(var(--running))",
-      },
+
+    impactRefs.push(nodeRef);
+    const depthNodes = nodesByDepth.get(node.depth) ?? [];
+    depthNodes.push(nodeRef);
+    nodesByDepth.set(node.depth, depthNodes);
+  });
+
+  let edgeIndex = 0;
+  impactRefs.forEach((nodeRef) => {
+    // The impact endpoint returns BFS depth but no concrete parent edge. Direct
+    // consumers attach to the root; deeper nodes attach to the prior BFS frontier
+    // so multi-hop chains render by hop instead of every node falsely pointing at root.
+    const sourceRefs = nodeRef.depth === 0 ? [rootRef] : nodesByDepth.get(nodeRef.depth - 1) ?? [rootRef];
+
+    sourceRefs.forEach((sourceRef) => {
+      const index = edgeIndex;
+      edgeIndex += 1;
+      initialEdges.push({
+        id: `lineage-edge-${index}`,
+        source: sourceRef.id,
+        target: nodeRef.id,
+        type: "lineage",
+        data: {
+          depth: nodeRef.depth,
+          sourceName: sourceRef.name,
+          targetName: nodeRef.name,
+          testId: lineageImpactEdgeTestId(sourceRef.name, nodeRef.name, index),
+        },
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          width: 20,
+          height: 20,
+          color: "hsl(var(--running))",
+        },
+        style: {
+          strokeWidth: 2,
+          stroke: "hsl(var(--running))",
+        },
+      });
     });
   });
 
   return getLayoutedElements(initialNodes, initialEdges);
 }
 
-function getLayoutedElements(nodes: Node<LineageNodeData>[], edges: Edge[], direction = "LR") {
+function getLayoutedElements(nodes: Node<LineageNodeData>[], edges: Edge<LineageEdgeData>[], direction = "LR") {
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
   dagreGraph.setGraph({
@@ -440,10 +487,22 @@ function getLayoutedElements(nodes: Node<LineageNodeData>[], edges: Edge[], dire
   };
 }
 
+function jobLabel(jobAlias?: string, jobId?: string) {
+  if (jobAlias) {
+    return jobAlias;
+  }
+  if (jobId) {
+    return shortId(jobId);
+  }
+  return "unknown job";
+}
+
 const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
   const isRoot = data.kind === "root";
   const testId = isRoot ? "lineage-root-node" : lineageImpactNodeTestId(data.namespace, data.name, data.jobId);
   const hop = typeof data.depth === "number" ? data.depth + 1 : undefined;
+  const displayJob = jobLabel(data.jobAlias, data.jobId);
+  const jobTitle = data.jobId ? `Open job ${displayJob}` : displayJob;
 
   return (
     <div
@@ -459,7 +518,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
           ? "border-gold/50 bg-[linear-gradient(155deg,hsl(var(--gold)/0.18),hsl(var(--node-surface)/0.95)_60%)]"
           : "cursor-pointer border-caesium-cyan/45 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--node-surface)/0.95)_60%)] hover:border-caesium-cyan/80",
       )}
-      title={isRoot ? `${data.namespace}/${data.name}` : `Open job ${data.jobAlias ?? data.jobId}`}
+      title={isRoot ? `${data.namespace}/${data.name}` : jobTitle}
     >
       {!isRoot ? (
         <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
@@ -492,7 +551,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
         ) : (
           <div className="space-y-1 text-xs text-text-3">
             <div className="truncate">
-              Job <span className="font-mono text-text-1">{data.jobAlias ?? shortId(data.jobId)}</span>
+              Job <span className="font-mono text-text-1">{displayJob}</span>
             </div>
             {data.producingStep ? (
               <div className="truncate">
@@ -524,7 +583,7 @@ const LineageImpactEdge = memo(({
   style,
   markerEnd,
   data,
-}: EdgeProps) => {
+}: EdgeProps<LineageEdgeData>) => {
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -535,14 +594,17 @@ const LineageImpactEdge = memo(({
     borderRadius: 16,
   });
   const depth = typeof data?.depth === "number" ? data.depth : 0;
+  const testId = data?.testId ?? `lineage-edge:${id}`;
 
   return (
     <>
       <BaseEdge id={id} path={edgePath} style={style} markerEnd={markerEnd} />
       <EdgeLabelRenderer>
         <div
-          data-testid="lineage-edge"
+          data-testid={testId}
           data-edge-id={id}
+          data-edge-source={data?.sourceName}
+          data-edge-target={data?.targetName}
           className="nodrag nopan rounded-full border border-running/35 bg-card/95 px-2 py-1 text-[10px] font-semibold text-running shadow-sm"
           style={{
             position: "absolute",

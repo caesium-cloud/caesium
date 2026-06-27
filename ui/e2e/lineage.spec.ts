@@ -63,12 +63,18 @@ test("operator can inspect a dataset-keyed downstream lineage graph", async ({ p
   await waitForRun(request, job.id, run.id);
 
   const rootName = `${alias}.extract.output`;
-  const downstreamName = `${alias}.transform.output`;
-  const impact = await waitForImpact(request, "caesium", rootName, downstreamName);
-  const downstream = impact.downstream.find((node) => node.dataset_name === downstreamName);
+  const transformName = `${alias}.transform.output`;
+  const publishName = `${alias}.publish.output`;
+  const impact = await waitForImpact(request, "caesium", rootName, publishName);
+  const transform = impact.downstream.find((node) => node.dataset_name === transformName);
+  const publish = impact.downstream.find((node) => node.dataset_name === publishName);
 
-  expect(downstream?.job_id).toBe(job.id);
-  expect(downstream?.job_alias).toBe(alias);
+  expect(transform?.job_id).toBe(job.id);
+  expect(transform?.job_alias).toBe(alias);
+  expect(transform?.depth).toBe(0);
+  expect(publish?.job_id).toBe(job.id);
+  expect(publish?.job_alias).toBe(alias);
+  expect(publish?.depth).toBe(1);
 
   await page.goto(`/lineage?namespace=caesium&name=${encodeURIComponent(rootName)}`);
 
@@ -80,13 +86,22 @@ test("operator can inspect a dataset-keyed downstream lineage graph", async ({ p
   await expect(page.getByTestId("lineage-root-node")).toContainText(rootName);
   await expect(page.getByTestId("lineage-root-node")).toContainText("caesium");
 
-  const impactNode = page.getByTestId(lineageImpactNodeTestId("caesium", downstreamName, job.id));
-  await expect(impactNode).toBeVisible();
-  await expect(impactNode).toContainText(downstreamName);
-  await expect(impactNode).toContainText(alias);
-  await expect(page.getByTestId("lineage-edge").first()).toContainText("downstream");
+  const transformNode = page.getByTestId(lineageImpactNodeTestId("caesium", transformName, job.id));
+  await expect(transformNode).toBeVisible();
+  await expect(transformNode).toContainText(transformName);
+  await expect(transformNode).toContainText(alias);
+  await expect(transformNode).toContainText("Hop 1");
 
-  await impactNode.click();
+  const publishNode = page.getByTestId(lineageImpactNodeTestId("caesium", publishName, job.id));
+  await expect(publishNode).toBeVisible();
+  await expect(publishNode).toContainText(publishName);
+  await expect(publishNode).toContainText(alias);
+  await expect(publishNode).toContainText("Hop 2");
+
+  await expect(page.getByTestId(lineageImpactEdgeTestId(rootName, transformName, 0))).toContainText("downstream");
+  await expect(page.getByTestId(lineageImpactEdgeTestId(transformName, publishName, 1))).toContainText("depth 2");
+
+  await transformNode.click();
   await page.waitForURL(new RegExp(`/jobs/${job.id}$`));
   await expect(page.getByRole("heading", { name: alias, exact: true })).toBeVisible();
 
@@ -99,6 +114,10 @@ test("operator can inspect a dataset-keyed downstream lineage graph", async ({ p
 
 function lineageImpactNodeTestId(namespace: string, name: string, jobId: string): string {
   return `lineage-impact-node:${namespace}:${name}:${jobId}`;
+}
+
+function lineageImpactEdgeTestId(sourceName: string, targetName: string, index: number): string {
+  return `lineage-edge:${sourceName}:${targetName}:${index}`;
 }
 
 function buildLineageDefinition(alias: string): LineageFixture {
@@ -153,6 +172,32 @@ function buildLineageDefinition(alias: string): LineageFixture {
           "echo got $CAESIUM_OUTPUT_EXTRACT_ROWS; echo '##caesium::output {\"clean\": \"yes\"}'",
         ],
         dependsOn: ["extract"],
+        next: ["publish"],
+      },
+      {
+        name: "publish",
+        engine: "docker",
+        image: shellImage,
+        inputSchema: {
+          transform: {
+            required: ["clean"],
+            properties: {
+              clean: { type: "string" },
+            },
+          },
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            sent: { type: "string" },
+          },
+        },
+        command: [
+          "sh",
+          "-c",
+          "echo got $CAESIUM_OUTPUT_TRANSFORM_CLEAN; echo '##caesium::output {\"sent\": \"yes\"}'",
+        ],
+        dependsOn: ["transform"],
       },
     ],
   };
