@@ -661,7 +661,7 @@ func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
 func TestValidateSimpleJSONPath(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{"$", "$.ref", "$.sender.login", "$.items.0.name"}
+	valid := []string{"$", "$.ref", "$.sender.login", "$.items.0.name", "$.items[0].name"}
 	for _, expr := range valid {
 		require.NoError(t, validateSimpleJSONPath(expr), expr)
 	}
@@ -670,6 +670,57 @@ func TestValidateSimpleJSONPath(t *testing.T) {
 	for _, expr := range invalid {
 		require.Error(t, validateSimpleJSONPath(expr), expr)
 	}
+}
+
+func TestValidateEventTriggerConfiguration(t *testing.T) {
+	t.Parallel()
+
+	valid := &Trigger{
+		Type: TriggerEvent,
+		Configuration: map[string]any{
+			"events": []any{
+				map[string]any{
+					"type":   "webhook.*",
+					"source": "github",
+					"filter": map[string]any{"repository.full_name": "caesium-cloud/caesium"},
+				},
+			},
+			"paramMapping":  map[string]any{"branch": "$.ref"},
+			"defaultParams": map[string]any{"environment": "staging"},
+		},
+	}
+	require.NoError(t, ValidateTriggerSpec(valid))
+
+	missingEvents := &Trigger{Type: TriggerEvent, Configuration: map[string]any{}}
+	require.Error(t, ValidateTriggerSpec(missingEvents))
+
+	nonStringFilter := &Trigger{
+		Type: TriggerEvent,
+		Configuration: map[string]any{
+			"events": []any{
+				map[string]any{"type": "webhook.*", "filter": map[string]any{"delivery.attempt": 2}},
+			},
+		},
+	}
+	require.Error(t, ValidateTriggerSpec(nonStringFilter))
+
+	badParamMapping := &Trigger{
+		Type: TriggerEvent,
+		Configuration: map[string]any{
+			"events":       []any{map[string]any{"type": "webhook.*"}},
+			"paramMapping": map[string]any{"branch": "ref"},
+		},
+	}
+	require.Error(t, ValidateTriggerSpec(badParamMapping))
+
+	badDefaultParams := &Trigger{
+		Type: TriggerEvent,
+		Configuration: map[string]any{
+			"events":        []any{map[string]any{"type": "webhook.*"}},
+			"defaultParams": map[string]any{"attempt": 2},
+		},
+	}
+	require.Error(t, ValidateTriggerSpec(badDefaultParams))
 }
 
 func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {

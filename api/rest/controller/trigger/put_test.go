@@ -32,6 +32,9 @@ func (s *stubTriggerService) List(*triggersvc.ListRequest) (models.Triggers, err
 	return nil, nil
 }
 func (s *stubTriggerService) ListByPath(string) (models.Triggers, error) { return nil, nil }
+func (s *stubTriggerService) ListByEventPattern(string, string) (models.Triggers, error) {
+	return nil, nil
+}
 func (s *stubTriggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 	if s.trigger != nil && s.trigger.ID == id {
 		return s.trigger, nil

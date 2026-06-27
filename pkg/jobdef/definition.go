@@ -17,8 +17,9 @@ const (
 	APIVersionV1 = "v1"
 	KindJob      = "Job"
 
-	TriggerCron = "cron"
-	TriggerHTTP = "http"
+	TriggerCron  = "cron"
+	TriggerHTTP  = "http"
+	TriggerEvent = "event"
 
 	CallbackNotification = "notification"
 
@@ -36,7 +37,7 @@ const (
 	StepTypeBranch = "branch"
 )
 
-var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\.[^.\s]+)*$`)
+var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\.[^.\s\[\]]+(?:\[[0-9]+\])*)*$`)
 
 // kueueQueueNamePattern matches a Kubernetes DNS-1123 label, the form Kueue
 // requires for a LocalQueue name (which Caesium emits verbatim as the
@@ -402,15 +403,20 @@ func (d *Definition) Validate() error {
 
 func validateTrigger(t *Trigger) error {
 	switch t.Type {
-	case TriggerCron, TriggerHTTP:
+	case TriggerCron, TriggerHTTP, TriggerEvent:
 	default:
-		return fmt.Errorf("trigger.type must be one of [%s,%s]", TriggerCron, TriggerHTTP)
+		return fmt.Errorf("trigger.type must be one of [%s,%s,%s]", TriggerCron, TriggerHTTP, TriggerEvent)
 	}
 	if t.Configuration == nil {
 		t.Configuration = map[string]any{}
 	}
-	if t.Type == TriggerHTTP {
+	switch t.Type {
+	case TriggerHTTP:
 		if err := validateHTTPTriggerConfiguration(t.Configuration); err != nil {
+			return err
+		}
+	case TriggerEvent:
+		if err := validateEventTriggerConfiguration(t.Configuration); err != nil {
 			return err
 		}
 	}
@@ -446,22 +452,99 @@ func validateHTTPTriggerConfiguration(cfg map[string]any) error {
 		}
 	}
 
-	if rawMapping, ok := cfg["paramMapping"]; ok && rawMapping != nil {
-		mapping, ok := rawMapping.(map[string]any)
+	if err := validateParamMappingConfiguration(cfg); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateEventTriggerConfiguration(cfg map[string]any) error {
+	rawEvents, ok := cfg["events"]
+	if !ok || rawEvents == nil {
+		return fmt.Errorf("trigger.configuration.events is required for event triggers")
+	}
+	events, ok := rawEvents.([]any)
+	if !ok {
+		return fmt.Errorf("trigger.configuration.events must be a non-empty list")
+	}
+	if len(events) == 0 {
+		return fmt.Errorf("trigger.configuration.events must contain at least one pattern")
+	}
+	for i, rawEvent := range events {
+		pattern, ok := rawEvent.(map[string]any)
 		if !ok {
-			return fmt.Errorf("trigger.configuration.paramMapping must be a map of string keys and values")
+			return fmt.Errorf("trigger.configuration.events[%d] must be an object", i)
 		}
-		for key, rawExpr := range mapping {
-			expr, ok := rawExpr.(string)
-			if !ok {
-				return fmt.Errorf("trigger.configuration.paramMapping[%q] must be a string", key)
+		rawType, ok := pattern["type"]
+		if !ok {
+			return fmt.Errorf("trigger.configuration.events[%d].type is required", i)
+		}
+		eventType, ok := rawType.(string)
+		if !ok {
+			return fmt.Errorf("trigger.configuration.events[%d].type must be a string", i)
+		}
+		if strings.TrimSpace(eventType) == "" {
+			return fmt.Errorf("trigger.configuration.events[%d].type must not be empty", i)
+		}
+		if rawSource, ok := pattern["source"]; ok && rawSource != nil {
+			if _, ok := rawSource.(string); !ok {
+				return fmt.Errorf("trigger.configuration.events[%d].source must be a string", i)
 			}
-			if err := validateSimpleJSONPath(expr); err != nil {
-				return fmt.Errorf("trigger.configuration.paramMapping[%q]: %w", key, err)
+		}
+		if rawFilter, ok := pattern["filter"]; ok && rawFilter != nil {
+			filter, ok := rawFilter.(map[string]any)
+			if !ok {
+				return fmt.Errorf("trigger.configuration.events[%d].filter must be a map of string keys and values", i)
+			}
+			for key, rawValue := range filter {
+				if _, ok := rawValue.(string); !ok {
+					return fmt.Errorf("trigger.configuration.events[%d].filter[%q] must be a string", i, key)
+				}
 			}
 		}
 	}
+	if err := validateParamMappingConfiguration(cfg); err != nil {
+		return err
+	}
+	return validateDefaultParamsConfiguration(cfg)
+}
 
+func validateParamMappingConfiguration(cfg map[string]any) error {
+	rawMapping, ok := cfg["paramMapping"]
+	if !ok || rawMapping == nil {
+		return nil
+	}
+	mapping, ok := rawMapping.(map[string]any)
+	if !ok {
+		return fmt.Errorf("trigger.configuration.paramMapping must be a map of string keys and values")
+	}
+	for key, rawExpr := range mapping {
+		expr, ok := rawExpr.(string)
+		if !ok {
+			return fmt.Errorf("trigger.configuration.paramMapping[%q] must be a string", key)
+		}
+		if err := validateSimpleJSONPath(expr); err != nil {
+			return fmt.Errorf("trigger.configuration.paramMapping[%q]: %w", key, err)
+		}
+	}
+	return nil
+}
+
+func validateDefaultParamsConfiguration(cfg map[string]any) error {
+	rawParams, ok := cfg["defaultParams"]
+	if !ok || rawParams == nil {
+		return nil
+	}
+	params, ok := rawParams.(map[string]any)
+	if !ok {
+		return fmt.Errorf("trigger.configuration.defaultParams must be a map of string keys and values")
+	}
+	for key, rawValue := range params {
+		if _, ok := rawValue.(string); !ok {
+			return fmt.Errorf("trigger.configuration.defaultParams[%q] must be a string", key)
+		}
+	}
 	return nil
 }
 

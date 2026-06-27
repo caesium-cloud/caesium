@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -23,6 +24,7 @@ type Trigger interface {
 	WithDatabase(*gorm.DB) Trigger
 	List(*ListRequest) (models.Triggers, error)
 	ListByPath(string) (models.Triggers, error)
+	ListByEventPattern(eventType, source string) (models.Triggers, error)
 	Get(uuid.UUID) (*models.Trigger, error)
 	Create(*CreateRequest) (*models.Trigger, error)
 	Update(uuid.UUID, *UpdateRequest) (*models.Trigger, error)
@@ -32,6 +34,29 @@ type Trigger interface {
 type triggerService struct {
 	ctx context.Context
 	db  *gorm.DB
+}
+
+type MutationHook func(context.Context) error
+
+var (
+	mutationHookMu sync.RWMutex
+	mutationHook   MutationHook
+)
+
+func SetMutationHook(hook MutationHook) {
+	mutationHookMu.Lock()
+	defer mutationHookMu.Unlock()
+	mutationHook = hook
+}
+
+func NotifyMutation(ctx context.Context) error {
+	mutationHookMu.RLock()
+	hook := mutationHook
+	mutationHookMu.RUnlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(ctx)
 }
 
 func Service(ctx context.Context) Trigger {
@@ -91,6 +116,19 @@ func (t *triggerService) ListByPath(path string) (models.Triggers, error) {
 	return triggers, err
 }
 
+func (t *triggerService) ListByEventPattern(eventType, source string) (models.Triggers, error) {
+	// Event trigger pattern matching is intentionally done by the router over
+	// its in-memory snapshot. The service lookup is the load-all seam used by
+	// router reloads and future callers that need the event-trigger set.
+	_, _ = eventType, source
+
+	var triggers models.Triggers
+	err := t.db.WithContext(t.ctx).
+		Where("type = ?", models.TriggerTypeEvent).
+		Find(&triggers).Error
+	return triggers, err
+}
+
 func (t *triggerService) Get(id uuid.UUID) (*models.Trigger, error) {
 	var (
 		trigger = &models.Trigger{ID: id}
@@ -139,7 +177,10 @@ func (t *triggerService) Create(req *CreateRequest) (*models.Trigger, error) {
 		return nil, err
 	}
 
-	return trigger, q.Create(trigger).Error
+	if err := q.Create(trigger).Error; err != nil {
+		return nil, err
+	}
+	return trigger, nil
 }
 
 type UpdateRequest struct {
@@ -190,7 +231,10 @@ func (t *triggerService) Delete(id uuid.UUID) error {
 		q = t.db.WithContext(t.ctx)
 	)
 
-	return q.Delete(&models.Trigger{}, id).Error
+	if err := q.Delete(&models.Trigger{}, id).Error; err != nil {
+		return err
+	}
+	return nil
 }
 
 func validateTriggerRequest(triggerType models.TriggerType, configuration map[string]interface{}) error {

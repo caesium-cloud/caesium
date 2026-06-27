@@ -16,7 +16,7 @@ func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Job{}))
+	require.NoError(t, db.AutoMigrate(&models.Trigger{}, &models.Job{}))
 	return db
 }
 
@@ -103,4 +103,26 @@ func TestListFiltersByAliases(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, jobs, 1)
 	require.Equal(t, "beta", jobs[0].Alias)
+}
+
+func TestDeleteSoftDeletesOwningTrigger(t *testing.T) {
+	db := openTestDB(t)
+	svc := &jobService{ctx: context.Background(), db: db}
+
+	trigger := &models.Trigger{
+		ID:            uuid.New(),
+		Type:          models.TriggerTypeEvent,
+		Configuration: `{"events":[{"type":"webhook.*"}]}`,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	created, err := svc.Create(&CreateRequest{TriggerID: trigger.ID, Alias: "delete-trigger"})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Delete(created.ID))
+
+	var stored models.Trigger
+	require.ErrorIs(t, db.First(&stored, "id = ?", trigger.ID).Error, gorm.ErrRecordNotFound)
+	require.NoError(t, db.Unscoped().First(&stored, "id = ?", trigger.ID).Error)
+	require.True(t, stored.DeletedAt.Valid)
 }

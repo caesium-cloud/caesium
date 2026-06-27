@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
@@ -19,6 +20,7 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -36,7 +38,34 @@ var (
 		80 * time.Millisecond,
 		160 * time.Millisecond,
 	}
+
+	triggerMutationHookMu sync.RWMutex
+	triggerMutationHook   TriggerMutationHook
 )
+
+type TriggerMutationHook func(context.Context) error
+
+func SetTriggerMutationHook(hook TriggerMutationHook) {
+	triggerMutationHookMu.Lock()
+	defer triggerMutationHookMu.Unlock()
+	triggerMutationHook = hook
+}
+
+func notifyTriggerMutation(ctx context.Context) error {
+	triggerMutationHookMu.RLock()
+	hook := triggerMutationHook
+	triggerMutationHookMu.RUnlock()
+	if hook == nil {
+		return nil
+	}
+	return hook(ctx)
+}
+
+func notifyTriggerMutationBestEffort(ctx context.Context, action string) {
+	if err := notifyTriggerMutation(ctx); err != nil {
+		log.Warn("event trigger router reload failed after jobdef mutation", "action", action, "error", err)
+	}
+}
 
 // Importer coordinates persistence of job definitions.
 type Importer struct {
@@ -138,6 +167,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	if err != nil {
 		return nil, err
 	}
+	notifyTriggerMutationBestEffort(ctx, "apply")
 
 	return result, nil
 }
@@ -194,7 +224,13 @@ func (i *Importer) PruneMissing(ctx context.Context, desiredAliases []string, op
 		pruned = attemptPruned
 		return nil
 	})
-	return pruned, err
+	if err != nil {
+		return pruned, err
+	}
+	if pruned > 0 {
+		notifyTriggerMutationBestEffort(ctx, "prune")
+	}
+	return pruned, nil
 }
 
 func withImporterBusyRetry(ctx context.Context, fn func() error) error {

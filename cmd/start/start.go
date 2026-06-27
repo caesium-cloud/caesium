@@ -15,6 +15,7 @@ import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	authldap "github.com/caesium-cloud/caesium/internal/auth/ldap"
 	authoidc "github.com/caesium-cloud/caesium/internal/auth/oidc"
@@ -30,6 +31,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/run"
+	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -155,6 +157,7 @@ func start(cmd *cobra.Command, args []string) error {
 	if err := db.Migrate(); err != nil {
 		log.Fatal("database migration failure", "error", err)
 	}
+	event.StartIngestRetentionPruner(ctx, event.NewIngestStore(db.Connection()), vars.EventRetention)
 
 	bus := event.New()
 	runStore := run.Default()
@@ -432,6 +435,15 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Fatal("secret resolver configuration failure", "error", err)
 	}
 	triggerhttp.SetSecretResolver(resolver)
+	eventRouter := triggerevent.ConfigureDefaultRouter(db.Connection())
+	if err := eventRouter.Reload(ctx); err != nil {
+		log.Fatal("event trigger router initial load failure", "error", err)
+	}
+	reloadEventRouter := func(reloadCtx context.Context) error {
+		return eventRouter.Reload(reloadCtx)
+	}
+	triggersvc.SetMutationHook(reloadEventRouter)
+	jobdef.SetTriggerMutationHook(reloadEventRouter)
 
 	watches, err := runtime.BuildGitWatches(vars, resolver)
 	if err != nil {

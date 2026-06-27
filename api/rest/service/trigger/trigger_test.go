@@ -74,6 +74,21 @@ func (s *TriggerSuite) createHTTPTrigger(alias, path string) *models.Trigger {
 	return trigger
 }
 
+func (s *TriggerSuite) createEventTrigger(alias, eventType string) *models.Trigger {
+	svc := s.svc()
+	trigger, err := svc.Create(&CreateRequest{
+		Alias: alias,
+		Type:  string(models.TriggerTypeEvent),
+		Configuration: map[string]interface{}{
+			"events": []interface{}{
+				map[string]interface{}{"type": eventType},
+			},
+		},
+	})
+	s.Require().NoError(err)
+	return trigger
+}
+
 // --- List ---
 
 func (s *TriggerSuite) TestListEmpty() {
@@ -132,6 +147,17 @@ func (s *TriggerSuite) TestListByPathPreservesRealLeadingSegments() {
 	s.Equal(matched.ID, triggers[0].ID)
 
 	triggers, err = s.svc().ListByPath("/v1/hooks/v1/build")
+	s.Require().NoError(err)
+	s.Len(triggers, 1)
+	s.Equal(matched.ID, triggers[0].ID)
+}
+
+func (s *TriggerSuite) TestListByEventPatternLoadsEventTriggers() {
+	matched := s.createEventTrigger("event-trigger", "webhook.*")
+	s.createHTTPTrigger("webhook-other", "/hooks/run")
+	s.createTrigger(string(models.TriggerTypeCron), "cron-trigger")
+
+	triggers, err := s.svc().ListByEventPattern("webhook.github", "github")
 	s.Require().NoError(err)
 	s.Len(triggers, 1)
 	s.Equal(matched.ID, triggers[0].ID)

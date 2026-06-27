@@ -525,6 +525,10 @@ var harnessMetricSpecs = map[string]metricSpec{
 		labelNames: nil,
 		read:       readCounter(metrics.DBBusyRetriesTotal),
 	},
+	"caesium_event_trigger_matches_total": {
+		labelNames: []string{"trigger_id", "event_type"},
+		read:       readCounterVec(metrics.EventTriggerMatchesTotal),
+	},
 	"caesium_job_runs_total": {
 		labelNames: []string{"job_id", "status"},
 		read:       readCounterVec(metrics.JobRunsTotal),

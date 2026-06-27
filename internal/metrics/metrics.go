@@ -251,6 +251,14 @@ var (
 		[]string{"path", "reason"},
 	)
 
+	EventTriggerMatchesTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_event_trigger_matches_total",
+			Help: "Total event trigger matches by trigger and event type.",
+		},
+		[]string{"trigger_id", "event_type"},
+	)
+
 	// DBWritesTotal counts durable database writes by category, measured in
 	// rows touched (so a batched UPDATE/INSERT increments by the row count, not
 	// by one). Use this for capacity-planning and "how much work is the DB
@@ -416,6 +424,7 @@ func Register() {
 			SSOLoginDurationSeconds,
 			SSOLogoutsTotal,
 			WebhookAuthFailuresTotal,
+			EventTriggerMatchesTotal,
 			DBWritesTotal,
 			DBStatementsTotal,
 			CompleteRejectedTotal,

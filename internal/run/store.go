@@ -232,6 +232,18 @@ func (s *Store) Bus() event.Bus {
 	return s.bus
 }
 
+// AdoptStartedRun records that this process should clear active-run bookkeeping
+// when Complete sees runID. It is used when a run is created transactionally by
+// a short-lived store instance but executed by the default runtime store.
+func (s *Store) AdoptStartedRun(runID uuid.UUID) {
+	if s == nil || runID == uuid.Nil {
+		return
+	}
+	s.startedMu.Lock()
+	s.startedRuns[runID] = struct{}{}
+	s.startedMu.Unlock()
+}
+
 func (s *Store) EventStore() *event.Store {
 	return s.eventStore
 }

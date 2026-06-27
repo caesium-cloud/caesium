@@ -48,10 +48,14 @@ func Service(ctx context.Context) Job {
 			eventStore: defaultService.eventStore,
 		}
 	}
+	return ServiceWithDatabase(ctx, db.Connection())
+}
+
+func ServiceWithDatabase(ctx context.Context, conn *gorm.DB) Job {
 	return &jobService{
 		ctx:        ctx,
-		db:         db.Connection(),
-		eventStore: event.NewStore(db.Connection()),
+		db:         conn,
+		eventStore: event.NewStore(conn),
 	}
 }
 
@@ -222,8 +226,17 @@ func (j *jobService) Delete(id uuid.UUID) error {
 
 	pendingEvents := make([]event.Event, 0, 1)
 	err := q.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Delete(&models.Job{}, id).Error; err != nil {
+		var jobModel models.Job
+		if err := tx.First(&jobModel, "id = ?", id).Error; err != nil {
 			return err
+		}
+		if err := tx.Delete(&jobModel).Error; err != nil {
+			return err
+		}
+		if jobModel.TriggerID != uuid.Nil {
+			if err := tx.Delete(&models.Trigger{}, jobModel.TriggerID).Error; err != nil {
+				return err
+			}
 		}
 		if j.eventStore != nil {
 			evt := event.Event{

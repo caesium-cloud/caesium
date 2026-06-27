@@ -118,7 +118,7 @@ startup. Largest blast radius, so it merges first. Mirror the shipped HTTP-trigg
 package (`internal/trigger/http/`) for the `FireWithParams` → list-jobs → merge →
 `job.Run()` shape.
 
-- [ ] A1. Add the `ingested_events` GORM model + a typed store + a retention
+- [x] A1. Add the `ingested_events` GORM model + a typed store + a retention
       pruner — **and the `event_trigger_matches` model** (`event_id`, `trigger_id`,
       `matched_at`, `runs_started`, skip/error metadata), the **durable truth source**
       the observability reads (B2) join against. (Recomputing matches from the
@@ -133,7 +133,11 @@ package (`internal/trigger/http/`) for the `FireWithParams` → list-jobs → me
       `internal/models/event_trigger_match.go`, `internal/models/models.go`,
       new `internal/event/ingest_store.go` (or `internal/trigger/event/store.go`),
       `pkg/env/env.go`, `cmd/start/start.go`.
-- [ ] A2. Implement the event matcher: `EventPattern.Matches(evt)` — type match
+      - W1-α: Added catalog-only `ingested_events` and `event_trigger_matches`,
+        `internal/event.IngestStore`, `CAESIUM_EVENT_RETENTION` (default `7d`),
+        and the startup retention pruner. Did not add these observability tables
+        to hot-path routing.
+- [x] A2. Implement the event matcher: `EventPattern.Matches(evt)` — type match
       (exact or glob, e.g. `webhook.*`), optional exact `source`, and every
       `filter` key (dot-path into the event data) equal to its expected string
       value; plus `extractField` for nested dot-path lookups. Pure logic, fully
@@ -141,7 +145,10 @@ package (`internal/trigger/http/`) for the `FireWithParams` → list-jobs → me
       coercion).
       Files: new `internal/trigger/event/matcher.go` (+ `matcher_test.go`).
       Depends on: A1 (the `IngestedEvent` type).
-- [ ] A3. Add `TriggerTypeEvent` to `internal/models/trigger.go` and the
+      - W1-α: Added exact/glob type matching, optional source matching,
+        dot-path filters over event data, string coercion, and matcher unit
+        coverage for glob/source/nested/missing/coercion cases.
+- [x] A3. Add `TriggerTypeEvent` to `internal/models/trigger.go` and the
       `EventTrigger`. **Interface contract (verified against the code):** the shared
       `internal/trigger.Trigger` interface has ONLY `Listen(ctx)`, `Fire(ctx)`,
       `ID()` — `FireWithParams` exists only on the *concrete* HTTP trigger, NOT the
@@ -156,7 +163,11 @@ package (`internal/trigger/http/`) for the `FireWithParams` → list-jobs → me
       Files: `internal/models/trigger.go`, new `internal/trigger/event/event.go`,
       `pkg/jobdef/definition.go` (type-specific trigger validation).
       Depends on: A2.
-- [ ] A4. Add the singleton event `Router` (`internal/trigger/event/router.go`):
+      - W1-α: Added concrete `EventTrigger` with `Listen`/`Fire`/`ID` plus
+        concrete `FireWithParams`, event param extraction from JSONPath
+        mappings, default-param merge, run pre-creation, and event-trigger
+        config validation without widening the shared trigger interface.
+- [x] A4. Add the singleton event `Router` (`internal/trigger/event/router.go`):
       `Route(ctx, evt)` returns a structured **`RouteResult`** (the matched triggers
       + each trigger's fire outcome — run id / skipped / error), **NOT a bare
       `[]uuid.UUID`**: all three event sources (B1 ingestion, B3 webhook, C1
@@ -190,6 +201,11 @@ package (`internal/trigger/http/`) for the `FireWithParams` → list-jobs → me
       Acceptance probe (integration): apply an event trigger AFTER boot → ingest a
       matching event → the run fires (apply-then-ingest); and update/delete a trigger
       takes effect without a restart.
+      - W1-α: Added singleton reloadable router, structured `RouteResult`,
+        transactional event/match/run-start persistence with post-commit job
+        launch, `ListByEventPattern` load-all seam, trigger-service and importer
+        mutation reload hooks, startup load, executor registration, and
+        `caesium_event_trigger_matches_total{trigger_id,event_type}`.
 
 ### Stream B — Event ingestion + observability REST API (WS2 surface)
 

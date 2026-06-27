@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/trigger"
 	"github.com/caesium-cloud/caesium/internal/trigger/cron"
+	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	"github.com/caesium-cloud/caesium/pkg/log"
 )
 
@@ -34,18 +35,21 @@ func (e *Executor) queue(ctx context.Context, t trigger.Trigger) {
 
 func Start(ctx context.Context) error {
 	var (
-		t   = time.NewTicker(time.Minute)
-		req = &svc.ListRequest{
-			Type: string(models.TriggerTypeCron),
+		t    = time.NewTicker(time.Minute)
+		reqs = []*svc.ListRequest{
+			{Type: string(models.TriggerTypeCron)},
+			{Type: string(models.TriggerTypeEvent)},
 		}
 	)
 
 	for {
 		select {
 		case <-t.C:
-			if err := queueTriggers(ctx, req); err != nil {
-				log.Error("trigger queue failure", "error", err)
-				return err
+			for _, req := range reqs {
+				if err := queueTriggers(ctx, req); err != nil {
+					log.Error("trigger queue failure", "error", err)
+					return err
+				}
 			}
 			continue
 		case <-ctx.Done():
@@ -63,10 +67,19 @@ func queueTriggers(ctx context.Context, req *svc.ListRequest) error {
 	log.Info("queueing triggers", "count", len(triggers))
 
 	for _, trig := range triggers {
-		if c, err := cron.New(trig); err == nil {
+		switch trig.Type {
+		case models.TriggerTypeCron:
+			c, err := cron.New(trig)
+			if err != nil {
+				return err
+			}
 			exec.queue(ctx, c)
-		} else {
-			return err
+		case models.TriggerTypeEvent:
+			e, err := triggerevent.New(trig)
+			if err != nil {
+				return err
+			}
+			exec.queue(ctx, e)
 		}
 	}
 
