@@ -20,6 +20,7 @@ import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
 import { getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
+import { ReceiptPanel } from "./ReceiptPanel";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
@@ -349,6 +350,8 @@ export function RunDetailPage() {
       <div className="flex items-center gap-4">
         <RunCacheSummary run={run} />
       </div>
+
+      <ReceiptPanel jobId={jobId} runId={runId} />
 
       {/* Gantt timeline */}
       <div className="rounded-md border border-border/50 bg-card overflow-hidden">
