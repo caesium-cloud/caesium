@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type Receipt, type ReceiptDrift, type ReceiptDriftKind, type VerifyResult } from "@/lib/api";
+import { api, type Receipt, type ReceiptDrift, type ReceiptDriftKind, type ReceiptTaskEntry, type VerifyResult } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 interface ReceiptPanelProps {
@@ -63,6 +63,13 @@ export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
     }
   };
 
+  const handleCommittedReceiptChange = (value: string) => {
+    setCommittedReceiptText(value);
+    if (inputError) {
+      setInputError(null);
+    }
+  };
+
   return (
     <Card data-testid="receipt-panel">
       <CardHeader className="pb-3">
@@ -109,7 +116,7 @@ export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
           inputError={inputError}
           isPending={verifyMutation.isPending}
           result={verifyMutation.data}
-          onChange={setCommittedReceiptText}
+          onChange={handleCommittedReceiptChange}
           onUpload={handleUpload}
           onVerify={handleVerify}
         />
@@ -129,7 +136,7 @@ function ReceiptSkeleton() {
 }
 
 function ReceiptStatus({ receipt }: { receipt: Receipt }) {
-  return receipt.degraded ? (
+  return receipt.degraded === true ? (
     <Badge data-testid="receipt-degraded-status" variant="destructive" className="h-fit gap-1.5">
       <ShieldAlert className="h-3.5 w-3.5" />
       degraded-unverifiable
@@ -143,6 +150,8 @@ function ReceiptStatus({ receipt }: { receipt: Receipt }) {
 }
 
 function ReceiptContent({ receipt }: { receipt: Receipt }) {
+  const tasks = receipt.tasks ?? [];
+
   return (
     <div data-testid="receipt-summary" className="space-y-4">
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -157,8 +166,8 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
           value={receipt.manifest_content_hash || "None"}
           mono
         />
-        <MetadataCell testId="receipt-task-count" label="tasks" value={String(receipt.tasks.length)} mono />
-        <MetadataCell testId="receipt-degraded" label="degraded" value={String(receipt.degraded)} mono />
+        <MetadataCell testId="receipt-task-count" label="tasks" value={String(tasks.length)} mono />
+        <MetadataCell testId="receipt-degraded" label="degraded" value={String(receipt.degraded ?? false)} mono />
       </div>
 
       <div className="rounded-md border border-border/60 bg-background/40 p-3">
@@ -177,14 +186,14 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
       <div className="space-y-2">
         <SectionLabel>tasks</SectionLabel>
         <div className="space-y-2">
-          {receipt.tasks.map((task) => (
+          {tasks.map((task) => (
             <div
               key={`${task.task_name}:${task.identity_hash}`}
               data-testid="receipt-task-row"
               data-task-name={task.task_name}
               className={cn(
                 "rounded-md border bg-background/40 p-3",
-                task.degraded ? "border-warning/35" : "border-border/50",
+                task.degraded === true ? "border-warning/35" : "border-border/50",
               )}
             >
               <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
@@ -203,7 +212,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                   <Badge variant={task.digest_pinned ? "success" : "destructive"} className="text-[10px]">
                     digest_pinned={String(task.digest_pinned)}
                   </Badge>
-                  {task.degraded ? (
+                  {task.degraded === true ? (
                     <Badge data-testid="receipt-task-unverifiable-marker" variant="destructive" className="text-[10px]">
                       unverifiable
                     </Badge>
@@ -221,7 +230,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                 <MetadataCell
                   testId="receipt-task-resolved-image-digest"
                   label="resolved_image_digest"
-                  value={task.resolved_image_digest || "None"}
+                  value={task.resolved_image_digest ?? "None"}
                   mono
                 />
                 <MetadataCell
@@ -233,7 +242,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                 <MetadataCell
                   testId="receipt-task-degraded"
                   label="degraded"
-                  value={String(task.degraded)}
+                  value={String(task.degraded ?? false)}
                   mono
                 />
               </div>
@@ -270,9 +279,12 @@ function UnverifiableSummary({ tasks }: { tasks: string[] }) {
           <div className="font-semibold">This receipt is degraded-unverifiable.</div>
           <div className="mt-1 text-warning/85">
             Unverifiable tasks:{" "}
-            {tasks.map((task) => (
-              <span key={task} data-testid="receipt-degraded-task" className="font-mono">
-                {task}
+            {tasks.map((task, index) => (
+              <span key={`${task}:${index}`}>
+                {index > 0 ? ", " : null}
+                <span data-testid="receipt-degraded-task" className="font-mono">
+                  {task}
+                </span>
               </span>
             ))}
           </div>
@@ -363,6 +375,7 @@ function VerifyForm({
 
 function VerifyResultView({ result }: { result: VerifyResult }) {
   const verdict = verifyVerdict(result);
+  const degradedTasks = result.degraded_tasks ?? [];
   const drifts = result.drifts ?? [];
 
   return (
@@ -401,15 +414,18 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
           mono
         />
         <MetadataCell testId="receipt-verify-match" label="match" value={String(result.match)} mono />
-        <MetadataCell testId="receipt-verify-degraded" label="degraded" value={String(result.degraded)} mono />
+        <MetadataCell testId="receipt-verify-degraded" label="degraded" value={String(result.degraded ?? false)} mono />
       </div>
 
-      {result.degraded_tasks && result.degraded_tasks.length > 0 ? (
+      {degradedTasks.length > 0 ? (
         <div className="rounded-md border border-warning/25 bg-warning/10 p-2 text-xs text-warning">
           <span className="font-semibold">degraded_tasks </span>
-          {result.degraded_tasks.map((task) => (
-            <span key={task} data-testid="receipt-verify-degraded-task" className="font-mono">
-              {task}
+          {degradedTasks.map((task, index) => (
+            <span key={`${task}:${index}`}>
+              {index > 0 ? ", " : null}
+              <span data-testid="receipt-verify-degraded-task" className="font-mono">
+                {task}
+              </span>
             </span>
           ))}
         </div>
@@ -515,45 +531,103 @@ function parseCommittedReceipt(raw: string, currentJobId: string, currentRunId: 
     return { error: `Committed receipt JSON could not be parsed: ${detail}` };
   }
 
-  if (!isReceipt(parsed)) {
+  const receipt = normalizeReceipt(parsed);
+  if (!receipt) {
     return { error: "Committed receipt JSON does not match the Receipt shape." };
   }
 
-  if (parsed.job_id !== currentJobId || parsed.run_id !== currentRunId) {
+  if (receipt.job_id !== currentJobId || receipt.run_id !== currentRunId) {
     return { error: "Committed receipt job_id and run_id must match the current run." };
   }
 
-  return { receipt: parsed };
+  return { receipt };
 }
 
-function isReceipt(value: unknown): value is Receipt {
+function normalizeReceipt(value: unknown): Receipt | null {
   if (!isObject(value)) {
-    return false;
+    return null;
   }
-  return (
-    typeof value.receipt_version === "number" &&
-    typeof value.run_id === "string" &&
-    typeof value.job_id === "string" &&
-    Array.isArray(value.tasks) &&
-    value.tasks.every(isReceiptTaskEntry) &&
-    typeof value.degraded === "boolean" &&
-    typeof value.receipt_digest === "string"
-  );
+
+  const tasks = value.tasks ?? [];
+  if (!Array.isArray(tasks)) {
+    return null;
+  }
+
+  const normalizedTasks = tasks.map(normalizeReceiptTaskEntry);
+  if (normalizedTasks.some((task) => task === null)) {
+    return null;
+  }
+
+  const degradedTasks = value.degraded_tasks ?? undefined;
+  if (degradedTasks !== undefined && !isStringArray(degradedTasks)) {
+    return null;
+  }
+
+  if (
+    typeof value.receipt_version !== "number" ||
+    typeof value.run_id !== "string" ||
+    typeof value.job_id !== "string" ||
+    !isOptionalString(value.job_alias) ||
+    !isOptionalString(value.git_commit) ||
+    !isOptionalString(value.manifest_content_hash) ||
+    !isOptionalBoolean(value.degraded) ||
+    typeof value.receipt_digest !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    receipt_version: value.receipt_version,
+    run_id: value.run_id,
+    job_id: value.job_id,
+    job_alias: value.job_alias ?? undefined,
+    git_commit: value.git_commit ?? undefined,
+    manifest_content_hash: value.manifest_content_hash ?? undefined,
+    tasks: normalizedTasks as ReceiptTaskEntry[],
+    degraded: value.degraded ?? false,
+    degraded_tasks: degradedTasks,
+    receipt_digest: value.receipt_digest,
+  };
 }
 
-function isReceiptTaskEntry(value: unknown) {
+function normalizeReceiptTaskEntry(value: unknown): ReceiptTaskEntry | null {
   if (!isObject(value)) {
-    return false;
+    return null;
   }
-  return (
+
+  if (
     typeof value.task_name === "string" &&
     typeof value.identity_hash === "string" &&
     typeof value.image === "string" &&
+    isOptionalString(value.resolved_image_digest) &&
     typeof value.digest_pinned === "boolean" &&
-    typeof value.degraded === "boolean" &&
-    (value.resolved_image_digest === undefined || typeof value.resolved_image_digest === "string") &&
-    (value.degraded_reason === undefined || typeof value.degraded_reason === "string")
-  );
+    isOptionalBoolean(value.degraded) &&
+    isOptionalString(value.degraded_reason)
+  ) {
+    return {
+      task_name: value.task_name,
+      identity_hash: value.identity_hash,
+      image: value.image,
+      resolved_image_digest: value.resolved_image_digest ?? undefined,
+      digest_pinned: value.digest_pinned,
+      degraded: value.degraded ?? false,
+      degraded_reason: value.degraded_reason ?? undefined,
+    };
+  }
+
+  return null;
+}
+
+function isOptionalString(value: unknown): value is string | null | undefined {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isOptionalBoolean(value: unknown): value is boolean | null | undefined {
+  return value === undefined || value === null || typeof value === "boolean";
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
