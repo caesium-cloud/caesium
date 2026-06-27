@@ -148,15 +148,25 @@ async function applyDefinitionWithProvenance(
 }
 
 async function findJobByAlias(request: APIRequestContext, alias: string): Promise<E2EJob> {
-  const response = await request.get("/v1/jobs");
-  if (!response.ok()) {
-    throw new Error(`failed to list jobs: ${response.status()} ${await response.text()}`);
-  }
+  let foundJob: E2EJob | undefined;
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get("/v1/jobs");
+        if (!response.ok()) {
+          throw new Error(`failed to list jobs: ${response.status()} ${await response.text()}`);
+        }
 
-  const jobs = (await response.json()) as E2EJob[];
-  const job = jobs.find((candidate) => candidate.alias === alias);
-  if (!job) {
-    throw new Error(`job not found after apply: ${alias}`);
-  }
-  return job;
+        const jobs = (await response.json()) as E2EJob[];
+        foundJob = jobs.find((candidate) => candidate.alias === alias);
+        return foundJob?.alias ?? "";
+      },
+      {
+        timeout: 10_000,
+        intervals: [250, 500, 1_000],
+      },
+    )
+    .toBe(alias);
+
+  return foundJob!;
 }

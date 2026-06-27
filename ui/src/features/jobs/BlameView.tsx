@@ -1,5 +1,5 @@
-import { type FormEvent, useState } from "react";
-import { Link, useNavigate, useParams, useSearch } from "@tanstack/react-router";
+import { type FormEvent, useEffect, useState } from "react";
+import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowLeft, GitBranch, GitCommit, Info, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -16,18 +16,14 @@ type BlameSearch = {
   task: string | undefined;
 };
 
+const blameRouteApi = getRouteApi("/jobs/$jobId/blame");
+
 export function BlameRoutePage() {
-  const { jobId } = useParams({ strict: false }) as { jobId: string };
-  const search = useSearch({ strict: false }) as BlameSearch;
+  const { jobId } = blameRouteApi.useParams();
+  const search = blameRouteApi.useSearch();
   const cleanSearch = buildSearch(search.from ?? "", search.to ?? "", search.task ?? "");
 
-  return (
-    <BlameView
-      key={`${jobId}:${cleanSearch.from ?? ""}:${cleanSearch.to ?? ""}:${cleanSearch.task ?? ""}`}
-      jobId={jobId}
-      search={cleanSearch}
-    />
-  );
+  return <BlameView jobId={jobId} search={cleanSearch} />;
 }
 
 export function BlameView({ jobId, search }: { jobId: string; search: BlameSearch }) {
@@ -38,6 +34,26 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
   const [fromInput, setFromInput] = useState(fromCommit ?? "");
   const [toInput, setToInput] = useState(toCommit ?? "");
   const [taskInput, setTaskInput] = useState(taskFilter ?? "");
+
+  useEffect(() => {
+    let active = true;
+    const nextFromInput = fromCommit ?? "";
+    const nextToInput = toCommit ?? "";
+    const nextTaskInput = taskFilter ?? "";
+
+    queueMicrotask(() => {
+      if (!active) {
+        return;
+      }
+      setFromInput(nextFromInput);
+      setToInput(nextToInput);
+      setTaskInput(nextTaskInput);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [fromCommit, toCommit, taskFilter]);
 
   const {
     data: blame,
@@ -71,7 +87,7 @@ export function BlameView({ jobId, search }: { jobId: string; search: BlameSearc
 
   if (isLoading) {
     return (
-      <div className="space-y-5 p-8" data-testid="blame-container">
+      <div className="space-y-5" data-testid="blame-container">
         <BlameBreadcrumb jobId={jobId} />
         <Skeleton className="h-8 w-[220px]" />
         <Skeleton className="h-24 w-full" />
@@ -408,24 +424,11 @@ function cleanParam(value?: string): string | undefined {
 }
 
 function buildSearch(from: string, to: string, task: string): BlameSearch {
-  const search: BlameSearch = {
-    from: undefined,
-    to: undefined,
-    task: undefined,
+  return {
+    from: cleanParam(from),
+    to: cleanParam(to),
+    task: cleanParam(task),
   };
-  const fromCommit = cleanParam(from);
-  const toCommit = cleanParam(to);
-  const taskFilter = cleanParam(task);
-  if (fromCommit) {
-    search.from = fromCommit;
-  }
-  if (toCommit) {
-    search.to = toCommit;
-  }
-  if (taskFilter) {
-    search.task = taskFilter;
-  }
-  return search;
 }
 
 function formatCoverage(coverage: string): string {
@@ -440,7 +443,7 @@ function formatCommit(commit: string): string {
 }
 
 function formatCommand(command?: string[]): string {
-  return JSON.stringify(command ?? []);
+  return command && command.length > 0 ? command.join(" ") : "No command recorded";
 }
 
 function testIdSlug(value: string): string {
