@@ -85,19 +85,34 @@ contracts W1/W2 follow; N-1 folds all of them into `design-event-triggers.md`.
 
 ## Progress (as of 2026-06-27)
 
-No implementation waves have shipped yet. WS1 (HTTP webhook triggers) shipped
-previously and is the foundation this plan builds on (`internal/trigger/http/`,
-`api/rest/controller/webhook/`, the `internal/event` bus + store). The first wave
-is the next eligible run of the `exec-plan-wave` skill against this doc — the
-leaf-eligible streams are **A** (the engine) and **H-1** (the integration harness).
-(Adversarial review moved D1 out of the first wave: it collides with A1 + B3 on
-`webhook.go`/`models.go`/`start.go`.)
+**Wave 1 shipped** the event-trigger engine (Stream A). WS1 (HTTP webhook triggers)
+shipped previously and is the foundation this plan builds on (`internal/trigger/http/`,
+`api/rest/controller/webhook/`, the `internal/event` bus + store). **Wave 2 fans out
+to B (ingestion + webhook bridge + observability) + C (chaining + cycle detection),
+both unblocked now that A's router is in**, plus H-1 (the integration harness, bundled
+with B since B's apply→ingest→run test needs the configured server).
+
+### Wave 1 — event-trigger engine shipped
+
+- **Stream α (A1–A4):** the reactive WS2 engine — the `event` trigger type, the content
+  matcher, the `EventTrigger` (concrete `FireWithParams`; shared `Trigger` interface
+  unchanged), and the singleton `Router` with a `RouteResult` persist-and-fire boundary
+  (atomic `ingested_events` + `event_trigger_matches`), reloading on trigger CRUD + the
+  git-sync importer — PR #257, merged `ee64233`. Opus 4-lens review + re-review + a
+  greptile/gemini sweep caught + fixed pre-merge: a run-store signature compile error; a
+  **blocker** (deleted event-trigger jobs kept firing — `job.Delete` now invalidates the
+  router and deletes the trigger only when it's the **last** referencing job, so 1:N
+  triggers aren't orphaned); the reload lifecycle (one post-commit non-fatal reload, a
+  `reloadMu` serializing concurrent reloads); a flaky test that hit the prod dqlite
+  singleton (a non-eager `ServiceWithDatabase` for the Route path); and idempotent
+  `job.Delete` + the JSONPath validation regex. Engine package coverage 9.9% → 79.5%;
+  integration gate green ×2.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Event-trigger evaluation engine — `event` type, matcher, `EventTrigger`, singleton router, executor + startup wiring | **P0** | Not started |
+| A | Event-trigger evaluation engine — `event` type, matcher, `EventTrigger`, singleton router, executor + startup wiring | **P0** | **Shipped** (#257) — engine + router + tests |
 | B | Event ingestion + observability REST API — keyed `POST /v1/events`, the webhook→event bridge, durable-match reads (`GET /v1/events/ingested`, `GET /v1/triggers/:id/events`) | **P0** | Not started |
 | C | Trigger chaining — internal lifecycle-bus bridge + static & runtime cycle detection | P1 | Not started |
 | D | Webhook event log + trigger CLI — durable `webhook_events`, `caesium event push`, `caesium trigger events` | P1 | Not started |
