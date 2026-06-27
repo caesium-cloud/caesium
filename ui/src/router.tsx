@@ -4,6 +4,7 @@ import { AtomsPage } from "./features/atoms/AtomsPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
 import { LogConsolePage } from "./features/logs/LogConsolePage";
 import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
+import { BlameRoutePage } from "./features/jobs/BlameView";
 import { JobsPage } from "./features/jobs/JobsPage";
 import { JobDetailPage } from "./features/jobs/JobDetailPage";
 import { RunDetailPage } from "./features/jobs/RunDetailPage";
@@ -32,6 +33,17 @@ const jobDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId",
   component: JobDetailPage,
+});
+
+const blameRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/blame",
+  validateSearch: (search: Record<string, unknown>) => ({
+    from: typeof search.from === "string" ? search.from : undefined,
+    to: typeof search.to === "string" ? search.to : undefined,
+    task: typeof search.task === "string" ? search.task : undefined,
+  }),
+  component: BlameRoutePage,
 });
 
 const runDetailRoute = createRoute({
@@ -101,6 +113,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
   jobDetailRoute,
+  blameRoute,
   runDiffRoute,
   runDetailRoute,
   statsRoute,

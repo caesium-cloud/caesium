@@ -248,16 +248,22 @@ Answer "why did this task run / skip / re-run / cache-hit" inline on the task.
 
 ### Stream D — Blame (topology attribution)
 
-- [ ] D1. Build a blame view (a `/jobs/$jobId/blame` route) driving `getBlame`: render
+- [x] D1. Build a blame view (a `/jobs/$jobId/blame` route) driving `getBlame`: render
       commit/snapshot attribution over `dag_snapshot` (topology + image + command), with
       the **coverage caveat** surfaced in the UI (env/spec/retries/cache/schema/sla/
       triggerRules are intentionally untracked). Optional `--from/--to` commit-range
       pickers.
       Files: new `ui/src/features/jobs/BlameView.tsx`, `ui/src/router.tsx`.
       Depends on: H-1.
-- [ ] D2. Playwright e2e: apply a job through the provenance path (apply-provenance /
+      Note: Added `BlameView` at `/jobs/$jobId/blame`, rendering job/range metadata,
+      topology+image+command coverage, task and edge attribution rows, snapshot IDs,
+      optional from/to/task filters, and the explicit untracked-field caveat.
+- [x] D2. Playwright e2e: apply a job through the provenance path (apply-provenance /
       git-sync) with distinct commits, open the blame view, assert the commit attribution
       + the coverage caveat render. Files: `ui/e2e/blame.spec.ts`. Depends on: D1.
+      Note: Added a Playwright spec that applies the same job twice through
+      `POST /v1/jobdefs/apply` with distinct `provenance.commit` values and asserts
+      the changed task's displayed commit, command, coverage label, and caveat.
 
 ### Stream E — Reproducibility receipt + verify
 
