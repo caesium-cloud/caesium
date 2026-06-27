@@ -1,6 +1,6 @@
 # Design: Event-Driven Triggers
 
-> Status: Work Stream 1 (HTTP webhook triggers) is shipped. Work Streams 2 (event-based routing) and 3 (trigger chaining) remain proposed and are the project's current top-priority next feature (roadmap P0). WS1 operator behaviour is covered by the HTTP-trigger fields in [job-schema-reference.md](job-schema-reference.md).
+> Status: Work Stream 1 (HTTP webhook triggers) is shipped. Work Streams 2 (event-based routing) and 3 (trigger chaining) are the project's current top-priority next feature (roadmap P0) and are now decomposed into the active exec-plan [`exec-plans/active/event-trigger-routing.md`](exec-plans/active/event-trigger-routing.md). WS1 operator behaviour is covered by the HTTP-trigger fields in [job-schema-reference.md](job-schema-reference.md).
 
 ## Problem statement
 
