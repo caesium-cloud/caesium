@@ -40,6 +40,8 @@ These features address the most common reasons a team would choose an alternativ
 
 **Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
 
+**Plan**: WS2 (event routing) + WS3 (chaining) — the remaining P0 work — are decomposed into the active exec-plan [Event-Driven Trigger Routing](exec-plans/active/event-trigger-routing.md).
+
 ### 1.3 Concurrency Strategies & Rate Limiting
 
 **Current state**: Concurrency control is a single numeric `maxParallelTasks` knob (defaults to CPU count). No rate limiting, no fairness policies, no strategy for handling overlapping runs.
