@@ -39,7 +39,21 @@ export async function loginAsScoped(page: Page, keys: AuthLaneKeys): Promise<Who
 }
 
 export async function loginWithApiKey(page: Page, key: string): Promise<WhoamiPrincipal> {
-  await page.goto("/");
+  const principal = await loginAtUrl(page, "/", key);
+  await expect(page.getByRole("heading", { name: "Jobs", exact: true })).toBeVisible();
+  return principal;
+}
+
+// Log in WITHOUT a separate page load afterwards. The api-key session lives in a
+// module-scoped variable (ui/src/lib/auth.ts) — NOT localStorage — so a full
+// page reload (page.goto) AFTER login drops the key and bounces back to the
+// login screen. AuthGate (ui/src/features/auth/AuthGate.tsx) instead renders the
+// LoginPage IN PLACE at the current URL when unauthenticated and swaps in the
+// app's children (the routed page) on login, with no navigation. So to land
+// authenticated on a deep route, navigate THERE first, then log in: the routed
+// page renders at the preserved URL. Do not page.goto again after this.
+export async function loginAtUrl(page: Page, url: string, key: string): Promise<WhoamiPrincipal> {
+  await page.goto(url);
   await expect(page.getByPlaceholder("csk_live_...")).toBeVisible();
   await page.getByPlaceholder("csk_live_...").fill(key);
 
@@ -50,9 +64,7 @@ export async function loginWithApiKey(page: Page, key: string): Promise<WhoamiPr
   const whoami = page.waitForResponse(isSuccessfulWhoamiResponse);
   await page.getByRole("button", { name: "Sign In" }).click();
 
-  const principal = await readWhoami(await whoami);
-  await expect(page.getByRole("heading", { name: "Jobs", exact: true })).toBeVisible();
-  return principal;
+  return readWhoami(await whoami);
 }
 
 async function seedAuthKeys(request: APIRequestContext): Promise<AuthLaneKeys> {

@@ -35,6 +35,7 @@ export interface JobRun {
   cache_hits?: number;
   executed_tasks?: number;
   total_tasks?: number;
+  quarantine?: boolean;
   tasks?: TaskRun[];
 }
 
