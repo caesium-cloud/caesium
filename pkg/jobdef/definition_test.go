@@ -661,7 +661,7 @@ func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
 func TestValidateSimpleJSONPath(t *testing.T) {
 	t.Parallel()
 
-	valid := []string{"$", "$.ref", "$.sender.login", "$.items.0.name", "$.items[0].name"}
+	valid := []string{"$", "$[0]", "$[0].id", "$.ref", "$.sender.login", "$.items.0.name", "$.items[0].name"}
 	for _, expr := range valid {
 		require.NoError(t, validateSimpleJSONPath(expr), expr)
 	}

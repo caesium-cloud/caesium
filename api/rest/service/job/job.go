@@ -3,14 +3,17 @@ package job
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
+	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -225,17 +228,30 @@ func (j *jobService) Delete(id uuid.UUID) error {
 	)
 
 	pendingEvents := make([]event.Event, 0, 1)
+	deleted := false
 	err := q.Transaction(func(tx *gorm.DB) error {
 		var jobModel models.Job
 		if err := tx.First(&jobModel, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
 			return err
 		}
 		if err := tx.Delete(&jobModel).Error; err != nil {
 			return err
 		}
+		deleted = true
 		if jobModel.TriggerID != uuid.Nil {
-			if err := tx.Delete(&models.Trigger{}, jobModel.TriggerID).Error; err != nil {
+			var remaining int64
+			if err := tx.Model(&models.Job{}).
+				Where("trigger_id = ?", jobModel.TriggerID).
+				Count(&remaining).Error; err != nil {
 				return err
+			}
+			if remaining == 0 {
+				if err := tx.Delete(&models.Trigger{}, jobModel.TriggerID).Error; err != nil {
+					return err
+				}
 			}
 		}
 		if j.eventStore != nil {
@@ -251,8 +267,11 @@ func (j *jobService) Delete(id uuid.UUID) error {
 		}
 		return nil
 	})
-	if err == nil {
+	if err == nil && deleted {
 		j.publishEvents(pendingEvents...)
+		if notifyErr := triggersvc.NotifyMutation(j.ctx); notifyErr != nil {
+			log.Warn("event trigger router reload failed after job delete", "job_id", id, "error", notifyErr)
+		}
 	}
 	return err
 }

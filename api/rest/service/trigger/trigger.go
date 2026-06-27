@@ -60,9 +60,13 @@ func NotifyMutation(ctx context.Context) error {
 }
 
 func Service(ctx context.Context) Trigger {
+	return ServiceWithDatabase(ctx, db.Connection())
+}
+
+func ServiceWithDatabase(ctx context.Context, conn *gorm.DB) Trigger {
 	return &triggerService{
 		ctx: ctx,
-		db:  db.Connection(),
+		db:  conn,
 	}
 }
 

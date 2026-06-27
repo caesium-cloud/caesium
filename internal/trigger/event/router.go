@@ -42,6 +42,7 @@ type Router struct {
 	adoptRun      func(uuid.UUID)
 
 	mu       sync.RWMutex
+	reloadMu sync.Mutex
 	triggers []*EventTrigger
 }
 
@@ -76,7 +77,7 @@ func (r *Router) defaultTriggerLister(ctx context.Context) (models.Triggers, err
 	if conn == nil {
 		return nil, errors.New("event trigger router has no database")
 	}
-	return triggersvc.Service(ctx).WithDatabase(conn).ListByEventPattern("", "")
+	return triggersvc.ServiceWithDatabase(ctx, conn).ListByEventPattern("", "")
 }
 
 func WithTriggerLister(fn func(context.Context) (models.Triggers, error)) RouterOption {
@@ -120,6 +121,9 @@ func (r *Router) Reload(ctx context.Context) error {
 	if r == nil {
 		return errors.New("event trigger router is nil")
 	}
+	r.reloadMu.Lock()
+	defer r.reloadMu.Unlock()
+
 	if r.triggerLister == nil {
 		return errors.New("event trigger router has no trigger lister")
 	}

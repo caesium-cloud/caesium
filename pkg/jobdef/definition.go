@@ -37,7 +37,7 @@ const (
 	StepTypeBranch = "branch"
 )
 
-var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\.[^.\s\[\]]+(?:\[[0-9]+\])*)*$`)
+var simpleJSONPathPattern = regexp.MustCompile(`^\$(?:\[[0-9]+\])*(?:\.[^.\s\[\]]+(?:\[[0-9]+\])*)*$`)
 
 // kueueQueueNamePattern matches a Kubernetes DNS-1123 label, the form Kueue
 // requires for a LocalQueue name (which Caesium emits verbatim as the

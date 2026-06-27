@@ -4,8 +4,6 @@ import (
 	"net/http"
 
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
-	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
-	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 )
@@ -18,9 +16,6 @@ func Delete(c *echo.Context) error {
 
 	if err := job.Service(c.Request().Context()).Delete(id); err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
-	}
-	if err := trigger.NotifyMutation(c.Request().Context()); err != nil {
-		log.Warn("event trigger router reload failed after job delete", "job_id", id, "error", err)
 	}
 
 	return c.NoContent(http.StatusAccepted)

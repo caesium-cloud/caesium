@@ -14,9 +14,12 @@ import (
 
 func openTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(&models.Trigger{}, &models.Job{}))
+	require.NoError(t, db.AutoMigrate(models.All...))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
 
@@ -125,4 +128,47 @@ func TestDeleteSoftDeletesOwningTrigger(t *testing.T) {
 	require.ErrorIs(t, db.First(&stored, "id = ?", trigger.ID).Error, gorm.ErrRecordNotFound)
 	require.NoError(t, db.Unscoped().First(&stored, "id = ?", trigger.ID).Error)
 	require.True(t, stored.DeletedAt.Valid)
+}
+
+func TestDeleteMissingJobIsIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	svc := ServiceWithDatabase(context.Background(), db)
+
+	require.NoError(t, svc.Delete(uuid.New()))
+}
+
+func TestDeleteSharedTriggerKeepsUntilLastJob(t *testing.T) {
+	db := openTestDB(t)
+	svc := ServiceWithDatabase(context.Background(), db)
+
+	trigger := &models.Trigger{
+		ID:            uuid.New(),
+		Type:          models.TriggerTypeEvent,
+		Configuration: `{"events":[{"type":"webhook.*"}]}`,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	firstJob, err := svc.Create(&CreateRequest{TriggerID: trigger.ID, Alias: "shared-trigger-first"})
+	require.NoError(t, err)
+	secondJob, err := svc.Create(&CreateRequest{TriggerID: trigger.ID, Alias: "shared-trigger-second"})
+	require.NoError(t, err)
+
+	require.NoError(t, svc.Delete(firstJob.ID))
+
+	var storedTrigger models.Trigger
+	require.NoError(t, db.First(&storedTrigger, "id = ?", trigger.ID).Error)
+
+	var remaining int64
+	require.NoError(t, db.Model(&models.Job{}).Where("trigger_id = ?", trigger.ID).Count(&remaining).Error)
+	require.Equal(t, int64(1), remaining)
+
+	var deletedJob models.Job
+	require.NoError(t, db.Unscoped().First(&deletedJob, "id = ?", firstJob.ID).Error)
+	require.True(t, deletedJob.DeletedAt.Valid)
+
+	require.NoError(t, svc.Delete(secondJob.ID))
+
+	require.ErrorIs(t, db.First(&storedTrigger, "id = ?", trigger.ID).Error, gorm.ErrRecordNotFound)
+	require.NoError(t, db.Unscoped().First(&storedTrigger, "id = ?", trigger.ID).Error)
+	require.True(t, storedTrigger.DeletedAt.Valid)
 }

@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -97,6 +98,58 @@ func TestRouterRoutePersistsEventAndMatches(t *testing.T) {
 	require.Equal(t, activeJob.ID, run.JobID)
 	require.Equal(t, triggerStart.ID, run.TriggerID)
 	require.JSONEq(t, `{"branch":"refs/heads/main"}`, string(run.Params))
+}
+
+func TestRouterRouteAfterSharedTriggerJobDeleteFiresSibling(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	db := openEventRouterTestDB(t)
+	trigger := eventRouterTestTrigger(t, "shared")
+	require.NoError(t, db.Create(trigger).Error)
+
+	jobSvc := jsvc.ServiceWithDatabase(ctx, db)
+	deletedJob, err := jobSvc.Create(&jsvc.CreateRequest{TriggerID: trigger.ID, Alias: "shared-deleted"})
+	require.NoError(t, err)
+	siblingJob, err := jobSvc.Create(&jsvc.CreateRequest{TriggerID: trigger.ID, Alias: "shared-sibling"})
+	require.NoError(t, err)
+
+	router := NewRouter(db,
+		WithEventTriggerOptions(WithRunJob(func(context.Context, *models.Job, map[string]string) error {
+			return nil
+		})),
+		withStartedRunAdopter(func(uuid.UUID) {}),
+	)
+	require.NoError(t, router.Reload(ctx))
+
+	require.NoError(t, jobSvc.Delete(deletedJob.ID))
+
+	var storedTrigger models.Trigger
+	require.NoError(t, db.First(&storedTrigger, "id = ?", trigger.ID).Error)
+
+	result, err := router.Route(ctx, &models.IngestedEvent{
+		Type:   "webhook.github",
+		Source: "github",
+		Data:   datatypes.JSON(`{"ref":"refs/heads/main"}`),
+	})
+	require.NoError(t, err)
+	require.Len(t, result.MatchedTriggers, 1)
+
+	routeResult := result.MatchedTriggers[0]
+	require.Equal(t, trigger.ID, routeResult.TriggerID)
+	require.Len(t, routeResult.RunsStarted, 1)
+	require.False(t, routeResult.Skipped)
+	require.Empty(t, routeResult.Error)
+
+	var run models.JobRun
+	require.NoError(t, db.First(&run, "id = ?", routeResult.RunsStarted[0]).Error)
+	require.Equal(t, siblingJob.ID, run.JobID)
+	require.Equal(t, trigger.ID, run.TriggerID)
+
+	require.NoError(t, jobSvc.Delete(siblingJob.ID))
+	require.ErrorIs(t, db.First(&storedTrigger, "id = ?", trigger.ID).Error, gorm.ErrRecordNotFound)
+	require.NoError(t, db.Unscoped().First(&storedTrigger, "id = ?", trigger.ID).Error)
+	require.True(t, storedTrigger.DeletedAt.Valid)
 }
 
 func openEventRouterTestDB(t *testing.T) *gorm.DB {
