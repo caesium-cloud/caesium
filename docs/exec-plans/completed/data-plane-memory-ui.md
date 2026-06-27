@@ -1,6 +1,6 @@
 # Data-Plane Memory UI — Surface the Causal Verbs in the Web UI
 
-Last updated: 2026-06-26
+Last updated: 2026-06-27 · **Status: COMPLETE** — every stream (H, A–F, N) shipped across Waves 1–4 (PRs #247–#255); see the `## Progress` dashboard. Archived here from `active/`.
 
 The two completed Data-Plane Memory plans shipped the entire Retain/causal layer
 **CLI + REST only** — `caesium run diff`, quarantined `replay`, `caesium why`,
@@ -53,10 +53,11 @@ the authoritative contract for the `ui/src/lib/api.ts` methods.
 
 ## Progress (as of 2026-06-26)
 
-**Waves 1–3 shipped:** the foundation (H-1), H-2 (role/scope), **H-3** (auth-enabled
-e2e lane), run-diff (A), `why` (C), blame (D), and receipt/verify (E). **Wave 4 fans out
-to B (replay) + F (lineage-impact)** — both unblocked now that H-3 is shipped. Remaining
-after that: N (roadmap flip, runs last).
+**Plan COMPLETE — all four waves shipped.** The foundation (H-1, H-2, H-3), run-diff (A),
+replay (B), `why` (C), blame (D), receipt/verify (E), lineage-impact (F), and the roadmap
+flip (N) are all merged. Every causal verb the data-plane-memory CLI+REST layer exposed is
+now a first-class affordance in the web UI, each gated by a Playwright e2e (incl. an
+auth-enabled lane) that drives the real UI against a live backend.
 
 ### Wave 1 — H-1 shipped (the shared API client)
 
@@ -103,18 +104,40 @@ after that: N (roadmap flip, runs last).
   **Standing finding:** scoped keys can't UI-login, so F3's scoped-lineage-denied check must
   be at the API level, not via the UI.
 
+### Wave 4 — replay + lineage + roadmap flip shipped (plan complete)
+
+- **Stream α (B1/B2/B3):** the quarantined replay dialog (role-gated, typed-refusal
+  surfacing, reuses RunDiffView) + e2e on both lanes — PR #254, merged. Opus review (1
+  blocker: a reset-on-open effect tripping `react-hooks/set-state-in-effect` → remount) +
+  bot fixes (`"completed"` isn't a terminal `JobRun` status, stale result panel on
+  re-submit, redundant memo, gate-reason layout). The e2e was **debugged live**: the
+  auth-lane gating failed because the api-key session is in-memory only (not localStorage),
+  so a `page.goto` after login dropped the key — fixed with `loginAtUrl` (navigate to the
+  target URL first, then log in; AuthGate renders the routed page at the preserved URL).
+  Validated locally (default 1, auth 2 passed) before the green CI.
+- **Stream β (F1/F2/F3):** the dataset-keyed downstream lineage-impact graph (ReactFlow) +
+  ui-e2e lineage enable + e2e — PR #255, merged. Opus review surfaced a **backend
+  follow-up** (descoped, not fixed per frontend-only): `producing_step` is always empty
+  because `persistTaskDatasets` writes the facet flat but `stepNameFromFacet` reads it
+  nested. Bot fixes (star-graph topology → real multi-hop chain, undefined-job null-guards,
+  unique per-edge test ids). The scoped-denied check is API-level (scoped keys can't
+  UI-login — the H-3 finding).
+- **Stream γ (N-1):** roadmap §3.4 flipped from "remaining" to the shipped UI verbs +
+  `docs/README.md` index entry (backtick form, per the guardrail) + a forward note in the
+  completed data-plane-memory-ii plan.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3 ✅) | **P0** | **H-1, H-2, H-3 all shipped** (#247, #248, #253) |
 | A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | **Shipped** (#249) — view + e2e |
-| B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | Not started |
+| B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | **Shipped** (#254) — dialog + role-gate + e2e |
 | C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | **Shipped** (#250) — explainer + e2e |
 | D | Blame view (commit/snapshot topology attribution) | P2 | **Shipped** (#251) — view + e2e |
 | E | Receipt display + `verify` of a user-supplied **committed** receipt (drift / degraded) | P2 | **Shipped** (#252) — display + verify + e2e |
-| F | Dataset-keyed **downstream** lineage-impact graph (ReactFlow) + ui-e2e lineage enable | P2 | Not started |
-| N | Roadmap §3.4 flip + cross-links (runs last) | — | Not started |
+| F | Dataset-keyed **downstream** lineage-impact graph (ReactFlow) + ui-e2e lineage enable | P2 | **Shipped** (#255) — graph + e2e |
+| N | Roadmap §3.4 flip + cross-links (runs last) | — | **Shipped** (N-1) — roadmap + README + forward note |
 
 ## Streams
 
@@ -379,7 +402,7 @@ DOWNSTREAM only** (`api/rest/controller/lineage/impact.go`; `internal/lineage/im
 
 ## Navigational / Organizational Improvements — Stream N
 
-- [ ] N-1. Flip `docs/roadmap.md` §3.4 — replace "Remaining beyond that: the UI
+- [x] N-1. Flip `docs/roadmap.md` §3.4 — replace "Remaining beyond that: the UI
       timeline/step-through replay surface" with the shipped UI verbs — and add this plan
       to `docs/README.md`'s index + a forward note in the completed data-plane-memory
       plans. Concentrate all roadmap/README edits here so the feature streams don't collide
