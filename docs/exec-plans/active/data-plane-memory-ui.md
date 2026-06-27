@@ -53,11 +53,10 @@ the authoritative contract for the `ui/src/lib/api.ts` methods.
 
 ## Progress (as of 2026-06-26)
 
-**Waves 1–3 shipped:** the foundation (H-1), H-2 (role/scope), run-diff (A), `why`
-(C), blame (D), and receipt/verify (E). Remaining: B (replay) and F (lineage-impact)
-— both need H-3 (the auth-enabled e2e lane — its `ui-e2e-auth` login-flow bug was
-root-caused and **fixed**; #253 re-pushed and validated locally, pending CI/merge), plus
-N (roadmap flip).
+**Waves 1–3 shipped:** the foundation (H-1), H-2 (role/scope), **H-3** (auth-enabled
+e2e lane), run-diff (A), `why` (C), blame (D), and receipt/verify (E). **Wave 4 fans out
+to B (replay) + F (lineage-impact)** — both unblocked now that H-3 is shipped. Remaining
+after that: N (roadmap flip, runs last).
 
 ### Wave 1 — H-1 shipped (the shared API client)
 
@@ -86,7 +85,7 @@ N (roadmap flip).
   null-guards). **Backend follow-up: add JSON tags to the task model so `/v1/jobs/:id/tasks`
   is consistent with the rest of the API.**
 
-### Wave 3 — blame + receipt/verify shipped; auth-lane fixed (#253 in flight)
+### Wave 3 — blame + receipt/verify + auth-lane shipped
 
 - **Stream α (D1/D2):** the blame view over `dag_snapshot` + e2e — PR #251, merged. Opus
   review (1 should-fix: widened the inter-apply gap so blame's CreatedAt ordering can't
@@ -108,7 +107,7 @@ N (roadmap flip).
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3) | **P0** | **H-1, H-2 shipped** (#247, #248); **H-3 fixed + re-pushed** (#253, pending CI/merge) |
+| H | Shared `api.ts` client (H-1 ✅), principal role/scope retention (H-2 ✅), auth-enabled ui-e2e lane (H-3 ✅) | **P0** | **H-1, H-2, H-3 all shipped** (#247, #248, #253) |
 | A | Run-diff view (causal cache-bust attribution) on `RunDetailPage` | **P1** | **Shipped** (#249) — view + e2e |
 | B | Replay (quarantined what-if) dialog + typed-refusal surfacing (no pre-emptive mode-gate; 409 inline) | **P1** | Not started |
 | C | Per-task causal explainer (`why`) in `TaskDetailPanel` | **P1** | **Shipped** (#250) — explainer + e2e |
