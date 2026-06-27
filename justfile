@@ -264,6 +264,8 @@ ui-e2e: build-release
             -v {{ sock }}:/var/run/docker.sock \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
+            -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+            -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null; \
         tries=0; \
         until curl -sf http://127.0.0.1:{{ port }}/health >/dev/null; do \
@@ -295,6 +297,8 @@ ui-e2e-auth: build-release
         -e CAESIUM_AUTH_MODE=api-key \
         -e CAESIUM_AUTH_KEY_HASH_SECRET=ui-e2e-auth-key-hash-secret-000001 \
         -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
     tries=0
     until node -e "fetch('http://127.0.0.1:{{ port }}/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do

@@ -7,6 +7,7 @@ import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
 import { BlameRoutePage } from "./features/jobs/BlameView";
 import { JobsPage } from "./features/jobs/JobsPage";
 import { JobDetailPage } from "./features/jobs/JobDetailPage";
+import { LineageRoutePage } from "./features/jobs/LineageGraph";
 import { RunDetailPage } from "./features/jobs/RunDetailPage";
 import { RunDiffRoutePage } from "./features/jobs/RunDiffView";
 import { StatsPage } from "./features/stats/StatsPage";
@@ -59,6 +60,16 @@ const runDiffRoute = createRoute({
     to: typeof search.to === "string" ? search.to : undefined,
   }),
   component: RunDiffRoutePage,
+});
+
+const lineageRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "lineage",
+  validateSearch: (search: Record<string, unknown>) => ({
+    namespace: typeof search.namespace === "string" ? search.namespace : undefined,
+    name: typeof search.name === "string" ? search.name : undefined,
+  }),
+  component: LineageRoutePage,
 });
 
 const statsRoute = createRoute({
@@ -116,6 +127,7 @@ const routeTree = rootRoute.addChildren([
   blameRoute,
   runDiffRoute,
   runDetailRoute,
+  lineageRoute,
   statsRoute,
   triggersRoute,
   atomsRoute,
