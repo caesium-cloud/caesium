@@ -34,13 +34,13 @@ These features address the most common reasons a team would choose an alternativ
 
 ### 1.2 Event-Driven Trigger Routing
 
-**Current state**: The internal event bus handles lifecycle events (run started, task completed, etc.) for SSE streaming and UI updates. There is no mechanism for external events to trigger jobs, no content-based routing, and no trigger chaining (one job's completion triggering another).
+**Status**: Shipped. The event-routing plan delivered `event` triggers with content filtering, `POST /v1/events` ingestion, the webhook-to-event bridge for `/v1/hooks/*` traffic, trigger chaining through the lifecycle bus, static and runtime cycle detection, and durable event observability with `caesium event push` and `caesium trigger events`.
 
-**Target state**: Jobs can declare event-based triggers that fire when matching events arrive — from external webhooks, internal lifecycle events (job completion chaining), or a new event ingestion API. Events support content-based filtering so a single webhook endpoint can route to different jobs based on payload content.
+**Delivered state**: Jobs can declare event-based triggers that fire when matching events arrive from external ingestion, webhook traffic, or internal lifecycle events. Event patterns support type globs, source filters, and JSON payload filters, so one endpoint or event stream can route many event shapes to the right jobs. Chained jobs flow through the same router, with lint/apply cycle checks and the `_trigger_depth` runtime guard preventing runaway loops.
 
 **Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
 
-**Plan**: WS2 (event routing) + WS3 (chaining) — the remaining P0 work — are decomposed into the active exec-plan [Event-Driven Trigger Routing](exec-plans/active/event-trigger-routing.md).
+**Plan**: [Event-Driven Trigger Routing](exec-plans/active/event-trigger-routing.md)
 
 ### 1.3 Concurrency Strategies & Rate Limiting
 

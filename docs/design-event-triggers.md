@@ -1,16 +1,16 @@
 # Design: Event-Driven Triggers
 
-> Status: Work Stream 1 (HTTP webhook triggers) is shipped. Work Streams 2 (event-based routing) and 3 (trigger chaining) are the project's current top-priority next feature (roadmap P0) and are now decomposed into the active exec-plan [`exec-plans/active/event-trigger-routing.md`](exec-plans/active/event-trigger-routing.md). WS1 operator behaviour is covered by the HTTP-trigger fields in [job-schema-reference.md](job-schema-reference.md).
+> Status: Work Stream 1 (HTTP webhook triggers), Work Stream 2 (event-based routing), and Work Stream 3 (trigger chaining) are shipped. The reconciliation plan is `exec-plans/active/event-trigger-routing.md`; operator-facing trigger fields are covered by [job-schema-reference.md](job-schema-reference.md).
 
 ## Problem statement
 
-Caesium's trigger system supports cron (fully implemented) and HTTP (shipped: dedicated webhook routes, authentication, payload param extraction, payload limits, per-IP rate limiting, and operator-authenticated manual/API fire). Two gaps remain:
+Caesium's trigger system supports cron, HTTP, and event triggers. HTTP shipped dedicated webhook routes, authentication, payload param extraction, payload limits, per-IP rate limiting, and operator-authenticated manual/API fire. WS2/WS3 closed the remaining gaps:
 
-- **No event-based routing.** A webhook path maps 1:1 to a set of jobs; there is no way to route an event to different jobs based on its type or payload content.
-- **No trigger chaining.** One job's completion cannot trigger another. The internal event bus carries lifecycle events but has no mechanism to route them to triggers.
-- **No event persistence / observability** for ingested external events.
+- **Event-based routing.** Jobs can match external, webhook-derived, and internal events by type/source/content.
+- **Trigger chaining.** One job's completion can trigger another through the lifecycle bus.
+- **Event persistence / observability.** Ingested events and event-trigger matches are persisted for inspection and CLI/API reads.
 
-This design addresses these in three work streams: WS1 (HTTP webhook trigger — **shipped**), WS2 (event-based triggers with content filtering), WS3 (trigger chaining via internal lifecycle events).
+This design records the shipped three work streams: WS1 (HTTP webhook trigger), WS2 (event-based triggers with content filtering), and WS3 (trigger chaining via internal lifecycle events).
 
 ## What shipped (WS1 — HTTP webhook triggers)
 
@@ -19,19 +19,19 @@ A webhook request to `POST /v1/hooks/*` is resolved to the matching trigger(s) a
 - **Receiver**: `POST /v1/hooks/:path`; the controller resolves the path via the trigger service's `ListByPath` (JSON-field lookup on `configuration.path`). Multiple triggers may share a path — each is validated and fired independently.
 - **Signature auth**: `hmac-sha256` (default), `hmac-sha1`, `bearer`, `basic`; secret resolved from `secret://` URIs; constant-time comparison; timestamp-based replay protection.
 - **Param extraction**: JSONPath `paramMapping` from the JSON body into run params, merged over `defaultParams` (webhook values win).
-- **`FireWithParams`** on the trigger interface forwards merged params to `job.Run()`.
+- **Concrete `FireWithParams`** on the HTTP trigger forwards merged params to `job.Run()`. The shared trigger interface stays minimal: `Listen(ctx)`, `Fire(ctx)`, and `ID()`.
 - **Abuse controls**: per-IP rate limiting (`CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE`/`_BURST`) and a body cap (`CAESIUM_WEBHOOK_MAX_BODY_SIZE`).
 - **Operator manual fire**: `POST /v1/triggers/:id/fire` with optional params, gated by `CAESIUM_MANUAL_TRIGGER_API_KEY`.
 
-Not yet shipped from the original WS1 scope: durable webhook event logging (the `webhook_events` table + retention) — folded into the observability phase below.
+Durable webhook/event observability is handled by the event-routing observability work: webhook traffic is bridged into the event router, ingested events and trigger matches are persisted, and the `caesium event push` / `caesium trigger events` CLI reads and writes those records.
 
 ## Current architecture (foundation for WS2/WS3)
 
-- **Trigger interface** (`internal/trigger/trigger.go`): `Listen(ctx)`, `Fire(ctx)`, `FireWithParams(ctx, params)`, `ID()`.
+- **Trigger interface** (`internal/trigger/trigger.go`): `Listen(ctx)`, `Fire(ctx)`, `ID()`. Parameterized firing is intentionally concrete-trigger behavior: HTTP and event triggers expose their own `FireWithParams` methods, and the event router holds concrete `*EventTrigger` values.
 - **Executor** (`internal/executor/executor.go`): a `sync.Map` of active triggers; a 60s loop queues cron triggers; HTTP triggers are queued on webhook arrival or manual fire. Event triggers need a reactive model (below), not timer polling.
-- **Event bus** (`internal/event/bus.go`): in-memory pub/sub with `Publish(Event)` / `Subscribe(ctx, Filter)` (filter on `JobID`, `RunID`, `Types`). Already publishes lifecycle events (`run_completed`, `run_failed`, …) and persists to `internal/event/store.go` for SSE catchup. **WS3 rides on this existing stream** — it is the substrate for chaining, currently consumed only by SSE/metrics/lineage/callbacks.
+- **Event bus** (`internal/event/bus.go`): in-memory pub/sub with `Publish(Event)` / `Subscribe(ctx, Filter)` (filter on `JobID`, `RunID`, `Types`). It publishes lifecycle events (`run_completed`, `run_failed`, …) and persists to `internal/event/store.go` for SSE catchup. **WS3 rides on this existing stream**: the event router subscribes to lifecycle events, converts them to ingested events with `source: caesium`, and routes matching event triggers.
 
-Only `cron` and `http` trigger types exist today (`internal/models/trigger.go`); WS2 adds `event`.
+The shipped trigger types are `cron`, `http`, and `event` (`internal/models/trigger.go` and `pkg/jobdef/definition.go`).
 
 ---
 
@@ -59,8 +59,8 @@ trigger:
     paramMapping:
       commit: "$.head_sha"
       branch: "$.workflow_run.head_branch"
-  defaultParams:
-    triggered_by: "event"
+    defaultParams:
+      triggered_by: "event"
 ```
 
 ### 2.3 Event ingestion API
@@ -71,7 +71,7 @@ POST /v1/events
   "data": { "environment": "production", "commit": "abc123", "actor": "cryan" } }
 ```
 
-Response: `{ "event_id": "...", "matched_triggers": 2, "runs_started": 2 }`. The endpoint persists the event to `ingested_events`, evaluates all event triggers, fires matches with extracted params, and returns the match/run counts. Reuse the webhook controller's auth + rate-limit middleware.
+Response: `{ "event_id": "...", "matched_triggers": 2, "runs_started": 2 }`. The endpoint requires `CAESIUM_EVENT_INGEST_API_KEY`, persists the event to `ingested_events`, evaluates all event triggers, fires matches with extracted params, and returns the match/run counts. It reuses the webhook abuse controls where applicable, but does **not** reuse webhook signature auth: webhook auth is path/signature based, while `/v1/events` is pathless API ingestion.
 
 ### 2.4 Event matching
 
@@ -85,8 +85,8 @@ type EventPattern struct {
     Filter map[string]string `json:"filter,omitempty"` // dot-path -> expected value
 }
 
-func (p *EventPattern) Matches(evt *IngestedEvent) bool {
-    if !matchGlob(p.Type, evt.Type) { return false }
+func (p EventPattern) Matches(evt *models.IngestedEvent) bool {
+    if !matchesEventType(p.Type, evt.Type) { return false }
     if p.Source != "" && p.Source != evt.Source { return false }
     for path, expected := range p.Filter {
         actual, err := extractField(evt.Data, path)
@@ -108,9 +108,22 @@ CREATE TABLE ingested_events (
 );
 CREATE INDEX idx_ingested_events_type ON ingested_events(type);
 CREATE INDEX idx_ingested_events_created ON ingested_events(created_at);
+
+CREATE TABLE event_trigger_matches (
+    id           TEXT PRIMARY KEY,
+    event_id     TEXT NOT NULL,
+    trigger_id   TEXT NOT NULL,
+    runs_started TEXT,
+    skipped      BOOLEAN NOT NULL DEFAULT false,
+    skip_reason  TEXT NOT NULL DEFAULT '',
+    error        TEXT NOT NULL DEFAULT '',
+    matched_at   TIMESTAMP NOT NULL
+);
+CREATE INDEX idx_event_trigger_matches_event ON event_trigger_matches(event_id);
+CREATE INDEX idx_event_trigger_matches_trigger ON event_trigger_matches(trigger_id, matched_at);
 ```
 
-Retention: prune older than `CAESIUM_EVENT_RETENTION` (default 7d). Events are for observability/debugging, not replay — the event-trigger contract is fire-and-forget.
+Retention: prune older than `CAESIUM_EVENT_RETENTION` (default 7d). Events are for observability/debugging, not replay — the event-trigger contract is fire-and-forget. `GET /v1/triggers/:id/events` reads the durable `event_trigger_matches` table joined to `ingested_events`; it never recomputes current trigger patterns over historical events, because that would lie after trigger edits.
 
 ### 2.6 Executor integration
 
@@ -119,35 +132,34 @@ Event triggers react to events rather than polling on a timer. Register them as 
 ```go
 // internal/trigger/event/event.go
 type EventTrigger struct {
-    id       uuid.UUID
-    patterns []EventPattern
-    params   map[string]string  // paramMapping
-    defaults map[string]string  // defaultParams
+    id     uuid.UUID
+    config Config // events, paramMapping, defaultParams
 }
-func (e *EventTrigger) FireWithParams(ctx context.Context, params map[string]string) error {
-    // Same as the HTTP trigger: list jobs, merge params, run each.
+func (e *EventTrigger) FireWithParams(ctx context.Context, params map[string]string) ([]FireOutcome, error) {
+    // List jobs, merge defaultParams with extracted params, apply _trigger_depth,
+    // start run records, and launch the matched jobs.
 }
 ```
 
 ```go
 // internal/trigger/event/router.go — loads event triggers on startup, subscribes to the bus,
-// and exposes Route(event) for the ingestion API and webhook controller.
-func (r *Router) Route(ctx context.Context, evt *IngestedEvent) []uuid.UUID {
-    r.mu.RLock(); defer r.mu.RUnlock()
-    var matched []uuid.UUID
-    for id, trig := range r.triggers {
-        for _, pattern := range trig.patterns {
-            if pattern.Matches(evt) {
-                params := mergeParams(trig.defaults, extractParams(evt.Data, trig.params))
-                go trig.FireWithParams(ctx, params)
-                matched = append(matched, id)
-                break
-            }
+// and exposes Route(event) for the ingestion API, webhook controller, and lifecycle bridge.
+func (r *Router) Route(ctx context.Context, evt *IngestedEvent) (*RouteResult, error) {
+    result := &RouteResult{EventType: evt.Type, Source: evt.Source}
+    return result, db.Transaction(func(tx *gorm.DB) error {
+        persistIngestedEvent(tx, evt)
+        for _, trig := range r.matchingTriggers(evt) { // concrete *EventTrigger values
+            params := withLifecycleTriggerDepth(evt, trig.ExtractEventParams(evt))
+            outcomes, err := trig.FireWithParams(ctx, params)
+            result.MatchedTriggers = append(result.MatchedTriggers, summarize(trig.ID(), outcomes, err))
         }
-    }
-    return matched
+        persistEventTriggerMatches(tx, evt.ID, result.MatchedTriggers)
+        return nil
+    })
 }
 ```
+
+The `Router.Route` boundary is deliberately both the persistence and firing boundary: `ingested_events` and one `event_trigger_matches` row per matched trigger are written in the same transaction as the run records created by `FireWithParams`; actual job execution is launched after commit.
 
 ---
 
@@ -199,9 +211,9 @@ Chaining risks infinite loops (A→B→A). Two guards:
 2. **Runtime**: track chain depth via a `_trigger_depth` param; reject when it exceeds `CAESIUM_MAX_TRIGGER_DEPTH` (default 10).
 
 ```go
-func (r *Router) FireWithParams(ctx context.Context, params map[string]string) error {
+func (e *EventTrigger) FireWithParams(ctx context.Context, params map[string]string) ([]FireOutcome, error) {
     depth, _ := strconv.Atoi(params["_trigger_depth"])
-    if depth >= r.maxDepth { return ErrTriggerChainDepthExceeded }
+    if depth >= e.maxTriggerDepth { return ErrTriggerChainDepthExceeded }
     params["_trigger_depth"] = strconv.Itoa(depth + 1)
     // ... fire jobs
 }
@@ -221,11 +233,11 @@ No structural change — `Trigger.Configuration` is already a flexible map (`Typ
 |--------|------|--------|
 | `POST` | `/v1/hooks/*` | ✅ shipped (WS1) |
 | `POST` | `/v1/triggers/:id/fire` | ✅ shipped (WS1, operator-authenticated) |
-| `POST` | `/v1/events` | proposed (WS2) |
-| `GET` | `/v1/events/ingested` | proposed (WS2 observability) |
-| `GET` | `/v1/triggers/:id/events` | proposed (WS2 observability) |
+| `POST` | `/v1/events` | shipped (WS2, keyed by `CAESIUM_EVENT_INGEST_API_KEY`) |
+| `GET` | `/v1/events/ingested` | shipped (WS2 observability) |
+| `GET` | `/v1/triggers/:id/events` | shipped (WS2 observability, backed by `event_trigger_matches`) |
 
-CLI (proposed): `caesium event push --type … --source … --data '{}'`; `caesium trigger events <alias>`. (`caesium trigger fire`/`list` ship with WS1.)
+WS1 manual fire is the operator-authenticated REST endpoint `POST /v1/triggers/:id/fire`. The event-trigger CLI shipped by this plan is `caesium event push --type … --source … --data '{}'` for `POST /v1/events` ingestion and `caesium trigger events <alias>` for `GET /v1/triggers/:id/events` inspection.
 
 ### Configuration
 
@@ -235,11 +247,12 @@ CLI (proposed): `caesium event push --type … --source … --data '{}'`; `caesi
 | `CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE` | `120` | ✅ shipped |
 | `CAESIUM_WEBHOOK_RATE_LIMIT_BURST` | `20` | ✅ shipped |
 | `CAESIUM_MANUAL_TRIGGER_API_KEY` | unset | ✅ shipped |
-| `CAESIUM_WEBHOOK_EVENT_RETENTION` | `7d` | proposed (webhook event log) |
-| `CAESIUM_EVENT_RETENTION` | `7d` | proposed (WS2) |
-| `CAESIUM_MAX_TRIGGER_DEPTH` | `10` | proposed (WS3) |
+| `CAESIUM_EVENT_INGEST_API_KEY` | unset | shipped (WS2 ingestion API) |
+| `CAESIUM_WEBHOOK_EVENT_RETENTION` | `7d` | shipped (webhook event log) |
+| `CAESIUM_EVENT_RETENTION` | `7d` | shipped (WS2 ingested event log) |
+| `CAESIUM_MAX_TRIGGER_DEPTH` | `10` | shipped (WS3 runtime chain guard) |
 
-### Metrics (proposed for WS2/WS3)
+### Metrics (WS2/WS3)
 
 `caesium_events_ingested_total{type,source}`, `caesium_event_trigger_matches_total{trigger_id,event_type}`, `caesium_trigger_chain_depth` (histogram), `caesium_trigger_chain_rejected_total`. (WS1's `caesium_webhook_received_total`/`caesium_webhook_auth_failures_total` ship with the receiver.)
 
@@ -249,15 +262,15 @@ JSONPath extraction is already vendored for WS1 param mapping; WS2/WS3 reuse it.
 
 ---
 
-## Remaining implementation plan
+## Shipped implementation record
 
 ### Phase 2: Event ingestion & routing (P0)
 
 1. `internal/trigger/event/event.go` — `EventTrigger` implementing the Trigger interface (`TriggerTypeEvent` in `internal/models/trigger.go`).
 2. `internal/trigger/event/matcher.go` — pattern matching (type glob, source filter, content filter).
 3. `internal/trigger/event/router.go` — singleton router that loads event triggers and dispatches matches.
-4. `api/rest/controller/event/ingest.go` — `POST /v1/events` (reusing webhook auth/rate-limit middleware).
-5. `ingested_events` table, model, GORM migration.
+4. `api/rest/controller/event/ingest.go` — `POST /v1/events` keyed by `CAESIUM_EVENT_INGEST_API_KEY`.
+5. `ingested_events` and `event_trigger_matches` tables, models, GORM migration.
 6. Executor: register event triggers alongside cron triggers; add `ListByEventPattern` to the trigger service.
 7. Linter rules for event-trigger configuration.
 8. Tests: matcher unit tests; integration test for event → match → run (fan-out to two jobs).
@@ -270,7 +283,7 @@ JSONPath extraction is already vendored for WS1 param mapping; WS2/WS3 reuse it.
 
 ### Phase 4: Observability & CLI (P1)
 
-12. Durable webhook event log (`webhook_events` table) + ingested-event pruners with retention.
+12. Durable webhook/event logging plus ingested-event pruners with retention.
 13. `GET /v1/events/ingested`, `GET /v1/triggers/:id/events`.
 14. CLI: `caesium event push`, `caesium trigger events`.
 15. Prometheus metrics above; UI: event-trigger visualization in the DAG view, event log on trigger detail.
@@ -311,7 +324,7 @@ trigger:
       key: "$.detail.object.key"
 steps:
   - name: process
-    image: etl:latest
+    image: alpine:3.23
     command: ["process.sh"]
 ```
 
@@ -334,7 +347,7 @@ trigger:
       upstream_run: "$.run_id"
 steps:
   - name: downstream-work
-    image: etl:latest
+    image: debian:12-slim
     command: ["continue.sh"]
 ```
 
@@ -360,6 +373,6 @@ trigger:
     environment: staging
 steps:
   - name: deploy
-    image: deploy:latest
+    image: alpine:3.23
     command: ["deploy.sh"]
 ```

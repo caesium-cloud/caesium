@@ -126,6 +126,9 @@ steps:
 - `trigger.defaultParams` seeds run parameters for cron-triggered executions and is persisted onto the resulting run. Caesium also injects a scheduler-owned `logical_date` parameter for cron fires so each scheduled slot has a stable identity.
 - HTTP triggers require `configuration.path`. Caesium serves the webhook at `POST /v1/hooks/<path>`. Existing manifests may spell the path as `/hooks/<path>` or `/v1/hooks/<path>`; Caesium normalizes those forms to the same route.
 - HTTP triggers may optionally define `secret`, `signatureScheme`, `signatureHeader`, and `paramMapping` to validate incoming webhook requests and extract JSON payload fields into run parameters.
+- Event triggers require `configuration.events`, a non-empty list of patterns with `type`, optional `source`, and optional string `filter` map. Event `type` accepts exact names or globs such as `webhook.*`; `filter` keys are dot paths into the event `data` payload.
+- Event triggers may define `configuration.paramMapping` to extract JSON event-data fields into run params and `configuration.defaultParams` to seed string params before extracted event params are merged.
+- Trigger chaining uses event triggers over lifecycle events with `source: caesium`, such as `run_completed` filtered by `job_alias`. Caesium owns the `_trigger_depth` run param for runtime cycle protection; do not set it manually.
 - `next` accepts either a single string or a list, enabling fan-out to multiple successors. Use `dependsOn` to express joins/fan-in; both fields accept the step name(s) they reference.
 - When no step declares `next` or `dependsOn`, the importer preserves the historical behaviour of linking each step to the following entry automatically. Once you opt into DAG fields, you are responsible for specifying the required edges explicitly.
 - Steps support retry controls via `retries`, `retryDelay`, and `retryBackoff`.
@@ -332,6 +335,8 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Multi-document run history samples with success and failure cases (`run-history.job.yaml`).
   - Task output extraction and downstream environment propagation (`task-outputs.job.yaml`).
   - Callback failure handling (`callback-failure.job.yaml`).
+  - Event-triggered workflow with content filtering (`event-trigger.job.yaml`).
+  - Lifecycle-triggered chaining workflow (`event-chaining.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
 
