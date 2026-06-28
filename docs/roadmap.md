@@ -40,7 +40,7 @@ These features address the most common reasons a team would choose an alternativ
 
 **Design doc**: [`design-event-triggers.md`](design-event-triggers.md)
 
-**Plan**: [Event-Driven Trigger Routing](exec-plans/active/event-trigger-routing.md)
+**Plan**: [Event-Driven Trigger Routing](exec-plans/completed/event-trigger-routing.md)
 
 ### 1.3 Concurrency Strategies & Rate Limiting
 

@@ -1,6 +1,6 @@
 # Event-Driven Trigger Routing — Event Triggers + Chaining (WS2 + WS3)
 
-Last updated: 2026-06-27
+Last updated: 2026-06-28 · **Status: COMPLETE** — every stream (A–D, H, N) shipped across Waves 1–3 (PRs #257–#261); see the `## Progress` dashboard. Archived here from `active/`.
 
 Caesium's trigger system today supports `cron` (timer-polled) and `http` (the
 shipped WS1 webhook receiver: dedicated `/v1/hooks/*` routes, signature auth,
@@ -85,12 +85,29 @@ contracts W1/W2 follow; N-1 folds all of them into `design-event-triggers.md`.
 
 ## Progress (as of 2026-06-27)
 
-**Waves 1–2 shipped** the engine (A), event ingestion + the webhook bridge +
-observability (B), trigger chaining + cycle detection (C), and the integration
-harness (H-1). WS1 (HTTP webhook triggers) shipped previously and is the foundation.
-**Wave 3 finishes the plan with D (durable webhook log + event ingestion/inspection
-CLI) + N-1 (roadmap §1.2 flip + schema docs + examples)** — D's CLI consumes the
-Stream B endpoints; N-1 runs last and reconciles the five design amendments.
+**Plan COMPLETE — all three waves shipped.** The engine (A), event ingestion +
+webhook bridge + observability (B), trigger chaining + cycle detection (C), the
+integration harness (H-1), the durable webhook log + `caesium event`/`trigger` CLI
+(D), and the docs reconciliation (N-1) are all merged. This takes the roadmap's
+single **P0** (§1.2 Event-Driven Trigger Routing) from proposed to shipped: WS2
+(event-based routing) and WS3 (trigger chaining) now ship on top of the WS1 webhook
+foundation, every endpoint + CLI verb gated by a live-server integration test.
+
+### Wave 3 — webhook log + CLI + docs shipped (plan complete)
+
+- **Stream α (D1+D2):** the durable `webhook_events` log (model + retention pruner
+  mirroring `ingested_events`; receipts recorded **off the webhook hot path** in a
+  best-effort, timeout-bounded goroutine) + the `caesium event push` / `caesium
+  trigger events` CLI (clean stdout via `runCLISeparate`, timed-out http client,
+  shared `cmd/cliutil` helper) — PR #260, merged `4643b3c`. Opus review: CLI/stdout
+  hygiene clean; fixes for a hollow persistence test (DB read-back), the hot-path
+  receipt write, a `-race` bug, an `http_runs_started`-before-launch count, and an
+  arch-boundary (cobra under `cmd/`). Integration gate green (231s).
+- **Stream β (N-1):** roadmap §1.2 flipped to Shipped; the `design-event-triggers.md`
+  banner + the **five code-verified amendments** reconciled into the doc body; the
+  `event` trigger schema documented across the references; event + chaining examples
+  (pinned images); README indexed — PR #261, merged `cf1b17e`. Review caught the
+  parallel-wave docs-over-claim (corrected the CLI verbs to the two that shipped).
 
 ### Wave 1 — event-trigger engine shipped
 
@@ -133,9 +150,9 @@ Stream B endpoints; N-1 runs last and reconciles the five design amendments.
 | A | Event-trigger evaluation engine — `event` type, matcher, `EventTrigger`, singleton router, executor + startup wiring | **P0** | **Shipped** (#257) — engine + router + tests |
 | B | Event ingestion + observability REST API — keyed `POST /v1/events`, the webhook→event bridge, durable-match reads (`GET /v1/events/ingested`, `GET /v1/triggers/:id/events`) | **P0** | **Shipped** (#258) — ingestion + bridge + e2e |
 | C | Trigger chaining — internal lifecycle-bus bridge + static & runtime cycle detection | P1 | **Shipped** (#259) — chaining + cycle + e2e |
-| D | Webhook event log + event ingestion/inspection CLI — durable `webhook_events`, `caesium event push`, `caesium trigger events` | P1 | Not started |
+| D | Webhook event log + event ingestion/inspection CLI — durable `webhook_events`, `caesium event push`, `caesium trigger events` | P1 | **Shipped** (#260) — log + CLI + e2e |
 | H-1 | Integration harness — exercise the event path on the live integration server | — | **Shipped** (#258) — ingest key + e2e wired |
-| N-1 | Docs — roadmap §1.2 flip, design banner, schema reference, examples, README | — | Not started |
+| N-1 | Docs — roadmap §1.2 flip, design banner, schema reference, examples, README | — | **Shipped** (#261) — roadmap + design + schema + examples |
 | (UI) | Event-trigger visualization + event log (design Phase 4 #15) | — | **Deferred** — candidate for a follow-on UI plan |
 
 ## Streams

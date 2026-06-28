@@ -27,7 +27,7 @@ This directory separates current-source operator documentation from forward-look
 Forward-looking or partially-shipped designs with open work. Each carries a `> Status:` banner near the top; CI enforces banners on the planning/historical records it tracks.
 
 - [design-airflow-parity.md](design-airflow-parity.md): Airflow-parity workstreams — current shipped subset in `airflow-parity.md`; this tracks the remaining workstreams.
-- [design-event-triggers.md](design-event-triggers.md): HTTP webhook triggers, event-based routing, and trigger chaining (WS1–WS3 shipped; reconciliation tracked in `exec-plans/active/event-trigger-routing.md`).
+- [design-event-triggers.md](design-event-triggers.md): HTTP webhook triggers, event-based routing, and trigger chaining (WS1–WS3 shipped; reconciliation tracked in `exec-plans/completed/event-trigger-routing.md`).
 - [design-concurrency-priority.md](design-concurrency-priority.md): Concurrency strategies, rate limiting, and priority-based scheduling (proposed).
 - [design-database-locking-fix.md](design-database-locking-fix.md): dqlite contention remediation (Phases 0–3 shipped) and the scale-out path.
 - [design-scaling-job-execution.md](design-scaling-job-execution.md): Cluster-wide task-start throughput frontier on sharded dqlite.

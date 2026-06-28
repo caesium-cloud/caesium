@@ -1,6 +1,6 @@
 # Design: Event-Driven Triggers
 
-> Status: Work Stream 1 (HTTP webhook triggers), Work Stream 2 (event-based routing), and Work Stream 3 (trigger chaining) are shipped. The reconciliation plan is `exec-plans/active/event-trigger-routing.md`; operator-facing trigger fields are covered by [job-schema-reference.md](job-schema-reference.md).
+> Status: Work Stream 1 (HTTP webhook triggers), Work Stream 2 (event-based routing), and Work Stream 3 (trigger chaining) are shipped. The reconciliation plan is `exec-plans/completed/event-trigger-routing.md`; operator-facing trigger fields are covered by [job-schema-reference.md](job-schema-reference.md).
 
 ## Problem statement
 
