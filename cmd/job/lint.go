@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	lintpkg "github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -46,6 +47,9 @@ var lintCmd = &cobra.Command{
 			if err := def.Validate(); err != nil {
 				return fmt.Errorf("definition %s: %w", def.Metadata.Alias, err)
 			}
+		}
+		if err := internaljobdef.ValidateTriggerChains(cmd.Context(), nil, defs); err != nil {
+			return err
 		}
 
 		if !lintCheckSecrets {

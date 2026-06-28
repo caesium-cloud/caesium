@@ -36,6 +36,9 @@ func (s *MetricsSuite) SetupTest() {
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
 		WebhookAuthFailuresTotal,
+		EventBusDroppedTotal,
+		TriggerChainDepth,
+		TriggerChainRejectedTotal,
 		SSOLoginsTotal,
 		SSOLoginDurationSeconds,
 		SSOLogoutsTotal,
@@ -113,6 +116,26 @@ func (s *MetricsSuite) TestTaskRegisterBatchSizeObserves() {
 	s.Require().NoError(TaskRegisterBatchSize.Write(&after))
 	s.Equal(before.GetHistogram().GetSampleCount()+1, after.GetHistogram().GetSampleCount())
 	s.InDelta(before.GetHistogram().GetSampleSum()+12, after.GetHistogram().GetSampleSum(), 0.000001)
+}
+
+func (s *MetricsSuite) TestTriggerChainMetricsObserveAndIncrement() {
+	beforeDrop := metrictestutil.CounterValue(s.T(), EventBusDroppedTotal, "run_completed")
+	EventBusDroppedTotal.WithLabelValues("run_completed").Inc()
+	s.GreaterOrEqual(metrictestutil.CounterValue(s.T(), EventBusDroppedTotal, "run_completed"), beforeDrop+1)
+
+	var beforeDepth dto.Metric
+	s.Require().NoError(TriggerChainDepth.Write(&beforeDepth))
+	TriggerChainDepth.Observe(3)
+	var afterDepth dto.Metric
+	s.Require().NoError(TriggerChainDepth.Write(&afterDepth))
+	s.Equal(beforeDepth.GetHistogram().GetSampleCount()+1, afterDepth.GetHistogram().GetSampleCount())
+
+	var beforeRejected dto.Metric
+	s.Require().NoError(TriggerChainRejectedTotal.Write(&beforeRejected))
+	TriggerChainRejectedTotal.Inc()
+	var afterRejected dto.Metric
+	s.Require().NoError(TriggerChainRejectedTotal.Write(&afterRejected))
+	s.GreaterOrEqual(afterRejected.GetCounter().GetValue(), beforeRejected.GetCounter().GetValue()+1)
 }
 
 func (s *MetricsSuite) TestJobsActiveGauge() {

@@ -2,10 +2,12 @@ package event
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	eventstore "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -152,6 +154,113 @@ func TestRouterRouteAfterSharedTriggerJobDeleteFiresSibling(t *testing.T) {
 	require.True(t, storedTrigger.DeletedAt.Valid)
 }
 
+func TestLifecycleBridgeRoutesRunCompletedWithJobAliasAndDepth(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db := openEventRouterTestDB(t)
+	upstreamTrigger := &models.Trigger{
+		ID:            uuid.New(),
+		Alias:         "upstream-cron",
+		Type:          models.TriggerTypeCron,
+		Configuration: `{"expression":"* * * * *"}`,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	downstreamTrigger := eventRouterTestTriggerConfig(t, "downstream-event", `{
+		"events":[{"type":"run_completed","source":"caesium","filter":{"job_alias":"upstream-job"}}]
+	}`)
+	require.NoError(t, db.Create([]*models.Trigger{upstreamTrigger, downstreamTrigger}).Error)
+
+	upstreamJob := &models.Job{
+		ID:        uuid.New(),
+		Alias:     "upstream-job",
+		TriggerID: upstreamTrigger.ID,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	downstreamJob := &models.Job{
+		ID:        uuid.New(),
+		Alias:     "downstream-job",
+		TriggerID: downstreamTrigger.ID,
+		CreatedAt: time.Now().UTC(),
+		UpdatedAt: time.Now().UTC(),
+	}
+	require.NoError(t, db.Create([]*models.Job{upstreamJob, downstreamJob}).Error)
+
+	router := NewRouter(db,
+		WithEventTriggerOptions(
+			WithRunJob(func(context.Context, *models.Job, map[string]string) error {
+				return nil
+			}),
+			WithMaxTriggerDepth(3),
+		),
+		withStartedRunAdopter(func(uuid.UUID) {}),
+	)
+	require.NoError(t, router.Reload(ctx))
+
+	bus := eventstore.New()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- router.StartLifecycleBridge(ctx, bus)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		require.NoError(t, <-errCh)
+	})
+
+	runID := uuid.New()
+	require.Eventually(t, func() bool {
+		bus.Publish(eventstore.Event{
+			Type:    eventstore.TypeRunCompleted,
+			JobID:   upstreamJob.ID,
+			RunID:   runID,
+			Payload: []byte(`{"params":{"_trigger_depth":"1"}}`),
+		})
+
+		var count int64
+		if err := db.Model(&models.JobRun{}).Where("job_id = ?", downstreamJob.ID).Count(&count).Error; err != nil {
+			return false
+		}
+		return count > 0
+	}, time.Second, 10*time.Millisecond)
+
+	var run models.JobRun
+	require.NoError(t, db.First(&run, "job_id = ?", downstreamJob.ID).Error)
+	require.JSONEq(t, `{"_trigger_depth":"2"}`, string(run.Params))
+
+	var ingested models.IngestedEvent
+	require.NoError(t, db.First(&ingested, "type = ? AND source = ?", string(eventstore.TypeRunCompleted), "caesium").Error)
+	require.JSONEq(t, `{
+		"event_type":"run_completed",
+		"job_alias":"upstream-job",
+		"job_id":"`+upstreamJob.ID.String()+`",
+		"run_id":"`+runID.String()+`",
+		"_trigger_depth":"1",
+		"params":{"_trigger_depth":"1"}
+	}`, string(ingested.Data))
+}
+
+func TestEventTriggerFireRejectsDepthExceeded(t *testing.T) {
+	t.Parallel()
+
+	triggerModel := eventRouterTestTrigger(t, "depth")
+	trigger, err := New(triggerModel,
+		WithMaxTriggerDepth(1),
+		WithListJobs(func(context.Context, string) (models.Jobs, error) {
+			t.Fatal("list jobs should not be called after depth rejection")
+			return nil, nil
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = trigger.FireWithParams(context.Background(), map[string]string{TriggerDepthParam: "1"})
+	require.ErrorIs(t, err, ErrTriggerChainDepthExceeded)
+	require.True(t, errors.Is(err, ErrTriggerChainDepthExceeded))
+}
+
 func openEventRouterTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
@@ -159,22 +268,32 @@ func openEventRouterTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.AutoMigrate(models.All...))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
+	// Serialize all access through a single connection: the lifecycle-bridge test
+	// writes (Route) concurrently with the test's reads on this cache=shared in-mem
+	// DB, and concurrent shared-cache access deadlocks (and via the process-wide
+	// shared-cache lock hangs sibling tests' gorm.Open). One connection serializes
+	// it without contention.
+	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
 
 func eventRouterTestTrigger(t *testing.T, alias string) *models.Trigger {
+	return eventRouterTestTriggerConfig(t, alias, `{
+		"events":[{"type":"webhook.*","source":"github"}],
+		"paramMapping":{"branch":"$.ref"}
+	}`)
+}
+
+func eventRouterTestTriggerConfig(t *testing.T, alias string, configuration string) *models.Trigger {
 	t.Helper()
 	trigger := &models.Trigger{
-		ID:    uuid.New(),
-		Alias: alias,
-		Type:  models.TriggerTypeEvent,
-		Configuration: `{
-			"events":[{"type":"webhook.*","source":"github"}],
-			"paramMapping":{"branch":"$.ref"}
-		}`,
-		CreatedAt: time.Now().UTC(),
-		UpdatedAt: time.Now().UTC(),
+		ID:            uuid.New(),
+		Alias:         alias,
+		Type:          models.TriggerTypeEvent,
+		Configuration: configuration,
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
 	}
 	require.NoError(t, trigger.ApplyDerivedFields())
 	return trigger

@@ -221,8 +221,9 @@ func TestEventDropWhenBufferFull(t *testing.T) {
 	ch, err := b.Subscribe(ctx, Filter{})
 	require.NoError(t, err)
 
-	// Publish 101 events without reading - should not deadlock or panic
-	for i := 0; i < 101; i++ {
+	// Publish more events than the subscriber buffer can hold without reading;
+	// this should not deadlock or panic.
+	for i := 0; i < defaultSubscriberBuffer+1; i++ {
 		b.Publish(Event{Type: TypeLogChunk, Timestamp: time.Now()})
 	}
 
@@ -237,7 +238,7 @@ func TestEventDropWhenBufferFull(t *testing.T) {
 		}
 	}
 done:
-	assert.Equal(t, 100, count)
+	assert.Equal(t, defaultSubscriberBuffer, count)
 }
 
 func TestContextCancellationCleansUp(t *testing.T) {
@@ -307,7 +308,7 @@ func TestConcurrentPublishSafety(t *testing.T) {
 
 	wg.Wait()
 	count := <-received
-	// Channel buffer is 100, total published is 10000.
+	// Channel buffer is bounded, total published is 10000.
 	// Some will be dropped but we should receive many.
 	assert.Greater(t, count, 0)
 }

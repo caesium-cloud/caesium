@@ -422,13 +422,6 @@ func start(cmd *cobra.Command, args []string) error {
 		})
 	}
 
-	runAsync(func() {
-		log.Info("launching event bus dispatcher")
-		if err := event.NewBusDispatcher(event.NewStore(db.Connection()), bus).Start(ctx); err != nil && ctx.Err() == nil {
-			log.Error("event bus dispatcher exited", "error", err)
-		}
-	})
-
 	importer := jobdef.NewImporter(db.Connection())
 	resolver, err := runtime.BuildSecretResolver(vars)
 	if err != nil {
@@ -439,6 +432,22 @@ func start(cmd *cobra.Command, args []string) error {
 	if err := eventRouter.Reload(ctx); err != nil {
 		log.Fatal("event trigger router initial load failure", "error", err)
 	}
+	lifecycleEvents, err := eventRouter.SubscribeLifecycleBridge(ctx, bus)
+	if err != nil {
+		log.Fatal("event trigger lifecycle bridge subscription failure", "error", err)
+	}
+	runAsync(func() {
+		log.Info("launching event trigger lifecycle bridge")
+		if err := eventRouter.RunLifecycleBridge(ctx, lifecycleEvents); err != nil && ctx.Err() == nil {
+			log.Error("event trigger lifecycle bridge exited", "error", err)
+		}
+	})
+	runAsync(func() {
+		log.Info("launching event bus dispatcher")
+		if err := event.NewBusDispatcher(event.NewStore(db.Connection()), bus).Start(ctx); err != nil && ctx.Err() == nil {
+			log.Error("event bus dispatcher exited", "error", err)
+		}
+	})
 	reloadEventRouter := func(reloadCtx context.Context) error {
 		return eventRouter.Reload(reloadCtx)
 	}

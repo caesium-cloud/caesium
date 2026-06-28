@@ -58,6 +58,7 @@ func TestFireWithParamsSkipAndErrorOutcomes(t *testing.T) {
 		require.NoError(t, err)
 		sqlDB, err := db.DB()
 		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
 		t.Cleanup(func() { _ = sqlDB.Close() })
 
 		job := &models.Job{ID: uuid.New(), TriggerID: triggerID}

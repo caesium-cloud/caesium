@@ -280,7 +280,7 @@ Chaining is WS2 with the event source being the internal lifecycle bus
 persists via `internal/event/store.go`). Builds directly on Stream A's router —
 **same file (`router.go`), so it sequences after A**.
 
-- [ ] C1. Bridge internal lifecycle events into the router: subscribe to
+- [x] C1. Bridge internal lifecycle events into the router: subscribe to
       `TypeRunCompleted`/`TypeRunFailed`/`TypeRunTerminal`, convert each to an
       `IngestedEvent{Source:"caesium"}`, enrich with `job_alias` (so triggers can
       `filter: {job_alias: …}`), and `Route` it. Raise the subscriber buffer and
@@ -288,7 +288,11 @@ persists via `internal/event/store.go`). Builds directly on Stream A's router �
       silently lose completions).
       Files: `internal/trigger/event/router.go`, `internal/event/` (bus subscribe).
       Depends on: A4.
-- [ ] C2. Cycle detection — **static (BATCH-level)**: build the trigger-dependency
+      - W2-β: Added the startup lifecycle bridge on the singleton router using
+        `TypeRunCompleted`/`TypeRunFailed`/`TypeRunTerminal` (`run_completed`,
+        `run_failed`, `run_terminal`), `Source:"caesium"` ingested events,
+        `job_alias` enrichment, and raised/logged/metered bus drops.
+- [x] C2. Cycle detection — **static (BATCH-level)**: build the trigger-dependency
       graph across **all definitions being applied PLUS the existing DB triggers**
       and reject cycles (A→B→A) **before any definition is persisted**. This must live
       in the **batch validation path** (`internal/jobdef/` collect/validate), NOT the
@@ -305,6 +309,10 @@ persists via `internal/event/store.go`). Builds directly on Stream A's router �
       `cmd/job/lint.go`, `pkg/env/env.go`, `internal/metrics/metrics.go`.
       Depends on: C1.
       Test: a cyclic batch is rejected with **no partial persistence**.
+      - W2-β: Added `internal/jobdef` batch trigger-chain cycle validation and wired it
+        into CLI lint, REST lint/apply pre-write, and git sync pre-apply. Runtime
+        `_trigger_depth` now increments in the event trigger fire path and rejects past
+        `CAESIUM_MAX_TRIGGER_DEPTH` with chain depth/rejection metrics.
 
 ### Stream D — Webhook event log + trigger CLI (WS2/WS3 observability)
 

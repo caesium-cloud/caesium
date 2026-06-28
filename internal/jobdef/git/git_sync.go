@@ -80,6 +80,11 @@ type WatchOptions struct {
 	Once     bool
 }
 
+type applyFilePlan struct {
+	def  *schema.Definition
+	opts *jobdef.ApplyOptions
+}
+
 // Watch performs an initial sync and optionally continues on an interval until ctx is cancelled.
 func Watch(ctx context.Context, importer *jobdef.Importer, opts WatchOptions) error {
 	if importer == nil {
@@ -244,6 +249,8 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 
 	slices.Sort(files)
 
+	plans := make([]applyFilePlan, 0)
+	defs := make([]schema.Definition, 0)
 	desiredAliases := make([]string, 0)
 	for _, path := range files {
 		relToRepo, err := filepath.Rel(dir, path)
@@ -259,11 +266,26 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 		}
 
 		opts := &jobdef.ApplyOptions{Provenance: prov}
-		aliases, err := applyFile(ctx, importer, path, opts)
+		fileDefs, err := collectFileDefinitions(path)
 		if err != nil {
 			return err
 		}
-		desiredAliases = append(desiredAliases, aliases...)
+		for _, def := range fileDefs {
+			def := def
+			desiredAliases = append(desiredAliases, def.Metadata.Alias)
+			defs = append(defs, def)
+			plans = append(plans, applyFilePlan{def: &def, opts: opts})
+		}
+	}
+
+	if err := importer.ValidateBatch(ctx, defs); err != nil {
+		return err
+	}
+
+	for _, plan := range plans {
+		if _, err := importer.ApplyWithOptions(ctx, plan.def, plan.opts); err != nil {
+			return err
+		}
 	}
 
 	if strings.TrimSpace(s.SourceID) != "" {
@@ -273,6 +295,26 @@ func (s *Source) applyDir(ctx context.Context, importer *jobdef.Importer, dir st
 	}
 
 	return nil
+}
+
+func collectFileDefinitions(path string) ([]schema.Definition, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	dec := yamlNewDecoder(data)
+	defs := make([]schema.Definition, 0)
+	for {
+		def, err := dec()
+		if errors.Is(err, errEOF) {
+			return defs, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		defs = append(defs, *def)
+	}
 }
 
 func (s *Source) cloneOptions(ctx context.Context) (*git.CloneOptions, func(), error) {
@@ -621,30 +663,6 @@ func (s *Source) shouldInclude(fullPath, relative string) bool {
 		}
 	}
 	return false
-}
-
-func applyFile(ctx context.Context, importer *jobdef.Importer, path string, opts *jobdef.ApplyOptions) ([]string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	dec := yamlNewDecoder(data)
-	aliases := make([]string, 0)
-	for {
-		def, err := dec()
-		if errors.Is(err, errEOF) {
-			return aliases, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-
-		if _, err := importer.ApplyWithOptions(ctx, def, opts); err != nil {
-			return nil, err
-		}
-		aliases = append(aliases, def.Metadata.Alias)
-	}
 }
 
 var errEOF = errors.New("eof")
