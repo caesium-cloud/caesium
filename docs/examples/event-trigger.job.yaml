@@ -1,0 +1,33 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: process-production-deployment
+  labels:
+    scenario: event-trigger
+trigger:
+  type: event
+  configuration:
+    events:
+      - type: "deployment.*"
+        source: "github-actions"
+        filter:
+          environment: "production"
+          "repository.full_name": "caesium-cloud/caesium"
+    paramMapping:
+      commit: "$.commit"
+      actor: "$.actor"
+      environment: "$.environment"
+    defaultParams:
+      triggered_by: event
+      priority: normal
+steps:
+  - name: summarize-event
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - echo "deployment ${CAESIUM_PARAM_COMMIT:-unknown} by ${CAESIUM_PARAM_ACTOR:-unknown} for ${CAESIUM_PARAM_ENVIRONMENT:-unknown}"
+  - name: notify
+    image: debian:12-slim
+    command: ["sh", "-c", "echo deployment event processed"]

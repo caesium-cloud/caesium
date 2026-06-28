@@ -36,7 +36,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 
 ## Trigger
 
-Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.
+Supported trigger types: `cron`, `http`, `event`. Each type accepts a `configuration` map that is persisted verbatim, with type-specific validation.
 
 ### Common Trigger Fields
 | Field | Type | Required | Notes |
@@ -57,6 +57,18 @@ Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map
 | `signatureScheme` | string | optional | One of `hmac-sha256`, `hmac-sha1`, `bearer`, `basic`. Defaults to `hmac-sha256` when `secret` is set. |
 | `signatureHeader` | string | optional | Header containing the signature or token. Default varies by scheme. |
 | `paramMapping` | map[string]string | optional | Extracts JSON request-body fields into run params using simple JSONPath expressions such as `$.ref`. |
+
+### Event Trigger
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `events` | array[object] | required | One or more event patterns. A pattern matches when its `type`, optional `source`, and optional `filter` all match the ingested event. |
+| `events[].type` | string | required | Event type to match. Exact strings and glob patterns such as `webhook.*` are supported. |
+| `events[].source` | string | optional | Exact event source filter, such as `github` or `caesium`. |
+| `events[].filter` | map[string]string | optional | Content filter over event `data`. Keys are dot paths like `repository.full_name`; values are string comparisons. |
+| `paramMapping` | map[string]string | optional | Extracts JSON event-data fields into run params using simple JSONPath expressions such as `$.run_id`. |
+| `defaultParams` | map[string]string | optional | Seeds run parameters for event-triggered executions before extracted event params are merged. Values must be strings. |
+
+For trigger chaining, Caesium routes lifecycle events with `source: caesium` through the same event router. The scheduler-owned `_trigger_depth` run parameter tracks chain depth and is rejected when it reaches `CAESIUM_MAX_TRIGGER_DEPTH`; authors should not set or depend on `_trigger_depth` for business logic.
 
 ## Callbacks
 

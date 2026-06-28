@@ -16,7 +16,7 @@ metadata:
   runTimeout: 30m                # Optional. Whole-run timeout.
   schemaValidation: warn         # Optional. "" | "warn" | "fail"
 trigger:
-  type: cron                     # "cron" or "http"
+  type: cron                     # "cron", "http", or "event"
   configuration:
     cron: "0 2 * * *"            # POSIX 5-field cron expression
     timezone: "UTC"              # Optional, defaults to UTC
@@ -46,7 +46,7 @@ steps:
 
 - `apiVersion: v1` and `kind: Job` (both required)
 - `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
-- `trigger` (required): `type` (`cron` | `http`) + `configuration` + optional `defaultParams` — see the snippets below
+- `trigger` (required): `type` (`cron` | `http` | `event`) + `configuration` + optional `defaultParams` — see the snippets below
 - `volumes` (optional): named BYO storage sources mounted by steps
 - `steps` (required, ≥1): see the step quick-reference below
 - `callbacks` (optional): post-run notification hooks
@@ -77,6 +77,27 @@ trigger:
       branch: "$.ref"
       commit: "$.after"
 ```
+
+### Trigger — Event
+
+```yaml
+trigger:
+  type: event
+  configuration:
+    events:                     # Required. One or more event patterns.
+      - type: "deployment.*"    # Required. Exact event type or glob.
+        source: "github-actions" # Optional. Exact source match.
+        filter:                 # Optional. Dot-path string comparisons over event data.
+          environment: "production"
+          "repository.full_name": "acme/warehouse"
+    paramMapping:               # Optional. JSON event data -> run params.
+      commit: "$.commit"
+      actor: "$.actor"
+    defaultParams:              # Optional. String defaults merged before extracted params.
+      triggered_by: event
+```
+
+For trigger chaining, match lifecycle events from `source: caesium`, for example `type: "run_completed"` with `filter.job_alias: "upstream-job"`. Caesium injects and increments the scheduler-owned `_trigger_depth` run param to stop runtime loops; do not set it in authored manifests.
 
 ### Steps (most-used fields)
 

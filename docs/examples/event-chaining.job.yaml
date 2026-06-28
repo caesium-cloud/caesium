@@ -1,0 +1,32 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: post-nightly-etl-quality-check
+  labels:
+    scenario: event-chaining
+trigger:
+  type: event
+  configuration:
+    events:
+      - type: "run_completed"
+        source: "caesium"
+        filter:
+          job_alias: "nightly-etl"
+    paramMapping:
+      upstream_run_id: "$.run_id"
+      upstream_job_id: "$.job_id"
+    defaultParams:
+      chain_name: nightly-etl-quality
+steps:
+  - name: inspect-upstream
+    image: alpine:3.23
+    next: publish-quality-summary
+    command:
+      - sh
+      - -c
+      - echo "checking upstream run ${CAESIUM_PARAM_UPSTREAM_RUN_ID:-unknown} from job ${CAESIUM_PARAM_UPSTREAM_JOB_ID:-unknown}"
+  - name: publish-quality-summary
+    image: debian:12-slim
+    dependsOn: [inspect-upstream]
+    command: ["sh", "-c", "echo quality summary ready for ${CAESIUM_PARAM_CHAIN_NAME:-unknown}"]
