@@ -2,6 +2,7 @@ package event
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -149,7 +150,9 @@ func requireEventIngestAPIKey(c *echo.Context) error {
 		}
 	}
 
-	if subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) != 1 {
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(expected))
+	if subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) != 1 {
 		return echo.NewHTTPError(http.StatusUnauthorized, "invalid api key")
 	}
 	return nil

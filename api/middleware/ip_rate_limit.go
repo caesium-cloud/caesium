@@ -7,6 +7,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
+const ipRateLimitMaxCleanupInterval = time.Minute
+
 // IPRateLimitConfig returns the per-minute rate and burst limit.
 type IPRateLimitConfig func() (perMinute int, burst int)
 
@@ -26,11 +28,13 @@ type ipClientLimiter struct {
 }
 
 func NewIPRateLimiters(staleAge time.Duration, config IPRateLimitConfig) *IPRateLimiters {
-	return &IPRateLimiters{
+	limiters := &IPRateLimiters{
 		clients:  map[string]*ipClientLimiter{},
 		staleAge: staleAge,
 		config:   config,
 	}
+	go limiters.cleanupLoop(cleanupInterval(staleAge))
+	return limiters
 }
 
 func (l *IPRateLimiters) Allow(ip string) bool {
@@ -49,13 +53,11 @@ func (l *IPRateLimiters) Allow(ip string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	for key, client := range l.clients {
-		if now.Sub(client.lastSeen) > l.staleAge {
-			delete(l.clients, key)
-		}
-	}
-
 	client, ok := l.clients[ip]
+	if ok && l.isStale(now, client) {
+		delete(l.clients, ip)
+		ok = false
+	}
 	if !ok || client.perMinute != perMinute || client.burstLimit != burst {
 		limit := rate.Every(time.Minute / time.Duration(perMinute))
 		client = &ipClientLimiter{
@@ -67,4 +69,42 @@ func (l *IPRateLimiters) Allow(ip string) bool {
 	}
 	client.lastSeen = now
 	return client.limiter.Allow()
+}
+
+func (l *IPRateLimiters) cleanupLoop(interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for now := range ticker.C {
+		l.cleanupStale(now)
+	}
+}
+
+func (l *IPRateLimiters) cleanupStale(now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	for key, client := range l.clients {
+		if l.isStale(now, client) {
+			delete(l.clients, key)
+		}
+	}
+}
+
+func (l *IPRateLimiters) isStale(now time.Time, client *ipClientLimiter) bool {
+	return now.Sub(client.lastSeen) > l.staleAge
+}
+
+func cleanupInterval(staleAge time.Duration) time.Duration {
+	if staleAge <= 0 {
+		return time.Second
+	}
+	interval := staleAge / 2
+	if interval <= 0 {
+		return time.Second
+	}
+	if interval > ipRateLimitMaxCleanupInterval {
+		return ipRateLimitMaxCleanupInterval
+	}
+	return interval
 }
