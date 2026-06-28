@@ -29,6 +29,7 @@ publish_builder_ref := repo + "/" + builder_image
 sock := env("CAESIUM_SOCK", default_sock)
 port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
+event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
 # images into the cluster's containerd. Port 5050 sidesteps the macOS
@@ -158,6 +159,7 @@ integration-test:
         -v {{ repo_dir }}:{{ bld_dir }} \
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
@@ -189,12 +191,14 @@ integration-test-podman: build
         -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
         -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
         -e CAESIUM_TEST_ENGINE=podman \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         --network=host \
         -w {{ bld_dir }} \
         {{ repo }}/{{ builder_image }}:{{ tag }}-full \
@@ -224,6 +228,7 @@ integration-up: build-test
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --user 0:0 \
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_DATABASE_SHARDS=4 \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \

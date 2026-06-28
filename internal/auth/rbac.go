@@ -53,12 +53,14 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/jobs/:id/backfills":                models.RoleViewer,
 	"GET /v1/jobs/:id/backfills/:id":            models.RoleViewer,
 	"GET /v1/events":                            models.RoleViewer,
+	"GET /v1/events/ingested":                   models.RoleViewer,
 	"GET /v1/stats":                             models.RoleViewer,
 	"GET /v1/stats/summary":                     models.RoleViewer,
 	"GET /v1/system/features":                   models.RoleViewer,
 	"GET /v1/system/nodes":                      models.RoleViewer,
 	"GET /v1/triggers":                          models.RoleViewer,
 	"GET /v1/triggers/:id":                      models.RoleViewer,
+	"GET /v1/triggers/:id/events":               models.RoleViewer,
 	"GET /v1/atoms":                             models.RoleViewer,
 	"GET /v1/atoms/:id":                         models.RoleViewer,
 	"GET /v1/nodes/:id/workers":                 models.RoleViewer,
@@ -76,6 +78,7 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/jobs/:id/runs/:id/retry":           models.RoleRunner,
 	"POST /v1/jobs/:id/runs/:id/callbacks/retry": models.RoleRunner,
 	"POST /v1/jobs/:id/backfill":                 models.RoleRunner,
+	"POST /v1/events":                            models.RoleRunner,
 	"POST /v1/triggers/:id/fire":                 models.RoleRunner,
 
 	// Operator

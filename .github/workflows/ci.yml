@@ -151,7 +151,7 @@ jobs:
       - name: Build release image (amd64)
         run: just tag=${{ env.IMAGE_TAG }}-amd64 build
       - name: Integration tests (amd64)
-        run: just tag=${{ env.IMAGE_TAG }}-amd64 integration-test
+        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test
       - name: Save release image
         run: |
           docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 \
@@ -180,7 +180,7 @@ jobs:
       - name: Build release image (arm64)
         run: just tag=${{ env.IMAGE_TAG }}-arm64 build
       - name: Integration tests (arm64)
-        run: just tag=${{ env.IMAGE_TAG }}-arm64 integration-test
+        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-arm64 integration-test
       - name: Save release image
         run: |
           docker save caesiumcloud/caesium:${{ env.IMAGE_TAG }}-arm64 \
