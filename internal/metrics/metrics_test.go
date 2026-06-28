@@ -36,6 +36,9 @@ func (s *MetricsSuite) SetupTest() {
 		WorkerLeaseExpirationsTotal,
 		TaskRetriesTotal,
 		WebhookAuthFailuresTotal,
+		EventTriggerMatchesTotal,
+		EventsIngestedTotal,
+		EventBridgeFailuresTotal,
 		SSOLoginsTotal,
 		SSOLoginDurationSeconds,
 		SSOLogoutsTotal,
@@ -199,6 +202,29 @@ func (s *MetricsSuite) TestWebhookAuthFailuresTotalIncrements() {
 
 	val = metrictestutil.CounterValue(s.T(), WebhookAuthFailuresTotal, "github/push", "replayed_request")
 	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestEventsIngestedTotalIncrements() {
+	EventsIngestedTotal.WithLabelValues("ingest").Inc()
+	EventsIngestedTotal.WithLabelValues("ingest").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), EventsIngestedTotal, "ingest")
+	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestEventTriggerMatchesTotalIncrements() {
+	EventTriggerMatchesTotal.WithLabelValues("trigger-1").Inc()
+	EventTriggerMatchesTotal.WithLabelValues("trigger-1").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), EventTriggerMatchesTotal, "trigger-1")
+	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestEventBridgeFailuresTotalIncrements() {
+	EventBridgeFailuresTotal.WithLabelValues("webhook").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), EventBridgeFailuresTotal, "webhook")
+	s.GreaterOrEqual(val, float64(1))
 }
 
 func (s *MetricsSuite) TestSSOLoginsTotalIncrements() {

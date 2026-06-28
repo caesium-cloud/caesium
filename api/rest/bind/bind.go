@@ -58,6 +58,8 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	{
 		ctrl := event.New(bus)
 		g.GET("/events", ctrl.Stream)
+		g.POST("/events", ctrl.Ingest)
+		g.GET("/events/ingested", ctrl.ListIngested)
 	}
 
 	// atoms
@@ -128,6 +130,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	{
 		g.GET("/triggers", trigger.List)
 		g.POST("/triggers", trigger.Post)
+		g.GET("/triggers/:id/events", trigger.Events)
 		g.GET("/triggers/:id", trigger.Get)
 		g.PATCH("/triggers/:id", trigger.Patch)
 		g.POST("/triggers/:id/fire", trigger.Fire)

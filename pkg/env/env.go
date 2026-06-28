@@ -88,6 +88,7 @@ type Environment struct {
 	DatabaseStandbys               int           `default:"3" split_words:"true"`
 	DatabaseConsoleEnabled         bool          `default:"false" split_words:"true"`
 	ManualTriggerAPIKey            string        `envconfig:"MANUAL_TRIGGER_API_KEY" default:""`
+	EventIngestAPIKey              string        `envconfig:"EVENT_INGEST_API_KEY" default:""`
 	MaxParallelTasks               int           `split_words:"true"`
 	TaskFailurePolicy              string        `default:"halt" split_words:"true"`
 	TaskTimeout                    time.Duration `default:"0" split_words:"true"`

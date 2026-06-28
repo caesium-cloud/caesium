@@ -226,7 +226,7 @@ func (r *Router) Route(ctx context.Context, evt *models.IngestedEvent) (*RouteRe
 		}
 	}
 	for _, match := range metricMatches {
-		metrics.EventTriggerMatchesTotal.WithLabelValues(match.TriggerID.String(), result.EventType).Inc()
+		metrics.EventTriggerMatchesTotal.WithLabelValues(match.TriggerID.String()).Inc()
 	}
 
 	return result, nil
