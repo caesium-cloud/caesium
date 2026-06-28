@@ -55,6 +55,7 @@ func ValidateTriggerChains(ctx context.Context, conn *gorm.DB, defs []schema.Def
 func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definition) ([]triggerChainNode, error) {
 	nodes := make([]triggerChainNode, 0, len(defs))
 	incomingAliases := make(map[string]struct{}, len(defs))
+	incomingAliasIndexes := make(map[string]int, len(defs))
 	for idx := range defs {
 		alias := strings.TrimSpace(defs[idx].Metadata.Alias)
 		if alias == "" {
@@ -64,6 +65,7 @@ func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definit
 			return nil, fmt.Errorf("%w: %s", ErrDuplicateJob, alias)
 		}
 		incomingAliases[alias] = struct{}{}
+		incomingAliasIndexes[alias] = len(nodes)
 		nodes = append(nodes, triggerChainNode{
 			alias:         alias,
 			triggerType:   strings.TrimSpace(defs[idx].Trigger.Type),
@@ -71,7 +73,22 @@ func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definit
 		})
 	}
 
-	existing, err := existingTriggerChainNodes(ctx, conn, incomingAliases)
+	incomingJobIDs, err := existingJobIDsByAlias(ctx, conn, incomingAliases)
+	if err != nil {
+		return nil, err
+	}
+	for alias, id := range incomingJobIDs {
+		if idx, ok := incomingAliasIndexes[alias]; ok {
+			nodes[idx].id = id
+		}
+	}
+
+	incomingJobIDSet := make(map[uuid.UUID]struct{}, len(incomingJobIDs))
+	for _, id := range incomingJobIDs {
+		incomingJobIDSet[id] = struct{}{}
+	}
+
+	existing, err := existingTriggerChainNodes(ctx, conn, incomingAliases, incomingJobIDSet)
 	if err != nil {
 		return nil, err
 	}
@@ -79,7 +96,45 @@ func triggerChainNodes(ctx context.Context, conn *gorm.DB, defs []schema.Definit
 	return nodes, nil
 }
 
-func existingTriggerChainNodes(ctx context.Context, conn *gorm.DB, incomingAliases map[string]struct{}) ([]triggerChainNode, error) {
+func existingJobIDsByAlias(ctx context.Context, conn *gorm.DB, incomingAliases map[string]struct{}) (map[string]uuid.UUID, error) {
+	if conn == nil || len(incomingAliases) == 0 {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	aliases := make([]string, 0, len(incomingAliases))
+	for alias := range incomingAliases {
+		aliases = append(aliases, alias)
+	}
+
+	var rows []struct {
+		ID    uuid.UUID
+		Alias string
+	}
+	err := conn.WithContext(ctx).
+		Table("jobs").
+		Select("id, alias").
+		Where("deleted_at IS NULL").
+		Where("alias IN ?", aliases).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+
+	ids := make(map[string]uuid.UUID, len(rows))
+	for _, row := range rows {
+		alias := strings.TrimSpace(row.Alias)
+		if alias == "" || row.ID == uuid.Nil {
+			continue
+		}
+		ids[alias] = row.ID
+	}
+	return ids, nil
+}
+
+func existingTriggerChainNodes(ctx context.Context, conn *gorm.DB, incomingAliases map[string]struct{}, incomingJobIDs map[uuid.UUID]struct{}) ([]triggerChainNode, error) {
 	if conn == nil {
 		return nil, nil
 	}
@@ -110,6 +165,9 @@ func existingTriggerChainNodes(ctx context.Context, conn *gorm.DB, incomingAlias
 			continue
 		}
 		if _, replaced := incomingAliases[alias]; replaced {
+			continue
+		}
+		if _, replaced := incomingJobIDs[row.ID]; replaced {
 			continue
 		}
 		cfg := make(map[string]any)

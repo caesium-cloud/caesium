@@ -79,6 +79,30 @@ func TestFireWithParamsSkipAndErrorOutcomes(t *testing.T) {
 		require.NotEmpty(t, outcomes[0].Error)
 		require.Equal(t, uuid.Nil, outcomes[0].RunID)
 	})
+
+	t.Run("malformed trigger depth starts new chain", func(t *testing.T) {
+		for _, rawDepth := range []string{"not-a-number", "-1"} {
+			rawDepth := rawDepth
+			t.Run(rawDepth, func(t *testing.T) {
+				listJobsCalled := false
+				trig, err := New(triggerModel,
+					WithMaxTriggerDepth(1),
+					WithListJobs(func(context.Context, string) (models.Jobs, error) {
+						listJobsCalled = true
+						return nil, nil
+					}),
+				)
+				require.NoError(t, err)
+
+				outcomes, err := trig.FireWithParams(context.Background(), map[string]string{TriggerDepthParam: rawDepth})
+				require.NoError(t, err)
+				require.True(t, listJobsCalled)
+				require.Len(t, outcomes, 1)
+				require.True(t, outcomes[0].Skipped)
+				require.Equal(t, "no jobs registered for trigger", outcomes[0].SkipReason)
+			})
+		}
+	})
 }
 
 func TestExtractParamsJSONPath(t *testing.T) {

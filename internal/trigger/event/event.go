@@ -196,20 +196,20 @@ func (t *EventTrigger) applyTriggerDepth(params map[string]string) error {
 
 	depth, err := strconv.Atoi(strings.TrimSpace(rawDepth))
 	if err != nil || depth < 0 {
-		metrics.TriggerChainRejectedTotal.Inc()
-		return fmt.Errorf("%w: invalid %s %q", ErrTriggerChainDepthExceeded, TriggerDepthParam, rawDepth)
+		depth = 0
 	}
 
-	nextDepth := depth + 1
 	maxDepth := t.maxTriggerDepth
 	if maxDepth <= 0 {
 		maxDepth = defaultMaxTriggerDepth
 	}
-	metrics.TriggerChainDepth.Observe(float64(nextDepth))
-	if nextDepth > maxDepth {
+	if depth >= maxDepth {
 		metrics.TriggerChainRejectedTotal.Inc()
-		return fmt.Errorf("%w: depth %d exceeds max %d", ErrTriggerChainDepthExceeded, nextDepth, maxDepth)
+		return fmt.Errorf("%w: depth %d exceeds max %d", ErrTriggerChainDepthExceeded, depth+1, maxDepth)
 	}
+
+	nextDepth := depth + 1
+	metrics.TriggerChainDepth.Observe(float64(nextDepth))
 
 	params[TriggerDepthParam] = strconv.Itoa(nextDepth)
 	return nil

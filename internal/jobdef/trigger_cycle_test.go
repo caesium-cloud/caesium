@@ -57,6 +57,63 @@ func TestValidateTriggerChainsRejectsJobIDScopedCycle(t *testing.T) {
 	require.Contains(t, err.Error(), "chain-a -> chain-b -> chain-a")
 }
 
+func TestValidateTriggerChainsUpdateSupersedesPersistedTriggerByJobID(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects cycle introduced by update", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTriggerCycleTestDB(t)
+		staleBTrigger := triggerCycleCronModel(t, "job-b")
+		require.NoError(t, db.Create(staleBTrigger).Error)
+		jobBID := createTriggerCycleJob(t, db, "job-b", staleBTrigger.ID)
+
+		jobATrigger := triggerCycleModelWithConfig(t, "job-a", map[string]any{
+			"events": []any{
+				map[string]any{
+					"type":   "run_completed",
+					"source": "caesium",
+					"filter": map[string]any{"job_id": jobBID.String()},
+				},
+			},
+		})
+		require.NoError(t, db.Create(jobATrigger).Error)
+		createTriggerCycleJob(t, db, "job-a", jobATrigger.ID)
+
+		err := ValidateTriggerChains(context.Background(), db, []schema.Definition{
+			triggerChainDefinition("job-b", "job-a"),
+		})
+		require.ErrorIs(t, err, ErrTriggerChainCycle)
+		require.Contains(t, err.Error(), "job-a -> job-b -> job-a")
+	})
+
+	t.Run("allows non-cyclic update without stale persisted edge", func(t *testing.T) {
+		t.Parallel()
+
+		db := openTriggerCycleTestDB(t)
+		staleBTrigger := triggerCycleModel(t, "job-b", "job-a")
+		require.NoError(t, db.Create(staleBTrigger).Error)
+		jobBID := createTriggerCycleJob(t, db, "job-b", staleBTrigger.ID)
+
+		jobATrigger := triggerCycleModelWithConfig(t, "job-a", map[string]any{
+			"events": []any{
+				map[string]any{
+					"type":   "run_completed",
+					"source": "caesium",
+					"filter": map[string]any{"job_id": jobBID.String()},
+				},
+			},
+		})
+		require.NoError(t, db.Create(jobATrigger).Error)
+		createTriggerCycleJob(t, db, "job-a", jobATrigger.ID)
+
+		err := ValidateTriggerChains(context.Background(), db, []schema.Definition{
+			triggerChainCronDefinition("job-b"),
+		})
+		require.NoError(t, err)
+	})
+}
+
 func TestValidateTriggerChainsAllowsJobIDScopedNonCycle(t *testing.T) {
 	t.Parallel()
 
@@ -104,6 +161,15 @@ func triggerChainDefinition(alias, upstream string) schema.Definition {
 	return triggerChainDefinitionWithFilter(alias, filter)
 }
 
+func triggerChainCronDefinition(alias string) schema.Definition {
+	def := triggerChainDefinitionWithFilter(alias, nil)
+	def.Trigger = schema.Trigger{
+		Type:          schema.TriggerCron,
+		Configuration: map[string]any{},
+	}
+	return def
+}
+
 func triggerChainDefinitionWithFilter(alias string, filter map[string]any) schema.Definition {
 	pattern := map[string]any{
 		"type":   "run_completed",
@@ -149,6 +215,20 @@ func triggerCycleModelWithConfig(t *testing.T, alias string, configuration map[s
 		Alias:         alias,
 		Type:          models.TriggerTypeEvent,
 		Configuration: string(cfg),
+		CreatedAt:     time.Now().UTC(),
+		UpdatedAt:     time.Now().UTC(),
+	}
+	require.NoError(t, trigger.ApplyDerivedFields())
+	return trigger
+}
+
+func triggerCycleCronModel(t *testing.T, alias string) *models.Trigger {
+	t.Helper()
+	trigger := &models.Trigger{
+		ID:            uuid.New(),
+		Alias:         alias,
+		Type:          models.TriggerTypeCron,
+		Configuration: `{}`,
 		CreatedAt:     time.Now().UTC(),
 		UpdatedAt:     time.Now().UTC(),
 	}

@@ -63,6 +63,9 @@ var lintCmd = &cobra.Command{
 					}
 				}
 			}
+			if err := writeLintTriggerScopeNote(cmd); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -84,6 +87,9 @@ var lintCmd = &cobra.Command{
 		if err := writeCmdOut(cmd, "Validated %d job definition(s) with secrets\n", len(defs)); err != nil {
 			return err
 		}
+		if err := writeLintTriggerScopeNote(cmd); err != nil {
+			return err
+		}
 		return nil
 	},
 }
@@ -101,6 +107,10 @@ func init() {
 	lintCmd.Flags().BoolVar(&lintVaultSkipVerify, "vault-skip-verify", envBool("VAULT_SKIP_VERIFY", false), "Disable TLS verification when connecting to Vault")
 
 	Cmd.AddCommand(lintCmd)
+}
+
+func writeLintTriggerScopeNote(cmd *cobra.Command) error {
+	return writeCmdOut(cmd, "Note: trigger-cycle lint is file-scoped; cross-job cycles against persisted triggers are validated at apply.\n")
 }
 
 func buildLintResolver() (*secret.MultiResolver, error) {
