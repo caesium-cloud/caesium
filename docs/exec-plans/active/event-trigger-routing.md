@@ -85,12 +85,12 @@ contracts W1/W2 follow; N-1 folds all of them into `design-event-triggers.md`.
 
 ## Progress (as of 2026-06-27)
 
-**Wave 1 shipped** the event-trigger engine (Stream A). WS1 (HTTP webhook triggers)
-shipped previously and is the foundation this plan builds on (`internal/trigger/http/`,
-`api/rest/controller/webhook/`, the `internal/event` bus + store). **Wave 2 fans out
-to B (ingestion + webhook bridge + observability) + C (chaining + cycle detection),
-both unblocked now that A's router is in**, plus H-1 (the integration harness, bundled
-with B since B's apply→ingest→run test needs the configured server).
+**Waves 1–2 shipped** the engine (A), event ingestion + the webhook bridge +
+observability (B), trigger chaining + cycle detection (C), and the integration
+harness (H-1). WS1 (HTTP webhook triggers) shipped previously and is the foundation.
+**Wave 3 finishes the plan with D (durable webhook log + `caesium event`/`trigger`
+CLI) + N-1 (roadmap §1.2 flip + schema docs + examples)** — D's CLI consumes the
+Stream B endpoints; N-1 runs last and reconciles the five design amendments.
 
 ### Wave 1 — event-trigger engine shipped
 
@@ -108,15 +108,33 @@ with B since B's apply→ingest→run test needs the configured server).
   `job.Delete` + the JSONPath validation regex. Engine package coverage 9.9% → 79.5%;
   integration gate green ×2.
 
+### Wave 2 — ingestion + bridge + chaining shipped
+
+- **Stream α (B1–B3 + H-1):** keyed `POST /v1/events` (constant-time, hash-before-compare,
+  fail-closed, `RoleRunner` RBAC) calling A's `Router.Route`; the durable-match observability
+  reads; the webhook→event bridge (graceful on Route failure, at-least-once); + the
+  apply→ingest→run integration test with the ingest key wired into the integration server —
+  PR #258, merged `0c030cb`. Opus security pass confirmed the auth sound; fixes: metric-
+  cardinality DoS (dropped attacker-controlled labels), three integration-test gaps, the
+  key-length-leak, an extracted-middleware arch-boundary + RBAC-policy gap, the rate-limiter
+  O(N) sweep. Integration gate green (205s).
+- **Stream β (C1–C2):** the lifecycle-bus bridge (run_completed/failed/terminal →
+  `IngestedEvent{source:caesium}` + job_alias → `Route`, Subscribe-before-dispatch so no
+  startup-race lost completions) + the batch static cycle validator (pre-write on REST
+  apply, git-sync, and lint; recognizes job_alias **and** job_id edges, dedups on update) +
+  the runtime `_trigger_depth` guard — PR #259, merged `366fba2`. Fixes: cycle-detection-
+  on-update (gemini high), malformed-`_trigger_depth` robustness, and a shared-cache test
+  deadlock (single-connection in-mem DB). Integration gate green (217s).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Event-trigger evaluation engine — `event` type, matcher, `EventTrigger`, singleton router, executor + startup wiring | **P0** | **Shipped** (#257) — engine + router + tests |
-| B | Event ingestion + observability REST API — keyed `POST /v1/events`, the webhook→event bridge, durable-match reads (`GET /v1/events/ingested`, `GET /v1/triggers/:id/events`) | **P0** | Not started |
-| C | Trigger chaining — internal lifecycle-bus bridge + static & runtime cycle detection | P1 | Not started |
+| B | Event ingestion + observability REST API — keyed `POST /v1/events`, the webhook→event bridge, durable-match reads (`GET /v1/events/ingested`, `GET /v1/triggers/:id/events`) | **P0** | **Shipped** (#258) — ingestion + bridge + e2e |
+| C | Trigger chaining — internal lifecycle-bus bridge + static & runtime cycle detection | P1 | **Shipped** (#259) — chaining + cycle + e2e |
 | D | Webhook event log + trigger CLI — durable `webhook_events`, `caesium event push`, `caesium trigger events` | P1 | Not started |
-| H-1 | Integration harness — exercise the event path on the live integration server | — | Not started |
+| H-1 | Integration harness — exercise the event path on the live integration server | — | **Shipped** (#258) — ingest key + e2e wired |
 | N-1 | Docs — roadmap §1.2 flip, design banner, schema reference, examples, README | — | Not started |
 | (UI) | Event-trigger visualization + event log (design Phase 4 #15) | — | **Deferred** — candidate for a follow-on UI plan |
 
