@@ -6,11 +6,13 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/blame"
 	"github.com/caesium-cloud/caesium/cmd/cache"
 	"github.com/caesium-cloud/caesium/cmd/dev"
+	"github.com/caesium-cloud/caesium/cmd/event"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	"github.com/caesium-cloud/caesium/cmd/receipt"
 	"github.com/caesium-cloud/caesium/cmd/run"
 	"github.com/caesium-cloud/caesium/cmd/start"
 	"github.com/caesium-cloud/caesium/cmd/test"
+	"github.com/caesium-cloud/caesium/cmd/trigger"
 	"github.com/caesium-cloud/caesium/cmd/verify"
 	"github.com/caesium-cloud/caesium/cmd/why"
 	"github.com/spf13/cobra"
@@ -22,11 +24,13 @@ var cmds = []*cobra.Command{
 	blame.Cmd,
 	cache.Cmd,
 	dev.Cmd,
+	event.Cmd,
 	job.Cmd,
 	receipt.Cmd,
 	run.Cmd,
 	start.Cmd,
 	test.Cmd,
+	trigger.Cmd,
 	verify.Cmd,
 	why.Cmd,
 }

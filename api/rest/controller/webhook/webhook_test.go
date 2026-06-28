@@ -47,8 +47,20 @@ func (s stubJobLister) List(*jsvc.ListRequest) (models.Jobs, error) {
 func stubWebhookRouter(t *testing.T, fn func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error)) {
 	t.Helper()
 	original := routeWebhookEvent
+	originalRecorder := recordWebhookReceipt
 	routeWebhookEvent = fn
-	t.Cleanup(func() { routeWebhookEvent = original })
+	recordWebhookReceipt = func(context.Context, *models.WebhookEvent) error { return nil }
+	t.Cleanup(func() {
+		routeWebhookEvent = original
+		recordWebhookReceipt = originalRecorder
+	})
+}
+
+func stubWebhookReceiptRecorder(t *testing.T, fn func(context.Context, *models.WebhookEvent) error) {
+	t.Helper()
+	original := recordWebhookReceipt
+	recordWebhookReceipt = fn
+	t.Cleanup(func() { recordWebhookReceipt = original })
 }
 
 func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
@@ -118,6 +130,79 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for webhook-triggered job")
 	}
+}
+
+func TestReceiveWithServicesRecordsWebhookReceipt(t *testing.T) {
+	require.NoError(t, env.Process())
+	eventID := uuid.New()
+	runID := uuid.New()
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		return &triggerevent.RouteResult{
+			EventID:   eventID,
+			EventType: evt.Type,
+			Source:    evt.Source,
+			MatchedTriggers: []triggerevent.TriggerRouteResult{
+				{TriggerID: uuid.New(), RunsStarted: []uuid.UUID{runID}},
+			},
+		}, nil
+	})
+
+	recorded := make(chan *models.WebhookEvent, 1)
+	stubWebhookReceiptRecorder(t, func(_ context.Context, receipt *models.WebhookEvent) error {
+		receipt.ID = uuid.New()
+		recorded <- receipt
+		return nil
+	})
+
+	triggerID := uuid.New()
+	jobID := uuid.New()
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
+	req.Header.Set("Authorization", "Bearer top-secret")
+	req.Header.Set("X-Caesium-Event-Source", "github")
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/push"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   triggerID,
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"github/push",
+						"secret":"top-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+			},
+		},
+		stubJobLister{jobs: models.Jobs{&models.Job{ID: jobID, Alias: "deploy"}}},
+		nil,
+		func(context.Context, *models.Job, map[string]string) error { return nil },
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	var receipt *models.WebhookEvent
+	select {
+	case receipt = <-recorded:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook receipt")
+	}
+	require.Equal(t, "github/push", receipt.Path)
+	require.Equal(t, "github", receipt.Source)
+	require.Equal(t, "accepted", receipt.Status)
+	require.Equal(t, eventID, receipt.EventID)
+	require.Equal(t, 1, receipt.EventMatchedTriggers)
+	require.Equal(t, 1, receipt.EventRunsStarted)
+	require.Equal(t, 1, receipt.HTTPTriggersAccepted)
+	require.Equal(t, 1, receipt.HTTPRunsStarted)
+	require.JSONEq(t, fmt.Sprintf(`["%s"]`, triggerID), string(receipt.HTTPTriggerIDs))
+	require.JSONEq(t, fmt.Sprintf(`["%s"]`, jobID), string(receipt.HTTPJobIDs))
 }
 
 func TestReceiveWithServicesContinuesWhenWebhookBridgeFails(t *testing.T) {

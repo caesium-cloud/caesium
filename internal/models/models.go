@@ -8,6 +8,7 @@ var All = []interface{}{
 	&Trigger{},
 	&Job{},
 	&IngestedEvent{},
+	&WebhookEvent{},
 	&Task{},
 	&TaskEdge{},
 	&Callback{},
