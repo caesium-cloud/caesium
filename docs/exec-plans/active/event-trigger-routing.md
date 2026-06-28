@@ -355,19 +355,26 @@ functionally independent of the engine, but it **shares files** with A1
 (`models.go`/`start.go`) and B3 (`webhook.go`), so it lands in **W3** (after those),
 NOT the first wave; D2 calls the Stream B endpoints.
 
-- [ ] D1. Add the durable `webhook_events` log: model + `All` registration + an
+- [x] D1. Add the durable `webhook_events` log: model + `All` registration + an
       env-gated pruner with `CAESIUM_WEBHOOK_EVENT_RETENTION` (default `7d`);
       record each webhook receipt in the receiver.
       Files: new `internal/models/webhook_event.go`, `internal/models/models.go`,
       `pkg/env/env.go`, `cmd/start/start.go`, `api/rest/controller/webhook/webhook.go`.
       Depends on: A1 + B3 (shared `models.go`/`start.go` and `webhook.go` — sequence
       after them per the collision matrix; not a functional dependency).
-- [ ] D2. Add the event ingestion/inspection CLI: `caesium event push --type --source --data '{}'`
+      - W3-α: Added catalog `webhook_events`, `CAESIUM_WEBHOOK_EVENT_RETENTION`
+        (default `7d`), a mirrored retention pruner, and webhook receipt recording
+        from the live receiver with receipt counts surfaced in the accepted response.
+- [x] D2. Add the trigger/event CLI: `caesium event push --type --source --data '{}'`
       (`POST /v1/events`) and `caesium trigger events <alias>`
       (`GET /v1/triggers/:id/events`), as new top-level Cobra command groups
       appended to the `cmds` slice in `cmd/execute.go`.
       Files: new `cmd/event/`, new `cmd/trigger/`, `cmd/execute.go`.
       Depends on: B1 + B2.
+      - W3-α: Added `caesium event push` and `caesium trigger events <alias>`;
+        both use `--server`, bearer API-key headers, and `cmd.OutOrStdout()` for
+        clean JSON stdout. Integration coverage drives the real CLI binary with
+        split stdout/stderr capture.
 
 #### Deferred — Event-trigger UI (design Phase 4 item 15)
 

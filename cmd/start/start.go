@@ -158,6 +158,7 @@ func start(cmd *cobra.Command, args []string) error {
 		log.Fatal("database migration failure", "error", err)
 	}
 	event.StartIngestRetentionPruner(ctx, event.NewIngestStore(db.Connection()), vars.EventRetention)
+	event.StartWebhookEventRetentionPruner(ctx, event.NewWebhookEventStore(db.Connection()), vars.WebhookEventRetention)
 
 	bus := event.New()
 	runStore := run.Default()

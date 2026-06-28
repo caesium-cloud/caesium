@@ -8,17 +8,21 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/auth"
+	eventstore "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/datatypes"
 )
@@ -40,6 +44,8 @@ type acceptedHTTPTrigger struct {
 	jobs        models.Jobs
 }
 
+const webhookReceiptRecordTimeout = 10 * time.Second
+
 // triggerFailure captures a per-trigger auth failure during the matching loop.
 type triggerFailure struct {
 	triggerID string
@@ -48,6 +54,10 @@ type triggerFailure struct {
 
 var routeWebhookEvent = func(ctx context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
 	return triggerevent.DefaultRouter().Route(ctx, evt)
+}
+
+var recordWebhookReceipt = func(ctx context.Context, receipt *models.WebhookEvent) error {
+	return eventstore.NewWebhookEventStore(db.Connection()).Create(ctx, receipt)
 }
 
 // ReceiveWith returns a handler that uses the given auditor for failure logging.
@@ -122,7 +132,8 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 	// before HTTP jobs are launched when possible, and both trigger families may
 	// start runs. The event bridge is at-least-once: retrying the same delivery
 	// can route another event-trigger run.
-	result, err := routeWebhookEvent(c.Request().Context(), webhookIngestedEvent(c, path, body))
+	ingested := webhookIngestedEvent(c, path, body)
+	result, err := routeWebhookEvent(c.Request().Context(), ingested)
 	switch {
 	case err != nil:
 		log.Warn("webhook event bridge failed", "path", path, "error", err)
@@ -134,11 +145,15 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		metrics.EventsIngestedTotal.WithLabelValues("webhook").Inc()
 	}
 
+	httpRunsStarted := 0
 	for _, acceptedTrigger := range accepted {
-		launchHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
+		httpRunsStarted += launchHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
 	}
 
-	return c.JSON(http.StatusAccepted, nil)
+	receipt := acceptedWebhookReceipt(path, ingested.Source, accepted, httpRunsStarted, result, err)
+	recordWebhookReceiptAsync(c.Request().Context(), path, receipt)
+
+	return c.JSON(http.StatusAccepted, webhookReceiptResponse(receipt))
 }
 
 func FireHTTPTrigger(ctx context.Context, jobSvc JobLister, trig *models.Trigger, params map[string]string, runner Runner) error {
@@ -188,17 +203,18 @@ func listTriggerJobs(ctx context.Context, jobSvc JobLister, trig *models.Trigger
 	return jobs, nil
 }
 
-func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) {
+func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) int {
 	if runner == nil {
 		runner = DefaultRunner
 	}
 	if accepted.httpTrigger == nil || accepted.trigger == nil {
 		log.Warn("skipping malformed accepted webhook trigger")
-		return
+		return 0
 	}
 
 	log.Info("running jobs", "count", len(accepted.jobs), "trigger_id", accepted.trigger.ID)
 
+	started := 0
 	for _, j := range accepted.jobs {
 		if j == nil {
 			log.Warn("skipping nil job", "trigger_id", accepted.trigger.ID)
@@ -211,6 +227,7 @@ func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, ru
 
 		capturedJob := j
 		capturedParams := cloneStringMap(accepted.httpTrigger.MergeParams(accepted.params))
+		started++
 		go func() {
 			runCtx := context.WithoutCancel(ctx)
 			if err := runner(runCtx, capturedJob, capturedParams); err != nil {
@@ -218,6 +235,7 @@ func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, ru
 			}
 		}()
 	}
+	return started
 }
 
 func DefaultRunner(ctx context.Context, j *models.Job, params map[string]string) error {
@@ -263,6 +281,113 @@ func webhookEventData(c *echo.Context, path string, body []byte) datatypes.JSON 
 		return datatypes.JSON(`{}`)
 	}
 	return datatypes.JSON(data)
+}
+
+func acceptedWebhookReceipt(path, source string, accepted []acceptedHTTPTrigger, httpRunsStarted int, result *triggerevent.RouteResult, routeErr error) *models.WebhookEvent {
+	receipt := &models.WebhookEvent{
+		ID:                   uuid.New(),
+		Path:                 path,
+		Source:               source,
+		Status:               "accepted",
+		HTTPTriggersAccepted: len(accepted),
+		HTTPRunsStarted:      httpRunsStarted,
+		HTTPTriggerIDs:       stringJSONList(acceptedWebhookTriggerIDs(accepted)),
+		HTTPJobIDs:           stringJSONList(acceptedWebhookJobIDs(accepted)),
+	}
+	if result != nil {
+		receipt.EventID = result.EventID
+		receipt.EventMatchedTriggers = len(result.MatchedTriggers)
+		receipt.EventRunsStarted = webhookEventRunsStarted(result)
+	}
+	if routeErr != nil {
+		receipt.Error = routeErr.Error()
+	}
+	return receipt
+}
+
+func recordWebhookReceiptAsync(ctx context.Context, path string, receipt *models.WebhookEvent) {
+	if receipt == nil {
+		return
+	}
+
+	captured := *receipt
+	// Capture the recorder synchronously before launching the goroutine: it's a
+	// package-level var that tests stub + restore, so reading it inside the
+	// goroutine races the test's Cleanup (the -race detector flags it).
+	recorder := recordWebhookReceipt
+	go func() {
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookReceiptRecordTimeout)
+		defer cancel()
+		if recordErr := recorder(recordCtx, &captured); recordErr != nil {
+			log.Warn("webhook receipt log failed", "path", path, "error", recordErr)
+		}
+	}()
+}
+
+func webhookReceiptResponse(receipt *models.WebhookEvent) map[string]any {
+	if receipt == nil {
+		return map[string]any{}
+	}
+	resp := map[string]any{
+		"receipt_id":             receipt.ID,
+		"path":                   receipt.Path,
+		"source":                 receipt.Source,
+		"event_matched_triggers": receipt.EventMatchedTriggers,
+		"event_runs_started":     receipt.EventRunsStarted,
+		"http_triggers_accepted": receipt.HTTPTriggersAccepted,
+		"http_runs_started":      receipt.HTTPRunsStarted,
+	}
+	if receipt.EventID != uuid.Nil {
+		resp["event_id"] = receipt.EventID
+	}
+	if receipt.Error != "" {
+		resp["error"] = receipt.Error
+	}
+	return resp
+}
+
+func acceptedWebhookTriggerIDs(accepted []acceptedHTTPTrigger) []string {
+	ids := make([]string, 0, len(accepted))
+	for _, item := range accepted {
+		if item.trigger != nil && item.trigger.ID != uuid.Nil {
+			ids = append(ids, item.trigger.ID.String())
+		}
+	}
+	return ids
+}
+
+func acceptedWebhookJobIDs(accepted []acceptedHTTPTrigger) []string {
+	ids := make([]string, 0)
+	for _, item := range accepted {
+		for _, j := range item.jobs {
+			if j != nil && !j.Paused && j.ID != uuid.Nil {
+				ids = append(ids, j.ID.String())
+			}
+		}
+	}
+	return ids
+}
+
+func webhookEventRunsStarted(result *triggerevent.RouteResult) int {
+	if result == nil {
+		return 0
+	}
+	var total int
+	for _, match := range result.MatchedTriggers {
+		total += len(match.RunsStarted)
+	}
+	return total
+}
+
+func stringJSONList(values []string) datatypes.JSON {
+	if len(values) == 0 {
+		return nil
+	}
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return nil
+	}
+	return datatypes.JSON(raw)
 }
 
 var errRequestTooLarge = errors.New("request body too large")
