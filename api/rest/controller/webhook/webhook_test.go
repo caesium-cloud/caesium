@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -12,10 +13,12 @@ import (
 	"testing"
 	"time"
 
+	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	metrictestutil "github.com/caesium-cloud/caesium/internal/metrics/testutil"
 	"github.com/caesium-cloud/caesium/internal/models"
+	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
@@ -41,8 +44,21 @@ func (s stubJobLister) List(*jsvc.ListRequest) (models.Jobs, error) {
 	return s.jobs, s.err
 }
 
+func stubWebhookRouter(t *testing.T, fn func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error)) {
+	t.Helper()
+	original := routeWebhookEvent
+	routeWebhookEvent = fn
+	t.Cleanup(func() { routeWebhookEvent = original })
+}
+
 func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 	require.NoError(t, env.Process())
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		require.Equal(t, "webhook", evt.Type)
+		require.Equal(t, "github/push", evt.Source)
+		require.JSONEq(t, `{"ref":"refs/heads/main"}`, string(evt.Data))
+		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
+	})
 
 	triggerID := uuid.New()
 	jobID := uuid.New()
@@ -99,6 +115,118 @@ func TestReceiveWithServicesFiresWebhookTrigger(t *testing.T) {
 			"environment": "staging",
 			"branch":      "refs/heads/main",
 		}, params)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook-triggered job")
+	}
+}
+
+func TestReceiveWithServicesContinuesWhenWebhookBridgeFails(t *testing.T) {
+	require.NoError(t, env.Process())
+	metrics.Register()
+
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		require.Equal(t, "webhook", evt.Type)
+		return nil, errors.New("route failed")
+	})
+
+	runs := make(chan struct{}, 1)
+	before := metrictestutil.CounterValue(t, metrics.EventBridgeFailuresTotal, "webhook")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req.Header.Set("Authorization", "Bearer top-secret")
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/issues"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"github/issues",
+						"secret":"top-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+			},
+		},
+		stubJobLister{jobs: models.Jobs{&models.Job{ID: uuid.New(), Alias: "deploy"}}},
+		nil,
+		func(context.Context, *models.Job, map[string]string) error {
+			runs <- struct{}{}
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	select {
+	case <-runs:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for webhook-triggered job")
+	}
+
+	after := metrictestutil.CounterValue(t, metrics.EventBridgeFailuresTotal, "webhook")
+	require.Greater(t, after, before)
+}
+
+func TestReceiveWithServicesRoutesWebhookBeforeHTTPJobs(t *testing.T) {
+	require.NoError(t, env.Process())
+
+	runs := make(chan struct{}, 1)
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		require.Equal(t, "webhook", evt.Type)
+		require.Equal(t, "github", evt.Source)
+		require.JSONEq(t, `{"action":"opened"}`, string(evt.Data))
+		select {
+		case <-runs:
+			t.Fatal("HTTP job launched before webhook event route completed")
+		default:
+		}
+		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/issues", strings.NewReader(`{"action":"opened"}`))
+	req.Header.Set("Authorization", "Bearer top-secret")
+	req.Header.Set("X-Caesium-Event-Source", "github")
+	rec := httptest.NewRecorder()
+
+	e := echo.New()
+	c := e.NewContext(req, rec)
+	c.SetPathValues(echo.PathValues{{Name: "*", Value: "github/issues"}})
+
+	err := ReceiveWithServices(
+		c,
+		stubTriggerLister{
+			triggers: models.Triggers{
+				&models.Trigger{
+					ID:   uuid.New(),
+					Type: models.TriggerTypeHTTP,
+					Configuration: `{
+						"path":"github/issues",
+						"secret":"top-secret",
+						"signatureScheme":"bearer"
+					}`,
+				},
+			},
+		},
+		stubJobLister{jobs: models.Jobs{&models.Job{ID: uuid.New(), Alias: "deploy"}}},
+		nil,
+		func(context.Context, *models.Job, map[string]string) error {
+			runs <- struct{}{}
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+
+	select {
+	case <-runs:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for webhook-triggered job")
 	}
@@ -172,10 +300,10 @@ func TestReceiveWithServicesRateLimitsByIP(t *testing.T) {
 	t.Setenv("CAESIUM_WEBHOOK_RATE_LIMIT_PER_MINUTE", "1")
 	t.Setenv("CAESIUM_WEBHOOK_RATE_LIMIT_BURST", "1")
 	require.NoError(t, env.Process())
-	webhookRateLimiters = &ipRateLimiters{
-		clients:  map[string]*clientLimiter{},
-		staleAge: 15 * time.Minute,
-	}
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
+	})
+	webhookRateLimiters = authmw.NewIPRateLimiters(15*time.Minute, webhookRateLimitConfig)
 
 	newContext := func() *echo.Context {
 		req := httptest.NewRequest(http.MethodPost, "/v1/hooks/github/push", strings.NewReader(`{"ref":"refs/heads/main"}`))
@@ -307,6 +435,9 @@ func TestReceiveWithServicesRecordsMetricOnReplayedRequest(t *testing.T) {
 func TestReceiveWithServicesNoMetricWhenOneTriggerAccepts(t *testing.T) {
 	require.NoError(t, env.Process())
 	metrics.Register()
+	stubWebhookRouter(t, func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
+		return &triggerevent.RouteResult{EventID: uuid.New(), EventType: evt.Type, Source: evt.Source}, nil
+	})
 
 	before := metrictestutil.CounterValue(t, metrics.WebhookAuthFailuresTotal, "multi/path", "invalid_signature")
 

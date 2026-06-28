@@ -231,7 +231,7 @@ path. There is already an `api/rest/controller/event/` package (SSE) and an
 `api/rest/controller/trigger/` package (List/Post/Get/Patch/Fire bound in
 `api/rest/bind/bind.go` lines ~127-133) — extend those, don't fork them.
 
-- [ ] B1. Add `POST /v1/events` (`{type, source, data}`): **authenticate via a
+- [x] B1. Add `POST /v1/events` (`{type, source, data}`): **authenticate via a
       dedicated `CAESIUM_EVENT_INGEST_API_KEY`** (mirroring the shipped
       `CAESIUM_MANUAL_TRIGGER_API_KEY` gate on `POST /v1/triggers/:id/fire` — the
       webhook signature auth is *per-path/per-trigger* and does NOT fit a path-less
@@ -245,7 +245,13 @@ path. There is already an `api/rest/controller/event/` package (SSE) and an
       Files: new `api/rest/controller/event/ingest.go`, `api/rest/service/event/`,
       `api/rest/bind/bind.go`, `pkg/env/env.go`, `internal/metrics/metrics.go`.
       Depends on: A4.
-- [ ] B2. Add the observability reads: `GET /v1/events/ingested` (filter by
+      - W2-α: Added keyed `POST /v1/events`, reusing the webhook per-IP
+        rate-limit and the manual-trigger API-key header convention. The handler
+        builds an `IngestedEvent`, calls the singleton `Router.Route`, maps the
+        `RouteResult` to `{event_id, matched_triggers, runs_started}`, and
+        increments `caesium_events_ingested_total{type,source}`; Stream A's router
+        remains the persist-and-fire boundary for events and match rows.
+- [x] B2. Add the observability reads: `GET /v1/events/ingested` (filter by
       `type`/`source`/time window, bounded+paginated) and `GET /v1/triggers/:id/events`
       (read the `event_trigger_matches` table joined to `ingested_events` — the
       durable match record, **NOT** a re-evaluation of the current patterns, which
@@ -253,7 +259,12 @@ path. There is already an `api/rest/controller/event/` package (SSE) and an
       Files: `api/rest/controller/event/`, `api/rest/controller/trigger/`,
       `api/rest/service/event/`, `api/rest/bind/bind.go`.
       Depends on: A1 (both models) + B1 (which writes the match rows).
-- [ ] B3. **Bridge the webhook receiver into the event router** — without this,
+      - W2-α: Added bounded `GET /v1/events/ingested` and durable
+        `GET /v1/triggers/:id/events` reads through `api/rest/service/event`,
+        with type/source/time filters plus limit/offset pagination. Trigger-event
+        reads join `event_trigger_matches` to `ingested_events` and return the
+        stored match/run outcome.
+- [x] B3. **Bridge the webhook receiver into the event router** — without this,
       content-based routing never reaches the shipped `/v1/hooks/*` traffic and the
       P0 problem stays half-solved (the design exposes the router to *both* the
       ingestion API AND the webhook controller). After the receiver's auth/rate-limit,
@@ -272,6 +283,11 @@ path. There is already an `api/rest/controller/event/` package (SSE) and an
       Files: `api/rest/controller/webhook/webhook.go` (reorder around the existing
       `FireHTTPTrigger`; routes through the shared persist-and-fire boundary from A4).
       Depends on: A4.
+      - W2-α: The webhook receiver now validates matching HTTP triggers and lists
+        their jobs first, routes a single `type:"webhook"` event through
+        `Router.Route` before launching HTTP jobs, then starts the prepared HTTP
+        work. The code documents the intentional double-fire contract: one webhook
+        can fire both HTTP-trigger jobs and event-trigger jobs.
 
 ### Stream C — Trigger chaining (WS3)
 
@@ -339,7 +355,7 @@ plan against the Stream B endpoints.
 
 ## Harness Strengthening
 
-- [ ] H-1. Ensure the integration server exercises the real event path: set
+- [x] H-1. Ensure the integration server exercises the real event path: set
       `CAESIUM_EVENT_INGEST_API_KEY` (so the Stream A/B/C scenarios can authenticate
       `POST /v1/events`) and a low `CAESIUM_MAX_TRIGGER_DEPTH` if the chain tests need
       a tight bound, on the `just integration-up` / `just integration-test` server,
@@ -347,6 +363,11 @@ plan against the Stream B endpoints.
       triggers land behind an enable flag, set it here (mirror the lineage
       `CAESIUM_OPEN_LINEAGE_ENABLED` precedent the `CLAUDE.md` gate calls out).
       Files: `justfile`, `.github/workflows/ci.yml`, `test/` harness helpers.
+      - W2-α: `just integration-up` now injects
+        `CAESIUM_EVENT_INGEST_API_KEY`, CI passes the same key into the integration
+        job, the test harness carries it, and `test/event_trigger_test.go` drives
+        apply → authenticated `/v1/events` ingest → durable trigger-event read →
+        run completion through the live server.
 
 ## Navigational / Organizational Improvements
 

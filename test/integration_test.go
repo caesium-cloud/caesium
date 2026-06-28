@@ -34,6 +34,7 @@ type IntegrationTestSuite struct {
 	projectRoot         string
 	engineType          string // "docker", "podman", or "kubernetes"
 	manualTriggerAPIKey string
+	eventIngestAPIKey   string
 }
 
 func (s *IntegrationTestSuite) SetupSuite() {
@@ -67,6 +68,10 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	s.manualTriggerAPIKey = os.Getenv("CAESIUM_MANUAL_TRIGGER_API_KEY")
 	if s.manualTriggerAPIKey == "" {
 		s.manualTriggerAPIKey = "integration-test-key"
+	}
+	s.eventIngestAPIKey = os.Getenv("CAESIUM_EVENT_INGEST_API_KEY")
+	if s.eventIngestAPIKey == "" {
+		s.eventIngestAPIKey = "integration-test-key"
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -357,5 +362,15 @@ func (s *IntegrationTestSuite) doManualTriggerRequest(method, target string, bod
 		return nil, err
 	}
 	req.Header.Set("X-Caesium-API-Key", s.manualTriggerAPIKey)
+	return http.DefaultClient.Do(req)
+}
+
+func (s *IntegrationTestSuite) doEventIngestRequest(method, target string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(s.T().Context(), method, target, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Caesium-API-Key", s.eventIngestAPIKey)
+	req.Header.Set("Content-Type", "application/json")
 	return http.DefaultClient.Do(req)
 }

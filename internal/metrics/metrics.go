@@ -254,9 +254,25 @@ var (
 	EventTriggerMatchesTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_event_trigger_matches_total",
-			Help: "Total event trigger matches by trigger and event type.",
+			Help: "Total event trigger matches by configured trigger.",
 		},
-		[]string{"trigger_id", "event_type"},
+		[]string{"trigger_id"},
+	)
+
+	EventsIngestedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_events_ingested_total",
+			Help: "Total events ingested by low-cardinality origin.",
+		},
+		[]string{"origin"},
+	)
+
+	EventBridgeFailuresTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_event_bridge_failures_total",
+			Help: "Total event bridge routing failures by low-cardinality origin.",
+		},
+		[]string{"origin"},
 	)
 
 	// DBWritesTotal counts durable database writes by category, measured in
@@ -425,6 +441,8 @@ func Register() {
 			SSOLogoutsTotal,
 			WebhookAuthFailuresTotal,
 			EventTriggerMatchesTotal,
+			EventsIngestedTotal,
+			EventBridgeFailuresTotal,
 			DBWritesTotal,
 			DBStatementsTotal,
 			CompleteRejectedTotal,
