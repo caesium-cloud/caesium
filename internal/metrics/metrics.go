@@ -275,6 +275,29 @@ var (
 		[]string{"origin"},
 	)
 
+	EventBusDroppedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_event_bus_dropped_total",
+			Help: "Total events dropped because an event bus subscriber buffer was full.",
+		},
+		[]string{"event_type"},
+	)
+
+	TriggerChainDepth = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "caesium_trigger_chain_depth",
+			Help:    "Observed trigger chain depth for lifecycle-event-triggered job runs.",
+			Buckets: []float64{1, 2, 3, 4, 5, 10, 20, 50},
+		},
+	)
+
+	TriggerChainRejectedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "caesium_trigger_chain_rejected_total",
+			Help: "Total event trigger fires rejected because trigger chain depth exceeded the configured maximum.",
+		},
+	)
+
 	// DBWritesTotal counts durable database writes by category, measured in
 	// rows touched (so a batched UPDATE/INSERT increments by the row count, not
 	// by one). Use this for capacity-planning and "how much work is the DB
@@ -441,6 +464,9 @@ func Register() {
 			SSOLogoutsTotal,
 			WebhookAuthFailuresTotal,
 			EventTriggerMatchesTotal,
+			EventBusDroppedTotal,
+			TriggerChainDepth,
+			TriggerChainRejectedTotal,
 			EventsIngestedTotal,
 			EventBridgeFailuresTotal,
 			DBWritesTotal,

@@ -1,11 +1,13 @@
 package jobdef
 
 import (
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
-	"fmt"
 
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/db"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/labstack/echo/v5"
 )
@@ -50,6 +52,11 @@ func Lint(c *echo.Context) error {
 
 	for _, def := range req.Definitions {
 		if err := def.Validate(); err != nil {
+			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		}
+	}
+	if len(resp.Errors) == 0 {
+		if err := internaljobdef.ValidateTriggerChains(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
 			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
 		}
 	}

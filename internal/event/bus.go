@@ -6,8 +6,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
+
+const defaultSubscriberBuffer = 1000
 
 // EventType represents the type of event.
 type Type string
@@ -87,14 +91,20 @@ func (b *bus) Publish(e Event) {
 			select {
 			case ch <- e:
 			default:
-				// Drop event if channel is full to prevent blocking
+				metrics.EventBusDroppedTotal.WithLabelValues(string(e.Type)).Inc()
+				log.Warn("event bus subscriber buffer full; dropping event",
+					"type", e.Type,
+					"sequence", e.Sequence,
+					"job_id", e.JobID,
+					"run_id", e.RunID,
+				)
 			}
 		}
 	}
 }
 
 func (b *bus) Subscribe(ctx context.Context, filter Filter) (<-chan Event, error) {
-	ch := make(chan Event, 100)
+	ch := make(chan Event, defaultSubscriberBuffer)
 
 	b.mu.Lock()
 	b.subscribers[ch] = filter

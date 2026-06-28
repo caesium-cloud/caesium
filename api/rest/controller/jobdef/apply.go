@@ -37,6 +37,9 @@ func Apply(c *echo.Context) error {
 		Force:      req.Force,
 		Provenance: prov,
 	}
+	if err := importer.ValidateBatch(ctx, req.Definitions); err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
+	}
 
 	for i := range req.Definitions {
 		def := &req.Definitions[i]

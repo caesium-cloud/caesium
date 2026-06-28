@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	lintpkg "github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -47,6 +48,9 @@ var lintCmd = &cobra.Command{
 				return fmt.Errorf("definition %s: %w", def.Metadata.Alias, err)
 			}
 		}
+		if err := internaljobdef.ValidateTriggerChains(cmd.Context(), nil, defs); err != nil {
+			return err
+		}
 
 		if !lintCheckSecrets {
 			if err := writeCmdOut(cmd, "Validated %d job definition(s)\n", len(defs)); err != nil {
@@ -58,6 +62,9 @@ var lintCmd = &cobra.Command{
 						return err
 					}
 				}
+			}
+			if err := writeLintTriggerScopeNote(cmd); err != nil {
+				return err
 			}
 			return nil
 		}
@@ -80,6 +87,9 @@ var lintCmd = &cobra.Command{
 		if err := writeCmdOut(cmd, "Validated %d job definition(s) with secrets\n", len(defs)); err != nil {
 			return err
 		}
+		if err := writeLintTriggerScopeNote(cmd); err != nil {
+			return err
+		}
 		return nil
 	},
 }
@@ -97,6 +107,10 @@ func init() {
 	lintCmd.Flags().BoolVar(&lintVaultSkipVerify, "vault-skip-verify", envBool("VAULT_SKIP_VERIFY", false), "Disable TLS verification when connecting to Vault")
 
 	Cmd.AddCommand(lintCmd)
+}
+
+func writeLintTriggerScopeNote(cmd *cobra.Command) error {
+	return writeCmdOut(cmd, "Note: trigger-cycle lint is file-scoped; cross-job cycles against persisted triggers are validated at apply.\n")
 }
 
 func buildLintResolver() (*secret.MultiResolver, error) {

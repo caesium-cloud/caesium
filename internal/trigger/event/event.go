@@ -4,20 +4,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	"github.com/caesium-cloud/caesium/internal/job"
+	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/trigger"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 )
 
 var _ trigger.Trigger = (*EventTrigger)(nil)
+
+const (
+	TriggerDepthParam      = "_trigger_depth"
+	defaultMaxTriggerDepth = 10
+)
+
+var ErrTriggerChainDepthExceeded = errors.New("trigger chain depth exceeded")
 
 type Config struct {
 	Events        []EventPattern    `json:"events,omitempty"`
@@ -33,6 +43,7 @@ type EventTrigger struct {
 	runStoreFactory func() *runstorage.Store
 	runJob          func(context.Context, *models.Job, map[string]string) error
 	deferLaunch     bool
+	maxTriggerDepth int
 }
 
 type Option func(*EventTrigger)
@@ -71,6 +82,12 @@ func WithRunJob(fn func(context.Context, *models.Job, map[string]string) error) 
 	}
 }
 
+func WithMaxTriggerDepth(max int) Option {
+	return func(t *EventTrigger) {
+		t.maxTriggerDepth = max
+	}
+}
+
 func withDeferredLaunch() Option {
 	return func(t *EventTrigger) {
 		t.deferLaunch = true
@@ -93,6 +110,7 @@ func New(t *models.Trigger, opts ...Option) (*EventTrigger, error) {
 		listJobs:        defaultListJobs,
 		runStoreFactory: runstorage.Default,
 		runJob:          defaultRunJob,
+		maxTriggerDepth: configuredMaxTriggerDepth(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -115,6 +133,11 @@ func (t *EventTrigger) Fire(ctx context.Context) error {
 func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]string) ([]FireOutcome, error) {
 	log.Info("trigger firing", "id", t.id, "type", models.TriggerTypeEvent)
 
+	mergedParams := t.config.mergedParams(params)
+	if err := t.applyTriggerDepth(mergedParams); err != nil {
+		return nil, err
+	}
+
 	jobs, err := t.listJobs(ctx, t.id.String())
 	if err != nil {
 		return nil, err
@@ -123,7 +146,6 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		return []FireOutcome{{Skipped: true, SkipReason: "no jobs registered for trigger"}}, nil
 	}
 
-	mergedParams := t.config.mergedParams(params)
 	outcomes := make([]FireOutcome, 0, len(jobs))
 	for _, j := range jobs {
 		jobModel := j
@@ -164,6 +186,33 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 	}
 
 	return outcomes, nil
+}
+
+func (t *EventTrigger) applyTriggerDepth(params map[string]string) error {
+	rawDepth, ok := params[TriggerDepthParam]
+	if !ok {
+		return nil
+	}
+
+	depth, err := strconv.Atoi(strings.TrimSpace(rawDepth))
+	if err != nil || depth < 0 {
+		depth = 0
+	}
+
+	maxDepth := t.maxTriggerDepth
+	if maxDepth <= 0 {
+		maxDepth = defaultMaxTriggerDepth
+	}
+	if depth >= maxDepth {
+		metrics.TriggerChainRejectedTotal.Inc()
+		return fmt.Errorf("%w: depth %d exceeds max %d", ErrTriggerChainDepthExceeded, depth+1, maxDepth)
+	}
+
+	nextDepth := depth + 1
+	metrics.TriggerChainDepth.Observe(float64(nextDepth))
+
+	params[TriggerDepthParam] = strconv.Itoa(nextDepth)
+	return nil
 }
 
 func (t *EventTrigger) ID() uuid.UUID {
@@ -215,6 +264,14 @@ var (
 		return job.New(j, job.WithParams(params)).Run(ctx)
 	}
 )
+
+func configuredMaxTriggerDepth() int {
+	maxDepth := env.Variables().MaxTriggerDepth
+	if maxDepth <= 0 {
+		return defaultMaxTriggerDepth
+	}
+	return maxDepth
+}
 
 func parseConfig(raw string) (Config, error) {
 	cfg := Config{}
