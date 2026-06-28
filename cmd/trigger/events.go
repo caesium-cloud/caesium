@@ -6,14 +6,12 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 )
-
-const apiKeyEnvVar = "CAESIUM_API_KEY"
 
 var (
 	eventsServer string
@@ -22,6 +20,8 @@ var (
 	eventsSource string
 	eventsLimit  uint64
 	eventsOffset uint64
+
+	eventsHTTPClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
 )
 
 type jobSummary struct {
@@ -63,7 +63,7 @@ var eventsCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
-		return writePrettyJSON(cmd, body, "trigger events response")
+		return cliutil.WritePrettyJSON(cmd, body, "trigger events response")
 	},
 }
 
@@ -103,7 +103,7 @@ func get(cmd *cobra.Command, reqURL, label string) ([]byte, error) {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := eventsHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -120,30 +120,12 @@ func get(cmd *cobra.Command, reqURL, label string) ([]byte, error) {
 }
 
 func resolveAPIKey(cmd *cobra.Command, flagValue string) string {
-	if strings.TrimSpace(flagValue) != "" {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: --api-key is visible in process listings; prefer %s\n", apiKeyEnvVar)
-		return strings.TrimSpace(flagValue)
-	}
-	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
-}
-
-func writePrettyJSON(cmd *cobra.Command, body []byte, label string) error {
-	var out any
-	if err := json.Unmarshal(body, &out); err != nil {
-		return fmt.Errorf("%s was not valid JSON: %w", label, err)
-	}
-	pretty, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("re-encoding %s: %w", label, err)
-	}
-	_, _ = cmd.OutOrStdout().Write(pretty)
-	_, _ = fmt.Fprintln(cmd.OutOrStdout())
-	return nil
+	return cliutil.ResolveAPIKey(cmd, flagValue, cliutil.APIKeyEnvVar)
 }
 
 func init() {
 	eventsCmd.Flags().StringVar(&eventsServer, "server", "http://localhost:8080", "Caesium server base URL")
-	eventsCmd.Flags().StringVar(&eventsAPIKey, "api-key", "", "API key for authentication (prefer "+apiKeyEnvVar+"; --api-key is visible in process listings)")
+	eventsCmd.Flags().StringVar(&eventsAPIKey, "api-key", "", "API key for authentication (prefer "+cliutil.APIKeyEnvVar+"; --api-key is visible in process listings)")
 	eventsCmd.Flags().StringVar(&eventsType, "type", "", "Filter by event type")
 	eventsCmd.Flags().StringVar(&eventsSource, "source", "", "Filter by event source")
 	eventsCmd.Flags().Uint64Var(&eventsLimit, "limit", 0, "Maximum number of events to return")

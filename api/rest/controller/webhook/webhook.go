@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
@@ -42,6 +43,8 @@ type acceptedHTTPTrigger struct {
 	params      map[string]string
 	jobs        models.Jobs
 }
+
+const webhookReceiptRecordTimeout = 10 * time.Second
 
 // triggerFailure captures a per-trigger auth failure during the matching loop.
 type triggerFailure struct {
@@ -142,12 +145,13 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		metrics.EventsIngestedTotal.WithLabelValues("webhook").Inc()
 	}
 
-	receipt := acceptedWebhookReceipt(path, ingested.Source, accepted, result, err)
-	recordWebhookReceiptAsync(c.Request().Context(), path, receipt)
-
+	httpRunsStarted := 0
 	for _, acceptedTrigger := range accepted {
-		launchHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
+		httpRunsStarted += launchHTTPTriggerJobs(c.Request().Context(), acceptedTrigger, runner)
 	}
+
+	receipt := acceptedWebhookReceipt(path, ingested.Source, accepted, httpRunsStarted, result, err)
+	recordWebhookReceiptAsync(c.Request().Context(), path, receipt)
 
 	return c.JSON(http.StatusAccepted, webhookReceiptResponse(receipt))
 }
@@ -199,17 +203,18 @@ func listTriggerJobs(ctx context.Context, jobSvc JobLister, trig *models.Trigger
 	return jobs, nil
 }
 
-func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) {
+func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, runner Runner) int {
 	if runner == nil {
 		runner = DefaultRunner
 	}
 	if accepted.httpTrigger == nil || accepted.trigger == nil {
 		log.Warn("skipping malformed accepted webhook trigger")
-		return
+		return 0
 	}
 
 	log.Info("running jobs", "count", len(accepted.jobs), "trigger_id", accepted.trigger.ID)
 
+	started := 0
 	for _, j := range accepted.jobs {
 		if j == nil {
 			log.Warn("skipping nil job", "trigger_id", accepted.trigger.ID)
@@ -222,6 +227,7 @@ func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, ru
 
 		capturedJob := j
 		capturedParams := cloneStringMap(accepted.httpTrigger.MergeParams(accepted.params))
+		started++
 		go func() {
 			runCtx := context.WithoutCancel(ctx)
 			if err := runner(runCtx, capturedJob, capturedParams); err != nil {
@@ -229,6 +235,7 @@ func launchHTTPTriggerJobs(ctx context.Context, accepted acceptedHTTPTrigger, ru
 			}
 		}()
 	}
+	return started
 }
 
 func DefaultRunner(ctx context.Context, j *models.Job, params map[string]string) error {
@@ -276,14 +283,14 @@ func webhookEventData(c *echo.Context, path string, body []byte) datatypes.JSON 
 	return datatypes.JSON(data)
 }
 
-func acceptedWebhookReceipt(path, source string, accepted []acceptedHTTPTrigger, result *triggerevent.RouteResult, routeErr error) *models.WebhookEvent {
+func acceptedWebhookReceipt(path, source string, accepted []acceptedHTTPTrigger, httpRunsStarted int, result *triggerevent.RouteResult, routeErr error) *models.WebhookEvent {
 	receipt := &models.WebhookEvent{
 		ID:                   uuid.New(),
 		Path:                 path,
 		Source:               source,
 		Status:               "accepted",
 		HTTPTriggersAccepted: len(accepted),
-		HTTPRunsStarted:      launchableWebhookJobCount(accepted),
+		HTTPRunsStarted:      httpRunsStarted,
 		HTTPTriggerIDs:       stringJSONList(acceptedWebhookTriggerIDs(accepted)),
 		HTTPJobIDs:           stringJSONList(acceptedWebhookJobIDs(accepted)),
 	}
@@ -309,7 +316,8 @@ func recordWebhookReceiptAsync(ctx context.Context, path string, receipt *models
 	// goroutine races the test's Cleanup (the -race detector flags it).
 	recorder := recordWebhookReceipt
 	go func() {
-		recordCtx := context.WithoutCancel(ctx)
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), webhookReceiptRecordTimeout)
+		defer cancel()
 		if recordErr := recorder(recordCtx, &captured); recordErr != nil {
 			log.Warn("webhook receipt log failed", "path", path, "error", recordErr)
 		}
@@ -358,18 +366,6 @@ func acceptedWebhookJobIDs(accepted []acceptedHTTPTrigger) []string {
 		}
 	}
 	return ids
-}
-
-func launchableWebhookJobCount(accepted []acceptedHTTPTrigger) int {
-	var count int
-	for _, item := range accepted {
-		for _, j := range item.jobs {
-			if j != nil && !j.Paused {
-				count++
-			}
-		}
-	}
-	return count
 }
 
 func webhookEventRunsStarted(result *triggerevent.RouteResult) int {

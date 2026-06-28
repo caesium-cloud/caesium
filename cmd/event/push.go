@@ -6,16 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/cmd/cliutil"
 	"github.com/spf13/cobra"
 )
 
-const (
-	eventIngestAPIKeyEnvVar = "CAESIUM_EVENT_INGEST_API_KEY"
-	apiKeyEnvVar            = "CAESIUM_API_KEY"
-)
+const eventIngestAPIKeyEnvVar = "CAESIUM_EVENT_INGEST_API_KEY"
 
 var (
 	pushType   string
@@ -23,6 +20,8 @@ var (
 	pushData   string
 	pushServer string
 	pushAPIKey string
+
+	pushHTTPClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
 )
 
 type pushRequest struct {
@@ -63,7 +62,7 @@ var pushCmd = &cobra.Command{
 			req.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		resp, err := pushHTTPClient.Do(req)
 		if err != nil {
 			return err
 		}
@@ -77,7 +76,7 @@ var pushCmd = &cobra.Command{
 			return fmt.Errorf("event push failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
-		return writePrettyJSON(cmd, body, "event push response")
+		return cliutil.WritePrettyJSON(cmd, body, "event push response")
 	},
 }
 
@@ -94,28 +93,7 @@ func parseEventData(raw string) (json.RawMessage, error) {
 }
 
 func resolveEventAPIKey(cmd *cobra.Command, flagValue string) string {
-	if strings.TrimSpace(flagValue) != "" {
-		_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "warning: --api-key is visible in process listings; prefer %s\n", eventIngestAPIKeyEnvVar)
-		return strings.TrimSpace(flagValue)
-	}
-	if value := strings.TrimSpace(os.Getenv(eventIngestAPIKeyEnvVar)); value != "" {
-		return value
-	}
-	return strings.TrimSpace(os.Getenv(apiKeyEnvVar))
-}
-
-func writePrettyJSON(cmd *cobra.Command, body []byte, label string) error {
-	var out any
-	if err := json.Unmarshal(body, &out); err != nil {
-		return fmt.Errorf("%s was not valid JSON: %w", label, err)
-	}
-	pretty, err := json.MarshalIndent(out, "", "  ")
-	if err != nil {
-		return fmt.Errorf("re-encoding %s: %w", label, err)
-	}
-	_, _ = cmd.OutOrStdout().Write(pretty)
-	_, _ = fmt.Fprintln(cmd.OutOrStdout())
-	return nil
+	return cliutil.ResolveAPIKey(cmd, flagValue, eventIngestAPIKeyEnvVar, cliutil.APIKeyEnvVar)
 }
 
 func init() {
