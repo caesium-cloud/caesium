@@ -44,23 +44,23 @@ These features address the most common reasons a team would choose an alternativ
 
 ### 1.3 Concurrency Strategies & Rate Limiting
 
-**Current state**: Concurrency control is a single numeric `maxParallelTasks` knob (defaults to CPU count). No rate limiting, no fairness policies, no strategy for handling overlapping runs.
+**Status**: Shipped. Jobs declare a `metadata.concurrency` block (`maxRuns` + `strategy` ∈ `queue`/`replace`/`skip`/`fail`) that gates a new run when the job is already at `maxRuns` — admission is a single atomic conditional insert (no cross-node TOCTOU), `replace` cancels the oldest active run, and `queue` parks overflow in a durable `run_queue` drained by a leader-gated dequeuer. Resource rate limiting (`metadata.rateLimits` / step `rateLimit`) throttles tasks against a named shared resource via a durable atomic sliding-window limiter, re-queuing (not blocking) over-limit tasks. Operator surface: `caesium job queue <alias>` + a run-queue panel on the job-detail page. Per-namespace fairness remains deferred to §3.1.
 
 **Target state**: Teams can configure concurrency strategies per job (queue, replace-oldest, skip-if-running) and rate limits per resource (e.g., "max 100 API calls/minute across all tasks using this endpoint"). In distributed mode, fairness policies ensure shared clusters serve multiple teams equitably.
 
 **Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
 
-**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/active/concurrency-priority-queues.md) (Streams A/C/D)
+**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/completed/concurrency-priority-queues.md) (Streams A/C/D)
 
 ### 1.4 Priority Queues
 
-**Current state**: All tasks are equal. In distributed mode, workers claim tasks in arbitrary order. There is no way to express "this pipeline is more important than that one."
+**Status**: Shipped. A job-level `metadata.priority` (and a per-run `caesium run start --priority` / REST override) maps `high`/`normal`/`low` → `3`/`2`/`1` and is stamped onto every `TaskRun`; the distributed claimer drains `ORDER BY priority DESC, created_at ASC` (over a supporting composite index), and the run-queue dequeuer drains priority-first. Strictly ordering, never preemptive.
 
 **Target state**: Jobs and individual runs can declare priority levels. The distributed task claimer respects priority ordering so critical pipelines run first when the cluster is saturated.
 
 **Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
 
-**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/active/concurrency-priority-queues.md) (Stream B)
+**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/completed/concurrency-priority-queues.md) (Stream B)
 
 ### 1.5 API Key Auth Hardening Follow-up
 

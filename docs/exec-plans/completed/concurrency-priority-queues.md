@@ -1,6 +1,6 @@
 # Concurrency Strategies & Priority Queues — Run-Level Scheduling Control
 
-Last updated: 2026-06-30
+Last updated: 2026-06-30 · **Status: COMPLETE** — every stream (A–E, H-1, N-1) shipped across Waves 1–4 (PRs #264–#269); see the `## Progress` dashboard. Roadmap §1.3 + §1.4 (both P1) are done. Archived here from `active/`.
 
 Caesium's concurrency model today is a single per-run knob: `metadata.maxParallelTasks`
 bounds how many **tasks within one run** execute at once (a `worker.Pool` semaphore at
@@ -226,8 +226,32 @@ path), folded into the **nine** as-built corrections in the Source-Of-Truth Note
   for the schedule.
 
 **Runtime complete.** Streams A (schema) → B (priority) → D (rate limiting) → C
-(concurrency strategies) are all shipped. Remaining: E (observability UI), H-1 (the
-distributed/run-queue CI harness + B's deferred drain-order e2e), N-1 (roadmap flip).
+(concurrency strategies) are all shipped.
+
+### Wave 4 — observability + harness + docs shipped (plan complete)
+
+- **Stream ε (E1–E2):** `GET /v1/jobs/:id/queue` (RoleViewer; a job-scoped key reads its
+  own queue) + a `caesium job queue <alias>` CLI (clean stdout), a run-queue panel on the
+  job-detail page, and a rate-limit status indicator on rate-limited tasks — PR #268,
+  merged `6647e36`. Opus review clean; bot sweep added the queued-run `id` to the
+  API/UI/CLI and dropped unused capability flags.
+- **H-1 (harness):** the first attempt flipped the *whole* integration suite to distributed
+  mode — which **broke 5 existing tests** (replay/timeout/SSE depend on local-mode timing),
+  caught by the integration gate. Re-scoped to a **dedicated distributed lane**
+  (`integration-up-distributed` + `integration-test-distributed` + a CI job) with the
+  run-owner/worker/lease config that makes single-node distributed execution actually
+  claim and run tasks; the main suite stays local. Stream B's claim-order drain assertion
+  (`high→normal→low`, via a filler run that occupies the 1-slot pool so all three are
+  pending before draining) now **runs and passes** in that lane — closing Acceptance
+  Criterion #2's distributed e2e. The cron-priority flake was de-flaked (deterministic
+  trigger). PR #269, merged `581a69d`.
+- **N-1 (docs):** roadmap §1.3 + §1.4 flipped to **Shipped**; the `design-concurrency-priority.md`
+  banner flipped to Shipped with the nine as-built corrections summarized; README updated.
+
+**Plan complete.** All streams (A–E, H-1, N-1) shipped; the roadmap's §1.3 + §1.4 (both
+**P1**) are done. Fairness (per-namespace) remains deferred to Multi-Tenancy (§3.1).
+Follow-ups recorded: surface the `id`/stale-claimed rows in the queue view, a single-deadline
+hardening of the claim-order pending wait, and a focused cancelRunTx read optimization.
 
 ### Stream Status
 
@@ -237,7 +261,9 @@ distributed/run-queue CI harness + B's deferred drain-order e2e), N-1 (roadmap f
 | B | Priority queues — `priority` on `JobRun`+`TaskRun` (+ claim index), JobRun→TaskRun propagation, claimer ordering, `caesium run start --priority` + REST/trigger priority | **P1** | **Shipped** (#265) — column + claim ordering + CLI; distributed drain-order e2e deferred to H-1 |
 | C | Run concurrency strategies — **atomic** admission gate in `run.Store.Start` (`skip`/`fail`), `replace` (+ cancellation primitive), `run_queue` model + **leader-gated** dequeuer | **P1** | **Shipped** (#267) — atomic admission + cancellation + leader-gated queue |
 | D | Resource rate limiting — durable single-statement sliding-window `Limiter`, `rate_limit_tokens` model, task-dispatch acquire/re-queue, token pruner | P2 | **Shipped** (#266) — atomic limiter + dispatch enforcement + pruner |
-| E | Observability surfaces — run-queue UI on job detail, rate-limit status indicator, `caesium job queue <alias>` | P2 | Not started |
+| E | Observability surfaces — run-queue UI on job detail, rate-limit status indicator, `caesium job queue <alias>` | P2 | **Shipped** (#268) — queue CLI + REST + UI panel |
+| H-1 | Harness — distributed claim-order e2e + de-flake | — | **Shipped** (#269) — dedicated distributed CI lane |
+| N-1 | Docs — roadmap §1.3/§1.4 flip, design reconciliation, README | — | **Shipped** — roadmap + design banner + README |
 | (Fairness) | Per-namespace round-robin + quotas (design §4) | — | **Deferred** — blocked on Multi-Tenancy (roadmap §3.1) |
 
 ## Streams
@@ -546,7 +572,7 @@ Makes the queue and rate-limit state legible to operators.
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip the roadmap + reconcile the design doc banner. `docs/roadmap.md` §1.3 +
+- [x] N-1. Flip the roadmap + reconcile the design doc banner. `docs/roadmap.md` §1.3 +
       §1.4 → Shipped (with the delivered surface); flip the `> Status:` banner on
       `docs/design-concurrency-priority.md` (Proposed → Shipped — **mandatory**, or
       `TestPlanningAndHistoricalDocsCarryStatusBanner` fails) and fold in the nine

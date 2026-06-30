@@ -1,6 +1,6 @@
 # Design: Concurrency Strategies & Priority Queues
 
-> Status: Proposed → active. This document covers concurrency strategies, rate limiting, and priority-based scheduling. The execution plan (with nine as-built corrections to this doc, reconciled on completion) is [`exec-plans/active/concurrency-priority-queues.md`](exec-plans/active/concurrency-priority-queues.md).
+> Status: Shipped. Concurrency strategies (`maxRuns` + queue/replace/skip/fail), priority-based scheduling, and resource rate limiting are all implemented (roadmap §1.3 + §1.4). The execution plan — which records **nine as-built corrections** to the design snippets below (the design was *Proposed* and misdescribed the live code: run-vs-task concurrency, where the config persists, the atomic admission gate, the cache-key exclusion, the cancellation primitive, leader-gated dequeuing, the catalog table shapes) — is [`exec-plans/completed/concurrency-priority-queues.md`](exec-plans/completed/concurrency-priority-queues.md). Where the prose/SQL/Go snippets below disagree with that plan, the plan (and the merged code) is authoritative.
 
 ## Problem Statement
 
