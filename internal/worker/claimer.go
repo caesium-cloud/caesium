@@ -181,6 +181,7 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 		if !claimed.Quarantine {
 			metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
 		}
+		metrics.TaskPriorityClaimTotal.WithLabelValues(run.PriorityLabel(claimed.Priority)).Inc()
 		metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
 		counts.commit()
@@ -258,7 +259,7 @@ WHERE id = (
 		AND (tr.rate_limit_retry_after IS NULL OR tr.rate_limit_retry_after <= ?)
 		AND ` + selectorSQL + `
 		AND ` + liveLeaseGuard + `
-	ORDER BY tr.created_at ASC
+	ORDER BY tr.priority DESC, tr.created_at ASC
 	LIMIT 1
 )
 AND status = ?

@@ -17,6 +17,7 @@ type runResponse struct {
 	ID         string            `json:"id"`
 	JobID      string            `json:"job_id"`
 	Status     string            `json:"status"`
+	Priority   int               `json:"priority"`
 	Error      string            `json:"error,omitempty"`
 	Quarantine bool              `json:"quarantine"`
 	Params     map[string]string `json:"params,omitempty"`
@@ -26,10 +27,12 @@ type runResponse struct {
 type runTaskResponse struct {
 	ID               string                    `json:"id"`
 	Status           string                    `json:"status"`
+	Priority         int                       `json:"priority"`
 	Result           string                    `json:"result,omitempty"`
 	Output           map[string]string         `json:"output,omitempty"`
 	SchemaViolations []schemaViolationResponse `json:"schema_violations,omitempty"`
 	Error            string                    `json:"error,omitempty"`
+	StartedAt        *time.Time                `json:"started_at,omitempty"`
 }
 
 type schemaViolationResponse struct {

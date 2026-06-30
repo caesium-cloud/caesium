@@ -59,6 +59,41 @@ func TestClaimerClaimNextClaimsOldestReadyTask(t *testing.T) {
 	require.Equal(t, string(run.TaskStatusPending), persistedBlocked.Status)
 }
 
+func TestClaimerClaimNextPrefersHigherPriority(t *testing.T) {
+	db := jobdeftestutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		jobdeftestutil.CloseDB(db)
+	})
+
+	now := time.Now().UTC()
+	_ = seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		priority:                run.PriorityLowValue,
+		outstandingPredecessors: 0,
+		createdAt:               now.Add(-3 * time.Minute),
+	})
+	high := seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		priority:                run.PriorityHighValue,
+		outstandingPredecessors: 0,
+		createdAt:               now.Add(-time.Minute),
+	})
+	_ = seedTaskRun(t, db, seedTaskRunInput{
+		status:                  string(run.TaskStatusPending),
+		priority:                run.PriorityNormalValue,
+		outstandingPredecessors: 0,
+		createdAt:               now.Add(-2 * time.Minute),
+	})
+
+	claimer := NewClaimer("node-priority", run.NewStore(db), 2*time.Minute)
+	claimed, err := claimer.ClaimNext(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+	require.Equal(t, high.ID, claimed.ID)
+	require.Equal(t, run.PriorityHighValue, claimed.Priority)
+	require.GreaterOrEqual(t, metrictestutil.CounterValue(t, metrics.TaskPriorityClaimTotal, "high"), float64(1))
+}
+
 func TestClaimerClaimNextSkipsUnexpiredAndReclaimsExpiredLease(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)
 	t.Cleanup(func() {
@@ -320,6 +355,7 @@ type seedTaskRunInput struct {
 	nodeSelector            map[string]string
 	claimExpiresAt          *time.Time
 	claimAttempt            int
+	priority                int
 	jobRunStatus            string
 	createdAt               time.Time
 	// jobRunID, when non-nil, reuses the given job_run_id instead of creating a
@@ -336,6 +372,9 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 	if strings.TrimSpace(in.jobRunStatus) == "" {
 		in.jobRunStatus = string(run.StatusRunning)
 	}
+	if in.priority == 0 {
+		in.priority = run.PriorityNormalValue
+	}
 
 	var jobRunID uuid.UUID
 	if in.jobRunID != nil {
@@ -347,6 +386,7 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 			ID:        jobRunID,
 			JobID:     jobID,
 			Status:    in.jobRunStatus,
+			Priority:  in.priority,
 			StartedAt: in.createdAt,
 			CreatedAt: in.createdAt,
 			UpdatedAt: in.createdAt,
@@ -362,6 +402,7 @@ func seedTaskRun(t *testing.T, db *gorm.DB, in seedTaskRunInput) *models.TaskRun
 		Image:                   "alpine:3.23",
 		Command:                 `["echo","ok"]`,
 		Status:                  in.status,
+		Priority:                in.priority,
 		ClaimedBy:               in.claimedBy,
 		NodeSelector:            jsonmap.FromStringMap(in.nodeSelector),
 		ClaimExpiresAt:          in.claimExpiresAt,
@@ -390,6 +431,7 @@ func seedJobRun(t *testing.T, db *gorm.DB, status string) uuid.UUID {
 		ID:        runID,
 		JobID:     jobID,
 		Status:    status,
+		Priority:  run.PriorityNormalValue,
 		StartedAt: now,
 		CreatedAt: now,
 		UpdatedAt: now,

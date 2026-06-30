@@ -131,6 +131,7 @@ type job struct {
 	runTimeout             time.Duration
 	alias                  string
 	priority               string
+	priorityOverride       string
 	concurrency            *jobdefschema.Concurrency
 	rateLimits             []jobdefschema.RateLimit
 	schemaValidation       string
@@ -306,6 +307,12 @@ func WithParams(params map[string]string) JobOption {
 	}
 }
 
+func WithPriorityOverride(priority string) JobOption {
+	return func(j *job) {
+		j.priorityOverride = strings.TrimSpace(priority)
+	}
+}
+
 // WithSecretResolver configures secret:// resolution for step environment
 // values. If omitted, Run builds the resolver from the processed environment.
 func WithSecretResolver(resolver secret.Resolver) JobOption {
@@ -411,11 +418,16 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	resolveRun := func() (*run.JobRun, error) {
+		startOpts := []run.StartOption{run.WithStartParams(j.params)}
+		if strings.TrimSpace(j.priorityOverride) != "" {
+			startOpts = append(startOpts, run.WithStartPriority(j.priorityOverride))
+		}
+
 		if id, ok := run.FromContext(ctx); ok {
 			existing, err := store.Get(id)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return store.Start(j.id, j.triggerID, j.params)
+					return store.Start(j.id, j.triggerID, startOpts...)
 				}
 				return nil, err
 			}
@@ -438,7 +450,7 @@ func (j *job) Run(ctx context.Context) error {
 			return store.Get(running.ID)
 		}
 
-		return store.Start(j.id, j.triggerID, j.params)
+		return store.Start(j.id, j.triggerID, startOpts...)
 	}
 
 	var snapshot *run.JobRun

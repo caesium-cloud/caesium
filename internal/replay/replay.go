@@ -747,8 +747,12 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 
 	records := make([]models.TaskRun, 0, len(plans))
 	allCached := true
+	priority := baseline.Priority
+	if priority <= 0 {
+		priority = run.PriorityNormalValue
+	}
 	for _, plan := range plans {
-		record, err := taskRunRecord(replayID, plan, now)
+		record, err := taskRunRecord(replayID, plan, now, priority)
 		if err != nil {
 			return uuid.Nil, err
 		}
@@ -773,6 +777,7 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 			JobID:             baseline.JobID,
 			Status:            status,
 			Params:            datatypes.JSON(encodedParams),
+			Priority:          priority,
 			Quarantine:        true,
 			ReplayFingerprint: fingerprintPtr,
 			ReplayOverrides:   datatypes.JSON(encodedOverrides),
@@ -809,7 +814,7 @@ func (c *Constructor) materialize(ctx context.Context, baseline models.JobRun, p
 	return replayID, nil
 }
 
-func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time) (models.TaskRun, error) {
+func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority int) (models.TaskRun, error) {
 	desc := plan.descriptor
 	encodedDescriptor, err := json.Marshal(&desc)
 	if err != nil {
@@ -833,6 +838,7 @@ func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time) (models.
 		Image:                   desc.Runtime.Image,
 		Command:                 command,
 		Status:                  string(run.TaskStatusPending),
+		Priority:                priority,
 		NodeSelector:            datatypes.JSONMap(stringMapToAny(desc.Runtime.NodeSelector)),
 		Attempt:                 1,
 		MaxAttempts:             maxAttempts,

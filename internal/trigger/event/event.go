@@ -160,7 +160,7 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		}
 
 		runtimeParams := cloneParams(mergedParams)
-		runRecord, err := t.runStoreFactory().Start(jobModel.ID, &t.id, runtimeParams)
+		runRecord, err := t.runStoreFactory().Start(jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
 		if err != nil {
 			outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Error: err.Error()})
 			continue
