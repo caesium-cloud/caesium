@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange, History, List, Pause, Play, Settings2, FileText, Zap } from "lucide-react";
+import { CalendarRange, History, List, ListOrdered, Pause, Play, Settings2, FileText, Zap } from "lucide-react";
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
@@ -25,7 +25,7 @@ import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type Job, type JobRun, type JobTask, type TaskRun, type Trigger } from "@/lib/api";
+import { api, type Atom, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
@@ -64,6 +64,12 @@ export function JobDetailPage() {
     queryKey: ["job", jobId, "runs"],
     queryFn: () => api.getJobRuns(jobId),
     refetchInterval: streamHealthy ? false : 15000,
+  });
+
+  const { data: queueRows, isLoading: isLoadingQueue } = useQuery({
+    queryKey: ["job", jobId, "queue"],
+    queryFn: () => api.getJobQueue(jobId),
+    refetchInterval: streamHealthy ? 3000 : 15000,
   });
 
   const { data: dag, isLoading: isLoadingDAG } = useQuery({
@@ -125,8 +131,13 @@ export function JobDetailPage() {
   const triggerMutation = useMutation({
     mutationFn: ({ jobId: currentJobId }: { jobId: string }) => api.triggerJob(currentJobId),
     onSuccess: (run) => {
-      toast.success("Job triggered successfully");
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      if (!run?.id) {
+        toast.success("Job queued");
+        return;
+      }
+      toast.success("Job triggered successfully");
       navigate({ to: "/jobs/$jobId/runs/$runId", params: { jobId: run.job_id, runId: run.id } });
     },
     onError: (err: Error) => {
@@ -262,6 +273,7 @@ export function JobDetailPage() {
       });
 
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
       queryClient.invalidateQueries({ queryKey: ["job", jobId] });
     };
 
@@ -378,6 +390,8 @@ export function JobDetailPage() {
           </Button>
         </div>
       </div>
+
+      <RunQueuePanel rows={queueRows} isLoading={isLoadingQueue} />
 
       {/* DAG — fills to bottom of viewport */}
       <div
@@ -516,6 +530,53 @@ function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
       {running > 0 && <span className="text-cyan-glow/80">{running} active</span>}
       {cached > 0 && <span className="text-cached/80">{cached} cached</span>}
       {queued > 0 && <span className="text-text-4">{queued} queued</span>}
+    </div>
+  );
+}
+
+function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: boolean }) {
+  const hasRows = (rows?.length ?? 0) > 0;
+  if (!hasRows && !isLoading) {
+    return null;
+  }
+
+  return (
+    <div data-testid="run-queue-panel" className="rounded-md border bg-card px-4 py-3">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <ListOrdered className="h-4 w-4 text-cyan-glow" />
+          <h2 className="text-sm font-semibold text-text-1">Run queue</h2>
+        </div>
+        <Badge variant="outline" className="font-mono text-[10px]">
+          {rows?.length ?? 0} pending
+        </Badge>
+      </div>
+      {hasRows ? (
+        <div className="divide-y rounded-md border bg-background/40">
+          {rows?.map((row) => (
+            <div
+              key={row.id}
+              data-testid="run-queue-row"
+              className="grid gap-2 px-3 py-2 text-xs md:grid-cols-[72px_96px_minmax(160px,1fr)_minmax(160px,1.4fr)] md:items-center"
+            >
+              <span className="font-mono text-text-3">#{row.position}</span>
+              <Badge variant="outline" className="w-fit font-mono text-[10px]">
+                {formatPriority(row.priority)}
+              </Badge>
+              <span className="text-text-3">
+                enqueued <RelativeTime date={row.enqueued_at} />
+              </span>
+              <span className="min-w-0 truncate font-mono text-text-2" title={formatQueueParams(row.params)}>
+                {formatQueueParams(row.params)}
+              </span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="rounded-md border bg-background/40 px-3 py-2 text-xs text-text-3">
+          Loading queued runs...
+        </div>
+      )}
     </div>
   );
 }
@@ -670,13 +731,14 @@ function ConfigurationView({
 /* ── Helpers ── */
 
 function buildTaskStatusMap(tasks?: TaskRun[]) {
-  const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string }> = {};
+  const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string; rate_limit_retry_after?: string }> = {};
   tasks?.forEach((task) => {
     metadata[task.task_id] = {
       status: task.status,
       started_at: task.started_at,
       completed_at: task.completed_at,
       error: task.error,
+      rate_limit_retry_after: task.rate_limit_retry_after,
     };
   });
   return metadata;
@@ -742,4 +804,25 @@ function formatCommand(command?: string | string[]) {
     return command.join(" ");
   }
   return command;
+}
+
+function formatPriority(priority: number) {
+  switch (priority) {
+    case 1:
+      return "low";
+    case 3:
+      return "high";
+    default:
+      return "normal";
+  }
+}
+
+function formatQueueParams(params?: Record<string, string>) {
+  if (!params || Object.keys(params).length === 0) {
+    return "no params";
+  }
+  return Object.keys(params)
+    .sort()
+    .map((key) => `${key}=${params[key]}`)
+    .join(", ");
 }

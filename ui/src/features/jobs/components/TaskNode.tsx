@@ -18,11 +18,12 @@ import {
   SkipForward,
   HardDrive,
   ShieldCheck,
+  TimerReset,
 } from 'lucide-react';
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter } = data;
   const taskLabel = typeof label === 'string' ? label : '';
   const runtimeHints = getRuntimeHints(atom?.spec);
 
@@ -197,6 +198,16 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                 </span>
               </div>
             </div>
+          ) : rateLimitRetryAfter ? (
+            <div data-testid="task-rate-limit-indicator" className="flex gap-2 items-start">
+              <TimerReset className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <span className="text-[8px] font-bold text-warning/90 uppercase tracking-wider">Rate limited</span>
+                <span className="text-[9px] text-warning/85 font-mono leading-relaxed line-clamp-3">
+                  Rate-limited until {formatRetryAfter(rateLimitRetryAfter)}
+                </span>
+              </div>
+            </div>
           ) : status === 'cached' ? (
             <div className="flex gap-2 items-start">
               <Archive className="w-3.5 h-3.5 text-cached shrink-0 mt-0.5" />
@@ -233,6 +244,17 @@ export const TaskNode = memo(({ data }: NodeProps) => {
 });
 
 TaskNode.displayName = 'TaskNode';
+
+function formatRetryAfter(value: unknown) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    return 'the current window resets';
+  }
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
 
 function getRuntimeHints(spec: unknown) {
   if (!isRecord(spec)) {

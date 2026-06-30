@@ -73,6 +73,7 @@ interface TaskRunMetadata {
   started_at?: string;
   completed_at?: string;
   error?: string;
+  rate_limit_retry_after?: string;
   output?: Record<string, string>;
 }
 
@@ -138,6 +139,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
                   startedAt: meta?.started_at,
                   completedAt: meta?.completed_at,
                   error: meta?.error,
+                  rateLimitRetryAfter: meta?.rate_limit_retry_after,
                   taskType: n.type,
                 },
                 position: { x: 0, y: 0 }

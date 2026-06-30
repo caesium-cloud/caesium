@@ -8,6 +8,7 @@ import {
   AlertTriangle,
   SkipForward,
   Archive,
+  TimerReset,
 } from "lucide-react";
 import { toast } from "sonner";
 import { cn, formatDurationNs, formatKeyValueMap } from "@/lib/utils";
@@ -245,6 +246,20 @@ export function TaskDetailPanel({
                 </div>
               ) : null}
 
+              {runTask?.rate_limit_retry_after ? (
+                <div data-testid="task-rate-limit-indicator" className="rounded-lg border border-warning/20 bg-warning/10 px-3 py-2.5 flex gap-3 items-start">
+                  <TimerReset className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+                  <div className="flex flex-col gap-1 min-w-0">
+                    <span className="text-[10px] font-bold text-warning uppercase tracking-wider">
+                      Rate limited
+                    </span>
+                    <span className="text-xs text-warning/90 font-mono leading-relaxed break-all">
+                      Rate-limited until {formatRetryAfter(runTask.rate_limit_retry_after)}
+                    </span>
+                  </div>
+                </div>
+              ) : null}
+
               {cached ? (
                 <div className="rounded-lg border border-cached/30 bg-cached/10 px-3 py-2.5 flex gap-3 items-start">
                   <Archive className="w-4 h-4 text-cached shrink-0 mt-0.5" />
@@ -288,6 +303,9 @@ export function TaskDetailPanel({
                 <MetadataCell label="Retries" value={String(task?.retries ?? 0)} mono />
                 <MetadataCell label="Retry Delay" value={formatDurationNs(task?.retry_delay)} mono />
                 <MetadataCell label="Backoff" value={task?.retry_backoff ? "Enabled" : "Disabled"} />
+                {runTask?.rate_limit_retry_after ? (
+                  <MetadataCell label="Rate Limit" value={`rate-limited until ${formatRetryAfter(runTask.rate_limit_retry_after)}`} />
+                ) : null}
                 <MetadataCell label="Claimed By" value={runTask?.claimed_by || "Unclaimed"} mono />
                 <MetadataCell
                   label="Node Selector"
@@ -425,6 +443,14 @@ function MetadataCell({
 function formatAttempts(runTask?: TaskRun): string {
   if (!runTask?.attempt && !runTask?.max_attempts) return "1 / 1";
   return `${runTask.attempt ?? 1} / ${runTask.max_attempts ?? 1}`;
+}
+
+function formatRetryAfter(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 function getInitialPanelWidth() {

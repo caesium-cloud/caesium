@@ -130,6 +130,7 @@ type TaskRun struct {
 	CacheOriginRunID        *uuid.UUID                `json:"cache_origin_run_id,omitempty"`
 	CacheCreatedAt          *time.Time                `json:"cache_created_at,omitempty"`
 	CacheExpiresAt          *time.Time                `json:"cache_expires_at,omitempty"`
+	RateLimitRetryAfter     *time.Time                `json:"rate_limit_retry_after,omitempty"`
 	StartedAt               *time.Time                `json:"started_at,omitempty"`
 	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
 	Error                   string                    `json:"error,omitempty"`
@@ -4058,6 +4059,10 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	if model.ClaimExpiresAt != nil {
 		expiresAt := *model.ClaimExpiresAt
 		task.ClaimExpiresAt = &expiresAt
+	}
+	if model.RateLimitRetryAfter != nil {
+		retryAfter := *model.RateLimitRetryAfter
+		task.RateLimitRetryAfter = &retryAfter
 	}
 	if model.CompletedAt != nil {
 		completed := *model.CompletedAt

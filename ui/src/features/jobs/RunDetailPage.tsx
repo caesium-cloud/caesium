@@ -170,13 +170,14 @@ export function RunDetailPage() {
   }, [jobId, runId, queryClient]);
 
   const taskMetadata = useMemo(() => {
-    const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string }> = {};
+    const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string; rate_limit_retry_after?: string }> = {};
     run?.tasks?.forEach((task) => {
       metadata[task.task_id] = {
         status: task.status,
         started_at: task.started_at,
         completed_at: task.completed_at,
         error: task.error,
+        rate_limit_retry_after: task.rate_limit_retry_after,
       };
     });
     return metadata;

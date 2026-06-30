@@ -274,6 +274,9 @@ ui-e2e: build-release
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+            -e CAESIUM_RUN_QUEUE_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
             --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null; \
         tries=0; \
         until curl -sf http://127.0.0.1:{{ port }}/health >/dev/null; do \
