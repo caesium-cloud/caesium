@@ -50,6 +50,8 @@ These features address the most common reasons a team would choose an alternativ
 
 **Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
 
+**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/active/concurrency-priority-queues.md) (Streams A/C/D)
+
 ### 1.4 Priority Queues
 
 **Current state**: All tasks are equal. In distributed mode, workers claim tasks in arbitrary order. There is no way to express "this pipeline is more important than that one."
@@ -57,6 +59,8 @@ These features address the most common reasons a team would choose an alternativ
 **Target state**: Jobs and individual runs can declare priority levels. The distributed task claimer respects priority ordering so critical pipelines run first when the cluster is saturated.
 
 **Design doc**: [`design-concurrency-priority.md`](design-concurrency-priority.md)
+
+**Plan**: [Concurrency Strategies & Priority Queues](exec-plans/active/concurrency-priority-queues.md) (Stream B)
 
 ### 1.5 API Key Auth Hardening Follow-up
 
