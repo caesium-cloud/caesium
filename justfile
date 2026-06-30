@@ -160,7 +160,6 @@ integration-test:
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
-        -e CAESIUM_EXECUTION_MODE=distributed \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
@@ -169,6 +168,35 @@ integration-test:
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
     else \
       echo "integration tests failed; caesium server logs:"; \
+      {{ container_cli }} logs {{ it_container }} || true; \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi
+
+integration-test-distributed:
+    just tag={{ tag }} integration-up-distributed
+    @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
+    rm -rf "$cli_dir"; \
+    mkdir -p "$cli_dir"; \
+    cli_ctr=$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true); \
+    trap '{{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"' EXIT; \
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
+    chmod +x "$cli_dir/caesium"; \
+    {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
+    if {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_EXECUTION_MODE=distributed \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --network=container:{{ it_container }} \
+        -w {{ bld_dir }} \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "TestRunConcurrencyStrategies|TestPriorityRunStartSurfacesAndCronDefault" -timeout 10m'; then \
+      {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
+    else \
+      echo "distributed integration tests failed; caesium server logs:"; \
       {{ container_cli }} logs {{ it_container }} || true; \
       {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true; \
       exit 1; \
@@ -235,10 +263,42 @@ integration-up: build-test
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        {{ local_image_ref }}:{{ tag }}-test start
+
+integration-up-distributed: build-test
+    {{ container_cli }} rm -f {{ it_container }} >/dev/null 2>&1 || true
+    # Keep this CI path sharded to exercise the multi-shard database router.
+    {{ container_cli }} run -d --platform {{ platform }} \
+        --name {{ it_container }} \
+        --privileged \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
+        -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
+        -e CAESIUM_INTERNAL_WAKEUP_TOKEN=integration-distributed-internal-token \
+        -e CAESIUM_INTERNAL_PORT=8443 \
+        -e CAESIUM_RUN_OWNER_ENABLED=true \
+        -e CAESIUM_RUN_LEASE_TTL=30s \
+        -e CAESIUM_RUN_OWNER_DISPATCH_INTERVAL=500ms \
+        -e CAESIUM_RUN_OWNER_DISPATCH_DEADLINE=5m \
         -e CAESIUM_WORKER_ENABLED=true \
         -e CAESIUM_WORKER_POOL_SIZE=1 \
         -e CAESIUM_WORKER_POLL_INTERVAL=500ms \
+        -e CAESIUM_WORKER_RECLAIM_INTERVAL=500ms \
+        -e CAESIUM_WORKER_LEASE_TTL=30s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
         -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
         -e CAESIUM_RUN_QUEUE_ENABLED=true \
