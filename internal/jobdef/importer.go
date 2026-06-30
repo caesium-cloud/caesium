@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -387,6 +388,14 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	if err != nil {
 		return nil, nil, fmt.Errorf("metadata.cache: %w", err)
 	}
+	concurrency, err := marshalOptionalJSON(def.Metadata.Concurrency)
+	if err != nil {
+		return nil, nil, fmt.Errorf("metadata.concurrency: %w", err)
+	}
+	rateLimits, err := marshalRateLimits(def.Metadata.RateLimits)
+	if err != nil {
+		return nil, nil, fmt.Errorf("metadata.rateLimits: %w", err)
+	}
 
 	if existing == nil {
 		jobModel := &models.Job{
@@ -398,6 +407,9 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 			MaxParallelTasks: def.Metadata.MaxParallelTasks,
 			TaskTimeout:      def.Metadata.TaskTimeout,
 			RunTimeout:       def.Metadata.RunTimeout,
+			Priority:         def.Metadata.Priority,
+			Concurrency:      concurrency,
+			RateLimits:       rateLimits,
 			SLA:              marshalSLA(def.Metadata.SLA),
 			SchemaValidation: def.Metadata.SchemaValidation,
 			ReplaySafe:       def.Metadata.ReplaySafe,
@@ -417,6 +429,9 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 	existing.MaxParallelTasks = def.Metadata.MaxParallelTasks
 	existing.TaskTimeout = def.Metadata.TaskTimeout
 	existing.RunTimeout = def.Metadata.RunTimeout
+	existing.Priority = def.Metadata.Priority
+	existing.Concurrency = concurrency
+	existing.RateLimits = rateLimits
 	existing.SLA = marshalSLA(def.Metadata.SLA)
 	existing.SchemaValidation = def.Metadata.SchemaValidation
 	existing.ReplaySafe = def.Metadata.ReplaySafe
@@ -431,6 +446,9 @@ func (i *Importer) upsertJobAndTriggerTx(tx *gorm.DB, existing *models.Job, def 
 		"max_parallel_tasks":   existing.MaxParallelTasks,
 		"task_timeout":         existing.TaskTimeout,
 		"run_timeout":          existing.RunTimeout,
+		"priority":             existing.Priority,
+		"concurrency":          existing.Concurrency,
+		"rate_limits":          existing.RateLimits,
 		"sla":                  existing.SLA,
 		"schema_validation":    existing.SchemaValidation,
 		"replay_safe":          existing.ReplaySafe,
@@ -602,20 +620,22 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 			}
 		} else {
 			taskUpdates := map[string]any{
-				"atom_id":       taskModel.AtomID,
-				"name":          taskModel.Name,
-				"type":          taskModel.Type,
-				"node_selector": taskModel.NodeSelector,
-				"retries":       taskModel.Retries,
-				"retry_delay":   taskModel.RetryDelay,
-				"retry_backoff": taskModel.RetryBackoff,
-				"trigger_rule":  taskModel.TriggerRule,
-				"replay_safe":   taskModel.ReplaySafe,
-				"cache_config":  taskModel.CacheConfig,
-				"output_schema": taskModel.OutputSchema,
-				"input_schema":  taskModel.InputSchema,
-				"position":      taskModel.Position,
-				"deleted_at":    nil,
+				"atom_id":             taskModel.AtomID,
+				"name":                taskModel.Name,
+				"type":                taskModel.Type,
+				"node_selector":       taskModel.NodeSelector,
+				"retries":             taskModel.Retries,
+				"retry_delay":         taskModel.RetryDelay,
+				"retry_backoff":       taskModel.RetryBackoff,
+				"trigger_rule":        taskModel.TriggerRule,
+				"replay_safe":         taskModel.ReplaySafe,
+				"rate_limit_resource": taskModel.RateLimitResource,
+				"rate_limit_units":    taskModel.RateLimitUnits,
+				"cache_config":        taskModel.CacheConfig,
+				"output_schema":       taskModel.OutputSchema,
+				"input_schema":        taskModel.InputSchema,
+				"position":            taskModel.Position,
+				"deleted_at":          nil,
 			}
 			if err := tx.Unscoped().Model(taskModel).Updates(taskUpdates).Error; err != nil {
 				return nil, nil, nil, err
@@ -1003,6 +1023,12 @@ func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema
 	taskModel.RetryBackoff = step.RetryBackoff
 	taskModel.TriggerRule = triggerRule
 	taskModel.ReplaySafe = replaySafe
+	taskModel.RateLimitResource = ""
+	taskModel.RateLimitUnits = 0
+	if step.RateLimit != nil {
+		taskModel.RateLimitResource = strings.TrimSpace(step.RateLimit.Resource)
+		taskModel.RateLimitUnits = step.RateLimit.Units
+	}
 	taskModel.CacheConfig = cacheConfig
 	taskModel.OutputSchema = outputSchema
 	taskModel.InputSchema = inputSchema
@@ -1013,11 +1039,25 @@ func marshalOptionalJSON(value any) (datatypes.JSON, error) {
 	if value == nil {
 		return nil, nil
 	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		if rv.IsNil() {
+			return nil, nil
+		}
+	}
 	b, err := json.Marshal(value)
 	if err != nil {
 		return nil, err
 	}
 	return datatypes.JSON(b), nil
+}
+
+func marshalRateLimits(rateLimits []schema.RateLimit) (datatypes.JSON, error) {
+	if len(rateLimits) == 0 {
+		return nil, nil
+	}
+	return marshalOptionalJSON(rateLimits)
 }
 
 func applyJobProvenance(jobModel *models.Job, opts *ApplyOptions) {

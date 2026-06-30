@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: priority-ratelimit
+  priority: high
+  rateLimits:
+    - resource: warehouse-api
+      limit: 120
+      window: 1m
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+    timezone: "UTC"
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: warehouse-api
+      units: 2
+    command: ["sh", "-c", "echo extracting from warehouse api"]

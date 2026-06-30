@@ -105,6 +105,9 @@ type job struct {
 	taskTimeout            time.Duration
 	runTimeout             time.Duration
 	alias                  string
+	priority               string
+	concurrency            *jobdefschema.Concurrency
+	rateLimits             []jobdefschema.RateLimit
 	schemaValidation       string
 	jobCacheConfig         interface{}
 	params                 map[string]string
@@ -132,6 +135,9 @@ func New(m *models.Job, opts ...JobOption) Job {
 		taskTimeout:            m.TaskTimeout,
 		runTimeout:             m.RunTimeout,
 		alias:                  m.Alias,
+		priority:               m.Priority,
+		concurrency:            unmarshalConcurrency(m.Concurrency),
+		rateLimits:             unmarshalRateLimits(m.RateLimits),
 		schemaValidation:       m.SchemaValidation,
 		jobCacheConfig:         unmarshalCacheConfig(m.CacheConfig),
 		runStoreFactory:        run.Default,
@@ -303,6 +309,30 @@ func unmarshalCacheConfig(raw []byte) interface{} {
 	}
 	var v interface{}
 	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	return v
+}
+
+func unmarshalConcurrency(raw []byte) *jobdefschema.Concurrency {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v *jobdefschema.Concurrency
+	if err := json.Unmarshal(raw, &v); err != nil {
+		log.Warn("failed to unmarshal job concurrency metadata", "error", err)
+		return nil
+	}
+	return v
+}
+
+func unmarshalRateLimits(raw []byte) []jobdefschema.RateLimit {
+	if len(raw) == 0 {
+		return nil
+	}
+	var v []jobdefschema.RateLimit
+	if err := json.Unmarshal(raw, &v); err != nil {
+		log.Warn("failed to unmarshal job rate limit metadata", "error", err)
 		return nil
 	}
 	return v

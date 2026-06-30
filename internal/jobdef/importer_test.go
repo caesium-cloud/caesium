@@ -2,6 +2,7 @@ package jobdef
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -151,6 +152,159 @@ steps:
 	}
 	s.True(atoms[0].ReplaySafe)
 	s.True(atoms[1].ReplaySafe)
+}
+
+func (s *ImporterTestSuite) TestApplyUpdatesSchedulingMetadata() {
+	const initial = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-metadata
+  priority: low
+  concurrency:
+    maxRuns: 1
+    strategy: queue
+  rateLimits:
+    - resource: warehouse-api
+      limit: 60
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: warehouse-api
+      units: 1
+`
+	def, err := schema.Parse([]byte(initial))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+
+	const updated = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-metadata
+  priority: high
+  concurrency:
+    maxRuns: 2
+    strategy: skip
+  rateLimits:
+    - resource: database
+      limit: 10
+      window: 30s
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: database
+      units: 3
+`
+	def, err = schema.Parse([]byte(updated))
+	s.Require().NoError(err)
+	job2, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.Equal(job.ID, job2.ID)
+
+	var jobModel models.Job
+	s.Require().NoError(s.db.First(&jobModel, "id = ?", job.ID).Error)
+	s.Equal(schema.PriorityHigh, jobModel.Priority)
+
+	var concurrency schema.Concurrency
+	s.Require().NoError(json.Unmarshal(jobModel.Concurrency, &concurrency))
+	s.Equal(schema.Concurrency{MaxRuns: 2, Strategy: schema.ConcurrencyStrategySkip}, concurrency)
+
+	var rateLimits []schema.RateLimit
+	s.Require().NoError(json.Unmarshal(jobModel.RateLimits, &rateLimits))
+	s.Equal([]schema.RateLimit{{Resource: "database", Limit: 10, Window: "30s"}}, rateLimits)
+
+	var tasks []models.Task
+	s.Require().NoError(s.db.Where("job_id = ?", job.ID).Order("position asc").Find(&tasks).Error)
+	s.Require().Len(tasks, 1)
+	s.Equal("database", tasks[0].RateLimitResource)
+	s.Equal(3, tasks[0].RateLimitUnits)
+}
+
+func (s *ImporterTestSuite) TestApplyStoresUnsetSchedulingMetadataAsSQLNull() {
+	const unset = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-null
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+`
+	def, err := schema.Parse([]byte(unset))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNull(job.ID)
+
+	const populated = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-null
+  concurrency:
+    maxRuns: 2
+    strategy: skip
+  rateLimits:
+    - resource: database
+      limit: 10
+      window: 30s
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: database
+      units: 3
+`
+	def, err = schema.Parse([]byte(populated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNotNull(job.ID)
+
+	def, err = schema.Parse([]byte(unset))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNull(job.ID)
+}
+
+func (s *ImporterTestSuite) assertSchedulingJSONColumnsNull(jobID uuid.UUID) {
+	var concurrency, rateLimits sql.NullString
+	s.Require().NoError(s.db.Raw("SELECT concurrency, rate_limits FROM jobs WHERE id = ?", jobID).Row().Scan(&concurrency, &rateLimits))
+	s.False(concurrency.Valid, "concurrency should be SQL NULL, got %q", concurrency.String)
+	s.False(rateLimits.Valid, "rate_limits should be SQL NULL, got %q", rateLimits.String)
+	s.NotEqual("null", concurrency.String)
+	s.NotEqual("null", rateLimits.String)
+}
+
+func (s *ImporterTestSuite) assertSchedulingJSONColumnsNotNull(jobID uuid.UUID) {
+	var concurrency, rateLimits sql.NullString
+	s.Require().NoError(s.db.Raw("SELECT concurrency, rate_limits FROM jobs WHERE id = ?", jobID).Row().Scan(&concurrency, &rateLimits))
+	s.True(concurrency.Valid, "concurrency should contain JSON")
+	s.True(rateLimits.Valid, "rate_limits should contain JSON")
+	s.NotEqual("null", concurrency.String)
+	s.NotEqual("null", rateLimits.String)
 }
 
 func (s *ImporterTestSuite) TestApplyPersistsResolvedVolumeAndIdentitySpec() {

@@ -188,7 +188,7 @@ reads these fields, so A merges first. `pkg/jobdef/definition.go` is a true-conf
 (the dual `Step`/`rawStep` declaration is parsed in both `UnmarshalYAML` *and*
 `UnmarshalJSON`), so **all** schema additions live in this one stream.
 
-- [ ] A1. Add the scheduling fields to the job schema and **exclude them from the cache
+- [x] A1. Add the scheduling fields to the job schema and **exclude them from the cache
       key**. Add `Priority string`, `Concurrency *Concurrency` (`MaxRuns int`,
       `Strategy string`), and `RateLimits []RateLimit` (`Resource`, `Limit`, `Window`)
       to `Metadata`; add `RateLimit *StepRateLimit` (`Resource`, `Units`) to `Step`,
@@ -199,7 +199,10 @@ reads these fields, so A merges first. `pkg/jobdef/definition.go` is a true-conf
       only `priority`/`concurrency`/`rateLimits` must produce an identical task hash.
       Files: `pkg/jobdef/definition.go`, `internal/cache/hash.go` (verify-only +
       `hash_test.go` stability case).
-- [ ] A2. Validate the new enums + duration at lint time. Extend `Definition.Validate()`
+      Done (W1-alpha): schema fields were added, `rateLimit` is mirrored through YAML and
+      JSON raw-step parsing, `internal/cache/hash.go` remains unchanged, and
+      `internal/cache/hash_test.go` covers scheduling-metadata hash stability.
+- [x] A2. Validate the new enums + duration at lint time. Extend `Definition.Validate()`
       (`definition.go:367`, the `fmt.Errorf` enum pattern at ~378-382, mirroring the
       Kueue DNS-1123 validator at ~790-804): reject `priority` ∉ {`high`,`normal`,`low`},
       `concurrency.strategy` ∉ {`queue`,`replace`,`skip`,`fail`}, `concurrency.maxRuns` < 0,
@@ -208,7 +211,10 @@ reads these fields, so A merges first. `pkg/jobdef/definition.go` is a true-conf
       job-level `rateLimits[]` entry. `cmd/job/lint.go:47` already calls `Validate()`.
       Files: `pkg/jobdef/definition.go`.
       Depends on: A1.
-- [ ] A3. **Persist the scheduling config to the catalog and wire it to runtime** (the
+      Done (W1-alpha): validation rejects invalid priority, concurrency strategy/maxRuns,
+      bad rate-limit windows/resources, and unmatched step-level rate-limit resources with
+      coverage in `pkg/jobdef/definition_test.go`.
+- [x] A3. **Persist the scheduling config to the catalog and wire it to runtime** (the
       "make the parsed fields reach the engine" item — without it, B/C/D read nothing).
       Add columns to `models.Job` (`Priority string` + `Concurrency datatypes.JSON` +
       `RateLimits datatypes.JSON`, mirroring the existing `SLA datatypes.JSON` precedent
@@ -229,7 +235,10 @@ reads these fields, so A merges first. `pkg/jobdef/definition.go` is a true-conf
       Files: `internal/models/job.go`, `internal/models/task.go`,
       `internal/jobdef/importer.go`, `internal/job/job.go`.
       Depends on: A1.
-- [ ] A4. Document the schema + ship pinned examples. Add the `concurrency`/`priority`/
+      Done (W1-alpha): job/task model columns, create/update importer maps,
+      `populateTaskFromStep`, and runtime `job.New` wiring were added; importer update-path
+      and runtime-constructor tests cover persistence and readback.
+- [x] A4. Document the schema + ship pinned examples. Add the `concurrency`/`priority`/
       `rateLimits` fields to the three references and one example per capability.
       Files: `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`,
       `docs/job-schema-reference.md`, `new docs/examples/concurrency-skip.job.yaml`,
@@ -237,6 +246,8 @@ reads these fields, so A merges first. `pkg/jobdef/definition.go` is a true-conf
       form such as `alpine:3.23` — the guardrail rejects an untagged image name;
       `debian:12-slim` is unscanned but fine).
       Depends on: A1.
+      Done (W1-alpha): generated schema rows were mirrored in `report.Markdown()` and
+      `docs/job-schema-reference.md`; hand-written refs and two pinned examples were added.
 
 ### Stream B — Priority queues (roadmap §1.4)
 

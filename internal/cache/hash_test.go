@@ -564,6 +564,60 @@ steps:
 		"step-level replaySafe is a replay gate, not an execution input")
 }
 
+func TestCompute_SchedulingMetadataExcludedFromDefinitionHash(t *testing.T) {
+	lowQueueAPI := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-cache
+  priority: low
+  concurrency:
+    maxRuns: 1
+    strategy: queue
+  rateLimits:
+    - resource: warehouse-api
+      limit: 60
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+    rateLimit:
+      resource: warehouse-api
+      units: 1
+`
+	highSkipDB := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-cache
+  priority: high
+  concurrency:
+    maxRuns: 2
+    strategy: skip
+  rateLimits:
+    - resource: database
+      limit: 10
+      window: 30s
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+    rateLimit:
+      resource: database
+      units: 3
+`
+
+	assert.Equal(t, taskHashFromDefinition(t, lowQueueAPI), taskHashFromDefinition(t, highSkipDB),
+		"priority, concurrency, and rate-limit settings are scheduling metadata and must not change the cache hash")
+}
+
 func taskHashFromDefinition(t *testing.T, src string) string {
 	t.Helper()
 

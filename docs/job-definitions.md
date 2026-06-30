@@ -137,9 +137,39 @@ steps:
 - Callback payloads POST a JSON body containing job/run metadata (`job_id`, `job_alias`, `run_id`, `status`, `error`, `started_at`, `completed_at`) and task entries (`task_id`, `engine`, `image`, `command`, `status`, `runtime_id`, `error`).
 - Callback attempts are recorded with status/error/timestamps so failed hooks can be inspected and retried (via `caesium run retry-callbacks --job-id <job> --run-id <run>` or the REST endpoint `POST /v1/jobs/:id/runs/:run_id/callbacks/retry`).
 - `metadata.labels`/`metadata.annotations` are persisted and exposed through the REST API and CLI tooling.
+- `metadata.priority` accepts `high`, `normal`, or `low` and orders future run/task scheduling without preempting work already running.
+- `metadata.concurrency` controls run-level admission for the same job with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`).
+- `metadata.rateLimits` declares shared resource budgets as `{resource, limit, window}`. `window` must be a duration string such as `30s` or `1m`.
+- `steps[].rateLimit` consumes units from a named job-level `metadata.rateLimits` resource via `{resource, units}`.
+- Priority, concurrency, and rate-limit fields are scheduling metadata; changing only these fields does not change the task cache identity.
 - Steps can set container options directly on the manifest via `env`, `workdir`, and `mounts`. Environment values are passed to every runtime, while bind mounts map host paths (`source`) into the container at `target` (set `readOnly: true` when needed). These fields are optional and default to the runtime image configuration.
 - Job-level `volumes` declare user-provided storage, and `steps[].volumeMounts` mount those volumes by name. Caesium mounts the storage; it does not provision or copy the bytes.
 - Kubernetes steps may set `serviceAccountName`, `podAnnotations`, and `automountServiceAccountToken`; metadata-level values act as defaults for Kubernetes steps. Docker/Podman identity is attached through normal `env` and `mounts` once those fields are applied at runtime.
+
+## Scheduling Controls
+
+`metadata.maxParallelTasks` limits how many steps can run concurrently within one run. The scheduling fields below control admission and ordering across runs and shared resources.
+
+```yaml
+metadata:
+  alias: warehouse-import
+  priority: high
+  concurrency:
+    maxRuns: 1
+    strategy: skip
+  rateLimits:
+    - resource: warehouse-api
+      limit: 120
+      window: 1m
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: warehouse-api
+      units: 2
+```
+
+Valid priorities are `high`, `normal`, and `low`. Valid concurrency strategies are `queue`, `replace`, `skip`, and `fail`. A step-level `rateLimit.resource` must match one of the job-level `metadata.rateLimits[].resource` entries.
 
 ## Volumes And Workload Identity
 
@@ -337,6 +367,8 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Callback failure handling (`callback-failure.job.yaml`).
   - Event-triggered workflow with content filtering (`event-trigger.job.yaml`).
   - Lifecycle-triggered chaining workflow (`event-chaining.job.yaml`).
+  - Run-level concurrency skip policy (`concurrency-skip.job.yaml`).
+  - Priority and shared resource rate-limit scheduling (`priority-ratelimit.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
 
