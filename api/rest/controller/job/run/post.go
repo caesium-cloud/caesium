@@ -17,7 +17,8 @@ import (
 
 // PostRequest holds the optional body for POST /v1/jobs/:id/run.
 type PostRequest struct {
-	Params map[string]string `json:"params,omitempty"`
+	Params   map[string]string `json:"params,omitempty"`
+	Priority string            `json:"priority,omitempty"`
 }
 
 func Post(c *echo.Context) error {
@@ -48,8 +49,16 @@ func Post(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusConflict, "job is paused")
 	}
 
-	r, err := runsvc.New(ctx).Start(j.ID, nil, req.Params)
+	r, err := runsvc.New(ctx).Start(
+		j.ID,
+		nil,
+		runstorage.WithStartParams(req.Params),
+		runstorage.WithStartPriority(req.Priority),
+	)
 	if err != nil {
+		if errors.Is(err, runstorage.ErrInvalidPriority) {
+			return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 

@@ -271,9 +271,10 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 	t.Parallel()
 
 	var (
-		seen []map[string]string
-		mu   sync.Mutex
-		done = make(chan struct{}, 2)
+		seen           []map[string]string
+		seenPriorities []string
+		mu             sync.Mutex
+		done           = make(chan struct{}, 2)
 	)
 	listJobsFn := func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		return models.Jobs{
@@ -282,13 +283,14 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 			&models.Job{ID: uuid.New(), Alias: "third"},
 		}, nil
 	}
-	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string) error {
+	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
 		copied := make(map[string]string, len(params))
 		for k, v := range params {
 			copied[k] = v
 		}
 		mu.Lock()
 		seen = append(seen, copied)
+		seenPriorities = append(seenPriorities, priority)
 		mu.Unlock()
 		done <- struct{}{}
 		return nil
@@ -309,7 +311,7 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 	err := h.FireWithParams(context.Background(), map[string]string{
 		"source": "api",
 		"branch": "main",
-	})
+	}, WithPriority("high"))
 	require.NoError(t, err)
 
 	select {
@@ -332,6 +334,7 @@ func TestFireWithParamsMergesDefaultAndOverrides(t *testing.T) {
 		"branch":      "main",
 	}, seen[0])
 	require.Equal(t, seen[0], seen[1])
+	require.Equal(t, []string{"high", "high"}, seenPriorities)
 }
 
 func TestFireUsesDefaultsWhenParamsMissing(t *testing.T) {
@@ -341,7 +344,7 @@ func TestFireUsesDefaultsWhenParamsMissing(t *testing.T) {
 	listJobsFn := func(ctx context.Context, triggerID string) (models.Jobs, error) {
 		return models.Jobs{&models.Job{ID: uuid.New(), Alias: "only"}}, nil
 	}
-	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string) error {
+	runJobFn := func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
 		copied := make(map[string]string, len(params))
 		for k, v := range params {
 			copied[k] = v
