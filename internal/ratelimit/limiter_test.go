@@ -44,6 +44,31 @@ func TestLimiterAcquireConditionalUpsertRowsAffected(t *testing.T) {
 	require.True(t, acquired, "new window should insert a fresh token")
 }
 
+func TestLimiterAcquireConflictUsesCurrentCallerLimit(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	now := time.Date(2026, 6, 29, 12, 0, 15, 0, time.UTC)
+	limiter := NewLimiter(db, WithClock(func() time.Time { return now }))
+
+	acquired, err := limiter.Acquire(context.Background(), "database", 1, 5, time.Minute)
+	require.NoError(t, err)
+	require.True(t, acquired)
+
+	acquired, err = limiter.Acquire(context.Background(), "database", 2, 2, time.Minute)
+	require.NoError(t, err)
+	require.False(t, acquired, "conflict guard must use the second caller's lower limit")
+
+	acquired, err = limiter.Acquire(context.Background(), "database", 1, 2, time.Minute)
+	require.NoError(t, err)
+	require.True(t, acquired, "one more unit should fit under the second caller's limit")
+
+	var token models.RateLimitToken
+	require.NoError(t, db.First(&token, "resource = ? AND window_key = ?", "database", now.Truncate(time.Minute).Format(time.RFC3339Nano)).Error)
+	require.Equal(t, 2, token.Consumed)
+	require.Equal(t, 2, token.LimitVal)
+}
+
 func TestLimiterRejectsSingleAcquireOverLimitOnFreshWindow(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })

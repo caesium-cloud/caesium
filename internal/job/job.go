@@ -57,6 +57,14 @@ var runStartReadBackoffs = []time.Duration{
 	320 * time.Millisecond,
 }
 
+const haltedDispatchWaitInterval = 50 * time.Millisecond
+
+type taskResult struct {
+	id              uuid.UUID
+	err             error
+	skippedByBranch []uuid.UUID
+}
+
 // ErrLocalQuarantinedReplayUnsupported is returned when a quarantined replay
 // reaches the in-process executor, which is not descriptor-aware.
 var ErrLocalQuarantinedReplayUnsupported = errors.New("replay requires the descriptor-aware executor")
@@ -91,6 +99,22 @@ func retryOnContention(ctx context.Context, fn func() error) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func waitForHaltedDispatchResult(results <-chan taskResult, wait time.Duration) (taskResult, bool) {
+	if wait <= 0 {
+		wait = haltedDispatchWaitInterval
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case result := <-results:
+		return result, true
+	case <-timer.C:
+		return taskResult{}, false
 	}
 }
 
@@ -716,12 +740,6 @@ func (j *job) Run(ctx context.Context) error {
 		return runErr
 	}
 
-	type taskResult struct {
-		id              uuid.UUID
-		err             error
-		skippedByBranch []uuid.UUID
-	}
-
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
@@ -1234,7 +1252,7 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	for (!halt && (len(queue) > 0 || len(deferred) > 0)) || active > 0 {
-		if moveDueDeferred() {
+		if !halt && moveDueDeferred() {
 			continue
 		}
 
@@ -1259,7 +1277,18 @@ func (j *job) Run(ctx context.Context) error {
 
 		var result taskResult
 		gotResult := false
-		if len(queue) == 0 && len(deferred) > 0 {
+		if halt && len(queue) == 0 && len(deferred) > 0 {
+			if active == 0 {
+				break
+			}
+			var ok bool
+			result, ok = waitForHaltedDispatchResult(results, haltedDispatchWaitInterval)
+			if !ok {
+				continue
+			}
+			active--
+			gotResult = true
+		} else if len(queue) == 0 && len(deferred) > 0 {
 			next, ok := nextDeferredAt()
 			if !ok {
 				continue

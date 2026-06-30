@@ -77,13 +77,17 @@ func (l *Limiter) Acquire(ctx context.Context, resource string, units, limit int
 
 	var acquired bool
 	err := l.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// A resource's limit should be consistent across jobs. Within a window,
+		// every guard uses the caller's limit, and successful conflict updates
+		// persist that most-recent caller's limit.
 		result := tx.Exec(`
-INSERT INTO rate_limit_tokens (resource, window_key, consumed, limit_val, expires_at)
-VALUES (?, ?, ?, ?, ?)
-ON CONFLICT(resource, window_key) DO UPDATE SET
-	consumed = consumed + ?
-WHERE consumed + ? <= limit_val`,
-			resource, windowKey, units, limit, expiresAt, units, units,
+	INSERT INTO rate_limit_tokens (resource, window_key, consumed, limit_val, expires_at)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT(resource, window_key) DO UPDATE SET
+		consumed = consumed + ?,
+		limit_val = ?
+	WHERE consumed + ? <= ?`,
+			resource, windowKey, units, limit, expiresAt, units, limit, units, limit,
 		)
 		if result.Error != nil {
 			return result.Error
