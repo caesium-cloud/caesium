@@ -225,6 +225,36 @@ steps:
 	require.Equal(t, 2, def.Steps[0].RateLimit.Units)
 }
 
+func TestParseSchedulingMetadataNormalizesAndDefaults(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-defaults
+  concurrency:
+    maxRuns: 1
+  rateLimits:
+    - resource: " api "
+      limit: 10
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: call
+    image: alpine:3.23
+    rateLimit:
+      resource: " api "
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	require.Equal(t, &Concurrency{MaxRuns: 1, Strategy: ConcurrencyStrategyQueue}, def.Metadata.Concurrency)
+	require.Equal(t, []RateLimit{{Resource: "api", Limit: 10, Window: "1m"}}, def.Metadata.RateLimits)
+	require.NotNil(t, def.Steps[0].RateLimit)
+	require.Equal(t, "api", def.Steps[0].RateLimit.Resource)
+	require.Equal(t, 1, def.Steps[0].RateLimit.Units)
+}
+
 func TestParseInvalidDefinitions(t *testing.T) {
 	cases := map[string]string{
 		"bad version": `apiVersion: v2
@@ -515,6 +545,39 @@ steps:
   - name: build
     image: example
 `,
+		"non-positive rate limit limit": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: api
+      limit: 0
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"duplicate rate limit resource": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: api
+      limit: 10
+      window: 1m
+    - resource: " api "
+      limit: 20
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
 		"bad rate limit window": `apiVersion: v1
 kind: Job
 metadata:
@@ -562,6 +625,24 @@ steps:
     rateLimit:
       resource: database
       units: 1
+`,
+		"negative step rate limit units": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: api
+      limit: 10
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    rateLimit:
+      resource: api
+      units: -1
 `,
 	}
 

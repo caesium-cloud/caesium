@@ -456,6 +456,9 @@ func validateSchedulingMetadata(metadata *Metadata) (map[string]struct{}, error)
 		if metadata.Concurrency.MaxRuns < 0 {
 			return nil, fmt.Errorf("metadata.concurrency.maxRuns must be >= 0")
 		}
+		if strings.TrimSpace(metadata.Concurrency.Strategy) == "" {
+			metadata.Concurrency.Strategy = ConcurrencyStrategyQueue
+		}
 		switch metadata.Concurrency.Strategy {
 		case ConcurrencyStrategyQueue, ConcurrencyStrategyReplace, ConcurrencyStrategySkip, ConcurrencyStrategyFail:
 		default:
@@ -475,9 +478,16 @@ func validateSchedulingMetadata(metadata *Metadata) (map[string]struct{}, error)
 		if resource == "" {
 			return nil, fmt.Errorf("metadata.rateLimits[%d].resource is required", i)
 		}
+		if limit.Limit <= 0 {
+			return nil, fmt.Errorf("metadata.rateLimits[%d].limit must be > 0", i)
+		}
 		if _, err := time.ParseDuration(limit.Window); err != nil {
 			return nil, fmt.Errorf("metadata.rateLimits[%d].window %q must be a valid duration: %w", i, limit.Window, err)
 		}
+		if _, exists := resources[resource]; exists {
+			return nil, fmt.Errorf("metadata.rateLimits[%d].resource %q duplicates another rate limit", i, resource)
+		}
+		limit.Resource = resource
 		resources[resource] = struct{}{}
 	}
 
@@ -824,8 +834,15 @@ func validateStepRateLimits(steps []Step, resources map[string]struct{}) error {
 		if resource == "" {
 			return fmt.Errorf("steps[%d].rateLimit.resource is required when rateLimit is set", i)
 		}
+		if rateLimit.Units < 0 {
+			return fmt.Errorf("steps[%d].rateLimit.units must be >= 0", i)
+		}
+		if rateLimit.Units == 0 {
+			rateLimit.Units = 1
+		}
+		rateLimit.Resource = resource
 		if _, ok := resources[resource]; !ok {
-			return fmt.Errorf("steps[%d].rateLimit.resource %q does not match any metadata.rateLimits[].resource", i, rateLimit.Resource)
+			return fmt.Errorf("steps[%d].rateLimit.resource %q does not match any metadata.rateLimits[].resource", i, resource)
 		}
 	}
 	return nil

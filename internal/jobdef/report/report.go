@@ -80,7 +80,7 @@ func Markdown() string {
 	b.WriteString("| `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |\n")
 	b.WriteString("| `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |\n")
 	b.WriteString("| `priority` | string | optional | Run and task scheduling priority: `high`, `normal`, or `low`. Scheduling metadata excluded from the cache identity hash. |\n")
-	b.WriteString("| `concurrency` | object | optional | Run-level concurrency control with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`). Scheduling metadata excluded from the cache identity hash. |\n")
+	b.WriteString("| `concurrency` | object | optional | Run-level concurrency control with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`); `strategy` defaults to `queue`. Scheduling metadata excluded from the cache identity hash. |\n")
 	b.WriteString("| `rateLimits` | array[object] | optional | Shared resource budgets declared as `{resource, limit, window}`. `window` is a duration string. Scheduling metadata excluded from the cache identity hash. |\n")
 	b.WriteString("| `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |\n")
 	b.WriteString("| `replaySafe` | boolean | optional | Marks every step in this job as eligible for quarantined what-if replay. Recorded on each baseline task run; excluded from the cache identity hash. |\n")

@@ -28,7 +28,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |
 | `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |
 | `priority` | string | optional | Run and task scheduling priority: `high`, `normal`, or `low`. Scheduling metadata excluded from the cache identity hash. |
-| `concurrency` | object | optional | Run-level concurrency control with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`). Scheduling metadata excluded from the cache identity hash. |
+| `concurrency` | object | optional | Run-level concurrency control with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`); `strategy` defaults to `queue`. Scheduling metadata excluded from the cache identity hash. |
 | `rateLimits` | array[object] | optional | Shared resource budgets declared as `{resource, limit, window}`. `window` is a duration string. Scheduling metadata excluded from the cache identity hash. |
 | `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
 | `replaySafe` | boolean | optional | Marks every step in this job as eligible for quarantined what-if replay. Recorded on each baseline task run; excluded from the cache identity hash. |

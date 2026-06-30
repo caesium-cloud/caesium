@@ -1,6 +1,7 @@
 package job
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -21,6 +22,8 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -39,6 +42,46 @@ func TestNewCopiesSchedulingMetadata(t *testing.T) {
 	require.Equal(t, schema.PriorityHigh, got.priority)
 	require.Equal(t, &schema.Concurrency{MaxRuns: 2, Strategy: schema.ConcurrencyStrategySkip}, got.concurrency)
 	require.Equal(t, []schema.RateLimit{{Resource: "database", Limit: 10, Window: "30s"}}, got.rateLimits)
+}
+
+func TestUnmarshalSchedulingMetadataLogsInvalidJSON(t *testing.T) {
+	t.Run("concurrency", func(t *testing.T) {
+		var got *schema.Concurrency
+		logs := captureJobLogs(t, func() {
+			got = unmarshalConcurrency([]byte(`{`))
+		})
+		require.Nil(t, got)
+		require.Contains(t, logs, "failed to unmarshal job concurrency metadata")
+		require.Contains(t, logs, "error")
+	})
+
+	t.Run("rate limits", func(t *testing.T) {
+		var got []schema.RateLimit
+		logs := captureJobLogs(t, func() {
+			got = unmarshalRateLimits([]byte(`{`))
+		})
+		require.Nil(t, got)
+		require.Contains(t, logs, "failed to unmarshal job rate limit metadata")
+		require.Contains(t, logs, "error")
+	})
+}
+
+func captureJobLogs(t *testing.T, fn func()) string {
+	t.Helper()
+
+	var buffer bytes.Buffer
+	oldLogger := zap.S()
+	zap.ReplaceGlobals(zap.New(
+		zapcore.NewCore(
+			zapcore.NewJSONEncoder(zap.NewProductionEncoderConfig()),
+			zapcore.AddSync(&buffer),
+			zapcore.DebugLevel,
+		),
+	))
+	defer zap.ReplaceGlobals(oldLogger.Desugar())
+
+	fn()
+	return buffer.String()
 }
 
 func TestRunLocalExecutesParallelBranches(t *testing.T) {

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -1037,6 +1038,13 @@ func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema
 func marshalOptionalJSON(value any) (datatypes.JSON, error) {
 	if value == nil {
 		return nil, nil
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		if rv.IsNil() {
+			return nil, nil
+		}
 	}
 	b, err := json.Marshal(value)
 	if err != nil {

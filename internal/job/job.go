@@ -320,6 +320,7 @@ func unmarshalConcurrency(raw []byte) *jobdefschema.Concurrency {
 	}
 	var v *jobdefschema.Concurrency
 	if err := json.Unmarshal(raw, &v); err != nil {
+		log.Warn("failed to unmarshal job concurrency metadata", "error", err)
 		return nil
 	}
 	return v
@@ -331,6 +332,7 @@ func unmarshalRateLimits(raw []byte) []jobdefschema.RateLimit {
 	}
 	var v []jobdefschema.RateLimit
 	if err := json.Unmarshal(raw, &v); err != nil {
+		log.Warn("failed to unmarshal job rate limit metadata", "error", err)
 		return nil
 	}
 	return v

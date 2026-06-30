@@ -2,6 +2,7 @@ package jobdef
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/url"
 	"strings"
@@ -230,6 +231,80 @@ steps:
 	s.Require().Len(tasks, 1)
 	s.Equal("database", tasks[0].RateLimitResource)
 	s.Equal(3, tasks[0].RateLimitUnits)
+}
+
+func (s *ImporterTestSuite) TestApplyStoresUnsetSchedulingMetadataAsSQLNull() {
+	const unset = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-null
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+`
+	def, err := schema.Parse([]byte(unset))
+	s.Require().NoError(err)
+
+	ctx := context.Background()
+	job, err := s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNull(job.ID)
+
+	const populated = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-null
+  concurrency:
+    maxRuns: 2
+    strategy: skip
+  rateLimits:
+    - resource: database
+      limit: 10
+      window: 30s
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: database
+      units: 3
+`
+	def, err = schema.Parse([]byte(populated))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNotNull(job.ID)
+
+	def, err = schema.Parse([]byte(unset))
+	s.Require().NoError(err)
+	_, err = s.importer.Apply(ctx, def)
+	s.Require().NoError(err)
+	s.assertSchedulingJSONColumnsNull(job.ID)
+}
+
+func (s *ImporterTestSuite) assertSchedulingJSONColumnsNull(jobID uuid.UUID) {
+	var concurrency, rateLimits sql.NullString
+	s.Require().NoError(s.db.Raw("SELECT concurrency, rate_limits FROM jobs WHERE id = ?", jobID).Row().Scan(&concurrency, &rateLimits))
+	s.False(concurrency.Valid, "concurrency should be SQL NULL, got %q", concurrency.String)
+	s.False(rateLimits.Valid, "rate_limits should be SQL NULL, got %q", rateLimits.String)
+	s.NotEqual("null", concurrency.String)
+	s.NotEqual("null", rateLimits.String)
+}
+
+func (s *ImporterTestSuite) assertSchedulingJSONColumnsNotNull(jobID uuid.UUID) {
+	var concurrency, rateLimits sql.NullString
+	s.Require().NoError(s.db.Raw("SELECT concurrency, rate_limits FROM jobs WHERE id = ?", jobID).Row().Scan(&concurrency, &rateLimits))
+	s.True(concurrency.Valid, "concurrency should contain JSON")
+	s.True(rateLimits.Valid, "rate_limits should contain JSON")
+	s.NotEqual("null", concurrency.String)
+	s.NotEqual("null", rateLimits.String)
 }
 
 func (s *ImporterTestSuite) TestApplyPersistsResolvedVolumeAndIdentitySpec() {
