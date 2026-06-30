@@ -2498,9 +2498,7 @@ func satisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
 		return true
 	}
 
-	isTerminal := func(s TaskStatus) bool {
-		return IsTerminal(s)
-	}
+	isTerminal := IsTerminal
 
 	switch rule {
 	case jobdefschema.TriggerRuleAllSuccess:
