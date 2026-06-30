@@ -22,6 +22,7 @@ const (
 	TypeRunStarted        Type = "run_started"
 	TypeRunCompleted      Type = "run_completed"
 	TypeRunFailed         Type = "run_failed"
+	TypeRunCancelled      Type = "run_cancelled"
 	TypeRunTerminal       Type = "run_terminal"
 	TypeTaskStarted       Type = "task_started"
 	TypeTaskSucceeded     Type = "task_succeeded"

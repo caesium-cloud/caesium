@@ -7,6 +7,7 @@ var All = []interface{}{
 	&Atom{},
 	&Trigger{},
 	&Job{},
+	&RunQueue{},
 	&IngestedEvent{},
 	&WebhookEvent{},
 	&Task{},

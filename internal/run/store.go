@@ -40,6 +40,7 @@ const (
 	StatusRunning   Status = "running"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
+	StatusCancelled Status = Status(models.JobRunStatusCancelled)
 )
 
 const (
@@ -49,6 +50,7 @@ const (
 	TaskStatusFailed    TaskStatus = "failed"
 	TaskStatusSkipped   TaskStatus = "skipped"
 	TaskStatusCached    TaskStatus = "cached"
+	TaskStatusCancelled TaskStatus = TaskStatus(models.TaskRunStatusCancelled)
 )
 
 // IsTerminalSuccess returns true for task statuses that represent successful completion.
@@ -62,7 +64,7 @@ func IsTerminalSuccess(status TaskStatus) bool {
 // scan, and archival so the set lives in exactly one place.
 func IsTerminal(status TaskStatus) bool {
 	switch status {
-	case TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached:
+	case TaskStatusSucceeded, TaskStatusFailed, TaskStatusSkipped, TaskStatusCached, TaskStatusCancelled:
 		return true
 	default:
 		return false
@@ -234,7 +236,50 @@ var (
 	defaultStoreOnce sync.Once
 )
 
-var ErrTaskClaimMismatch = errors.New("run: task claim mismatch")
+var (
+	ErrTaskClaimMismatch        = errors.New("run: task claim mismatch")
+	ErrRunSkipped               = errors.New("run: skipped by concurrency policy")
+	ErrRunQueued                = errors.New("run: queued by concurrency policy")
+	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
+)
+
+type admissionDecision int
+
+const (
+	admissionNoPolicy admissionDecision = iota
+	admissionCreated
+	admissionSkipped
+	admissionFailed
+	admissionQueued
+)
+
+type cancelledRunInfo struct {
+	ID          uuid.UUID
+	JobID       uuid.UUID
+	JobAlias    string
+	StartedAt   time.Time
+	Quarantine  bool
+	CancelledAt time.Time
+}
+
+type admissionResult struct {
+	decision           admissionDecision
+	jobAlias           string
+	skipReason         string
+	replaced           bool
+	cancelledRun       *cancelledRunInfo
+	cancelledRunEvents []event.Event
+}
+
+type startRunRequest struct {
+	jobID            uuid.UUID
+	triggerID        *uuid.UUID
+	backfillID       *uuid.UUID
+	params           map[string]string
+	priorityOverride string
+	fromQueue        bool
+	policyOnly       bool
+}
 
 // storeBusyRetryBackoffs aliases the shared contention-retry schedule so
 // whole-transaction store ops back off on the same budget as the autocommit
@@ -555,6 +600,368 @@ func (s *Store) replayPredecessorRefsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([
 	return descriptor.DAG.Predecessors, true, nil
 }
 
+func newStartRunModel(req startRunRequest) (*models.JobRun, error) {
+	now := time.Now().UTC()
+	model := &models.JobRun{
+		ID:        uuid.New(),
+		JobID:     req.jobID,
+		Status:    string(StatusRunning),
+		StartedAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if req.triggerID != nil {
+		model.TriggerID = *req.triggerID
+	}
+	if req.backfillID != nil {
+		model.BackfillID = req.backfillID
+	}
+	if len(req.params) > 0 {
+		encoded, err := json.Marshal(req.params)
+		if err != nil {
+			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
+		}
+		model.Params = encoded
+	}
+	return model, nil
+}
+
+func (s *Store) appendRunStartedEventTx(tx *gorm.DB, model *models.JobRun) (*event.Event, error) {
+	if s.eventStore == nil || model == nil {
+		return nil, nil
+	}
+	payload, err := json.Marshal(&JobRun{
+		ID:        model.ID,
+		JobID:     model.JobID,
+		Status:    Status(model.Status),
+		Priority:  model.Priority,
+		StartedAt: model.StartedAt,
+		CreatedAt: model.CreatedAt,
+		UpdatedAt: model.UpdatedAt,
+		Tasks:     []*TaskRun{},
+	})
+	if err != nil {
+		return nil, err
+	}
+	evt := event.Event{
+		Type:       event.TypeRunStarted,
+		JobID:      model.JobID,
+		RunID:      model.ID,
+		Timestamp:  time.Now().UTC(),
+		Payload:    payload,
+		Quarantine: model.Quarantine,
+	}
+	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+		return nil, err
+	}
+	return &evt, nil
+}
+
+type concurrencyConfig struct {
+	jobAlias string
+	maxRuns  int
+	strategy string
+}
+
+func concurrencyFromJSON(raw []byte) (*jobdefschema.Concurrency, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var cfg *jobdefschema.Concurrency
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (s *Store) concurrencyConfigTx(tx *gorm.DB, jobID uuid.UUID) (concurrencyConfig, bool, error) {
+	var row struct {
+		Alias       string
+		Concurrency datatypes.JSON
+	}
+	err := tx.Model(&models.Job{}).
+		Select("alias", "concurrency").
+		Where("id = ?", jobID).
+		Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return concurrencyConfig{}, false, nil
+		}
+		return concurrencyConfig{}, false, err
+	}
+	cfg, err := concurrencyFromJSON(row.Concurrency)
+	if err != nil {
+		return concurrencyConfig{}, false, fmt.Errorf("run: decode job concurrency metadata: %w", err)
+	}
+	if cfg == nil || cfg.MaxRuns <= 0 {
+		return concurrencyConfig{jobAlias: row.Alias}, false, nil
+	}
+	strategy := strings.ToLower(strings.TrimSpace(cfg.Strategy))
+	if strategy == "" {
+		strategy = jobdefschema.ConcurrencyStrategyQueue
+	}
+	return concurrencyConfig{
+		jobAlias: row.Alias,
+		maxRuns:  cfg.MaxRuns,
+		strategy: strategy,
+	}, true, nil
+}
+
+func (s *Store) admit(tx *gorm.DB, model *models.JobRun, req startRunRequest) (admissionResult, error) {
+	if model == nil {
+		return admissionResult{}, errors.New("run: admission requires a run model")
+	}
+	cfg, ok, err := s.concurrencyConfigTx(tx, model.JobID)
+	if err != nil {
+		return admissionResult{}, err
+	}
+	result := admissionResult{decision: admissionNoPolicy, jobAlias: cfg.jobAlias}
+	if !ok {
+		return result, nil
+	}
+	if model.BackfillID != nil {
+		// Backfills use their own MaxConcurrent semaphore and run_queue does not
+		// carry backfill_id, so ordinary run concurrency deliberately excludes
+		// backfill rows via backfill_id IS NULL in the active-count predicates.
+		return result, nil
+	}
+
+	inserted, err := s.insertRunIfSlotTx(tx, model, cfg.maxRuns)
+	if err != nil {
+		return result, err
+	}
+	if inserted {
+		result.decision = admissionCreated
+		return result, nil
+	}
+
+	switch cfg.strategy {
+	case jobdefschema.ConcurrencyStrategySkip:
+		result.decision = admissionSkipped
+		result.skipReason = "max_concurrency"
+		return result, nil
+	case jobdefschema.ConcurrencyStrategyFail:
+		result.decision = admissionFailed
+		return result, nil
+	case jobdefschema.ConcurrencyStrategyQueue:
+		if req.fromQueue {
+			result.decision = admissionFailed
+			return result, nil
+		}
+		if err := s.enqueueRunTx(tx, model.JobID, model.Params, model.Priority, env.Variables().RunQueueMaxDepth); err != nil {
+			return result, err
+		}
+		result.decision = admissionQueued
+		return result, nil
+	case jobdefschema.ConcurrencyStrategyReplace:
+		cancelled, cancelEvents, err := s.cancelOldestActiveRunTx(tx, model.JobID)
+		if err != nil {
+			return result, err
+		}
+		inserted, err := s.insertRunIfSlotTx(tx, model, cfg.maxRuns)
+		if err != nil {
+			return result, err
+		}
+		if !inserted {
+			result.decision = admissionFailed
+			return result, nil
+		}
+		result.decision = admissionCreated
+		result.replaced = cancelled != nil
+		result.cancelledRun = cancelled
+		result.cancelledRunEvents = cancelEvents
+		return result, nil
+	default:
+		return result, fmt.Errorf("run: unsupported concurrency strategy %q", cfg.strategy)
+	}
+}
+
+func (s *Store) insertRunIfSlotTx(tx *gorm.DB, model *models.JobRun, maxRuns int) (bool, error) {
+	if maxRuns <= 0 {
+		return true, tx.Create(model).Error
+	}
+	var backfillID any
+	if model.BackfillID != nil {
+		backfillID = *model.BackfillID
+	}
+	params := any(nil)
+	if len(model.Params) > 0 {
+		params = string(model.Params)
+	}
+	// This must remain one conditional INSERT statement: dqlite serializes the
+	// statement through Raft, so concurrent nodes derive admission from
+	// RowsAffected instead of racing through CountActive-then-Create. Backfill
+	// rows are intentionally excluded; they are governed by backfill maxConcurrent.
+	result := tx.Exec(`
+INSERT INTO job_runs (
+	id, job_id, backfill_id, trigger_id, status, priority, params, quarantine,
+	started_at, created_at, updated_at
+)
+SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+WHERE (
+	SELECT count(*)
+	FROM job_runs
+	WHERE job_id = ?
+		AND status = ?
+		AND quarantine <> true
+		AND backfill_id IS NULL
+) < ?`,
+		model.ID,
+		model.JobID,
+		backfillID,
+		model.TriggerID,
+		model.Status,
+		model.Priority,
+		params,
+		model.Quarantine,
+		model.StartedAt,
+		model.CreatedAt,
+		model.UpdatedAt,
+		model.JobID,
+		string(StatusRunning),
+		maxRuns,
+	)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected == 1, nil
+}
+
+func metricJobAlias(jobID uuid.UUID, alias string) string {
+	if strings.TrimSpace(alias) != "" {
+		return alias
+	}
+	return jobID.String()
+}
+
+func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
+	model, err := newStartRunModel(req)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		pendingEvents []event.Event
+		admission     admissionResult
+	)
+	if err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 3)
+		attemptAdmission := admissionResult{decision: admissionNoPolicy}
+		err := s.db.Transaction(func(tx *gorm.DB) error {
+			priority, err := startPriorityTx(tx, req.jobID, req.priorityOverride)
+			if err != nil {
+				return err
+			}
+			model.Priority = priority
+
+			result, err := s.admit(tx, model, req)
+			if err != nil {
+				return err
+			}
+			attemptAdmission = result
+
+			switch result.decision {
+			case admissionNoPolicy:
+				if req.policyOnly {
+					return nil
+				}
+				if err := tx.Create(model).Error; err != nil {
+					return err
+				}
+				attemptAdmission.decision = admissionCreated
+			case admissionCreated:
+			case admissionSkipped, admissionFailed, admissionQueued:
+				return nil
+			default:
+				return fmt.Errorf("run: unknown admission decision %d", result.decision)
+			}
+
+			evt, err := s.appendRunStartedEventTx(tx, model)
+			if err != nil {
+				return err
+			}
+			if evt != nil {
+				attemptEvents = append(attemptEvents, *evt)
+			}
+			if result.cancelledRun != nil && s.eventStore != nil {
+				// cancelRunTx appends its own events to the event store. They are
+				// returned here for bus publication after the surrounding run-start
+				// transaction commits.
+				attemptEvents = append(result.cancelledRunEvents, attemptEvents...)
+			}
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+			admission = attemptAdmission
+		}
+		return err
+	}); err != nil {
+		return nil, err
+	}
+
+	switch admission.decision {
+	case admissionNoPolicy:
+		return nil, nil
+	case admissionSkipped:
+		reason := admission.skipReason
+		if reason == "" {
+			reason = "max_concurrency"
+		}
+		log.Info("run skipped by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias, "reason", reason)
+		metrics.RunSkippedTotal.WithLabelValues(metricJobAlias(req.jobID, admission.jobAlias), reason).Inc()
+		return nil, ErrRunSkipped
+	case admissionFailed:
+		return nil, ErrMaxConcurrentRunsReached
+	case admissionQueued:
+		log.Info("run queued by concurrency policy", "job_id", req.jobID, "job_alias", admission.jobAlias)
+		if err := s.observeRunQueueDepth(req.jobID); err != nil {
+			log.Warn("run queue: failed to observe depth", "job_id", req.jobID, "error", err)
+		}
+		return nil, ErrRunQueued
+	}
+
+	// Publish events immediately after commit, before loadRun, so that
+	// run_started reaches the bus before any task events that the executor
+	// may emit once Start returns.
+	s.publishEvents(pendingEvents...)
+
+	if admission.replaced {
+		metrics.RunReplacedTotal.WithLabelValues(metricJobAlias(req.jobID, admission.jobAlias)).Inc()
+	}
+	if admission.cancelledRun != nil {
+		s.recordCancelledRunMetrics(*admission.cancelledRun)
+	}
+
+	// Phase 2: write run_leases row when owner mode is enabled.
+	// This is done outside the run-creation transaction so that a lease write
+	// failure does not roll back the run itself — the ClaimNext recovery path
+	// still picks up the run if no lease is ever acquired.
+	if s.leaseStore != nil {
+		vars := env.Variables()
+		if _, leaseErr := s.leaseStore.AcquireLease(
+			context.Background(),
+			model.ID,
+			vars.NodeAddress,
+			vars.RunLeaseTTL,
+		); leaseErr != nil {
+			log.Warn("run owner: failed to acquire run lease; run will fall back to ClaimNext",
+				"run_id", model.ID,
+				"error", leaseErr,
+			)
+		}
+	}
+
+	if !model.Quarantine {
+		metrics.JobsActive.WithLabelValues(req.jobID.String()).Inc()
+		s.startedMu.Lock()
+		s.startedRuns[model.ID] = struct{}{}
+		s.startedMu.Unlock()
+	}
+
+	return s.loadRun(model.ID)
+}
+
 func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
 	if mutate == nil {
 		return nil
@@ -625,211 +1032,53 @@ func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef
 
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOption) (*JobRun, error) {
 	startOpts := startOptionsFrom(opts)
-	model := &models.JobRun{
-		ID:        uuid.New(),
-		JobID:     jobID,
-		Status:    string(StatusRunning),
-		StartedAt: time.Now().UTC(),
+	return s.startRun(startRunRequest{
+		jobID:            jobID,
+		triggerID:        triggerID,
+		params:           startOpts.Params,
+		priorityOverride: startOpts.Priority,
+	})
+}
+
+func (s *Store) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOption) (*JobRun, bool, error) {
+	startOpts := startOptionsFrom(opts)
+	r, err := s.startRun(startRunRequest{
+		jobID:            jobID,
+		triggerID:        triggerID,
+		params:           startOpts.Params,
+		priorityOverride: startOpts.Priority,
+		policyOnly:       true,
+	})
+	if r == nil && err == nil {
+		return nil, false, nil
 	}
-
-	if triggerID != nil {
-		model.TriggerID = *triggerID
-	}
-	if len(startOpts.Params) > 0 {
-		encoded, err := json.Marshal(startOpts.Params)
-		if err != nil {
-			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
-		}
-		model.Params = encoded
-	}
-
-	var pendingEvents []event.Event
-	if err := withStoreBusyRetry(func() error {
-		attemptEvents := make([]event.Event, 0, 1)
-		err := s.db.Transaction(func(tx *gorm.DB) error {
-			priority, err := startPriorityTx(tx, jobID, startOpts.Priority)
-			if err != nil {
-				return err
-			}
-			model.Priority = priority
-
-			if err := tx.Create(model).Error; err != nil {
-				return err
-			}
-
-			if s.eventStore != nil {
-				payload, err := json.Marshal(&JobRun{
-					ID:        model.ID,
-					JobID:     model.JobID,
-					Status:    Status(model.Status),
-					Priority:  model.Priority,
-					StartedAt: model.StartedAt,
-					CreatedAt: model.CreatedAt,
-					UpdatedAt: model.UpdatedAt,
-					Tasks:     []*TaskRun{},
-				})
-				if err != nil {
-					return err
-				}
-
-				evt := event.Event{
-					Type:       event.TypeRunStarted,
-					JobID:      jobID,
-					RunID:      model.ID,
-					Timestamp:  time.Now().UTC(),
-					Payload:    payload,
-					Quarantine: model.Quarantine,
-				}
-				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
-					return err
-				}
-				attemptEvents = append(attemptEvents, evt)
-			}
-
-			return nil
-		})
-		if err == nil {
-			pendingEvents = attemptEvents
-		}
-		return err
-	}); err != nil {
-		return nil, err
-	}
-
-	// Publish events immediately after commit, before loadRun, so that
-	// run_started reaches the bus before any task events that the executor
-	// may emit once Start returns.
-	s.publishEvents(pendingEvents...)
-
-	// Phase 2: write run_leases row when owner mode is enabled.
-	// This is done outside the run-creation transaction so that a lease write
-	// failure does not roll back the run itself — the ClaimNext recovery path
-	// still picks up the run if no lease is ever acquired.
-	if s.leaseStore != nil {
-		vars := env.Variables()
-		if _, leaseErr := s.leaseStore.AcquireLease(
-			context.Background(),
-			model.ID,
-			vars.NodeAddress,
-			vars.RunLeaseTTL,
-		); leaseErr != nil {
-			log.Warn("run owner: failed to acquire run lease; run will fall back to ClaimNext",
-				"run_id", model.ID,
-				"error", leaseErr,
-			)
-		}
-	}
-
-	if !model.Quarantine {
-		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
-		s.startedMu.Lock()
-		s.startedRuns[model.ID] = struct{}{}
-		s.startedMu.Unlock()
-	}
-
-	run, err := s.loadRun(model.ID)
-	return run, err
+	return r, true, err
 }
 
 // StartForBackfill creates a JobRun pre-linked to a backfill ID. The caller
 // should then execute the job with run.WithContext(ctx, r.ID) so the executor
 // resumes from this pre-created record rather than creating a new one.
 func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]string) (*JobRun, error) {
-	model := &models.JobRun{
-		ID:         uuid.New(),
-		JobID:      jobID,
-		BackfillID: &backfillID,
-		Status:     string(StatusRunning),
-		StartedAt:  time.Now().UTC(),
+	return s.startRun(startRunRequest{
+		jobID:      jobID,
+		backfillID: &backfillID,
+		params:     params,
+	})
+}
+
+// StartQueuedRun creates a fresh JobRun from an already-claimed run_queue row.
+// If a slot disappears between dequeue and insert, the caller should release the
+// queue row so a later drain can retry it.
+func (s *Store) StartQueuedRun(_ context.Context, queued *models.RunQueue) (*JobRun, error) {
+	if queued == nil {
+		return nil, errors.New("run: queued run is nil")
 	}
-
-	if len(params) > 0 {
-		encoded, err := json.Marshal(params)
-		if err != nil {
-			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
-		}
-		model.Params = encoded
-	}
-
-	var pendingEvents []event.Event
-	if err := withStoreBusyRetry(func() error {
-		attemptEvents := make([]event.Event, 0, 1)
-		err := s.db.Transaction(func(tx *gorm.DB) error {
-			priority, err := startPriorityTx(tx, jobID, "")
-			if err != nil {
-				return err
-			}
-			model.Priority = priority
-
-			if err := tx.Create(model).Error; err != nil {
-				return err
-			}
-
-			if s.eventStore != nil {
-				payload, err := json.Marshal(&JobRun{
-					ID:        model.ID,
-					JobID:     model.JobID,
-					Status:    Status(model.Status),
-					Priority:  model.Priority,
-					StartedAt: model.StartedAt,
-					CreatedAt: model.CreatedAt,
-					UpdatedAt: model.UpdatedAt,
-					Tasks:     []*TaskRun{},
-				})
-				if err != nil {
-					return err
-				}
-
-				evt := event.Event{
-					Type:       event.TypeRunStarted,
-					JobID:      jobID,
-					RunID:      model.ID,
-					Timestamp:  time.Now().UTC(),
-					Payload:    payload,
-					Quarantine: model.Quarantine,
-				}
-				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
-					return err
-				}
-				attemptEvents = append(attemptEvents, evt)
-			}
-
-			return nil
-		})
-		if err == nil {
-			pendingEvents = attemptEvents
-		}
-		return err
-	}); err != nil {
-		return nil, err
-	}
-
-	s.publishEvents(pendingEvents...)
-
-	// Phase 2: write run_leases row when owner mode is enabled.
-	if s.leaseStore != nil {
-		vars := env.Variables()
-		if _, leaseErr := s.leaseStore.AcquireLease(
-			context.Background(),
-			model.ID,
-			vars.NodeAddress,
-			vars.RunLeaseTTL,
-		); leaseErr != nil {
-			log.Warn("run owner: failed to acquire run lease (backfill); run will fall back to ClaimNext",
-				"run_id", model.ID,
-				"error", leaseErr,
-			)
-		}
-	}
-
-	if !model.Quarantine {
-		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
-		s.startedMu.Lock()
-		s.startedRuns[model.ID] = struct{}{}
-		s.startedMu.Unlock()
-	}
-
-	return s.loadRun(model.ID)
+	return s.startRun(startRunRequest{
+		jobID:            queued.JobID,
+		params:           decodeRunParams(queued.Params),
+		priorityOverride: PriorityLabel(queued.Priority),
+		fromQueue:        true,
+	})
 }
 
 func (s *Store) RegisterTask(runID uuid.UUID, task *models.Task, atom *models.Atom, outstanding int) error {
@@ -2249,9 +2498,7 @@ func satisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
 		return true
 	}
 
-	isTerminal := func(s TaskStatus) bool {
-		return s == TaskStatusSucceeded || s == TaskStatusCached || s == TaskStatusFailed || s == TaskStatusSkipped
-	}
+	isTerminal := IsTerminal
 
 	switch rule {
 	case jobdefschema.TriggerRuleAllSuccess:
@@ -2758,6 +3005,7 @@ func terminalStatusStrings() []string {
 		string(TaskStatusFailed),
 		string(TaskStatusSkipped),
 		string(TaskStatusCached),
+		string(TaskStatusCancelled),
 	}
 }
 
@@ -3113,7 +3361,7 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 			// from the triggering node's waitForRunCompletion; this keeps the
 			// second call a no-op so run_completed/run_failed events fire once.
 			res := tx.Model(&models.JobRun{}).
-				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed)}).
+				Where("id = ? AND status NOT IN ?", runID, []string{string(StatusSucceeded), string(StatusFailed), string(StatusCancelled)}).
 				Updates(map[string]interface{}{
 					"status":       string(status),
 					"completed_at": now,
@@ -3221,6 +3469,167 @@ func (s *Store) Complete(runID uuid.UUID, result error) error {
 	return nil
 }
 
+func (s *Store) CancelRun(ctx context.Context, runID uuid.UUID) error {
+	var (
+		pendingEvents []event.Event
+		cancelled     *cancelledRunInfo
+	)
+	if err := withStoreBusyRetry(func() error {
+		attemptEvents := make([]event.Event, 0, 2)
+		var attemptCancelled *cancelledRunInfo
+		err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			info, events, err := s.cancelRunTx(tx, runID, "cancelled by concurrency replacement")
+			if err != nil {
+				return err
+			}
+			attemptCancelled = info
+			attemptEvents = events
+			return nil
+		})
+		if err == nil {
+			pendingEvents = attemptEvents
+			cancelled = attemptCancelled
+		}
+		return err
+	}); err != nil {
+		return err
+	}
+	s.publishEvents(pendingEvents...)
+	if cancelled != nil {
+		s.recordCancelledRunMetrics(*cancelled)
+	}
+	return nil
+}
+
+func (s *Store) cancelOldestActiveRunTx(tx *gorm.DB, jobID uuid.UUID) (*cancelledRunInfo, []event.Event, error) {
+	var model models.JobRun
+	err := tx.
+		Where("job_id = ? AND status = ? AND quarantine <> true AND backfill_id IS NULL", jobID, string(StatusRunning)).
+		Order("started_at ASC").
+		Take(&model).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	return s.cancelRunTx(tx, model.ID, "cancelled by concurrency replacement")
+}
+
+func (s *Store) cancelRunTx(tx *gorm.DB, runID uuid.UUID, reason string) (*cancelledRunInfo, []event.Event, error) {
+	now := time.Now().UTC()
+	if strings.TrimSpace(reason) == "" {
+		reason = "cancelled"
+	}
+	res := tx.Model(&models.JobRun{}).
+		Where("id = ? AND status = ?", runID, string(StatusRunning)).
+		Updates(map[string]interface{}{
+			"status":       string(StatusCancelled),
+			"completed_at": now,
+			"error":        reason,
+		})
+	if res.Error != nil {
+		return nil, nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, nil, nil
+	}
+
+	taskRes := tx.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND status NOT IN ?", runID, terminalTaskStatuses()).
+		Updates(map[string]interface{}{
+			"status":                 string(TaskStatusCancelled),
+			"completed_at":           now,
+			"error":                  reason,
+			"claimed_by":             "",
+			"claim_expires_at":       nil,
+			"runtime_id":             "",
+			"rate_limit_retry_after": nil,
+		})
+	if taskRes.Error != nil {
+		return nil, nil, taskRes.Error
+	}
+	if err := deleteRunLeaseTx(tx, runID); err != nil {
+		return nil, nil, err
+	}
+
+	var infoRow struct {
+		models.JobRun
+		JobAlias string
+	}
+	if err := tx.Table("job_runs").
+		Select("job_runs.*, jobs.alias as job_alias").
+		Joins("left join jobs on jobs.id = job_runs.job_id").
+		Where("job_runs.id = ?", runID).
+		Take(&infoRow).Error; err != nil {
+		return nil, nil, err
+	}
+
+	info := &cancelledRunInfo{
+		ID:          runID,
+		JobID:       infoRow.JobID,
+		JobAlias:    infoRow.JobAlias,
+		StartedAt:   infoRow.StartedAt,
+		Quarantine:  infoRow.Quarantine,
+		CancelledAt: now,
+	}
+
+	if s.eventStore == nil {
+		return info, nil, nil
+	}
+	loaded, err := s.loadRunWithDB(tx, runID)
+	if err != nil {
+		return nil, nil, err
+	}
+	payload, err := json.Marshal(loaded)
+	if err != nil {
+		return nil, nil, err
+	}
+	cancelledEvent := event.Event{
+		Type:       event.TypeRunCancelled,
+		JobID:      loaded.JobID,
+		RunID:      runID,
+		Timestamp:  now,
+		Payload:    payload,
+		Quarantine: loaded.Quarantine,
+	}
+	if err := s.eventStore.AppendTx(tx, &cancelledEvent); err != nil {
+		return nil, nil, err
+	}
+	terminalEvent := event.Event{
+		Type:       event.TypeRunTerminal,
+		JobID:      loaded.JobID,
+		RunID:      runID,
+		Timestamp:  now,
+		Payload:    payload,
+		Quarantine: loaded.Quarantine,
+	}
+	if err := s.eventStore.AppendTx(tx, &terminalEvent); err != nil {
+		return nil, nil, err
+	}
+	return info, []event.Event{cancelledEvent, terminalEvent}, nil
+}
+
+func (s *Store) recordCancelledRunMetrics(info cancelledRunInfo) {
+	if info.Quarantine {
+		return
+	}
+	jobLabel := info.JobID.String()
+	s.startedMu.Lock()
+	_, started := s.startedRuns[info.ID]
+	if started {
+		delete(s.startedRuns, info.ID)
+	}
+	s.startedMu.Unlock()
+	metrics.JobRunsTotal.WithLabelValues(jobLabel, string(StatusCancelled)).Inc()
+	if started {
+		metrics.JobsActive.WithLabelValues(jobLabel).Dec()
+	}
+	if !info.StartedAt.IsZero() {
+		metrics.JobRunDurationSeconds.WithLabelValues(jobLabel, string(StatusCancelled)).Observe(info.CancelledAt.Sub(info.StartedAt).Seconds())
+	}
+}
+
 func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND status = ?", runID, string(TaskStatusRunning)).
@@ -3239,6 +3648,175 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 			"cache_created_at":       nil,
 			"cache_expires_at":       nil,
 		}).Error
+}
+
+func (s *Store) CountActive(jobID uuid.UUID) (int64, error) {
+	var count int64
+	err := s.db.Model(&models.JobRun{}).
+		Where("job_id = ? AND status = ? AND quarantine <> true AND backfill_id IS NULL", jobID, string(StatusRunning)).
+		Count(&count).Error
+	return count, err
+}
+
+func (s *Store) enqueueRunTx(tx *gorm.DB, jobID uuid.UUID, params datatypes.JSON, priority, maxDepth int) error {
+	if priority <= 0 {
+		priority = PriorityNormalValue
+	}
+	if maxDepth <= 0 {
+		maxDepth = 100
+	}
+	now := time.Now().UTC()
+	row := &models.RunQueue{
+		ID:        uuid.New(),
+		JobID:     jobID,
+		Params:    append(datatypes.JSON(nil), params...),
+		Priority:  priority,
+		ClaimedBy: "",
+		CreatedAt: now,
+	}
+	if err := tx.Create(row).Error; err != nil {
+		return err
+	}
+	var depth int64
+	if err := tx.Model(&models.RunQueue{}).
+		Where("job_id = ? AND claimed_by = ''", jobID).
+		Count(&depth).Error; err != nil {
+		return err
+	}
+	if overflow := int(depth) - maxDepth; overflow > 0 {
+		if err := tx.Exec(`
+DELETE FROM run_queue
+WHERE id IN (
+	SELECT id
+	FROM run_queue
+	WHERE job_id = ? AND claimed_by = ''
+	ORDER BY created_at ASC
+	LIMIT ?
+)`, jobID, overflow).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) DequeueNextRun(ctx context.Context, jobID uuid.UUID, claimedBy string) (*models.RunQueue, error) {
+	claimedBy = strings.TrimSpace(claimedBy)
+	if claimedBy == "" {
+		claimedBy = uuid.NewString()
+	}
+	result := s.db.WithContext(ctx).Exec(`
+UPDATE run_queue
+SET claimed_by = ?, claimed_at = ?
+WHERE id = (
+	SELECT id
+	FROM run_queue
+	WHERE job_id = ? AND claimed_by = ''
+	ORDER BY priority DESC, created_at ASC
+	LIMIT 1
+)
+AND claimed_by = ''`, claimedBy, time.Now().UTC(), jobID)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	var queued models.RunQueue
+	if err := s.db.WithContext(ctx).
+		Where("job_id = ? AND claimed_by = ?", jobID, claimedBy).
+		Take(&queued).Error; err != nil {
+		return nil, err
+	}
+	if err := s.observeRunQueueDepth(jobID); err != nil {
+		log.Warn("run queue: failed to observe depth after dequeue", "job_id", jobID, "error", err)
+	}
+	return &queued, nil
+}
+
+func (s *Store) ReleaseQueuedRun(ctx context.Context, queueID uuid.UUID, claimedBy string) error {
+	result := s.db.WithContext(ctx).
+		Model(&models.RunQueue{}).
+		Where("id = ? AND claimed_by = ?", queueID, claimedBy).
+		Updates(map[string]any{
+			"claimed_by": "",
+			"claimed_at": nil,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	var queued models.RunQueue
+	if err := s.db.WithContext(ctx).Select("job_id").First(&queued, "id = ?", queueID).Error; err == nil {
+		if observeErr := s.observeRunQueueDepth(queued.JobID); observeErr != nil {
+			log.Warn("run queue: failed to observe depth after release", "job_id", queued.JobID, "error", observeErr)
+		}
+	}
+	return nil
+}
+
+func (s *Store) DeleteQueuedRun(ctx context.Context, queued *models.RunQueue) error {
+	if queued == nil {
+		return nil
+	}
+	result := s.db.WithContext(ctx).
+		Delete(&models.RunQueue{}, "id = ?", queued.ID)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		alias, err := s.jobAlias(queued.JobID)
+		if err != nil {
+			log.Warn("run queue: failed to load job alias for wait metric", "job_id", queued.JobID, "error", err)
+		} else {
+			metrics.RunQueueWaitSeconds.WithLabelValues(metricJobAlias(queued.JobID, alias)).Observe(time.Since(queued.CreatedAt).Seconds())
+		}
+	}
+	if err := s.observeRunQueueDepth(queued.JobID); err != nil {
+		log.Warn("run queue: failed to observe depth after delete", "job_id", queued.JobID, "error", err)
+	}
+	return nil
+}
+
+func (s *Store) jobAlias(jobID uuid.UUID) (string, error) {
+	var job models.Job
+	if err := s.db.Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
+		return "", err
+	}
+	return job.Alias, nil
+}
+
+func (s *Store) observeRunQueueDepth(jobID uuid.UUID) error {
+	alias, err := s.jobAlias(jobID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			alias = jobID.String()
+		} else {
+			return err
+		}
+	}
+	rows := []struct {
+		Priority int
+		Depth    int64
+	}{}
+	if err := s.db.Model(&models.RunQueue{}).
+		Select("priority, count(*) as depth").
+		Where("job_id = ? AND claimed_by = ''", jobID).
+		Group("priority").
+		Scan(&rows).Error; err != nil {
+		return err
+	}
+	depths := map[int]int64{
+		PriorityLowValue:    0,
+		PriorityNormalValue: 0,
+		PriorityHighValue:   0,
+	}
+	for _, row := range rows {
+		depths[row.Priority] = row.Depth
+	}
+	jobLabel := metricJobAlias(jobID, alias)
+	for priority, depth := range depths {
+		metrics.RunQueueDepth.WithLabelValues(jobLabel, PriorityLabel(priority)).Set(float64(depth))
+	}
+	return nil
 }
 
 func (s *Store) FindRunning(jobID uuid.UUID) (*JobRun, error) {

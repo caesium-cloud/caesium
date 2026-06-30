@@ -346,7 +346,7 @@ Gates a *new run* when the job is already at `maxRuns`. The gate lives in `run.S
 — the one place REST, cron, and HTTP-trigger all create runs — and is **atomic** so it
 holds across nodes.
 
-- [ ] C1. Atomic admission + the simple strategies. Add `run.Store.CountActive(jobID)` and
+- [x] C1. Atomic admission + the simple strategies. Add `run.Store.CountActive(jobID)` and
       an `admit(tx, jobID, strategy, maxRuns)` helper (correction #4) invoked from
       `store.Start`, `resolveRun` (before the `FindRunning` attach), and `StartForBackfill`
       (or backfill excluded from the count). `admit` loads the job's `maxRuns`/`strategy`
@@ -368,7 +368,12 @@ holds across nodes.
       `api/rest/controller/job/run/post.go`, `internal/trigger/event/event.go`,
       `internal/job/job.go` (the `resolveRun` admit call), `internal/metrics/metrics.go`.
       Depends on: A3.
-- [ ] C2. The `replace` strategy + the cancellation primitive it needs (correction #9).
+      Done (W3-gamma): shared admission now runs through `Store.Start`, `AdmitRun`
+      from `resolveRun`, and `StartForBackfill`; ordinary active counts explicitly
+      exclude backfills with `backfill_id IS NULL`. Admission uses a single raw
+      conditional `INSERT ... SELECT ... WHERE` with client-generated UUIDs and no
+      `RETURNING`, and REST/event callers surface skip/fail outcomes with nil-run guards.
+- [x] C2. The `replace` strategy + the cancellation primitive it needs (correction #9).
       Add a `StatusCancelled` terminal status (+ its `ExecutionEvent` type) and a
       `run.Store.CancelRun` that **atomically** transitions the target `JobRun` AND its
       non-terminal `task_runs` **AND expires its `run_leases` row** in one transaction. The
@@ -389,7 +394,12 @@ holds across nodes.
       `internal/models/run.go` (status const), `internal/models/execution_event.go`
       (event type), `internal/job/job.go`, `internal/metrics/metrics.go`.
       Depends on: C1.
-- [ ] C3. The durable run queue + **leader-gated** dequeuer for `queue`. New `RunQueue`
+      Done (W3-gamma): cancelled run/task statuses and events are wired through
+      terminal handling; `CancelRun` updates the run, non-terminal task runs, and
+      run lease inside one transaction. `replace` cancels the oldest active run,
+      inserts the replacement under the same admission decision, records the
+      replacement metric, and `waitForRunCompletion` treats cancellation as terminal.
+- [x] C3. The durable run queue + **leader-gated** dequeuer for `queue`. New `RunQueue`
       catalog model (`uuid.UUID` PK, `JobID` FK→Job, `Params datatypes.JSON`,
       `Priority int`, `ClaimedBy string`, composite index `(job_id, priority DESC,
       created_at ASC)` via GORM tags — not raw SQL); register in `models.All` after `Job`;
@@ -407,6 +417,12 @@ holds across nodes.
       `pkg/env/env.go`, `internal/metrics/metrics.go`,
       `test/run_concurrency_test.go` (skip/fail/replace/queue integration scenarios).
       Depends on: C1 + C2 + B1 (the queue orders by B's `priority`).
+      Done (W3-gamma): `RunQueue` is registered after `Job` and not in hot routing
+      tables; queue admission persists rows with max-depth eviction, dequeue claims
+      rows with an optimistic update, and the `CAESIUM_RUN_QUEUE_*` dequeuer is
+      `runAsync` wired with `dqlite.IsLocalLeader`, launches the created run, and
+      is enabled in `integration-up`. Queue depth/wait metrics and unit/integration
+      coverage were added for the real admission surfaces.
 
 ### Stream D — Resource rate limiting (roadmap §1.3, P2)
 

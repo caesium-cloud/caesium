@@ -419,8 +419,12 @@ func (j *job) Run(ctx context.Context) error {
 
 	resolveRun := func() (*run.JobRun, error) {
 		startOpts := []run.StartOption{run.WithStartParams(j.params)}
-		if strings.TrimSpace(j.priorityOverride) != "" {
-			startOpts = append(startOpts, run.WithStartPriority(j.priorityOverride))
+		startPriority := strings.TrimSpace(j.priorityOverride)
+		if startPriority == "" {
+			startPriority = strings.TrimSpace(j.priority)
+		}
+		if startPriority != "" {
+			startOpts = append(startOpts, run.WithStartPriority(startPriority))
 		}
 
 		if id, ok := run.FromContext(ctx); ok {
@@ -432,6 +436,10 @@ func (j *job) Run(ctx context.Context) error {
 				return nil, err
 			}
 			return existing, nil
+		}
+
+		if admitted, handled, err := store.AdmitRun(j.id, j.triggerID, startOpts...); handled || err != nil {
+			return admitted, err
 		}
 
 		running, err := store.FindRunning(j.id)
@@ -459,7 +467,13 @@ func (j *job) Run(ctx context.Context) error {
 		snapshot, e = resolveRun()
 		return e
 	}); err != nil {
+		if errors.Is(err, run.ErrRunSkipped) || errors.Is(err, run.ErrRunQueued) {
+			return nil
+		}
 		return err
+	}
+	if snapshot == nil {
+		return nil
 	}
 
 	runID := snapshot.ID
@@ -1572,7 +1586,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 	if bus := store.Bus(); bus != nil {
 		events, err := bus.Subscribe(ctx, event.Filter{
 			RunID: runID,
-			Types: []event.Type{event.TypeRunTerminal, event.TypeRunCompleted, event.TypeRunFailed},
+			Types: []event.Type{event.TypeRunTerminal, event.TypeRunCompleted, event.TypeRunFailed, event.TypeRunCancelled},
 		})
 		if err == nil {
 			ch = events
@@ -1588,10 +1602,16 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 				ch = nil
 				continue
 			}
-			if evt.Type == event.TypeRunFailed {
+			if evt.Type == event.TypeRunFailed || evt.Type == event.TypeRunCancelled {
 				snapshot, err := store.Get(runID)
 				if err != nil {
 					return err
+				}
+				if snapshot.Status == run.StatusCancelled {
+					if snapshot.Error != "" {
+						return errors.New(snapshot.Error)
+					}
+					return fmt.Errorf("run %s cancelled", runID)
 				}
 				if snapshot.Error != "" {
 					return errors.New(snapshot.Error)
@@ -1609,6 +1629,12 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 					}
 					return fmt.Errorf("run %s failed", runID)
 				}
+				if snapshot.Status == run.StatusCancelled {
+					if snapshot.Error != "" {
+						return errors.New(snapshot.Error)
+					}
+					return fmt.Errorf("run %s cancelled", runID)
+				}
 				return nil
 			}
 		case <-ticker.C:
@@ -1622,6 +1648,7 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 			succeeded := 0
 			skipped := 0
 			cached := 0
+			cancelled := 0
 
 			for _, taskState := range snapshot.Tasks {
 				switch taskState.Status {
@@ -1635,11 +1662,23 @@ func waitForRunCompletion(ctx context.Context, store *run.Store, runID uuid.UUID
 					skipped++
 				case run.TaskStatusCached:
 					cached++
+				case run.TaskStatusCancelled:
+					cancelled++
 				}
 			}
 
-			terminal := failed + succeeded + skipped + cached
+			if snapshot.Status == run.StatusCancelled {
+				if snapshot.Error != "" {
+					return errors.New(snapshot.Error)
+				}
+				return fmt.Errorf("run %s cancelled", runID)
+			}
+
+			terminal := failed + succeeded + skipped + cached + cancelled
 			if terminal == taskCount {
+				if cancelled > 0 {
+					return fmt.Errorf("run %s cancelled", runID)
+				}
 				if failed > 0 {
 					return fmt.Errorf("run %s completed with %d failed task(s)", runID, failed)
 				}
