@@ -101,6 +101,7 @@ func (s *Store) TerminalTaskRunsSince(runID uuid.UUID, afterSeq int64) ([]models
 				string(TaskStatusFailed),
 				string(TaskStatusSkipped),
 				string(TaskStatusCached),
+				string(TaskStatusCancelled),
 			}).
 		Order("terminal_sequence ASC").
 		Find(&rows).Error

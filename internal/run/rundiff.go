@@ -186,6 +186,7 @@ func terminalTaskStatuses() []string {
 		string(TaskStatusFailed),
 		string(TaskStatusSkipped),
 		string(TaskStatusCached),
+		string(TaskStatusCancelled),
 	}
 }
 

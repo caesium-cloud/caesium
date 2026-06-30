@@ -59,7 +59,16 @@ func Post(c *echo.Context) error {
 		if errors.Is(err, runstorage.ErrInvalidPriority) {
 			return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
 		}
+		if errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
+			return echo.NewHTTPError(http.StatusConflict, "max concurrent runs reached").Wrap(err)
+		}
+		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) {
+			return c.NoContent(http.StatusAccepted)
+		}
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+	if r == nil {
+		return c.NoContent(http.StatusAccepted)
 	}
 
 	go func() {

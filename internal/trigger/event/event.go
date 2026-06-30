@@ -162,7 +162,19 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		runtimeParams := cloneParams(mergedParams)
 		runRecord, err := t.runStoreFactory().Start(jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
 		if err != nil {
+			if errors.Is(err, runstorage.ErrRunSkipped) {
+				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "max concurrency reached"})
+				continue
+			}
+			if errors.Is(err, runstorage.ErrRunQueued) {
+				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "queued"})
+				continue
+			}
 			outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Error: err.Error()})
+			continue
+		}
+		if runRecord == nil {
+			outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "no run created"})
 			continue
 		}
 

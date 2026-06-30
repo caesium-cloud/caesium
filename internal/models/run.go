@@ -8,6 +8,11 @@ import (
 	"gorm.io/datatypes"
 )
 
+const (
+	JobRunStatusCancelled  = "cancelled"
+	TaskRunStatusCancelled = "cancelled"
+)
+
 type JobRun struct {
 	ID           uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	JobID        uuid.UUID      `gorm:"type:uuid;index;not null" json:"job_id"`

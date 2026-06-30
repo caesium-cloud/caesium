@@ -32,6 +32,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/notification"
 	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
+	"github.com/caesium-cloud/caesium/internal/runqueue"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/internal/worker"
@@ -172,6 +173,20 @@ func start(cmd *cobra.Command, args []string) error {
 	runStore.SetBus(bus)
 	jsvc.Service(ctx).SetBus(bus)
 	runsvc.New(ctx).SetBus(bus)
+	if vars.RunQueueDequeuerEnabled {
+		dequeuer := runqueue.NewDequeuer(runqueue.Config{
+			DB:                  db.Connection(),
+			Store:               runStore,
+			NodeID:              vars.NodeAddress,
+			Interval:            vars.RunQueueDequeueInterval,
+			StaleClaimThreshold: vars.RunQueueClaimStaleAfter,
+			LeaderCheck:         dqlite.IsLocalLeader,
+		})
+		runAsync(func() {
+			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth)
+			dequeuer.Run(ctx)
+		})
+	}
 
 	distributedMode := strings.EqualFold(strings.TrimSpace(vars.ExecutionMode), "distributed")
 	wakeupSignaler := worker.NewWakeupSignaler()

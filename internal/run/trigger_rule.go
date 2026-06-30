@@ -37,10 +37,6 @@ func SatisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
 		return true
 	}
 
-	isTerminal := func(s TaskStatus) bool {
-		return s == TaskStatusSucceeded || s == TaskStatusCached || s == TaskStatusFailed || s == TaskStatusSkipped
-	}
-
 	switch rule {
 	case jobdefschema.TriggerRuleAllSuccess:
 		for _, s := range predStatuses {
@@ -52,7 +48,7 @@ func SatisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
 
 	case jobdefschema.TriggerRuleAllDone, jobdefschema.TriggerRuleAlways:
 		for _, s := range predStatuses {
-			if !isTerminal(s) {
+			if !IsTerminal(s) {
 				return false
 			}
 		}

@@ -6,6 +6,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const ExecutionEventTypeRunCancelled = "run_cancelled"
+
 type ExecutionEvent struct {
 	Sequence           uint64     `gorm:"primaryKey;autoIncrement" json:"sequence"`
 	Type               string     `gorm:"type:text;index;not null" json:"type"`

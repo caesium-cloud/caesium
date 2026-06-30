@@ -23,6 +23,13 @@ func NewLeaseStore(db *gorm.DB) *LeaseStore {
 	return &LeaseStore{db: db}
 }
 
+func deleteRunLeaseTx(tx *gorm.DB, runID uuid.UUID) error {
+	if tx == nil || runID == uuid.Nil {
+		return nil
+	}
+	return tx.Delete(&models.RunLease{}, "run_id = ?", runID.String()).Error
+}
+
 // AcquireLease writes a run_leases row for the given run, recording the
 // owning node and expiry.  If a row already exists (e.g., from a previous
 // attempt), it is left unchanged — the initial write is treated as

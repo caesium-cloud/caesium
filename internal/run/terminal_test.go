@@ -8,6 +8,7 @@ func TestIsTerminal(t *testing.T) {
 		TaskStatusFailed,
 		TaskStatusSkipped,
 		TaskStatusCached,
+		TaskStatusCancelled,
 	}
 	for _, s := range terminal {
 		if !IsTerminal(s) {

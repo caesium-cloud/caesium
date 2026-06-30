@@ -220,6 +220,31 @@ var (
 		[]string{"job_alias", "reason"},
 	)
 
+	RunReplacedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_run_replaced_total",
+			Help: "Total running job runs cancelled and replaced by the run concurrency policy.",
+		},
+		[]string{"job_alias"},
+	)
+
+	RunQueueDepth = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "caesium_run_queue_depth",
+			Help: "Current number of queued runs by job and priority.",
+		},
+		[]string{"job_alias", "priority"},
+	)
+
+	RunQueueWaitSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "caesium_run_queue_wait_seconds",
+			Help:    "Time a queued run waited before being launched.",
+			Buckets: []float64{0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
+		},
+		[]string{"job_alias"},
+	)
+
 	// Auth metrics
 
 	AuthRequestsTotal = prometheus.NewCounterVec(
@@ -495,6 +520,9 @@ func Register() {
 			RateLimitAcquiredTotal,
 			RateLimitRejectedTotal,
 			RunSkippedTotal,
+			RunReplacedTotal,
+			RunQueueDepth,
+			RunQueueWaitSeconds,
 			AuthRequestsTotal,
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,
