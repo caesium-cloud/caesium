@@ -154,6 +154,8 @@ type Environment struct {
 	EventRetention            time.Duration `envconfig:"EVENT_RETENTION" default:"168h"`
 	WebhookEventRetention     time.Duration `envconfig:"WEBHOOK_EVENT_RETENTION" default:"168h"`
 	MaxTriggerDepth           int           `envconfig:"MAX_TRIGGER_DEPTH" default:"10"`
+	RateLimitPrunerEnabled    bool          `envconfig:"RATE_LIMIT_PRUNER_ENABLED" default:"false"`
+	RateLimitPruneInterval    time.Duration `envconfig:"RATE_LIMIT_PRUNE_INTERVAL" default:"1m"`
 
 	// Notification Watcher
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`

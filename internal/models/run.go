@@ -37,23 +37,26 @@ type JobRun struct {
 }
 
 type TaskRun struct {
-	ID             uuid.UUID         `gorm:"type:uuid;primaryKey" json:"id"`
-	JobRunID       uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
-	JobRun         JobRun            `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	TaskID         uuid.UUID         `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
-	Task           Task              `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	AtomID         uuid.UUID         `gorm:"type:uuid;index;not null" json:"atom_id"`
-	Engine         AtomEngine        `gorm:"type:text;not null" json:"engine"`
-	Image          string            `gorm:"not null" json:"image"`
-	Command        string            `gorm:"not null" json:"command"`
-	Status         string            `gorm:"type:text;index;not null" json:"status"`
-	ClaimedBy      string            `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
-	ClaimExpiresAt *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
-	ClaimAttempt   int               `gorm:"not null;default:0" json:"claim_attempt"`
-	Attempt        int               `gorm:"not null;default:1" json:"attempt"`
-	MaxAttempts    int               `gorm:"not null;default:1" json:"max_attempts"`
-	NodeSelector   datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
-	Hash           string            `gorm:"type:text;index" json:"-"`
+	ID             uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
+	JobRunID       uuid.UUID  `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
+	JobRun         JobRun     `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	TaskID         uuid.UUID  `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
+	Task           Task       `gorm:"constraint:OnDelete:CASCADE" json:"-"`
+	AtomID         uuid.UUID  `gorm:"type:uuid;index;not null" json:"atom_id"`
+	Engine         AtomEngine `gorm:"type:text;not null" json:"engine"`
+	Image          string     `gorm:"not null" json:"image"`
+	Command        string     `gorm:"not null" json:"command"`
+	Status         string     `gorm:"type:text;index;not null" json:"status"`
+	ClaimedBy      string     `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
+	ClaimExpiresAt *time.Time `gorm:"index" json:"claim_expires_at,omitempty"`
+	ClaimAttempt   int        `gorm:"not null;default:0" json:"claim_attempt"`
+	// RateLimitRetryAfter keeps over-limit tasks pending without letting worker
+	// claims or owner dispatch pick them back up before the current window rolls.
+	RateLimitRetryAfter *time.Time        `gorm:"index" json:"rate_limit_retry_after,omitempty"`
+	Attempt             int               `gorm:"not null;default:1" json:"attempt"`
+	MaxAttempts         int               `gorm:"not null;default:1" json:"max_attempts"`
+	NodeSelector        datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
+	Hash                string            `gorm:"type:text;index" json:"-"`
 	// EffectiveHash is the identity this task presents to its DOWNSTREAM
 	// consumers when a value-verified short-circuit was proven (design Component
 	// 5 / D2). Nullable: empty means "use Hash" — the common case. When this

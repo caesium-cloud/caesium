@@ -184,6 +184,34 @@ var (
 		},
 	)
 
+	// The resource label is bounded by declared metadata.rateLimits resources,
+	// not per-request free-form input.
+	RateLimitAcquiredTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_rate_limit_acquired_total",
+			Help: "Total rate-limit token acquisitions by declared resource.",
+		},
+		[]string{"resource"},
+	)
+
+	// The resource label is bounded by declared metadata.rateLimits resources,
+	// not per-request free-form input.
+	RateLimitRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_rate_limit_rejected_total",
+			Help: "Total rate-limit token rejections by declared resource.",
+		},
+		[]string{"resource"},
+	)
+
+	RunSkippedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_run_skipped_total",
+			Help: "Total runs or run tasks skipped by scheduler control, by job and reason.",
+		},
+		[]string{"job_alias", "reason"},
+	)
+
 	// Auth metrics
 
 	AuthRequestsTotal = prometheus.NewCounterVec(
@@ -455,6 +483,9 @@ func Register() {
 			TaskCacheMissesTotal,
 			TaskCacheShortCircuitsTotal,
 			TaskCacheEntries,
+			RateLimitAcquiredTotal,
+			RateLimitRejectedTotal,
+			RunSkippedTotal,
 			AuthRequestsTotal,
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,

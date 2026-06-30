@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/google/uuid"
@@ -70,6 +71,11 @@ type Claimer struct {
 	store             *run.Store
 	leaseTTL          time.Duration
 	busyRetryBackoffs []time.Duration
+	rateLimiter       resourceLimiter
+}
+
+type resourceLimiter interface {
+	Acquire(ctx context.Context, resource string, units, limit int, window time.Duration) (bool, error)
 }
 
 func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLabels ...map[string]string) *Claimer {
@@ -98,6 +104,12 @@ func NewClaimer(nodeID string, store *run.Store, leaseTTL time.Duration, nodeLab
 		leaseTTL:          leaseTTL,
 		busyRetryBackoffs: defaultBusyRetryBackoffSchedule(),
 	}
+}
+
+// WithRateLimiter gates claimed tasks before they enter the worker pool.
+func (c *Claimer) WithRateLimiter(l resourceLimiter) *Claimer {
+	c.rateLimiter = l
+	return c
 }
 
 func defaultBusyRetryBackoffSchedule() []time.Duration {
@@ -150,6 +162,21 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if claimed != nil {
+		acquired, jobAlias, retryAfter, err := c.acquireRateLimit(ctx, claimed)
+		if err != nil {
+			return nil, err
+		}
+		if !acquired {
+			counts.commit()
+			if err := c.store.RateLimitTask(ctx, claimed.JobRunID, claimed.TaskID, retryAfter); err != nil {
+				return nil, err
+			}
+			metrics.RunSkippedTotal.WithLabelValues(jobAlias, "rate_limit").Inc()
+			return nil, nil
+		}
+	}
 	if claimed != nil {
 		if !claimed.Quarantine {
 			metrics.WorkerClaimsTotal.WithLabelValues(c.nodeID).Inc()
@@ -161,6 +188,28 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 	c.store.PublishEvents(pendingEvents...)
 
 	return claimed, nil
+}
+
+func (c *Claimer) acquireRateLimit(ctx context.Context, task *models.TaskRun) (bool, string, time.Time, error) {
+	if c.rateLimiter == nil || task == nil {
+		return true, "", time.Time{}, nil
+	}
+	rule, ok, err := ratelimit.RuleForTask(ctx, c.store.DB(), task.JobRunID, task.TaskID)
+	if err != nil {
+		return false, "", time.Time{}, err
+	}
+	if !ok {
+		return true, "", time.Time{}, nil
+	}
+	acquired, err := c.rateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
+	if err != nil {
+		return false, rule.JobAlias, time.Time{}, err
+	}
+	if acquired {
+		return true, rule.JobAlias, time.Time{}, nil
+	}
+	now := time.Now().UTC()
+	return false, rule.JobAlias, now.Add(ratelimit.RetryAfter(now, rule.Window)), nil
 }
 
 func (c *Claimer) claimNextTx(tx *gorm.DB, now, leaseExpiry time.Time, counts *dbWriteCounts) (*models.TaskRun, *event.Event, error) {
@@ -197,7 +246,7 @@ func (c *Claimer) claimNextSingleStatementTx(tx *gorm.DB, now, leaseExpiry time.
 
 	sql := `
 UPDATE task_runs
-SET claimed_by = ?, claim_expires_at = ?, claim_attempt = claim_attempt + 1, status = ?, updated_at = ?
+SET claimed_by = ?, claim_expires_at = ?, claim_attempt = claim_attempt + 1, status = ?, updated_at = ?, rate_limit_retry_after = NULL
 WHERE id = (
 	SELECT tr.id
 	FROM task_runs AS tr
@@ -206,6 +255,7 @@ WHERE id = (
 		AND tr.status = ?
 		AND tr.outstanding_predecessors = ?
 		AND (tr.claimed_by = '' OR tr.claim_expires_at IS NULL OR tr.claim_expires_at < ?)
+		AND (tr.rate_limit_retry_after IS NULL OR tr.rate_limit_retry_after <= ?)
 		AND ` + selectorSQL + `
 		AND ` + liveLeaseGuard + `
 	ORDER BY tr.created_at ASC
@@ -214,6 +264,7 @@ WHERE id = (
 AND status = ?
 AND outstanding_predecessors = ?
 AND (claimed_by = '' OR claim_expires_at IS NULL OR claim_expires_at < ?)
+AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)
 AND job_run_id IN (SELECT id FROM job_runs WHERE status = ?)
 RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS claim_job_id`
 
@@ -226,11 +277,12 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 		string(run.TaskStatusPending),
 		0,
 		now,
+		now,
 	}
 	args = append(args, selectorArgs...)
 	// liveLeaseGuard binds one parameter: now (the live-lease expiry cutoff).
 	args = append(args, now)
-	args = append(args, string(run.TaskStatusPending), 0, now, string(run.StatusRunning))
+	args = append(args, string(run.TaskStatusPending), 0, now, now, string(run.StatusRunning))
 
 	var claimed claimedTaskRunRow
 	result := tx.Raw(sql, args...).Scan(&claimed)

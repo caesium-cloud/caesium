@@ -31,9 +31,11 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
+	"gorm.io/gorm"
 )
 
 // DispatchRejectionReason labels for caesium_dispatch_rejected_total.
@@ -87,6 +89,15 @@ type TaskPendingReader interface {
 	PendingTasksForDispatch(ctx context.Context, runID uuid.UUID, limit int) ([]models.TaskRun, error)
 }
 
+// RateLimiter consumes durable resource tokens before a task is dispatched.
+type RateLimiter interface {
+	Acquire(ctx context.Context, resource string, units, limit int, window time.Duration) (bool, error)
+}
+
+type rateLimitTaskUpdater interface {
+	RateLimitTask(ctx context.Context, runID, taskID uuid.UUID, retryAfter time.Time) error
+}
+
 // DispatchLoopConfig holds all parameters for the dispatch loop goroutine.
 type DispatchLoopConfig struct {
 	// NodeID is this node's canonical address (CAESIUM_NODE_ADDRESS).  Used
@@ -117,6 +128,11 @@ type DispatchLoopConfig struct {
 	LeaseStore OwnerReader
 	// Store provides pending-task queries.
 	Store TaskPendingReader
+	// RateLimitDB is the catalog DB used to resolve persisted task/job
+	// rate-limit metadata. Nil disables rate limiting for tests.
+	RateLimitDB *gorm.DB
+	// RateLimiter enforces declared resource limits before worker dispatch.
+	RateLimiter RateLimiter
 	// Peers resolves the current peer list.
 	Peers PeerLister
 	// PeerBaseURL maps a raw peer node address (host:dqlitePort) to the HTTP
@@ -154,6 +170,11 @@ type DispatchLoop struct {
 	// alive and merely declined.
 	benchMu      sync.Mutex
 	benchedPeers map[string]time.Time
+
+	// In-memory owner mode does not poll PendingTasksForDispatch, so it needs a
+	// local mirror of rate-limit retry-after times to avoid re-dispatch spin.
+	rateLimitDelayMu sync.Mutex
+	rateLimitDelays  map[uuid.UUID]map[uuid.UUID]time.Time
 }
 
 // peerBenchCooldown is how long a peer stays benched after a network-error
@@ -176,7 +197,11 @@ func NewDispatchLoop(cfg DispatchLoopConfig) *DispatchLoop {
 	if cfg.APIPort <= 0 {
 		cfg.APIPort = 8080
 	}
-	l := &DispatchLoop{cfg: cfg, benchedPeers: make(map[string]time.Time)}
+	l := &DispatchLoop{
+		cfg:             cfg,
+		benchedPeers:    make(map[string]time.Time),
+		rateLimitDelays: make(map[uuid.UUID]map[uuid.UUID]time.Time),
+	}
 	// Reuse the same nodeAddr→baseURL logic the peer list uses so the owner's
 	// own base URL is built identically (and honors the PeerBaseURL test hook).
 	l.ownerBaseURL = l.nodeAddrToBaseURL(cfg.NodeID)
@@ -334,6 +359,9 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID); !ok {
+				return
+			}
 			l.postOne(ctx, runID, p, req, task.Quarantine)
 		}(p, req)
 	}
@@ -357,6 +385,18 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 	}
 
 	ready := mgr.ReadyForDispatch(runID)
+	if len(ready) == 0 {
+		return
+	}
+	now := time.Now().UTC()
+	filtered := ready[:0]
+	for _, dt := range ready {
+		if l.rateLimitDelayed(runID, dt.TaskID, now) {
+			continue
+		}
+		filtered = append(filtered, dt)
+	}
+	ready = filtered
 	if len(ready) == 0 {
 		return
 	}
@@ -392,10 +432,94 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID); !ok {
+				return
+			}
 			l.postOne(ctx, runID, p, req, false)
 		}(p, req)
 	}
 	wg.Wait()
+}
+
+func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID uuid.UUID) bool {
+	if l.cfg.RateLimiter == nil || l.cfg.RateLimitDB == nil {
+		return true
+	}
+	rule, ok, err := ratelimit.RuleForTask(ctx, l.cfg.RateLimitDB, runID, taskID)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Warn("dispatch loop: rate limit lookup failed", "run_id", runID, "task_id", taskID, "error", err)
+		}
+		return false
+	}
+	if !ok {
+		return true
+	}
+	acquired, err := l.cfg.RateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Warn("dispatch loop: rate limit acquire failed", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "error", err)
+		}
+		return false
+	}
+	if acquired {
+		return true
+	}
+
+	updater, ok := l.cfg.Store.(rateLimitTaskUpdater)
+	if !ok {
+		log.Warn("dispatch loop: rate limit rejected task but store cannot requeue", "run_id", runID, "task_id", taskID, "resource", rule.Resource)
+		return false
+	}
+	now := time.Now().UTC()
+	retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
+	if err := updater.RateLimitTask(ctx, runID, taskID, retryAfter); err != nil {
+		if ctx.Err() == nil {
+			log.Warn("dispatch loop: rate limit requeue failed", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "error", err)
+		}
+		return false
+	}
+	if l.cfg.OwnerManager != nil {
+		l.rememberRateLimitDelay(runID, taskID, retryAfter)
+	}
+	metrics.RunSkippedTotal.WithLabelValues(rule.JobAlias, "rate_limit").Inc()
+	log.Info("dispatch loop: task delayed by rate limit", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter)
+	return false
+}
+
+func (l *DispatchLoop) rememberRateLimitDelay(runID, taskID uuid.UUID, retryAfter time.Time) {
+	if retryAfter.IsZero() {
+		return
+	}
+	l.rateLimitDelayMu.Lock()
+	defer l.rateLimitDelayMu.Unlock()
+	tasks := l.rateLimitDelays[runID]
+	if tasks == nil {
+		tasks = make(map[uuid.UUID]time.Time)
+		l.rateLimitDelays[runID] = tasks
+	}
+	tasks[taskID] = retryAfter.UTC()
+}
+
+func (l *DispatchLoop) rateLimitDelayed(runID, taskID uuid.UUID, now time.Time) bool {
+	l.rateLimitDelayMu.Lock()
+	defer l.rateLimitDelayMu.Unlock()
+	tasks := l.rateLimitDelays[runID]
+	if tasks == nil {
+		return false
+	}
+	retryAfter, ok := tasks[taskID]
+	if !ok {
+		return false
+	}
+	if retryAfter.After(now.UTC()) {
+		return true
+	}
+	delete(tasks, taskID)
+	if len(tasks) == 0 {
+		delete(l.rateLimitDelays, runID)
+	}
+	return false
 }
 
 // postOne does the actual HTTP call + metric/log accounting for one dispatch.
