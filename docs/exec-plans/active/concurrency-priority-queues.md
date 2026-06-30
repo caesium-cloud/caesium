@@ -524,7 +524,7 @@ Makes the queue and rate-limit state legible to operators.
 
 ## Harness Strengthening
 
-- [ ] H-1. Enable the new config gates on the integration server so CI exercises the real
+- [x] H-1. Enable the new config gates on the integration server so CI exercises the real
       paths. Add `CAESIUM_RUN_QUEUE_*` + `CAESIUM_RATE_LIMIT_*` to `just integration-up`
       (the lineage `CAESIUM_OPEN_LINEAGE_ENABLED` precedent) so the dequeuer + pruner +
       rate-limit path actually execute under `just integration-test`. **Also wire
@@ -536,6 +536,13 @@ Makes the queue and rate-limit state legible to operators.
       against the live distributed server.
       Files: `justfile`, `test/concurrency_priority_test.go`, `test/` harness setup.
       Depends on: C3 + D2.
+      Note (W4-η): `just integration-up` now starts the integration server in distributed
+      mode with a one-slot worker pool, fast worker polling, the rate-limit pruner, and
+      the run-queue dequeuer enabled; `just integration-test` passes the distributed-mode
+      env into the test container so the Stream B claim-order assertion runs. The
+      cron-priority assertion now starts the cron-configured job deterministically through
+      `POST /v1/jobs/:id/run` without a priority override instead of waiting for the cron
+      schedule.
 
 ## Navigational / Organizational Improvements
 

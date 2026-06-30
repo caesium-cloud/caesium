@@ -58,15 +58,54 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 
 	s.Run("distributed claimer claim order", func() {
 		if !strings.EqualFold(strings.TrimSpace(os.Getenv("CAESIUM_EXECUTION_MODE")), "distributed") {
-			s.T().Skip("distributed claimer claim-order e2e is wired by Stream H-1 (CAESIUM_EXECUTION_MODE=distributed on integration-up); the priority sort itself is unit-proven in internal/worker/claimer_test.go")
+			s.T().Skip("distributed claimer claim-order e2e requires CAESIUM_EXECUTION_MODE=distributed")
 		}
 
+		fillerAlias := fmt.Sprintf("e2e-priority-filler-%d", time.Now().UnixNano())
+		fillerDir := s.writeJobManifest(priorityJobManifest(fillerAlias, "high", `sleep 15`))
+		defer os.RemoveAll(fillerDir)
+		s.runCLI("job", "apply", "--path", fillerDir, "--server", s.caesiumURL)
+		fillerJob := s.requireJobByAlias(fillerAlias)
+		s.Require().NotNil(fillerJob)
+
+		fillerRunID := s.triggerRun(fillerJob.ID)
+		fillerRunning := s.awaitFirstTaskStatus(fillerJob.ID, fillerRunID, runTimeout, "running")
+		s.Require().NotNil(fillerRunning.Tasks[0].StartedAt, "filler task must occupy the single worker slot before priority runs are queued")
+
+		blockedLowRunID := s.startRunREST(job.ID, "low", map[string]string{"lane": "blocked-low"})
+		blockedNormalRunID := s.startRunREST(job.ID, "normal", map[string]string{"lane": "blocked-normal"})
+		blockedHighRunID := s.startRunREST(job.ID, "high", map[string]string{"lane": "blocked-high"})
+
+		for label, runID := range map[string]string{
+			"high":   blockedHighRunID,
+			"normal": blockedNormalRunID,
+			"low":    blockedLowRunID,
+		} {
+			pendingRun := s.awaitFirstTaskStatus(job.ID, runID, 10*time.Second, "pending")
+			s.Nil(pendingRun.Tasks[0].StartedAt, "%s run must remain unclaimed while the filler occupies the worker slot", label)
+		}
+
+		fillerDone := s.awaitRun(fillerJob.ID, fillerRunID, runTimeout)
+		s.Equal("succeeded", fillerDone.Status)
+
+		blockedHighRun := s.awaitRun(job.ID, blockedHighRunID, runTimeout)
+		blockedNormalRun := s.awaitRun(job.ID, blockedNormalRunID, runTimeout)
+		blockedLowRun := s.awaitRun(job.ID, blockedLowRunID, runTimeout)
+		s.Require().NotEmpty(blockedHighRun.Tasks)
+		s.Require().NotNil(blockedHighRun.Tasks[0].StartedAt)
+		s.Require().NotEmpty(blockedNormalRun.Tasks)
+		s.Require().NotNil(blockedNormalRun.Tasks[0].StartedAt)
+		s.Require().NotEmpty(blockedLowRun.Tasks)
+		s.Require().NotNil(blockedLowRun.Tasks[0].StartedAt)
+
 		drained := priorityDrainOrder(map[string]*runResponse{
-			"high":   highRun,
-			"normal": normalRun,
-			"low":    lowRun,
+			"high":   blockedHighRun,
+			"normal": blockedNormalRun,
+			"low":    blockedLowRun,
 		})
 		s.Equal([]string{"high", "normal", "low"}, drained)
+		s.True(blockedHighRun.Tasks[0].StartedAt.Before(*blockedNormalRun.Tasks[0].StartedAt), "high priority run should start before normal priority run")
+		s.True(blockedNormalRun.Tasks[0].StartedAt.Before(*blockedLowRun.Tasks[0].StartedAt), "normal priority run should start before low priority run")
 	})
 
 	cronAlias := fmt.Sprintf("e2e-priority-cron-%d", time.Now().UnixNano())
@@ -75,25 +114,11 @@ func (s *IntegrationTestSuite) TestPriorityRunStartSurfacesAndCronDefault() {
 	s.runCLI("job", "apply", "--path", cronDir, "--server", s.caesiumURL)
 	cronJob := s.requireJobByAlias(cronAlias)
 
-	var cronRun *runResponse
-	s.Require().Eventually(func() bool {
-		runs := s.fetchRuns(cronJob.ID)
-		if len(runs) == 0 {
-			return false
-		}
-		for i := range runs {
-			run := s.fetchRun(cronJob.ID, runs[i].ID)
-			if len(run.Tasks) == 0 {
-				continue
-			}
-			if run.Priority == 3 && run.Tasks[0].Priority == 3 {
-				cronRun = &run
-				return true
-			}
-		}
-		return false
-	}, 75*time.Second, time.Second, "cron-triggered tasks should inherit metadata.priority")
-	s.Require().NotNil(cronRun)
+	cronRunID := s.triggerRun(cronJob.ID)
+	cronRun := s.awaitRun(cronJob.ID, cronRunID, runTimeout)
+	s.Equal(3, cronRun.Priority, "cron-configured job runs should inherit metadata.priority")
+	s.Require().NotEmpty(cronRun.Tasks)
+	s.Equal(3, cronRun.Tasks[0].Priority, "cron-configured job tasks should inherit metadata.priority")
 }
 
 func (s *IntegrationTestSuite) startRunREST(jobID, priority string, params map[string]string) string {
@@ -113,6 +138,30 @@ func (s *IntegrationTestSuite) startRunREST(jobID, priority string, params map[s
 	s.Require().NoError(json.NewDecoder(resp.Body).Decode(&run))
 	s.Require().NotEmpty(run.ID)
 	return run.ID
+}
+
+func (s *IntegrationTestSuite) awaitFirstTaskStatus(jobID, runID string, timeout time.Duration, statuses ...string) runResponse {
+	s.T().Helper()
+	want := make(map[string]struct{}, len(statuses))
+	for _, status := range statuses {
+		want[status] = struct{}{}
+	}
+
+	deadline := time.Now().Add(timeout)
+	for {
+		if time.Now().After(deadline) {
+			s.T().Fatalf("timeout waiting for run %s first task to reach one of %v", runID, statuses)
+		}
+
+		run := s.fetchRun(jobID, runID)
+		if len(run.Tasks) > 0 {
+			if _, ok := want[run.Tasks[0].Status]; ok {
+				return run
+			}
+		}
+
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func priorityDrainOrder(runs map[string]*runResponse) []string {
