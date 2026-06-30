@@ -22,6 +22,7 @@ import (
 )
 
 type queueCLIItem struct {
+	ID         string            `json:"id"`
 	Position   int               `json:"position"`
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`
@@ -44,16 +45,17 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 
 	var stdout, stderr string
 	var err error
-	s.Require().Eventually(func() bool {
+	queueListed := s.Eventually(func() bool {
 		stdout, stderr, err = s.runCLISeparate("job", "queue", alias, "--server", s.caesiumURL)
 		return err == nil && strings.Contains(stdout, "lane=queued")
 	}, 10*time.Second, 250*time.Millisecond, "job queue CLI should list the pending queued run")
-	s.Require().NoError(err, "caesium job queue failed:\nstdout=%s\nstderr=%s", stdout, stderr)
 	// stderr may carry the live server's debug-level logs; assert only that no WARN/ERROR
 	// diagnostics surfaced — the clean-stdout check below is the real machine-output gate.
 	s.NotContains(stderr, `"level":"warn"`, "job queue should surface no warnings on success")
 	s.NotContains(stderr, `"level":"error"`, "job queue should surface no errors on success")
 	s.NotContains(stdout, `"level":"`, "job queue stdout should not contain structured logs")
+	s.Require().True(queueListed, "job queue CLI should list the pending queued run")
+	s.Require().NoError(err, "caesium job queue failed:\nstdout=%s\nstderr=%s", stdout, stderr)
 
 	lines := nonEmptyLines(stdout)
 	s.Require().GreaterOrEqual(len(lines), 2, "queue table should have a header and row:\n%s", stdout)
@@ -72,6 +74,8 @@ func (s *IntegrationTestSuite) TestJobQueueCLIListsPendingRun() {
 	var rows []queueCLIItem
 	s.Require().NoError(json.Unmarshal([]byte(jsonOut), &rows))
 	s.Require().Len(rows, 1)
+	s.Require().NotEmpty(rows[0].ID)
+	s.Require().NoError(uuid.Validate(rows[0].ID))
 	s.Equal(1, rows[0].Position)
 	s.Equal(3, rows[0].Priority)
 	s.Equal("queued", rows[0].Params["lane"])

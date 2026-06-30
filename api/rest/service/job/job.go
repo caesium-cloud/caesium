@@ -173,6 +173,7 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 }
 
 type QueueItem struct {
+	ID         uuid.UUID         `json:"id"`
 	Position   int               `json:"position"`
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`
@@ -196,6 +197,7 @@ func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
 			return nil, err
 		}
 		items = append(items, QueueItem{
+			ID:         rows[idx].ID,
 			Position:   idx + 1,
 			Priority:   rows[idx].Priority,
 			Params:     params,

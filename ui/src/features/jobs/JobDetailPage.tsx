@@ -555,7 +555,7 @@ function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: 
         <div className="divide-y rounded-md border bg-background/40">
           {rows?.map((row) => (
             <div
-              key={`${row.position}:${row.enqueued_at}`}
+              key={row.id}
               data-testid="run-queue-row"
               className="grid gap-2 px-3 py-2 text-xs md:grid-cols-[72px_96px_minmax(160px,1fr)_minmax(160px,1.4fr)] md:items-center"
             >

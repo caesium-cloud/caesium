@@ -30,6 +30,7 @@ type queueJobSummary struct {
 }
 
 type queueItem struct {
+	ID         string            `json:"id"`
 	Position   int               `json:"position"`
 	Priority   int               `json:"priority"`
 	Params     map[string]string `json:"params,omitempty"`

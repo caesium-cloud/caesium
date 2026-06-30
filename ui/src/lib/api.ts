@@ -97,6 +97,7 @@ export interface TaskRun {
 }
 
 export interface RunQueueItem {
+  id: string;
   position: number;
   priority: number;
   params?: Record<string, string>;
@@ -275,8 +276,6 @@ export interface Node {
 export interface SystemFeatures {
   database_console_enabled: boolean;
   log_console_enabled: boolean;
-  run_queue_observability_enabled?: boolean;
-  rate_limit_observability_enabled?: boolean;
   external_url?: string;
 }
 
