@@ -160,6 +160,7 @@ integration-test:
         -v {{ sock }}:/var/run/docker.sock \
         -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_EXECUTION_MODE=distributed \
         -e DOCKER_HOST=unix:///var/run/docker.sock \
         --network=container:{{ it_container }} \
         -w {{ bld_dir }} \
@@ -234,6 +235,12 @@ integration-up: build-test
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_EXECUTION_MODE=distributed \
+        -e CAESIUM_WORKER_ENABLED=true \
+        -e CAESIUM_WORKER_POOL_SIZE=1 \
+        -e CAESIUM_WORKER_POLL_INTERVAL=500ms \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
         -e CAESIUM_RUN_QUEUE_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
