@@ -191,6 +191,40 @@ steps:
 	require.True(t, def.EffectiveReplaySafeForStep(&def.Steps[1]))
 }
 
+func TestParseSchedulingMetadata(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: scheduling-metadata
+  priority: high
+  concurrency:
+    maxRuns: 1
+    strategy: skip
+  rateLimits:
+    - resource: warehouse-api
+      limit: 120
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: warehouse-api
+      units: 2
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	require.Equal(t, PriorityHigh, def.Metadata.Priority)
+	require.Equal(t, &Concurrency{MaxRuns: 1, Strategy: ConcurrencyStrategySkip}, def.Metadata.Concurrency)
+	require.Equal(t, []RateLimit{{Resource: "warehouse-api", Limit: 120, Window: "1m"}}, def.Metadata.RateLimits)
+	require.NotNil(t, def.Steps[0].RateLimit)
+	require.Equal(t, "warehouse-api", def.Steps[0].RateLimit.Resource)
+	require.Equal(t, 2, def.Steps[0].RateLimit.Units)
+}
+
 func TestParseInvalidDefinitions(t *testing.T) {
 	cases := map[string]string{
 		"bad version": `apiVersion: v2
@@ -441,6 +475,94 @@ steps:
     image: example
     kueue: {queueName: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa}
 `,
+		"bad priority": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  priority: urgent
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"bad concurrency strategy": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  concurrency:
+    maxRuns: 1
+    strategy: newest
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"negative concurrency maxRuns": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  concurrency:
+    maxRuns: -1
+    strategy: skip
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"bad rate limit window": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: api
+      limit: 10
+      window: forever
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"blank rate limit resource": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: " "
+      limit: 10
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+`,
+		"step rate limit unknown resource": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+  rateLimits:
+    - resource: api
+      limit: 10
+      window: 1m
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: build
+    image: example
+    rateLimit:
+      resource: database
+      units: 1
+`,
 	}
 
 	for name, src := range cases {
@@ -645,6 +767,7 @@ func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
 		"serviceAccountName": "deployer",
 		"podAnnotations": {"iam": "enabled"},
 		"automountServiceAccountToken": false,
+		"rateLimit": {"resource": "api", "units": 3},
 		"volumeMounts": [{"volume": "work", "path": "/work"}]
 	}`)
 
@@ -655,6 +778,7 @@ func TestStepUnmarshalJSONIncludesVolumeAndIdentityFields(t *testing.T) {
 	require.Equal(t, map[string]string{"iam": "enabled"}, step.PodAnnotations)
 	require.NotNil(t, step.AutomountServiceAccountToken)
 	require.False(t, *step.AutomountServiceAccountToken)
+	require.Equal(t, &StepRateLimit{Resource: "api", Units: 3}, step.RateLimit)
 	require.Equal(t, []VolumeMount{{Volume: "work", Path: "/work"}}, step.VolumeMounts)
 }
 

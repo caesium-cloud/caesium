@@ -14,6 +14,14 @@ metadata:
   maxParallelTasks: 2            # Optional. Max concurrent tasks.
   taskTimeout: 5m                # Optional. Per-task timeout.
   runTimeout: 30m                # Optional. Whole-run timeout.
+  priority: normal               # Optional. high | normal | low.
+  concurrency:                   # Optional. Run-level admission policy.
+    maxRuns: 1
+    strategy: queue              # queue | replace | skip | fail
+  rateLimits:                    # Optional. Shared resource budgets.
+    - resource: warehouse-api
+      limit: 120
+      window: 1m
   schemaValidation: warn         # Optional. "" | "warn" | "fail"
 trigger:
   type: cron                     # "cron", "http", or "event"
@@ -32,6 +40,9 @@ steps:
     engine: docker               # "docker" (default), "podman", or "kubernetes"
     image: alpine:3.23
     command: ["sh", "-c", "echo hello"]
+    rateLimit:                   # Optional. Consumes a metadata.rateLimits resource.
+      resource: warehouse-api
+      units: 1
     volumeMounts:
       - {volume: work, path: /work}
 ```
@@ -45,7 +56,7 @@ steps:
 ### Structure at a glance
 
 - `apiVersion: v1` and `kind: Job` (both required)
-- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
+- `metadata` (required): `alias` (required, unique) · `labels` · `annotations` · `maxParallelTasks` · `taskTimeout` · `runTimeout` · `priority` (`high` | `normal` | `low`) · `concurrency` (`maxRuns` + `strategy`) · `rateLimits` · `schemaValidation` (`""` | `"warn"` | `"fail"`) · `replaySafe` · `cache` · Kubernetes defaults (`serviceAccountName`, `podAnnotations`, `automountServiceAccountToken`)
 - `trigger` (required): `type` (`cron` | `http` | `event`) + `configuration` + optional `defaultParams` — see the snippets below
 - `volumes` (optional): named BYO storage sources mounted by steps
 - `steps` (required, ≥1): see the step quick-reference below
@@ -99,6 +110,39 @@ trigger:
 
 For trigger chaining, match lifecycle events from `source: caesium`, for example `type: "run_completed"` with `filter.job_alias: "upstream-job"`. Caesium injects and increments the scheduler-owned `_trigger_depth` run param to stop runtime loops; do not set it in authored manifests.
 
+### Run Scheduling Controls
+
+Use `metadata.priority` to order pending work when the cluster is saturated. Valid values are `high`, `normal`, and `low`. Priority is ordering only; it does not preempt running tasks.
+
+Use `metadata.concurrency` to control new runs of the same job when prior runs are still active:
+
+```yaml
+metadata:
+  alias: nightly-import
+  concurrency:
+    maxRuns: 1
+    strategy: skip              # queue, replace, skip, or fail
+```
+
+Use `metadata.rateLimits` to declare shared resource budgets and `steps[].rateLimit` to consume units from one of those resources:
+
+```yaml
+metadata:
+  alias: api-ingest
+  rateLimits:
+    - resource: warehouse-api
+      limit: 120
+      window: 1m
+steps:
+  - name: extract
+    image: alpine:3.23
+    rateLimit:
+      resource: warehouse-api
+      units: 2
+```
+
+`priority`, `concurrency`, `rateLimits`, and `steps[].rateLimit` are scheduling metadata, not execution inputs, so changing only these fields does not change the task cache identity.
+
 ### Steps (most-used fields)
 
 | Field | Type | Required | Notes |
@@ -113,6 +157,7 @@ For trigger chaining, match lifecycle events from `source: caesium`, for example
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
+| `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |

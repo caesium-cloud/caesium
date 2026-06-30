@@ -18,10 +18,28 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+func TestNewCopiesSchedulingMetadata(t *testing.T) {
+	model := &models.Job{
+		ID:          uuid.New(),
+		Alias:       "scheduling-metadata",
+		Priority:    schema.PriorityHigh,
+		Concurrency: datatypes.JSON(`{"maxRuns":2,"strategy":"skip"}`),
+		RateLimits:  datatypes.JSON(`[{"resource":"database","limit":10,"window":"30s"}]`),
+	}
+
+	got, ok := New(model).(*job)
+	require.True(t, ok)
+	require.Equal(t, schema.PriorityHigh, got.priority)
+	require.Equal(t, &schema.Concurrency{MaxRuns: 2, Strategy: schema.ConcurrencyStrategySkip}, got.concurrency)
+	require.Equal(t, []schema.RateLimit{{Resource: "database", Limit: 10, Window: "30s"}}, got.rateLimits)
+}
 
 func TestRunLocalExecutesParallelBranches(t *testing.T) {
 	db := jobdeftestutil.OpenTestDB(t)

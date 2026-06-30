@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: concurrency-skip
+  concurrency:
+    maxRuns: 1
+    strategy: skip
+trigger:
+  type: cron
+  configuration:
+    cron: "*/5 * * * *"
+    timezone: "UTC"
+steps:
+  - name: ingest
+    image: alpine:3.23
+    command: ["sh", "-c", "echo ingesting scheduled batch"]

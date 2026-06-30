@@ -62,6 +62,15 @@ const (
 	SchemaValidationDisabled = ""
 	SchemaValidationWarn     = "warn"
 	SchemaValidationFail     = "fail"
+
+	PriorityHigh   = "high"
+	PriorityNormal = "normal"
+	PriorityLow    = "low"
+
+	ConcurrencyStrategyQueue   = "queue"
+	ConcurrencyStrategyReplace = "replace"
+	ConcurrencyStrategySkip    = "skip"
+	ConcurrencyStrategyFail    = "fail"
 )
 
 // SLAConfig defines the service-level agreement for a job.
@@ -90,6 +99,9 @@ type Metadata struct {
 	MaxParallelTasks int               `yaml:"maxParallelTasks,omitempty" json:"maxParallelTasks,omitempty"`
 	TaskTimeout      time.Duration     `yaml:"taskTimeout,omitempty" json:"taskTimeout,omitempty"`
 	RunTimeout       time.Duration     `yaml:"runTimeout,omitempty" json:"runTimeout,omitempty"`
+	Priority         string            `yaml:"priority,omitempty" json:"priority,omitempty"`
+	Concurrency      *Concurrency      `yaml:"concurrency,omitempty" json:"concurrency,omitempty"`
+	RateLimits       []RateLimit       `yaml:"rateLimits,omitempty" json:"rateLimits,omitempty"`
 	// SLA defines the service-level agreement for this job. It supports two
 	// modes that may be used independently or together:
 	//   duration    — max run duration before an SLA miss alert (relative to
@@ -108,6 +120,19 @@ type Metadata struct {
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
+}
+
+// Concurrency controls admission of new runs for the same job.
+type Concurrency struct {
+	MaxRuns  int    `yaml:"maxRuns,omitempty" json:"maxRuns,omitempty"`
+	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
+}
+
+// RateLimit declares a shared resource budget for task scheduling.
+type RateLimit struct {
+	Resource string `yaml:"resource" json:"resource"`
+	Limit    int    `yaml:"limit" json:"limit"`
+	Window   string `yaml:"window" json:"window"`
 }
 
 // Trigger defines how the job is triggered.
@@ -179,6 +204,12 @@ type Kueue struct {
 	QueueName string `yaml:"queueName,omitempty" json:"queueName,omitempty"`
 }
 
+// StepRateLimit declares the units of a job-level rate limit a step consumes.
+type StepRateLimit struct {
+	Resource string `yaml:"resource" json:"resource"`
+	Units    int    `yaml:"units" json:"units"`
+}
+
 // Step defines an execution step.
 type Step struct {
 	Name         string            `yaml:"name" json:"name"`
@@ -203,6 +234,9 @@ type Step struct {
 	// Kueue delegates this step's admission to a Kueue LocalQueue (kubernetes
 	// engine only). It is scheduling metadata and does not affect the cache hash.
 	Kueue *Kueue `yaml:"kueue,omitempty" json:"kueue,omitempty"`
+	// RateLimit references a job-level shared resource budget for this step.
+	// It is scheduling metadata and does not affect the cache hash.
+	RateLimit *StepRateLimit `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
 	// OutputSchema is a JSON Schema describing this step's expected output keys.
 	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
@@ -233,6 +267,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		PodAnnotations               map[string]string         `yaml:"podAnnotations"`
 		AutomountServiceAccountToken *bool                     `yaml:"automountServiceAccountToken"`
 		Kueue                        *Kueue                    `yaml:"kueue"`
+		RateLimit                    *StepRateLimit            `yaml:"rateLimit"`
 		OutputSchema                 map[string]any            `yaml:"outputSchema"`
 		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
 		Cache                        interface{}               `yaml:"cache"`
@@ -278,6 +313,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.PodAnnotations = rs.PodAnnotations
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.Kueue = rs.Kueue
+	s.RateLimit = rs.RateLimit
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -308,6 +344,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		PodAnnotations               map[string]string         `json:"podAnnotations"`
 		AutomountServiceAccountToken *bool                     `json:"automountServiceAccountToken"`
 		Kueue                        *Kueue                    `json:"kueue"`
+		RateLimit                    *StepRateLimit            `json:"rateLimit"`
 		OutputSchema                 map[string]any            `json:"outputSchema"`
 		InputSchema                  map[string]map[string]any `json:"inputSchema"`
 		Cache                        interface{}               `json:"cache"`
@@ -343,6 +380,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.PodAnnotations = rs.PodAnnotations
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.Kueue = rs.Kueue
+	s.RateLimit = rs.RateLimit
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Cache = rs.Cache
@@ -382,6 +420,11 @@ func (d *Definition) Validate() error {
 			d.Metadata.SchemaValidation, SchemaValidationWarn, SchemaValidationFail)
 	}
 
+	rateLimitResources, err := validateSchedulingMetadata(&d.Metadata)
+	if err != nil {
+		return err
+	}
+
 	if err := validateTrigger(&d.Trigger); err != nil {
 		return err
 	}
@@ -395,10 +438,50 @@ func (d *Definition) Validate() error {
 	if len(d.Steps) == 0 {
 		return fmt.Errorf("steps must contain at least one entry")
 	}
-	if err := validateSteps(d.Steps, volumes); err != nil {
+	if err := validateSteps(d.Steps, volumes, rateLimitResources); err != nil {
 		return err
 	}
 	return nil
+}
+
+func validateSchedulingMetadata(metadata *Metadata) (map[string]struct{}, error) {
+	switch metadata.Priority {
+	case "", PriorityHigh, PriorityNormal, PriorityLow:
+	default:
+		return nil, fmt.Errorf("metadata.priority %q must be one of [\"%s\",\"%s\",\"%s\"]",
+			metadata.Priority, PriorityHigh, PriorityNormal, PriorityLow)
+	}
+
+	if metadata.Concurrency != nil {
+		if metadata.Concurrency.MaxRuns < 0 {
+			return nil, fmt.Errorf("metadata.concurrency.maxRuns must be >= 0")
+		}
+		switch metadata.Concurrency.Strategy {
+		case ConcurrencyStrategyQueue, ConcurrencyStrategyReplace, ConcurrencyStrategySkip, ConcurrencyStrategyFail:
+		default:
+			return nil, fmt.Errorf("metadata.concurrency.strategy %q must be one of [\"%s\",\"%s\",\"%s\",\"%s\"]",
+				metadata.Concurrency.Strategy,
+				ConcurrencyStrategyQueue,
+				ConcurrencyStrategyReplace,
+				ConcurrencyStrategySkip,
+				ConcurrencyStrategyFail)
+		}
+	}
+
+	resources := make(map[string]struct{}, len(metadata.RateLimits))
+	for i := range metadata.RateLimits {
+		limit := &metadata.RateLimits[i]
+		resource := strings.TrimSpace(limit.Resource)
+		if resource == "" {
+			return nil, fmt.Errorf("metadata.rateLimits[%d].resource is required", i)
+		}
+		if _, err := time.ParseDuration(limit.Window); err != nil {
+			return nil, fmt.Errorf("metadata.rateLimits[%d].window %q must be a valid duration: %w", i, limit.Window, err)
+		}
+		resources[resource] = struct{}{}
+	}
+
+	return resources, nil
 }
 
 func validateTrigger(t *Trigger) error {
@@ -701,12 +784,15 @@ func isKnownAccessMode(value string) bool {
 	}
 }
 
-func validateSteps(steps []Step, volumes map[string]*Volume) error {
+func validateSteps(steps []Step, volumes map[string]*Volume, rateLimitResources map[string]struct{}) error {
 	names, adj, err := computeStepAdjacency(steps)
 	if err != nil {
 		return err
 	}
 	if err := validateStepVolumeMounts(steps, volumes); err != nil {
+		return err
+	}
+	if err := validateStepRateLimits(steps, rateLimitResources); err != nil {
 		return err
 	}
 	if err := detectCycles(adj, names); err != nil {
@@ -724,6 +810,23 @@ func validateSteps(steps []Step, volumes map[string]*Volume) error {
 	}
 	if err := validateSchemas(steps, names, predecessors); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateStepRateLimits(steps []Step, resources map[string]struct{}) error {
+	for i := range steps {
+		rateLimit := steps[i].RateLimit
+		if rateLimit == nil {
+			continue
+		}
+		resource := strings.TrimSpace(rateLimit.Resource)
+		if resource == "" {
+			return fmt.Errorf("steps[%d].rateLimit.resource is required when rateLimit is set", i)
+		}
+		if _, ok := resources[resource]; !ok {
+			return fmt.Errorf("steps[%d].rateLimit.resource %q does not match any metadata.rateLimits[].resource", i, rateLimit.Resource)
+		}
 	}
 	return nil
 }

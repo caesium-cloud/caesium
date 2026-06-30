@@ -23,7 +23,11 @@ type Task struct {
 	RetryBackoff bool              `gorm:"not null;default:false" json:"retry_backoff"`
 	TriggerRule  string            `gorm:"type:text;not null;default:'all_success'" json:"trigger_rule"`
 	ReplaySafe   bool              `gorm:"not null;default:false" json:"replay_safe"`
-	CacheConfig  datatypes.JSON    `gorm:"type:json" json:"cache_config,omitempty"`
+	// RateLimitResource and RateLimitUnits carry step scheduling metadata from
+	// the job definition into the durable task catalog.
+	RateLimitResource string         `gorm:"type:text;not null;default:''" json:"rate_limit_resource,omitempty"`
+	RateLimitUnits    int            `gorm:"not null;default:0" json:"rate_limit_units,omitempty"`
+	CacheConfig       datatypes.JSON `gorm:"type:json" json:"cache_config,omitempty"`
 	// OutputSchema is a JSON Schema describing this task's expected output keys.
 	OutputSchema datatypes.JSON `gorm:"type:json" json:"output_schema,omitempty"`
 	// InputSchema maps predecessor task names to JSON Schema fragments describing

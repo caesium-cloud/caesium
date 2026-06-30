@@ -27,6 +27,9 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `maxParallelTasks` | integer | optional | Caps concurrent runnable steps for a single job run. |
 | `taskTimeout` | duration | optional | Default timeout applied to each step unless overridden by runtime configuration. |
 | `runTimeout` | duration | optional | Maximum total wall-clock time for the job run. |
+| `priority` | string | optional | Run and task scheduling priority: `high`, `normal`, or `low`. Scheduling metadata excluded from the cache identity hash. |
+| `concurrency` | object | optional | Run-level concurrency control with `maxRuns` and `strategy` (`queue`, `replace`, `skip`, or `fail`). Scheduling metadata excluded from the cache identity hash. |
+| `rateLimits` | array[object] | optional | Shared resource budgets declared as `{resource, limit, window}`. `window` is a duration string. Scheduling metadata excluded from the cache identity hash. |
 | `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
 | `replaySafe` | boolean | optional | Marks every step in this job as eligible for quarantined what-if replay. Recorded on each baseline task run; excluded from the cache identity hash. |
 | `cache` | boolean or object | optional | Job-level cache defaults; accepts `true`, `{ttl: "24h"}`, or `{pinDigests: true}`. Step-level `cache` overrides these defaults. |
@@ -108,6 +111,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `podAnnotations` | map[string]string | optional | Kubernetes pod annotations for this step. |
 | `automountServiceAccountToken` | boolean | optional | Kubernetes pod service-account token setting for this step. |
 | `kueue` | object | optional | Delegate this step's admission to a Kueue LocalQueue (kubernetes engine only). See [Kueue](#kueue) below. Excluded from the cache identity hash — it is scheduling metadata, not an execution input. |
+| `rateLimit` | object | optional | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Scheduling metadata excluded from the cache identity hash. |
 | `replaySafe` | boolean | optional | Marks this step as eligible for quarantined what-if replay. The effective value (`metadata.replaySafe` or this field) is recorded on the baseline task run and excluded from the cache identity hash. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
