@@ -203,13 +203,39 @@ path), folded into the **nine** as-built corrections in the Source-Of-Truth Note
   `NormalizeWindow`), a shutdown CPU-spin, and stale `limit_val` on conflict. Integration
   gate green ×3 (incl. the merge-resolution build).
 
+### Wave 3 — run concurrency strategies shipped (runtime complete)
+
+- **Stream γ (C1–C3):** gates a *new run* at `maxRuns` with `skip`/`fail`/`replace`/`queue`.
+  Admission is a single **atomic** conditional `INSERT … SELECT WHERE count < maxRuns`
+  (no CountActive-then-Create TOCTOU), invoked from all three creation paths
+  (`store.Start`, `resolveRun` before the `FindRunning` attach, `StartForBackfill`);
+  `replace` cancels the oldest active run via a new `StatusCancelled` + `CancelRun` that
+  atomically transitions the JobRun, its `task_runs`, and its lease in one transaction;
+  `queue` parks overflow in a durable, leader-gated (`dqlite.IsLocalLeader`) `run_queue`
+  drained by an atomic optimistic row-claim with a stale-claim reaper — PR #267, merged
+  `125e241`. **Opus 3-lens review: atomic-admission + cancellation-race CLEAN with proof,
+  0 blockers.** Six review/gate rounds then fixed: the queue stale-claim reaper, dequeuer
+  sentinel handling (`ErrRunSkipped`/`ErrMaxConcurrentRunsReached`), the event-surface
+  `fail` outcome, wiring `CAESIUM_RUN_QUEUE_*` into `integration-up` (the dequeuer wasn't
+  running in CI), a priority-default regression in the `startRun` refactor, and a
+  `RunQueue` GORM table-name mismatch (`run_queues` vs the raw-SQL `run_queue`) — the last
+  three each caught **only** by the integration gate driving the live surface. CI amd64
+  `build-and-integration-test` green (×2 across commits). Known follow-up: the
+  cron-priority integration assertion (`TestPriorityRunStartSurfacesAndCronDefault`) is
+  cron-timing-flaky — de-flake by triggering the run deterministically rather than waiting
+  for the schedule.
+
+**Runtime complete.** Streams A (schema) → B (priority) → D (rate limiting) → C
+(concurrency strategies) are all shipped. Remaining: E (observability UI), H-1 (the
+distributed/run-queue CI harness + B's deferred drain-order e2e), N-1 (roadmap flip).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Job-schema foundation — `priority`/`concurrency`/`rateLimits` schema, enum validation, **cache-hash exclusion**, **catalog persistence + importer mapping + runtime wiring**, schema docs | **P1** | **Shipped** (#264) — schema + persistence + generator |
 | B | Priority queues — `priority` on `JobRun`+`TaskRun` (+ claim index), JobRun→TaskRun propagation, claimer ordering, `caesium run start --priority` + REST/trigger priority | **P1** | **Shipped** (#265) — column + claim ordering + CLI; distributed drain-order e2e deferred to H-1 |
-| C | Run concurrency strategies — **atomic** admission gate in `run.Store.Start` (`skip`/`fail`), `replace` (+ cancellation primitive), `run_queue` model + **leader-gated** dequeuer | **P1** | Not started |
+| C | Run concurrency strategies — **atomic** admission gate in `run.Store.Start` (`skip`/`fail`), `replace` (+ cancellation primitive), `run_queue` model + **leader-gated** dequeuer | **P1** | **Shipped** (#267) — atomic admission + cancellation + leader-gated queue |
 | D | Resource rate limiting — durable single-statement sliding-window `Limiter`, `rate_limit_tokens` model, task-dispatch acquire/re-queue, token pruner | P2 | **Shipped** (#266) — atomic limiter + dispatch enforcement + pruner |
 | E | Observability surfaces — run-queue UI on job detail, rate-limit status indicator, `caesium job queue <alias>` | P2 | Not started |
 | (Fairness) | Per-namespace round-robin + quotas (design §4) | — | **Deferred** — blocked on Multi-Tenancy (roadmap §3.1) |
