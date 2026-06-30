@@ -1,6 +1,6 @@
 # Concurrency Strategies & Priority Queues — Run-Level Scheduling Control
 
-Last updated: 2026-06-29
+Last updated: 2026-06-30
 
 Caesium's concurrency model today is a single per-run knob: `metadata.maxParallelTasks`
 bounds how many **tasks within one run** execute at once (a `worker.Pool` semaphore at
@@ -154,7 +154,7 @@ Multi-Tenancy (roadmap §3.1). Priority and rate-limit storage are designed to a
 later `namespace` scoping column without a rewrite; that is the only forward-compat
 concession this plan makes.
 
-## Progress (as of 2026-06-29)
+## Progress (as of 2026-06-30)
 
 The plan was published from the `design-concurrency-priority.md` design, a six-subsystem
 survey of the live backend, and **two adversarial-review rounds** — which caught **eleven
@@ -179,14 +179,38 @@ path), folded into the **nine** as-built corrections in the Source-Of-Truth Note
   `limit`/`units` validation, duplicate-resource validation, an empty-`strategy` default
   to `queue`, and logged unmarshal errors. Integration gate green ×2.
 
+### Wave 2 — priority queues + rate limiting shipped
+
+- **Stream β (B1–B3):** priority flows from job metadata or a per-run override onto the
+  durable run and every task; the distributed claimer drains by it. `Priority` column on
+  `JobRun`+`TaskRun` with a composite claim index (equality predicates → sort cols →
+  `claimed_by` last), `JobRun→TaskRun` propagation (incl. the `RegisterTasks` `Select`
+  fix), claimer `ORDER BY priority DESC, created_at ASC`, and `caesium run start
+  --priority` + REST/trigger priority via an options-struct (no positional-arg break) —
+  PR #265, merged `e833039`. Opus review caught the headline drain-order assertion as
+  green-but-hollow (gated behind distributed mode the CI server doesn't enable) → made
+  the skip **explicit** and **deferred the distributed claim-order e2e to H-1** (the sort
+  is unit-proven, the column round-trip is e2e-proven); bot sweep fixed the index column
+  order and reverted a breaking `DisallowUnknownFields` tightening. Integration gate green.
+- **Stream δ (D1–D2):** a durable sliding-window `RateLimitToken` catalog model + a
+  `Limiter.Acquire` that is a single atomic guarded raw-SQL upsert (`clause.OnConflict`
+  can't express the WHERE-guard), normalizing sub-minute windows to a 1-minute bucket;
+  dispatch-path enforcement reading the persisted per-task `rateLimit` (re-queue with
+  retry-after, no slot held) + an env-gated expired-window pruner — PR #266, merged
+  `18cdba1`. Four review/bot rounds fixed: an unused-import build break, the
+  `units > limit` fresh-window admission gap, a `record-not-found` no-op (it was breaking
+  **all** local dispatch), the window-normalization bug (`Acquire` never called
+  `NormalizeWindow`), a shutdown CPU-spin, and stale `limit_val` on conflict. Integration
+  gate green ×3 (incl. the merge-resolution build).
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Job-schema foundation — `priority`/`concurrency`/`rateLimits` schema, enum validation, **cache-hash exclusion**, **catalog persistence + importer mapping + runtime wiring**, schema docs | **P1** | **Shipped** (#264) — schema + persistence + generator |
-| B | Priority queues — `priority` on `JobRun`+`TaskRun` (+ claim index), JobRun→TaskRun propagation, claimer ordering, `caesium run start --priority` + REST/trigger priority | **P1** | Not started |
+| B | Priority queues — `priority` on `JobRun`+`TaskRun` (+ claim index), JobRun→TaskRun propagation, claimer ordering, `caesium run start --priority` + REST/trigger priority | **P1** | **Shipped** (#265) — column + claim ordering + CLI; distributed drain-order e2e deferred to H-1 |
 | C | Run concurrency strategies — **atomic** admission gate in `run.Store.Start` (`skip`/`fail`), `replace` (+ cancellation primitive), `run_queue` model + **leader-gated** dequeuer | **P1** | Not started |
-| D | Resource rate limiting — durable single-statement sliding-window `Limiter`, `rate_limit_tokens` model, task-dispatch acquire/re-queue, token pruner | P2 | Not started |
+| D | Resource rate limiting — durable single-statement sliding-window `Limiter`, `rate_limit_tokens` model, task-dispatch acquire/re-queue, token pruner | P2 | **Shipped** (#266) — atomic limiter + dispatch enforcement + pruner |
 | E | Observability surfaces — run-queue UI on job detail, rate-limit status indicator, `caesium job queue <alias>` | P2 | Not started |
 | (Fairness) | Per-namespace round-robin + quotas (design §4) | — | **Deferred** — blocked on Multi-Tenancy (roadmap §3.1) |
 
@@ -453,8 +477,14 @@ Makes the queue and rate-limit state legible to operators.
 - [ ] H-1. Enable the new config gates on the integration server so CI exercises the real
       paths. Add `CAESIUM_RUN_QUEUE_*` + `CAESIUM_RATE_LIMIT_*` to `just integration-up`
       (the lineage `CAESIUM_OPEN_LINEAGE_ENABLED` precedent) so the dequeuer + pruner +
-      rate-limit path actually execute under `just integration-test`.
-      Files: `justfile`, `test/` harness setup.
+      rate-limit path actually execute under `just integration-test`. **Also wire
+      `CAESIUM_EXECUTION_MODE=distributed`** so the distributed claimer is instantiated,
+      and **un-skip the Stream B claim-order drain assertion** in
+      `test/concurrency_priority_test.go` (carried forward from W2-β — it `t.Skip`s today
+      because `integration-up` runs the server in local mode, leaving Acceptance
+      Criterion #2's e2e claim-order proof unrun). Verify the high→normal→low drain runs
+      against the live distributed server.
+      Files: `justfile`, `test/concurrency_priority_test.go`, `test/` harness setup.
       Depends on: C3 + D2.
 
 ## Navigational / Organizational Improvements
