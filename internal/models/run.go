@@ -48,12 +48,12 @@ type TaskRun struct {
 	Image          string            `gorm:"not null" json:"image"`
 	Command        string            `gorm:"not null" json:"command"`
 	Status         string            `gorm:"type:text;index;index:idx_taskrun_claim_priority,priority:1;not null" json:"status"`
-	ClaimedBy      string            `gorm:"type:text;index;index:idx_taskrun_claim_priority,priority:3;not null;default:''" json:"claimed_by"`
+	ClaimedBy      string            `gorm:"type:text;index;index:idx_taskrun_claim_priority,priority:5;not null;default:''" json:"claimed_by"`
 	ClaimExpiresAt *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
 	ClaimAttempt   int               `gorm:"not null;default:0" json:"claim_attempt"`
 	Attempt        int               `gorm:"not null;default:1" json:"attempt"`
 	MaxAttempts    int               `gorm:"not null;default:1" json:"max_attempts"`
-	Priority       int               `gorm:"not null;default:2;index:idx_taskrun_claim_priority,priority:4,sort:desc" json:"priority"`
+	Priority       int               `gorm:"not null;default:2;index:idx_taskrun_claim_priority,priority:3,sort:desc" json:"priority"`
 	NodeSelector   datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Hash           string            `gorm:"type:text;index" json:"-"`
 	// EffectiveHash is the identity this task presents to its DOWNSTREAM
@@ -132,7 +132,7 @@ type TaskRun struct {
 	TerminalSequence int64      `gorm:"not null;default:0;index:idx_taskrun_terminal_seq,priority:2" json:"terminal_sequence,omitempty"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	CreatedAt        time.Time  `gorm:"not null;index:idx_taskrun_claim_priority,priority:5,sort:asc" json:"created_at"`
+	CreatedAt        time.Time  `gorm:"not null;index:idx_taskrun_claim_priority,priority:4,sort:asc" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
 }
 

@@ -142,7 +142,6 @@ func TestParseOptionalFireRequestEnvelope(t *testing.T) {
 		body         map[string]any
 		wantParams   map[string]string
 		wantPriority string
-		wantErr      bool
 	}{
 		{
 			name:         "priority without params",
@@ -161,9 +160,10 @@ func TestParseOptionalFireRequestEnvelope(t *testing.T) {
 			wantPriority: "high",
 		},
 		{
-			name:    "unknown top-level key",
-			body:    map[string]any{"params": map[string]string{"branch": "main"}, "garbage": true},
-			wantErr: true,
+			name:         "unknown top-level key",
+			body:         map[string]any{"params": map[string]string{"branch": "main"}, "priority": "high", "garbage": true},
+			wantParams:   map[string]string{"branch": "main"},
+			wantPriority: "high",
 		},
 	}
 
@@ -173,10 +173,6 @@ func TestParseOptionalFireRequestEnvelope(t *testing.T) {
 			require.NoError(t, err)
 
 			req, err := parseOptionalFireRequest(bytes.NewReader(body))
-			if tt.wantErr {
-				require.Error(t, err)
-				return
-			}
 			require.NoError(t, err)
 			require.Equal(t, tt.wantParams, req.Params)
 			require.Equal(t, tt.wantPriority, req.Priority)

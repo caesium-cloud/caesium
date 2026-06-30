@@ -83,13 +83,16 @@ func parseOptionalFireRequest(body io.Reader) (FireRequest, error) {
 		return FireRequest{}, nil
 	}
 
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return FireRequest{}, err
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return FireRequest{}, nil
+	}
+
 	var req FireRequest
-	dec := json.NewDecoder(body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&req); err != nil {
-		if errors.Is(err, io.EOF) {
-			return FireRequest{}, nil
-		}
+	if err := json.Unmarshal(data, &req); err != nil {
 		return FireRequest{}, err
 	}
 	return req, nil
