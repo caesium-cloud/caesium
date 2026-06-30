@@ -30,6 +30,7 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
         <MetadataRow label="Retries" value={String(task?.retries ?? 0)} mono />
         <MetadataRow label="Retry Delay" value={formatDurationNs(task?.retry_delay)} mono />
         <MetadataRow label="Backoff" value={task?.retry_backoff ? "Enabled" : "Disabled"} />
+        {runTask?.rate_limit_retry_after ? <MetadataRow label="Rate Limit" value={`rate-limited until ${formatRetryAfter(runTask.rate_limit_retry_after)}`} /> : null}
         <MetadataRow label="Claimed By" value={runTask?.claimed_by || "Unclaimed"} mono />
         <MetadataRow label="Node Selector" value={formatKeyValueMap((task?.node_selector || runTask?.node_selector) as Record<string, unknown>)} />
         <MetadataRow label="Outstanding Predecessors" value={String(runTask?.outstanding_predecessors ?? 0)} mono />
@@ -79,6 +80,14 @@ function formatAttempts(runTask?: TaskRun): string {
   }
 
   return `${runTask.attempt ?? 1} / ${runTask.max_attempts ?? 1}`;
+}
+
+function formatRetryAfter(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return value;
+  }
+  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
 interface MetadataRowProps {

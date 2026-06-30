@@ -23,6 +23,7 @@ type Job interface {
 	SetBus(event.Bus)
 	List(*ListRequest) (models.Jobs, error)
 	Get(uuid.UUID) (*models.Job, error)
+	Queue(uuid.UUID) ([]QueueItem, error)
 	Create(*CreateRequest) (*models.Job, error)
 	Delete(uuid.UUID) error
 	SetPaused(id uuid.UUID, paused bool) (*models.Job, error)
@@ -169,6 +170,50 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 	}
 
 	return job, nil
+}
+
+type QueueItem struct {
+	Position   int               `json:"position"`
+	Priority   int               `json:"priority"`
+	Params     map[string]string `json:"params,omitempty"`
+	EnqueuedAt time.Time         `json:"enqueued_at"`
+}
+
+func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
+	var rows []models.RunQueue
+	if err := j.db.WithContext(j.ctx).
+		Where("job_id = ? AND claimed_by = ''", id).
+		Order("priority DESC").
+		Order("created_at ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+
+	items := make([]QueueItem, 0, len(rows))
+	for idx := range rows {
+		params, err := decodeQueueParams(rows[idx].Params)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, QueueItem{
+			Position:   idx + 1,
+			Priority:   rows[idx].Priority,
+			Params:     params,
+			EnqueuedAt: rows[idx].CreatedAt,
+		})
+	}
+	return items, nil
+}
+
+func decodeQueueParams(raw []byte) (map[string]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var params map[string]string
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return nil, err
+	}
+	return params, nil
 }
 
 type CreateRequest struct {

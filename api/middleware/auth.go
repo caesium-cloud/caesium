@@ -383,6 +383,8 @@ func auditActionForRoute(method, routePath string) string {
 		return auth.ActionJobUnpause
 	case "POST /v1/jobs/:id/run":
 		return auth.ActionRunTrigger
+	case "GET /v1/jobs/:id/queue":
+		return auth.ActionRunQueueRead
 	case "POST /v1/jobs/:id/runs/:id/retry":
 		return auth.ActionRunRetry
 	case "POST /v1/jobs/:id/backfill":

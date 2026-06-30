@@ -77,6 +77,7 @@ export interface TaskRun {
   claimed_by?: string;
   claim_expires_at?: string;
   claim_attempt?: number;
+  rate_limit_retry_after?: string;
   attempt?: number;
   max_attempts?: number;
   result?: string;
@@ -93,6 +94,13 @@ export interface TaskRun {
   completed_at?: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface RunQueueItem {
+  position: number;
+  priority: number;
+  params?: Record<string, string>;
+  enqueued_at: string;
 }
 
 export interface Atom {
@@ -267,6 +275,8 @@ export interface Node {
 export interface SystemFeatures {
   database_console_enabled: boolean;
   log_console_enabled: boolean;
+  run_queue_observability_enabled?: boolean;
+  rate_limit_observability_enabled?: boolean;
   external_url?: string;
 }
 
@@ -810,6 +820,7 @@ export const api = {
     const suffix = params ? `?${params}` : "";
     return request<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
   },
+  getJobQueue: (jobId: string) => request<RunQueueItem[]>(`/jobs/${encodeURIComponent(jobId)}/queue`),
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getRunDiff: (jobId: string, left: string, right: string) =>
     request<RunDiff>(

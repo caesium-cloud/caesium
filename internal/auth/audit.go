@@ -36,6 +36,7 @@ const (
 	ActionJobUnpause         = "job.unpause"
 	ActionRunTrigger         = "run.trigger"
 	ActionRunRetry           = "run.retry"
+	ActionRunQueueRead       = "run_queue.read"
 	ActionBackfill           = "run.backfill"
 	ActionJobdefApply        = "jobdef.apply"
 	ActionCachePrune         = "cache.prune"

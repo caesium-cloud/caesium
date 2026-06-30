@@ -34,9 +34,11 @@ type Node struct {
 }
 
 type Features struct {
-	DatabaseConsoleEnabled bool   `json:"database_console_enabled"`
-	LogConsoleEnabled      bool   `json:"log_console_enabled"`
-	ExternalURL            string `json:"external_url,omitempty"`
+	DatabaseConsoleEnabled        bool   `json:"database_console_enabled"`
+	LogConsoleEnabled             bool   `json:"log_console_enabled"`
+	RunQueueObservabilityEnabled  bool   `json:"run_queue_observability_enabled"`
+	RateLimitObservabilityEnabled bool   `json:"rate_limit_observability_enabled"`
+	ExternalURL                   string `json:"external_url,omitempty"`
 }
 
 type Service struct {
@@ -122,8 +124,10 @@ func (s *Service) Nodes() ([]Node, error) {
 func (s *Service) Features() (*Features, error) {
 	v := env.Variables()
 	return &Features{
-		DatabaseConsoleEnabled: v.DatabaseConsoleEnabled,
-		LogConsoleEnabled:      v.LogConsoleEnabled,
-		ExternalURL:            v.APIExternalURL,
+		DatabaseConsoleEnabled:        v.DatabaseConsoleEnabled,
+		LogConsoleEnabled:             v.LogConsoleEnabled,
+		RunQueueObservabilityEnabled:  true,
+		RateLimitObservabilityEnabled: true,
+		ExternalURL:                   v.APIExternalURL,
 	}, nil
 }

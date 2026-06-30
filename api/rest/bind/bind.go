@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	jobcache "github.com/caesium-cloud/caesium/api/rest/controller/job/cache"
+	jobqueue "github.com/caesium-cloud/caesium/api/rest/controller/job/queue"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job/run"
 	jobdef "github.com/caesium-cloud/caesium/api/rest/controller/jobdef"
 	lineagectrl "github.com/caesium-cloud/caesium/api/rest/controller/lineage"
@@ -76,6 +77,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id", job.Get)
 		g.GET("/jobs/:id/tasks", job.Tasks)
 		g.GET("/jobs/:id/dag", job.DAG)
+		g.GET("/jobs/:id/queue", jobqueue.List)
 		g.GET("/jobs/:id/runs", run.List)
 		g.GET("/jobs/:id/runs/diff", rundiffctrl.Get)
 		g.GET("/jobs/:id/runs/:run_id", run.Get)

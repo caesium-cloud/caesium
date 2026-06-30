@@ -490,7 +490,7 @@ except the shared schema (A).
 
 Makes the queue and rate-limit state legible to operators.
 
-- [ ] E1. Add the run-queue inspection CLI + REST read with its RBAC policy. `caesium job
+- [x] E1. Add the run-queue inspection CLI + REST read with its RBAC policy. `caesium job
       queue <alias>` lists pending queued runs (position, priority, enqueued-at) via a new
       `GET /v1/jobs/:id/queue` endpoint (controller + service + `bind.go` route). Wire the
       auth correctly (correction class — there is no `api/rest/middleware/rbac.go`): add the
@@ -506,13 +506,21 @@ Makes the queue and rate-limit state legible to operators.
       `internal/auth/rbac.go`, `api/middleware/auth_scope.go`,
       `test/job_queue_cli_test.go` (incl. a scoped-key assertion).
       Depends on: C3.
-- [ ] E2. Surface the queue + rate-limit state in the web UI. Run-queue panel on the
+      Status: W4-ε added `GET /v1/jobs/:id/queue`, the `caesium job queue <alias>`
+      table/JSON CLI, RBAC/audit/scope wiring, and integration coverage for clean stdout
+      plus scoped own-job access. Local verification was limited to `gofmt` + diff reread
+      per the no-Docker handoff.
+- [x] E2. Surface the queue + rate-limit state in the web UI. Run-queue panel on the
       job-detail page and a rate-limit status indicator on rate-limited tasks; add the
       capability to the `Features` struct (`api/rest/service/system/system.go`) if
       UI-gated; a Playwright e2e drives the real UI against a live backend.
       Files: `ui/src/features/jobs/`, `ui/src/lib/api.ts`, `ui/src/router.tsx`,
       `api/rest/service/system/system.go`, `ui/e2e/` (new spec).
       Depends on: C3 + D2 + E1.
+      Status: W4-ε added the job-detail queue panel, `api.getJobQueue`, feature flags,
+      `rate_limit_retry_after` propagation to task UI surfaces, a Playwright queue-panel
+      e2e with `alpine:3.23`, and queue envs for the default UI e2e backend. UI lint/e2e
+      were not run locally per the no-Docker handoff.
 
 ## Harness Strengthening
 
