@@ -18,6 +18,7 @@ type JobRun struct {
 	TriggerType  string         `gorm:"type:text" json:"trigger_type"`
 	TriggerAlias string         `gorm:"type:text" json:"trigger_alias"`
 	Status       string         `gorm:"type:text;index;not null" json:"status"`
+	Priority     int            `gorm:"not null;default:2" json:"priority"`
 	Error        string         `json:"error,omitempty"`
 	Params       datatypes.JSON `gorm:"type:json" json:"params,omitempty"`
 	Quarantine   bool           `gorm:"not null;default:false;index" json:"quarantine"`
@@ -46,12 +47,13 @@ type TaskRun struct {
 	Engine         AtomEngine        `gorm:"type:text;not null" json:"engine"`
 	Image          string            `gorm:"not null" json:"image"`
 	Command        string            `gorm:"not null" json:"command"`
-	Status         string            `gorm:"type:text;index;not null" json:"status"`
-	ClaimedBy      string            `gorm:"type:text;index;not null;default:''" json:"claimed_by"`
+	Status         string            `gorm:"type:text;index;index:idx_taskrun_claim_priority,priority:1;not null" json:"status"`
+	ClaimedBy      string            `gorm:"type:text;index;index:idx_taskrun_claim_priority,priority:3;not null;default:''" json:"claimed_by"`
 	ClaimExpiresAt *time.Time        `gorm:"index" json:"claim_expires_at,omitempty"`
 	ClaimAttempt   int               `gorm:"not null;default:0" json:"claim_attempt"`
 	Attempt        int               `gorm:"not null;default:1" json:"attempt"`
 	MaxAttempts    int               `gorm:"not null;default:1" json:"max_attempts"`
+	Priority       int               `gorm:"not null;default:2;index:idx_taskrun_claim_priority,priority:4,sort:desc" json:"priority"`
 	NodeSelector   datatypes.JSONMap `gorm:"type:json" json:"node_selector,omitempty"`
 	Hash           string            `gorm:"type:text;index" json:"-"`
 	// EffectiveHash is the identity this task presents to its DOWNSTREAM
@@ -113,7 +115,7 @@ type TaskRun struct {
 	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`
 	Error                   string         `json:"error,omitempty"`
 	RuntimeID               string         `json:"runtime_id,omitempty"`
-	OutstandingPredecessors int            `gorm:"not null" json:"outstanding_predecessors"`
+	OutstandingPredecessors int            `gorm:"not null;index:idx_taskrun_claim_priority,priority:2" json:"outstanding_predecessors"`
 	// OwnerGeneration is set to the RunLease.Generation of the owning node when
 	// run-owner mode is active.  Every coordination write by the owner
 	// includes AND (owner_generation = ? OR owner_generation = 0) in its WHERE
@@ -130,7 +132,7 @@ type TaskRun struct {
 	TerminalSequence int64      `gorm:"not null;default:0;index:idx_taskrun_terminal_seq,priority:2" json:"terminal_sequence,omitempty"`
 	StartedAt        *time.Time `json:"started_at,omitempty"`
 	CompletedAt      *time.Time `json:"completed_at,omitempty"`
-	CreatedAt        time.Time  `gorm:"not null" json:"created_at"`
+	CreatedAt        time.Time  `gorm:"not null;index:idx_taskrun_claim_priority,priority:5,sort:asc" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
 }
 

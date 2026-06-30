@@ -94,6 +94,14 @@ var (
 		[]string{"node_id"},
 	)
 
+	TaskPriorityClaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_task_priority_claim_total",
+			Help: "Total number of tasks successfully claimed by priority.",
+		},
+		[]string{"priority"},
+	)
+
 	WorkerClaimContentionTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "caesium_worker_claim_contention_total",
@@ -444,6 +452,7 @@ func Register() {
 			CallbackRunsTotal,
 			TriggerFiresTotal,
 			WorkerClaimsTotal,
+			TaskPriorityClaimTotal,
 			WorkerClaimContentionTotal,
 			DBBusyRetriesTotal,
 			ReclaimDurationSeconds,

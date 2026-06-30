@@ -255,7 +255,7 @@ Threads a priority value from job metadata (and an optional per-run override) on
 durable run, propagates it to every task, and teaches the distributed claimer to honor
 it — with the supporting index. Strictly ordering, never preemptive.
 
-- [ ] B1. Persist priority on the run + tasks, with the claim index. Add a
+- [x] B1. Persist priority on the run + tasks, with the claim index. Add a
       `Priority int` column (`gorm:"not null;default:2"`) to `JobRun` **and** `TaskRun`
       (`internal/models/run.go:11` and `:39`); add a GORM **composite index** on `TaskRun`
       covering the claim predicate (`status`, `outstanding_predecessors`, `claimed_by`) +
@@ -273,13 +273,20 @@ it — with the supporting index. Strictly ordering, never preemptive.
       Files: `internal/models/run.go`, `internal/run/store.go`,
       `api/rest/service/run/run.go` (interface).
       Depends on: A3.
-- [ ] B2. Order the distributed claimer by priority. Change `ORDER BY tr.created_at ASC`
+      Note: W2-β added `JobRun.Priority`/`TaskRun.Priority`, `idx_taskrun_claim_priority`,
+      the options-based `Start` signature, priority default/override mapping, and
+      `RegisterTasks` propagation from the loaded `JobRun` including the required
+      `"priority"` select.
+- [x] B2. Order the distributed claimer by priority. Change `ORDER BY tr.created_at ASC`
       (`internal/worker/claimer.go:211`) to `ORDER BY tr.priority DESC, tr.created_at ASC`;
       keep the optimistic-lock `UPDATE … WHERE claimed_by = '' …` intact. Increment
       `caesium_task_priority_claim_total{priority}` (3-value label — safe cardinality).
       Files: `internal/worker/claimer.go`, `internal/metrics/metrics.go` (two edit sites).
       Depends on: B1.
-- [ ] B3. Add the operator surface for per-run priority across **all** initiation paths.
+      Note: W2-β changed the claim `ORDER BY`, added and registered
+      `caesium_task_priority_claim_total{priority}`, and covered priority ordering with a
+      focused claimer test.
+- [x] B3. Add the operator surface for per-run priority across **all** initiation paths.
       New `caesium run start --job-id <id> [--params …] [--priority high|normal|low]`
       subcommand (`cmd/run/run.go` is a parent with `replay`/`diff`/`retry`/`retry-callbacks`
       but no on-demand start verb); add `Priority string` to the REST `PostRequest`
@@ -293,6 +300,9 @@ it — with the supporting index. Strictly ordering, never preemptive.
       `test/concurrency_priority_test.go` (mixed-priority claim-order integration test
       incl. a cron-path assertion).
       Depends on: B1 + B2.
+      Note: W2-β added `caesium run start`, REST and manual HTTP-trigger priority
+      threading, run priority response fields, CLI stdout-clean coverage, and an
+      integration scenario covering CLI/REST overrides plus cron metadata propagation.
 
 ### Stream C — Run concurrency strategies (roadmap §1.3)
 

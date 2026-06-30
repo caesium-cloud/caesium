@@ -75,15 +75,20 @@ func TestFireAcceptsOptionalParams(t *testing.T) {
 		return &stubTriggerService{trigger: created}
 	}
 
-	var captured map[string]string
-	fireHTTPTrigger = func(_ context.Context, trig *models.Trigger, params map[string]string) error {
+	var (
+		capturedParams   map[string]string
+		capturedPriority string
+	)
+	fireHTTPTrigger = func(_ context.Context, trig *models.Trigger, params map[string]string, priority string) error {
 		require.Equal(t, created.ID, trig.ID)
-		captured = params
+		capturedParams = params
+		capturedPriority = priority
 		return nil
 	}
 
 	body, err := json.Marshal(map[string]any{
-		"params": map[string]string{"branch": "main"},
+		"params":   map[string]string{"branch": "main"},
+		"priority": "high",
 	})
 	require.NoError(t, err)
 
@@ -100,7 +105,8 @@ func TestFireAcceptsOptionalParams(t *testing.T) {
 	err = Fire(c)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusAccepted, rec.Code)
-	require.Equal(t, map[string]string{"branch": "main"}, captured)
+	require.Equal(t, map[string]string{"branch": "main"}, capturedParams)
+	require.Equal(t, "high", capturedPriority)
 }
 
 func TestFireRejectsMissingAPIKey(t *testing.T) {
@@ -130,13 +136,52 @@ func TestFireRejectsMissingAPIKey(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, httpErr.Code)
 }
 
-func TestParseOptionalParamsRequiresEnvelope(t *testing.T) {
-	body, err := json.Marshal(map[string]string{"branch": "main"})
-	require.NoError(t, err)
+func TestParseOptionalFireRequestEnvelope(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         map[string]any
+		wantParams   map[string]string
+		wantPriority string
+		wantErr      bool
+	}{
+		{
+			name:         "priority without params",
+			body:         map[string]any{"priority": "high"},
+			wantPriority: "high",
+		},
+		{
+			name:       "params without priority",
+			body:       map[string]any{"params": map[string]string{"branch": "main"}},
+			wantParams: map[string]string{"branch": "main"},
+		},
+		{
+			name:         "params with priority",
+			body:         map[string]any{"params": map[string]string{"branch": "main"}, "priority": "high"},
+			wantParams:   map[string]string{"branch": "main"},
+			wantPriority: "high",
+		},
+		{
+			name:    "unknown top-level key",
+			body:    map[string]any{"params": map[string]string{"branch": "main"}, "garbage": true},
+			wantErr: true,
+		},
+	}
 
-	params, err := parseOptionalParams(bytes.NewReader(body))
-	require.Nil(t, params)
-	require.Error(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.body)
+			require.NoError(t, err)
+
+			req, err := parseOptionalFireRequest(bytes.NewReader(body))
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tt.wantParams, req.Params)
+			require.Equal(t, tt.wantPriority, req.Priority)
+		})
+	}
 }
 
 func TestPostCreatesTrigger(t *testing.T) {

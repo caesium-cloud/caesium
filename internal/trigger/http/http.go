@@ -27,7 +27,7 @@ type HTTP struct {
 
 	secretResolver secret.Resolver
 	listJobs       func(context.Context, string) (models.Jobs, error)
-	runJob         func(context.Context, *models.Job, map[string]string) error
+	runJob         func(context.Context, *models.Job, map[string]string, string) error
 }
 
 var (
@@ -55,9 +55,23 @@ func WithListJobs(fn func(context.Context, string) (models.Jobs, error)) Option 
 	}
 }
 
-func WithRunJob(fn func(context.Context, *models.Job, map[string]string) error) Option {
+func WithRunJob(fn func(context.Context, *models.Job, map[string]string, string) error) Option {
 	return func(h *HTTP) {
-		h.runJob = fn
+		if fn != nil {
+			h.runJob = fn
+		}
+	}
+}
+
+type FireOptions struct {
+	Priority string
+}
+
+type FireOption func(*FireOptions)
+
+func WithPriority(priority string) FireOption {
+	return func(opts *FireOptions) {
+		opts.Priority = strings.TrimSpace(priority)
 	}
 }
 
@@ -72,9 +86,9 @@ func New(t *models.Trigger, opts ...Option) (*HTTP, error) {
 	}
 
 	h := &HTTP{
-		id:     t.ID,
-		config: cfg,
-		now:    time.Now,
+		id:             t.ID,
+		config:         cfg,
+		now:            time.Now,
 		secretResolver: defaultSecretResolver,
 		listJobs:       defaultListJobs,
 		runJob:         defaultRunJob,
@@ -102,11 +116,18 @@ func (h *HTTP) Fire(ctx context.Context) error {
 	return h.FireWithParams(ctx, nil)
 }
 
-func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) error {
+func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string, opts ...FireOption) error {
 	log.Info(
 		"trigger firing",
 		"id", h.id,
 		"type", models.TriggerTypeHTTP)
+
+	var fireOptions FireOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&fireOptions)
+		}
+	}
 
 	jobs, err := h.listJobs(ctx, h.id.String())
 	if err != nil {
@@ -128,11 +149,12 @@ func (h *HTTP) FireWithParams(ctx context.Context, params map[string]string) err
 			continue
 		}
 		runtimeParams := cloneParams(mergedParams)
-		go func(jobModel *models.Job, params map[string]string) {
-			if err := h.runJob(context.WithoutCancel(ctx), jobModel, params); err != nil {
+		priority := fireOptions.Priority
+		go func(jobModel *models.Job, params map[string]string, priority string) {
+			if err := h.runJob(context.WithoutCancel(ctx), jobModel, params, priority); err != nil {
 				log.Error("job run failure", "id", jobModel.ID, "error", err)
 			}
-		}(jobModel, runtimeParams)
+		}(jobModel, runtimeParams, priority)
 	}
 
 	return nil
@@ -212,11 +234,15 @@ var (
 		return jsvc.Service(ctx).List(req)
 	}
 
-	defaultRunJob = func(ctx context.Context, j *models.Job, params map[string]string) error {
+	defaultRunJob = func(ctx context.Context, j *models.Job, params map[string]string, priority string) error {
 		if j == nil {
 			return fmt.Errorf("job is nil")
 		}
-		return job.New(j, job.WithParams(params)).Run(ctx)
+		opts := []job.JobOption{job.WithParams(params)}
+		if strings.TrimSpace(priority) != "" {
+			opts = append(opts, job.WithPriorityOverride(priority))
+		}
+		return job.New(j, opts...).Run(ctx)
 	}
 )
 

@@ -111,6 +111,7 @@ type TaskRun struct {
 	Command                 []string                  `json:"command"`
 	RuntimeID               string                    `json:"runtime_id,omitempty"`
 	Status                  TaskStatus                `json:"status"`
+	Priority                int                       `json:"priority"`
 	NodeSelector            map[string]string         `json:"node_selector,omitempty"`
 	ClaimedBy               string                    `json:"claimed_by,omitempty"`
 	ClaimExpiresAt          *time.Time                `json:"claim_expires_at,omitempty"`
@@ -144,6 +145,7 @@ type JobRun struct {
 	TriggerType   string            `json:"trigger_type,omitempty"`
 	TriggerAlias  string            `json:"trigger_alias,omitempty"`
 	Status        Status            `json:"status"`
+	Priority      int               `json:"priority"`
 	Params        map[string]string `json:"params,omitempty"`
 	Quarantine    bool              `json:"quarantine"`
 	StartedAt     time.Time         `json:"started_at"`
@@ -180,6 +182,51 @@ type RegisterTaskInput struct {
 	Task                    *models.Task
 	Atom                    *models.Atom
 	OutstandingPredecessors int
+}
+
+type StartOptions struct {
+	Params   map[string]string
+	Priority string
+}
+
+type StartOption func(*StartOptions)
+
+func WithStartParams(params map[string]string) StartOption {
+	return func(opts *StartOptions) {
+		opts.Params = maps.Clone(params)
+	}
+}
+
+func WithStartPriority(priority string) StartOption {
+	return func(opts *StartOptions) {
+		opts.Priority = strings.TrimSpace(priority)
+	}
+}
+
+func startOptionsFrom(opts []StartOption) StartOptions {
+	var out StartOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&out)
+		}
+	}
+	return out
+}
+
+func startPriorityTx(tx *gorm.DB, jobID uuid.UUID, override string) (int, error) {
+	if strings.TrimSpace(override) != "" {
+		return PriorityValue(override)
+	}
+
+	var job models.Job
+	err := tx.Select("priority").First(&job, "id = ?", jobID).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return PriorityNormalValue, nil
+		}
+		return 0, err
+	}
+	return PriorityValue(job.Priority)
 }
 
 var (
@@ -576,7 +623,8 @@ func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef
 	return merged
 }
 
-func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[string]string) (*JobRun, error) {
+func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOption) (*JobRun, error) {
+	startOpts := startOptionsFrom(opts)
 	model := &models.JobRun{
 		ID:        uuid.New(),
 		JobID:     jobID,
@@ -587,8 +635,8 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 	if triggerID != nil {
 		model.TriggerID = *triggerID
 	}
-	if len(params) > 0 && len(params[0]) > 0 {
-		encoded, err := json.Marshal(params[0])
+	if len(startOpts.Params) > 0 {
+		encoded, err := json.Marshal(startOpts.Params)
 		if err != nil {
 			return nil, fmt.Errorf("run: failed to marshal params: %w", err)
 		}
@@ -599,6 +647,12 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 	if err := withStoreBusyRetry(func() error {
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			priority, err := startPriorityTx(tx, jobID, startOpts.Priority)
+			if err != nil {
+				return err
+			}
+			model.Priority = priority
+
 			if err := tx.Create(model).Error; err != nil {
 				return err
 			}
@@ -608,6 +662,7 @@ func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, params ...map[strin
 					ID:        model.ID,
 					JobID:     model.JobID,
 					Status:    Status(model.Status),
+					Priority:  model.Priority,
 					StartedAt: model.StartedAt,
 					CreatedAt: model.CreatedAt,
 					UpdatedAt: model.UpdatedAt,
@@ -700,6 +755,12 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 	if err := withStoreBusyRetry(func() error {
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
+			priority, err := startPriorityTx(tx, jobID, "")
+			if err != nil {
+				return err
+			}
+			model.Priority = priority
+
 			if err := tx.Create(model).Error; err != nil {
 				return err
 			}
@@ -709,6 +770,7 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 					ID:        model.ID,
 					JobID:     model.JobID,
 					Status:    Status(model.Status),
+					Priority:  model.Priority,
 					StartedAt: model.StartedAt,
 					CreatedAt: model.CreatedAt,
 					UpdatedAt: model.UpdatedAt,
@@ -798,7 +860,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 	}
 
 	var jobRun models.JobRun
-	if err := s.db.Select("id", "job_id", "params", "trigger_id", "trigger_type", "trigger_alias", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
+	if err := s.db.Select("id", "job_id", "params", "trigger_id", "trigger_type", "trigger_alias", "priority", "quarantine").First(&jobRun, "id = ?", runID).Error; err != nil {
 		return fmt.Errorf("run: job run %s not found: %w", runID, err)
 	}
 	jobID := jobRun.JobID
@@ -909,6 +971,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					Image:                   atom.Image,
 					Command:                 command,
 					Status:                  string(TaskStatusPending),
+					Priority:                jobRun.Priority,
 					NodeSelector:            maps.Clone(task.NodeSelector),
 					Attempt:                 1,
 					MaxAttempts:             maxAttempts,
@@ -3278,6 +3341,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 		JobID:      model.JobID,
 		BackfillID: model.BackfillID,
 		Status:     Status(model.Status),
+		Priority:   model.Priority,
 		Quarantine: model.Quarantine,
 		StartedAt:  model.StartedAt,
 		CreatedAt:  model.CreatedAt,
@@ -3337,6 +3401,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Command:                 command,
 		RuntimeID:               model.RuntimeID,
 		Status:                  TaskStatus(model.Status),
+		Priority:                model.Priority,
 		NodeSelector:            jsonmap.ToStringMap(model.NodeSelector),
 		ClaimedBy:               model.ClaimedBy,
 		ClaimAttempt:            model.ClaimAttempt,

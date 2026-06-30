@@ -12,6 +12,7 @@ import (
 
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/google/uuid"
@@ -23,6 +24,11 @@ var (
 	triggerServiceFactory = triggersvc.Service
 	fireHTTPTrigger       = fireTrigger
 )
+
+type FireRequest struct {
+	Params   map[string]string `json:"params,omitempty"`
+	Priority string            `json:"priority,omitempty"`
+}
 
 func Fire(c *echo.Context) error {
 	ctx := c.Request().Context()
@@ -36,9 +42,14 @@ func Fire(c *echo.Context) error {
 		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
 	}
 
-	params, err := parseOptionalParams(c.Request().Body)
+	fireReq, err := parseOptionalFireRequest(c.Request().Body)
 	if err != nil {
 		return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
+	}
+	if strings.TrimSpace(fireReq.Priority) != "" {
+		if _, err := runstorage.PriorityValue(fireReq.Priority); err != nil {
+			return echo.NewHTTPError(codes.StatusBadRequest, "bad request").Wrap(err)
+		}
 	}
 
 	trig, err := triggerServiceFactory(ctx).Get(id)
@@ -60,48 +71,36 @@ func Fire(c *echo.Context) error {
 		)
 	}
 
-	if err := fireHTTPTrigger(ctx, trig, params); err != nil {
+	if err := fireHTTPTrigger(ctx, trig, fireReq.Params, fireReq.Priority); err != nil {
 		return echo.NewHTTPError(codes.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
 	return c.JSON(codes.StatusAccepted, nil)
 }
 
-func parseOptionalParams(body io.Reader) (map[string]string, error) {
+func parseOptionalFireRequest(body io.Reader) (FireRequest, error) {
 	if body == nil {
-		return nil, nil
+		return FireRequest{}, nil
 	}
 
-	data, err := io.ReadAll(body)
-	if err != nil {
-		return nil, err
+	var req FireRequest
+	dec := json.NewDecoder(body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		if errors.Is(err, io.EOF) {
+			return FireRequest{}, nil
+		}
+		return FireRequest{}, err
 	}
-	if len(data) == 0 {
-		return nil, nil
-	}
-
-	var payload map[string]json.RawMessage
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, err
-	}
-	rawParams, ok := payload["params"]
-	if !ok {
-		return nil, fmt.Errorf("invalid json body: missing params object")
-	}
-
-	var params map[string]string
-	if err := json.Unmarshal(rawParams, &params); err != nil {
-		return nil, fmt.Errorf("invalid json body: %w", err)
-	}
-	return params, nil
+	return req, nil
 }
 
-func fireTrigger(ctx context.Context, trig *models.Trigger, params map[string]string) error {
+func fireTrigger(ctx context.Context, trig *models.Trigger, params map[string]string, priority string) error {
 	httpTrigger, err := triggerhttp.New(trig)
 	if err != nil {
 		return err
 	}
-	return httpTrigger.FireWithParams(ctx, params)
+	return httpTrigger.FireWithParams(ctx, params, triggerhttp.WithPriority(priority))
 }
 
 func requireManualTriggerAPIKey(c *echo.Context) error {

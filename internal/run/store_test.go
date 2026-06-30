@@ -114,6 +114,64 @@ func TestStartQuarantinedRunStartedEventCarriesMarker(t *testing.T) {
 	require.Equal(t, 0, transport.Count(), "lineage transport must not receive quarantined run_started")
 }
 
+func TestStartAndRegisterTasksPropagatePriority(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() {
+		testutil.CloseDB(db)
+	})
+
+	store := NewStore(db)
+	now := time.Now().UTC()
+	trigger := &models.Trigger{
+		ID:            uuid.New(),
+		Alias:         "priority-trigger",
+		Type:          models.TriggerTypeCron,
+		Configuration: `{"cron":"0 * * * *","timezone":"UTC"}`,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	require.NoError(t, db.Create(trigger).Error)
+
+	job := &models.Job{
+		ID:        uuid.New(),
+		Alias:     "priority-job",
+		TriggerID: trigger.ID,
+		Priority:  jobdef.PriorityHigh,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(job).Error)
+
+	runRecord, err := store.Start(job.ID, &trigger.ID)
+	require.NoError(t, err)
+	require.Equal(t, PriorityHighValue, runRecord.Priority)
+
+	atom := &models.Atom{
+		ID:        uuid.New(),
+		Engine:    models.AtomEngineDocker,
+		Image:     "alpine:3.23",
+		Command:   `["echo","priority"]`,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	task := &models.Task{
+		ID:        uuid.New(),
+		JobID:     job.ID,
+		AtomID:    atom.ID,
+		Name:      "priority-step",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	require.NoError(t, db.Create(atom).Error)
+	require.NoError(t, db.Create(task).Error)
+
+	require.NoError(t, store.RegisterTask(runRecord.ID, task, atom, 0))
+
+	var taskRun models.TaskRun
+	require.NoError(t, db.First(&taskRun, "job_run_id = ? AND task_id = ?", runRecord.ID, task.ID).Error)
+	require.Equal(t, PriorityHighValue, taskRun.Priority)
+}
+
 func TestTaskExecutionDescriptorCaptureCoversContainerSpecFields(t *testing.T) {
 	descriptorType := reflect.TypeOf(models.TaskExecutionDescriptor{})
 
@@ -185,7 +243,7 @@ func TestRegisterTaskPersistsInitialExecutionDescriptorEnvelope(t *testing.T) {
 	}
 	require.NoError(t, db.Create(job).Error)
 
-	runRecord, err := store.Start(job.ID, &trigger.ID, map[string]string{"logical_date": "2026-06-25"})
+	runRecord, err := store.Start(job.ID, &trigger.ID, WithStartParams(map[string]string{"logical_date": "2026-06-25"}))
 	require.NoError(t, err)
 
 	automount := false
