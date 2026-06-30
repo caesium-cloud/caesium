@@ -1,6 +1,6 @@
 # Concurrency Strategies & Priority Queues — Run-Level Scheduling Control
 
-Last updated: 2026-06-28
+Last updated: 2026-06-29
 
 Caesium's concurrency model today is a single per-run knob: `metadata.maxParallelTasks`
 bounds how many **tasks within one run** execute at once (a `worker.Pool` semaphore at
@@ -154,24 +154,36 @@ Multi-Tenancy (roadmap §3.1). Priority and rate-limit storage are designed to a
 later `namespace` scoping column without a rewrite; that is the only forward-compat
 concession this plan makes.
 
-## Progress (as of 2026-06-28)
+## Progress (as of 2026-06-29)
 
-No implementation waves have shipped yet. The plan was published from the
-`design-concurrency-priority.md` design, a six-subsystem survey of the live backend, and
-**two adversarial-review rounds** — which caught **eleven blockers** (the
-metadata-never-persisted gap on both create and update paths, the TOCTOU admission race,
-the cron-overrun bypass, the REST-path choke-point error, the per-node dequeuer
-double-launch, the missing cancellation primitive, the fictional RBAC file, the
+The plan was published from the `design-concurrency-priority.md` design, a six-subsystem
+survey of the live backend, and **two adversarial-review rounds** — which caught **eleven
+blockers** (the metadata-never-persisted gap on both create and update paths, the TOCTOU
+admission race, the cron-overrun bypass, the REST-path choke-point error, the per-node
+dequeuer double-launch, the missing cancellation primitive, the fictional RBAC file, the
 step-rateLimit-never-persisted gap, the `skip`/`fail` nil-panic, and the `StartForBackfill`
-path), folded into the **nine** as-built corrections in the Source-Of-Truth Note. The first
-wave is the next eligible run of the `exec-plan-wave` skill; Stream A is the only stream
-with no unmet dependency.
+path), folded into the **nine** as-built corrections in the Source-Of-Truth Note.
+
+### Wave 1 — schema foundation shipped
+
+- **Stream α (A1–A4):** the scheduling-config schema everything else reads —
+  `metadata.priority`/`concurrency`/`rateLimits` + step `rateLimit` (dual rawStep in
+  YAML+JSON), `Validate()` enum/duration/resource checks, **excluded from the cache key**
+  (the `Kueue.QueueName` precedent, with a real stability test), **persisted onto
+  `models.Job`/`Task`** through the importer's create literal AND its update allow-list
+  maps + into the runtime `job` struct, and the schema-reference **generator** taught to
+  emit the new fields — PR #264, merged `236b197`. Opus 2-lens review clean (all three
+  correctness traps held); a greptile/gemini sweep then caught + fixed eight real bugs
+  pre-merge: a **typed-nil → JSON `"null"`** persistence bug (nil `*Concurrency` through
+  `any` stored the string, not SQL NULL), resource trim-writeback, missing positive
+  `limit`/`units` validation, duplicate-resource validation, an empty-`strategy` default
+  to `queue`, and logged unmarshal errors. Integration gate green ×2.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Job-schema foundation — `priority`/`concurrency`/`rateLimits` schema, enum validation, **cache-hash exclusion**, **catalog persistence + importer mapping + runtime wiring**, schema docs | **P1** | Not started |
+| A | Job-schema foundation — `priority`/`concurrency`/`rateLimits` schema, enum validation, **cache-hash exclusion**, **catalog persistence + importer mapping + runtime wiring**, schema docs | **P1** | **Shipped** (#264) — schema + persistence + generator |
 | B | Priority queues — `priority` on `JobRun`+`TaskRun` (+ claim index), JobRun→TaskRun propagation, claimer ordering, `caesium run start --priority` + REST/trigger priority | **P1** | Not started |
 | C | Run concurrency strategies — **atomic** admission gate in `run.Store.Start` (`skip`/`fail`), `replace` (+ cancellation primitive), `run_queue` model + **leader-gated** dequeuer | **P1** | Not started |
 | D | Resource rate limiting — durable single-statement sliding-window `Limiter`, `rate_limit_tokens` model, task-dispatch acquire/re-queue, token pruner | P2 | Not started |
