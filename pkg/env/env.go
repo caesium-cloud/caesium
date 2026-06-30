@@ -156,6 +156,7 @@ type Environment struct {
 	MaxTriggerDepth           int           `envconfig:"MAX_TRIGGER_DEPTH" default:"10"`
 	RateLimitPrunerEnabled    bool          `envconfig:"RATE_LIMIT_PRUNER_ENABLED" default:"false"`
 	RateLimitPruneInterval    time.Duration `envconfig:"RATE_LIMIT_PRUNE_INTERVAL" default:"1m"`
+	RunQueueEnabled           bool          `envconfig:"RUN_QUEUE_ENABLED" default:"false"`
 	RunQueueDequeuerEnabled   bool          `envconfig:"RUN_QUEUE_DEQUEUER_ENABLED" default:"false"`
 	RunQueueDequeueInterval   time.Duration `envconfig:"RUN_QUEUE_DEQUEUE_INTERVAL" default:"1s"`
 	RunQueueClaimStaleAfter   time.Duration `envconfig:"RUN_QUEUE_CLAIM_STALE_AFTER" default:"2m"`

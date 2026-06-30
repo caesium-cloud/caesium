@@ -7,6 +7,8 @@ import (
 	"gorm.io/datatypes"
 )
 
+func (RunQueue) TableName() string { return "run_queue" }
+
 type RunQueue struct {
 	ID        uuid.UUID      `gorm:"type:uuid;primaryKey" json:"id"`
 	JobID     uuid.UUID      `gorm:"type:uuid;not null;index:idx_run_queue_job_priority_created,priority:1" json:"job_id"`

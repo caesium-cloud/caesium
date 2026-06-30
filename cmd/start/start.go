@@ -173,7 +173,7 @@ func start(cmd *cobra.Command, args []string) error {
 	runStore.SetBus(bus)
 	jsvc.Service(ctx).SetBus(bus)
 	runsvc.New(ctx).SetBus(bus)
-	if vars.RunQueueDequeuerEnabled {
+	if vars.RunQueueEnabled || vars.RunQueueDequeuerEnabled {
 		dequeuer := runqueue.NewDequeuer(runqueue.Config{
 			DB:                  db.Connection(),
 			Store:               runStore,

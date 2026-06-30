@@ -419,8 +419,12 @@ func (j *job) Run(ctx context.Context) error {
 
 	resolveRun := func() (*run.JobRun, error) {
 		startOpts := []run.StartOption{run.WithStartParams(j.params)}
-		if strings.TrimSpace(j.priorityOverride) != "" {
-			startOpts = append(startOpts, run.WithStartPriority(j.priorityOverride))
+		startPriority := strings.TrimSpace(j.priorityOverride)
+		if startPriority == "" {
+			startPriority = strings.TrimSpace(j.priority)
+		}
+		if startPriority != "" {
+			startOpts = append(startOpts, run.WithStartPriority(startPriority))
 		}
 
 		if id, ok := run.FromContext(ctx); ok {

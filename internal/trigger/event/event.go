@@ -166,6 +166,10 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "max concurrency reached"})
 				continue
 			}
+			if errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
+				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "max concurrency reached; run rejected"})
+				continue
+			}
 			if errors.Is(err, runstorage.ErrRunQueued) {
 				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "queued"})
 				continue

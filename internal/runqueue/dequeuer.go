@@ -163,6 +163,15 @@ func (d *Dequeuer) drainJob(ctx context.Context, jobID uuid.UUID) error {
 		}
 		started, err := d.store.StartQueuedRun(ctx, queued)
 		if err != nil {
+			if errors.Is(err, runstorage.ErrRunSkipped) {
+				if err := d.store.DeleteQueuedRun(ctx, queued); err != nil {
+					if releaseErr := d.store.ReleaseQueuedRun(ctx, queued.ID, claim); releaseErr != nil {
+						log.Warn("run queue dequeuer failed to release skipped queued run", "queue_id", queued.ID, "error", releaseErr)
+					}
+					return err
+				}
+				continue
+			}
 			if releaseErr := d.store.ReleaseQueuedRun(ctx, queued.ID, claim); releaseErr != nil {
 				log.Warn("run queue dequeuer failed to release queued run", "queue_id", queued.ID, "error", releaseErr)
 			}
