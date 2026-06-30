@@ -158,12 +158,14 @@ concession this plan makes.
 
 No implementation waves have shipped yet. The plan was published from the
 `design-concurrency-priority.md` design, a six-subsystem survey of the live backend, and
-a three-lens adversarial review (which caught seven blockers — the metadata-never-persisted
-gap, the TOCTOU admission race, the REST-path choke-point error, the per-node dequeuer
-double-launch, the missing cancellation primitive, the fictional RBAC file, and the
-step-rateLimit-never-persisted gap — all folded in below). The first wave is the next
-eligible run of the `exec-plan-wave` skill; Stream A is the only stream with no unmet
-dependency.
+**two adversarial-review rounds** — which caught **eleven blockers** (the
+metadata-never-persisted gap on both create and update paths, the TOCTOU admission race,
+the cron-overrun bypass, the REST-path choke-point error, the per-node dequeuer
+double-launch, the missing cancellation primitive, the fictional RBAC file, the
+step-rateLimit-never-persisted gap, the `skip`/`fail` nil-panic, and the `StartForBackfill`
+path), folded into the **nine** as-built corrections in the Source-Of-Truth Note. The first
+wave is the next eligible run of the `exec-plan-wave` skill; Stream A is the only stream
+with no unmet dependency.
 
 ### Stream Status
 
@@ -312,15 +314,20 @@ holds across nodes.
 - [ ] C2. The `replace` strategy + the cancellation primitive it needs (correction #9).
       Add a `StatusCancelled` terminal status (+ its `ExecutionEvent` type) and a
       `run.Store.CancelRun` that **atomically** transitions the target `JobRun` AND its
-      non-terminal `task_runs` **AND expires its `run_leases` row** in one transaction (the
-      claimer ties to job-run status in two places — the inner `JOIN job_runs … jr.status
+      non-terminal `task_runs` **AND expires its `run_leases` row** in one transaction. The
+      claimer ties to job-run status in two places (the inner `JOIN job_runs … jr.status
       ='running'` and the outer `job_run_id IN (SELECT … status='running')`,
-      `claimer.go:204-217` — so flipping the JobRun suffices to make its tasks unclaimable;
-      flipping the task_runs is belt-and-suspenders. Without the lease delete,
-      `RenewOwnedLeases` (`internal/run/lease.go:132`) keeps refreshing the dead run's
-      lease). On `replace` at `maxRuns`: cancel the oldest active run, then admit the new
-      one; count `caesium_run_replaced_total{job_alias}`; handle a cancelled run in
-      `waitForRunCompletion` (`job.go:1376`).
+      `claimer.go:204-217`), so flipping the JobRun suffices to make its tasks unclaimable;
+      flipping the task_runs is belt-and-suspenders, and the lease delete stops
+      `RenewOwnedLeases` (`internal/run/lease.go:132`) refreshing the dead run's lease.
+      On `replace` at `maxRuns`: cancel the oldest active run, then admit the new one;
+      count `caesium_run_replaced_total{job_alias}`; handle a cancelled run in
+      `waitForRunCompletion` (`job.go:1376`). **In the trigger/`resolveRun` path,
+      `admit`'s `replace` cancels the oldest active run *and signals "create a fresh run"*
+      so `resolveRun` proceeds to `store.Start` rather than re-attaching via `FindRunning`
+      to a different still-running run** (define `admit`'s return as a decision —
+      create / skip / fail — that both `store.Start` and `resolveRun` honor, so `replace`
+      and `queue` behave identically across REST and cron).
       Files: `internal/run/store.go`, `internal/run/lease.go`,
       `internal/models/run.go` (status const), `internal/models/execution_event.go`
       (event type), `internal/job/job.go`, `internal/metrics/metrics.go`.
