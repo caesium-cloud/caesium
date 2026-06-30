@@ -1,6 +1,6 @@
 # Design: Concurrency Strategies & Priority Queues
 
-> Status: Proposed. This document covers concurrency strategies, rate limiting, and priority-based scheduling.
+> Status: Proposed → active. This document covers concurrency strategies, rate limiting, and priority-based scheduling. The execution plan (with nine as-built corrections to this doc, reconciled on completion) is [`exec-plans/active/concurrency-priority-queues.md`](exec-plans/active/concurrency-priority-queues.md).
 
 ## Problem Statement
 

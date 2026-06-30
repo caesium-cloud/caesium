@@ -28,7 +28,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 
 - [design-airflow-parity.md](design-airflow-parity.md): Airflow-parity workstreams — current shipped subset in `airflow-parity.md`; this tracks the remaining workstreams.
 - [design-event-triggers.md](design-event-triggers.md): HTTP webhook triggers, event-based routing, and trigger chaining (WS1–WS3 shipped; reconciliation tracked in `exec-plans/completed/event-trigger-routing.md`).
-- [design-concurrency-priority.md](design-concurrency-priority.md): Concurrency strategies, rate limiting, and priority-based scheduling (proposed).
+- [design-concurrency-priority.md](design-concurrency-priority.md): Concurrency strategies, rate limiting, and priority-based scheduling (active; execution plan in `exec-plans/active/concurrency-priority-queues.md`).
 - [design-database-locking-fix.md](design-database-locking-fix.md): dqlite contention remediation (Phases 0–3 shipped) and the scale-out path.
 - [design-scaling-job-execution.md](design-scaling-job-execution.md): Cluster-wide task-start throughput frontier on sharded dqlite.
 - [design-incremental-execution.md](design-incremental-execution.md): Smart incremental execution and task caching (Phase 1 shipped; follow-on phases planned).
