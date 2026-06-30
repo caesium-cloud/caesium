@@ -87,7 +87,7 @@ func Markdown() string {
 	b.WriteString("| `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |\n\n")
 
 	b.WriteString("## Trigger\n\n")
-	b.WriteString("Supported trigger types: `cron`, `http`. Each type accepts a `configuration` map that is persisted verbatim.\n\n")
+	b.WriteString("Supported trigger types: `cron`, `http`, `event`. Each type accepts a `configuration` map that is persisted verbatim, with type-specific validation.\n\n")
 	b.WriteString("### Common Trigger Fields\n")
 	b.WriteString("| Field | Type | Required | Notes |\n")
 	b.WriteString("|-------|------|----------|-------|\n")
@@ -105,6 +105,17 @@ func Markdown() string {
 	b.WriteString("| `signatureScheme` | string | optional | One of `hmac-sha256`, `hmac-sha1`, `bearer`, `basic`. Defaults to `hmac-sha256` when `secret` is set. |\n")
 	b.WriteString("| `signatureHeader` | string | optional | Header containing the signature or token. Default varies by scheme. |\n")
 	b.WriteString("| `paramMapping` | map[string]string | optional | Extracts JSON request-body fields into run params using simple JSONPath expressions such as `$.ref`. |\n\n")
+
+	b.WriteString("### Event Trigger\n")
+	b.WriteString("| Field | Type | Required | Notes |\n")
+	b.WriteString("|-------|------|----------|-------|\n")
+	b.WriteString("| `events` | array[object] | required | One or more event patterns. A pattern matches when its `type`, optional `source`, and optional `filter` all match the ingested event. |\n")
+	b.WriteString("| `events[].type` | string | required | Event type to match. Exact strings and glob patterns such as `webhook.*` are supported. |\n")
+	b.WriteString("| `events[].source` | string | optional | Exact event source filter, such as `github` or `caesium`. |\n")
+	b.WriteString("| `events[].filter` | map[string]string | optional | Content filter over event `data`. Keys are dot paths like `repository.full_name`; values are string comparisons. |\n")
+	b.WriteString("| `paramMapping` | map[string]string | optional | Extracts JSON event-data fields into run params using simple JSONPath expressions such as `$.run_id`. |\n")
+	b.WriteString("| `defaultParams` | map[string]string | optional | Seeds run parameters for event-triggered executions before extracted event params are merged. Values must be strings. |\n\n")
+	b.WriteString("For trigger chaining, Caesium routes lifecycle events with `source: caesium` through the same event router. The scheduler-owned `_trigger_depth` run parameter tracks chain depth and is rejected when it reaches `CAESIUM_MAX_TRIGGER_DEPTH`; authors should not set or depend on `_trigger_depth` for business logic.\n\n")
 
 	b.WriteString("## Callbacks\n\n")
 	b.WriteString("Currently the `notification` callback is supported. Custom handlers consume the JSON payload via the callbacks table.\n\n")
