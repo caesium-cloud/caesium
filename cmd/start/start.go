@@ -30,6 +30,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/lineage"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/notification"
+	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
 	triggerhttp "github.com/caesium-cloud/caesium/internal/trigger/http"
@@ -159,6 +160,12 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 	event.StartIngestRetentionPruner(ctx, event.NewIngestStore(db.Connection()), vars.EventRetention)
 	event.StartWebhookEventRetentionPruner(ctx, event.NewWebhookEventStore(db.Connection()), vars.WebhookEventRetention)
+	if vars.RateLimitPrunerEnabled {
+		runAsync(func() {
+			log.Info("launching rate limit token pruner", "interval", vars.RateLimitPruneInterval)
+			ratelimit.NewPruner(db.Connection()).Run(ctx, vars.RateLimitPruneInterval)
+		})
+	}
 
 	bus := event.New()
 	runStore := run.Default()
@@ -324,6 +331,8 @@ func start(cmd *cobra.Command, args []string) error {
 			LeaseTTL:     vars.RunLeaseTTL,
 			LeaseStore:   leaseStore,
 			Store:        runStore,
+			RateLimitDB:  db.Connection(),
+			RateLimiter:  ratelimit.NewLimiter(db.Connection()),
 			Peers:        dqliteDispatchPeerResolver(),
 			OwnerManager: ownerManager,
 		})
@@ -501,7 +510,8 @@ func start(cmd *cobra.Command, args []string) error {
 			vars.WorkerLeaseTTL,
 		)
 
-		claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels))
+		claimer := worker.NewClaimer(vars.NodeAddress, runStore, vars.WorkerLeaseTTL, worker.ParseNodeLabels(vars.NodeLabels)).
+			WithRateLimiter(ratelimit.NewLimiter(db.Connection()))
 		executorFn := worker.NewRuntimeExecutor(runStore, vars.TaskTimeout, vars.TaskFailurePolicy, resolver)
 		wakeups := worker.SubscribeWakeups(ctx, bus, wakeupSignaler.C())
 		distributedWorker = worker.NewWorker(claimer, worker.NewPool(poolSize), vars.WorkerPollInterval, executorFn).

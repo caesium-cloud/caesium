@@ -27,6 +27,7 @@ var All = []interface{}{
 	&SAMLAssertionReplay{},
 	&NotificationChannel{},
 	&NotificationPolicy{},
+	&RateLimitToken{},
 	// Phase 2 run-owner coordination tables (catalog DB, cross-run, low-volume).
 	&RunLease{},
 	&InternalCAGeneration{},

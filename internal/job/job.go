@@ -28,6 +28,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/internal/ratelimit"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/worker"
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -54,6 +55,14 @@ var runStartReadBackoffs = []time.Duration{
 	80 * time.Millisecond,
 	160 * time.Millisecond,
 	320 * time.Millisecond,
+}
+
+const haltedDispatchWaitInterval = 50 * time.Millisecond
+
+type taskResult struct {
+	id              uuid.UUID
+	err             error
+	skippedByBranch []uuid.UUID
 }
 
 // ErrLocalQuarantinedReplayUnsupported is returned when a quarantined replay
@@ -90,6 +99,22 @@ func retryOnContention(ctx context.Context, fn func() error) error {
 			return ctx.Err()
 		case <-timer.C:
 		}
+	}
+}
+
+func waitForHaltedDispatchResult(results <-chan taskResult, wait time.Duration) (taskResult, bool) {
+	if wait <= 0 {
+		wait = haltedDispatchWaitInterval
+	}
+
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+
+	select {
+	case result := <-results:
+		return result, true
+	case <-timer.C:
+		return taskResult{}, false
 	}
 }
 
@@ -727,12 +752,6 @@ func (j *job) Run(ctx context.Context) error {
 		return runErr
 	}
 
-	type taskResult struct {
-		id              uuid.UUID
-		err             error
-		skippedByBranch []uuid.UUID
-	}
-
 	paramEnv := buildParamEnv(snapshot.ID, j.alias, snapshot.Params)
 
 	// executeAtom creates, monitors, and stops a container for one execution attempt.
@@ -1170,8 +1189,69 @@ func (j *job) Run(ctx context.Context) error {
 	results := make(chan taskResult)
 	active := 0
 	halt := false
+	deferred := make(map[uuid.UUID]time.Time)
+	rateLimiter := ratelimit.NewLimiter(store.DB())
+
+	acquireTaskRateLimit := func(taskID uuid.UUID) (bool, time.Time, error) {
+		rule, ok, err := ratelimit.RuleForTask(ctx, store.DB(), runID, taskID)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if !ok {
+			return true, time.Time{}, nil
+		}
+		acquired, err := rateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if acquired {
+			return true, time.Time{}, nil
+		}
+
+		now := time.Now().UTC()
+		retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
+		if err := store.RateLimitTask(ctx, runID, taskID, retryAfter); err != nil {
+			return false, time.Time{}, err
+		}
+		metrics.RunSkippedTotal.WithLabelValues(j.alias, "rate_limit").Inc()
+		log.Info("task delayed by rate limit", "job_id", j.id, "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter)
+		return false, retryAfter, nil
+	}
+
+	moveDueDeferred := func() bool {
+		now := time.Now().UTC()
+		moved := false
+		for taskID, retryAfter := range deferred {
+			if retryAfter.After(now) {
+				continue
+			}
+			delete(deferred, taskID)
+			push(taskID)
+			moved = true
+		}
+		return moved
+	}
+
+	nextDeferredAt := func() (time.Time, bool) {
+		var next time.Time
+		for _, retryAfter := range deferred {
+			if next.IsZero() || retryAfter.Before(next) {
+				next = retryAfter
+			}
+		}
+		return next, !next.IsZero()
+	}
 
 	dispatch := func(taskID uuid.UUID) error {
+		acquired, retryAfter, err := acquireTaskRateLimit(taskID)
+		if err != nil {
+			return err
+		}
+		if !acquired {
+			deferred[taskID] = retryAfter
+			return nil
+		}
+
 		active++
 		if err := taskPool.Submit(ctx, func() {
 			skipped, err := runTask(taskID)
@@ -1183,7 +1263,11 @@ func (j *job) Run(ctx context.Context) error {
 		return nil
 	}
 
-	for len(queue) > 0 || active > 0 {
+	for (!halt && (len(queue) > 0 || len(deferred) > 0)) || active > 0 {
+		if !halt && moveDueDeferred() {
+			continue
+		}
+
 		for !halt && active < maxParallel && len(queue) > 0 {
 			taskID := queue[0]
 			queue = queue[1:]
@@ -1203,12 +1287,67 @@ func (j *job) Run(ctx context.Context) error {
 			}
 		}
 
-		if active == 0 {
-			break
+		var result taskResult
+		gotResult := false
+		if halt && len(queue) == 0 && len(deferred) > 0 {
+			if active == 0 {
+				break
+			}
+			var ok bool
+			result, ok = waitForHaltedDispatchResult(results, haltedDispatchWaitInterval)
+			if !ok {
+				continue
+			}
+			active--
+			gotResult = true
+		} else if len(queue) == 0 && len(deferred) > 0 {
+			next, ok := nextDeferredAt()
+			if !ok {
+				continue
+			}
+			wait := time.Until(next)
+			if wait <= 0 {
+				continue
+			}
+			timer := time.NewTimer(wait)
+			if active == 0 {
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					runErr = ctx.Err()
+					halt = true
+					continue
+				case <-timer.C:
+					continue
+				}
+			}
+			select {
+			case result = <-results:
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				active--
+				gotResult = true
+			case <-ctx.Done():
+				timer.Stop()
+				runErr = ctx.Err()
+				halt = true
+				continue
+			case <-timer.C:
+				continue
+			}
 		}
 
-		result := <-results
-		active--
+		if !gotResult {
+			if active == 0 {
+				break
+			}
+			result = <-results
+			active--
+		}
 
 		if processed[result.id] {
 			continue

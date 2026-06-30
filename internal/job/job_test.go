@@ -66,6 +66,32 @@ func TestUnmarshalSchedulingMetadataLogsInvalidJSON(t *testing.T) {
 	})
 }
 
+func TestHaltedDispatchWaitDoesNotBusySpin(t *testing.T) {
+	t.Run("blocks until bounded timer", func(t *testing.T) {
+		results := make(chan taskResult)
+		wait := 25 * time.Millisecond
+
+		started := time.Now()
+		_, gotResult := waitForHaltedDispatchResult(results, wait)
+
+		require.False(t, gotResult)
+		require.GreaterOrEqual(t, time.Since(started), wait-2*time.Millisecond)
+	})
+
+	t.Run("returns on task completion", func(t *testing.T) {
+		results := make(chan taskResult, 1)
+		want := taskResult{id: uuid.New()}
+		results <- want
+
+		started := time.Now()
+		got, gotResult := waitForHaltedDispatchResult(results, time.Second)
+
+		require.True(t, gotResult)
+		require.Equal(t, want.id, got.id)
+		require.Less(t, time.Since(started), 100*time.Millisecond)
+	})
+}
+
 func captureJobLogs(t *testing.T, fn func()) string {
 	t.Helper()
 

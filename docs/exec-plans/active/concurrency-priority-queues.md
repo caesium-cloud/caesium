@@ -390,7 +390,7 @@ A durable sliding-window counter that throttles tasks against a named shared res
 a single atomic statement, re-queuing (not blocking) over-limit tasks. Independent of B/C
 except the shared schema (A).
 
-- [ ] D1. Build the durable resource limiter + model. New `RateLimitToken` catalog model
+- [x] D1. Build the durable resource limiter + model. New `RateLimitToken` catalog model
       (composite PK `(resource, window_key)`, `consumed`/`limit_val`/`expires_at`; in
       `models.All` catalog section, **not** hot-sharded); new
       `internal/ratelimit.Limiter.Acquire(resource, units, limit, window) (bool, error)`
@@ -404,7 +404,9 @@ except the shared schema (A).
       Files: `new internal/models/rate_limit_token.go`, `internal/models/models.go`,
       `new internal/ratelimit/limiter.go`, `internal/metrics/metrics.go`.
       Depends on: A1.
-- [ ] D2. Integrate the limiter into task dispatch + add the pruner. Read the persisted
+      Done (W2-delta): added the catalog `RateLimitToken`, raw guarded `tx.Exec`
+      upsert limiter, bounded-resource metrics, and limiter/pruner unit tests.
+- [x] D2. Integrate the limiter into task dispatch + add the pruner. Read the persisted
       per-task `RateLimitResource`/`RateLimitUnits` (A3) before dispatch; on rejection,
       re-queue the task `pending` with a retry-after delay (don't hold the slot) and count
       `caesium_run_skipped_total{reason="rate_limit"}`; a `CAESIUM_RATE_LIMIT_*`-gated
@@ -413,6 +415,10 @@ except the shared schema (A).
       `new internal/ratelimit/pruner.go`, `cmd/start/start.go`, `pkg/env/env.go`,
       `test/rate_limit_test.go` (enforcement + window rollover + multi-task contention).
       Depends on: D1 + A3.
+      Done (W2-delta): local, owner-push, and pull-worker dispatch gates acquire tokens
+      before worker submission; rejects stamp `rate_limit_retry_after`, increment
+      `caesium_run_skipped_total` with reason `rate_limit`, and the env-gated
+      token pruner is wired via `runAsync`.
 
 ### Stream E — Observability surfaces (P2)
 

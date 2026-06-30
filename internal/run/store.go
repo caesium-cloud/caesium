@@ -1330,9 +1330,10 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 			if err := tx.Model(&models.TaskRun{}).
 				Where("job_run_id = ? AND task_id = ?", runID, taskID).
 				Updates(map[string]interface{}{
-					"status":     string(TaskStatusRunning),
-					"runtime_id": runtimeID,
-					"started_at": now,
+					"status":                 string(TaskStatusRunning),
+					"runtime_id":             runtimeID,
+					"started_at":             now,
+					"rate_limit_retry_after": nil,
 				}).Error; err != nil {
 				return err
 			}
@@ -1394,19 +1395,20 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			// in memory and did NOT decrement the DB counter, so the dispatched
 			// successor still shows outstanding>0 here — trustOwnerReadiness drops
 			// the predecessor check so the claim reflects the owner's decision.
-			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ?"
+			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
 			if trustOwnerReadiness {
-				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ?"
+				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
 			}
 			result := tx.Model(&models.TaskRun{}).
-				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration).
+				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration, now).
 				Updates(map[string]interface{}{
-					"status":           string(TaskStatusRunning),
-					"claimed_by":       workerNode,
-					"claim_expires_at": leaseExpiry,
-					"claim_attempt":    gorm.Expr("claim_attempt + 1"),
-					"started_at":       now,
-					"owner_generation": ownerGeneration,
+					"status":                 string(TaskStatusRunning),
+					"claimed_by":             workerNode,
+					"claim_expires_at":       leaseExpiry,
+					"claim_attempt":          gorm.Expr("claim_attempt + 1"),
+					"started_at":             now,
+					"owner_generation":       ownerGeneration,
+					"rate_limit_retry_after": nil,
 				})
 			if result.Error != nil {
 				return result.Error
@@ -1451,8 +1453,8 @@ func (s *Store) PendingTasksForDispatch(ctx context.Context, runID uuid.UUID, li
 	}
 	var tasks []models.TaskRun
 	err := s.db.WithContext(ctx).
-		Where("job_run_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0",
-			runID, string(TaskStatusPending)).
+		Where("job_run_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)",
+			runID, string(TaskStatusPending), time.Now().UTC()).
 		Order("created_at ASC").
 		Limit(limit).
 		Find(&tasks).Error
@@ -1518,6 +1520,36 @@ func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, owne
 	})
 }
 
+// RateLimitTask leaves a task pending until retryAfter so rate-limit rejections
+// do not hold worker capacity or spin through immediate reclaims.
+func (s *Store) RateLimitTask(ctx context.Context, runID, taskID uuid.UUID, retryAfter time.Time) error {
+	if retryAfter.IsZero() {
+		retryAfter = time.Now().UTC()
+	}
+	retryAfter = retryAfter.UTC()
+
+	return withStoreBusyRetry(func() error {
+		result := s.db.WithContext(ctx).Model(&models.TaskRun{}).
+			Where("job_run_id = ? AND task_id = ? AND status IN ?", runID, taskID, []string{string(TaskStatusPending), string(TaskStatusRunning)}).
+			Updates(map[string]interface{}{
+				"status":                 string(TaskStatusPending),
+				"claimed_by":             "",
+				"claim_expires_at":       nil,
+				"runtime_id":             "",
+				"started_at":             nil,
+				"rate_limit_retry_after": retryAfter,
+			})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected > 0 {
+			metrics.DBWritesTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Add(float64(result.RowsAffected))
+			metrics.DBStatementsTotal.WithLabelValues(metrics.DBWriteCategoryTaskRunStatus).Inc()
+		}
+		return nil
+	})
+}
+
 func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
@@ -1529,8 +1561,9 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 			result := tx.Model(&models.TaskRun{}).
 				Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
 				Updates(map[string]interface{}{
-					"runtime_id": runtimeID,
-					"started_at": now,
+					"runtime_id":             runtimeID,
+					"started_at":             now,
+					"rate_limit_retry_after": nil,
 				})
 			if result.Error != nil {
 				return result.Error
@@ -2924,21 +2957,22 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 		}
 		resultUpdate := updateQuery.
 			Updates(map[string]interface{}{
-				"status":              string(TaskStatusPending),
-				"attempt":             attempt,
-				"runtime_id":          "",
-				"started_at":          nil,
-				"completed_at":        nil,
-				"result":              "",
-				"output":              nil,
-				"branch_selections":   nil,
-				"log_text":            "",
-				"log_truncated":       false,
-				"error":               "",
-				"cache_hit":           false,
-				"cache_origin_run_id": nil,
-				"cache_created_at":    nil,
-				"cache_expires_at":    nil,
+				"status":                 string(TaskStatusPending),
+				"attempt":                attempt,
+				"runtime_id":             "",
+				"started_at":             nil,
+				"completed_at":           nil,
+				"result":                 "",
+				"output":                 nil,
+				"branch_selections":      nil,
+				"log_text":               "",
+				"log_truncated":          false,
+				"error":                  "",
+				"rate_limit_retry_after": nil,
+				"cache_hit":              false,
+				"cache_origin_run_id":    nil,
+				"cache_created_at":       nil,
+				"cache_expires_at":       nil,
 			})
 		if resultUpdate.Error != nil {
 			return resultUpdate.Error
@@ -3195,14 +3229,15 @@ func (s *Store) ResetInFlightTasks(runID uuid.UUID) error {
 			// Clear the claim too, so a new owner taking over a run can re-claim
 			// these rows (ClaimTaskForDispatch requires claimed_by = '').  The old
 			// owner's worker that held the claim is gone (its lease expired).
-			"claimed_by":          "",
-			"claim_expires_at":    nil,
-			"runtime_id":          "",
-			"started_at":          nil,
-			"cache_hit":           false,
-			"cache_origin_run_id": nil,
-			"cache_created_at":    nil,
-			"cache_expires_at":    nil,
+			"claimed_by":             "",
+			"claim_expires_at":       nil,
+			"runtime_id":             "",
+			"started_at":             nil,
+			"rate_limit_retry_after": nil,
+			"cache_hit":              false,
+			"cache_origin_run_id":    nil,
+			"cache_created_at":       nil,
+			"cache_expires_at":       nil,
 		}).Error
 }
 
