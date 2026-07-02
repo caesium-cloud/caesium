@@ -242,6 +242,13 @@ for a product surface.
 - [ ] C3. Hide the React Flow attribution watermark on every DAG
       (`proOptions={{ hideAttribution: true }}` on the `ReactFlow` element) and
       drop the now-dead `.react-flow__attribution` styling.
+      **Licensing gate**: xyflow's terms ask that you either keep the "React
+      Flow" attribution or hold a Pro subscription / approved OSS exception to
+      remove it (the library is MIT, but `hideAttribution` is governed by their
+      ToS). Before shipping this item, confirm the project's stance; if a
+      subscription/exception isn't in place, the fallback is to keep a
+      lightweight "Powered by React Flow" credit in an About/footer surface
+      rather than the on-canvas watermark, which still de-clutters the DAG.
       Files: `ui/src/features/jobs/JobDAG.tsx`, `ui/src/index.css`.
 
 ### Stream D — Task log drawer
