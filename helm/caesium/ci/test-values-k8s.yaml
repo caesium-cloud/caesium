@@ -8,6 +8,16 @@ config:
   extraEnv:
     - name: CAESIUM_MANUAL_TRIGGER_API_KEY
       value: integration-test-key
+    # Enable event ingest so the event-trigger/webhook integration scenarios run here.
+    - name: CAESIUM_EVENT_INGEST_API_KEY
+      value: integration-test-key
+    # Enable the run-queue dequeuer so the concurrency queue strategy scenarios run here.
+    - name: CAESIUM_RUN_QUEUE_ENABLED
+      value: "true"
+    - name: CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED
+      value: "true"
+    - name: CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL
+      value: 500ms
     # Enable lineage so the data-plane impact integration scenario runs here too.
     - name: CAESIUM_OPEN_LINEAGE_ENABLED
       value: "true"

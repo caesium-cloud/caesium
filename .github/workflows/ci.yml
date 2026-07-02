@@ -475,6 +475,10 @@ jobs:
             -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
             -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+            -e CAESIUM_EVENT_INGEST_API_KEY=integration-test-key \
+            -e CAESIUM_RUN_QUEUE_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
             -e CAESIUM_LOG_LEVEL=debug \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
