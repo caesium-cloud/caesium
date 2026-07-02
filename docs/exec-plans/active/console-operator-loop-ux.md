@@ -168,7 +168,13 @@ trigger deliberate, and its status honest.
       - **Route**: add `DELETE /v1/jobs/:id/queue/:queue_id` (new
         `api/rest/controller/job/queue/delete.go` + a `Cancel`/`Dequeue` method
         in `api/rest/service/job/`), bound in `Protected()` of
-        `api/rest/bind/bind.go` next to the existing `GET /jobs/:id/queue`.
+        `api/rest/bind/bind.go` next to the existing queue route. Mind the two
+        path forms: `bind.go` registers routes **group-relative** — the existing
+        entry is `g.GET("/jobs/:id/queue", …)` and the new one is
+        `g.DELETE("/jobs/:id/queue/:queue_id", …)` (no `/v1`; the parent group
+        adds it) — while the **public URL and the RBAC policy key** carry the
+        full `/v1/jobs/:id/queue/:queue_id` prefix (see `internal/auth/rbac.go`,
+        where the existing policy key is `GET /v1/jobs/:id/queue`).
       - **Auth**: add an explicit entry to the policy map in
         `internal/auth/rbac.go` gated at `models.RoleOperator` — matching the
         nearest analog `PUT /v1/jobs/:id/backfills/:id/cancel` (settle
@@ -248,8 +254,19 @@ ambiguous. This stream gives the drawer room and makes its state legible.
 
 - [ ] D1. Give the log drawer room to breathe: default it wider / to full height,
       stop it occluding the DAG node it describes (offset or dim the canvas
-      rather than overlapping the selected node), and horizontally scroll
-      structured log lines instead of wrapping them mid-word.
+      rather than overlapping the selected node), and stop breaking structured
+      log lines mid-word.
+      **Implementation constraint**: `LogViewer.tsx` renders via `xterm.js`
+      (`Terminal` + `FitAddon`, `convertEol: true`), a terminal emulator that
+      hard-wraps to its column width and has no native horizontal scroll. The
+      widen-and-offset work is straightforward, but true no-wrap /
+      horizontal-scroll for long structured lines requires a design decision by
+      the stream owner: either (a) render structured logs through a scrollable
+      text/HTML viewer (e.g. a `<pre>` with `overflow-x:auto`,
+      `white-space:pre`) instead of xterm, or (b) pin a fixed wide terminal
+      column inside a horizontally scrollable container — which fights the
+      `FitAddon` auto-resize and is the more brittle path. Prefer (a) for the
+      structured-log case; keep xterm for free-form/colorized streaming.
       Files: `ui/src/features/jobs/TaskDetailPanel.tsx`,
       `ui/src/features/jobs/LogViewer.tsx`.
 - [ ] D2. Disambiguate the log-state labels (`Ready` / `Retained` / `Live` /
