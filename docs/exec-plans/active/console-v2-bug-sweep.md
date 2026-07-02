@@ -372,11 +372,16 @@ sequenced after them (see `## Sequencing & Dependencies`).
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Cross-link this plan. Add a short "Console v2 hardening" note under
-      `docs/roadmap.md` §2.4 (the shipped UI-refresh section) pointing at this
-      plan, and add an active-records bullet in `docs/README.md`. Land this as
-      the final doc-sync item once the runtime streams have merged. Files:
-      `docs/roadmap.md` (§2.4), `docs/README.md`.
+- [ ] N-1. Close out the docs. The **publish-time** cross-links already landed
+      with this plan's publication PR — the "Hardening (active)" note under
+      `docs/roadmap.md` §2.4 and the "Active Exec Plans" bullet in
+      `docs/README.md` — so N-1 is **not** those additions. N-1 is the **final
+      status sync once all runtime streams have merged**: flip the roadmap
+      §2.4 note from "active" to shipped/closed, move this plan from
+      `docs/exec-plans/active/` to `docs/exec-plans/completed/` (updating the
+      README bullet accordingly), and confirm the `## Progress` dashboard and
+      per-stream Status table match the merged PRs. Files: `docs/roadmap.md`
+      (§2.4), `docs/README.md`, this plan doc.
 
 ## Sequencing & Dependencies
 
