@@ -153,26 +153,26 @@ percentage/duration syntax, and the `onViolation` enum.
 **1. Truncated feed / bad values.** Nightly load writes 10M rows but 3 bad
 rows upstream corrupted the dedup pass — `dedup_ratio` comes back `0.31`
 against `max: 0.05`. The task succeeds; the evaluator opens a `DatasetHold`
-on `warehouse/transactions_daily` and fires **one** alert naming the dataset,
-producing run, and violated assertion with observed-vs-bound values.
-Overnight, four downstream jobs trigger on their crons; each is
+on `warehouse/transactions_daily` and fires **one** alert naming the
+dataset, producing run, and violated assertion with observed-vs-bound
+values. Overnight, four downstream jobs trigger on their crons; each is
 admission-gated and skips with reason
-`dataset_hold:warehouse/transactions_daily` (informational, non-paging).
-Morning page count: one, at the source, with the blast radius attached.
+`dataset_hold:warehouse/transactions_daily` (non-paging). Morning page
+count: one, at the source, with the blast radius attached.
 
-**2. False positive: month-end.** On July 31 the row count legitimately lands
-10× baseline; `deltaFromBaseline: 50%` trips. The operator checks the
+**2. False positive: month-end.** On July 31 the row count legitimately
+lands 10× baseline; `deltaFromBaseline: 50%` trips. The operator checks the
 baseline sparkline, agrees it is seasonal, and acks:
 `caesium dataset release warehouse/transactions_daily --reason "month-end" --tolerate rowCount.deltaFromBaseline=72h`.
-The hold releases immediately; the named assertion is snoozed on that dataset
-for 72h so follow-up runs don't re-trip. Tolerance windows are the v1 answer
-to seasonality — seasonal baseline *models* are out of scope.
+The hold releases immediately; the named assertion is snoozed on that
+dataset for 72h so follow-up runs don't re-trip. Tolerance windows are the
+v1 answer to seasonality — seasonal baseline *models* are out of scope.
 
 **3. Clean rerun auto-releases.** The vendor re-ships the file; the operator
-retries the producing run. All assertions pass, so the evaluator releases the
-active hold (`release_reason: clean_run`, recording which run cleared it) and
-downstream flows again on the next trigger — no human ack required. A clean
-run releases only holds on datasets it re-produced, never unrelated holds.
+retries the producing run. All assertions pass, so the evaluator releases
+the hold (`release_reason: clean_run`, recording which run cleared it) and
+downstream flows on the next trigger — no ack required. A clean run releases
+only holds on datasets it re-produced, never unrelated holds.
 
 ## Backend design
 
@@ -294,7 +294,7 @@ Deployments wanting an enforced ack chain set an auth mode;
 `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release when no
 authenticated principal is present.
 
-### Events & notifications
+### Events, notifications, REST, env
 
 New bus types (`internal/event/bus.go`): `dataset_held`, `dataset_released`,
 `run_held_upstream`, flowing through the existing persisted-event store and
@@ -306,13 +306,11 @@ defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
 `caesium_dataset_holds_active`, `caesium_runs_held_upstream_total`,
 `caesium_data_assertions_total{result}`.
 
-### REST & env
-
-- `GET /v1/datasets` (registry + freshness/hold status), `GET /v1/datasets/holds?status=active`,
-  `GET /v1/datasets/:ns/:name/metrics?metric=rowCount` (baseline series),
-  `POST /v1/datasets/holds/:id/release`.
-- `CAESIUM_DATA_ASSERTIONS_ENABLED` (default `false`, master gate — off means
-  no evaluator, no gate, no routes; reported by `GET /system/features`),
+- REST: `GET /v1/datasets` (registry + freshness/hold status),
+  `GET /v1/datasets/holds?status=active`, `GET /v1/datasets/:ns/:name/metrics`
+  (baseline series), `POST /v1/datasets/holds/:id/release`.
+- Env: `CAESIUM_DATA_ASSERTIONS_ENABLED` (default `false`, master gate — off
+  means no evaluator, no gate, no routes; reported by `GET /system/features`),
   `CAESIUM_BASELINE_WINDOW=20`, `CAESIUM_BASELINE_MIN_SAMPLES=5`,
   `CAESIUM_DATASET_METRIC_RETENTION=2160h`, `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=false`.
 

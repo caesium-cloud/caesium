@@ -58,8 +58,7 @@ baseline runs (last 30)  ×  candidate image transform:pr-412@sha256:…
    Backtest report: 28 unchanged · 2 changed · 0 failed  →  PR comment
 ```
 
-Everything inherits the quarantined-replay safety model
-([`design-quarantined-replay.md`](design-quarantined-replay.md)): replay runs are
+Everything inherits the quarantined-replay safety model: replay runs are
 `Quarantine=true`, write no production cache, emit no lineage, fire no
 callbacks/notifications, pollute no metrics or run lists, and are gated by the
 baseline-recorded `replaySafe` mark. What backtesting *adds* — executing code
@@ -282,21 +281,21 @@ baseline.
 - Drill-down reuses the shipped
   `GET /v1/jobs/:id/runs/diff?left=<baseline>&right=<replay>` unchanged.
 
-Extending `POST …/runs/:run_id/replay` instead was rejected: its contract is
+Extending `POST …/runs/:run_id/replay` was rejected: its contract is
 "params-only, identical code", its body is deliberately closed
 (`DisallowUnknownFields`, `api/rest/controller/replay/replay.go:113`), and
-widening it would let existing replay callers smuggle code overrides under the
-old attestation. New capability, new endpoint, new authorization surface.
+widening it would smuggle code overrides under the old attestation. New
+capability, new endpoint, new authorization surface.
 
 ## CLI
 
-- `caesium backtest --job <alias|id> --against last-30-runs
-  [--image step=ref] [--command step='…'] [--set k=v] [--path candidate.job.yaml]
+- `caesium backtest --job <alias|id> --against last-30-runs [--image step=ref]
+  [--command step='…'] [--set k=v] [--path candidate.job.yaml]
   [--ignore-output glob]… [--dry-run] [--json] [--format markdown]
   [--idempotency-key k] [--timeout d]` — create, poll to terminal (client-side
   loop like `replay --diff`), render the matrix. `--json` writes clean,
   parseable stdout with logs on stderr (the repo's hard-learned rule);
-  `--format markdown` emits the PR-comment body directly.
+  `--format markdown` emits the PR-comment body.
 - `caesium backtest report <backtest-id> --job <id>` — re-render a stored report
   (the Action's comment step; also how humans re-attach after a timeout).
 - Non-zero exit when any verdict is `changed`/`failed` unless `--allow-changes`

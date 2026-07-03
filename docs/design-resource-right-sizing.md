@@ -240,10 +240,10 @@ Hook: the existing per-attempt loops, both executors.
   stamps `MaxAttempts = Retries+1` today), stamp
   `MaxAttempts = Retries + 1 + onOOM.maxEscalations`. Escalation attempts
   are *class-gated*: consumable only when the previous attempt classified as
-  OOM (`ResourceFailure` + `OOMKilled`); a plain failure that exhausted
-  `Retries` fails even if escalation attempts remain. One accounting spine
-  (the existing `Attempt`/`MaxAttempts` columns), with `EscalationLevel`
-  recording how many consumed attempts were escalations.
+  OOM; a plain failure that exhausted `Retries` fails even if escalation
+  attempts remain. One accounting spine (the existing
+  `Attempt`/`MaxAttempts` columns), with `EscalationLevel` recording how
+  many consumed attempts were escalations.
 - **Escalation step.** Next attempt's memory =
   `min(applied × factor, memory.max)`, quantized up to 64Mi. Already at
   `memory.max` ⇒ no attempt consumed: fail now, classified, trail attached —
@@ -254,11 +254,10 @@ Hook: the existing per-attempt loops, both executors.
   a per-attempt spec copy with escalated `Resources`, nothing else changed.
 - **Persistence and resets.** `RetryTaskClaimed` additionally persists
   `EscalationLevel` and the next attempt's `AppliedResources`, so a
-  re-claimed task (worker death, lease expiry) resumes at the escalated
-  size. The run-level `RetryFromFailure` (`internal/run/store.go:4614+`)
-  resets `attempt` to 1 and must also reset escalation state to baseline.
-  (Per the sibling doc's finding, that path bypasses concurrency admission
-  and `Job.Paused`; this design adds no new caller of it.)
+  re-claimed task resumes at the escalated size. The run-level
+  `RetryFromFailure` (`internal/run/store.go:4614+`) resets `attempt` to 1
+  and must also reset escalation state. (Per the sibling doc's finding, that
+  path bypasses concurrency admission and `Job.Paused`; no new caller here.)
 - **Feedback into learning.** OOM-killed attempts are censored observations
   (peak ≥ limit), so suggestions rise even when sampling missed the spike —
   a success-after-escalation is the strongest recommendation signal.
@@ -412,11 +411,10 @@ matching the data-plane-memory-ui precedent.
 
 ## Phasing
 
-- **Phase 0 — See truthfully.** `Stats()` + sampling for Docker/Podman,
-  terminated-state capture for K8s, OOM reclassification to
-  `ResourceFailure`, `TaskRun` columns incl. `ExitCode`, Prometheus metrics.
-  This *is* roadmap §2.5 items 1–2 and co-delivers agent-doc Phase 0's
-  exit-code need — build once.
+- **Phase 0 — See truthfully.** `Stats()` + sampling (Docker/Podman),
+  terminated-state capture (K8s), OOM reclassification to `ResourceFailure`,
+  `TaskRun` columns incl. `ExitCode`, Prometheus metrics. This *is* roadmap
+  §2.5 items 1–2 and co-delivers agent-doc Phase 0's exit-code need.
 - **Phase 1 — Declare.** `resources:` through all three engines, lint,
   descriptor schema bump, cache-identity exclusion test, distributed flow.
   Independently valuable: today Caesium cannot set limits at all.
@@ -430,20 +428,20 @@ matching the data-plane-memory-ui precedent.
 ## Non-Goals (v1)
 
 - **No cluster autoscaling or bin-packing** — placement stays delegated
-  (Kueue on K8s; the kernel on plain hosts). Caesium sizes containers, it
-  does not schedule nodes.
+  (Kueue on K8s; the kernel on plain hosts). Caesium sizes containers, not
+  nodes.
 - **No mid-run resize** — no VPA-style in-place pod resize, even where K8s
   supports it; escalation happens *between attempts*, never inside one.
 - **No Beam/Dataflow-style resharding** of a running computation — the
   horizontal analog is
-  [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory (whose
-  fan-out children inherit the template step's `resources` — a deliberate
+  [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory, whose
+  fan-out children inherit the template step's `resources` (a deliberate
   composition point).
 - **No cost/dollar modeling** — §2.5's cost layer multiplies the columns
   this design persists; substrate shared, scope not.
 - **No per-run manual resource overrides** — sizing is learned or declared,
-  not a run param (params feed `HashInput`, which would reopen the identity
-  question by the back door).
+  not a run param (params feed `HashInput`, reopening the identity question
+  by the back door).
 
 ## Open Questions
 

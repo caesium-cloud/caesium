@@ -55,18 +55,15 @@ autoscaler, and it never places tasks on nodes.
 ## Overview
 
 ```
- window trigger fires at window open ──▶ park durable row in run_queue
-                                          (window columns set, claimed_by='')
-        ▼                            every CAESIUM_WINDOW_CHECK_INTERVAL
- ┌──────────────────────────────────────────────────────────────────┐
- │ Window Scheduler (leader-gated, same LeaderCheck as dequeuer)    │
- │  for each parked row, priority DESC then slack ASC:              │
- │   now ≥ forceAt?  ──────────────▶ FORCE START (ignore signals)   │
- │   else: load gate → cost/carbon gate → all green? ─▶ start now   │
- │   else: stay parked, record rationale                            │
- └──────────────────────────────────────────────────────────────────┘
-        │ start = store.AdmitRun(...)   (normal atomic admission —
-        ▼                                concurrency/priority still apply)
+ window trigger fires at open ──▶ park durable row in run_queue
+        ▼                          (window columns set, claimed_by='')
+ Window Scheduler tick (leader-gated, same LeaderCheck as dequeuer),
+ for each parked row, priority DESC then slack ASC:
+   now ≥ forceAt? ──▶ FORCE START (ignore signals)
+   else: load gate → cost/carbon gate → all green? ─▶ start now
+   else: stay parked, record rationale
+        ▼ start = store.AdmitRun(...)  (normal atomic admission —
+                                        concurrency/priority still apply)
  run executes exactly like any cron-triggered run
 
  forceAt = deadline − p95(duration) − buffer     (the LATEST SAFE START)
@@ -90,9 +87,7 @@ trigger:
     buffer: "15m"                  # deadline-safety margin; default 10m
     objective: cheapest            # earliest | latest | cheapest (default earliest)
 steps:
-  - name: load
-    image: warehouse-load:latest
-    command: ["load.sh"]
+  - { name: load, image: warehouse-load:latest, command: ["load.sh"] }
 ```
 
 - `latestStart` is **auto-derived**: `deadline − p95 − buffer`, re-evaluated
@@ -181,10 +176,9 @@ if now ≥ forceAt:              release(FORCED)     // unconditional
 else if now < windowOpen:      skip
 else if objective == earliest: release(PLANNED)
 else if objective == latest:   skip until forceAt (that IS the plan)
-else:                          // cheapest: gate chain, all must be green
-    load gate:  running task count < ceiling             (P1)
-    cost gate:  signal(now) ≤ min over [now, forceAt]    (P2)
-    green → release(PLANNED, rationale);  red → stay parked, record rationale
+else: // cheapest — gate chain, all green required:
+    load gate (P1): running task count < ceiling
+    cost gate (P2): signal(now) ≤ min over [now, forceAt]
 ```
 
 Deliberate: **a gate chain with recorded rationale, not a weighted score** —
@@ -331,7 +325,7 @@ late, never twice.
 
 ## Testing
 
-Per the repo's end-to-end gate (CLAUDE.md): every new CLI command and REST
+Per the repo's end-to-end gate (CLAUDE.md), every new CLI command and REST
 endpoint ships with an integration test in `test/` driving the real surface.
 
 - **Integration** (`-tags=integration`, with
