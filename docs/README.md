@@ -36,6 +36,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 - [design-task-templates.md](design-task-templates.md): Reusable, parameterized step templates (proposed).
 - [design-data-plane-memory.md](design-data-plane-memory.md): The second-act substrate (digest pinning, decomposed-hash persistence, DAG versioning, lineage datasets, large-object passing) that makes the data-plane queryable — explain/reproduce/skip. Substrate shipped (streams A–D, #213–#222); the causal query verbs (`run diff`, quarantined `replay`, `blame`) shipped via the completed follow-on plan `exec-plans/completed/data-plane-memory-ii.md`, and those verbs (plus `why`, receipt/`verify`, and the cross-job lineage-impact graph) are now surfaced in the web UI via `exec-plans/completed/data-plane-memory-ui.md`.
 - [design-quarantined-replay.md](design-quarantined-replay.md): Authoritative fail-closed safety model for quarantined replay in the data-plane-memory-ii plan.
+- [design-agent-in-the-loop.md](design-agent-in-the-loop.md): Agent-in-the-loop ETL remediation — autonomous failure triage and bounded remediation via a container-native agent over the data-plane-memory primitives (proposed).
 
 ## Load Testing
 
