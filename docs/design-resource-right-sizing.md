@@ -149,13 +149,12 @@ else stands on it (and shared with the agent doc's Phase 0, which
 independently needs `TaskRun.ExitCode`):
 
 - **OOM detection per engine**, at the inspect each engine already does:
-  Docker consults `InspectResponse.State.OOMKilled` in `Result()` before the
-  exit-code map and returns `atom.ResourceFailure`; Kubernetes checks
+  Docker consults `InspectResponse.State.OOMKilled` in `Result()` before
+  the exit-code map and returns `atom.ResourceFailure`; Kubernetes checks
   `terminatedState(pod).Reason == "OOMKilled"` (in hand at
-  `internal/atom/kubernetes/atom.go:39-53` — only `ExitCode` is read today);
-  podman checks `InspectContainerState.OOMKilled`. Compatibility, honestly:
-  OOM kills change from `killed` to `resource_failure` in persisted
-  results — release-noted, env-gated.
+  `internal/atom/kubernetes/atom.go:39-53`); podman checks
+  `InspectContainerState.OOMKilled`. Compatibility, honestly: OOM kills
+  change from `killed` to `resource_failure` — release-noted, env-gated.
 - **`Stats()` on the engine interface** plus a sampling loop in both
   executors. Docker/Podman: `ContainerStats` samples — cgroup v2 dropped
   `max_usage_in_bytes`, so peak is the max of samples and **under-reports
@@ -220,12 +219,10 @@ Hook: the existing per-attempt loops, both executors.
   `EscalationLevel`.
 - **Escalation step.** Next attempt's memory =
   `min(applied × factor, memory.max)`, quantized up to 64Mi. Already at
-  `memory.max` ⇒ no attempt consumed: fail now, classified, trail attached —
-  never burn attempts on a doomed identical retry. The attempt runs a
-  per-attempt spec copy with escalated `Resources`, nothing else changed —
-  which requires making OOM-class results retryable in the local loop
-  (today an unsuccessful result returns without retry, `job.go:1161-1163`,
-  unlike the worker path).
+  `memory.max` ⇒ no attempt consumed: fail now, classified, trail
+  attached — never burn attempts on a doomed identical retry. The attempt
+  runs a per-attempt spec copy with escalated `Resources`, nothing else
+  changed — which requires the local-loop retryability fix noted above.
 - **Persistence and resets.** `RetryTaskClaimed` additionally persists
   `EscalationLevel` and the next attempt's `AppliedResources`, so a
   re-claimed task resumes at the escalated size. The run-level
@@ -311,13 +308,13 @@ the repo rule that merged-stream captures hide leaks.
 **JobDetailPage** gains a per-step Resources panel: declared limit vs
 observed-peak sparkline, utilization %, suggestion badge ("declared 4Gi ·
 p99 412Mi · suggest 512Mi"), one-click Apply (rendered as "Open PR" with a
-diff preview on git-synced jobs). **TaskDetailPanel/TaskMetadataPanel** show
-the attempt trail — per-attempt applied limits with OOM badges ("attempt 1
-OOMKilled at 1Gi → attempt 2 at 1.5Gi ✓"): the receipt-grade evidence view.
-**RunDetailPage** gets an anomaly ribbon when a run's peak exceeded 2× the
-rolling average (the §2.5 rule); the **stats page** gets a fleet reclaim
-view (top overprovisioned steps, reclaimable memory, OOM leaderboard), a
-pending-suggestion count joining `useNavCounts.ts`.
+diff preview on git-synced jobs). **TaskDetailPanel/TaskMetadataPanel**
+show the attempt trail — per-attempt applied limits with OOM badges
+("attempt 1 OOMKilled at 1Gi → attempt 2 at 1.5Gi ✓"): receipt-grade
+evidence. **RunDetailPage** gets an anomaly ribbon when a run's peak
+exceeded 2× the rolling average (the §2.5 rule); the **stats page** gets a
+fleet reclaim view (top overprovisioned steps, reclaimable memory, OOM
+leaderboard), a pending-suggestion count joining `useNavCounts.ts`.
 
 ## Safety
 
@@ -368,8 +365,7 @@ allocates N MiB (real OOMs against real Docker in CI):
 K8s result-mapping and metrics-API degradation are unit-tested with fake
 pod statuses (CI has no cluster; a kind lane is a follow-up). Feature envs
 are enabled in `just integration-up` so the paths execute in CI; UI panels
-get Playwright e2e against the live backend, per the data-plane-memory-ui
-precedent.
+get Playwright e2e against the live backend, per precedent.
 
 ## Phasing
 
@@ -415,7 +411,7 @@ precedent.
    a params-distribution shift too?
    [`design-window-scheduling.md`](design-window-scheduling.md) /
    [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
-   cohorts could partition the window per data-window size.
+   cohorts could partition it per data-window size.
 4. **Opt-in identity folding.** `rightSizing.hashResources: true` for steps
    whose outputs depend on limits (self-sizing JVMs), at the cost of cache
    busts on every change? Leaning: no in v1 — document `cache: false`.
