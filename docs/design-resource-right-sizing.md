@@ -38,16 +38,15 @@ resharding, no live resize, no autoscaling; see Non-Goals).
 Quoting the six principles from [`roadmap.md`](roadmap.md):
 
 1. **"Container-native execution."** Limits apply through each engine's
-   native knobs (`HostConfig.Resources`, pod `resources`, podman
-   `ResourceLimits`); stats come from what each runtime already exposes. No
-   agent inside the user's container, no SDK.
+   native knobs; stats come from what each runtime already exposes. No agent
+   inside the user's container, no SDK.
 2. **"Declarative and GitOps-first."** `resources:`/`rightSizing:` live in
    the YAML, linted and PR-reviewed; recommendations for git-synced jobs are
    *proposed as a Git PR* — Caesium never silently diverges the DB from Git.
 3. **"Zero-dependency simplicity."** Stats are columns on `task_runs`;
-   recommendations are computed from history in dqlite. Prometheus metrics
-   are *exported*, never *required*. One disclosed exception: k8s
-   peak-memory capture needs metrics-server, degrading gracefully without.
+   recommendations compute from history in dqlite. Prometheus metrics are
+   *exported*, never *required*. Disclosed exception: k8s peak-memory
+   capture needs metrics-server, degrading gracefully without.
 4. **"Smart by default."** Stats on ⇒ every step gets observed-vs-declared
    visibility free; escalation/auto-apply are opt-in with declared bounds.
 5. **"Data engineering first."** Recurring batch runs give a stable
@@ -351,26 +350,24 @@ per the repo's hard-won rule that merged-stream captures hide leaks.
 - **Bounds are absolute.** Escalation and auto-apply clamp to declared
   `[min, max]`; no bound, no auto behavior. Caesium does not discover
   cluster quota — a pod rejected by `ResourceQuota`/`LimitRange` surfaces as
-  `StartupFailure`; bounds are the operator's declared envelope, honestly
-  not a cluster guarantee.
+  `StartupFailure`; bounds are the operator's envelope, honestly not a
+  cluster guarantee.
 - **Escalated attempts are accounted, visible, capped** — they extend
   `MaxAttempts` explicitly at registration, are class-gated to OOM, recorded
   per attempt, and counted in `caesium_task_retries_total` plus a new
-  `caesium_task_oom_escalations_total`. Downsizing is conservative:
-  suggest-only by default; `auto` downsizes only after a full OOM-free
-  window, and an OOM after an auto downsize reverts immediately and freezes
-  downsizing for the cooldown.
-- **Cache identity disclosed** (section above): limits are not execution
-  inputs; steps whose outputs depend on limits must opt out of caching.
+  `caesium_task_oom_escalations_total`. Downsizing is conservative: `auto`
+  downsizes only after a full OOM-free window, and an OOM after an auto
+  downsize reverts immediately and freezes downsizing for the cooldown.
+- **Cache identity disclosed** (above): limits are not execution inputs;
+  steps whose outputs depend on limits must opt out of caching.
 - **Auto never touches Git-owned truth directly** — provenance routing is
   server-enforced, and direct apply requires an active auth mode
   (`CAESIUM_AUTH_MODE` defaults to `none`, so this is a real gate).
-- **Agent composition:** with
-  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) enabled, the
-  `oom` class becomes a deterministic rule deferring to in-run escalation;
-  an incident opens only when bounds exhaust, arriving pre-diagnosed
-  ("OOMKilled at 4Gi and 6Gi; bound max 6Gi; raise `memory.max`" — a tier-3
-  jobdef-patch proposal with the trail attached).
+- **Agent composition:** with the agent doc enabled, `oom` becomes a
+  deterministic rule deferring to in-run escalation; an incident opens only
+  when bounds exhaust, arriving pre-diagnosed ("OOMKilled at 4Gi and 6Gi;
+  bound max 6Gi; raise `memory.max`" — a tier-3 jobdef-patch proposal with
+  the trail attached).
 
 ## Testing
 

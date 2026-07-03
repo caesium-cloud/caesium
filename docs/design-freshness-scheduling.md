@@ -53,8 +53,7 @@ identity).
 4. **Smart by default.** Skip-when-fresh composes with the shipped cache:
    the cache makes a no-op run cheap; freshness makes it free (no run).
 5. **Data engineering first.** Freshness SLOs on datasets are the native
-   language of data teams — the feature Airflow's `schedule_interval` never
-   grew into.
+   language of data teams — what Airflow's `schedule_interval` never became.
 
 ## Overview
 
@@ -183,17 +182,17 @@ succeed and produce nothing new. The contract distinguishes them:
 ### 1. The late vendor file stops being a failure
 
 Today: cron fires at 03:15, `extract.sh` exits non-zero on a missing file,
-`task_failed` pages a human (or opens an agent incident). With freshness: at
-03:15 no arrival event for `raw.vendor_x` has been seen, so `staging.orders`
-is `stale-upstream` — the evaluator **does not derive a run** (running is
-provably pointless) and the cron tick is skipped with a recorded reason; the
-dataset board shows *"stale — waiting on raw.vendor_x, last arrived 25h
-ago"*. At 04:30 the S3 notification hits `/v1/hooks/*`, the arrival
-advances, the evaluator reacts, and the chain refreshes. Nobody was paged.
-If `analytics.orders_daily` crosses `maxStaleness` first,
-`freshness_violated` escalates with the diagnosis — *"12h stale because
-vendor file never arrived"* — not a stack trace. The agent design's
-`data_unavailable` incident class largely dissolves here.
+`task_failed` pages a human. With freshness: at 03:15 no arrival event for
+`raw.vendor_x` has been seen, so `staging.orders` is `stale-upstream` — the
+evaluator **does not derive a run** (running is provably pointless) and the
+cron tick is skipped with a recorded reason; the dataset board shows
+*"stale — waiting on raw.vendor_x, last arrived 25h ago"*. At 04:30 the S3
+notification hits `/v1/hooks/*`, the arrival advances, the evaluator
+reacts, and the chain refreshes. Nobody was paged. If
+`analytics.orders_daily` crosses `maxStaleness` first, `freshness_violated`
+escalates with the diagnosis — *"12h stale because vendor file never
+arrived"* — not a stack trace. The agent design's `data_unavailable`
+incident class largely dissolves here.
 
 ### 2. Fan-in: run once, when all three upstreams have arrived
 
@@ -268,11 +267,11 @@ New package `internal/freshness`: a single evaluator modeled on the
 run-queue dequeuer, **not** the executor trigger loop — constructed with
 `LeaderCheck: dqlite.IsLocalLeader` in `cmd/start/start.go`, ticking every
 `CAESIUM_FRESHNESS_EVAL_INTERVAL` (default `1m`). Everything it needs
-(states, declarations, derivation dedupe) is in dqlite — no in-process timer
-is ever the only record of a pending decision, so failover resumes on the
-new leader. A reactive fast path subscribes to dataset-advance events and
-immediately evaluates the affected downstream slice (the same BFS shape as
-`QueryImpact`); the timer loop remains the correctness backstop.
+(states, declarations, derivation dedupe) is in dqlite — no in-process
+timer is ever the only record of a pending decision, so failover resumes on
+the new leader. A reactive fast path subscribes to dataset-advance events
+and immediately evaluates the affected downstream slice; the timer loop
+remains the correctness backstop.
 
 Per produced dataset with an SLO, the state machine:
 
