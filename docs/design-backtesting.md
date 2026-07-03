@@ -11,16 +11,16 @@ cases, the vendor file with the weird encoding. Staging data is not production
 data, so the regression is discovered by the *consumer*: a dashboard shows wrong
 numbers, and someone runs `caesium run diff` after the fact.
 
-Every mainstream orchestrator has this gap, because none of them *records* what a
-production run consumed and produced in a re-executable form. Caesium does: the
+Every mainstream orchestrator has this gap, because none *records* what a
+production run consumed and produced in re-executable form. Caesium does: the
 data-plane-memory substrate persists, per task run, an immutable
-`TaskExecutionDescriptor` (the complete effective runtime envelope —
-`internal/models/run.go:154`), the decomposed `HashInput` blob, typed step outputs
-(`TaskRun.Output`, `internal/models/run.go:80`), resolved image digests, and a
-content-addressed receipt (`internal/receipt/receipt.go`). Quarantined replay
-(`internal/replay/replay.go`) already re-executes a historical run from those
-descriptors with Caesium-internal side effects suppressed; causal run diff
-(`internal/run/rundiff.go`) already attributes *why* two runs differ.
+`TaskExecutionDescriptor` (`internal/models/run.go:154`), the decomposed
+`HashInput` blob, typed step outputs (`TaskRun.Output`, run.go:80), resolved
+image digests, and a content-addressed receipt (`internal/receipt/receipt.go`).
+Quarantined replay (`internal/replay/replay.go`) already re-executes a
+historical run from those descriptors with Caesium-internal side effects
+suppressed; causal run diff (`internal/run/rundiff.go`) already attributes *why*
+two runs differ.
 
 Backtesting is the composition: **before merge, replay the candidate change over
 the last N production runs' recorded inputs and report output deltas per run** —
@@ -33,12 +33,11 @@ next to the code review.
   changes *reviewable* (lint → visual DAG diff → preview run → PR comment);
   backtesting makes them *testable against reality*. The unit under review is
   the manifest + image in git; the test fixture is production history the server
-  already recorded. No other orchestrator can offer this in a PR check because
-  none has the recorded substrate.
-- **Container-native execution.** The candidate is just a different image/command
-  — no SDK, no test-harness contract.
-- **Zero-dependency simplicity.** Baselines, descriptors, outputs, and backtest
-  reports all live in the existing dqlite store.
+  already recorded. No other orchestrator can offer this in a PR check.
+- **Container-native execution.** The candidate is just a different
+  image/command — no SDK, no test-harness contract.
+- **Zero-dependency simplicity.** Baselines, descriptors, outputs, and reports
+  all live in the existing dqlite store.
 - **Smart by default.** Content-addressed caching makes N-run backtests
   affordable: only the changed step and its downstream re-execute per baseline
   run (see the cost model).
@@ -96,23 +95,22 @@ Rendered as a PR comment by the §2.1 Action:
 > | `run_90bc` | 2026-06-30 | ⚠ CHANGED | `transform.row_count` 41 872 → 40 619 |
 > | 25 runs | 2026-06-01 … 2026-07-02 | ✓ unchanged | — |
 >
-> Both changed runs are **month-end** runs. Cost: 22 tasks re-executed,
-> 41 served from cache. [Full report](…) · [Per-run diff](…)
+> Both changed runs are **month-end**. Cost: 22 tasks re-executed, 41 cached.
+> [Full report](…) · [Per-run diff](…)
 
-The month-end pattern jumping out of the run matrix *is the feature*: the
+The month-end pattern jumping out of the run matrix *is* the feature: the
 regression only manifests on data shapes that staging never has.
 
 ## Scenarios
 
 1. **Schema-mapping change backtests clean.** A vendor renamed a field; the fix
-   updates the extract mapping and `outputSchema`. Backtest over 30 runs: the 4
-   runs since the rename show the corrected outputs (expected, annotated by the
-   author); 26 older runs are byte-identical. The reviewer approves with
-   evidence instead of hope.
-2. **"Harmless" refactor changes month-end.** A transform rewrite "with no
-   behavior change" backtests unchanged on 28 of 30 runs — but both month-end
-   runs lose ~3% of rows: the refactor mishandles a partition that only exists
-   at month boundaries. Caught in review; the consumer never sees it.
+   updates the extract mapping and `outputSchema`. The 4 runs since the rename
+   show the corrected outputs (expected, annotated by the author); 26 older runs
+   are byte-identical. The reviewer approves with evidence instead of hope.
+2. **"Harmless" refactor changes month-end.** A rewrite "with no behavior
+   change" backtests unchanged on 28 of 30 runs — but both month-end runs lose
+   ~3% of rows: it mishandles a partition that only exists at month boundaries.
+   Caught in review; the consumer never sees it.
 3. **Dependency bump changes nothing.** A base-image CVE bump
    (`python:3.12.4 → 3.12.6`) backtests 30/30 byte-identical (output-ref digests
    equal). Merge with confidence, receipt-grade evidence in the PR.
@@ -268,22 +266,13 @@ backtest inherits that for any run that isn't fully cache-served.
 
 ### Data model
 
-```go
-type Backtest struct {          // internal/models
-    ID, JobID uuid.UUID
-    Status string               // pending|running|succeeded|failed|partial
-    Overrides, IgnorePaths datatypes.JSON
-    Fingerprint *string         // scoped idempotency (unique index), as replay
-    Requested, Eligible, Changed, Unchanged, Failed int
-}
-type BacktestRun struct {
-    BacktestID, BaselineRunID uuid.UUID
-    ReplayRunID *uuid.UUID      // null when skipped
-    Verdict, SkipReason string  // unchanged|changed|failed|skipped|degraded
-    OutputDelta datatypes.JSON  // per-task FieldChanges
-    TasksReexecuted, TasksCached int
-}
-```
+Two new GORM models in `internal/models` (house `AutoMigrate` pattern):
+`Backtest` (`ID`, `JobID`, `Status` pending/running/succeeded/failed/partial,
+`Overrides` + `IgnorePaths` JSON, unique nullable `Fingerprint`, and
+requested/eligible/changed/unchanged/failed counters) and `BacktestRun`
+(`BacktestID`, `BaselineRunID`, nullable `ReplayRunID`, `Verdict`
+unchanged/changed/failed/skipped/degraded, `SkipReason`, `OutputDelta` JSON of
+per-task `FieldChange`s, re-executed/cached task counts).
 
 Creation is idempotent the way replay creation is: `Idempotency-Key` header,
 scoped fingerprint (job + baseline set + overrides + principal + key), insert
@@ -375,25 +364,23 @@ Layered posture, honest about which layers are enforcement and which are not:
 
 1. **`replaySafe` remains the hard gate (enforced).** Baseline-recorded, shipped
    semantics: no `--force`, no retroactive grant, request bodies cannot clear
-   quarantine — inherited verbatim. Backtest never touches a baseline without it.
-2. **`backtestMode: readOnly` job attestation (attestation, not enforcement).**
-   A job opts into candidate-code backtesting by declaring its steps
-   read-from-sources / write-only-declared-outputs. Caesium records and displays
-   this; it **cannot verify it** — a policy statement by the pipeline owner,
-   like `replaySafe` itself. Say exactly that in the docs.
+   quarantine — inherited verbatim.
+2. **`backtestMode: readOnly` job attestation (not enforcement).** A job opts
+   into candidate-code backtesting by declaring its steps read-from-sources /
+   write-only-declared-outputs. Caesium records and displays this; it **cannot
+   verify it** — a pipeline-owner policy statement, like `replaySafe` itself.
+   Say exactly that in the docs.
 3. **Network-policy guidance (deployment-level enforcement, not Caesium's).**
-   Document running backtest replays under a NetworkPolicy/egress profile that
-   allows sources and blocks sinks, keyed off the descriptor's captured workload
-   identity. Caesium provides the hook (quarantined runs are identifiable), not
-   the firewall.
-4. **Authorization (enforced).** Creating a backtest with overrides requires a
-   higher-privilege API-key capability than params-only replay; idempotent
-   creation, bounded override sizes (mirroring the replay controller's caps),
-   digest-resolved images only.
+   Document running backtest replays under an egress profile that allows sources
+   and blocks sinks, keyed off the descriptor's captured workload identity.
+   Caesium provides the hook (quarantined runs are identifiable), not the
+   firewall.
+4. **Authorization (enforced).** Overrides require a higher-privilege API-key
+   capability than params-only replay; idempotent creation, bounded override
+   sizes (mirroring the replay controller's caps), digest-resolved images only.
 5. **Audit (enforced).** `Backtest.Overrides`, per-replay `DescriptorOverrides`,
-   and candidate digests are durable; each replay's descriptor still records the
-   baseline it deviated from. "What code ran under a backtest banner" is
-   answerable after the fact.
+   and candidate digests are durable; each replay's descriptor records the
+   baseline it deviated from.
 
 P0 (same-code backtest, no overrides) carries **none** of the new risk — it is
 exactly the shipped replay risk, N times — a reason to phase it first.

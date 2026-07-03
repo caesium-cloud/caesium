@@ -44,12 +44,12 @@ zero-dependency (dqlite rows, the existing event router and cache identity).
    ride the existing `##caesium::output` marker; datasets are declared in
    YAML. No SDK, no library.
 2. **Declarative and GitOps-first.** `produces`/`consumes`/`freshness` are
-   jobdef fields — linted, diffed, PR-reviewed; the dataset graph is
-   reconstructable from manifests alone.
+   jobdef fields — linted, diffed, PR-reviewed, reconstructable from
+   manifests alone.
 3. **Zero-dependency simplicity.** The registry and state machine are dqlite
-   tables; arrival signals ride the shipped event ingestion. Caesium grows
-   **no built-in S3/SFTP pollers** — external arrival is event push or a
-   documented sensor-container pattern.
+   tables; arrival signals ride the shipped event ingestion. **No built-in
+   S3/SFTP pollers** — external arrival is event push or a documented
+   sensor-container pattern.
 4. **Smart by default.** Skip-when-fresh composes with the shipped cache:
    the cache makes a no-op run cheap; freshness makes it free (no run).
 5. **Data engineering first.** Freshness SLOs on datasets are the native
@@ -88,22 +88,22 @@ observable in the UI and CLI.
 
 - **Observed lineage datasets exist, but only behind OpenLineage.**
   `lineage_datasets` rows (`internal/models/lineage_dataset.go:20-41`) are
-  written per task run by the lineage mapper — and only when
-  `CAESIUM_OPEN_LINEAGE_ENABLED=true` (default `false`,
-  `pkg/env/env.go:143`; wired in `cmd/start/start.go:396-423`). Dataset
-  identity is *derived*, not declared: `buildTaskDatasets`
-  (`internal/lineage/mapper.go:611-698`) promotes **path/URI-like structured
-  output values** to datasets, or synthesizes `<job>.<step>.output` from a
-  declared `outputSchema`; inputs come from `inputSchema` keys. Most jobs
-  today declare neither and emit no path-like outputs — the observed graph
-  is sparse and appears only *after* runs happen. **Freshness cannot
-  bootstrap from observation alone; it needs explicit YAML declarations.**
+  written per task run by the lineage mapper — only when
+  `CAESIUM_OPEN_LINEAGE_ENABLED=true` (default `false`, `pkg/env/env.go:143`;
+  wired in `cmd/start/start.go:396-423`). Dataset identity is *derived*, not
+  declared: `buildTaskDatasets` (`internal/lineage/mapper.go:611-698`)
+  promotes **path/URI-like structured output values** to datasets or
+  synthesizes `<job>.<step>.output` from a declared `outputSchema`; inputs
+  come from `inputSchema` keys. Most jobs today declare neither and emit no
+  path-like outputs — the observed graph is sparse and appears only *after*
+  runs happen. **Freshness cannot bootstrap from observation alone; it needs
+  explicit YAML declarations.**
 - **Downstream traversal exists.** `QueryImpact`
   (`internal/lineage/impact.go:82`) BFS-walks dataset consumers across job
   boundaries (depth-capped at 20). The declared registry feeds this shape.
 - **Arrival signaling exists.** `POST /v1/events`, `caesium event push`,
-  webhook bridging, and the event router with the `_trigger_depth` chain
-  guard ([`design-event-triggers.md`](design-event-triggers.md)) are shipped.
+  webhook bridging, and the event router's `_trigger_depth` chain guard
+  ([`design-event-triggers.md`](design-event-triggers.md)) are shipped.
 - **"Nothing changed" is already detectable.** `HashInput`
   (`internal/cache/hash.go:266-287`) folds image digest, command, env,
   predecessor hashes, **predecessor outputs**, and run params into cache
@@ -119,9 +119,8 @@ observable in the UI and CLI.
   with `LeaderCheck: dqlite.IsLocalLeader` at `cmd/start/start.go:183`). The
   freshness evaluator must follow the dequeuer — a per-node evaluator would
   derive N duplicate runs per stale dataset.
-- **Admission exists.** New runs pass atomic concurrency admission
-  (`internal/run/store.go:711` `admit`; `AdmitRun` at `store.go:1044`).
-  Derived runs go through it like everyone else.
+- **Admission exists** (`internal/run/store.go:711` `admit`; `AdmitRun` at
+  `store.go:1044`). Derived runs pass it like everyone else.
 
 ## YAML example
 
@@ -231,16 +230,15 @@ compose rather than compete.
 New jobdef surface (`pkg/jobdef/definition.go`): `datasets` on `Step`
 (`consumes: [name...]`, `produces: [{name, freshness, maxStaleness,
 watermark}]`) and `metadata.datasets.sources` for external datasets
-(`expectedEvery`, `arrival` event binding with JSONPath watermark
-extraction). Lint: SLO fields parse as durations; a `consumes` name must be
-produced in the applied set, declared as a source, or marked
-`external: true`; exactly one job may produce a given dataset (any number
-consume); the declared produces/consumes graph must be acyclic **across
-jobs** — a dataset cycle is a derivation cycle, the same check class as
-event-trigger static cycle detection.
+(`expectedEvery`, `arrival` binding). Lint: SLO fields parse as durations; a
+`consumes` name must be produced in the applied set, declared as a source,
+or marked `external: true`; exactly one job produces a given dataset (any
+number consume); the declared graph must be acyclic **across jobs** — a
+dataset cycle is a derivation cycle, the same check class as event-trigger
+static cycle detection.
 
-Apply upserts declarations into a new `dataset_declarations` table. This is
-the *declared* graph, independent of and complementary to the *observed*
+Apply upserts declarations into a new `dataset_declarations` table: the
+*declared* graph, independent of and complementary to the *observed*
 `lineage_datasets` graph — declarations bootstrap scheduling before any run
 exists; observations (when OpenLineage is on) validate declarations and flag
 drift. Freshness does **not** require `CAESIUM_OPEN_LINEAGE_ENABLED`.
@@ -268,12 +266,11 @@ Three ways a dataset advances, all existing surfaces:
    `CAESIUM_EVENT_INGEST_API_KEY`, or a `/v1/hooks/*` webhook such as an S3
    notification) matches a source's `arrival` binding; the watermark is
    JSONPath-extracted. `caesium event push` covers scripting;
-   `caesium dataset advance <name> --watermark <v>`
-   (`POST /v1/datasets/:namespace/:name/advance`) covers operators.
-3. **Sensor-container pattern** (documented, not built in): a small cron job
-   whose only step polls SFTP/S3/a table and, on new data, emits
-   `##caesium::output {"watermark": ...}` for the source dataset it
-   produces. Caesium stays zero-dependency; the poller is just a container.
+   `caesium dataset advance` covers operators.
+3. **Sensor-container pattern** (documented, not built in): a small cron
+   job whose only step polls SFTP/S3/a table and, on new data, emits the
+   watermark output for the source dataset it produces. Caesium stays
+   zero-dependency; the poller is just a container.
 
 ### The freshness evaluator (leader-gated, durable)
 

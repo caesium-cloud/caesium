@@ -18,14 +18,13 @@ truncated vendor file (900 rows instead of 10 million, schema perfectly
 valid); a join key goes 40% null after an upstream refactor; the watermark
 stops advancing and today's partition silently carries yesterday's data.
 
-Three properties make this failure class worse than a red run.
-**Bad data propagates further than bad runs**: a failed task stops its own
-DAG, but a *successful* task that emitted garbage feeds every
-lineage-downstream job on the next trigger, materializing the poison one hop
-further with every consumer that runs. **Failing the world duplicates
-alerts**: the blunt fix — every consumer validates its inputs and fails —
-turns one bad extract into N red runs and N pages, burying the root cause
-under its own symptoms (the noise pattern
+Three properties make this failure class worse than a red run. **Bad data
+propagates further than bad runs**: a failed task stops its own DAG, but a
+*successful* task that emitted garbage feeds every lineage-downstream job on
+the next trigger, materializing the poison one hop further with every
+consumer that runs. **Failing the world duplicates alerts**: making every
+consumer validate its inputs and fail turns one bad extract into N red runs
+and N pages, burying the root cause under its own symptoms (the noise pattern
 [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) added
 `suppress_downstream_alerts` to fight after the fact). And **silent poison is
 worst of all**: with neither check, nobody is paged and the bad numbers reach
@@ -34,11 +33,10 @@ a dashboard or a customer.
 The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
 is a circuit breaker on the dataset: when what a step *produced* looks
 statistically wrong, mark the **dataset** held, let downstream jobs skip
-instead of consuming it, alert **once at the source**, and release on human
-ack or the next clean run. This gives scenario 3 of
-`design-agent-in-the-loop.md` (bad values) a native primitive instead of a
-playbook workaround, and is the runtime complement of the PR-time checks in
-`design-contract-enforcement.md`.
+instead of consuming poison, alert **once at the source**, and release on
+human ack or the next clean run — a native primitive for scenario 3 of
+`design-agent-in-the-loop.md` (bad values) and the runtime complement of the
+PR-time checks in `design-contract-enforcement.md`.
 
 ## Terminology: "hold", deliberately not "quarantine"
 
@@ -58,18 +56,18 @@ share a column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
-1. **Container-native execution.** Assertions evaluate from what the step
-   *prints* — a new `##caesium::metrics` stdout marker beside the existing
-   `##caesium::output` protocol (`pkg/task/output.go`). No SDK, no agent in
-   the container; Caesium never opens a connection to the data.
+1. **Container-native.** Assertions evaluate from what the step *prints* — a
+   new `##caesium::metrics` stdout marker beside the `##caesium::output`
+   protocol (`pkg/task/output.go`). No SDK, no in-container agent; Caesium
+   never opens a connection to the data.
 2. **Declarative and GitOps-first.** Assertions live in the job YAML on the
    producing step, linted by `caesium job lint`, diffable in PRs.
-3. **Zero-dependency simplicity.** Holds, metrics, and the registry are small
-   dqlite tables; baseline math is percentiles over the last N runs, computed
+3. **Zero-dependency.** Holds, metrics, and the registry are small dqlite
+   tables; baselines are percentiles over the last N runs, computed
    server-side in Go. No stats engine, no time-series store.
-4. **Smart by default.** Declaring assertions is opt-in; once declared,
-   baseline tracking, hold propagation, downstream skip, and single-source
-   alerting happen without user glue code.
+4. **Smart by default.** Opt-in declaration; once declared, baseline
+   tracking, hold propagation, downstream skip, and single-source alerting
+   happen without glue code.
 5. **Data engineering first.** The "stop the line" primitive every data team
    builds badly on top of orchestrators that only understand runs.
 
@@ -110,9 +108,8 @@ re-emits, not for Caesium.
 Assertions attach to a **declared produced dataset** on the step. The
 `produces:` block is the declared-dataset registry — explicitly the *same*
 YAML and model substrate as [`design-freshness-scheduling.md`](design-freshness-scheduling.md):
-one `datasets` registry keyed `(namespace, name)`, which freshness scheduling
-reads for watermarks and this feature reads for holds. Neither design ships a
-private copy.
+one registry keyed `(namespace, name)`, read by freshness scheduling for
+watermarks and by this feature for holds. Neither design ships a private copy.
 
 ```yaml
 steps:
@@ -220,30 +217,29 @@ what-if must not trip or clear a production breaker.
 
 ### Data model (`internal/models/`)
 
-- `DatasetHold` — id; `Namespace`/`Name`; `Status` (`active|released`) with a
+- `DatasetHold` — namespace/name; `Status` (`active|released`) with a
   partial-unique guard so at most one active hold per dataset, enforced the
   way concurrency admission is (one conditional INSERT, leader-safe under
   dqlite's Raft serialization); held-by job/run/task refs; violation JSON
   (assertion, observed, bound, baseline snapshot); occurrence count;
-  `ReleasedAt`/`ReleasedBy`/`ReleaseReason` (`ack|clean_run`) + release-run
-  ref; tolerance entries (assertion name → expiry).
+  released-at/by/reason (`ack|clean_run`) + release-run ref; tolerance
+  entries (assertion → expiry).
 - `DatasetMetric` — task-run ref (CASCADE like `LineageDataset`), namespace,
-  name, metric, float value (watermarks as epoch seconds), created-at.
-  Pruned past `CAESIUM_DATASET_METRIC_RETENTION` (default 90d).
+  name, metric, float value (watermarks as epoch seconds), created-at;
+  pruned past `CAESIUM_DATASET_METRIC_RETENTION` (default 90d).
 - `Dataset` — the declared registry row (namespace, name, declaring job/step,
   spec JSON). **Shared table with freshness scheduling**; whichever design
   lands first creates it, the other extends it.
 
-Baselines are computed on read: median + p10/p90 over the last N clean
+Baselines are computed on read — median + p10/p90 over the last N clean
 (non-held, non-quarantined, succeeded) runs' `DatasetMetric` rows,
-`N = CAESIUM_BASELINE_WINDOW` (default 20). No materialized baseline table in
-v1 — the window is ≤20 small rows per metric, and computing on read avoids a
-second write path to keep consistent.
-
-**Cold start:** with fewer than `CAESIUM_BASELINE_MIN_SAMPLES` (default 5)
-samples, `deltaFromBaseline` assertions are **warn-only** — recorded,
-surfaced in the UI as "seeding", never holding. Absolute bounds enforce from
-run one. This makes turning the feature on safe by construction.
+`N = CAESIUM_BASELINE_WINDOW` (default 20). No materialized baseline table:
+the window is ≤20 small rows per metric, and computing on read avoids a
+second write path to keep consistent. **Cold start:** below
+`CAESIUM_BASELINE_MIN_SAMPLES` (default 5) samples, `deltaFromBaseline`
+assertions are **warn-only** — recorded, surfaced in the UI as "seeding",
+never holding; absolute bounds enforce from run one. Turning the feature on
+is safe by construction.
 
 ### Dataset identity
 
@@ -277,21 +273,15 @@ transaction** that inserts the run. On a hit, the default disposition is
 status with `SkipReason: dataset_hold:<ns>/<name>`, reusing the
 concurrency-skip machinery so run history shows *why* nothing ran (an
 invisible non-run would be silent-poison's evil twin), and emits
-`run_held_upstream`. Per-job override:
-
-```yaml
-metadata:
-  onUpstreamHold: skip     # skip (default) | run
-```
-
-`run` opts a consumer out (e.g. a monitoring job that *wants* to read held
-data). A third disposition — `park`, holding the run in the durable
-`run_queue` and draining on release — is deferred to Phase 3: the queue's
-dequeuer is concurrency-driven today and correct hold-release draining needs
-its own leader-gated wiring. Trigger rules are unaffected: the gate acts at
-run granularity, before any task exists, so a gate-skipped run looks to
-trigger chaining exactly like a concurrency-skipped run does today. Mid-run
-task starts do not re-check holds in v1 (documented limitation).
+`run_held_upstream`. A per-job override, `metadata.onUpstreamHold: skip|run`
+(default `skip`), lets a consumer opt out — e.g. a monitoring job that
+*wants* to read held data. A third disposition — `park`, holding the run in
+the durable `run_queue` and draining on release — is deferred to Phase 3: the
+queue's dequeuer is concurrency-driven today and correct hold-release
+draining needs its own leader-gated wiring. Trigger rules are unaffected: the
+gate acts at run granularity, before any task exists, so a gate-skipped run
+looks to trigger chaining exactly like a concurrency-skipped run does today.
+Mid-run task starts do not re-check holds in v1 (documented limitation).
 
 ### Release semantics
 
@@ -422,13 +412,13 @@ get their own scenarios.
 
 - **No data-plane access.** Caesium never connects to warehouses, reads
   files, or samples rows. Metrics are step-emitted, full stop.
-- **No anomaly ML, no seasonal baseline models.** Rolling median/percentile
-  windows plus manual tolerance windows only; month-end is a human ack, not
-  a Fourier term.
-- **No row-level holds.** Setting *rows* aside is the pipeline's job (cf. the
-  `badRowPolicy` param pattern in agent-in-the-loop scenario 3); Caesium
-  holds the dataset pointer, never data.
-- **No retroactive un-skip** of gate-skipped runs on release in v1.
+- **No anomaly ML, no seasonal baseline models.** Rolling percentile windows
+  plus manual tolerance windows; month-end is a human ack, not a Fourier
+  term.
+- **No row-level holds.** Setting rows aside is the pipeline's job (cf. the
+  `badRowPolicy` pattern in agent-in-the-loop scenario 3); Caesium holds the
+  dataset pointer, never data.
+- **No retroactive un-skip** of gate-skipped runs on release.
 - **Not a data catalog.** The registry stores identity + contract, not
   ownership/glossary/discovery metadata.
 
