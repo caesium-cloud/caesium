@@ -10,25 +10,24 @@
 ## Problem
 
 Caesium's data contracts today are structural: `outputSchema` is validated
-post-task (`internal/run/schema_validation.go`), violations are persisted on
-the `TaskRun`, and `metadata.schemaValidation: warn|fail` decides whether the
-task goes red. That catches *shape* problems. It does not catch the failures
-that actually poison downstream consumers: the extract "succeeds" on a
-truncated vendor file (900 rows instead of 10 million, schema perfectly
-valid); a join key goes 40% null after an upstream refactor; the watermark
-stops advancing and today's partition silently carries yesterday's data.
+post-task (`internal/run/schema_validation.go`), violations persist on the
+`TaskRun`, and `metadata.schemaValidation: warn|fail` decides whether the
+task goes red. That catches *shape* problems — not the failures that actually
+poison consumers: the extract "succeeds" on a truncated vendor file (900 rows
+instead of 10 million, schema perfectly valid); a join key goes 40% null
+after an upstream refactor; the watermark stops advancing and today's
+partition silently carries yesterday's data.
 
 Three properties make this failure class worse than a red run. **Bad data
 propagates further than bad runs**: a failed task stops its own DAG, but a
 *successful* task that emitted garbage feeds every lineage-downstream job on
-the next trigger, materializing the poison one hop further with every
-consumer that runs. **Failing the world duplicates alerts**: making every
-consumer validate its inputs and fail turns one bad extract into N red runs
-and N pages, burying the root cause under its own symptoms (the noise pattern
-[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) added
-`suppress_downstream_alerts` to fight after the fact). And **silent poison is
-worst of all**: with neither check, nobody is paged and the bad numbers reach
-a dashboard or a customer.
+the next trigger, one hop further with every consumer that runs. **Failing
+the world duplicates alerts**: making every consumer validate its inputs and
+fail turns one bad extract into N red runs and N pages, burying the root
+cause under its own symptoms (the noise pattern agent-in-the-loop added
+`suppress_downstream_alerts` to fight after the fact). And **silent poison
+is worst of all**: with neither check, nobody is paged and the bad numbers
+reach a dashboard or a customer.
 
 The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
 is a circuit breaker on the dataset: when what a step *produced* looks
@@ -76,12 +75,11 @@ column, an event field, or a YAML key.
 Caesium has **no data plane**: it cannot count rows, it schedules containers
 and reads their stdout. A row-count assertion works because *the step emits
 the count it observed* — the same trust boundary as `##caesium::output` and
-the `output-ref` digests. Stated honestly: the breaker catches **accidents,
-not adversaries** — a malicious or buggy image can print flattering metrics.
-The flip side is universality: any tool that can `echo` participates (dbt
+the `output-ref` digests. Stated honestly, the breaker catches **accidents,
+not adversaries**: a malicious or buggy image can print flattering metrics.
+The flip side is universality — any tool that can `echo` participates (dbt
 post-hooks, Spark counters, a two-line `psql` wrapper). Verifying metrics
-against actual data is a job for an auditing *step* that recomputes and
-re-emits, not for Caesium.
+against actual data is a job for an auditing *step*, not for Caesium.
 
 ## Overview
 
@@ -141,14 +139,13 @@ markers in `pkg/task/output.go` `parseMarkers`):
 ##caesium::metrics {"dataset":"warehouse/transactions_daily","rowCount":10400312,"null_rate_customer_id":0.0003,"max_event_time":"2026-07-03T01:12:00Z","dedup_ratio":0.001}
 ```
 
-Semantics: `warn` records the violation (like `schemaValidation: warn`), no
-hold; `fail` fails the task (existing red-run semantics); `hold` lets the
-task **succeed** — the work is done, and failing it would just invite a retry
-of the same data — but holds the dataset. Absolute bounds (`min`/`max`/
-`maxLag`) always enforce; `deltaFromBaseline` enforces only once the baseline
-is seeded (below). A missing declared metric is itself a violation — a step
-that stops emitting `rowCount` must not silently pass. `caesium job lint`
-validates dataset names, `consumes` resolvability against the registry,
+Semantics: `warn` records the violation (like `schemaValidation: warn`);
+`fail` fails the task (red-run semantics); `hold` lets the task **succeed** —
+the work is done, and failing it would just invite a retry of the same data —
+but holds the dataset. Absolute bounds always enforce; `deltaFromBaseline`
+only once the baseline is seeded (below). A missing declared metric is itself
+a violation — a step that stops emitting `rowCount` must not silently pass.
+`caesium job lint` validates dataset names, `consumes` resolvability,
 percentage/duration syntax, and the `onViolation` enum.
 
 ## Scenario walkthroughs
@@ -188,9 +185,8 @@ error if ambiguous); values are JSON numbers or RFC3339 strings; multiple
 lines merge last-write-wins per (dataset, metric). Metrics get their own cap
 (`MaxMetricsBytes = 16 KiB`, separate from the 64 KiB `MaxOutputBytes` so a
 chatty metrics emitter cannot evict real outputs, or vice versa). Malformed
-lines are skipped leniently like malformed output lines — but a declared
-assertion whose metric never arrives is a violation, so lenience cannot mask
-a broken emitter.
+lines are skipped leniently like malformed output lines — safe because a
+declared assertion whose metric never arrives is itself a violation.
 
 ### Assertion evaluator (post-task pipeline)
 
@@ -227,9 +223,8 @@ what-if must not trip or clear a production breaker.
 
 Baselines are computed on read — median + p10/p90 over the last N clean
 (non-held, non-quarantined, succeeded) runs' `DatasetMetric` rows,
-`N = CAESIUM_BASELINE_WINDOW` (default 20). No materialized baseline table:
-the window is ≤20 small rows per metric, and computing on read avoids a
-second write path to keep consistent. **Cold start:** below
+`N = CAESIUM_BASELINE_WINDOW` (default 20); no materialized baseline table,
+since the window is ≤20 small rows per metric. **Cold start:** below
 `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) samples, `deltaFromBaseline`
 assertions are **warn-only** — recorded, surfaced in the UI as "seeding",
 never holding; absolute bounds enforce from run one. Turning the feature on
@@ -239,13 +234,13 @@ is safe by construction.
 
 Today a "dataset" exists only as *observed* lineage rows — `LineageDataset`
 keyed `(namespace, name, direction)` per task run
-(`internal/models/lineage_dataset.go`), with names heuristically derived from
-path-like output values or synthesized as `alias.step.output`
-(`internal/lineage/mapper.go` `buildTaskDatasets`). Heuristic names are too
-unstable to hang holds on; the declared registry fixes identity. Where a
-declared name matches observed lineage rows, the impact graph
-(`internal/lineage/impact.go` `QueryImpact`) attaches blast-radius data to
-the hold; a lint hint flags declared datasets never observed in lineage.
+(`internal/models/lineage_dataset.go`), with names heuristically derived
+from path-like output values or synthesized as `alias.step.output`
+(`internal/lineage/mapper.go`). Heuristic names are too unstable to hang
+holds on; the declared registry fixes identity. Where a declared name
+matches observed lineage rows, the impact graph (`internal/lineage/impact.go`
+`QueryImpact`) attaches blast-radius data to the hold; a lint hint flags
+declared datasets never observed in lineage.
 
 ### Downstream admission gate
 
@@ -294,10 +289,10 @@ changes this later).
 unauthenticated POST and `ReleasedBy` records `anonymous`. Unlike
 agent-in-the-loop's approval gates (where an unauthenticated approve route
 would let the agent approve itself), a hold is a *safety* device against
-accidents, not a security boundary against operators — the feature is not
-hard-gated on auth. Deployments wanting an enforced ack chain set an auth
-mode; `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release when
-no authenticated principal is present.
+accidents, not a security boundary — the feature is not hard-gated on auth.
+Deployments wanting an enforced ack chain set an auth mode;
+`CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release when no
+authenticated principal is present.
 
 ### Events & notifications
 

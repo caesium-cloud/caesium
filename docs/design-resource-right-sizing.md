@@ -162,27 +162,26 @@ rather than kills — CPU is right-sized via suggestions only).
 
 ### Phase 0 substrate: stats capture + honest OOM detection
 
-This is roadmap §2.5's implementation-plan items 1–2, built here because
-everything else stands on it (and shared with
-[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) Phase 0, which
+Roadmap §2.5's implementation-plan items 1–2, built here because everything
+else stands on it (and shared with the agent doc's Phase 0, which
 independently needs `TaskRun.ExitCode`):
 
 - **OOM detection per engine**, at the inspect each engine already does:
   Docker consults `InspectResponse.State.OOMKilled` in `Result()` before the
   exit-code map and returns `atom.ResourceFailure`; Kubernetes checks
-  `terminatedState(pod).Reason == "OOMKilled"` (the terminated state is in
-  hand at `internal/atom/kubernetes/atom.go:39-53` — only its `ExitCode` is
-  read today); podman checks `InspectContainerState.OOMKilled`.
-  Compatibility, honestly: OOM kills change from `killed` to
-  `resource_failure` in persisted results — release-noted, env-gated.
+  `terminatedState(pod).Reason == "OOMKilled"` (in hand at
+  `internal/atom/kubernetes/atom.go:39-53` — only `ExitCode` is read today);
+  podman checks `InspectContainerState.OOMKilled`. Compatibility, honestly:
+  OOM kills change from `killed` to `resource_failure` in persisted
+  results — release-noted, env-gated.
 - **`Stats()` on the engine interface** plus a sampling loop in both
   executors while awaiting completion. Docker/Podman: `ContainerStats`
   samples — cgroup v2 dropped `max_usage_in_bytes`, so peak is the max of
   samples and **under-reports spikes shorter than the sample interval**; the
-  OOM flag is the corrective ground truth (an OOM-killed attempt proves peak
-  ≥ limit). Kubernetes: `metrics.k8s.io`, requiring metrics-server; absent
-  it, k8s capture degrades to OOM-signal-only and recommendations report
-  "insufficient samples" rather than guessing.
+  OOM flag is the corrective ground truth (an OOM-killed attempt proves
+  peak ≥ limit). Kubernetes: `metrics.k8s.io`, requiring metrics-server;
+  absent it, k8s capture degrades to OOM-signal-only and recommendations
+  report "insufficient samples" rather than guessing.
 - **New `TaskRun` columns** (`internal/models/run.go`):
   `PeakMemoryBytes *int64`, `CPUSeconds *float64`, `StatsSource string`
   (`sampled|oom_inferred|none`), `ExitCode *int`, `OOMKilled bool`,
@@ -190,8 +189,7 @@ independently needs `TaskRun.ExitCode`):
   `EscalationLevel int`; earlier attempts' trail rides the execution
   descriptor. Prometheus export uses the §2.5 names
   (`caesium_task_memory_peak_bytes`, `caesium_task_cpu_seconds_total`, plus
-  `caesium_task_oom_kills_total`), joining the existing `caesium_task_*`
-  family (`internal/metrics/metrics.go:138`).
+  `caesium_task_oom_kills_total`; family at `internal/metrics/metrics.go`).
 
 ### Applying `resources` through the engines
 
@@ -218,23 +216,21 @@ descriptor → worker. Engine mapping:
 `HashInput`**, following the QueueName precedent
 (`internal/cache/hash.go:329-336`): if limits fed the hash, every
 right-sizing change would bust the cache and recompute the downstream DAG —
-the feature would punish its own adoption. Consequences, plainly:
-
-- An escalated retry keeps the *same* cache identity as the failed attempt —
-  correct, since the computation is unchanged; retries already share one
-  hash (computed once before the attempt loop, `internal/job/job.go:998`).
-  `caesium why`/`run diff` will never attribute a re-run to a limits change,
-  and a cached success is reusable regardless of current limits.
-- The honest counter-case: unlike QueueName, limits **are visible inside the
-  container** (cgroup files; JVM `MaxRAMPercentage`-style self-sizing). A
-  step whose *output* depends on its memory limit is non-deterministic under
-  this rule. Escape hatches: `cache: false`, or a cache `version` bump
-  alongside a limits change. We accept and document this rather than
-  pretending limits are invisible.
-- Receipts stay truthful without identity impact: `AppliedResources` and the
-  escalation trail land on the TaskRun/descriptor (a descriptor
-  schema-version bump — v1 has no resources field), so `caesium receipt get`
-  shows what actually ran even though the hash doesn't fold it in.
+the feature would punish its own adoption. Consequences, plainly: an
+escalated retry keeps the *same* cache identity as the failed attempt
+(correct — the computation is unchanged; retries already share one hash,
+computed once before the attempt loop, `internal/job/job.go:998`);
+`caesium why`/`run diff` never attribute a re-run to a limits change; a
+cached success is reusable regardless of current limits. The honest
+counter-case: unlike QueueName, limits **are visible inside the container**
+(cgroup files; JVM `MaxRAMPercentage`-style self-sizing) — a step whose
+*output* depends on its memory limit is non-deterministic under this rule.
+Escape hatches: `cache: false`, or a cache `version` bump alongside a limits
+change; we document this rather than pretending limits are invisible.
+Receipts stay truthful without identity impact: `AppliedResources` and the
+escalation trail land on the TaskRun/descriptor (a descriptor schema bump —
+v1 has no resources field), so `caesium receipt get` shows what actually ran
+even though the hash doesn't fold it in.
 
 ### OOM retry escalation
 
@@ -303,36 +299,33 @@ unless opted in — backfill inputs differ systematically from steady state.
 - **Non-git job**: staged through the normal `jobdefs/diff` + `apply` path,
   recorded in the audit log.
 - The applier never exceeds declared bounds, and the direct-apply endpoint
-  is refused when auth mode is `none` (same reasoning as the agent doc's
-  master gate — an unauthenticated apply route must not exist); PR-routed
-  proposals are safe regardless, since a human merges.
+  is refused when auth mode is `none` (an unauthenticated apply route must
+  not exist — the agent doc's master-gate reasoning); PR-routed proposals
+  are safe regardless, since a human merges.
 
-### Data model & REST
+### Data model, REST, config
 
-- `TaskRun` columns as in Phase 0 (stats, OOM, applied resources, escalation
-  level) — no new tables in the core loop; `resource_recommendations` is an
-  optional lazily-recomputed cache table in Phase 3.
-- Endpoints (Echo controllers beside `api/rest/controller/stats/`):
-  - `GET /v1/jobs/:id/resources` — per-step declared vs observed
-    (p50/p99/max/OOM count over window) + suggestion + utilization.
-  - `POST /v1/jobs/:id/resources/apply` — provenance-routed apply
-    (operator-authenticated; body may narrow to steps).
-  - `GET /v1/stats/resources` — fleet rollup: top overprovisioned steps,
-    reclaimable bytes, OOM leaderboard. Complements §2.5's planned
-    `/v1/jobs/:id/costs`, which multiplies these same columns by a cost
-    model.
+`TaskRun` columns as in Phase 0 — no new tables in the core loop
+(`resource_recommendations` is an optional lazily-recomputed cache in
+Phase 3). Endpoints (Echo controllers beside `api/rest/controller/stats/`):
 
-### Config (env, `pkg/env/env.go`, envconfig pattern per `env.go:143`)
+- `GET /v1/jobs/:id/resources` — per-step declared vs observed
+  (p50/p99/max/OOM count over window) + suggestion + utilization.
+- `POST /v1/jobs/:id/resources/apply` — provenance-routed apply
+  (operator-authenticated; body may narrow to steps).
+- `GET /v1/stats/resources` — fleet rollup: top overprovisioned steps,
+  reclaimable bytes, OOM leaderboard. Complements §2.5's planned
+  `/v1/jobs/:id/costs`, which multiplies these columns by a cost model.
 
-- `CAESIUM_RESOURCE_STATS_ENABLED` (default `false`) — Phase 0 gate (stats
-  sampling + OOM reclassification);
-  `CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL` (default `10s`).
-- `CAESIUM_RIGHT_SIZING_ENABLED` (default `false`) — recommendations,
-  escalation, apply routes; off ⇒ no routes bound, `resources:` still
-  applies statically. Tuning: `..._WINDOW_RUNS` (20), `..._PERCENTILE` (99),
-  `..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5).
-- `CAESIUM_GIT_WRITE_CREDENTIALS` (or a write token on the git-sync source
-  config) — enables the PR route; absent ⇒ degrade to suggest.
+Env (`pkg/env/env.go`, envconfig pattern per `env.go:143`):
+`CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate: sampling +
+OOM reclassification) with `..._SAMPLE_INTERVAL` (10s);
+`CAESIUM_RIGHT_SIZING_ENABLED` (default `false` — recommendations,
+escalation, apply routes; off ⇒ no routes bound, `resources:` still applies
+statically) with tuning `..._WINDOW_RUNS` (20), `..._PERCENTILE` (99),
+`..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5); `CAESIUM_GIT_WRITE_CREDENTIALS`
+(or a write token on the git-sync source) enables the PR route — absent,
+degrade to suggest.
 
 ## CLI
 
@@ -348,18 +341,17 @@ per the repo's hard-won rule that merged-stream captures hide leaks.
 
 ## Frontend (`ui/src/features/jobs/`)
 
-1. **JobDetailPage: per-step Resources panel.** Declared limit vs observed
-   peak sparkline, utilization %, suggestion badge ("declared 4Gi · p99
-   412Mi · suggest 512Mi"), one-click Apply — rendered as "Open PR" with a
-   diff preview on git-synced jobs.
-2. **TaskDetailPanel / TaskMetadataPanel: attempt trail.** Per-attempt
-   applied limits with OOM badges: "attempt 1 OOMKilled at 1Gi → attempt 2
-   at 1.5Gi ✓" — the receipt-grade evidence view.
-3. **RunDetailPage: anomaly ribbon** when a run's peak exceeded 2× the
-   rolling average (the §2.5 anomaly rule), linking to the panel.
-4. **Stats page: fleet reclaim view** — top overprovisioned steps,
-   reclaimable memory, OOM leaderboard; pending-suggestion count joins
-   `useNavCounts.ts`.
+- **JobDetailPage: per-step Resources panel** — declared limit vs observed
+  peak sparkline, utilization %, suggestion badge ("declared 4Gi · p99
+  412Mi · suggest 512Mi"), one-click Apply (rendered as "Open PR" with a
+  diff preview on git-synced jobs).
+- **TaskDetailPanel / TaskMetadataPanel: attempt trail** — per-attempt
+  applied limits with OOM badges ("attempt 1 OOMKilled at 1Gi → attempt 2
+  at 1.5Gi ✓"): the receipt-grade evidence view.
+- **RunDetailPage: anomaly ribbon** when a run's peak exceeded 2× the
+  rolling average (the §2.5 anomaly rule). **Stats page: fleet reclaim
+  view** — top overprovisioned steps, reclaimable memory, OOM leaderboard;
+  pending-suggestion count joins `useNavCounts.ts`.
 
 ## Safety
 

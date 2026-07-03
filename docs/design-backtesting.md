@@ -39,8 +39,7 @@ next to the code review.
 - **Zero-dependency simplicity.** Baselines, descriptors, outputs, and reports
   all live in the existing dqlite store.
 - **Smart by default.** Content-addressed caching makes N-run backtests
-  affordable: only the changed step and its downstream re-execute per baseline
-  run (see the cost model).
+  affordable: only the changed step and its downstream re-execute (cost model).
 - **Data engineering first.** "Does my refactor change the numbers?" is the
   question data teams ask before every transform merge.
 
@@ -78,7 +77,6 @@ replaying 27 runs …  cache-hit tasks: 41  re-executed: 22
 RESULT: output changed in 2 of 27 runs
   2026-06-30  transform.row_count   41 872 → 40 619  (-3.0%)
   2026-05-31  transform.row_count   44 108 → 42 971  (-2.6%)
-  25 runs: byte-identical outputs (proven via output digests)
 drill down: caesium run diff --job-id … --left <baseline> --right <replay>
 ```
 
@@ -97,7 +95,7 @@ Rendered as a PR comment by the §2.1 Action:
 > [Full report](…) · [Per-run diff](…)
 
 The month-end pattern jumping out of the run matrix *is* the feature: the
-regression only manifests on data shapes that staging never has.
+regression only manifests on data shapes staging never has.
 
 ## Scenarios
 
@@ -264,17 +262,16 @@ backtest inherits that for any run that isn't fully cache-served.
 
 Two new GORM models in `internal/models` (house `AutoMigrate` pattern):
 `Backtest` (`ID`, `JobID`, `Status` pending/running/succeeded/failed/partial,
-`Overrides` + `IgnorePaths` JSON, unique nullable `Fingerprint`, and
+`Overrides` + `IgnorePaths` JSON, unique nullable `Fingerprint`,
 requested/eligible/changed/unchanged/failed counters) and `BacktestRun`
 (`BacktestID`, `BaselineRunID`, nullable `ReplayRunID`, `Verdict`
 unchanged/changed/failed/skipped/degraded, `SkipReason`, `OutputDelta` JSON of
-per-task `FieldChange`s, re-executed/cached task counts).
-
-Creation is idempotent the way replay creation is: `Idempotency-Key` header,
-scoped fingerprint (job + baseline set + overrides + principal + key), insert
-before dispatch, resume on duplicate. Each child replay's fingerprint derives
-from backtest fingerprint + baseline run ID, so a crashed backtest resumes
-without double-executing any baseline.
+per-task `FieldChange`s, re-executed/cached counts). Creation is idempotent the
+way replay creation is: `Idempotency-Key` header, scoped fingerprint (job +
+baseline set + overrides + principal + key), insert before dispatch, resume on
+duplicate. Each child replay's fingerprint derives from backtest fingerprint +
+baseline run ID, so a crashed backtest resumes without double-executing any
+baseline.
 
 ### REST
 
@@ -344,16 +341,15 @@ re-run to execute, so a busy repo doesn't burn 30 replays per push.
 
 ## Safety
 
-**The problem, front and center: quarantine does not sandbox the container, and
-candidate code is by definition unvetted.** Shipped replay's risk story leaned
-on two facts — the code already ran in production once, and a human marked it
+**Front and center: quarantine does not sandbox the container, and candidate
+code is by definition unvetted.** Shipped replay's risk story leaned on two
+facts — the code already ran in production once, and a human marked it
 `replaySafe`. Backtest keeps the second and *loses the first*: a candidate image
 runs with the baseline's real mounts, secrets, network egress, and workload
-identity, and a buggy or malicious candidate can write to the production
-warehouse 30 times. Caesium-internal suppression
-(cache/lineage/callbacks/metrics/SSE — inherited, enforced at
-`internal/worker/runtime_executor.go:116-124,288-352` and the `run.Store` metric
-gates) does nothing about external effects.
+identity; a buggy or malicious candidate can write to the production warehouse
+30 times. Caesium-internal suppression (cache/lineage/callbacks/metrics/SSE —
+inherited, enforced at `internal/worker/runtime_executor.go:116-124,288-352` and
+the `run.Store` metric gates) does nothing about external effects.
 
 Layered posture, honest about which layers are enforcement and which are not:
 
@@ -418,9 +414,8 @@ with an integration test in `test/` driving the real surface.
 ## Non-Goals
 
 - **Not CI for data quality.** Backtest compares candidate vs baseline over
-  *recorded history*; judging whether tonight's fresh data is sane is the
-  circuit-breaker problem
-  ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)).
+  *recorded history*; judging whether tonight's fresh data is sane is
+  [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)'s problem.
 - **Not a staging environment.** No environment redirection, synthetic data, or
   alternate namespaces (explicitly cut from replay v1; still cut here).
 - **Not row/column dataset diffing.** Deltas are over typed step outputs and
@@ -450,8 +445,7 @@ with an integration test in `test/` driving the real surface.
 ## Related Documents
 
 - [`design-quarantined-replay.md`](design-quarantined-replay.md) — the inherited
-  safety model (quarantine carriers, suppression audit, `replaySafe`, descriptor
-  and secret-identity rules); authoritative for every invariant reused here.
+  safety model; authoritative for every invariant reused here.
 - [`design-data-plane-memory.md`](design-data-plane-memory.md) — the substrate
   that recorded everything backtest replays.
 - [`design-reproduce.md`](design-reproduce.md) — same descriptor substrate,
