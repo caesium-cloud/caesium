@@ -30,13 +30,12 @@ actually know is a *constraint* about the finish time:
 
 The proposal: jobs declare an execution **window** plus a completion
 **deadline** ("start any time between 00:00 and 05:00, finish by 06:00");
-Caesium picks the start moment using predicted duration (p95 from run
-history), current cluster load, optional cost/carbon signals, and priority —
-with a hard deadline-safety rule that force-starts the run at the latest safe
-moment regardless of signals. This is a **queueing/scheduling policy over
-machinery that already exists** (durable run queue, priorities, atomic
-admission, SLA events) — not an autoscaler, and it does not place tasks on
-nodes.
+Caesium picks the start moment using predicted duration (p95 from history),
+cluster load, optional cost/carbon signals, and priority — with a hard rule
+that force-starts the run at the latest safe moment regardless of signals.
+This is a **queueing/scheduling policy over machinery that already exists**
+(durable run queue, priorities, atomic admission, SLA events) — not an
+autoscaler, and it never places tasks on nodes.
 
 ## Fit with Design Principles
 
@@ -44,24 +43,21 @@ nodes.
    *when* a run is initiated.
 2. **Declarative and GitOps-first.** The window is YAML on the trigger,
    lintable (`open + p95 + buffer ≤ deadline` satisfiability) and diffable.
-3. **Zero-dependency simplicity.** Parked runs are rows in the existing dqlite
-   `run_queue`; signals are an env-configured static calendar or events via
-   the shipped `POST /v1/events` pipeline — never a mandatory external
-   service. Deployments without windows pay nothing.
-4. **Smart by default.** The predictor reads history the server already stores
-   (`job_runs.started_at`/`completed_at`, `internal/models/run.go:35-36`);
-   users declare intent, not schedules.
+3. **Zero-dependency simplicity.** Parked runs are rows in the existing
+   dqlite `run_queue`; signals are an env-configured static calendar or
+   events via the shipped `POST /v1/events` pipeline — never a mandatory
+   external service. Deployments without windows pay nothing.
+4. **Smart by default.** The predictor reads history the server already
+   stores (`job_runs.started_at`/`completed_at`,
+   `internal/models/run.go:35-36`); users declare intent, not schedules.
 5. **Data engineering first.** Nightly loads and vendor-drop-then-deadline
-   pipelines are the workloads with real windows.
+   pipelines are the workloads with real windows and deadlines.
 
 ## Overview
 
 ```
- window trigger fires at window open (reuses robfig/cron schedule)
-        │
-        ▼
- park durable row in run_queue (window columns set, claimed_by='')
-        │
+ window trigger fires at window open ──▶ park durable row in run_queue
+                                          (window columns set, claimed_by='')
         ▼                            every CAESIUM_WINDOW_CHECK_INTERVAL
  ┌──────────────────────────────────────────────────────────────────┐
  │ Window Scheduler (leader-gated, same LeaderCheck as dequeuer)    │
@@ -75,8 +71,7 @@ nodes.
  run executes exactly like any cron-triggered run
 ```
 
-where `forceAt = deadline − p95(duration) − buffer` — the **latest safe
-start**.
+where `forceAt = deadline − p95(duration) − buffer` — the **latest safe start**.
 
 ## YAML
 
@@ -102,8 +97,7 @@ steps:
 ```
 
 - `latestStart` is **auto-derived**: `deadline − p95 − buffer`, re-evaluated
-  every scheduler tick; `close`, if set, caps it
-  (`effectiveLatest = min(close, latestSafeStart)`).
+  every tick; `close` caps it (`effectiveLatest = min(close, latestSafeStart)`).
 - `objective`: `earliest` (start at open — cron-equivalent plus deadline
   guarantee), `latest` (park until latest-safe-start — freshest inputs at
   deadline), `cheapest` (wait for signal valleys, P1/P2).
@@ -113,8 +107,8 @@ steps:
   `time.LoadLocation` (as `extractLocation`, cron.go:268-287).
 
 The alternative — `type: cron` plus a `window:` sibling block — was rejected:
-a cron trigger's contract is "fire at this minute," and an annotation that
-turns it into "fire sometime later" would surprise in diffs and the UI.
+a cron trigger's contract is "fire at this minute," and an annotation turning
+that into "fire sometime later" would surprise in diffs and the UI.
 `TriggerType` is an open string enum (`internal/models/trigger.go:14-18`); the
 executor's listing loop needs `window` added
 (`internal/executor/executor.go:38-42`).
@@ -124,15 +118,14 @@ executor's listing loop needs `window` added
 1. **Nightly warehouse load spread across the cluster valley.** Forty jobs
    pinned at `0 0 * * *` become `window 00:00 → 05:00, deadline 06:00` with
    the P1 load gate. All forty park at 00:00; the scheduler releases them in
-   priority order while running-task count stays under the ceiling, smearing
-   the herd across the valley.
+   priority order while running-task count stays under the ceiling.
 2. **Carbon-aware batch.** A weekly rebuild declares `objective: cheapest`
    with a static carbon calendar (or a webhook feed posted into `/v1/events`)
    and starts in the greenest hour of its window — unless the valley never
    comes, in which case the force rule fires anyway.
 3. **Deadline force-start.** `deadline 06:00`, p95 = 50m, buffer = 15m;
-   signals stay red all night. At 04:55 the scheduler stops caring, forces the
-   start, emits `window_forced`; the run completes ~05:45, inside deadline.
+   signals stay red all night. At 04:55 the scheduler stops caring, forces
+   the start, emits `window_forced`; the run completes ~05:45, in deadline.
 
 ## Backend
 
@@ -168,12 +161,10 @@ job listing (`dequeuer.go:110-114`) and `DequeueNextRun`
 (`internal/run/store.go:3703-3735`) add `AND window_deadline IS NULL` — while
 the new **window scheduler** owns the rest. (The dequeuer already skips jobs
 without queue-strategy concurrency, `dequeuer.go:143-150`, so window rows for
-jobs with no concurrency block would otherwise never drain.)
-
-Crucially, **no in-process timer holds a parked run**. Every existing wait
-(cron `time.After`, watcher/dequeuer tickers) is process-local; a parked run
-must survive restarts and leader failover, so its only representation is the
-row.
+jobs with no concurrency block would otherwise never drain.) Crucially, **no
+in-process timer holds a parked run**: every existing wait (cron `time.After`,
+watcher/dequeuer tickers) is process-local, and a parked run must survive
+restarts and leader failover, so its only representation is the row.
 
 ### Window scheduler loop
 
@@ -183,9 +174,8 @@ row.
 (`internal/runqueue/dequeuer.go:21,94-103`; `cmd/start/start.go:177-184`).
 Only the dqlite leader evaluates and releases window rows, so two nodes never
 double-start a parked run; claim columns + stale reclaim cover leader death
-mid-release.
-
-Each tick, for parked rows ordered `priority DESC, (deadline − now − p95) ASC`:
+mid-release. Each tick, for parked rows ordered `priority DESC,
+(deadline − now − p95) ASC`:
 
 ```
 p95     := predictor.P95(jobID)
@@ -223,11 +213,11 @@ service uses (`api/rest/service/stats/stats.go:72-77`,
   If `internal/sla/predictor.go` ships, the window scheduler should consume
   quantiles from that shared package — one engine, two consumers.
 - **Cold start (required policy):** fewer than 3 completed runs → no p95 →
-  `forceAt = windowOpen`: **the run starts at window open**, degrading to cron
-  behavior. Elasticity is earned by history, never assumed.
+  `forceAt = windowOpen`: **the run starts at window open**, degrading to
+  cron behavior. Elasticity is earned by history, never assumed.
   `metadata.runTimeout`, when set, caps the assumed duration.
-- **Regression guard:** forceAt is recomputed every tick from live history; if
-  p95 grows past remaining slack, the force rule fires on the next tick.
+- **Regression guard:** forceAt is recomputed every tick from live history;
+  if p95 grows past remaining slack, the force rule fires on the next tick.
 
 ### Signal sources (zero-dependency, pluggable)
 
@@ -274,7 +264,7 @@ duration and completedBy SLAs (`watcher.go:119-128, 136-246`). `job apply`
 derives an implicit `sla.completedBy` from the window deadline when the job
 declares no SLA, so a blown deadline produces the standard `sla_missed` event
 with zero new alerting machinery. New bus/store events: `window_planned`,
-`window_forced`, `window_deadline_at_risk` (a forced start whose p95 no longer
+`window_forced`, `window_deadline_at_risk` (forced start whose p95 no longer
 fits).
 
 ### Models, REST, env
@@ -303,9 +293,9 @@ Why:               cluster 12/32 running (green); cost signal 0.71 now,
                    forced at 04:58 regardless.
 ```
 
-`caesium job window <alias> --json` emits the REST payload on **stdout**
-(machine output separated from logs — the hard-won rule in CLAUDE.md).
-Subcommand precedent: `caesium job queue` (`cmd/job/queue.go`).
+`--json` emits the REST payload on **stdout** (machine output separated from
+logs — the hard-won rule in CLAUDE.md). Subcommand precedent: `caesium job
+queue` (`cmd/job/queue.go`).
 
 ## Frontend
 
@@ -324,8 +314,8 @@ probability ≥ the p95 coverage (≈0.95 under stationarity), completes by
 `D − B + δ + α`. Choosing `B > δ + α` (defaults: 10m vs 15s + subsecond
 admission) yields: **Caesium initiates the start early enough that a
 p95-or-faster run completes before the deadline.** It is a *start* guarantee;
-completion stays probabilistic — regressions beyond p95 or a saturated cluster
-can still miss, which is exactly what the derived `sla_missed` +
+completion stays probabilistic — regressions beyond p95 or a saturated
+cluster can still miss, which is exactly what the derived `sla_missed` +
 `window_deadline_at_risk` events flag.
 
 **Concurrency admission interplay.** A window start — including a forced one —

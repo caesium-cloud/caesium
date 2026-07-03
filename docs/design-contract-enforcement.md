@@ -101,12 +101,11 @@ edges.
 ## YAML: declared produces/consumes
 
 The step-level `datasets` block is **the same block** introduced by
-[`design-freshness-scheduling.md`](design-freshness-scheduling.md) for
-freshness SLOs — one declaration, two consumers of it. Freshness reads
-`freshness`/`watermark`; this design adds `schema`/`schemaFrom` to `produces`
-entries and lets a `consumes` entry be an object carrying the consumer's
-required schema. Dataset `name` maps to the OpenLineage `(namespace, name)`
-identity recorded in `lineage_datasets`.
+[`design-freshness-scheduling.md`](design-freshness-scheduling.md) —
+freshness reads `freshness`/`watermark`; this design adds
+`schema`/`schemaFrom` to `produces` entries and lets a `consumes` entry
+carry the consumer's required schema. Dataset `name` maps to the OpenLineage
+`(namespace, name)` identity recorded in `lineage_datasets`.
 
 ```yaml
 # vendor-x-daily.job.yaml (producer, team A)
@@ -170,10 +169,10 @@ subset** with an honest fourth verdict:
   `consumes.schema.required` or referenced by a `paramMapping` path) no
   longer satisfiable.
 - **Compatible** (pass): additive optional properties, new enum values,
-  widened types, relaxed constraints, doc-only edits.
-- **Compatible-per-consumer**: a narrowing change that still satisfies every
-  *declared* consumer requirement (e.g. drops a field nobody consumes)
-  passes with an informational note.
+  widened types, relaxed constraints, doc-only edits — plus the
+  *per-consumer* case: a narrowing change that still satisfies every
+  declared consumer requirement (drops a field nobody consumes) passes with
+  an informational note.
 - **Unknown** (warn, never silently pass): any construct outside the subset —
   `$ref`, `allOf`/`anyOf`/`oneOf`/`not`, `if/then/else`,
   `patternProperties`, `dependentSchemas` — reported as "cannot prove
@@ -182,10 +181,10 @@ subset** with an honest fourth verdict:
 New machinery: `santhosh-tekuri/jsonschema/v6` gives us **compilation and
 instance validation only** (`pkg/task/schema.go` `ValidateOutput` checks a
 value against one schema). Compatibility is schema-vs-schema and is written
-fresh — a new `pkg/jobdef/schemacompat` package walking two raw
+fresh: a new `pkg/jobdef/schemacompat` package walks two raw
 `map[string]any` trees over exactly the subset above, returning typed
-findings `{Kind, Path, Detail, Verdict}`. Deterministic, unit-testable, kept
-in `pkg/` because the CLI needs it offline.
+findings `{Kind, Path, Detail, Verdict}` — deterministic, unit-testable, in
+`pkg/` because the CLI needs it offline.
 
 ## Scenarios
 
@@ -229,10 +228,10 @@ proceeds. Consumers change nothing.
 
 ### Contract graph derivation
 
-New package `internal/contract`. Given the incoming definitions plus the
-persisted world (same merge shape as `triggerChainNodes` in
+New package `internal/contract`. Given the incoming definitions merged with
+the persisted world (the `triggerChainNodes` shape in
 `internal/jobdef/trigger_cycle.go`, which already joins `jobs` × `triggers`
-and substitutes incoming defs for their persisted versions):
+and substitutes incoming defs for persisted versions), derive:
 
 1. **Declared edges** — match `produces`/`consumes` on dataset name across
    all jobs.
@@ -250,11 +249,11 @@ and substitutes incoming defs for their persisted versions):
    marked `evidence` with a `lastSeen` timestamp.
 
 The graph is **derived, not stored**: edges are recomputed per request from
-authoritative sources, so they can never go stale against jobdef edits. The
-only new persisted model is `ContractAck` (id, dataset identity or edge-set
-digest, actor, reason, created/expires). No `ContractEdge` table in v1;
-`GET /v1/contracts/graph` computes on demand (job counts are small; the
-trigger-cycle validator already does an equivalent full scan on every apply).
+authoritative sources, so they can never go stale against jobdef edits. No
+`ContractEdge` table in v1 — `GET /v1/contracts/graph` computes on demand
+(job counts are small; the trigger-cycle validator already does an
+equivalent full scan on every apply). The only new persisted model is
+`ContractAck` (dataset/edge-set digest, actor, reason, created/expires).
 
 ### Integration points (server-side, because only the server sees all jobs)
 
@@ -288,8 +287,8 @@ uses server mode.
 
 ### Config
 
-- `CAESIUM_CONTRACT_ENFORCEMENT` — `""` (off, default), `warn`, `fail`.
-  Mirrors `metadata.schemaValidation`'s tri-state. Off ⇒ no graph
+- `CAESIUM_CONTRACT_ENFORCEMENT` — `""` (off, default), `warn`, `fail`;
+  mirrors `metadata.schemaValidation`'s tri-state. Off ⇒ no graph
   computation, no routes registered (reported by `GET /system/features`).
 - `CAESIUM_CONTRACT_DEPRECATION_WINDOW` (default `336h`).
 - Evidence-only edges never exceed warn regardless of mode.
@@ -310,11 +309,10 @@ agent-in-the-loop design applies to its approval gates.
 caesium contract graph [--dataset ns/name] [--json]   # GET /v1/contracts/graph
 caesium contract check --path jobs/ [--json]          # server-mode contract lint only
 caesium job lint --server                             # existing lint + contract findings
-caesium job apply --allow-breaking dataset=<ns/name> [--reason ...]
+caesium job apply --allow-breaking dataset=<name> [--reason ...]
 ```
 
-Per the repo testing gate: `--json` output goes to stdout, clean and
-parseable, stderr for logs.
+Per the repo testing gate, `--json` goes to stdout clean and parseable.
 
 ## CI / PR flow (roadmap §2.1)
 
@@ -341,16 +339,16 @@ producer's repo, before merge.
 
 - **[`design-freshness-scheduling.md`](design-freshness-scheduling.md)** —
   the step-level `datasets` block is *shared substrate*: freshness uses it
-  for time (is the data recent enough), this design for shape (is it the
-  right shape). One declaration, two enforcers.
+  for time (recent enough?), this design for shape (right shape?). One
+  declaration, two enforcers.
 - **[`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)** —
   enforces at runtime what this enforces at apply: the breaker trips on
   observed bad data crossing an edge; this design keeps the *declared*
-  version of the same break from ever deploying. Same edge model.
-- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** — scenario
-  2's agent-proposed schema patches flow through `jobdefs/diff` + `apply`, so
-  they are contract-checked before a human sees the approval card; a patch
-  that would break a downstream team is rejected or annotated automatically.
+  version of the same break from deploying. Same edge model.
+- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** —
+  scenario 2's agent-proposed schema patches flow through `jobdefs/diff` +
+  `apply`, so they are contract-checked before a human sees the approval
+  card; a patch that would break a downstream team is auto-rejected.
 - **[`design-backtesting.md`](design-backtesting.md)** — backtests replay
   historical definitions; the graph endpoint gives them the edge set to
   validate a proposed schema against historical consumer versions.
@@ -390,9 +388,8 @@ UI badges and the graph view get Playwright e2e against a live backend.
   `unknown` verdict is the contract.
 - No runtime behavior change: the `schemaValidation` gate is untouched; this
   never blocks a *run*, only an *apply*.
-- No cross-cluster contracts; one server's persisted world is the graph.
-- No automatic consumer migration (the agent design's patch proposals are
-  the assisted path).
+- No cross-cluster contracts, and no automatic consumer migration (the agent
+  design's patch proposals are the assisted path).
 
 ## Open Questions
 

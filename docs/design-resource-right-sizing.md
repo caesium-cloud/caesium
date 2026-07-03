@@ -1,13 +1,12 @@
 # Design: Learned Resource Right-Sizing & OOM Retry Escalation
 
-> Status: Brainstorm/Design — proposal for learning per-step resource
-> requirements from run history, proposing/applying right-sized requests, and
-> escalating memory on OOM retries instead of failing identically. No
-> implementation yet. Depends on and delivers the stats-collection substrate
-> planned in roadmap §2.5 (Cost Tracking & Resource Awareness). Composes with
-> [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) (the `oom`
-> failure class becomes a deterministic rule) and shares the provenance-routed
-> GitOps-patch machinery designed there.
+> Status: Brainstorm/Design — proposal for learning per-step resource needs
+> from run history, proposing/applying right-sized requests, and escalating
+> memory on OOM retries instead of failing identically. No implementation
+> yet. Depends on and delivers the stats substrate planned in roadmap §2.5;
+> composes with [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+> (the `oom` class becomes a deterministic rule) and reuses its
+> provenance-routed GitOps-patch machinery.
 
 ## Problem
 
@@ -16,23 +15,23 @@ Two failure modes bracket every containerized pipeline:
 - **OOMKilled at 3 a.m.** A step that fit in 512Mi for six months hits a
   quarter-end batch and dies at its limit. Declared `retries` re-run the
   *identical* container with the *identical* limit — it dies identically,
-  and a human gets paged to do the one mechanical fix an orchestrator could
+  and a human is paged to do the one mechanical fix an orchestrator could
   have done: retry with more memory.
 - **10× overprovisioning.** Nobody knows what a step needs, so everyone
-  requests 4Gi "to be safe." On Kubernetes those requests are reserved
-  capacity — quota consumed, nodes underpacked, Kueue admission delayed —
-  and nobody ever walks the YAML back down, because nobody has the data.
+  requests 4Gi "to be safe" — quota consumed, nodes underpacked, Kueue
+  admission delayed — and nobody walks the YAML back down, because nobody
+  has the data.
 
-Both are the same missing feature: **Caesium runs every task and observes
-nothing about its resource consumption.** The gap is even more basic than
-tuning — a Caesium step cannot declare resource limits at all (see "Grounded
-reality"), and an OOM kill is not even distinguishable from a manual
-`SIGKILL` in the recorded result.
+Both are one missing feature: **Caesium runs every task and observes nothing
+about its resource consumption.** The gap is even more basic than tuning — a
+step cannot declare resource limits at all (see "Grounded reality"), and an
+OOM kill is not even distinguishable from a manual `SIGKILL` in the recorded
+result.
 
-This design is the tractable *vertical* slice of "Dataflow-style compute
-sized to the ETL": per-container sizing, learned from history, applied through
-the engines Caesium already drives. It never reshapes a running computation —
-no resharding, no live resize, no autoscaling (see Non-Goals).
+This is the tractable *vertical* slice of "Dataflow-style compute sized to
+the ETL": per-container sizing, learned from history, applied through the
+engines Caesium already drives — never reshaping a running computation (no
+resharding, no live resize, no autoscaling; see Non-Goals).
 
 ## Fit with Design Principles
 
@@ -88,15 +87,14 @@ Read before designing; every later claim builds on these:
   has no memory/CPU columns and no exit code. **This design DEPENDS on
   §2.5's stats capture and scopes Phase 0 to the minimal slice it needs.**
 - **The retry loops are the escalation hook, and they are asymmetric.**
-  Local: `internal/job/job.go:1055-1198` loops attempts
-  (`maxAttempts = Retries+1`; `computeRetryDelay`,
-  `internal/job/failure_policy.go:31-39`; persisted via `store.RetryTask`,
-  `job.go:1182`) — but it only retries *execution errors*; a container that
-  runs and exits unsuccessfully is completed with that result and returned
-  without retry (`job.go:1161-1163`). The distributed worker loop
-  (`internal/worker/runtime_executor.go:307-376`) *does* retry unsuccessful
-  results — `executeTask` converts them to an error
-  (`runtime_executor.go:584-585`) — persisting via `RetryTaskClaimed`
+  Local: `internal/job/job.go:1055-1198` loops attempts (persisted via
+  `store.RetryTask`, `job.go:1182`; delay from `computeRetryDelay`,
+  `internal/job/failure_policy.go:31-39`) — but only retries *execution
+  errors*; a container that runs and exits unsuccessfully is completed with
+  that result and returned without retry (`job.go:1161-1163`). The
+  distributed worker loop (`internal/worker/runtime_executor.go:307-376`)
+  *does* retry unsuccessful results — `executeTask` converts them to errors
+  (`runtime_executor.go:584-585`), persisting via `RetryTaskClaimed`
   (`:356`). Escalation must make the OOM class retryable in the local loop
   too, or the feature silently works only in distributed mode.
 - **Resource limits do not feed cache identity — because they can't exist
@@ -270,15 +268,13 @@ Hook: the existing per-attempt loops, both executors.
   loop (today an unsuccessful result returns without retry,
   `internal/job/job.go:1161-1163`, unlike the worker path); the attempt runs
   a per-attempt spec copy with escalated `Resources`, nothing else changed.
-- **Distributed persistence.** `RetryTaskClaimed` additionally persists
+- **Persistence and resets.** `RetryTaskClaimed` additionally persists
   `EscalationLevel` and the next attempt's `AppliedResources`, so a
-  re-claimed task (worker death, lease expiry) resumes at the escalated size
-  rather than resetting to baseline.
-- **`RetryFromFailure` interplay.** The run-level retry
-  (`internal/run/store.go:4614+`) resets `attempt` to 1; it must also reset
-  `EscalationLevel`/`AppliedResources` to baseline — a manual retry starts
-  the ladder over. (Per the sibling doc's finding, that path bypasses
-  concurrency admission and `Job.Paused`; this design adds no new caller.)
+  re-claimed task (worker death, lease expiry) resumes at the escalated
+  size. The run-level `RetryFromFailure` (`internal/run/store.go:4614+`)
+  resets `attempt` to 1 and must also reset escalation state to baseline.
+  (Per the sibling doc's finding, that path bypasses concurrency admission
+  and `Job.Paused`; this design adds no new caller of it.)
 - **Feedback into learning.** OOM-killed attempts are censored observations
   (peak ≥ limit), so suggestions rise even when sampling missed the spike —
   a success-after-escalation is the strongest recommendation signal.
