@@ -53,8 +53,6 @@ Against the six principles from [`roadmap.md`](roadmap.md):
 
 ## Grounded Reality (what exists today)
 
-Read before designing; every later claim builds on these:
-
 - **No resource fields, no limits applied.** `container.Spec`'s complete
   field set is `Env`, `WorkDir`, `Mounts`, `ResolvedVolumeMounts`,
   `Kubernetes` (`pkg/container/spec.go:99-105`); Docker `Create` builds a
@@ -238,8 +236,8 @@ Hook: the existing per-attempt loops, both executors.
   `RetryFromFailure` (`internal/run/store.go:4614+`) resets `attempt` to 1
   and must also reset escalation state. (Per the sibling doc's finding, that
   path bypasses concurrency admission and `Job.Paused`; no new caller here.)
-  A success-after-escalation is also the strongest learning signal — see the
-  censored-observation rule below.
+  A success-after-escalation is also the strongest learning signal — see
+  the censored-observation rule below.
 
 ### Recommendation engine
 
@@ -265,21 +263,18 @@ from steady state.
 
 ### Applying: provenance-routed, reusing the agent-doc router
 
-`mode: auto` (and explicit `--apply`) routes exactly like
-`apply_jobdef_patch` in
-[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md):
-
-- **Git-synced job** (`Provenance*` fields set): direct DB apply is
-  *rejected* — the next sync would revert it. The recommendation renders as
-  a minimal YAML patch to `ProvenancePath`, opened as a Git PR (requires
-  write credentials, config below; absent them, degrade to `suggest` with
-  the rendered diff attached). PRs batch per job per window,
-  cooldown-limited — never one PR per run.
-- **Non-git job**: staged through the normal `jobdefs/diff` + `apply` path,
-  audit-logged. The applier never exceeds declared bounds, and the
-  direct-apply endpoint is refused when auth mode is `none` (an
-  unauthenticated apply route must not exist — the agent doc's master-gate
-  reasoning); PR-routed proposals are safe regardless, since a human merges.
+`mode: auto` (and explicit `--apply`) routes exactly like the agent doc's
+`apply_jobdef_patch`. **Git-synced job** (`Provenance*` fields set): direct
+DB apply is *rejected* — the next sync would revert it; the recommendation
+renders as a minimal YAML patch to `ProvenancePath`, opened as a Git PR
+(requires write credentials, config below; absent them, degrade to
+`suggest` with the rendered diff attached), batched per job per window and
+cooldown-limited — never one PR per run. **Non-git job**: staged through
+the normal `jobdefs/diff` + `apply` path, audit-logged. The applier never
+exceeds declared bounds, and the direct-apply endpoint is refused when auth
+mode is `none` (an unauthenticated apply route must not exist — the agent
+doc's master-gate reasoning); PR-routed proposals are safe regardless,
+since a human merges.
 
 ### Data model, REST, config
 
@@ -332,8 +327,8 @@ a pending-suggestion count joining `useNavCounts.ts`.
 
 - **Bounds are absolute.** Escalation and auto-apply clamp to declared
   `[min, max]`; no bound, no auto behavior. Caesium does not discover
-  cluster quota — a pod rejected by `ResourceQuota`/`LimitRange` surfaces as
-  `StartupFailure`; bounds are the operator's envelope, not a cluster
+  cluster quota — a pod rejected by `ResourceQuota`/`LimitRange` surfaces
+  as `StartupFailure`; bounds are the operator's envelope, not a cluster
   guarantee.
 - **Escalated attempts are accounted, visible, capped** — they extend
   `MaxAttempts` explicitly at registration, are class-gated to OOM, recorded
