@@ -16,10 +16,10 @@ production run consumed and produced in re-executable form. Caesium does: the
 data-plane-memory substrate persists, per task run, an immutable
 `TaskExecutionDescriptor` (`internal/models/run.go:154`), the decomposed
 `HashInput` blob, typed step outputs (`TaskRun.Output`, run.go:80), resolved
-image digests, and a content-addressed receipt (`internal/receipt/receipt.go`).
-Quarantined replay (`internal/replay/replay.go`) already re-executes a
+image digests, and a content-addressed receipt (`internal/receipt/receipt.go`);
+quarantined replay (`internal/replay/replay.go`) already re-executes a
 historical run from those descriptors with Caesium-internal side effects
-suppressed; causal run diff (`internal/run/rundiff.go`) already attributes *why*
+suppressed, and causal run diff (`internal/run/rundiff.go`) attributes *why*
 two runs differ.
 
 Backtesting is the composition: **before merge, replay the candidate change over
@@ -159,9 +159,9 @@ Rules:
   at backtest creation (reusing `internal/imagecheck/resolve.go`); all N replays
   run that digest. Unresolvable images are refused, not degraded — a tag moving
   mid-backtest would compare apples to oranges.
-- **Overrides flow into the hash honestly.** The overridden image digest/command
-  replaces the descriptor value *before* `computeDescriptorHash`, so the step's
-  identity changes, it re-executes, and downstream re-executes via the
+- **Overrides flow into the hash honestly.** The override replaces the
+  descriptor value *before* `computeDescriptorHash`, so the step's identity
+  changes, it re-executes, and downstream re-executes via the
   `PredecessorHashes` cascade. Never hide an override from `HashInput` — the
   false-hit bug class the replay design forbids.
 - **The replay TaskRun records both.** The stored descriptor keeps baseline
@@ -180,11 +180,10 @@ Rules:
   (`planTasks(..., forceReexecute=true)`, replay.go:186-190/443). The CLI prints
   this cost difference before dispatch.
 
-**New safety implication, stated plainly:** shipped replay executes code that
-already ran in production once; `replaySafe` attested that code. A backtest
-executes **unvetted candidate code** against the baseline's real mounts,
-secrets, network, and workload identity — the attestation does not transfer.
-This is the top risk; see Safety.
+**New safety implication:** shipped replay executes code that already ran in
+production once; `replaySafe` attested that code. A backtest executes
+**unvetted candidate code** against the baseline's real mounts, secrets,
+network, and workload identity — the attestation does not transfer. See Safety.
 
 ### Output-delta computation
 
@@ -238,9 +237,9 @@ DAG = never".
   fall back to the baseline `TaskRun.Result`). So the practical window for
   cache-enabled jobs is `min(N requested, runs younger than cache TTL)`; the
   eligibility report says "skipped: cache proof expired (job TTL 168h)" and the
-  docs say **size your cache TTL to your desired backtest depth**. Relaxing the
-  abort to trust the durable baseline result is a candidate change in the replay
-  layer, decided there, not silently here.
+  docs say **size your cache TTL to your desired backtest depth**. Relaxing
+  that abort is open question 1 — a replay-layer decision, not a silent one
+  here.
 
 ### Scheduling, throttling, env
 
@@ -287,10 +286,10 @@ capability, new endpoint, new authorization surface.
 - `caesium backtest --job <alias|id> --against last-30-runs [--image step=ref]
   [--command step='…'] [--set k=v] [--path candidate.job.yaml]
   [--ignore-output glob]… [--dry-run] [--json] [--format markdown]
-  [--idempotency-key k] [--timeout d]` — create, poll to terminal (client-side
-  loop like `replay --diff`), render the matrix. `--json` writes clean,
-  parseable stdout with logs on stderr (the repo's hard-learned rule);
-  `--format markdown` emits the PR-comment body.
+  [--idempotency-key k] [--timeout d]` — create, poll to terminal (a client-side
+  loop like `replay --diff`), render the matrix. `--json` writes clean stdout
+  with logs on stderr (the repo's hard-learned rule); `--format markdown` emits
+  the PR-comment body.
 - `caesium backtest report <backtest-id> --job <id>` — re-render a stored report
   (the Action's comment step; also how humans re-attach after a timeout).
 - Non-zero exit when any verdict is `changed`/`failed` unless `--allow-changes`
@@ -324,8 +323,7 @@ re-run to execute, so a busy repo doesn't burn 30 replays per push.
 - **Backtest report view** (`/jobs/:id/backtests/:btid`): header (candidate
   digest vs baseline range, cost split), then a **run-matrix heat strip** — one
   cell per baseline run in date order: green unchanged / amber changed / red
-  failed / grey skipped. Month-end clustering is visible at a glance; that strip
-  is the screenshot people share.
+  failed / grey skipped. Month-end clustering is visible at a glance.
 - A cell drills into the per-run view: output-delta table (before/after per
   changed key, ignored keys listed) plus the existing **RunDiffView**, reused
   unchanged — baseline left, replay right.
@@ -337,12 +335,12 @@ re-run to execute, so a busy repo doesn't burn 30 replays per push.
 **Front and center: quarantine does not sandbox the container, and candidate
 code is by definition unvetted.** Shipped replay's risk story leaned on two
 facts — the code already ran in production once, and a human marked it
-`replaySafe`. Backtest keeps the second and *loses the first*: a candidate image
-runs with the baseline's real mounts, secrets, network egress, and workload
-identity; a buggy or malicious candidate can write to the production warehouse
-30 times. Caesium-internal suppression (cache/lineage/callbacks/metrics/SSE —
-inherited, enforced at `internal/worker/runtime_executor.go:116-124,288-352` and
-the `run.Store` metric gates) does nothing about external effects.
+`replaySafe`. Backtest keeps the second and *loses the first*: a buggy or
+malicious candidate image, running with the baseline's real mounts, secrets,
+network egress, and workload identity, can write to the production warehouse 30
+times. Caesium-internal suppression (cache/lineage/callbacks/metrics/SSE —
+inherited, enforced at `internal/worker/runtime_executor.go:116-124` and the
+`run.Store` metric gates) does nothing about external effects.
 
 Layered posture, honest about which layers are enforcement and which are not:
 
@@ -424,8 +422,8 @@ with an integration test in `test/` driving the real surface.
 2. Per-step param dependency contracts (so `--set` backtests stop paying
    full-DAG cost) — shared open item with replay v2.
 3. A `backtestServiceAccount` / egress-profile override for k8s: genuine
-   enforcement for safety layer 3, but breaks "runs with baseline identity" —
-   does a backtest want baseline identity or a deliberately weaker one?
+   enforcement for safety layer 3, but breaks baseline workload identity —
+   which does a backtest want?
 4. Output tolerance expressions (`transform.row_count: ±0.5%`) and
    expected-change annotations reviewable in the PR itself.
 5. Backfill interplay: `last-30-runs` on a backfill-heavy job may pick 30

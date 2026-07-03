@@ -26,20 +26,18 @@ Both are one missing feature: **Caesium runs every task and observes nothing
 about its resource consumption.** The gap is even more basic than tuning — a
 step cannot declare resource limits at all (see "Grounded reality"), and an
 OOM kill is not even distinguishable from a manual `SIGKILL` in the recorded
-result.
-
-This is the tractable *vertical* slice of "Dataflow-style compute sized to
-the ETL": per-container sizing, learned from history, applied through the
-engines Caesium already drives — never reshaping a running computation (no
-resharding, no live resize, no autoscaling; see Non-Goals).
+result. This is the tractable *vertical* slice of "Dataflow-style compute
+sized to the ETL": per-container sizing, learned from history, applied
+through the engines Caesium already drives — never reshaping a running
+computation (no resharding, no live resize, no autoscaling; see Non-Goals).
 
 ## Fit with Design Principles
 
-Quoting the six principles from [`roadmap.md`](roadmap.md):
+Against the six principles from [`roadmap.md`](roadmap.md):
 
 1. **"Container-native execution."** Limits apply through each engine's
    native knobs; stats come from what each runtime already exposes. No agent
-   inside the user's container, no SDK.
+   in the user's container, no SDK.
 2. **"Declarative and GitOps-first."** `resources:`/`rightSizing:` live in
    the YAML, linted and PR-reviewed; recommendations for git-synced jobs are
    *proposed as a Git PR* — Caesium never silently diverges the DB from Git.
@@ -50,11 +48,9 @@ Quoting the six principles from [`roadmap.md`](roadmap.md):
 4. **"Smart by default."** Stats on ⇒ every step gets observed-vs-declared
    visibility free; escalation/auto-apply are opt-in with declared bounds.
 5. **"Data engineering first."** Recurring batch runs give a stable
-   distribution to learn from; "retry the 3 a.m. OOM bigger" is a data-eng
-   pager item.
+   distribution to learn from; the 3 a.m. OOM is a data-eng pager item.
 6. **"Open source, community-driven."** Self-hosted, no managed telemetry;
-   right-sizing is a headline feature FinOps teams otherwise buy from SaaS
-   orchestrators.
+   right-sizing is a headline feature FinOps teams otherwise buy from SaaS.
 
 ## Grounded Reality (what exists today)
 
@@ -168,21 +164,20 @@ independently needs `TaskRun.ExitCode`):
   OOM kills change from `killed` to `resource_failure` in persisted
   results — release-noted, env-gated.
 - **`Stats()` on the engine interface** plus a sampling loop in both
-  executors while awaiting completion. Docker/Podman: `ContainerStats`
-  samples — cgroup v2 dropped `max_usage_in_bytes`, so peak is the max of
-  samples and **under-reports spikes shorter than the sample interval**; the
-  OOM flag is the corrective ground truth (an OOM-killed attempt proves
-  peak ≥ limit). Kubernetes: `metrics.k8s.io`, requiring metrics-server;
-  absent it, k8s capture degrades to OOM-signal-only and recommendations
-  report "insufficient samples" rather than guessing.
+  executors. Docker/Podman: `ContainerStats` samples — cgroup v2 dropped
+  `max_usage_in_bytes`, so peak is the max of samples and **under-reports
+  spikes shorter than the sample interval**; the OOM flag is the corrective
+  ground truth (an OOM-killed attempt proves peak ≥ limit). Kubernetes:
+  `metrics.k8s.io`, requiring metrics-server; absent it, capture degrades to
+  OOM-signal-only and recommendations report "insufficient samples" rather
+  than guessing.
 - **New `TaskRun` columns** (`internal/models/run.go`):
   `PeakMemoryBytes *int64`, `CPUSeconds *float64`, `StatsSource string`
   (`sampled|oom_inferred|none`), `ExitCode *int`, `OOMKilled bool`,
   `AppliedResources datatypes.JSON` (limits the final attempt ran with),
   `EscalationLevel int`; earlier attempts' trail rides the execution
-  descriptor. Prometheus export uses the §2.5 names
-  (`caesium_task_memory_peak_bytes`, `caesium_task_cpu_seconds_total`, plus
-  `caesium_task_oom_kills_total`; family at `internal/metrics/metrics.go`).
+  descriptor. Prometheus export uses the §2.5 metric names plus
+  `caesium_task_oom_kills_total` (family at `internal/metrics/metrics.go`).
 
 ### Applying `resources` through the engines
 
@@ -207,21 +202,20 @@ request delta for queued steps.
 `HashInput`**, following the QueueName precedent
 (`internal/cache/hash.go:329-336`): if limits fed the hash, every
 right-sizing change would bust the cache and recompute the downstream DAG —
-the feature would punish its own adoption. Consequences, plainly: an
-escalated retry keeps the *same* cache identity as the failed attempt
-(correct — the computation is unchanged; retries already share one hash,
-computed once before the attempt loop, `internal/job/job.go:998`);
-`caesium why`/`run diff` never attribute a re-run to a limits change; a
-cached success is reusable regardless of current limits. The honest
-counter-case: unlike QueueName, limits **are visible inside the container**
-(cgroup files; JVM `MaxRAMPercentage`-style self-sizing) — a step whose
-*output* depends on its memory limit is non-deterministic under this rule.
-Escape hatches: `cache: false`, or a cache `version` bump alongside a limits
-change; we document this rather than pretending limits are invisible.
-Receipts stay truthful without identity impact: `AppliedResources` and the
-escalation trail land on the TaskRun/descriptor (a descriptor schema bump —
-v1 has no resources field), so `caesium receipt get` shows what actually ran
-even though the hash doesn't fold it in.
+the feature would punish its own adoption. Consequences: an escalated retry
+keeps the *same* identity as the failed attempt (correct — the computation
+is unchanged; retries already share one hash, computed before the attempt
+loop, `internal/job/job.go:998`); `caesium why`/`run diff` never attribute a
+re-run to a limits change; a cached success is reusable under any limits.
+The honest counter-case: unlike QueueName, limits **are visible inside the
+container** (cgroup files; JVM `MaxRAMPercentage`-style self-sizing) — a
+step whose *output* depends on its memory limit is non-deterministic under
+this rule. Escape hatches: `cache: false`, or a cache `version` bump with
+the limits change; we document this rather than pretending limits are
+invisible. Receipts stay truthful without identity impact:
+`AppliedResources` and the escalation trail land on the TaskRun/descriptor
+(a descriptor schema bump — v1 has no resources field), so
+`caesium receipt get` shows what actually ran.
 
 ### OOM retry escalation
 

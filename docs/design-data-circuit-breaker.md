@@ -26,8 +26,8 @@ the world duplicates alerts**: making every consumer validate its inputs and
 fail turns one bad extract into N red runs and N pages, burying the root
 cause under its own symptoms (the noise pattern agent-in-the-loop added
 `suppress_downstream_alerts` to fight after the fact). And **silent poison
-is worst of all**: with neither check, nobody is paged and the bad numbers
-reach a dashboard or a customer.
+is worst**: with neither check, nobody is paged and the bad numbers reach a
+dashboard or a customer.
 
 The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
 is a circuit breaker on the dataset: when what a step *produced* looks
@@ -56,13 +56,12 @@ a column, an event field, or a YAML key.
 
 1. **Container-native.** Assertions evaluate from what the step *prints* —
    a new `##caesium::metrics` stdout marker beside `##caesium::output`
-   (`pkg/task/output.go`). No SDK, no in-container agent, no connection to
-   the data.
+   (`pkg/task/output.go`). No SDK, no agent, no connection to the data.
 2. **Declarative and GitOps-first.** Assertions live in the job YAML on the
    producing step, linted by `caesium job lint`, diffable in PRs.
 3. **Zero-dependency.** Holds, metrics, and the registry are small dqlite
-   tables; baselines are percentiles computed server-side in Go. No stats
-   engine, no time-series store.
+   tables; baselines are percentiles computed server-side in Go — no stats
+   engine or time-series store.
 4. **Smart by default.** Opt-in declaration; once declared, baselines, hold
    propagation, downstream skip, and single-source alerting need no glue.
 5. **Data engineering first.** The "stop the line" primitive every data team
@@ -76,8 +75,8 @@ the count it observed* — the same trust boundary as `##caesium::output` and
 the `output-ref` digests. Stated honestly, the breaker catches **accidents,
 not adversaries**: a malicious or buggy image can print flattering metrics.
 The flip side is universality — any tool that can `echo` participates (dbt
-post-hooks, Spark counters, a two-line `psql` wrapper). Verifying metrics
-against actual data is a job for an auditing *step*, not for Caesium.
+post-hooks, Spark counters, a `psql` wrapper). Verifying metrics against
+actual data is a job for an auditing *step*, not for Caesium.
 
 ## Overview
 
@@ -156,9 +155,9 @@ one, at the source, with the blast radius attached.
 lands 10× baseline; `deltaFromBaseline: 50%` trips. The operator checks the
 baseline sparkline, agrees it is seasonal, and acks:
 `caesium dataset release warehouse/transactions_daily --reason "month-end" --tolerate rowCount.deltaFromBaseline=72h`.
-The hold releases immediately; the named assertion is snoozed on that
-dataset for 72h so follow-up runs don't re-trip. Tolerance windows are the
-v1 answer to seasonality — seasonal baseline *models* are out of scope.
+The hold releases immediately; the named assertion is snoozed on that dataset
+for 72h so follow-up runs don't re-trip. Tolerance windows are the v1 answer
+to seasonality — seasonal baseline *models* are out of scope.
 
 **3. Clean rerun auto-releases.** The vendor re-ships the file; the operator
 retries the producing run. All assertions pass, so the evaluator releases
@@ -193,9 +192,8 @@ persists violations (a `DataViolation` shape parallel to `SchemaViolations`);
 error the executors escalate exactly as schema `fail` mode, `hold` opens the
 hold via idempotent upsert (one *active* hold per dataset; repeat violations
 append occurrences rather than re-alerting). Replay-quarantined runs
-(`TaskRun.Quarantine`) are excluded completely — no metrics, no baselines, no
-holds opened or released; a what-if must not trip or clear a production
-breaker.
+(`TaskRun.Quarantine`) are excluded completely — no metrics, no baselines,
+no holds opened or released; a what-if never trips or clears the breaker.
 
 ### Data model (`internal/models/`)
 
@@ -204,8 +202,7 @@ breaker.
   way concurrency admission is (one conditional INSERT, leader-safe under
   dqlite's Raft serialization); held-by job/run/task refs; violation JSON
   (assertion, observed, bound, baseline snapshot); occurrence count;
-  released-at/by/reason + release-run ref; tolerance entries (assertion →
-  expiry).
+  released-at/by/reason + release-run ref; tolerance entries.
 - `DatasetMetric` — task-run ref (CASCADE like `LineageDataset`), namespace,
   name, metric, float value (watermarks as epoch seconds), created-at;
   pruned past `CAESIUM_DATASET_METRIC_RETENTION` (default 90d).
@@ -218,9 +215,9 @@ Baselines are computed on read — median + p10/p90 over the last N clean
 `N = CAESIUM_BASELINE_WINDOW` (default 20); no materialized baseline table,
 since the window is ≤20 small rows per metric. **Cold start:** below
 `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) samples, `deltaFromBaseline`
-assertions are **warn-only** — recorded, surfaced in the UI as "seeding",
-never holding; absolute bounds enforce from run one. Turning the feature on
-is safe by construction.
+assertions are **warn-only** (recorded, surfaced in the UI as "seeding",
+never holding); absolute bounds enforce from run one. Turning the feature
+on is safe by construction.
 
 ### Dataset identity
 
@@ -271,19 +268,17 @@ optional per-assertion tolerance windows; audited (`AuditLog`). **Clean run**
 releases any active hold on that dataset (`release_reason: clean_run`) in the
 same transaction that records the metrics; configurable per dataset
 (`release: auto|manual`, default `auto`). Release is level-triggered —
-downstream jobs simply pass the gate on their next trigger; Caesium does not
-retroactively fire skipped runs in v1 (operators can retry them; `park`
-changes this later).
+downstream jobs simply pass the gate on their next trigger; Caesium never
+retroactively fires skipped runs in v1 (operators can retry them).
 
 **Auth honesty.** Caesium defaults to `CAESIUM_AUTH_MODE=none`
-(`pkg/env/env.go:169`), so by default the release endpoint is an
-unauthenticated POST and `ReleasedBy` records `anonymous`. Unlike
-agent-in-the-loop's approval gates (where an unauthenticated approve route
-would let the agent approve itself), a hold is a *safety* device against
-accidents, not a security boundary — the feature is not hard-gated on auth.
-Deployments wanting an enforced ack chain set an auth mode;
-`CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release when no
-authenticated principal is present.
+(`pkg/env/env.go:169`), so by default release is an unauthenticated POST and
+`ReleasedBy` records `anonymous`. Unlike agent-in-the-loop's approval gates
+(where an unauthenticated approve route would let the agent approve itself),
+a hold is a *safety* device against accidents, not a security boundary — the
+feature is not hard-gated on auth. Deployments wanting an enforced ack chain
+set an auth mode; `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s
+release when no authenticated principal is present.
 
 ### Events, notifications, REST, env
 
@@ -294,8 +289,8 @@ route them like any lifecycle event. Alert-once is structural: `dataset_held`
 is the page-worthy event, emitted exactly once per hold (repeat violations
 increment the occurrence counter without re-emitting); `run_held_upstream`
 defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
-`caesium_dataset_holds_active`, `caesium_runs_held_upstream_total`,
-`caesium_data_assertions_total{result}`.
+`caesium_dataset_holds_active`, `caesium_data_assertions_total{result}`,
+`caesium_runs_held_upstream_total`.
 
 - REST: `GET /v1/datasets` (registry + freshness/hold status),
   `GET /v1/datasets/holds?status=active`, `GET /v1/datasets/:ns/:name/metrics`
