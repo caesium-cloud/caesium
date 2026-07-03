@@ -479,6 +479,9 @@ jobs:
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+            -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+            -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+            -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
             -e CAESIUM_LOG_LEVEL=debug \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \

@@ -18,6 +18,13 @@ config:
       value: "true"
     - name: CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL
       value: 500ms
+    # Prune rate-limit windows + poll notifications fast enough for the integration waits.
+    - name: CAESIUM_RATE_LIMIT_PRUNER_ENABLED
+      value: "true"
+    - name: CAESIUM_RATE_LIMIT_PRUNE_INTERVAL
+      value: 500ms
+    - name: CAESIUM_NOTIFICATION_WATCHER_INTERVAL
+      value: 1s
     # Enable lineage so the data-plane impact integration scenario runs here too.
     - name: CAESIUM_OPEN_LINEAGE_ENABLED
       value: "true"
