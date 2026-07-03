@@ -55,18 +55,17 @@ column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
-1. **Container-native.** Assertions evaluate from what the step *prints* — a
-   new `##caesium::metrics` stdout marker beside the `##caesium::output`
-   protocol (`pkg/task/output.go`). No SDK, no in-container agent; Caesium
-   never opens a connection to the data.
+1. **Container-native.** Assertions evaluate from what the step *prints* —
+   a new `##caesium::metrics` stdout marker beside `##caesium::output`
+   (`pkg/task/output.go`). No SDK, no in-container agent, no connection to
+   the data.
 2. **Declarative and GitOps-first.** Assertions live in the job YAML on the
    producing step, linted by `caesium job lint`, diffable in PRs.
 3. **Zero-dependency.** Holds, metrics, and the registry are small dqlite
-   tables; baselines are percentiles over the last N runs, computed
-   server-side in Go. No stats engine, no time-series store.
-4. **Smart by default.** Opt-in declaration; once declared, baseline
-   tracking, hold propagation, downstream skip, and single-source alerting
-   happen without glue code.
+   tables; baselines are percentiles computed server-side in Go. No stats
+   engine, no time-series store.
+4. **Smart by default.** Opt-in declaration; once declared, baselines, hold
+   propagation, downstream skip, and single-source alerting need no glue.
 5. **Data engineering first.** The "stop the line" primitive every data team
    builds badly on top of orchestrators that only understand runs.
 
@@ -370,15 +369,15 @@ Per the repo's end-to-end gate, every CLI command and endpoint above ships
 with an integration test in `test/` driving the real surface. A
 metrics-emitting script image covers: passing run records metrics/baselines;
 violating `hold` run opens exactly one hold + one `dataset_held` event; the
-downstream job's trigger produces a skipped run with the hold reason;
-`caesium dataset release` (stdout-clean `--json`, asserted via
-`runCLIStdout`) reopens the gate; clean rerun auto-releases; cold-start runs
-warn-only; `fail` mode goes red like schema `fail`; disabled gate is inert.
-`CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in `just integration-up` so
-the path executes in CI. Distributed parity (worker path via
-`runtime_executor.go`; leader-safe gate decisions under concurrent admission)
-and replay isolation (a quarantined replay neither trips nor releases holds)
-get their own scenarios.
+downstream trigger produces a skipped run with the hold reason;
+`caesium dataset release` (stdout-clean `--json` via `runCLIStdout`) reopens
+the gate; clean rerun auto-releases; cold-start runs warn-only; `fail` mode
+goes red like schema `fail`; disabled gate is inert.
+`CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in `just integration-up` so the
+path executes in CI. Distributed parity (worker path via
+`runtime_executor.go`; leader-safe gate under concurrent admission) and
+replay isolation (a quarantined replay neither trips nor releases holds) get
+their own scenarios.
 
 ## Phasing
 
@@ -398,13 +397,12 @@ get their own scenarios.
 - **No data-plane access.** Caesium never connects to warehouses, reads
   files, or samples rows. Metrics are step-emitted, full stop.
 - **No anomaly ML, no seasonal baseline models.** Rolling percentile windows
-  plus manual tolerance windows; month-end is a human ack, not a Fourier
-  term.
+  plus manual tolerance windows; month-end is an ack, not a Fourier term.
 - **No row-level holds.** Setting rows aside is the pipeline's job (cf. the
   `badRowPolicy` pattern in agent-in-the-loop scenario 3); Caesium holds the
   dataset pointer, never data.
-- **No retroactive un-skip** of gate-skipped runs on release.
-- **Not a data catalog.** The registry stores identity + contract, not
+- **No retroactive un-skip** of gate-skipped runs on release, and **not a
+  data catalog** — the registry stores identity + contract, not
   ownership/glossary/discovery metadata.
 
 ## Open questions
@@ -422,4 +420,4 @@ get their own scenarios.
    schema should reserve an optional partition key now.
 4. **Tenancy.** When multi-tenancy (roadmap §3.1) lands, holds and the
    registry scope per namespace; models carry a nullable tenant column from
-   day one, as agent-in-the-loop already commits to.
+   day one, as agent-in-the-loop already commits to for incidents.

@@ -111,20 +111,16 @@ Read before designing; every later claim builds on these:
 ## Overview
 
 ```
- run completes ─▶ stats capture (per attempt): peak mem / cpu-secs /
-                  oom flag / exit code → task_runs columns      [Phase 0
-                    │                    │                       = §2.5 1–2]
-        OOM on attempt k          history (last N runs)
-                    ▼                    ▼
-        retry escalation:         recommendation engine:
-        next attempt at           p99(peak) × headroom, quantized,
-        mem × factor, clamped     clamped to declared bounds
-        to bounds → green run       │
-        (bounds exhaust →         suggest ─▶ CLI/UI/REST recommendation
-         classified fail,         auto ────▶ provenance-routed apply:
-         agent/incident                      git-synced → Git PR
-         hand-off)                           non-git    → jobdefs apply
-                                             no creds   → degrade to suggest
+run completes ─▶ stats capture per attempt (peak mem / cpu-secs / oom flag /
+                 exit code → task_runs columns)          [Phase 0 = §2.5 1–2]
+     │ OOM on attempt k                │ history (last N runs)
+     ▼                                 ▼
+retry escalation: next attempt   recommendation: p99(peak) × headroom,
+at mem × factor, clamped to      quantized, clamped to declared bounds
+bounds → green run; bounds         ├─ suggest ─▶ CLI / UI / REST
+exhaust → classified fail,         └─ auto ────▶ provenance-routed apply:
+agent/incident hand-off               git-synced → Git PR · non-git →
+                                      jobdefs apply · no creds → suggest
 ```
 
 ## YAML
@@ -199,16 +195,14 @@ strings, parsed at lint/apply) to `container.Spec`. Because `Step` embeds
 `RuntimeSpecForStep` (`definition.go:959-1016`) persists the resolved spec
 onto the atom model, the field flows automatically: YAML → atom →
 `runner.spec` (local, `internal/job/job.go:555-559`) and YAML → execution
-descriptor → worker. Engine mapping:
-
-- Docker/Podman: `HostConfig.Resources.Memory` / `NanoCPUs` (resp. specgen
-  `ResourceLimits`). Honest limit: these are limits only — Docker has no
-  admission, so oversubscription protection on plain hosts is the kernel's
-  OOM killer, which is exactly the signal we now catch.
-- Kubernetes: `requests = limits` for memory (Guaranteed semantics),
-  `requests` only for CPU (burstable). Changing memory requests changes
-  **Kueue admission** arithmetic for `kueue:`-queued steps — disclosed; the
-  recommendation UI shows the request delta for queued steps.
+descriptor → worker. Docker/Podman map it to `HostConfig.Resources.Memory` /
+`NanoCPUs` (resp. specgen `ResourceLimits`) — limits only; Docker has no
+admission, so oversubscription protection on plain hosts is the kernel's OOM
+killer, exactly the signal we now catch. Kubernetes sets
+`requests = limits` for memory (Guaranteed semantics) and `requests` only
+for CPU; changing memory requests changes **Kueue admission** arithmetic for
+`kueue:`-queued steps — disclosed, and the recommendation UI shows the
+request delta for queued steps.
 
 ### Cache identity: stated honestly
 
