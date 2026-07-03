@@ -40,4 +40,8 @@ var All = []interface{}{
 	// dag_snapshots is append-only topology history (data-plane-memory B1).
 	// Must follow Job (FK parent) so AutoMigrate creates the parent table first.
 	&DagSnapshot{},
+	// dataset_declarations is the declared dataset graph (freshness A2). Must
+	// follow Job (FK parent). Rebuilt from the manifest on every apply; not a
+	// hot per-run table.
+	&DatasetDeclaration{},
 }

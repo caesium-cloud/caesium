@@ -37,7 +37,10 @@ func (i *Importer) ValidateBatch(ctx context.Context, defs []schema.Definition) 
 			return fmt.Errorf("definition %s: %w", defs[idx].Metadata.Alias, err)
 		}
 	}
-	return ValidateTriggerChains(ctx, i.db, defs)
+	if err := ValidateTriggerChains(ctx, i.db, defs); err != nil {
+		return err
+	}
+	return ValidateDatasetGraph(ctx, i.db, defs)
 }
 
 func ValidateTriggerChains(ctx context.Context, conn *gorm.DB, defs []schema.Definition) error {

@@ -60,6 +60,11 @@ func Lint(c *echo.Context) error {
 			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
 		}
 	}
+	if len(resp.Errors) == 0 {
+		if err := internaljobdef.ValidateDatasetGraph(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
+			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		}
+	}
 
 	var stepsSummary string
 	if len(resp.Errors) == 0 {

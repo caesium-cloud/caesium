@@ -120,6 +120,9 @@ type Metadata struct {
 	ServiceAccountName           string            `yaml:"serviceAccountName,omitempty" json:"serviceAccountName,omitempty"`
 	PodAnnotations               map[string]string `yaml:"podAnnotations,omitempty" json:"podAnnotations,omitempty"`
 	AutomountServiceAccountToken *bool             `yaml:"automountServiceAccountToken,omitempty" json:"automountServiceAccountToken,omitempty"`
+	// Datasets declares the external source datasets this job's steps consume.
+	// It is scheduling metadata for freshness and does not affect the cache hash.
+	Datasets *MetadataDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
 }
 
 // Concurrency controls admission of new runs for the same job.
@@ -210,6 +213,80 @@ type StepRateLimit struct {
 	Units    int    `yaml:"units" json:"units"`
 }
 
+// Dataset direction constants describe how a declaration relates a step (or the
+// job's metadata) to a dataset. They are the canonical values persisted on the
+// DatasetDeclaration registry model and read by the cross-job lint.
+const (
+	// DatasetDirectionProduces marks a dataset a step produces (carries the SLO).
+	DatasetDirectionProduces = "produces"
+	// DatasetDirectionConsumes marks a dataset a step consumes.
+	DatasetDirectionConsumes = "consumes"
+	// DatasetDirectionSource marks an external dataset declared under
+	// metadata.datasets.sources that nobody in this instance produces.
+	DatasetDirectionSource = "source"
+)
+
+// Watermark identifies the ##caesium::output key a producing step emits to
+// advance its dataset. It is not a JSONPath — it names an output key on the
+// existing zero-SDK output contract (echo '##caesium::output {"<key>": ...}').
+type Watermark struct {
+	Key string `yaml:"key,omitempty" json:"key,omitempty"`
+}
+
+// ProducedDataset declares a dataset a step produces plus the freshness SLO
+// consumers care about. The SLO fields are scheduling metadata, not execution
+// inputs — they never enter the cache identity hash.
+type ProducedDataset struct {
+	// Name is the dataset identity (keyed on name in v1; namespace is reserved).
+	Name string `yaml:"name" json:"name"`
+	// Freshness is the target staleness SLO as a Go duration string (e.g. "6h").
+	Freshness string `yaml:"freshness,omitempty" json:"freshness,omitempty"`
+	// MaxStaleness is the hard bound whose breach emits freshness_violated.
+	MaxStaleness string `yaml:"maxStaleness,omitempty" json:"maxStaleness,omitempty"`
+	// Watermark names the output key this step emits to advance the dataset.
+	Watermark *Watermark `yaml:"watermark,omitempty" json:"watermark,omitempty"`
+}
+
+// StepDatasets is the per-step datasets surface: the datasets a step consumes
+// and the datasets it produces (with their freshness SLOs).
+type StepDatasets struct {
+	Consumes []string          `yaml:"consumes,omitempty" json:"consumes,omitempty"`
+	Produces []ProducedDataset `yaml:"produces,omitempty" json:"produces,omitempty"`
+}
+
+// ArrivalEvent is the event pattern a source dataset's arrival binds to. It
+// mirrors the shipped event-trigger matcher shape (type + string filter).
+type ArrivalEvent struct {
+	Type   string            `yaml:"type,omitempty" json:"type,omitempty"`
+	Filter map[string]string `yaml:"filter,omitempty" json:"filter,omitempty"`
+}
+
+// Arrival binds an external event to a source dataset advance: when an ingested
+// event matches Event, Watermark (a JSONPath into the event payload) is
+// extracted as the new watermark value.
+type Arrival struct {
+	Event     *ArrivalEvent `yaml:"event,omitempty" json:"event,omitempty"`
+	Watermark string        `yaml:"watermark,omitempty" json:"watermark,omitempty"`
+}
+
+// SourceDataset declares an external dataset nobody in Caesium produces — the
+// upstream a consuming step depends on. expectedEvery is a cadence expectation;
+// a late arrival surfaces as stale-upstream rather than a failed run.
+type SourceDataset struct {
+	Name          string   `yaml:"name" json:"name"`
+	ExpectedEvery string   `yaml:"expectedEvery,omitempty" json:"expectedEvery,omitempty"`
+	Arrival       *Arrival `yaml:"arrival,omitempty" json:"arrival,omitempty"`
+	// External marks the dataset as intentionally produced outside Caesium so
+	// the cross-job lint does not demand a producing job.
+	External bool `yaml:"external,omitempty" json:"external,omitempty"`
+}
+
+// MetadataDatasets is the job-level datasets surface: the external source
+// datasets the job's steps consume.
+type MetadataDatasets struct {
+	Sources []SourceDataset `yaml:"sources,omitempty" json:"sources,omitempty"`
+}
+
 // Step defines an execution step.
 type Step struct {
 	Name         string            `yaml:"name" json:"name"`
@@ -241,8 +318,11 @@ type Step struct {
 	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
 	// which keys this step requires from each predecessor's output.
-	InputSchema    map[string]map[string]any `yaml:"inputSchema,omitempty" json:"inputSchema,omitempty"`
-	Cache          interface{}               `yaml:"cache,omitempty" json:"cache"`
+	InputSchema map[string]map[string]any `yaml:"inputSchema,omitempty" json:"inputSchema,omitempty"`
+	// Datasets declares the datasets this step consumes and produces. It is
+	// scheduling metadata for freshness and does not affect the cache hash.
+	Datasets       *StepDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
+	Cache          interface{}   `yaml:"cache,omitempty" json:"cache"`
 	container.Spec `yaml:",inline" json:",inline"`
 }
 
@@ -270,6 +350,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		RateLimit                    *StepRateLimit            `yaml:"rateLimit"`
 		OutputSchema                 map[string]any            `yaml:"outputSchema"`
 		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
+		Datasets                     *StepDatasets             `yaml:"datasets"`
 		Cache                        interface{}               `yaml:"cache"`
 		container.Spec               `yaml:",inline"`
 	}
@@ -316,6 +397,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.RateLimit = rs.RateLimit
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
+	s.Datasets = rs.Datasets
 	s.Cache = rs.Cache
 	s.Spec = rs.Spec
 
@@ -347,6 +429,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		RateLimit                    *StepRateLimit            `json:"rateLimit"`
 		OutputSchema                 map[string]any            `json:"outputSchema"`
 		InputSchema                  map[string]map[string]any `json:"inputSchema"`
+		Datasets                     *StepDatasets             `json:"datasets"`
 		Cache                        interface{}               `json:"cache"`
 		container.Spec               `json:",inline"`
 	}
@@ -383,6 +466,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.RateLimit = rs.RateLimit
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
+	s.Datasets = rs.Datasets
 	s.Cache = rs.Cache
 	s.Spec = rs.Spec
 
@@ -441,6 +525,110 @@ func (d *Definition) Validate() error {
 	if err := validateSteps(d.Steps, volumes, rateLimitResources); err != nil {
 		return err
 	}
+	if err := validateDatasets(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateDatasets performs single-definition validation of the datasets
+// surface: SLO fields parse as Go durations, arrival watermarks are well-formed
+// JSONPaths, produced/source names are unique within the job, and consumes
+// entries are non-empty and de-duplicated. It deliberately does NOT reject a
+// consumes name that resolves to no dataset in THIS definition: a step may
+// consume a dataset produced by another job, and that cross-job resolution
+// (produced-in-applied-set / declared-source / external:true) is the batch
+// validator's job (internal/jobdef, item A3), which sees the whole applied set
+// plus persisted declarations. Datasets are scheduling metadata and never enter
+// the cache identity hash.
+func validateDatasets(d *Definition) error {
+	produced := make(map[string]struct{})
+	sources := make(map[string]struct{})
+
+	if d.Metadata.Datasets != nil {
+		for i := range d.Metadata.Datasets.Sources {
+			src := &d.Metadata.Datasets.Sources[i]
+			name := strings.TrimSpace(src.Name)
+			if name == "" {
+				return fmt.Errorf("metadata.datasets.sources[%d].name is required", i)
+			}
+			if _, exists := sources[name]; exists {
+				return fmt.Errorf("metadata.datasets.sources[%d].name %q duplicates another source", i, name)
+			}
+			sources[name] = struct{}{}
+			if strings.TrimSpace(src.ExpectedEvery) != "" {
+				if _, err := time.ParseDuration(src.ExpectedEvery); err != nil {
+					return fmt.Errorf("metadata.datasets.sources[%d].expectedEvery %q must be a valid duration: %w", i, src.ExpectedEvery, err)
+				}
+			}
+			if src.Arrival != nil {
+				if src.Arrival.Event != nil && strings.TrimSpace(src.Arrival.Event.Type) == "" {
+					return fmt.Errorf("metadata.datasets.sources[%d].arrival.event.type is required when event is set", i)
+				}
+				if wm := strings.TrimSpace(src.Arrival.Watermark); wm != "" {
+					if err := validateSimpleJSONPath(wm); err != nil {
+						return fmt.Errorf("metadata.datasets.sources[%d].arrival.watermark: %w", i, err)
+					}
+				}
+			}
+			src.Name = name
+		}
+	}
+
+	for i := range d.Steps {
+		step := &d.Steps[i]
+		if step.Datasets == nil {
+			continue
+		}
+		for j := range step.Datasets.Produces {
+			p := &step.Datasets.Produces[j]
+			name := strings.TrimSpace(p.Name)
+			if name == "" {
+				return fmt.Errorf("steps[%d].datasets.produces[%d].name is required", i, j)
+			}
+			if _, exists := produced[name]; exists {
+				return fmt.Errorf("steps[%d].datasets.produces[%d].name %q is produced more than once in this job", i, j, name)
+			}
+			if _, exists := sources[name]; exists {
+				return fmt.Errorf("steps[%d].datasets.produces[%d].name %q is also declared under metadata.datasets.sources", i, j, name)
+			}
+			produced[name] = struct{}{}
+			if strings.TrimSpace(p.Freshness) != "" {
+				if _, err := time.ParseDuration(p.Freshness); err != nil {
+					return fmt.Errorf("steps[%d].datasets.produces[%d].freshness %q must be a valid duration: %w", i, j, p.Freshness, err)
+				}
+			}
+			if strings.TrimSpace(p.MaxStaleness) != "" {
+				if _, err := time.ParseDuration(p.MaxStaleness); err != nil {
+					return fmt.Errorf("steps[%d].datasets.produces[%d].maxStaleness %q must be a valid duration: %w", i, j, p.MaxStaleness, err)
+				}
+			}
+			if p.Watermark != nil && strings.TrimSpace(p.Watermark.Key) == "" {
+				return fmt.Errorf("steps[%d].datasets.produces[%d].watermark.key is required when watermark is set", i, j)
+			}
+			p.Name = name
+		}
+	}
+
+	for i := range d.Steps {
+		step := &d.Steps[i]
+		if step.Datasets == nil {
+			continue
+		}
+		seen := make(map[string]struct{}, len(step.Datasets.Consumes))
+		for j, raw := range step.Datasets.Consumes {
+			name := strings.TrimSpace(raw)
+			if name == "" {
+				return fmt.Errorf("steps[%d].datasets.consumes[%d] must not be empty", i, j)
+			}
+			if _, dup := seen[name]; dup {
+				return fmt.Errorf("steps[%d].datasets.consumes contains duplicate entry %q", i, name)
+			}
+			seen[name] = struct{}{}
+			step.Datasets.Consumes[j] = name
+		}
+	}
+
 	return nil
 }
 
