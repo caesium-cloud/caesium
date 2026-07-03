@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -51,8 +52,19 @@ func (s *IntegrationTestSuite) TestRunConcurrencyStrategies() {
 		s.NotEmpty(secondRunID)
 		s.NotEqual(firstRunID, secondRunID)
 
-		cancelled := s.awaitRunStatus(job.ID, firstRunID, 10*time.Second, "cancelled")
+		// The replace flips the run and its non-terminal tasks to "cancelled" in
+		// a single transaction, and the store now refuses to resurrect a terminal
+		// task (StartTask/completeTask skip an already-cancelled row), so in local
+		// execution mode the orphaned container can no longer overwrite the task
+		// back to running/succeeded — the cancelled state is durable. The only
+		// remaining transient is a torn read under the read/write connection
+		// split, where a GET can momentarily surface the cancelled run alongside a
+		// task still reporting its pre-cancel "running" value. Poll until the run
+		// and every task converge rather than snapshotting the instant the
+		// run-level status flips.
+		cancelled := s.awaitRunCancelled(job.ID, firstRunID, 15*time.Second)
 		s.Equal("cancelled", cancelled.Status)
+		s.NotEmpty(cancelled.Tasks, "cancelled run should still expose its tasks")
 		for _, task := range cancelled.Tasks {
 			s.Equal("cancelled", task.Status, "cancelled run's tasks must be unclaimable")
 		}
@@ -208,6 +220,55 @@ WHERE id = ? AND claimed_by = ''
 	affected, err := result.RowsAffected()
 	s.Require().NoError(err)
 	s.Equal(int64(1), affected)
+}
+
+// awaitRunCancelled polls until the run reaches the terminal "cancelled" status
+// AND every one of its tasks has also converged to "cancelled". A concurrency
+// "replace" flips the run and its non-terminal tasks in a single transaction,
+// but under the read/write connection split a GET can momentarily observe the
+// cancelled run alongside a task still reporting its pre-cancel "running" state.
+// Since the committed end state is always all-cancelled, we wait for it to
+// converge instead of asserting on the first cancelled snapshot. A task that
+// genuinely ended in another terminal status (e.g. "succeeded") never satisfies
+// the predicate, so a real "ran to completion despite cancel" regression still
+// fails here — loudly, with the observed statuses.
+func (s *IntegrationTestSuite) awaitRunCancelled(jobID, runID string, timeout time.Duration) runResponse {
+	s.T().Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		run := s.fetchRun(jobID, runID)
+		if run.Status == "cancelled" && allTasksHaveStatus(run.Tasks, "cancelled") {
+			return run
+		}
+		if time.Now().After(deadline) {
+			s.T().Fatalf("timeout waiting for run %s and all tasks to converge to cancelled; last run status=%q tasks=[%s]",
+				runID, run.Status, taskStatusSummary(run.Tasks))
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+}
+
+// allTasksHaveStatus reports whether every task carries status. It returns false
+// for an empty slice so callers cannot mistake "no tasks yet" for convergence.
+func allTasksHaveStatus(tasks []runTaskResponse, status string) bool {
+	if len(tasks) == 0 {
+		return false
+	}
+	for _, t := range tasks {
+		if t.Status != status {
+			return false
+		}
+	}
+	return true
+}
+
+// taskStatusSummary renders "id=status" pairs for a timeout failure message.
+func taskStatusSummary(tasks []runTaskResponse) string {
+	parts := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		parts = append(parts, fmt.Sprintf("%s=%s", t.ID, t.Status))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func (s *IntegrationTestSuite) awaitRunStatus(jobID, runID string, timeout time.Duration, statuses ...string) runResponse {

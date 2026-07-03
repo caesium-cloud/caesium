@@ -1577,15 +1577,26 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, taskID).
+			result := tx.Model(&models.TaskRun{}).
+				Where("job_run_id = ? AND task_id = ? AND status NOT IN ?", runID, taskID, terminalTaskStatuses()).
 				Updates(map[string]interface{}{
 					"status":                 string(TaskStatusRunning),
 					"runtime_id":             runtimeID,
 					"started_at":             now,
 					"rate_limit_retry_after": nil,
-				}).Error; err != nil {
-				return err
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				// The task is already terminal (e.g. cancelled by a concurrency
+				// replace while its orphaned container was starting), so the guarded
+				// UPDATE touched no rows. Skip the metric bump and the TypeTaskStarted
+				// event — emitting one here would publish a phantom task_started for a
+				// task that is still cancelled in the DB. Mirrors StartTaskClaimed's
+				// RowsAffected==0 gate (which returns a claim mismatch; a local no-op
+				// is benign, so return nil).
+				return nil
 			}
 			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
@@ -1920,6 +1931,9 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 					return ErrTaskClaimMismatch
 				}
 				return err
+			}
+			if IsTerminal(TaskStatus(taskRun.Status)) {
+				return nil
 			}
 
 			updateQuery := tx.Model(&models.TaskRun{}).
@@ -2593,6 +2607,18 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 				taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
 			}
 			if err := taskQuery.First(&taskRun).Error; err == nil {
+				if IsTerminal(TaskStatus(taskRun.Status)) {
+					// A terminal task must not be resurrected by a late completion. In local
+					// execution mode a concurrency replace cancels the run's task while its
+					// orphaned container is still running; without this guard the container's
+					// eventual exit would overwrite cancelled -> succeeded. The claimed path is
+					// already protected by the claimed_by guard; this covers the unclaimed
+					// local path. Returning nil is a no-op that also (correctly) skips the DAG
+					// cascade: a terminal task has already been accounted for, and in the
+					// replace-cancel case that motivates this the run is cancelled, so no
+					// successor should advance.
+					return nil
+				}
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
 					if !taskRun.Quarantine && !jobRun.Quarantine {
