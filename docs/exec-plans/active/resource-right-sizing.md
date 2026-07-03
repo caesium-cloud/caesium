@@ -377,7 +377,7 @@ Surfaces the backend through the jobs feature, gated on the `RightSizing`
       overprovisioned steps, reclaimable memory, OOM leaderboard) with a
       pending-suggestion count joining `useNavCounts.ts`.
       Files: the TaskDetail/TaskMetadata panels + `RunDetailPage` + the stats
-      page under `ui/src/features/`, `ui/src/lib/hooks/useNavCounts.ts`,
+      page under `ui/src/features/`, `ui/src/features/jobs/useNavCounts.ts`,
       `ui/src/lib/api.ts`.
       Depends on: C2 (the escalation trail data), D2 (observed/suggestion reads).
 

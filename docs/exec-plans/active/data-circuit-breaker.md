@@ -285,8 +285,12 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       (403 naming the precondition)** and holds release only through the `clean_run`
       path; `ReleasedBy` then always records an authenticated principal. Emit
       `dataset_released`.
+      The `/v1/datasets/holds/:id/release` route extends the base dataset REST
+      package owned by [`freshness-scheduling.md`](freshness-scheduling.md) Stream E
+      — see Stream D's cross-plan ownership note; this item adds a handler file and
+      appends one route line, it does not create the package.
       Files: `internal/run/data_assertions.go` (clean-run release),
-      new `api/rest/controller/dataset/release.go`, new
+      new `api/rest/controller/dataset/release.go`,
       `api/rest/service/dataset/`, `api/rest/bind/bind.go`.
       Depends on: C1.
 - [ ] C4. Add the bus event types `dataset_held`, `dataset_released`,
@@ -320,21 +324,41 @@ The read side of the registry/hold surface plus the operator CLI. The release
 `POST` is owned by C3 (it's release *semantics*); D owns the reads and the CLI
 that drives all four endpoints.
 
+**Cross-plan ownership (base `cmd/dataset/` + `/v1/datasets` package):** the base
+`caesium dataset` Cobra group, the `api/rest/controller/dataset/` +
+`api/rest/service/dataset/` package, and the base `/v1/datasets` route family are
+owned by [`freshness-scheduling.md`](freshness-scheduling.md) **Stream E**. The
+items below (and C3's release route) **extend** that package — adding
+hold/metrics/release handlers and the `/v1/datasets/holds*` +
+`/v1/datasets/:ns/:name/metrics` routes and the `holds`/`release`/`metrics`
+subcommands — rather than creating a second package or Cobra group. If
+freshness Stream E has not merged yet, whichever dataset-surface item lands first
+creates the package skeleton + the `cmds`-slice / `Protected()` registration under
+these canonical paths; the other extends it. The two plans' `bind.go` /
+`cmd/execute.go` dataset edits must not land in the same wave (see Sequencing).
+
 - [ ] D1. Add the dataset read endpoints: `GET /v1/datasets` (registry + hold
       status), `GET /v1/datasets/holds?status=active`, and
       `GET /v1/datasets/:ns/:name/metrics` (baseline series). Route lines appended
-      in `Protected()` (`api/rest/bind/bind.go`).
+      in `Protected()` (`api/rest/bind/bind.go`). Extends the base dataset package
+      owned by freshness Stream E (see the cross-plan note above) — `GET
+      /v1/datasets` is created once by whichever plan lands first, then reused.
       Files: `api/rest/controller/dataset/`, `api/rest/service/dataset/`,
       `api/rest/bind/bind.go`.
       Depends on: A2 (models) + A5 (baseline read) + C1 (`DatasetHold`).
-- [ ] D2. Add the `caesium dataset` CLI group — `list`, `holds [--status active]
-      [--json]`, `release <ns>/<name> [--reason …] [--tolerate <assertion>=<dur>]`,
-      `metrics <ns>/<name> --metric rowCount [--json]` — as a new top-level Cobra
-      command group appended to the `cmds` slice in `cmd/execute.go`. `--json` goes
-      to **stdout, clean and parseable** via `cmd.OutOrStdout()` (asserted in tests
-      via `runCLIStdout`, never the stream-merging capture); a timed-out HTTP client
-      + bearer API-key header like the shipped `cmd/event`/`cmd/trigger` groups.
-      Files: new `cmd/dataset/`, `cmd/execute.go`.
+- [ ] D2. Add the circuit-breaker subcommands to the `caesium dataset` CLI group —
+      `holds [--status active] [--json]`,
+      `release <ns>/<name> [--reason …] [--tolerate <assertion>=<dur>]`,
+      `metrics <ns>/<name> --metric rowCount [--json]` — extending the base
+      `cmd/dataset/` group owned by freshness Stream E (which contributes
+      `list`/`status`/`advance`). If that group does not exist yet, this item
+      creates it + appends it to the `cmds` slice in `cmd/execute.go` under the
+      canonical path; otherwise it adds subcommand files to the existing group.
+      `--json` goes to **stdout, clean and parseable** via `cmd.OutOrStdout()`
+      (asserted in tests via `runCLIStdout`, never the stream-merging capture); a
+      timed-out HTTP client + bearer API-key header like the shipped
+      `cmd/event`/`cmd/trigger` groups.
+      Files: `cmd/dataset/` (extend or create), `cmd/execute.go`.
       Depends on: D1 + C3 (the release endpoint `release` drives).
 
 ### Stream E — Console UI: hold badges, ack/release, baseline sparkline
@@ -426,6 +450,17 @@ registry item merges first **creates** the registry model; the second **extends*
 it (adds columns / jobdef sub-fields) rather than redefining the table (see the
 Source-Of-Truth Note). Coordinate at wave-dispatch so the two Stream-A registry
 items are not in flight in the same wave; the later one rebases onto the merged base.
+
+**Cross-PLAN order (shared `cmd/dataset/` group + `/v1/datasets` package):** this
+plan's C3/D1/D2 add handlers/subcommands/routes to the same dataset REST package +
+Cobra group that [`freshness-scheduling`](freshness-scheduling.md) **Stream E**
+owns (`api/rest/controller/dataset/`, `api/rest/service/dataset/`, `cmd/dataset/`,
+the `/v1/datasets` route family, the `cmds`-slice registration). Whichever plan's
+dataset-surface item merges first **creates** the package skeleton + registration
+under the canonical paths; the other **extends** it (adds files, appends route
+lines). Never land this plan's `bind.go` / `cmd/execute.go` dataset edits in the
+same wave as a freshness Stream-E `bind.go` / `cmd/execute.go` edit — sequence them
+(the later item rebases onto the merged base).
 
 **Suggested waves:**
 - **W1 = A (A1 → A2 → A3 → A4 → A5) + H-1.** A is one near-strict chain (marker,

@@ -317,11 +317,20 @@ No built-in S3/SFTP pollers (design Non-goal) — arrival is event push, a
 
 ### Stream E — Dataset REST + CLI operator surface (P0)
 
-The read/act surface over the state store. This stream **owns the entire
-`caesium dataset` Cobra group** (`cmd/dataset/`) and the `datasets` REST routes
-(`api/rest/bind/bind.go`), so no other stream creates `cmd/dataset/` or a
-`/v1/datasets` route. `--json` output goes to **stdout, clean and parseable**,
-captured separately from stderr per the `CLAUDE.md` gate.
+The read/act surface over the state store. This stream **owns the base
+`caesium dataset` Cobra group** (`cmd/dataset/`), the base `datasets` REST
+package (`api/rest/controller/dataset/`, `api/rest/service/dataset/`), and the
+base `/v1/datasets` route family in `api/rest/bind/bind.go`. **Cross-plan
+coordination:** [`data-circuit-breaker.md`](data-circuit-breaker.md) Stream C/D
+**extends** this same package with hold/metrics/release subcommands and
+`/v1/datasets/holds*` + `/v1/datasets/:ns/:name/metrics` routes — it does **not**
+create a second `cmd/dataset/` group or dataset controller package. Whichever
+plan's dataset-surface item merges first creates the package skeleton + the
+`cmds`-slice / `Protected()` registration under these canonical paths; the second
+plan's items add files and append route lines to it. The two plans' `bind.go` /
+`cmd/execute.go` dataset edits must not land in the same wave (see Sequencing).
+`--json` output goes to **stdout, clean and parseable**, captured separately from
+stderr per the `CLAUDE.md` gate.
 
 - [ ] E1. Add the dataset read + advance REST: `GET /v1/datasets` (list +
       `status` filter, bounded/paginated), `GET /v1/datasets/:ns/:name` (state,
@@ -517,12 +526,21 @@ C3 (strict). E1 → E2. F1 → F2. G1 → G2. D1 standalone.
 - `internal/event/bus.go` — **C1** adds the `freshness_violated` /
   `dataset_freshness_at_risk` event types (append to the `Type` const block near
   `:45`). Single stream.
-- `api/rest/bind/bind.go` — only **E1** adds `/v1/datasets*` routes (the import
-  block is the conflict-prone part; single stream avoids it). D1 routes arrivals
-  through the *existing* event ingestion, adding no new REST route.
-- `cmd/execute.go` — only **E2** appends the `caesium dataset` command group;
-  **Stream E owns the entire `cmd/dataset/` group** (list, status, advance) so no
-  other stream creates it.
+- `api/rest/bind/bind.go` — within this plan only **E1** adds `/v1/datasets*`
+  routes (the import block is the conflict-prone part; single stream avoids it). D1
+  routes arrivals through the *existing* event ingestion, adding no new REST route.
+  **Cross-plan:** [`data-circuit-breaker.md`](data-circuit-breaker.md) also appends
+  `/v1/datasets/holds*` + `/v1/datasets/:ns/:name/metrics` routes to this same file;
+  E1 owns the base `/v1/datasets` family and the sibling plan extends it — never
+  land both plans' `bind.go` dataset edits in the same wave (whichever merges first
+  creates the package + import block; the other rebases and appends).
+- `cmd/execute.go` — within this plan only **E2** appends the `caesium dataset`
+  command group; **Stream E owns the base `cmd/dataset/` group** (list, status,
+  advance). **Cross-plan:** `data-circuit-breaker.md` extends that same group with
+  `holds`/`release`/`metrics` subcommands — it does not create a second group.
+  Whichever plan's item merges first creates `cmd/dataset/` + the `cmds`-slice
+  append; the other adds subcommand files. Sequence the two plans' `cmd/execute.go`
+  dataset edits across waves.
 - `internal/jobdef/` batch validator — **A3** (single-producer + cross-job
   dataset cycle) lives here, NOT in `pkg/jobdef/definition.go` (the
   single-`Definition` validator can't see cross-job cycles). A1's per-definition

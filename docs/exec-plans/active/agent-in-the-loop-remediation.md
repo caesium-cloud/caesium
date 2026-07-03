@@ -495,7 +495,7 @@ primary evidence — nothing is prose-only.
       `triaging` view (elapsed wall-clock vs budget, tool calls used, streaming
       agent-container logs via the existing `LogViewer`) with a prominent **"Take
       over"** button that ends the session and marks the incident human-owned.
-      Files: `ui/src/features/runs/RunDetailPage.tsx`,
+      Files: `ui/src/features/jobs/RunDetailPage.tsx`,
       `ui/src/features/jobs/JobDetailPage.tsx`, new
       `ui/src/features/incidents/AgentActivity.tsx`.
       Depends on: U2.
