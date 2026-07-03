@@ -84,21 +84,32 @@ hard boundaries — an item that crosses one stops and reconciles first.
 
 ## Progress (as of 2026-07-03)
 
-No implementation waves have shipped yet. The plan was published from the
+The plan was published from the
 [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md) design
-of record (the strategic flagship of the Phase 4 data-plane design wave); the
-first wave is the next eligible run of the `exec-plan-wave` skill against this
-doc. The design's P0 slice (declarations + observability, no scheduling change)
-maps to Streams A–F + H-1 + N-1; P1 (skip-when-fresh) and P2 (full derivation)
-are the tail items in Streams C and G, gated behind `CAESIUM_FRESHNESS_ENABLED`
-and sequenced last so scheduling behavior only changes after the substrate is
-proven.
+of record (the strategic flagship of the Phase 4 data-plane design wave). The
+design's P0 slice (declarations + observability, no scheduling change) maps to
+Streams A–F + H-1 + N-1; P1 (skip-when-fresh) and P2 (full derivation) are the
+tail items in Streams C and G, gated behind `CAESIUM_FRESHNESS_ENABLED` and
+sequenced last so scheduling behavior only changes after the substrate is proven.
+
+### Wave 1 — Stream A foundation (shipped)
+
+- **Stream A** (A1–A3) shipped in [#277](https://github.com/caesium-cloud/caesium/pull/277)
+  (merge `d0ddd8e`): the `datasets` jobdef surface (`Step.Datasets` +
+  `Metadata.Datasets.Sources`, dual `Step`/`rawStep` + single-definition
+  validation, no cache-key change), the canonical `DatasetDeclaration` registry
+  model + store upserted/pruned on every apply seam, and the batch cross-job lint
+  (single-producer, consume-resolution, cross-job acyclicity) wired into
+  `caesium job lint` and the REST lint controller. This is the shared substrate
+  the `data-circuit-breaker` and `contract-enforcement` plans extend. Review:
+  Greptile 5/5; duration-positivity validation added per Gemini. Streams B–G +
+  H-1 remain for later waves.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Jobdef `datasets` schema, declared registry (`dataset_declarations`), cross-job cycle + single-producer lint | **P0** | Not started |
+| A | Jobdef `datasets` schema, declared registry (`dataset_declarations`), cross-job cycle + single-producer lint | **P0** | **Shipped** (Wave 1, #277) |
 | B | Dataset state substrate — `DatasetState` + `DatasetDerivation` models, state store, watermark advance/verify contract, consumed-watermark capture | **P0** | Not started |
 | C | Freshness evaluator — leader-gated durable loop + reactive fast path, observe-only state machine, then P2 derivation to run starts | **P0** → P2 | Not started |
 | D | Arrival signals — source `arrival` event-binding bridged through the event router to advance dataset state | **P0** | Not started |
@@ -125,7 +136,7 @@ NOT enter `internal/cache/hash.go` (declarations don't bust cache); the watermar
 rides the *existing* `##caesium::output` marker, so `pkg/task/output.go` is
 untouched.
 
-- [ ] A1. Add the `datasets` jobdef surface: `Step.Datasets` (`consumes`,
+- [x] A1. Add the `datasets` jobdef surface: `Step.Datasets` (`consumes`,
       `produces []ProducedDataset{name, freshness, maxStaleness, watermark{key}}`)
       and `Metadata.Datasets.Sources []SourceDataset{name, expectedEvery,
       arrival{event{type,filter}, watermark}, external}`. Wire the dual
@@ -139,7 +150,7 @@ untouched.
       step leaves `HashInput.Compute()` unchanged).
       Files: `pkg/jobdef/definition.go` (Step + rawStep + Metadata + Validate +
       UnmarshalYAML), `pkg/jobdef/schema.go`.
-- [ ] A2. Add the `DatasetDeclaration` GORM model (job/step refs,
+- [x] A2. Add the `DatasetDeclaration` GORM model (job/step refs,
       `namespace` (nullable, day-one per design Non-goals) + `name`, direction,
       SLO fields, watermark key, arrival-binding JSON) and register it in the
       `All` slice; add the declared-registry store (typed CRUD over
@@ -152,7 +163,7 @@ untouched.
       declared-registry store), `internal/jobdef/` (Importer apply/prune),
       `api/rest/controller/jobdef/`.
       Depends on: A1.
-- [ ] A3. Add the **batch (cross-job) declared-graph lint**: exactly one job
+- [x] A3. Add the **batch (cross-job) declared-graph lint**: exactly one job
       produces a given dataset (any number consume); a `consumes` name resolves
       to a produced dataset, a declared source, or `external: true` across the
       **whole applied set PLUS existing DB declarations**; and the declared graph
