@@ -26,8 +26,8 @@ the world duplicates alerts**: making every consumer validate its inputs and
 fail turns one bad extract into N red runs and N pages, burying the root
 cause under its own symptoms (the noise pattern agent-in-the-loop added
 `suppress_downstream_alerts` to fight after the fact). And **silent poison
-is worst**: with neither check, nobody is paged and the bad numbers reach a
-dashboard or a customer.
+is worst**: with neither check, nobody is paged and the bad numbers reach
+a dashboard or a customer.
 
 The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
 is a circuit breaker on the dataset: when what a step *produced* looks
@@ -87,10 +87,10 @@ actual data is a job for an auditing *step*, not for Caesium.
      │ pass ─▶ record metrics, update baseline, release own hold
      ├─ violation, onViolation: warn|fail ─▶ existing schema semantics
      └─ violation, onViolation: hold ─▶ DatasetHold + dataset_held event
-                 ▼                                 └─▶ ONE alert (policies)
+                 │                                 └─▶ ONE alert (policies)
+                 ▼
    downstream run-admission gate (run store, same tx as admit):
      job consumes held dataset? ─▶ skip with reason, non-paging event
-                 ▼
    release: human ack (CLI/UI/REST) or next clean producer run
             ─▶ dataset_released, gate reopens
 ```
@@ -335,13 +335,12 @@ via `runCLIStdout`, never the stream-merging capture.
   trigger or advances downstream scheduling.
 - **[`design-contract-enforcement.md`](design-contract-enforcement.md)** —
   static/PR-time enforcement there; this is the runtime breaker for what
-  static analysis cannot see, the *values*. One contract story, two
-  enforcement points.
+  static analysis cannot see, the *values*. One contract story, two gates.
 - **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** —
   `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
   bundle carries the violation, baseline, and impact graph; `release_hold`
-  joins the action catalog at tier 2 (tier 3 with tolerance windows).
-  `suppress_downstream_alerts` becomes largely unnecessary here — holds
+  joins the action catalog at tier 2 (tier 3 with tolerance windows);
+  `suppress_downstream_alerts` becomes largely unnecessary here since holds
   alert once by construction.
 - **[`design-backtesting.md`](design-backtesting.md)** — assertions evaluate
   in backtests too, over metrics historical runs emitted: free regression
@@ -361,8 +360,8 @@ goes red like schema `fail`; disabled gate is inert.
 `CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in `just integration-up` so the
 path executes in CI. Distributed parity (worker path via
 `runtime_executor.go`; leader-safe gate under concurrent admission) and
-replay isolation (a quarantined replay neither trips nor releases holds) get
-their own scenarios.
+replay isolation (a quarantined replay neither trips nor releases holds)
+get their own scenarios.
 
 ## Phasing
 
@@ -372,8 +371,7 @@ their own scenarios.
 - **Phase 1 — Assert.** Evaluator with `warn|fail`, violations persisted,
   lint. Feature-complete for teams that only want red runs.
 - **Phase 2 — Break the circuit.** `DatasetHold`, admission gate, release
-  (ack + clean-run), events/notifications, holds CLI/UI. The headline
-  release.
+  (ack + clean-run), events/notifications, holds CLI/UI. The headline drop.
 - **Phase 3 — Ergonomics & reach.** `park` disposition with release-drain,
   agent actions + incident class, freshness integration, backtest evaluation.
 
@@ -384,8 +382,8 @@ their own scenarios.
 - **No anomaly ML, no seasonal baseline models.** Rolling percentile windows
   plus manual tolerance windows; month-end is an ack, not a Fourier term.
 - **No row-level holds.** Setting rows aside is the pipeline's job (cf. the
-  `badRowPolicy` pattern in agent-in-the-loop scenario 3); Caesium holds the
-  dataset pointer, never data.
+  `badRowPolicy` pattern in agent-in-the-loop scenario 3); Caesium holds
+  the dataset pointer, never data.
 - **No retroactive un-skip** of gate-skipped runs on release, and **not a
   data catalog** — the registry stores identity + contract, not
   ownership/glossary/discovery metadata.

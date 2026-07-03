@@ -134,7 +134,6 @@ The durable `run_queue` table (`internal/models/run_queue.go:12-21`) already
 provides restart durability, a claim protocol with stale-claim reclaim
 (`internal/runqueue/dequeuer.go:125-141`), and a priority-ordered drain
 index. Add nullable columns:
-
 ```go
 // models.RunQueue additions (all NULL for ordinary concurrency-queued rows)
 WindowOpen     *time.Time // window open (resolved instant, UTC)
@@ -162,7 +161,6 @@ process-local, so the row is the run's only representation.
 two nodes never double-start a parked run; claim columns + stale reclaim
 cover leader death mid-release. Each tick, for parked rows ordered
 `priority DESC, (deadline − now − p95) ASC`:
-
 ```
 p95     := predictor.P95(jobID)
 forceAt := min(windowClose, windowDeadline − p95 − buffer)

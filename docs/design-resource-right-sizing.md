@@ -232,11 +232,11 @@ Hook: the existing per-attempt loops, both executors.
 - **Escalation step.** Next attempt's memory =
   `min(applied × factor, memory.max)`, quantized up to 64Mi. Already at
   `memory.max` ⇒ no attempt consumed: fail now, classified, trail attached —
-  never burn attempts on a doomed identical retry.
-- **Local executor change.** Make OOM-class results retryable in the local
-  loop (today an unsuccessful result returns without retry,
-  `internal/job/job.go:1161-1163`, unlike the worker path); the attempt runs
-  a per-attempt spec copy with escalated `Resources`, nothing else changed.
+  never burn attempts on a doomed identical retry. The attempt runs a
+  per-attempt spec copy with escalated `Resources`, nothing else changed —
+  which requires making OOM-class results retryable in the local loop
+  (today an unsuccessful result returns without retry, `job.go:1161-1163`,
+  unlike the worker path).
 - **Persistence and resets.** `RetryTaskClaimed` additionally persists
   `EscalationLevel` and the next attempt's `AppliedResources`, so a
   re-claimed task resumes at the escalated size. The run-level
@@ -282,25 +282,23 @@ unless opted in — backfill inputs differ systematically from steady state.
   the rendered diff attached). PRs batch per job per window,
   cooldown-limited — never one PR per run.
 - **Non-git job**: staged through the normal `jobdefs/diff` + `apply` path,
-  recorded in the audit log.
-- The applier never exceeds declared bounds, and the direct-apply endpoint
-  is refused when auth mode is `none` (an unauthenticated apply route must
-  not exist — the agent doc's master-gate reasoning); PR-routed proposals
-  are safe regardless, since a human merges.
+  audit-logged. The applier never exceeds declared bounds, and the
+  direct-apply endpoint is refused when auth mode is `none` (an
+  unauthenticated apply route must not exist — the agent doc's master-gate
+  reasoning); PR-routed proposals are safe regardless, since a human merges.
 
 ### Data model, REST, config
 
 `TaskRun` columns as in Phase 0 — no new tables in the core loop
 (`resource_recommendations` is an optional lazily-recomputed cache in
 Phase 3). Endpoints (Echo controllers beside `api/rest/controller/stats/`):
-
-- `GET /v1/jobs/:id/resources` — per-step declared vs observed
-  (p50/p99/max/OOM count over window) + suggestion + utilization.
-- `POST /v1/jobs/:id/resources/apply` — provenance-routed apply
-  (operator-authenticated; body may narrow to steps).
-- `GET /v1/stats/resources` — fleet rollup: top overprovisioned steps,
-  reclaimable bytes, OOM leaderboard. Complements §2.5's planned
-  `/v1/jobs/:id/costs`, which multiplies these columns by a cost model.
+`GET /v1/jobs/:id/resources` (per-step declared vs observed —
+p50/p99/max/OOM count over window — plus suggestion and utilization);
+`POST /v1/jobs/:id/resources/apply` (provenance-routed,
+operator-authenticated; body may narrow to steps); `GET /v1/stats/resources`
+(fleet rollup: top overprovisioned steps, reclaimable bytes, OOM
+leaderboard — complements §2.5's planned `/v1/jobs/:id/costs`, which
+multiplies these columns by a cost model).
 
 Env (`pkg/env/env.go`, envconfig pattern per `env.go:143`):
 `CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate: sampling +
