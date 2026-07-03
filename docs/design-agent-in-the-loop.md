@@ -436,9 +436,16 @@ max tool calls), and default playbook. Shipped default profiles: a
 `triage-only` profile (tier 0 + `escalate` — pure RCA, zero risk) so teams
 can adopt incrementally.
 
-Everything lints: `caesium job lint` validates action names, class names,
-profile references, and that `paramOverrides` keys exist in
-`defaultParams`.
+Linting is honest about its two modes (the same split
+[`design-contract-enforcement.md`](design-contract-enforcement.md) adopts):
+offline `caesium job lint` validates everything knowable from the local
+YAML — action names, class names, and that `paramOverrides` keys exist in
+`defaultParams` — but cannot verify `profile:` references, because lint is
+offline today (it calls `ValidateTriggerChains` with a nil DB) and
+`AgentProfile` is server-side state. Profile references are verified by
+server-side lint (`POST /v1/jobdefs/lint`) and enforced inside the apply
+transaction; offline lint emits a scope note naming the unverified
+reference.
 
 ### Approval gates
 

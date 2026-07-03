@@ -267,14 +267,18 @@ same transaction that records the metrics; configurable per dataset
 downstream jobs simply pass the gate on their next trigger; Caesium never
 retroactively fires skipped runs in v1 (operators can retry them).
 
-**Auth honesty.** Caesium defaults to `CAESIUM_AUTH_MODE=none`
-(`pkg/env/env.go:169`), so by default release is an unauthenticated POST and
-`ReleasedBy` records `anonymous`. Unlike agent-in-the-loop's approval gates
-(where an unauthenticated approve route would let the agent approve itself),
-a hold is a *safety* device against accidents, not a security boundary — the
-feature is not hard-gated on auth. Deployments wanting an enforced ack chain
-set an auth mode; `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s
-release when no authenticated principal is present.
+**Auth honesty — manual release is fail-closed.** Caesium defaults to
+`CAESIUM_AUTH_MODE=none` (`pkg/env/env.go:169`), which attaches no auth
+middleware; an unauthenticated release POST would let any client with
+network reach clear the very gate that stops bad data from propagating. So
+manual release follows the same fail-closed posture as agent-in-the-loop's
+approval endpoints and right-sizing's auto-apply: with no auth mode active,
+`POST /v1/datasets/holds/:id/release` is disabled (403 with a reason naming
+the precondition), and holds release only through the `clean_run` path —
+which requires no network-supplied identity, because it is triggered by the
+producing task actually succeeding with passing assertions. Deployments
+that want human ack-based release enable an auth mode; `ReleasedBy` then
+always records an authenticated principal, never `anonymous`.
 
 ### Events, notifications, REST, env
 
@@ -294,7 +298,9 @@ defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
 - Env: `CAESIUM_DATA_ASSERTIONS_ENABLED` (default `false`, master gate — off
   means no evaluator, no gate, no routes; reported by `GET /system/features`),
   `CAESIUM_BASELINE_WINDOW=20`, `CAESIUM_BASELINE_MIN_SAMPLES=5`,
-  `CAESIUM_DATASET_METRIC_RETENTION=2160h`, `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=false`.
+  `CAESIUM_DATASET_METRIC_RETENTION=2160h`. (No release-auth toggle: manual
+  hold release is unconditionally disabled when `CAESIUM_AUTH_MODE=none` —
+  see Release semantics.)
 
 ## CLI
 
