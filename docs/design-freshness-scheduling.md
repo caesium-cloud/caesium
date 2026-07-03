@@ -314,10 +314,10 @@ A `stale` decision derives a run for the producing job. Derived runs:
 ### REST & config
 
 ```
-GET  /v1/datasets                              list + status filter
-GET  /v1/datasets/:namespace/:name             state, SLO, declarations, producing job
-GET  /v1/datasets/:namespace/:name/derivations decision audit (why did/didn't)
-POST /v1/datasets/:namespace/:name/advance     operator/manual arrival (auth-scoped)
+GET  /v1/datasets                               list + status filter
+GET  /v1/datasets/:ns/:name                     state, SLO, producing job
+GET  /v1/datasets/:ns/:name/derivations         decision audit (why/why not)
+POST /v1/datasets/:ns/:name/advance             manual arrival (auth-scoped)
 ```
 
 Env (`pkg/env/env.go`): `CAESIUM_FRESHNESS_ENABLED` (default `false` — no
@@ -332,13 +332,13 @@ evaluator goroutine, no routes, declarations lint-only),
 
 ```
 caesium dataset list [--status stale|violated|...] [--json]
-caesium dataset status <namespace.name> [--json]   # state, SLO, last decision
+caesium dataset status <namespace.name> [--json]  # state, SLO, last decision
 caesium dataset advance <namespace.name> --watermark <v>
-caesium job lint / preview                         # validate + render graph
 ```
 
-Per the repo testing gate, `--json` output goes to stdout, clean and
-parseable, asserted with stdout captured separately from stderr.
+`caesium job lint`/`preview` validate and render the declared graph. Per the
+repo testing gate, `--json` output goes to stdout, clean and parseable,
+asserted with stdout captured separately from stderr.
 
 ## Frontend (Caesium Console)
 
