@@ -5,8 +5,7 @@
 > memory on OOM retries instead of failing identically. No implementation
 > yet. Depends on and delivers the stats substrate planned in roadmap §2.5;
 > composes with [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
-> (the `oom` class becomes a deterministic rule) and reuses its
-> provenance-routed GitOps-patch machinery.
+> and reuses its provenance-routed GitOps-patch machinery.
 
 ## Problem
 
@@ -134,9 +133,9 @@ steps:
       mode: auto                 # suggest | auto | off   (default: off)
       memory: {min: 512Mi, max: 6Gi}
       cpu:    {min: 250m,  max: "2"}
-      onOOM:                     # retry-with-escalation policy
-        factor: 1.5              # next attempt = applied × 1.5 (quantized)
-        maxEscalations: 2        # extra OOM-only attempts beyond `retries`
+      onOOM: {factor: 1.5, maxEscalations: 2}
+      # next OOM attempt = applied × factor (quantized);
+      # maxEscalations = extra OOM-only attempts beyond `retries`
 ```
 
 Semantics, lint-enforced: `resources` without `rightSizing` is valid (static
