@@ -45,7 +45,7 @@ autoscaler, and it never places tasks on nodes.
 3. **Zero-dependency simplicity.** Parked runs are rows in the existing
    dqlite `run_queue`; signals are an env-configured static calendar or
    events via the shipped `POST /v1/events` pipeline — never a mandatory
-   external service. Deployments without windows pay nothing.
+   external service. No windows declared ⇒ nothing paid.
 4. **Smart by default.** The predictor reads history the server already
    stores (`job_runs.started_at`/`completed_at`,
    `internal/models/run.go:35-36`); users declare intent, not schedules.
@@ -154,9 +154,8 @@ job listing (`dequeuer.go:110-114`) and `DequeueNextRun`
 the new **window scheduler** owns the rest. (The dequeuer already skips jobs
 without queue-strategy concurrency, `dequeuer.go:143-150`, so window rows
 would otherwise never drain.) Crucially, **no in-process timer holds a parked
-run**: every existing wait (cron `time.After`, watcher/dequeuer tickers) is
-process-local, and a parked run must survive restarts and leader failover, so
-its only representation is the row.
+run** — every existing wait (cron `time.After`, watcher/dequeuer tickers) is
+process-local, so the row is the run's only representation.
 
 ### Window scheduler loop
 
@@ -227,8 +226,7 @@ One interface, three shipped implementations, selected by env:
    Expired signal ⇒ gate green (fail-open: a dead feed must never strand a
    job past its valley). Caesium never calls a price API itself.
 3. **Load** — count of running runs/tasks (same pattern as `CountActive`,
-   `internal/run/store.go:3654-3660`), gated by
-   `CAESIUM_WINDOW_LOAD_MAX_RUNNING`.
+   `internal/run/store.go:3654-3660`), vs `CAESIUM_WINDOW_LOAD_MAX_RUNNING`.
 
 ### Timezones & DST
 
@@ -364,9 +362,9 @@ endpoint ships with an integration test in `test/` driving the real surface.
 - [`design-freshness-scheduling.md`](design-freshness-scheduling.md) —
   freshness targets may *subsume* windows for data-driven jobs: a freshness
   policy compiles down to a rolling window + deadline. They compose as
-  layers — freshness decides *what deadline a run must meet*; this design's
-  parking/predictor/force machinery decides *when inside the resulting
-  window to start*. One substrate, two intent front-ends.
+  layers — freshness decides *what deadline a run must meet*; this design
+  decides *when inside the resulting window to start*. One substrate, two
+  intent front-ends.
 - [`design-dynamic-fanout.md`](design-dynamic-fanout.md) — the spatial
   elasticity slice (how wide); this doc is the temporal slice (when).
 - [`design-resource-right-sizing.md`](design-resource-right-sizing.md) —
