@@ -111,14 +111,13 @@ Read before designing; every later claim builds on these:
 ```
 run completes ─▶ stats capture per attempt (peak mem / cpu-secs / oom flag /
                  exit code → task_runs columns)          [Phase 0 = §2.5 1–2]
-     │ OOM on attempt k                │ history (last N runs)
-     ▼                                 ▼
+     │ OOM on attempt k               │ history (last N runs)
+     ▼                                ▼
 retry escalation: next attempt   recommendation: p99(peak) × headroom,
 at mem × factor, clamped to      quantized, clamped to declared bounds
-bounds → green run; bounds         ├─ suggest ─▶ CLI / UI / REST
-exhaust → classified fail,         └─ auto ────▶ provenance-routed apply:
-agent/incident hand-off               git-synced → Git PR · non-git →
-                                      jobdefs apply · no creds → suggest
+bounds → green run (bounds        ├─ suggest ─▶ CLI / UI / REST
+exhaust → classified fail,        └─ auto ────▶ provenance-routed apply:
+agent/incident hand-off)             git PR | jobdefs apply | degrade
 ```
 
 ## YAML
@@ -438,8 +437,7 @@ precedent.
 
 1. **Peak fidelity on cgroup v2.** Is sample-max + OOM-censoring enough, or
    should Docker/Podman read `memory.peak` from the cgroup fs when
-   co-hosted? Leaning: sampling first; host-path reads are an optimization
-   with real portability cost.
+   co-hosted? Leaning: sampling first; host-path reads cost portability.
 2. **K8s requests-vs-limits.** Ship `request = limit` for memory only, or
    expose `resources.requests` separately? More honest for CPU, but doubles
    the recommendation surface.
@@ -448,11 +446,11 @@ precedent.
    [`design-window-scheduling.md`](design-window-scheduling.md) /
    [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
    cohorts could partition the window per data-window size.
-4. **Opt-in identity folding.** Offer `rightSizing.hashResources: true` for
-   steps whose outputs depend on limits (self-sizing JVMs), at the cost of
-   cache busts on every change? Leaning: no in v1 — document `cache: false`.
+4. **Opt-in identity folding.** `rightSizing.hashResources: true` for steps
+   whose outputs depend on limits (self-sizing JVMs), at the cost of cache
+   busts on every change? Leaning: no in v1 — document `cache: false`.
 5. **PR ergonomics.** One rolling Renovate-style PR per repo vs. discrete
    PRs per job? Interacts with how
    [`design-contract-enforcement.md`](design-contract-enforcement.md) and
-   the agent doc route their proposals — a shared "Caesium proposals"
-   channel may deserve its own mini-design.
+   the agent doc route proposals — a shared "Caesium proposals" channel may
+   deserve its own mini-design.

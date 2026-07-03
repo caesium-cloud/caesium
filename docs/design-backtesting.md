@@ -113,9 +113,9 @@ regression only manifests on data shapes staging never has.
 ### Baseline selection
 
 `--against last-30-runs` resolves server-side to the job's most recent terminal,
-**non-quarantined** production runs (`quarantine IS NOT TRUE`, the same predicate
-family the replay work added to all baseline-selecting queries). Alternatives:
-`--against 2026-06-01..2026-06-30`, or an explicit run-ID list.
+**non-quarantined** production runs (`quarantine IS NOT TRUE`, the predicate the
+replay work added to all baseline-selecting queries). Alternatives: a date range
+or an explicit run-ID list.
 
 Each selected baseline is checked for **eligibility**, reusing replay's
 fail-closed validation (`internal/replay/replay.go` `Prepare`): every task run
@@ -256,13 +256,12 @@ that isn't fully cache-served.
 ### Data model
 
 Two new GORM models in `internal/models` (house `AutoMigrate` pattern):
-`Backtest` (`ID`, `JobID`, `Status` pending/running/succeeded/failed/partial,
-`Overrides` + `IgnorePaths` JSON, unique nullable `Fingerprint`,
-requested/eligible/changed/unchanged/failed counters) and `BacktestRun`
-(`BacktestID`, `BaselineRunID`, nullable `ReplayRunID`, `Verdict`
-unchanged/changed/failed/skipped/degraded, `SkipReason`, `OutputDelta` JSON of
-per-task `FieldChange`s, re-executed/cached counts). Creation is idempotent the
-way replay creation is: `Idempotency-Key` header, scoped fingerprint (job +
+`Backtest` (`ID`, `JobID`, `Status`, `Overrides` + `IgnorePaths` JSON, unique
+nullable `Fingerprint`, requested/eligible/changed/unchanged/failed counters)
+and `BacktestRun` (`BacktestID`, `BaselineRunID`, nullable `ReplayRunID`,
+`Verdict` unchanged/changed/failed/skipped/degraded, `SkipReason`,
+`OutputDelta` JSON, re-executed/cached counts). Creation is idempotent the way
+replay creation is: `Idempotency-Key` header, scoped fingerprint (job +
 baseline set + overrides + principal + key), insert before dispatch, resume on
 duplicate. Each child replay's fingerprint derives from backtest fingerprint +
 baseline run ID, so a crashed backtest resumes without double-executing any

@@ -199,9 +199,9 @@ incident class largely dissolves here.
 at unpredictable times; today that's a cron guess padded late enough to
 usually be safe. With freshness the rollup needs no cron: each upstream
 advance triggers evaluation, and the derivation fires only when the
-rollup's output is stale **and** consumed datasets have advanced past what
-the last run consumed. Three upstream completions produce one derived run,
-not three (derivations dedupe on the consumed-watermark set).
+rollup's output is stale **and** consumed datasets advanced past what the
+last run consumed. Three upstream completions produce one derived run, not
+three (derivations dedupe on the consumed-watermark set).
 
 ### 3. Skip-when-fresh saves the compute entirely
 
@@ -219,12 +219,12 @@ does its job — the layers compose rather than compete.
 New jobdef surface (`pkg/jobdef/definition.go`): `datasets` on `Step`
 (`consumes: [name...]`, `produces: [{name, freshness, maxStaleness,
 watermark}]`) and `metadata.datasets.sources` for external datasets
-(`expectedEvery`, `arrival` binding). Lint: SLO fields parse as durations; a
-`consumes` name must be produced in the applied set, declared as a source,
-or marked `external: true`; exactly one job produces a given dataset (any
-number consume); the declared graph must be acyclic **across jobs** — a
-dataset cycle is a derivation cycle (the event-trigger static-cycle check
-class).
+(`expectedEvery`, `arrival` binding). Lint: SLO fields parse as durations;
+a `consumes` name must be produced in the applied set, declared as a
+source, or marked `external: true`; exactly one job produces a given
+dataset (any number consume); the declared graph must be acyclic **across
+jobs** — a dataset cycle is a derivation cycle (the event-trigger
+static-cycle check class).
 
 Apply upserts declarations into a new `dataset_declarations` table: the
 *declared* graph, complementary to the *observed* `lineage_datasets` graph —
@@ -425,8 +425,7 @@ ships with an integration test in `test/` driving the real surface, with
 ## Non-goals (v1)
 
 - **No built-in pollers.** Caesium never speaks S3/SFTP/JDBC to detect
-  arrival; that is event push or a sensor container. Zero-dependency is
-  load-bearing.
+  arrival; that is event push or a sensor container.
 - **No data-quality judgment.** Freshness is recency, not correctness —
   quality gating is the circuit breaker's job.
 - **No partition-level freshness.** One watermark per dataset in v1.
