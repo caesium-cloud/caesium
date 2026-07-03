@@ -87,18 +87,18 @@ observable in the UI and CLI.
 - **Observed lineage datasets exist, but only behind OpenLineage.**
   `lineage_datasets` rows (`internal/models/lineage_dataset.go:20-41`) are
   written per task run by the lineage mapper — only when
-  `CAESIUM_OPEN_LINEAGE_ENABLED=true` (default `false`, `pkg/env/env.go:143`;
-  wired in `cmd/start/start.go:396-423`). Dataset identity is *derived*, not
-  declared: `buildTaskDatasets` (`internal/lineage/mapper.go:611-698`)
-  promotes **path/URI-like structured output values** to datasets or
-  synthesizes `<job>.<step>.output` from a declared `outputSchema`; inputs
-  come from `inputSchema` keys. Most jobs today declare neither and emit no
-  path-like outputs — the observed graph is sparse and appears only *after*
-  runs happen. **Freshness cannot bootstrap from observation alone; it needs
+  `CAESIUM_OPEN_LINEAGE_ENABLED=true` (default `false`,
+  `pkg/env/env.go:143`). Dataset identity is *derived*, not declared:
+  `buildTaskDatasets` (`internal/lineage/mapper.go:611-698`) promotes
+  **path/URI-like structured output values** to datasets or synthesizes
+  `<job>.<step>.output` from a declared `outputSchema`; inputs come from
+  `inputSchema` keys. Most jobs today declare neither and emit no path-like
+  outputs — the observed graph is sparse and appears only *after* runs
+  happen. **Freshness cannot bootstrap from observation alone; it needs
   explicit YAML declarations.**
 - **Downstream traversal exists.** `QueryImpact`
   (`internal/lineage/impact.go:82`) BFS-walks dataset consumers across job
-  boundaries (depth-capped at 20). The declared registry feeds this shape.
+  boundaries. The declared registry feeds this same shape.
 - **Arrival signaling exists.** `POST /v1/events`, `caesium event push`,
   webhook bridging, and the event router's `_trigger_depth` chain guard
   ([`design-event-triggers.md`](design-event-triggers.md)) are shipped.
@@ -114,9 +114,9 @@ observable in the UI and CLI.
   cron trigger fires with no leader check
   (`internal/trigger/cron/cron.go:82-104`). The leader-gated house pattern
   is the run-queue dequeuer (`internal/runqueue/dequeuer.go:21-70`, wired
-  with `LeaderCheck: dqlite.IsLocalLeader` at `cmd/start/start.go:183`). The
-  freshness evaluator must follow the dequeuer — a per-node evaluator would
-  derive N duplicate runs per stale dataset.
+  with `LeaderCheck: dqlite.IsLocalLeader` at `cmd/start/start.go:183`) —
+  the evaluator must follow the dequeuer, or an N-node cluster derives N
+  duplicate runs per stale dataset.
 - **Admission exists** (`internal/run/store.go:711` `admit`; `AdmitRun` at
   `store.go:1044`). Derived runs pass it like everyone else.
 
@@ -143,22 +143,20 @@ trigger:
 steps:
   - name: extract
     image: etl:1.4
-    command: ["extract.sh"]
     datasets:
       consumes: [raw.vendor_x]
       produces:
         - name: staging.orders
           freshness: 8h
-          watermark: { key: max_order_ts }   # output key this step emits
+          watermark: { key: max_order_ts }  # output key this step emits
   - name: transform
     image: etl:1.4
-    command: ["transform.sh"]
     datasets:
       consumes: [staging.orders]
       produces:
         - name: analytics.orders_daily
-          freshness: 6h             # the SLO consumers actually care about
-          maxStaleness: 12h         # hard bound; breach ⇒ freshness_violated
+          freshness: 6h        # the SLO consumers actually care about
+          maxStaleness: 12h    # hard bound; breach ⇒ freshness_violated
           watermark: { key: max_order_ts }
 ```
 
@@ -206,10 +204,10 @@ vendor file never arrived"* — not a stack trace. The agent design's
 `reporting-rollup` consumes three datasets produced by three jobs finishing
 at unpredictable times; today that's a cron guess padded late enough to
 usually be safe. With freshness the rollup needs no cron: each upstream
-advance triggers evaluation, and the derivation fires only when the rollup's
-output is stale **and** consumed datasets have advanced past what the last
-run consumed. Three upstream completions produce one derived run, not three
-(derivations dedupe on the consumed-watermark set).
+advance triggers evaluation, and the derivation fires only when the
+rollup's output is stale **and** consumed datasets have advanced past what
+the last run consumed. Three upstream completions produce one derived run,
+not three (derivations dedupe on the consumed-watermark set).
 
 ### 3. Skip-when-fresh saves the compute entirely
 
@@ -246,8 +244,7 @@ drift. Freshness does **not** require `CAESIUM_OPEN_LINEAGE_ENABLED`.
 - `DatasetDeclaration` — job/step refs, namespace+name, direction, SLO
   fields, watermark key, arrival binding JSON. Rebuilt on apply.
 - `DatasetState` — one row per dataset (natural key namespace+name):
-  `watermark`, `advanced_at`, `verified_at`, `status`
-  (`unknown|fresh|stale|stale-upstream|violated|quarantined`), `reason`,
+  `watermark`, `advanced_at`, `verified_at`, `status`, `reason`,
   `last_run_id`. Small, hot, updated transactionally.
 - `DatasetDerivation` — append-only audit of every evaluator decision:
   dataset, decision (`derived|skipped_fresh|skipped_upstream|
@@ -285,16 +282,15 @@ immediately evaluates the affected downstream slice (the same BFS shape as
 Per produced dataset with an SLO, the state machine:
 
 - `fresh` — `now - max(advanced_at, verified_at) ≤ freshness`.
-- `stale` — SLO window exceeded (or an upstream advanced past the last run's
-  consumed watermarks) **and** upstream data is available → derive a run.
+- `stale` — SLO window exceeded (or an upstream advanced past the last
+  run's consumed watermarks) **and** upstream data is available → derive.
 - `stale-upstream` — SLO window exceeded but some consumed dataset has not
-  advanced past what the last run already consumed → running is pointless;
-  record the reason, emit `dataset_freshness_at_risk` once per window.
+  advanced past what the last run consumed → running is pointless; record
+  the reason, emit `dataset_freshness_at_risk` once per window.
 - `violated` — `maxStaleness` breached → emit `freshness_violated` on the
   event bus (alongside `sla_missed`, `internal/event/bus.go:45`), routed to
-  notification policies (Slack/PagerDuty/email/webhook) and — when
-  agent-in-the-loop lands — opening a `freshness_violation` incident class
-  with the upstream diagnosis pre-attached.
+  notification policies and — when agent-in-the-loop lands — opening a
+  `freshness_violation` incident class with the diagnosis pre-attached.
 - `quarantined` — set by the data circuit breaker; never `fresh`, never
   advances consumers, suppresses derivation of runs that would consume it.
 
@@ -303,17 +299,16 @@ Per produced dataset with an SLO, the state machine:
 A `stale` decision derives a run for the producing job. Derived runs:
 
 - are stamped `_trigger_depth` exactly like event-chained runs, so a refresh
-  cascade (extract → transform → rollup) rides the existing runaway guard
-  (`CAESIUM_MAX_TRIGGER_DEPTH`), and a cycle that slipped past lint still
-  terminates;
+  cascade rides the existing runaway guard (`CAESIUM_MAX_TRIGGER_DEPTH`) and
+  a cycle that slipped past lint still terminates;
 - pass concurrency admission (`internal/run/store.go:711`) with the job's
   declared strategy; an admission skip/queue is recorded on the
   `DatasetDerivation` row, never silently dropped;
 - are deduped: at most one in-flight derivation per (dataset,
   consumed-watermark set), and none while the producing job already has an
   active or queued run consuming the same watermarks;
-- carry params: `logical_date`, `_derived_from_dataset`, and the consumed
-  watermarks, so a step can extract incrementally ("everything since
+- carry params (`logical_date`, `_derived_from_dataset`, consumed
+  watermarks) so a step can extract incrementally ("everything since
   `$CAESIUM_PARAM_SINCE_WATERMARK`").
 
 ### REST & config
@@ -400,8 +395,7 @@ New feature dir `ui/src/features/datasets/`:
 
 Per the repo's end-to-end gate, every CLI command and REST endpoint above
 ships with an integration test in `test/` driving the real surface, with
-`CAESIUM_FRESHNESS_ENABLED=true` set on the integration server in
-`just integration-up`:
+`CAESIUM_FRESHNESS_ENABLED=true` set in `just integration-up`:
 
 - Apply a two-job declared graph; `GET /v1/datasets` and
   `caesium dataset list --json` (stdout captured separately via
@@ -417,18 +411,18 @@ ships with an integration test in `test/` driving the real surface, with
   cycle is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
 - Evaluator leader-gating unit tests (fake `LeaderCheck`, the dequeuer's
   pattern); disabled-gate inertness. Playwright e2e for the dataset board
-  and lineage overlay against a live backend, matching the
-  data-plane-memory-ui precedent.
+  and lineage overlay against a live backend (data-plane-memory-ui
+  precedent).
 
 ## Phasing
 
 - **P0 — Declarations + observability (no scheduling change).** Jobdef
   fields, lint (incl. cross-job cycle check), registry + state models,
-  watermark capture, arrival bindings, evaluator in *observe-only* mode
-  (states, events, metrics — no derivation), `GET /v1/datasets`,
-  `caesium dataset list/status`, dataset board + lineage coloring. Day-one
-  value: every dataset shows fresh/stale with reason, and
-  `freshness_violated` pages carry the diagnosis. Zero scheduling risk.
+  watermark capture, arrival bindings, evaluator in *observe-only* mode (no
+  derivation), `GET /v1/datasets`, `caesium dataset list/status`, dataset
+  board + lineage coloring. Day-one value: every dataset shows fresh/stale
+  with reason and `freshness_violated` pages carry the diagnosis. Zero
+  scheduling risk.
 - **P1 — Skip-when-fresh.** Cron ticks consult dataset state and skip
   recorded-fresh work (per-job opt-in). Compute savings; no new run starts.
 - **P2 — Full derivation.** Stale ⇒ derived runs through admission +
@@ -444,10 +438,10 @@ ships with an integration test in `test/` driving the real surface, with
 - **No data-quality judgment.** Freshness is recency, not correctness —
   quality gating is the circuit breaker's job.
 - **No partition-level freshness.** One watermark per dataset in v1.
-- **Not a data catalog.** The registry stores scheduling-relevant metadata
-  only; rich catalogs consume our OpenLineage emission.
-- **No cross-instance datasets** and no namespace scoping until roadmap
-  §3.1 lands (models carry a nullable `namespace` column from day one).
+- **Not a data catalog.** The registry stores scheduling metadata only;
+  rich catalogs consume our OpenLineage emission.
+- **No cross-instance datasets**; namespace scoping waits for roadmap §3.1
+  (models carry a nullable `namespace` column from day one).
 
 ## Open questions
 

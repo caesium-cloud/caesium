@@ -72,8 +72,6 @@ event-trigger chain vendor-x-daily → reporting-daily)."*
   in response       annotations        compatible or acknowledged
 ```
 
-Edge classes are ranked by confidence and enforced accordingly:
-
 | Edge source | How derived | Default action on break |
 |---|---|---|
 | Declared `produces`/`consumes` | new YAML block (shared with [`design-freshness-scheduling.md`](design-freshness-scheduling.md)) | **fail** |
@@ -148,14 +146,14 @@ steps:
 ```
 
 Lint validates that `schemaFrom: output` names a step with an
-`outputSchema`, that schemas compile under `santhosh-tekuri/jsonschema/v6`,
-and that dataset names are well-formed.
+`outputSchema`, schemas compile under `santhosh-tekuri/jsonschema/v6`, and
+dataset names are well-formed.
 
 ## Breaking-change semantics
 
 Full JSON Schema compatibility is undecidable in general (schemas embed
 arbitrary boolean combinators), so the checker implements a **pragmatic
-subset** with an honest fourth verdict:
+subset** with an honest "can't tell" verdict:
 
 - **Breaking** (error): a `required` field removed from the schema or from
   `properties` entirely; a `type` narrowed or changed (`string→integer`;
@@ -217,8 +215,8 @@ proceeds. Consumers change nothing.
    digest only; consumers' own applies warn "consuming a deprecated
    contract". When the window lapses, unmigrated consumers' next apply
    fails, and the ack is spent — a *new* breaking change needs a new ack.
-4. With auth enabled, `--allow-breaking` can be policy-restricted (producing
-   team or operator role). See Ownership.
+4. With auth enabled, `--allow-breaking` can be policy-restricted
+   (see Ownership).
 
 ## Backend
 
@@ -284,8 +282,8 @@ world. The §2.1 PR flow always uses server mode.
 - `CAESIUM_CONTRACT_ENFORCEMENT` — `""` (off, default), `warn`, `fail`;
   mirrors `metadata.schemaValidation`'s tri-state. Off ⇒ no graph
   computation, no routes registered (reported by `GET /system/features`).
-- `CAESIUM_CONTRACT_DEPRECATION_WINDOW` (default `336h`).
-- Evidence-only edges never exceed warn regardless of mode.
+- `CAESIUM_CONTRACT_DEPRECATION_WINDOW` (default `336h`). Evidence-only
+  edges never exceed warn regardless of mode.
 
 ### Ownership and auth (advisory until auth is on)
 
@@ -311,11 +309,11 @@ Per the repo testing gate, `--json` goes to stdout clean and parseable.
 ## CI / PR flow (roadmap §2.1)
 
 The planned GitHub Action (`lint → diff → dev --once → comment`) gains a
-contract section: breaking findings render as a table (field, producer step,
-consumers, owning teams, edge source) in the PR comment, and the Action
-exits nonzero. `caesium job diff --format=markdown` includes the per-edge
-badges. This is where the feature earns its keep — at review time, in the
-producer's repo, before merge.
+contract section: breaking findings render in the PR comment as a table
+(field, producer step, consumers, owning teams, edge source) and the Action
+exits nonzero; `caesium job diff --format=markdown` includes the per-edge
+badges. This is where the feature earns its keep — at review time, before
+merge.
 
 ## Frontend (Caesium Console)
 

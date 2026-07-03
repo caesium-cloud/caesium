@@ -2,9 +2,9 @@
 
 > Status: Brainstorm/Design — proposal for window-based scheduling with a
 > completion deadline and signal-driven start selection. No implementation
-> yet. This is the *temporal* slice of "Dataflow-style elasticity"; the
-> spatial slice is [`design-dynamic-fanout.md`](design-dynamic-fanout.md).
-> Companions: [`design-sla-management.md`](design-sla-management.md) (§2.3),
+> yet. The *temporal* slice of "Dataflow-style elasticity"; the spatial slice
+> is [`design-dynamic-fanout.md`](design-dynamic-fanout.md). Companions:
+> [`design-sla-management.md`](design-sla-management.md) (§2.3),
 > [`design-freshness-scheduling.md`](design-freshness-scheduling.md),
 > [`design-resource-right-sizing.md`](design-resource-right-sizing.md).
 
@@ -68,9 +68,9 @@ autoscaler, and it never places tasks on nodes.
         │ start = store.AdmitRun(...)   (normal atomic admission —
         ▼                                concurrency/priority still apply)
  run executes exactly like any cron-triggered run
-```
 
-where `forceAt = deadline − p95(duration) − buffer` — the **latest safe start**.
+ forceAt = deadline − p95(duration) − buffer     (the LATEST SAFE START)
+```
 
 ## YAML
 
@@ -108,9 +108,8 @@ steps:
 The alternative — `type: cron` plus a `window:` sibling block — was rejected:
 a cron trigger's contract is "fire at this minute," and an annotation turning
 that into "fire sometime later" would surprise in diffs and the UI.
-`TriggerType` is an open string enum (`internal/models/trigger.go:14-18`); the
-executor's listing loop needs `window` added
-(`internal/executor/executor.go:38-42`).
+`TriggerType` is an open string enum (`internal/models/trigger.go:14-18`);
+the executor's listing loop needs `window` added (`executor.go:38-42`).
 
 ## Scenarios
 
@@ -132,12 +131,12 @@ executor's listing loop needs `window` added
 
 `internal/trigger/window` implements the three-method `Trigger` interface
 (`Listen`/`Fire`/`ID`, `internal/trigger/trigger.go:10-14`) and reuses cron's
-schedule/timezone parsing (`cron.ParseSchedule`, cron.go:222-254). Its
-`Listen` waits for the next window *open* exactly as cron waits for its tick
+schedule/timezone parsing (`cron.ParseSchedule`, cron.go:222-254). `Listen`
+waits for the next window *open* exactly as cron waits for its tick
 (cron.go:82-104) — but on fire it does **not** launch the job; it inserts a
-parked row stamped with the logical date, open, effective close, and deadline
-resolved in the configured location. The in-process `time.After` is only an
-optimization to park promptly; correctness never depends on it.
+parked row stamped with logical date, open, effective close, and deadline in
+the configured location. The in-process `time.After` is only an optimization
+to park promptly; correctness never depends on it.
 
 ### Parked rows: extend `run_queue`
 
@@ -159,22 +158,21 @@ the **existing dequeuer** keeps draining only concurrency-overflow rows — its
 job listing (`dequeuer.go:110-114`) and `DequeueNextRun`
 (`internal/run/store.go:3703-3735`) add `AND window_deadline IS NULL` — while
 the new **window scheduler** owns the rest. (The dequeuer already skips jobs
-without queue-strategy concurrency, `dequeuer.go:143-150`, so window rows for
-jobs with no concurrency block would otherwise never drain.) Crucially, **no
-in-process timer holds a parked run**: every existing wait (cron `time.After`,
-watcher/dequeuer tickers) is process-local, and a parked run must survive
-restarts and leader failover, so its only representation is the row.
+without queue-strategy concurrency, `dequeuer.go:143-150`, so window rows
+would otherwise never drain.) Crucially, **no in-process timer holds a parked
+run**: every existing wait (cron `time.After`, watcher/dequeuer tickers) is
+process-local, and a parked run must survive restarts and leader failover, so
+its only representation is the row.
 
 ### Window scheduler loop
 
 `internal/windowsched`, structured like the run-queue dequeuer: ticker,
 `DrainOnce`, and the same leadership gate — `LeaderCheck` wired to
 `dqlite.IsLocalLeader` exactly as the dequeuer is
-(`internal/runqueue/dequeuer.go:21,94-103`; `cmd/start/start.go:177-184`).
-Only the dqlite leader evaluates and releases window rows, so two nodes never
-double-start a parked run; claim columns + stale reclaim cover leader death
-mid-release. Each tick, for parked rows ordered `priority DESC,
-(deadline − now − p95) ASC`:
+(`internal/runqueue/dequeuer.go:21,94-103`; `cmd/start/start.go:177-184`), so
+only the dqlite leader releases window rows and two nodes never double-start
+a parked run; claim columns + stale reclaim cover leader death mid-release.
+Each tick, for parked rows ordered `priority DESC, (deadline − now − p95) ASC`:
 
 ```
 p95     := predictor.P95(jobID)
@@ -199,6 +197,14 @@ logical date — the run passes normal atomic admission (`store.admit`,
 store.go:711-778; single conditional `INSERT ... WHERE count(active) <
 maxRuns`, store.go:780-809). Never bypasses concurrency; see Safety.
 
+**Restart safety & missed opens.** On becoming leader and on every tick, the
+scheduler reconciles: compute each window job's most recent open ≤ now in its
+timezone; if the window is still feasible and no run/parked row exists for
+that logical date (unique index ⇒ idempotent), park it — forcing immediately
+if `now ≥ forceAt`. This mirrors cron catchup's watermark approach
+(`fireCatchup`, cron.go:150-197) but is driven from the durable table, not
+process memory.
+
 ### Duration predictor
 
 `internal/windowsched/predictor.go`: p95 over the last N (default 20)
@@ -208,14 +214,14 @@ service uses (`api/rest/service/stats/stats.go:72-77`,
 
 - **Why p95, not EWMA:** the SLA design proposes an EWMA predictor for
   *at-risk detection*; a *safety margin* wants a conservative upper quantile.
-  If `internal/sla/predictor.go` ships, the window scheduler should consume
-  quantiles from that shared package — one engine, two consumers.
+  If `internal/sla/predictor.go` ships, consume quantiles from that shared
+  package — one engine, two consumers.
 - **Cold start (required policy):** fewer than 3 completed runs → no p95 →
   `forceAt = windowOpen`: **the run starts at window open**, degrading to
-  cron behavior. Elasticity is earned by history, never assumed.
+  cron behavior. Elasticity is earned by history, never assumed;
   `metadata.runTimeout`, when set, caps the assumed duration.
 - **Regression guard:** forceAt is recomputed every tick from live history;
-  if p95 grows past remaining slack, the force rule fires on the next tick.
+  if p95 grows past remaining slack, the force rule fires next tick.
 
 ### Signal sources (zero-dependency, pluggable)
 
@@ -231,15 +237,6 @@ One interface, three shipped implementations, selected by env:
 3. **Load** — count of running runs/tasks (same pattern as `CountActive`,
    `internal/run/store.go:3654-3660`), gated by
    `CAESIUM_WINDOW_LOAD_MAX_RUNNING`.
-
-### Restart safety & missed opens
-
-On becoming leader and on every tick, the scheduler reconciles: compute each
-window job's most recent open ≤ now in its timezone; if the window is still
-feasible and no run/parked row exists for that logical date (unique index ⇒
-idempotent), park it — forcing immediately if `now ≥ forceAt`. This mirrors
-cron catchup's watermark approach (`fireCatchup`, cron.go:150-197) but is
-driven from the durable table, not process memory.
 
 ### Timezones & DST
 
@@ -262,8 +259,7 @@ duration and completedBy SLAs (`watcher.go:119-128, 136-246`). `job apply`
 derives an implicit `sla.completedBy` from the window deadline when the job
 declares no SLA, so a blown deadline produces the standard `sla_missed` event
 with zero new alerting machinery. New bus/store events: `window_planned`,
-`window_forced`, `window_deadline_at_risk` (forced start whose p95 no longer
-fits).
+`window_forced`, `window_deadline_at_risk`.
 
 ### Models, REST, env
 
@@ -327,12 +323,11 @@ concurrency queue instead of starting emits `window_deadline_at_risk`.
 high-priority jobs claim signal valleys first — but every parked row owns a
 force time, so a low-priority job is delayed only until its own
 latest-safe-start, never starved past it. Priority shapes *where in the
-window* a run lands, never *whether* it runs.
-
-**No new write authority.** The scheduler only inserts runs through the same
-admission path triggers use; leader-gating plus the atomic conditional insert
-(no cross-node TOCTOU) means the worst failover outcome is a run starting one
-tick late, never twice.
+window* a run lands, never *whether* it runs. And the scheduler holds no new
+write authority: it only inserts runs through the same admission path
+triggers use, so with leader-gating plus the atomic conditional insert (no
+cross-node TOCTOU) the worst failover outcome is a run starting one tick
+late, never twice.
 
 ## Testing
 
@@ -359,8 +354,7 @@ endpoint ships with an integration test in `test/` driving the real surface.
   columns, leader-gated scheduler with `earliest`/`latest` objectives, p95
   predictor + cold-start policy, force-start, derived `completedBy` SLA,
   `caesium job window`, REST, integration tests.
-- **P1 — load signal.** Running-count gate + ceiling env; the thundering-herd
-  scenario. No new tables.
+- **P1 — load signal.** Running-count gate + ceiling env. No new tables.
 - **P2 — pluggable cost/carbon.** `cheapest` objective, static calendar +
   event-ingested signals, forecast-minimum gate, UI window bar.
 
