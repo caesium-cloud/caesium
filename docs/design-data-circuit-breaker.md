@@ -75,17 +75,15 @@ share a column, an event field, or a YAML key.
 
 ## Trust model (read this before the YAML)
 
-Caesium has **no data plane**. It cannot count rows; it schedules containers
+Caesium has **no data plane**: it cannot count rows, it schedules containers
 and reads their stdout. A row-count assertion works because *the step emits
-the count it observed*. This is the same trust boundary as `##caesium::output`
-and the `output-ref` digests: the producing container self-reports, Caesium
-evaluates the report. Consequences, stated honestly: the breaker catches
-**accidents, not adversaries** — a malicious or buggy image can print
-flattering metrics, and so can a step whose metric-computing query is itself
-wrong. The flip side is universality: any tool that can `echo` participates
-(dbt post-hooks, Spark counters, a two-line `psql` wrapper). Verifying
-metrics against the actual data is a job for an auditing *step* that
-recomputes and re-emits, not for Caesium.
+the count it observed* — the same trust boundary as `##caesium::output` and
+the `output-ref` digests. Stated honestly: the breaker catches **accidents,
+not adversaries** — a malicious or buggy image can print flattering metrics.
+The flip side is universality: any tool that can `echo` participates (dbt
+post-hooks, Spark counters, a two-line `psql` wrapper). Verifying metrics
+against actual data is a job for an auditing *step* that recomputes and
+re-emits, not for Caesium.
 
 ## Overview
 
@@ -251,16 +249,15 @@ run one. This makes turning the feature on safe by construction.
 
 ### Dataset identity
 
-Today a "dataset" exists only as *observed* lineage rows: `LineageDataset`
+Today a "dataset" exists only as *observed* lineage rows — `LineageDataset`
 keyed `(namespace, name, direction)` per task run
-(`internal/models/lineage_dataset.go`), where namespace is the instance's
-OpenLineage namespace and the name is heuristically derived from path-like
-output values or synthesized as `alias.step.output`
+(`internal/models/lineage_dataset.go`), with names heuristically derived from
+path-like output values or synthesized as `alias.step.output`
 (`internal/lineage/mapper.go` `buildTaskDatasets`). Heuristic names are too
 unstable to hang holds on; the declared registry fixes identity. Where a
 declared name matches observed lineage rows, the impact graph
 (`internal/lineage/impact.go` `QueryImpact`) attaches blast-radius data to
-the hold, and a lint hint flags declared datasets never observed in lineage.
+the hold; a lint hint flags declared datasets never observed in lineage.
 
 ### Downstream admission gate
 
@@ -311,14 +308,14 @@ retroactively fire skipped runs in v1 (operators can retry them; `park`
 changes this later).
 
 **Auth honesty.** Caesium defaults to `CAESIUM_AUTH_MODE=none`
-(`pkg/env/env.go:169`) — in that mode the release endpoint is an
+(`pkg/env/env.go:169`), so by default the release endpoint is an
 unauthenticated POST and `ReleasedBy` records `anonymous`. Unlike
 agent-in-the-loop's approval gates (where an unauthenticated approve route
 would let the agent approve itself), a hold is a *safety* device against
-accidents, not a security boundary against operators, so the feature is not
+accidents, not a security boundary against operators — the feature is not
 hard-gated on auth. Deployments wanting an enforced ack chain set an auth
-mode; `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release
-when no authenticated principal is present.
+mode; `CAESIUM_HOLD_RELEASE_REQUIRE_AUTH=true` additionally 403s release when
+no authenticated principal is present.
 
 ### Events & notifications
 

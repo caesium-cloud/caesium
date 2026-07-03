@@ -38,29 +38,25 @@ no resharding, no live resize, no autoscaling (see Non-Goals).
 
 Quoting the six principles from [`roadmap.md`](roadmap.md):
 
-1. **"Container-native execution."** Limits are applied through the native
-   knobs of each engine (`HostConfig.Resources`, pod
-   `resources.requests/limits`, podman `ResourceLimits`); stats come from
-   what each runtime already exposes (inspect flags, terminated-state
-   reasons, stats endpoints). No agent inside the user's container, no SDK.
+1. **"Container-native execution."** Limits apply through each engine's
+   native knobs (`HostConfig.Resources`, pod `resources`, podman
+   `ResourceLimits`); stats come from what each runtime already exposes. No
+   agent inside the user's container, no SDK.
 2. **"Declarative and GitOps-first."** `resources:`/`rightSizing:` live in
-   the job YAML, linted and PR-reviewed. Recommendations for git-synced jobs
-   are *proposed as a Git PR* — the repo stays the source of truth; Caesium
-   never silently diverges the database from Git.
-3. **"Zero-dependency simplicity."** Stats snapshots are columns on the
-   existing `task_runs` table; recommendations are computed from history in
-   dqlite. No metrics database; Prometheus metrics are *exported*, never
-   *required*. One disclosed exception: peak-memory capture on Kubernetes
-   needs metrics-server, and degrades gracefully without it.
-4. **"Smart by default."** Once stats collection is on, every step gets
-   observed-vs-declared visibility for free; escalation and auto-apply are
-   opt-in per step with declared bounds.
-5. **"Data engineering first."** Recurring batch runs of the same step give
-   a stable distribution to learn from, and "retry the 3 a.m. OOM bigger" is
-   a data-eng pager item, not an app-server concern.
+   the YAML, linted and PR-reviewed; recommendations for git-synced jobs are
+   *proposed as a Git PR* — Caesium never silently diverges the DB from Git.
+3. **"Zero-dependency simplicity."** Stats are columns on `task_runs`;
+   recommendations are computed from history in dqlite. Prometheus metrics
+   are *exported*, never *required*. One disclosed exception: k8s
+   peak-memory capture needs metrics-server, degrading gracefully without.
+4. **"Smart by default."** Stats on ⇒ every step gets observed-vs-declared
+   visibility free; escalation/auto-apply are opt-in with declared bounds.
+5. **"Data engineering first."** Recurring batch runs give a stable
+   distribution to learn from; "retry the 3 a.m. OOM bigger" is a data-eng
+   pager item.
 6. **"Open source, community-driven."** Self-hosted, no managed telemetry;
-   the right-sizing story is a headline feature FinOps teams otherwise buy
-   from SaaS orchestrators.
+   right-sizing is a headline feature FinOps teams otherwise buy from SaaS
+   orchestrators.
 
 ## Grounded Reality (what exists today)
 
