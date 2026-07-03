@@ -416,13 +416,12 @@ precedent.
 - **No Beam/Dataflow-style resharding** of a running computation — the
   horizontal analog is
   [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory, whose
-  fan-out children inherit the template step's `resources` (a deliberate
-  composition point).
+  fan-out children inherit the template step's `resources`.
 - **No cost/dollar modeling** — §2.5's cost layer multiplies the columns
-  this design persists; substrate shared, scope not.
-- **No per-run manual resource overrides** — sizing is learned or declared,
-  not a run param (params feed `HashInput`, reopening the identity question
-  by the back door).
+  this design persists; substrate shared, scope not. **No per-run manual
+  resource overrides** — sizing is learned or declared, not a run param
+  (params feed `HashInput`, reopening the identity question by the back
+  door).
 
 ## Open Questions
 

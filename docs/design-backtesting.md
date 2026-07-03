@@ -203,8 +203,7 @@ image". Backtest needs the other half: **did the outputs change?**
 - **Verdicts per task:** `OUTPUT_UNCHANGED`; `OUTPUT_CHANGED` (per-key
   before/after `FieldChange`s, the `internal/run/whydiff.go` shape); `FAILED`
   (candidate errored where baseline succeeded — always a reported regression);
-  `NOT_COMPARED` (cache-hit; equal by construction); `DEGRADED` (output missing
-  on one side).
+  `NOT_COMPARED` (cache-hit); `DEGRADED` (output missing on one side).
 - **Ignore-paths, or timestamps lie to you.** Outputs routinely embed
   `generated_at`, run IDs, temp paths; without an ignore mechanism every
   backtest reports 30/30 changed and the feature is noise. Job-level config

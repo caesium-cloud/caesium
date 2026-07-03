@@ -48,8 +48,8 @@ Overloading it would be a correctness hazard — a reviewer seeing
 `Quarantine` must be able to assume "non-authoritative replay run"
 everywhere. This feature therefore uses **hold** exclusively: `DatasetHold`
 model, `dataset_held`/`dataset_released` events, `caesium dataset holds`
-CLI. A dataset is *held*; a replay run is *quarantined*; the two never share
-a column, an event field, or a YAML key.
+CLI. A dataset is *held*; a replay run is *quarantined*; the two never
+share a column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
