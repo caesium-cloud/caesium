@@ -202,6 +202,14 @@ steps:
 3. UI: timeline view with task state at each point, diff view with highlighted changes
 4. Root-cause trace: from a failed task, walk predecessors highlighting unexpected outputs or missing env vars
 
+### 3.5 Agent-in-the-Loop ETL Remediation
+
+**Current state**: When a pipeline fails, Caesium retries per declared policy, then notifies a human. Triage (reading logs, classifying the failure, deciding to wait/retry/patch/escalate) is entirely manual.
+
+**Target state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call.
+
+**Design doc**: [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+
 ---
 
 ## Execution Priority
@@ -220,6 +228,7 @@ steps:
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
+| **P3** | 3.5 Agent-in-the-loop remediation | Converts the data-plane-memory substrate into autonomous ops. Phase 0 (diagnosed pages) is cheap and de-risks the rest. |
 
 ---
 
@@ -257,3 +266,4 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
 - [Design: Task Templates](design-task-templates.md) — P2 reusable steps
 - [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
+- [Design: Agent-in-the-Loop ETL Remediation](design-agent-in-the-loop.md) — P3 autonomous failure triage & remediation
