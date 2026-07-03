@@ -20,11 +20,11 @@ why 3 a.m. pages exist:
   [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) exists
   largely because time-based scheduling turns "not yet" into "error".
 - To be safe, the guess is padded: run hourly "just in case", re-run DAGs
-  whose inputs haven't changed. Compute is burned proving nothing happened.
+  whose inputs never changed. Compute is burned proving nothing happened.
 - The thing consumers actually care about is never stated anywhere: *how
   stale may this table be?* Nobody consumes "the 03:15 run"; they consume
-  `analytics.orders_daily` at most 6h out of date. Today that SLO lives in
-  a runbook, if anywhere.
+  `analytics.orders_daily` at most 6h out of date. That SLO lives in a
+  runbook, if anywhere.
 
 Freshness-driven scheduling inverts the declaration. Jobs declare the
 datasets their steps produce and consume, and a freshness SLO on each
@@ -164,16 +164,15 @@ A run *succeeding* is not the same as its output *advancing* — a run can
 succeed and produce nothing new. The contract distinguishes them:
 
 - **With a declared `watermark.key`**: the dataset **advances** only when
-  the emitted value changes (and, for RFC3339/numeric values, only when it
-  increases — a regression is recorded, never advanced). A successful run
-  with an unchanged watermark updates `verified_at` ("checked, nothing new")
-  but not `advanced_at`.
+  the emitted value changes (for RFC3339/numeric values, only increases —
+  a regression is recorded, never advanced). A successful run with an
+  unchanged watermark updates `verified_at`, not `advanced_at`.
 - **Without a watermark key** (degraded mode): a successful non-cached run's
   completion time is the watermark — an honest limitation, flagged by lint,
   that conflates "ran" with "advanced".
-- **Freshness** is evaluated against `max(advanced_at, verified_at)` — a run
-  (or cache-identity check) that *confirms* the output is up to date counts
-  as freshening even when no new bytes were produced.
+- **Freshness** is evaluated against `max(advanced_at, verified_at)` —
+  *confirming* the output is up to date counts as freshening even when no
+  new bytes were produced.
 - Each run records the **consumed watermark set**, so "is my output up to
   date with my inputs" is a pure row comparison, not a heuristic.
 
@@ -371,7 +370,7 @@ New feature dir `ui/src/features/datasets/`:
   execute.
 - **Agent-in-the-loop**: `freshness_violated` becomes an incident class
   whose triage bundle already contains the answer (which upstream, how
-  late, lateness history); the delayed-file scenario mostly stops reaching
+  late, lateness history); the delayed-file scenario mostly never reaches
   the incident manager because no task fails.
 - **Window scheduling** ([`design-window-scheduling.md`](design-window-scheduling.md)):
   freshness says IF, windows say WHEN — a derived run outside its window
@@ -404,7 +403,8 @@ ships with an integration test in `test/` driving the real surface, with
   cycle is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
 - Evaluator leader-gating unit tests (fake `LeaderCheck`, the dequeuer's
   pattern); disabled-gate inertness. Playwright e2e for the dataset board
-  and lineage overlay against a live backend (the data-plane-memory-ui precedent).
+  and lineage overlay against a live backend (data-plane-memory-ui
+  precedent).
 
 ## Phasing
 

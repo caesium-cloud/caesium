@@ -24,8 +24,7 @@ two runs differ.
 
 Backtesting is the composition: **before merge, replay the candidate change over
 the last N production runs' recorded inputs and report output deltas per run** —
-"your change alters output for 2 of 30 days; here is the diff" — as a PR comment,
-next to the code review.
+"your change alters output for 2 of 30 days; here is the diff" — as a PR comment.
 
 ## Fit with Design Principles
 
@@ -45,9 +44,9 @@ next to the code review.
 
 ## Overview
 
-A **backtest** is an aggregate over N quarantined replay runs, one per selected
-baseline production run, each executed with a **candidate override** applied to
-the reconstructed descriptors — a new image (by digest), a changed command or
+A **backtest** aggregates N quarantined replay runs, one per selected baseline
+production run, each executed with a **candidate override** applied to the
+reconstructed descriptors — a new image (by digest), a changed command or
 schema, or param changes — plus an **output-delta computation** comparing each
 replay's task outputs against its baseline's recorded outputs.
 
@@ -76,7 +75,6 @@ replaying 27 runs …  cache-hit tasks: 41  re-executed: 22
 RESULT: output changed in 2 of 27 runs
   2026-06-30  transform.row_count   41 872 → 40 619  (-3.0%)
   2026-05-31  transform.row_count   44 108 → 42 971  (-2.6%)
-drill down: caesium run diff --job-id … --left <baseline> --right <replay>
 ```
 
 Rendered as a PR comment by the §2.1 Action:
@@ -100,8 +98,8 @@ regression only manifests on data shapes staging never has.
 
 1. **Schema-mapping change backtests clean.** A vendor renamed a field; the fix
    updates the extract mapping and `outputSchema`. The 4 runs since the rename
-   show the corrected outputs (expected, annotated by the author); 26 older runs
-   are byte-identical. The reviewer approves with evidence instead of hope.
+   show corrected outputs (expected, annotated by the author); 26 older runs are
+   byte-identical. The reviewer approves with evidence instead of hope.
 2. **"Harmless" refactor changes month-end.** A rewrite "with no behavior
    change" backtests unchanged on 28 of 30 runs — but both month-end runs lose
    ~3% of rows: it mishandles a partition that only exists at month boundaries.
@@ -358,10 +356,9 @@ Layered posture, honest about which layers are enforcement and which are not:
    verify it** — a pipeline-owner policy statement, like `replaySafe` itself.
    Say exactly that in the docs.
 3. **Network-policy guidance (deployment-level enforcement, not Caesium's).**
-   Document running backtest replays under an egress profile that allows sources
-   and blocks sinks, keyed off the descriptor's captured workload identity.
-   Caesium provides the hook (quarantined runs are identifiable), not the
-   firewall.
+   Document running backtest replays under an egress profile that allows
+   sources and blocks sinks. Caesium provides the hook (quarantined runs are
+   identifiable), not the firewall.
 4. **Authorization (enforced).** Overrides require a higher-privilege API-key
    capability than params-only replay; idempotent creation, bounded override
    sizes (mirroring the replay controller's caps), digest-resolved images only.
