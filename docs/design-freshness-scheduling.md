@@ -92,8 +92,8 @@ identity).
   happen. **Freshness cannot bootstrap from observation alone; it needs
   explicit YAML declarations.**
 - **Downstream traversal exists.** `QueryImpact`
-  (`internal/lineage/impact.go:82`) BFS-walks dataset consumers across job
-  boundaries. The declared registry feeds this same shape.
+  (`internal/lineage/impact.go:82`) BFS-walks dataset consumers across
+  job boundaries; the declared registry feeds this same shape.
 - **Arrival signaling exists.** `POST /v1/events`, `caesium event push`,
   webhook bridging, and the event router's `_trigger_depth` chain guard
   ([`design-event-triggers.md`](design-event-triggers.md)) are shipped.
@@ -228,10 +228,10 @@ dataset cycle is a derivation cycle (the event-trigger static-cycle check
 class).
 
 Apply upserts declarations into a new `dataset_declarations` table: the
-*declared* graph, independent of and complementary to the *observed*
-`lineage_datasets` graph — declarations bootstrap scheduling before any run
-exists; observations (when OpenLineage is on) validate declarations and flag
-drift. Freshness does **not** require `CAESIUM_OPEN_LINEAGE_ENABLED`.
+*declared* graph, complementary to the *observed* `lineage_datasets` graph —
+declarations bootstrap scheduling before any run exists; observations (when
+OpenLineage is on) validate declarations and flag drift. Freshness does
+**not** require `CAESIUM_OPEN_LINEAGE_ENABLED`.
 
 ### Models (`internal/models/`)
 
@@ -330,9 +330,8 @@ caesium dataset status <namespace.name> [--json]  # state, SLO, last decision
 caesium dataset advance <namespace.name> --watermark <v>
 ```
 
-`caesium job lint`/`preview` validate and render the declared graph. Per the
-repo testing gate, `--json` output goes to stdout, clean and parseable,
-asserted with stdout captured separately from stderr.
+`caesium job lint`/`preview` validate and render the declared graph. `--json`
+output goes to stdout, clean and parseable, per the repo testing gate.
 
 ## Frontend (Caesium Console)
 
@@ -405,8 +404,7 @@ ships with an integration test in `test/` driving the real surface, with
   cycle is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
 - Evaluator leader-gating unit tests (fake `LeaderCheck`, the dequeuer's
   pattern); disabled-gate inertness. Playwright e2e for the dataset board
-  and lineage overlay against a live backend (data-plane-memory-ui
-  precedent).
+  and lineage overlay against a live backend (the data-plane-memory-ui precedent).
 
 ## Phasing
 

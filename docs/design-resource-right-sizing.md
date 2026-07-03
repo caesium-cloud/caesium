@@ -71,13 +71,12 @@ Read before designing; every later claim builds on these:
   `internal/atom/atom.go:134`, with a human message already waiting in the
   run store (`internal/run/store.go:2991`) — but no engine ever returns it.
   All three map exit codes through a `resultMap` where `137 → atom.Killed`
-  (`internal/atom/docker/docker.go:25-33`,
-  `internal/atom/kubernetes/kubernetes.go:21-29`,
-  `internal/atom/podman/podman.go:27-35`); none consults Docker's
-  `State.OOMKilled`, K8s' `ContainerStateTerminated.Reason == "OOMKilled"`
-  (fetched at `internal/atom/kubernetes/atom.go:93-103` but only its
-  `ExitCode` read), or podman's `InspectContainerState.OOMKilled`. **An OOM
-  today is recorded as `killed`, indistinguishable from operator SIGKILL.**
+  (`internal/atom/docker/docker.go:25-33`, `kubernetes/kubernetes.go:21-29`,
+  `podman/podman.go:27-35`); none consults Docker's `State.OOMKilled`, K8s'
+  `ContainerStateTerminated.Reason == "OOMKilled"` (fetched at
+  `internal/atom/kubernetes/atom.go:93-103` but only its `ExitCode` read),
+  or podman's `InspectContainerState.OOMKilled`. **An OOM today is recorded
+  as `killed`, indistinguishable from operator SIGKILL.**
 - **No stats collection.** The `Engine` interface is
   Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — §2.5's
   `Stats()` does not exist — and `TaskRun` (`internal/models/run.go:45-145`)
@@ -381,24 +380,24 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
 2. **OOM classification:** 64Mi limit, allocate 128Mi → result
    `resource_failure`, `OOMKilled=true`, exit code recorded.
 3. **Escalation green-run:** workload needing ~100Mi at a 64Mi limit with
-   `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt
-   trail, `AppliedResources`, `EscalationLevel`, and an identical cache
-   hash across attempts. **Bounds exhaustion:** max below need → classified
-   failure; a plain non-OOM failure does NOT consume escalation attempts.
+   `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt trail,
+   `AppliedResources`, `EscalationLevel`, and an identical cache hash across
+   attempts. **Bounds exhaustion:** max below need → classified failure; a
+   plain non-OOM failure does NOT consume escalation attempts.
 4. **Distributed lane:** escalation through the claimed worker path,
    including a forced re-claim mid-ladder (escalation level persists).
-5. **Recommendation math:** seed N real runs, assert the suggested value
-   (percentile + headroom + quantization) through CLI and REST.
-   **Provenance routing:** git-synced apply is rejected/PR-routed; non-git
-   round-trips `diff`/`apply`; auth-off refuses direct apply.
+5. **Recommendation math** (seed N real runs, assert the suggested value
+   through CLI and REST) and **provenance routing** (git-synced apply is
+   rejected/PR-routed; non-git round-trips `diff`/`apply`; auth-off refuses
+   direct apply).
 6. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
    stay pre-change (`killed`).
 
-Kubernetes result-mapping and metrics-API degradation are covered at unit
-level with fake pod statuses (CI has no cluster; a kind lane is a
-follow-up). Feature envs are enabled in `just integration-up` so the paths
-execute in CI; UI panels get Playwright e2e against the live backend,
-matching the data-plane-memory-ui precedent.
+K8s result-mapping and metrics-API degradation are unit-tested with fake pod
+statuses (CI has no cluster; a kind lane is a follow-up). Feature envs are
+enabled in `just integration-up` so the paths execute in CI; UI panels get
+Playwright e2e against the live backend, per the data-plane-memory-ui
+precedent.
 
 ## Phasing
 
