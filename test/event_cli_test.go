@@ -145,6 +145,11 @@ func (s *IntegrationTestSuite) TestEventAndTriggerCLIWithWebhookReceiptLog() {
 	s.Equal(1, receipt.HTTPTriggersAccepted)
 	s.Equal(1, receipt.HTTPRunsStarted)
 
+	if s.engineType == "kubernetes" {
+		s.T().Logf("skipping direct webhook_events DB assertion: dqlite binds to POD_IP under CAESIUM_TEST_ENGINE=%s and is not port-forward-reachable; DB-level persistence is covered on the docker + podman lanes", s.engineType)
+		return
+	}
+
 	catalogDB := s.openIntegrationCatalogDB()
 	defer func() { s.Require().NoError(catalogDB.Close()) }()
 

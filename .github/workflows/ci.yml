@@ -475,6 +475,13 @@ jobs:
             -v "${PODMAN_SOCK}:/run/podman/podman.sock" \
             -e CAESIUM_PODMAN_URI=unix:///run/podman/podman.sock \
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+            -e CAESIUM_EVENT_INGEST_API_KEY=integration-test-key \
+            -e CAESIUM_RUN_QUEUE_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+            -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+            -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+            -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+            -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
             -e CAESIUM_LOG_LEVEL=debug \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
@@ -493,7 +500,7 @@ jobs:
             -v $(pwd):/bld/caesium \
             -e CAESIUM_TEST_ENGINE=podman \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
-            --network=host \
+            --network=container:caesium-server-podman \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
             sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'
