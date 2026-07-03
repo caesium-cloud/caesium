@@ -10,10 +10,10 @@
 
 ## Problem
 
-Steps already declare per-step contracts — `OutputSchema` (JSON Schema for the
-step's `##caesium::output` keys) and `InputSchema` (keyed by predecessor step
-name) in `pkg/jobdef/definition.go`, validated **at runtime, within one run**
-by `pkg/task/schema.go`. But data also flows *between jobs*:
+Steps already declare per-step contracts — `OutputSchema` (JSON Schema for
+the step's `##caesium::output` keys) and `InputSchema` (keyed by predecessor
+step name) in `pkg/jobdef/definition.go`, validated **at runtime, within one
+run** by `pkg/task/schema.go`. But data also flows *between jobs*:
 
 - **Trigger chaining.** Job B declares an `event` trigger matching
   `run_completed` filtered on `job_alias: vendor-x-daily`
@@ -22,21 +22,20 @@ by `pkg/task/schema.go`. But data also flows *between jobs*:
   (`internal/run/store.go`) — and B's `paramMapping` JSONPath expressions
   pull values from it into run params, which become env vars for B's steps.
 - **Datasets.** Steps emit output-refs recorded as `LineageDataset` rows
-  (`internal/models/lineage_dataset.go`); `internal/lineage/impact.go`
-  `QueryImpact` walks producer→consumer edges across jobs.
+  (`internal/models/lineage_dataset.go`), whose producer→consumer edges
+  `internal/lineage/impact.go` `QueryImpact` walks across jobs.
 
 Nothing checks, at `lint`/`diff`/`apply` time, that a change to the
 *producer's* `outputSchema` is compatible with what *consumers* extract or
 require. The failure mode: team A trims `customer_id` from `vendor-x-daily`
 on Tuesday; `reporting-daily` (team B) fails its `inputSchema` gate — or
-silently loads nulls — at 3 a.m. Wednesday. The runtime gate works exactly as
-designed and is still the wrong place to discover the problem. The
+silently loads nulls — at 3 a.m. Wednesday. The runtime gate works exactly
+as designed and is still the wrong place to discover the problem. The
 agent-in-the-loop design remediates that page; this design prevents it:
-**the 3 a.m. failure becomes a lint error in the producer's PR**, with the
-consumer and its owning team named — *"BREAKING: vendor-x-daily step
-`export` removes required field `customer_id` consumed by reporting-daily
-step `load` (owner: team=b, via event-trigger chain vendor-x-daily →
-reporting-daily)."*
+**the 3 a.m. failure becomes a lint error in the producer's PR** —
+*"BREAKING: vendor-x-daily step `export` removes required field
+`customer_id` consumed by reporting-daily step `load` (owner: team=b, via
+event-trigger chain vendor-x-daily → reporting-daily)."*
 
 ## Fit with Design Principles
 
@@ -58,9 +57,7 @@ reporting-daily)."*
 
 ```
   producer PR: vendor-x-daily.job.yaml (outputSchema edited)
-        │
-  caesium job lint/diff/apply → POST /v1/jobdefs/{lint,diff,apply}
-        │
+        │  caesium job lint/diff/apply → POST /v1/jobdefs/{lint,diff,apply}
   ┌─────▼─ contract graph derivation ────────────────┐
   │  1. declared  produces/consumes dataset blocks   │
   │  2. inferred  event-trigger chains + paramMapping│
@@ -93,10 +90,9 @@ Caesium-mediated channel is the lifecycle event payload described above:
 today's cross-job "contract" is an undeclared, stringly-typed JSONPath into
 another team's run payload. This design statically checks those paths
 against the producer's `outputSchema` and adds explicit declarations.
-Dataset I/O that never transits the event payload (a step writes S3, another
-job reads S3) is invisible to Caesium except as lineage evidence — which is
-why declarations are the only path to *fail*-grade enforcement for dataset
-edges.
+Dataset I/O that never transits the event payload (a step writes S3,
+another job reads S3) is invisible except as lineage evidence — which is why
+declarations are the only path to *fail*-grade enforcement for dataset edges.
 
 ## YAML: declared produces/consumes
 
@@ -235,11 +231,11 @@ and substitutes incoming defs for persisted versions), derive:
 
 1. **Declared edges** — match `produces`/`consumes` on dataset name across
    all jobs.
-2. **Trigger-chain inference** — reuse the lifecycle-pattern matching from
-   `trigger_cycle.go` (`patternCanMatchCaesiumLifecycle`,
+2. **Trigger-chain inference** — reuse `trigger_cycle.go`'s
+   lifecycle-pattern matching (`patternCanMatchCaesiumLifecycle`,
    `triggerChainPatternSourceAlias`) for A→B edges; then statically parse
    B's `paramMapping` values and flag paths of shape
-   `$.tasks[<i>].output.<key>` — those name concrete producer output keys.
+   `$.tasks[<i>].output.<key>`, which name concrete producer output keys.
    Positional indexing is brittle: when the index can't be resolved to a
    step, the key is checked against the union of A's step `outputSchema`s
    and findings degrade to warn.
@@ -258,10 +254,9 @@ equivalent full scan on every apply). The only new persisted model is
 ### Integration points (server-side, because only the server sees all jobs)
 
 - **`POST /v1/jobdefs/lint`** (`api/rest/controller/jobdef/lint.go`): after
-  the existing `Validate()` + `ValidateTriggerChains` steps, run the contract
-  check; response gains `contracts: {breaking: [...], warnings: [...],
-  edges: n}`. The existing within-job `contractSummary` folds into the same
-  section.
+  the existing `Validate()` + `ValidateTriggerChains` steps, run the check;
+  the response gains `contracts: {breaking: [...], warnings: [...], edges:
+  n}`, and the within-job `contractSummary` folds into the same section.
 - **`POST /v1/jobdefs/diff`**: per-job diff entries gain `contractFindings`
   so the UI/PR comment can badge edges.
 - **`POST /v1/jobdefs/apply`**: the check runs **inside the importer's apply
@@ -277,13 +272,12 @@ equivalent full scan on every apply). The only new persisted model is
 ### Offline vs server lint — two honest modes
 
 CLI `caesium job lint` is offline today: it passes a `nil` DB to
-`ValidateTriggerChains` and prints *"trigger-cycle lint is file-scoped;
-cross-job cycles against persisted triggers are validated at apply"*
-(`cmd/job/lint.go`). Contract lint keeps that honesty: **offline** (default)
-checks only edges derivable inside the linted file set and appends the same
-style of scope note; **`--server`** (new flag) POSTs to `/v1/jobdefs/lint`
-and reports findings against the persisted world. The §2.1 PR flow always
-uses server mode.
+`ValidateTriggerChains` and prints a "file-scoped; cross-job cycles are
+validated at apply" note (`cmd/job/lint.go`). Contract lint keeps that
+honesty: **offline** (default) checks only edges derivable inside the linted
+file set and appends the same style of scope note; **`--server`** (new flag)
+POSTs to `/v1/jobdefs/lint` and reports findings against the persisted
+world. The §2.1 PR flow always uses server mode.
 
 ### Config
 
@@ -297,8 +291,8 @@ uses server mode.
 
 "Owned by team B" resolves from `metadata.labels.team` — already a live
 convention (labels ride on every run/event as `JobLabels`). With
-`CAESIUM_AUTH_MODE=none` (the default) ownership is **advisory**: messages
-name the team, notifications route by label, but anyone can pass
+`CAESIUM_AUTH_MODE=none` (the default), ownership is **advisory**: messages
+name the team and notifications route by label, but anyone can pass
 `--allow-breaking`. With auth enabled, the ack path can require an operator
 role or a key scoped to the producing job — the same honesty the
 agent-in-the-loop design applies to its approval gates.

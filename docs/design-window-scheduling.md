@@ -18,8 +18,8 @@ actually know is a *constraint* about the finish time:
   the same tick (`internal/trigger/cron/cron.go:133-145` — one goroutine per
   job, no spreading).
 - **Cron encodes a guess.** "Run at 02:30" means "upstream lands by ~02:00,
-  the report is needed by 06:00, and 02:30 seemed safe." When the job slows
-  down, the guess silently rots until the deadline is missed.
+  needed by 06:00, 02:30 seemed safe." When the job slows down, the guess
+  silently rots until the deadline is missed.
 - **Cost and carbon vary 3–5× intraday.** Spot prices, tariffs, and grid
   carbon intensity have deep nightly valleys; cron pins a movable job to a
   minute chosen with none of that information.
@@ -39,8 +39,7 @@ autoscaler, and it never places tasks on nodes.
 
 ## Fit with Design Principles
 
-1. **Container-native execution.** Nothing changes about *what* runs — only
-   *when* a run is initiated.
+1. **Container-native.** Nothing changes about *what* runs — only *when*.
 2. **Declarative and GitOps-first.** The window is YAML on the trigger,
    lintable (`open + p95 + buffer ≤ deadline` satisfiability) and diffable.
 3. **Zero-dependency simplicity.** Parked runs are rows in the existing
@@ -190,10 +189,9 @@ else:                          // cheapest: gate chain, all must be green
     green → release(PLANNED, rationale);  red → stay parked, record rationale
 ```
 
-Deliberate choice: **a gate chain with recorded rationale, not a weighted
-score** — every decision explainable in one sentence (`"parked: cluster at
-41/32 running tasks; forecast valley 02:00; force at 04:55"`), the bar the
-data-plane-memory verbs set.
+Deliberate: **a gate chain with recorded rationale, not a weighted score** —
+every decision explainable in one sentence (`"parked: cluster at 41/32
+running tasks; forecast valley 02:00; force at 04:55"`).
 
 **Release** = `store.AdmitRun(jobID, triggerID, ...)`
 (`internal/run/store.go:1044`) with the parked row's params, priority, and
@@ -229,9 +227,9 @@ One interface, three shipped implementations, selected by env:
    events through the shipped ingestion endpoint (`POST /v1/events`, roadmap
    §1.2); a subscriber persists the latest value per signal with a TTL.
    Expired signal ⇒ gate green (fail-open: a dead feed must never strand a
-   job past its valley). Caesium never calls out to a price API itself.
-3. **Load** — no configuration: count of running runs/tasks (same pattern as
-   `CountActive`, `internal/run/store.go:3654-3660`), gated by
+   job past its valley). Caesium never calls a price API itself.
+3. **Load** — count of running runs/tasks (same pattern as `CountActive`,
+   `internal/run/store.go:3654-3660`), gated by
    `CAESIUM_WINDOW_LOAD_MAX_RUNNING`.
 
 ### Restart safety & missed opens
@@ -248,13 +246,13 @@ driven from the durable table, not process memory.
 Window open resolves through the cron schedule evaluated in the configured
 location (as `nextTick` does today, cron.go:325-331); `deadline`/`close` via
 `time.Date` in the same location on the logical date. robfig/cron v1.2.0 has
-no native tz support — Caesium already owns location conversion and this
-design inherits it. Policies (tested): spring-forward gap → first valid
-instant after it; ambiguous fall-back → first occurrence (earlier UTC —
-conservative for a deadline); DST-collapsed window (`open ≥ forceAt`) → park
-and immediately force with a `window_collapsed` warning. Note: the shipped
-`sla.completedBy` resolver is UTC-only HH:MM (`watcher.go:386-400`); window
-deadlines are tz-aware from day one and do not reuse it.
+no native tz support — Caesium already owns location conversion. Policies
+(tested): spring-forward gap → first valid instant after it; ambiguous
+fall-back → first occurrence (earlier UTC — conservative for a deadline);
+DST-collapsed window (`open ≥ forceAt`) → park and immediately force with a
+`window_collapsed` warning. The shipped `sla.completedBy` resolver is
+UTC-only HH:MM (`watcher.go:386-400`); window deadlines are tz-aware from day
+one and do not reuse it.
 
 ### SLA integration (reuse, don't duplicate)
 
@@ -289,8 +287,7 @@ Predicted p95:     47m  (18 samples)
 Latest safe start: 04:58  (deadline − p95 − 15m buffer)
 Plan:              parked — waiting for cost valley
 Why:               cluster 12/32 running (green); cost signal 0.71 now,
-                   forecast minimum 0.24 at 02:00; will start ≈02:00,
-                   forced at 04:58 regardless.
+                   forecast minimum 0.24 at 02:00 — will start ≈02:00.
 ```
 
 `--json` emits the REST payload on **stdout** (machine output separated from
@@ -299,8 +296,8 @@ queue` (`cmd/job/queue.go`).
 
 ## Frontend
 
-- **Job detail**: planned-start badge on the trigger summary (`parked · starts
-  ≈02:00 · forced 04:58`) with the rationale as tooltip/expando.
+- **Job detail**: planned-start badge on the trigger summary (`parked ·
+  starts ≈02:00 · forced 04:58`), rationale as tooltip/expando.
 - **Run detail / history**: a horizontal window bar per run — window span,
   planned start, actual start (colored planned/forced), actual end, deadline
   tick — showing at a glance how much elasticity was used.
@@ -313,10 +310,9 @@ releases by `t ≤ D − P − B + δ`; the run starts by `t + α` and, with
 probability ≥ the p95 coverage (≈0.95 under stationarity), completes by
 `D − B + δ + α`. Choosing `B > δ + α` (defaults: 10m vs 15s + subsecond
 admission) yields: **Caesium initiates the start early enough that a
-p95-or-faster run completes before the deadline.** It is a *start* guarantee;
-completion stays probabilistic — regressions beyond p95 or a saturated
-cluster can still miss, which is exactly what the derived `sla_missed` +
-`window_deadline_at_risk` events flag.
+p95-or-faster run completes before the deadline.** A *start* guarantee —
+completion stays probabilistic (regressions beyond p95, saturated cluster),
+which is exactly what `sla_missed` + `window_deadline_at_risk` flag.
 
 **Concurrency admission interplay.** A window start — including a forced one —
 still passes `store.admit()` (store.go:711): `maxRuns` can queue, skip, or
@@ -348,14 +344,14 @@ endpoint ships with an integration test in `test/` driving the real surface.
   config-gated features must be enabled there or CI proves nothing): apply a
   job with a seconds-scale window; assert it parks (visible via
   `GET /v1/window/parked` and `caesium job window`), force-starts by
-  latest-safe-start, and completes; assert `--json` stdout is clean and
-  parseable via `runCLIStdout` (never the stream-merging `runCLIRaw`); restart
-  the server mid-window and assert the parked run survives and still starts;
-  cold-start job (no history) starts at window open.
+  latest-safe-start, and completes; `--json` stdout clean and parseable via
+  `runCLIStdout` (never the stream-merging `runCLIRaw`); restart the server
+  mid-window — the parked run survives and still starts; cold-start job (no
+  history) starts at window open.
 - **Unit**: p95 + cold-start floor; forceAt derivation incl. `close` cap; DST
-  cases; gate-chain rationale strings; signal parsing + TTL fail-open;
-  reconciler idempotency. Injectable clock; integration tests use short real
-  windows, not mocked time.
+  cases; rationale strings; signal parsing + TTL fail-open; reconciler
+  idempotency. Injectable clock; integration uses short real windows, not
+  mocked time.
 
 ## Phasing
 
@@ -372,10 +368,10 @@ endpoint ships with an integration test in `test/` driving the real surface.
 
 - **No autoscaling.** Caesium never adds/removes capacity; it moves work in
   *time* to fit the capacity that exists.
-- **No preemption.** A started run is never paused or killed to make room
-  (consistent with §1.4's "strictly ordering, never preemptive").
-- **No bin-packing scheduler.** Node placement stays with the engines; on
-  Kubernetes, quota-aware admission is already delegated to Kueue
+- **No preemption.** A started run is never paused or killed (§1.4: "strictly
+  ordering, never preemptive").
+- **No bin-packing.** Node placement stays with the engines; on Kubernetes,
+  quota-aware admission is already delegated to Kueue
   (`pkg/jobdef/definition.go:192-198`).
 - **No per-step windows.** The window is a run-level property.
 
@@ -385,16 +381,16 @@ endpoint ships with an integration test in `test/` driving the real surface.
   freshness targets may *subsume* windows for data-driven jobs: a freshness
   policy compiles down to a rolling window + deadline. They compose as
   layers — freshness decides *what deadline a run must meet*; this design's
-  parking/predictor/force machinery decides *when inside the resulting window
-  to start*. One substrate, two intent front-ends.
+  parking/predictor/force machinery decides *when inside the resulting
+  window to start*. One substrate, two intent front-ends.
 - [`design-dynamic-fanout.md`](design-dynamic-fanout.md) — the spatial
   elasticity slice (how wide); this doc is the temporal slice (when).
-- [`design-resource-right-sizing.md`](design-resource-right-sizing.md) — same
-  run-history substrate applied to sizing; its cost models should share the
-  signal-source interface defined here.
-- [`design-sla-management.md`](design-sla-management.md) — shipped subset
-  (`watcher.go` breach detection) reused verbatim; its proposed
-  predictive-ETA engine should become the shared quantile provider.
+- [`design-resource-right-sizing.md`](design-resource-right-sizing.md) —
+  same run-history substrate applied to sizing; its cost models should share
+  the signal-source interface defined here.
+- [`design-sla-management.md`](design-sla-management.md) — shipped breach
+  detection reused verbatim; its proposed predictive-ETA engine should become
+  the shared quantile provider.
 - [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) —
   `window_deadline_at_risk` / `window_forced` are incident inputs;
   "reschedule within window" is a natural bounded playbook verb.
@@ -405,11 +401,11 @@ endpoint ships with an integration test in `test/` driving the real surface.
    or do heterogeneous fleets need tunable coefficients? Deferred until P2.
 2. **Separate `window_queue` table?** Reusing `run_queue` shares claim/reclaim
    machinery but overloads one table behind a discriminator; split if
-   window-specific state grows (rationale history, signal snapshots).
+   window-specific state grows.
 3. **Global vs. per-job load ceiling** — a single cluster ceiling is crude;
    per-namespace fairness belongs to roadmap §3.1, not here.
-4. **Quantile choice** — heavy-tailed jobs may want p99 or `max(recent)`;
-   possibly a `durationQuantile` knob.
+4. **Quantile choice** — heavy-tailed jobs may want p99; possibly a
+   `durationQuantile` knob.
 5. **Backfills** — backfill runs bypass ordinary concurrency accounting
-   (store.go:723-728); should backfilled logical dates respect windows, or
-   always run immediately? Leaning immediate (operator intent is explicit).
+   (store.go:723-728); should backfilled logical dates respect windows?
+   Leaning immediate execution (operator intent is explicit).

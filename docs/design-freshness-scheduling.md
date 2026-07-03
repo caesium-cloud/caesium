@@ -59,25 +59,23 @@ zero-dependency (dqlite rows, the existing event router and cache identity).
 ## Overview
 
 ```
- YAML apply                       arrival signals
- produces/consumes/freshness      POST /v1/events, /v1/hooks/*,
-      │                           sensor job, ##caesium::output watermark
-      ▼                                   │
- ┌───────────────────┐            ┌───────▼───────────────┐
- │ Dataset registry  │            │  Dataset state store  │
- │ (declared graph)  │───────────▶│  watermark, advanced_at,│
- └───────────────────┘            │  status + reason       │
-                                  └───────┬───────────────┘
-                                          │ evaluate (leader-gated loop
-                                          │ + reactive on advance events)
-                                          ▼
-                     fresh ──────────▶ skip (recorded: "fresh")
-                     stale ──────────▶ derive run ──▶ event router
-                                          │            (_trigger_depth,
-                     stale-upstream ──▶ wait +          concurrency admission)
-                                        at-risk event
-                     violated ────────▶ freshness_violated event
-                                        (notifications + agent incident)
+ YAML apply                      arrival signals
+ produces/consumes/freshness     POST /v1/events, /v1/hooks/*,
+      │                          sensor job, ##caesium::output watermark
+      ▼                                  │
+ ┌───────────────────┐           ┌───────▼────────────────┐
+ │ Dataset registry  │──────────▶│  Dataset state store   │
+ │ (declared graph)  │           │  watermark, advanced_at,│
+ └───────────────────┘           │  status + reason        │
+                                 └───────┬────────────────┘
+                                         │ evaluate (leader-gated loop
+                                         │ + reactive on advance events)
+                                         ▼
+              fresh ──────────▶ skip (recorded: "fresh")
+              stale ──────────▶ derive run ──▶ _trigger_depth +
+              stale-upstream ─▶ wait + at-risk   concurrency admission
+              violated ───────▶ freshness_violated event
+                                (notifications + agent incident)
 ```
 
 A derivation flows through the same admission path as every other run, and
@@ -173,16 +171,16 @@ A run *succeeding* is not the same as its output *advancing* — a run can
 succeed and produce nothing new. The contract distinguishes them:
 
 - **With a declared `watermark.key`**: the dataset **advances** only when
-  the emitted value changes (and, when values parse as RFC3339 or numeric,
-  only when it increases — a regression is recorded, never advanced). A
-  successful run with an unchanged watermark updates `verified_at`
-  ("checked, nothing new") but not `advanced_at`.
+  the emitted value changes (and, for RFC3339/numeric values, only when it
+  increases — a regression is recorded, never advanced). A successful run
+  with an unchanged watermark updates `verified_at` ("checked, nothing new")
+  but not `advanced_at`.
 - **Without a watermark key** (degraded mode): a successful non-cached run's
-  completion time is the watermark. Honest limitation, flagged by lint: this
-  conflates "ran" with "advanced", so skip-when-fresh is weaker.
+  completion time is the watermark — an honest limitation, flagged by lint,
+  that conflates "ran" with "advanced".
 - **Freshness** is evaluated against `max(advanced_at, verified_at)` — a run
-  (or cache-identity check) that *confirms* the output is up to date with
-  its inputs counts as freshening even when no new bytes were produced.
+  (or cache-identity check) that *confirms* the output is up to date counts
+  as freshening even when no new bytes were produced.
 - Each run records the **consumed watermark set**, so "is my output up to
   date with my inputs" is a pure row comparison, not a heuristic.
 
@@ -194,11 +192,11 @@ Today: cron fires at 03:15, `extract.sh` exits non-zero on a missing file,
 `task_failed` pages a human (or opens an agent incident). With freshness: at
 03:15 no arrival event for `raw.vendor_x` has been seen, so `staging.orders`
 is `stale-upstream` — the evaluator **does not derive a run** (running is
-provably pointless) and the cron tick is skipped with a recorded reason. The
+provably pointless) and the cron tick is skipped with a recorded reason; the
 dataset board shows *"stale — waiting on raw.vendor_x, last arrived 25h
-ago"*. At 04:30 the S3 notification hits `/v1/hooks/*`, the arrival advances
-`raw.vendor_x`, the evaluator reacts, and the chain refreshes. Nobody was
-paged. If `analytics.orders_daily` crosses `maxStaleness` first,
+ago"*. At 04:30 the S3 notification hits `/v1/hooks/*`, the arrival
+advances, the evaluator reacts, and the chain refreshes. Nobody was paged.
+If `analytics.orders_daily` crosses `maxStaleness` first,
 `freshness_violated` escalates with the diagnosis — *"12h stale because
 vendor file never arrived"* — not a stack trace. The agent design's
 `data_unavailable` incident class largely dissolves here.
@@ -380,17 +378,16 @@ New feature dir `ui/src/features/datasets/`:
   advance** a watermark (monotonic guard; derivations ignore backfill runs —
   the same reasoning as cron catchup keying off `LatestSuccessfulCronRun`).
 - **Incremental execution**: cache identity keeps a derived-but-unnecessary
-  run cheap, and the value-verified short-circuit lets a `verified_at`
-  refresh be *proven*. Freshness decides whether to start; the cache decides
-  what to execute.
+  run cheap; the value-verified short-circuit lets a `verified_at` refresh
+  be *proven*. Freshness decides whether to start; the cache, what to
+  execute.
 - **Agent-in-the-loop**: `freshness_violated` becomes an incident class
-  whose triage bundle already contains the answer (which upstream, how late,
-  lateness history); the delayed-file scenario mostly stops reaching the
-  incident manager because no task fails.
+  whose triage bundle already contains the answer (which upstream, how
+  late, lateness history); the delayed-file scenario mostly stops reaching
+  the incident manager because no task fails.
 - **Window scheduling** ([`design-window-scheduling.md`](design-window-scheduling.md)):
   freshness says IF, windows say WHEN — a derived run outside its window
-  parks until the window opens; staleness accrued while parked is
-  attributed to the window, not the data.
+  parks until it opens; staleness accrued while parked is the window's.
 - **Circuit breaker / contracts**: quarantined datasets
   ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)) are
   never fresh; contract violations
@@ -454,8 +451,8 @@ ships with an integration test in `test/` driving the real surface, with
 
 ## Open questions
 
-1. **Watermark ordering.** Is "changed" enough, or must v1 enforce monotonic
-   ordering — and what does legitimate reprocessing that lowers
+1. **Watermark ordering.** Is "changed" enough, or must v1 enforce
+   monotonic ordering — and what does legitimate reprocessing that lowers
    `max_order_ts` do (a `cache.version`-style `watermark.epoch` bump)?
 2. **Shared dataset ownership.** Single-producer is lint-enforced per
    applied set; two repos applying to one server — apply-time conflict, or
@@ -466,8 +463,7 @@ ships with an integration test in `test/` driving the real surface, with
    hashing outside the worker path — does it stay honest with
    distributed-mode propagation?
 4. **Evaluation fan-out.** A hub dataset with hundreds of consumers makes
-   each advance a wide evaluation; is per-tick batching enough, or does the
-   reactive path need its own budget?
+   each advance a wide evaluation; does the reactive path need a budget?
 5. **Snoozing a known-late source.** Can an operator acknowledge
-   `stale-upstream` so the at-risk event quiets, and does that share the
-   agent design's persisted-timer primitive?
+   `stale-upstream` so the at-risk event quiets, sharing the agent design's
+   persisted-timer primitive?

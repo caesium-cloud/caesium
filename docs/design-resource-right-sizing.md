@@ -61,26 +61,24 @@ Quoting the six principles from [`roadmap.md`](roadmap.md):
 
 Read before designing; every later claim builds on these:
 
-- **`container.Spec` carries no resource fields** — its complete field set
-  is `Env`, `WorkDir`, `Mounts`, `ResolvedVolumeMounts`, `Kubernetes`
-  (`pkg/container/spec.go:99-105`) — and **no engine applies limits**:
-  Docker `Create` builds a `HostConfig` only to carry mounts
-  (`internal/atom/docker/engine.go:112-115`), the Kubernetes pod spec sets
-  no `Resources` (`internal/atom/kubernetes/engine.go:132-150`), podman
-  likewise. No step, in any engine, can request or limit CPU/memory today.
+- **No resource fields, no limits applied.** `container.Spec`'s complete
+  field set is `Env`, `WorkDir`, `Mounts`, `ResolvedVolumeMounts`,
+  `Kubernetes` (`pkg/container/spec.go:99-105`); Docker `Create` builds a
+  `HostConfig` only for mounts (`internal/atom/docker/engine.go:112-115`),
+  the K8s pod spec sets no `Resources`
+  (`internal/atom/kubernetes/engine.go:132-150`), podman likewise. No step,
+  in any engine, can request or limit CPU/memory today.
 - **`atom.ResourceFailure` is dead code.** Defined at
   `internal/atom/atom.go:134`, with a human message already waiting in the
-  run store ("atom exhausted resources (e.g. OOM)",
-  `internal/run/store.go:2991`) — but no engine ever returns it. All three
-  map exit codes through a `resultMap` where `137 → atom.Killed`
+  run store (`internal/run/store.go:2991`) — but no engine ever returns it.
+  All three map exit codes through a `resultMap` where `137 → atom.Killed`
   (`internal/atom/docker/docker.go:25-33`,
   `internal/atom/kubernetes/kubernetes.go:21-29`,
   `internal/atom/podman/podman.go:27-35`); none consults Docker's
-  `State.OOMKilled`, Kubernetes' `ContainerStateTerminated.Reason ==
-  "OOMKilled"` (the terminated state is fetched at
-  `internal/atom/kubernetes/atom.go:93-103` but only its `ExitCode` read),
-  or podman's `InspectContainerState.OOMKilled`. **An OOM today is recorded
-  as `killed`, indistinguishable from an operator SIGKILL.**
+  `State.OOMKilled`, K8s' `ContainerStateTerminated.Reason == "OOMKilled"`
+  (fetched at `internal/atom/kubernetes/atom.go:93-103` but only its
+  `ExitCode` read), or podman's `InspectContainerState.OOMKilled`. **An OOM
+  today is recorded as `killed`, indistinguishable from operator SIGKILL.**
 - **No stats collection.** The `Engine` interface is
   Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — §2.5's
   `Stats()` does not exist — and `TaskRun` (`internal/models/run.go:45-145`)
@@ -88,29 +86,27 @@ Read before designing; every later claim builds on these:
   §2.5's stats capture and scopes Phase 0 to the minimal slice it needs.**
 - **The retry loops are the escalation hook, and they are asymmetric.**
   Local: `internal/job/job.go:1055-1198` loops attempts (persisted via
-  `store.RetryTask`, `job.go:1182`; delay from `computeRetryDelay`,
-  `internal/job/failure_policy.go:31-39`) — but only retries *execution
-  errors*; a container that runs and exits unsuccessfully is completed with
-  that result and returned without retry (`job.go:1161-1163`). The
-  distributed worker loop (`internal/worker/runtime_executor.go:307-376`)
-  *does* retry unsuccessful results — `executeTask` converts them to errors
+  `store.RetryTask`, `job.go:1182`) — but only retries *execution errors*; a
+  container that runs and exits unsuccessfully is completed with that result
+  and returned without retry (`job.go:1161-1163`). The distributed worker
+  loop (`internal/worker/runtime_executor.go:307-376`) *does* retry
+  unsuccessful results — `executeTask` converts them to errors
   (`runtime_executor.go:584-585`), persisting via `RetryTaskClaimed`
   (`:356`). Escalation must make the OOM class retryable in the local loop
   too, or the feature silently works only in distributed mode.
-- **Resource limits do not feed cache identity — because they can't exist
-  yet.** `cache.HashInput` (`internal/cache/hash.go:266-287`) hashes
+- **Resource limits do not feed cache identity — they can't exist yet.**
+  `cache.HashInput` (`internal/cache/hash.go:266-287`) hashes
   image/command/env/mounts/K8s-identity-fields/predecessors/params. The
   needed precedent exists: `KubernetesSpec.QueueName` is deliberately
   excluded as "scheduling metadata, not an execution input"
   (`internal/cache/hash.go:329-336`, `pkg/container/spec.go:76-81`).
-- **In distributed mode the worker applies the spec** from
-  `descriptor.ContainerSpec` (`internal/worker/runtime_executor.go:153`) on
-  its own node — resources in `container.Spec` reach workers with zero new
-  plumbing, but *escalation state must persist on the row*: a lease-expired
-  task is re-claimed by a worker that sees only `TaskRun.Attempt`.
-- **Git provenance exists for PR routing.** `Job` carries
-  `ProvenanceSourceID/Repo/Ref/Commit/Path` (`internal/models/job.go:19-23`),
-  maintained by the git sync in `internal/jobdef/git/`.
+- **Distributed workers apply the spec** from `descriptor.ContainerSpec`
+  (`internal/worker/runtime_executor.go:153`) on their own node — resources
+  in `container.Spec` reach workers with zero new plumbing, but *escalation
+  state must persist on the row*: a lease-expired task is re-claimed by a
+  worker that sees only `TaskRun.Attempt`. **Git provenance exists for PR
+  routing**: `Job` carries `ProvenanceSourceID/Repo/Ref/Commit/Path`
+  (`internal/models/job.go:19-23`), maintained by `internal/jobdef/git/`.
 
 ## Overview
 
@@ -134,13 +130,9 @@ Read before designing; every later claim builds on these:
 ## YAML
 
 ```yaml
-apiVersion: v1
-kind: Job
 metadata:
   alias: nightly-aggregate
-  # optional job-level defaults; steps override field-wise
-  rightSizing:
-    mode: suggest                # suggest | auto | off   (default: off)
+  rightSizing: {mode: suggest}   # job-level default; steps override
 steps:
   - name: transform
     image: etl/transform:1.9
@@ -150,7 +142,7 @@ steps:
       memory: 1Gi                # limit; also the k8s request (see Backend)
       cpu: 500m                  # k8s request / docker+podman NanoCPUs
     rightSizing:
-      mode: auto                 # may rewrite resources.* within bounds
+      mode: auto                 # suggest | auto | off   (default: off)
       memory: {min: 512Mi, max: 6Gi}
       cpu:    {min: 250m,  max: "2"}
       onOOM:                     # retry-with-escalation policy
@@ -158,17 +150,13 @@ steps:
         maxEscalations: 2        # extra OOM-only attempts beyond `retries`
 ```
 
-Semantics, all lint-enforced (`caesium job lint`):
-
-- `resources` without `rightSizing` is valid: static limits, no learning.
-- `rightSizing` requires `resources` (a declared baseline) and
-  `memory.max ≥ resources.memory ≥ memory.min`.
-- `suggest` computes recommendations but never mutates; `auto` may apply
-  within `[min, max]` — on git-synced jobs "apply" *means opening a PR*,
-  never a direct write (see Backend).
-- `onOOM` works in every mode, including alongside `mode: off`; escalation
-  is memory-only (CPU exhaustion throttles rather than kills — CPU is
-  right-sized only via suggestions).
+Semantics, all lint-enforced (`caesium job lint`): `resources` without
+`rightSizing` is valid (static limits, no learning); `rightSizing` requires
+`resources` and `memory.max ≥ resources.memory ≥ memory.min`; `suggest`
+never mutates, `auto` applies within `[min, max]` — and on git-synced jobs
+"apply" *means opening a PR*, never a direct write (see Backend); `onOOM`
+works in every mode, and escalation is memory-only (CPU exhaustion throttles
+rather than kills — CPU is right-sized via suggestions only).
 
 ## Backend
 
@@ -284,24 +272,21 @@ Hook: the existing per-attempt loops, both executors.
 Computed on read (no new store, no background fleet scans):
 
 ```
-window   = last N successful runs of (job, task name)   [default N=20]
-           discarding runs older than the step's current image tag change
-           when digest history (descriptor) shows a change
-suggest  = quantize_up( p99(peak_mem over window) × (1 + headroom) )
-           clamped to [memory.min, memory.max]; never below max(window)
-cpu      = same over CPU seconds / duration (suggestion only)
+window  = last N successful runs of (job, task name)   [default N=20],
+          reset when the descriptor's image digest changes
+suggest = quantize_up( p99(peak_mem over window) × (1 + headroom) ),
+          clamped to [memory.min, memory.max]; never below max(window)
+cpu     = same over CPU-seconds / duration (suggestion only)
 ```
 
-Guard rails: minimum sample count (default 5) before any suggestion;
-downward suggestions suppressed while the §2.5 anomaly condition holds
-(latest run > 2× rolling average); `oom_inferred` censored points force the
-suggestion to at least `applied × onOOM.factor`. Deliberately
-percentile-plus-headroom, not a model — boring, explainable, auditable.
-Quarantined replays and runs from
-[`design-backtesting.md`](design-backtesting.md) are excluded from the
-window (`quarantine IS NOT TRUE`, the established filter), as are backfill
-storms unless opted in — backfill inputs can differ systematically from
-steady state.
+Guard rails: minimum sample count (default 5); downward suggestions
+suppressed while the §2.5 anomaly condition holds (latest run > 2× rolling
+average); `oom_inferred` censored points force the suggestion to at least
+`applied × onOOM.factor`. Deliberately percentile-plus-headroom, not a
+model — boring, explainable, auditable. Quarantined replays and runs from
+[`design-backtesting.md`](design-backtesting.md) are excluded
+(`quarantine IS NOT TRUE`, the established filter), as are backfill storms
+unless opted in — backfill inputs differ systematically from steady state.
 
 ### Applying: provenance-routed, reusing the agent-doc router
 
@@ -380,21 +365,21 @@ per the repo's hard-won rule that merged-stream captures hide leaks.
 
 - **Bounds are absolute.** Escalation and auto-apply clamp to declared
   `[min, max]`; no bound, no auto behavior. Caesium does not discover
-  cluster/namespace quota — a pod rejected by `ResourceQuota`/`LimitRange`
-  surfaces as `StartupFailure` with the K8s message; bounds are the
-  operator's declared envelope, honestly not a cluster guarantee.
-- **Escalated attempts are accounted, visible, and capped** — they extend
+  cluster quota — a pod rejected by `ResourceQuota`/`LimitRange` surfaces as
+  `StartupFailure`; bounds are the operator's declared envelope, honestly
+  not a cluster guarantee.
+- **Escalated attempts are accounted, visible, capped** — they extend
   `MaxAttempts` explicitly at registration, are class-gated to OOM, recorded
   per attempt, and counted in `caesium_task_retries_total` plus a new
-  `caesium_task_oom_escalations_total`.
+  `caesium_task_oom_escalations_total`. Downsizing is conservative:
+  suggest-only by default; `auto` downsizes only after a full OOM-free
+  window, and an OOM after an auto downsize reverts immediately and freezes
+  downsizing for the cooldown.
 - **Cache identity disclosed** (section above): limits are not execution
   inputs; steps whose outputs depend on limits must opt out of caching.
 - **Auto never touches Git-owned truth directly** — provenance routing is
   server-enforced, and direct apply requires an active auth mode
   (`CAESIUM_AUTH_MODE` defaults to `none`, so this is a real gate).
-- **Downsizing is conservative:** suggest-only by default; `auto` downsizes
-  only after a full OOM-free window, and an OOM after an auto downsize
-  immediately reverts and freezes downsizing for the cooldown.
 - **Agent composition:** with
   [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) enabled, the
   `oom` class becomes a deterministic rule deferring to in-run escalation;
@@ -413,26 +398,25 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
    --json` (stdout-clean via `runCLIStdout`).
 2. **OOM classification:** 64Mi limit, allocate 128Mi → result
    `resource_failure`, `OOMKilled=true`, exit code recorded.
-3. **Escalation green-run:** `onOOM: {factor: 2, maxEscalations: 2}`,
-   workload needs ~100Mi at a 64Mi limit → attempt 2 at 128Mi succeeds;
-   assert attempt trail, `AppliedResources`, `EscalationLevel`, and an
-   identical cache hash across attempts.
-4. **Bounds exhaustion:** max below need → classified failure after
-   class-gated attempts; a plain non-OOM failure does NOT consume
-   escalation attempts.
-5. **Distributed lane:** escalation through the claimed worker path,
+3. **Escalation green-run:** workload needing ~100Mi at a 64Mi limit with
+   `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt
+   trail, `AppliedResources`, `EscalationLevel`, and an identical cache
+   hash across attempts. **Bounds exhaustion:** max below need → classified
+   failure; a plain non-OOM failure does NOT consume escalation attempts.
+4. **Distributed lane:** escalation through the claimed worker path,
    including a forced re-claim mid-ladder (escalation level persists).
-6. **Recommendation math:** seed N real runs, assert the suggested value
+5. **Recommendation math:** seed N real runs, assert the suggested value
    (percentile + headroom + quantization) through CLI and REST.
-7. **Provenance routing:** git-synced apply is rejected/PR-routed; non-git
+   **Provenance routing:** git-synced apply is rejected/PR-routed; non-git
    round-trips `diff`/`apply`; auth-off refuses direct apply.
-8. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
+6. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
    stay pre-change (`killed`).
-9. Kubernetes result-mapping and metrics-API degradation covered at unit
-   level with fake pod statuses (CI has no cluster; a kind lane is a
-   follow-up). Feature envs enabled in `just integration-up` so the paths
-   execute in CI; UI panels get Playwright e2e against the live backend,
-   matching the data-plane-memory-ui precedent.
+
+Kubernetes result-mapping and metrics-API degradation are covered at unit
+level with fake pod statuses (CI has no cluster; a kind lane is a
+follow-up). Feature envs are enabled in `just integration-up` so the paths
+execute in CI; UI panels get Playwright e2e against the live backend,
+matching the data-plane-memory-ui precedent.
 
 ## Phasing
 
@@ -472,23 +456,22 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
 ## Open Questions
 
 1. **Peak fidelity on cgroup v2.** Is sample-max + OOM-censoring enough, or
-   should Docker/Podman read `memory.peak` from the cgroup fs when Caesium
-   shares the host? Leaning: sampling first; host-path reads are an
-   optimization with real portability cost.
-2. **K8s requests-vs-limits policy.** Ship `request = limit` for memory
-   only, or expose `resources.requests` separately? Separate fields are more
-   honest for CPU but double the recommendation surface.
-3. **Window reset triggers.** Image-digest changes reset the learning
-   window; should a params-distribution shift too, and how is that detected
-   cheaply? [`design-window-scheduling.md`](design-window-scheduling.md) /
+   should Docker/Podman read `memory.peak` from the cgroup fs when
+   co-hosted? Leaning: sampling first; host-path reads are an optimization
+   with real portability cost.
+2. **K8s requests-vs-limits.** Ship `request = limit` for memory only, or
+   expose `resources.requests` separately? More honest for CPU, but doubles
+   the recommendation surface.
+3. **Window reset triggers.** Image-digest changes reset the window; should
+   a params-distribution shift too?
+   [`design-window-scheduling.md`](design-window-scheduling.md) /
    [`design-freshness-scheduling.md`](design-freshness-scheduling.md)
    cohorts could partition the window per data-window size.
 4. **Opt-in identity folding.** Offer `rightSizing.hashResources: true` for
-   steps whose outputs genuinely depend on limits (self-sizing JVMs), at the
-   cost of cache busts on every change? Leaning: no in v1 — document
-   `cache: false`; revisit with evidence.
+   steps whose outputs depend on limits (self-sizing JVMs), at the cost of
+   cache busts on every change? Leaning: no in v1 — document `cache: false`.
 5. **PR ergonomics.** One rolling Renovate-style PR per repo vs. discrete
-   PRs per job per window? Interacts with how
+   PRs per job? Interacts with how
    [`design-contract-enforcement.md`](design-contract-enforcement.md) and
-   the agent doc route their proposals — a shared "Caesium proposals" PR
+   the agent doc route their proposals — a shared "Caesium proposals"
    channel may deserve its own mini-design.
