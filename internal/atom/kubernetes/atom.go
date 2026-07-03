@@ -54,13 +54,14 @@ func (c *Atom) Result() atom.Result {
 }
 
 // ExitCode returns the terminated container's raw exit code, preserved for the
-// incident classifier before Result() folds it into a coarse Result. Returns 0
+// incident classifier before Result() folds it into a coarse Result. Returns nil
 // when no container has reached a terminated state.
-func (c *Atom) ExitCode() int {
+func (c *Atom) ExitCode() *int {
 	if term := terminatedState(c.metadata); term != nil {
-		return int(term.ExitCode)
+		code := int(term.ExitCode)
+		return &code
 	}
-	return 0
+	return nil
 }
 
 // CreatedAt returns the UTC time the Atom was created.

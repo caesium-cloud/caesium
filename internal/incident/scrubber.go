@@ -5,7 +5,14 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
+
+// hexTokenRe matches a purely hexadecimal token (git commit SHAs, Docker image
+// digests, hashes). These have a high character-class mix and high entropy, so
+// the entropy heuristic would flag them — but they are non-sensitive identifiers
+// whose redaction only destroys log readability. Excluded from token scrubbing.
+var hexTokenRe = regexp.MustCompile(`^[0-9a-fA-F]+$`)
 
 // Redacted is the placeholder substituted for a scrubbed secret value or token.
 const Redacted = "[REDACTED]"
@@ -159,6 +166,11 @@ func looksLikeSecretToken(tok string) bool {
 	if len(tok) < 20 {
 		return false
 	}
+	// A purely-hex token is a git SHA / image digest / hash — a non-sensitive
+	// identifier, not a secret. Redacting it only hurts log readability.
+	if hexTokenRe.MatchString(tok) {
+		return false
+	}
 	var hasLower, hasUpper, hasDigit bool
 	for _, r := range tok {
 		switch {
@@ -193,7 +205,7 @@ func shannonEntropy(s string) float64 {
 	for _, r := range s {
 		counts[r]++
 	}
-	n := float64(len([]rune(s)))
+	n := float64(utf8.RuneCountInString(s))
 	var h float64
 	for _, c := range counts {
 		p := float64(c) / n

@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -32,14 +33,14 @@ func (s *Store) DB() *gorm.DB { return s.db }
 
 // OpenParams describes a failure the subscriber wants to record as an incident.
 type OpenParams struct {
-	Namespace *string
-	JobID     uuid.UUID
-	RunID     *uuid.UUID
-	TaskID    *uuid.UUID
-	TaskName  string
-	Class     FailureClass
-	LastError string
-	Evidence  datatypes.JSON
+	Namespace  *string
+	JobID      uuid.UUID
+	RunID      *uuid.UUID
+	TaskID     *uuid.UUID
+	TaskName   string
+	Class      FailureClass
+	LastError  string
+	Evidence   datatypes.JSON
 	BackfillID *uuid.UUID
 	// RemediationTargetRunID is the run whose later success would close this
 	// incident as remediated.
@@ -108,27 +109,40 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		UpdatedAt:              now,
 	}
 
-	// Atomic conditional insert: on conflict with an existing non-terminal
-	// incident sharing active_dedupe_key, do nothing (RowsAffected == 0).
-	res := s.db.WithContext(ctx).
-		Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "active_dedupe_key"}},
-			DoNothing: true,
-		}).
-		Create(inc)
-	if res.Error != nil {
-		return nil, "", res.Error
-	}
-	if res.RowsAffected == 1 {
-		return inc, OutcomeOpened, nil
-	}
+	// Atomic conditional insert with a bounded retry. On conflict with an existing
+	// non-terminal incident sharing active_dedupe_key, DoNothing (RowsAffected==0)
+	// and fold the failure in as an occurrence. If that twin is transitioned to a
+	// terminal state (which nulls active_dedupe_key) between our conflict and the
+	// append — a race with the leader's timer supervisor or success path —
+	// appendOccurrence finds no active row (ErrRecordNotFound); retry, and the
+	// now-free key lets the insert win instead of dropping the failure.
+	const maxOpenAttempts = 3
+	for attempt := 0; attempt < maxOpenAttempts; attempt++ {
+		res := s.db.WithContext(ctx).
+			Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "active_dedupe_key"}},
+				DoNothing: true,
+			}).
+			Create(inc)
+		if res.Error != nil {
+			return nil, "", res.Error
+		}
+		if res.RowsAffected == 1 {
+			return inc, OutcomeOpened, nil
+		}
 
-	// A twin already exists — fold in as an occurrence and advance the target.
-	existing, err := s.appendOccurrence(ctx, key, p, now)
-	if err != nil {
-		return nil, "", err
+		existing, err := s.appendOccurrence(ctx, key, p, now)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				// The twin closed between the conflict and the append; the dedupe
+				// key is free now — retry the insert.
+				continue
+			}
+			return nil, "", err
+		}
+		return existing, OutcomeAppended, nil
 	}
-	return existing, OutcomeAppended, nil
+	return nil, "", fmt.Errorf("incident: OpenOrAppend exhausted retries opening incident for dedupe key %q", key)
 }
 
 // appendOccurrence increments the occurrence counter on the open incident for
@@ -236,11 +250,14 @@ func (s *Store) Remediate(ctx context.Context, id uuid.UUID, summary string) (*m
 // name matches. Used by the terminal-verification success path.
 func (s *Store) OpenForJobTask(ctx context.Context, jobID uuid.UUID, taskName string) ([]models.Incident, error) {
 	var incidents []models.Incident
+	// Match task_name EXACTLY, including the empty string: a run-level success
+	// event (run_completed, no TaskID) carries taskName == "" and must remediate
+	// only run-level incidents (which store task_name == ""), never every open
+	// incident for the job. Per-task success (task_succeeded) carries the task
+	// name and remediates that task's incidents. This mirrors the (job, task,
+	// class) dedupe correlation key.
 	q := s.db.WithContext(ctx).
-		Where("job_id = ? AND active_dedupe_key IS NOT NULL", jobID)
-	if taskName != "" {
-		q = q.Where("task_name = ?", taskName)
-	}
+		Where("job_id = ? AND task_name = ? AND active_dedupe_key IS NOT NULL", jobID, taskName)
 	if err := q.Find(&incidents).Error; err != nil {
 		return nil, err
 	}

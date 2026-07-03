@@ -38,8 +38,8 @@ type ApprovalRequest struct {
 	Decider string `gorm:"type:text" json:"decider,omitempty"`
 	Reason  string `gorm:"type:text" json:"reason,omitempty"`
 
-	ExpiresAt  *time.Time `gorm:"index" json:"expires_at,omitempty"`
-	DecidedAt  *time.Time `json:"decided_at,omitempty"`
-	CreatedAt  time.Time  `gorm:"not null" json:"created_at"`
-	UpdatedAt  time.Time  `gorm:"not null" json:"updated_at"`
+	ExpiresAt *time.Time `gorm:"index" json:"expires_at,omitempty"`
+	DecidedAt *time.Time `json:"decided_at,omitempty"`
+	CreatedAt time.Time  `gorm:"not null" json:"created_at"`
+	UpdatedAt time.Time  `gorm:"not null" json:"updated_at"`
 }

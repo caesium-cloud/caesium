@@ -2139,7 +2139,7 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSn
 // task completion onto the task run. The incident classifier reads this
 // alongside SchemaViolations/Result to bucket a failure into a failure_class.
 // Best-effort: a nil-safe no-op when the row is gone.
-func (s *Store) SetTaskExitCode(runID, taskID uuid.UUID, exitCode int) error {
+func (s *Store) SetTaskExitCode(runID, taskID uuid.UUID, exitCode *int) error {
 	return s.db.Model(&models.TaskRun{}).
 		Where("job_run_id = ? AND task_id = ?", runID, taskID).
 		Update("exit_code", exitCode).Error

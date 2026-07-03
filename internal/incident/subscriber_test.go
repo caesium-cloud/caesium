@@ -30,7 +30,7 @@ func seedFailedTask(t *testing.T, db *gorm.DB, logText string) (jobID, runID, ta
 	}).Error)
 	require.NoError(t, db.Create(&models.TaskRun{
 		ID: uuid.New(), JobRunID: runID, TaskID: taskID, AtomID: uuid.New(),
-		Engine: models.AtomEngineDocker, Image: "busybox", Command: "sh",
+		Engine: models.AtomEngineDocker, Image: "busybox:1.36.1", Command: "sh",
 		Status: "failed", Result: "failure", LogText: logText,
 		CreatedAt: now, UpdatedAt: now,
 	}).Error)

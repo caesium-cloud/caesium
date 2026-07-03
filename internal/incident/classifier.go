@@ -93,14 +93,23 @@ func defaultExitCodeRules() map[int]FailureClass {
 	}
 }
 
+// Default log-rule patterns, compiled once at package load rather than on every
+// NewClassifier() call.
+var (
+	oomLogRe             = regexp.MustCompile(`(?i)(out of memory|oomkilled|oom-kill|cannot allocate memory|killed process|memory cgroup out of memory)`)
+	authFailureLogRe     = regexp.MustCompile(`(?i)(permission denied|unauthorized|forbidden|authentication failed|invalid credentials|access denied|401|403|expired token|invalid api key)`)
+	quotaLogRe           = regexp.MustCompile(`(?i)(quota exceeded|rate limit|ratelimit|too many requests|429|throttl|limit exceeded)`)
+	dataUnavailableLogRe = regexp.MustCompile(`(?i)(no such file|not found|does not exist|doesn't exist|connection refused|could not connect|could not resolve|no route to host|no data available|table.*(not exist|missing))`)
+)
+
 // defaultLogRules ships case-insensitive patterns for the four log-driven
 // classes. Order encodes precedence: oom, then auth, then quota, then data.
 func defaultLogRules() []logRule {
 	return []logRule{
-		{re: regexp.MustCompile(`(?i)(out of memory|oomkilled|oom-kill|cannot allocate memory|killed process|memory cgroup out of memory)`), class: ClassOOM},
-		{re: regexp.MustCompile(`(?i)(permission denied|unauthorized|forbidden|authentication failed|invalid credentials|access denied|401|403|expired token|invalid api key)`), class: ClassAuthFailure},
-		{re: regexp.MustCompile(`(?i)(quota exceeded|rate limit|ratelimit|too many requests|429|throttl|limit exceeded)`), class: ClassQuota},
-		{re: regexp.MustCompile(`(?i)(no such file|not found|does not exist|doesn't exist|connection refused|could not connect|could not resolve|no route to host|no data available|table.*(not exist|missing))`), class: ClassDataUnavailable},
+		{re: oomLogRe, class: ClassOOM},
+		{re: authFailureLogRe, class: ClassAuthFailure},
+		{re: quotaLogRe, class: ClassQuota},
+		{re: dataUnavailableLogRe, class: ClassDataUnavailable},
 	}
 }
 
@@ -126,12 +135,12 @@ func (c *Classifier) WithLogRule(pattern string, class FailureClass) (*Classifie
 
 // Classify maps a Signal to a FailureClass. Precedence, top to bottom:
 //
-//	1. run_timed_out / sla_missed          → sla_risk
-//	2. schema_violation event / violations → schema_violation
-//	3. StartupFailure / ResourceFailure    → transient_infra
-//	4. log-tail regex table                → data_unavailable|auth_failure|oom|quota
-//	5. exit-code table                     → (default 137 → oom)
-//	6. fallback                            → unknown
+//  1. run_timed_out / sla_missed          → sla_risk
+//  2. schema_violation event / violations → schema_violation
+//  3. StartupFailure / ResourceFailure    → transient_infra
+//  4. log-tail regex table                → data_unavailable|auth_failure|oom|quota
+//  5. exit-code table                     → (default 137 → oom)
+//  6. fallback                            → unknown
 func (c *Classifier) Classify(sig Signal) FailureClass {
 	switch event.Type(sig.EventType) {
 	case event.TypeRunTimedOut, event.TypeSLAMissed:

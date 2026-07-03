@@ -78,6 +78,36 @@ func TestTerminalTransitionFreesDedupeKey(t *testing.T) {
 	testutil.AssertCount(t, db, &models.Incident{}, 2)
 }
 
+func TestOpenForJobTaskMatchesTaskNameExactly(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	ctx := context.Background()
+	jobID := uuid.New()
+
+	// One per-task incident and one run-level incident (empty task name) for the
+	// same job.
+	_, _, err := store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "extract", Class: ClassDataUnavailable})
+	require.NoError(t, err)
+	_, _, err = store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "", Class: ClassSLARisk})
+	require.NoError(t, err)
+
+	// A per-task success (task_succeeded → task name) must match ONLY that task's
+	// incident.
+	perTask, err := store.OpenForJobTask(ctx, jobID, "extract")
+	require.NoError(t, err)
+	require.Len(t, perTask, 1)
+	require.Equal(t, "extract", perTask[0].TaskName)
+
+	// A run-level success (run_completed → empty task name) must match ONLY the
+	// run-level incident, never wildcard-close the per-task one.
+	runLevel, err := store.OpenForJobTask(ctx, jobID, "")
+	require.NoError(t, err)
+	require.Len(t, runLevel, 1)
+	require.Equal(t, "", runLevel[0].TaskName)
+	require.Equal(t, string(ClassSLARisk), runLevel[0].Class)
+}
+
 func TestInvalidTransitionRejected(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
