@@ -117,28 +117,20 @@ Read before designing; every later claim builds on these:
 ## Overview
 
 ```
-                     run N completes
-                          │
-        ┌─────────────────▼──────────────────┐
-        │ Stats capture (per attempt)        │   Phase 0
-        │ peak mem / cpu-secs / oom flag /   │   = roadmap §2.5 items 1–2
-        │ exit code → task_runs columns      │
-        └───────┬─────────────────┬──────────┘
-                │                 │
-    OOM on attempt k         history (last N runs)
-                │                 │
-   ┌────────────▼───────┐   ┌─────▼──────────────────────┐
-   │ Retry escalation    │   │ Recommendation engine      │
-   │ next attempt at     │   │ p99(peak) × headroom,      │
-   │ mem × factor,       │   │ quantized, clamped to      │
-   │ clamped to bounds   │   │ declared bounds            │
-   └────────────┬───────┘   └─────┬──────────────────────┘
-                │                 │
-        run turns green     mode: suggest ──▶ CLI/UI/REST recommendation
-        (or bounds exhaust  mode: auto ─────▶ provenance-routed apply:
-         → classified fail,          git-synced job → Git PR
-         agent/incident              non-git job    → jobdefs apply
-         hand-off)                   no write creds → degrade to suggest
+ run completes ─▶ stats capture (per attempt): peak mem / cpu-secs /
+                  oom flag / exit code → task_runs columns      [Phase 0
+                    │                    │                       = §2.5 1–2]
+        OOM on attempt k          history (last N runs)
+                    ▼                    ▼
+        retry escalation:         recommendation engine:
+        next attempt at           p99(peak) × headroom, quantized,
+        mem × factor, clamped     clamped to declared bounds
+        to bounds → green run       │
+        (bounds exhaust →         suggest ─▶ CLI/UI/REST recommendation
+         classified fail,         auto ────▶ provenance-routed apply:
+         agent/incident                      git-synced → Git PR
+         hand-off)                           non-git    → jobdefs apply
+                                             no creds   → degrade to suggest
 ```
 
 ## YAML
@@ -192,31 +184,28 @@ independently needs `TaskRun.ExitCode`):
 - **OOM detection per engine**, at the inspect each engine already does:
   Docker consults `InspectResponse.State.OOMKilled` in `Result()` before the
   exit-code map and returns `atom.ResourceFailure`; Kubernetes checks
-  `terminatedState(pod).Reason == "OOMKilled"` (the terminated state is
-  already in hand at `internal/atom/kubernetes/atom.go:39-53` — only its
-  `ExitCode` is read today); podman checks
-  `InspectContainerState.OOMKilled`. Compatibility, stated honestly: OOM
-  kills change from `killed` to `resource_failure` in persisted results —
-  release-noted and gated by the feature env below.
+  `terminatedState(pod).Reason == "OOMKilled"` (the terminated state is in
+  hand at `internal/atom/kubernetes/atom.go:39-53` — only its `ExitCode` is
+  read today); podman checks `InspectContainerState.OOMKilled`.
+  Compatibility, honestly: OOM kills change from `killed` to
+  `resource_failure` in persisted results — release-noted, env-gated.
 - **`Stats()` on the engine interface** plus a sampling loop in both
   executors while awaiting completion. Docker/Podman: `ContainerStats`
-  samples — honest limit: cgroup v2 dropped `max_usage_in_bytes`, so peak is
-  the max of samples and **under-reports spikes shorter than the sample
-  interval**; the OOM flag is the corrective ground truth (an OOM-killed
-  attempt proves peak ≥ limit). Kubernetes: point-in-time usage from
-  `metrics.k8s.io`, which requires metrics-server; when absent, k8s capture
-  degrades to OOM-signal-only and the recommendation engine reports
+  samples — cgroup v2 dropped `max_usage_in_bytes`, so peak is the max of
+  samples and **under-reports spikes shorter than the sample interval**; the
+  OOM flag is the corrective ground truth (an OOM-killed attempt proves peak
+  ≥ limit). Kubernetes: `metrics.k8s.io`, requiring metrics-server; absent
+  it, k8s capture degrades to OOM-signal-only and recommendations report
   "insufficient samples" rather than guessing.
 - **New `TaskRun` columns** (`internal/models/run.go`):
   `PeakMemoryBytes *int64`, `CPUSeconds *float64`, `StatsSource string`
   (`sampled|oom_inferred|none`), `ExitCode *int`, `OOMKilled bool`,
   `AppliedResources datatypes.JSON` (limits the final attempt ran with),
-  `EscalationLevel int`. Earlier attempts' trail rides the execution
-  descriptor (see below).
-- **Prometheus export**: `caesium_task_memory_peak_bytes`,
-  `caesium_task_cpu_seconds_total`, `caesium_task_oom_kills_total` — the
-  §2.5 names, joining the existing `caesium_task_*` family
-  (`internal/metrics/metrics.go:138`).
+  `EscalationLevel int`; earlier attempts' trail rides the execution
+  descriptor. Prometheus export uses the §2.5 names
+  (`caesium_task_memory_peak_bytes`, `caesium_task_cpu_seconds_total`, plus
+  `caesium_task_oom_kills_total`), joining the existing `caesium_task_*`
+  family (`internal/metrics/metrics.go:138`).
 
 ### Applying `resources` through the engines
 
@@ -243,19 +232,19 @@ descriptor → worker. Engine mapping:
 `HashInput`**, following the QueueName precedent
 (`internal/cache/hash.go:329-336`): if limits fed the hash, every
 right-sizing change would bust the cache and recompute the downstream DAG —
-the feature would punish its own adoption. Consequences, stated plainly:
+the feature would punish its own adoption. Consequences, plainly:
 
 - An escalated retry keeps the *same* cache identity as the failed attempt —
   correct, since the computation is unchanged; retries already share one
   hash (computed once before the attempt loop, `internal/job/job.go:998`).
-- `caesium why` / `run diff` will never attribute a re-run to a limits
-  change, and a cached success is reusable regardless of current limits.
+  `caesium why`/`run diff` will never attribute a re-run to a limits change,
+  and a cached success is reusable regardless of current limits.
 - The honest counter-case: unlike QueueName, limits **are visible inside the
   container** (cgroup files; JVM `MaxRAMPercentage`-style self-sizing). A
-  step whose *output* genuinely depends on its memory limit is
-  non-deterministic under this rule. Escape hatches: `cache: false` on the
-  step, or a cache `version` bump alongside a limits change. We accept and
-  document this rather than pretending limits are invisible.
+  step whose *output* depends on its memory limit is non-deterministic under
+  this rule. Escape hatches: `cache: false`, or a cache `version` bump
+  alongside a limits change. We accept and document this rather than
+  pretending limits are invisible.
 - Receipts stay truthful without identity impact: `AppliedResources` and the
   escalation trail land on the TaskRun/descriptor (a descriptor
   schema-version bump — v1 has no resources field), so `caesium receipt get`

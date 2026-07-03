@@ -243,29 +243,28 @@ DAG = never".
   Honest and loud.
 - **Retention bounds backtest depth.** Verified reality: `JobRun`/`TaskRun` rows
   (with their descriptors and outputs) are **not pruned today** — no run pruner
-  exists (only webhook/ingest event stores and rate-limit tokens have retention
-  pruners). But `TaskCache` entries expire via `CacheExpiresAt` +
-  `cache.Store.Prune()` (`internal/cache/store.go:173`), and the shipped replay
+  exists (only webhook/ingest events and rate-limit tokens have retention
+  pruners). But `TaskCache` entries expire (`CacheExpiresAt` +
+  `cache.Store.Prune()`, `internal/cache/store.go:173`), and the shipped replay
   planner **hard-aborts** an unchanged, cache-enabled task whose entry is gone
-  (`replay.go:538`, `ErrUnavailableBaselineProof` "cache entry is unavailable or
-  expired"; only cache-*disabled* tasks fall back to the baseline
-  `TaskRun.Result`). So the practical window for cache-enabled jobs is
-  `min(N requested, runs younger than cache TTL)`. The eligibility report says
-  "run X skipped: cache proof expired (job TTL 168h)"; the docs say **size your
-  cache TTL to your desired backtest depth**. Relaxing the abort to trust the
-  durable baseline `TaskRun.Result` for cache-enabled tasks is a candidate
-  change in the replay layer, decided there, not silently here.
+  (`replay.go:538`, `ErrUnavailableBaselineProof`; only cache-*disabled* tasks
+  fall back to the baseline `TaskRun.Result`). So the practical window for
+  cache-enabled jobs is `min(N requested, runs younger than cache TTL)`. The
+  eligibility report says "skipped: cache proof expired (job TTL 168h)"; the
+  docs say **size your cache TTL to your desired backtest depth**. Relaxing the
+  abort to trust the durable baseline result is a candidate change in the replay
+  layer, decided there, not silently here.
 
-### Scheduling & throttling
+### Scheduling, throttling, env
 
 N replays are N real container workloads. Backtest is a server-side aggregate
-feeding replays into the **existing** dispatch machinery under a cap
-(`CAESIUM_BACKTEST_MAX_PARALLEL_REPLAYS`, default 2), sequenced oldest-first so
+feeding replays into the **existing** dispatch machinery, gated by
+`CAESIUM_BACKTEST_ENABLED` (default `false`) and capped by
+`CAESIUM_BACKTEST_MAX_PARALLEL_REPLAYS` (default 2), sequenced oldest-first so
 partial results are meaningful; the cap keeps quarantined work from starving
-production claims. Re-executing replay requires distributed execution mode today
+production claims. Re-executing replay requires distributed execution mode
 (`ErrReplayRequiresDistributedMode`, `api/rest/service/replay/replay.go:32,146`);
-backtest inherits that requirement for any run that isn't fully cache-served,
-and the error says so.
+backtest inherits that for any run that isn't fully cache-served.
 
 ### Data model
 

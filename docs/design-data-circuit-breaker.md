@@ -163,28 +163,26 @@ percentage/duration syntax, and the `onViolation` enum.
 **1. Truncated feed / bad values.** Nightly load writes 10M rows but 3 bad
 rows upstream corrupted the dedup pass — `dedup_ratio` comes back `0.31`
 against `max: 0.05`. The task succeeds; the evaluator opens a `DatasetHold`
-on `warehouse/transactions_daily`, emits `dataset_held`, and notification
-policies fire **one** alert naming the dataset, producing run, and violated
-assertion with observed-vs-bound values. Overnight, four downstream jobs
-trigger on their crons; each is admission-gated, skips with reason
-`dataset_hold:warehouse/transactions_daily`, and emits an informational
-(non-paging) `run_held_upstream` event. Morning page count: one, at the
-source, with the blast radius (lineage impact of the held dataset) attached.
+on `warehouse/transactions_daily` and fires **one** alert naming the dataset,
+producing run, and violated assertion with observed-vs-bound values.
+Overnight, four downstream jobs trigger on their crons; each is
+admission-gated and skips with reason
+`dataset_hold:warehouse/transactions_daily` (informational, non-paging).
+Morning page count: one, at the source, with the blast radius attached.
 
 **2. False positive: month-end.** On July 31 the row count legitimately lands
-10× baseline; `deltaFromBaseline: 50%` trips. The operator inspects the
+10× baseline; `deltaFromBaseline: 50%` trips. The operator checks the
 baseline sparkline, agrees it is seasonal, and acks:
 `caesium dataset release warehouse/transactions_daily --reason "month-end" --tolerate rowCount.deltaFromBaseline=72h`.
 The hold releases immediately; the named assertion is snoozed on that dataset
 for 72h so follow-up runs don't re-trip. Tolerance windows are the v1 answer
-to seasonality — seasonal baseline *models* are explicitly out of scope.
+to seasonality — seasonal baseline *models* are out of scope.
 
 **3. Clean rerun auto-releases.** The vendor re-ships the file; the operator
 retries the producing run. All assertions pass, so the evaluator releases the
-active hold with `release_reason: clean_run` (recording which run cleared
-it), emits `dataset_released`, and downstream flows again on the next trigger
-— no human ack required. A clean run releases only holds on datasets it
-re-produced, never unrelated holds.
+active hold (`release_reason: clean_run`, recording which run cleared it) and
+downstream flows again on the next trigger — no human ack required. A clean
+run releases only holds on datasets it re-produced, never unrelated holds.
 
 ## Backend design
 
@@ -395,18 +393,17 @@ machine-readable-output gate, asserted by integration tests using
 
 Per the repo's end-to-end gate, every CLI command and endpoint above ships
 with an integration test in `test/` driving the real surface. A
-metrics-emitting script image drives the scenarios: passing run records
-metrics/baselines; violating `hold` run opens exactly one hold + one
-`dataset_held` event; the downstream job's trigger produces a skipped run
-with the hold reason; `caesium dataset release` (stdout-clean `--json`,
-asserted via `runCLIStdout`) reopens the gate; clean rerun auto-releases;
-cold-start runs warn-only; `fail` mode goes red like schema `fail`; disabled
-gate is inert. `CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set on the
-integration server in `just integration-up` so the path executes in CI.
-Distributed parity (worker-executed tasks via `runtime_executor.go` evaluate
-identically; gate decisions leader-safe under concurrent admission) and
-replay isolation (a quarantined replay neither trips nor releases holds) get
-their own scenarios.
+metrics-emitting script image covers: passing run records metrics/baselines;
+violating `hold` run opens exactly one hold + one `dataset_held` event; the
+downstream job's trigger produces a skipped run with the hold reason;
+`caesium dataset release` (stdout-clean `--json`, asserted via
+`runCLIStdout`) reopens the gate; clean rerun auto-releases; cold-start runs
+warn-only; `fail` mode goes red like schema `fail`; disabled gate is inert.
+`CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in `just integration-up` so
+the path executes in CI. Distributed parity (worker path via
+`runtime_executor.go`; leader-safe gate decisions under concurrent admission)
+and replay isolation (a quarantined replay neither trips nor releases holds)
+get their own scenarios.
 
 ## Phasing
 

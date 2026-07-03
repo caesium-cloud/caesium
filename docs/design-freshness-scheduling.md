@@ -17,15 +17,14 @@ why 3 a.m. pages exist:
 - The vendor file usually lands by 03:00, so the extract runs at 03:15. The
   day it lands at 04:30, the extract **fails** and the on-call is paged; the
   "fix" is to wait and press retry. The delayed-file incident class in
-  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) exists almost
-  entirely because time-based scheduling turns "not yet" into "error".
+  [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) exists
+  largely because time-based scheduling turns "not yet" into "error".
 - To be safe, the guess is padded: run hourly "just in case", re-run DAGs
   whose inputs haven't changed. Compute is burned proving nothing happened.
-  (The cache makes the re-run cheap; a run that never starts is cheaper.)
 - The thing consumers actually care about is never stated anywhere: *how
   stale may this table be?* Nobody consumes "the 03:15 run"; they consume
-  `analytics.orders_daily` at most 6 hours out of date. Today that SLO
-  lives in a runbook, if anywhere.
+  `analytics.orders_daily` at most 6h out of date. Today that SLO lives in
+  a runbook, if anywhere.
 
 Freshness-driven scheduling inverts the declaration. Jobs declare the
 datasets their steps produce and consume, and a freshness SLO on each output
@@ -81,9 +80,9 @@ zero-dependency (dqlite rows, the existing event router and cache identity).
                                         (notifications + agent incident)
 ```
 
-The evaluator never starts work directly: a derivation flows through the same
-admission path as every other run, and staleness states are persisted rows —
-survives restart and failover, observable in the UI and CLI.
+A derivation flows through the same admission path as every other run, and
+staleness states are persisted rows — surviving restart and failover,
+observable in the UI and CLI.
 
 ## What exists today (honest inventory)
 
@@ -132,16 +131,16 @@ kind: Job
 metadata:
   alias: orders-daily
   datasets:
-    sources:                        # external datasets nobody in Caesium produces
+    sources:                 # external datasets nobody in Caesium produces
       - name: raw.vendor_x
-        expectedEvery: 24h          # cadence expectation; late ⇒ stale-upstream downstream
-        arrival:                    # event binding — how "it arrived" is signaled
+        expectedEvery: 24h   # cadence expectation; late ⇒ stale-upstream
+        arrival:             # event binding — how "it arrived" is signaled
           event:
             type: "s3:ObjectCreated"
             filter: { "detail.bucket.name": "vendor-x-drop" }
-          watermark: "$.detail.object.key"   # JSONPath into the event payload
+          watermark: "$.detail.object.key"  # JSONPath into event payload
 trigger:
-  type: cron                        # fallback cadence; freshness augments (see Interplay)
+  type: cron                 # fallback cadence; freshness augments
   configuration:
     expression: "0 */6 * * *"
 steps:
@@ -167,10 +166,7 @@ steps:
 ```
 
 The step emits its watermark through the existing zero-SDK contract:
-
-```sh
-echo '##caesium::output {"max_order_ts": "2026-07-03T04:31:00Z"}'
-```
+`echo '##caesium::output {"max_order_ts": "2026-07-03T04:31:00Z"}'`.
 
 ### The watermark / advance contract
 
@@ -281,16 +277,15 @@ Three ways a dataset advances, all existing surfaces:
 
 ### The freshness evaluator (leader-gated, durable)
 
-New package `internal/freshness`. A single evaluator modeled on the
-run-queue dequeuer, **not** the executor trigger loop: constructed with
+New package `internal/freshness`: a single evaluator modeled on the
+run-queue dequeuer, **not** the executor trigger loop — constructed with
 `LeaderCheck: dqlite.IsLocalLeader` in `cmd/start/start.go`, ticking every
 `CAESIUM_FRESHNESS_EVAL_INTERVAL` (default `1m`). Everything it needs
-(`dataset_states`, declarations, derivation dedupe) is in dqlite — no
-in-process timer is ever the only record of a pending decision, so failover
-resumes on the new leader. A reactive fast path subscribes to
-dataset-advance events and immediately evaluates the affected downstream
-slice (bounded by the declared graph, the same BFS shape as `QueryImpact`);
-the timer loop remains the correctness backstop.
+(states, declarations, derivation dedupe) is in dqlite — no in-process timer
+is ever the only record of a pending decision, so failover resumes on the
+new leader. A reactive fast path subscribes to dataset-advance events and
+immediately evaluates the affected downstream slice (the same BFS shape as
+`QueryImpact`); the timer loop remains the correctness backstop.
 
 Per produced dataset with an SLO, the state machine:
 
@@ -347,12 +342,12 @@ evaluator goroutine, no routes, declarations lint-only),
 
 ```
 caesium dataset list [--status stale|violated|...] [--json]
-caesium dataset status <namespace.name> [--json]     # state, SLO, why-last-decision
+caesium dataset status <namespace.name> [--json]   # state, SLO, last decision
 caesium dataset advance <namespace.name> --watermark <v>
-caesium job lint / preview                            # validate + render the dataset graph
+caesium job lint / preview                         # validate + render graph
 ```
 
-Per the repo testing gate: `--json` output goes to stdout, clean and
+Per the repo testing gate, `--json` output goes to stdout, clean and
 parseable, asserted with stdout captured separately from stderr.
 
 ## Frontend (Caesium Console)
@@ -369,9 +364,8 @@ New feature dir `ui/src/features/datasets/`:
    Declared edges render even before the first run.
 3. **Job detail — "why did/didn't this run"**: a derivations panel rendering
    `DatasetDerivation` rows: *"18:00 tick skipped — analytics.orders_daily
-   fresh (2h/6h)"*, *"04:31 derived by raw.vendor_x advance"*.
-4. Run detail shows the consumed-watermark set and which advance derived the
-   run, linking back to the arrival event.
+   fresh (2h/6h)"*, *"04:31 derived by raw.vendor_x advance"*. Run detail
+   shows the consumed-watermark set, linking back to the arrival event.
 
 ## Interplay
 
