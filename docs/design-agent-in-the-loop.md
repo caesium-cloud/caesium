@@ -225,7 +225,12 @@ Pipeline per event:
 2. **Classify.** A deterministic, cheap classifier — no LLM — maps signals to
    a `failure_class`:
    - `atom.Result` (`StartupFailure`, `ResourceFailure` vs `Failure`) →
-     `transient_infra` for the infra shapes
+     `transient_infra` for the infra shapes. Honesty note: `ResourceFailure`
+     is defined but never produced today — every engine maps exit 137 to
+     `Killed` and none reads the runtime OOM flags — so `oom` classification
+     depends on the detection substrate
+     [`design-resource-right-sizing.md`](design-resource-right-sizing.md)
+     builds in its Phase 0.
    - `TaskRun.SchemaViolations` → `schema_violation`
    - `run_timed_out`/`sla_missed` → `sla_risk`
    - exit code + log-tail regex table (configurable, shipped with sane
