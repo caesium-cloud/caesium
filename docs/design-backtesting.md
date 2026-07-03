@@ -91,7 +91,7 @@ Rendered as a PR comment by the §2.1 Action:
 > Both changed runs are **month-end**. Cost: 22 tasks re-executed, 41 cached.
 > [Full report](…) · [Per-run diff](…)
 
-The month-end pattern jumping out of the run matrix *is* the feature: the
+The month-end pattern jumping out of the run matrix *is* the feature: this
 regression only manifests on data shapes staging never has.
 
 ## Scenarios
@@ -387,7 +387,8 @@ with an integration test in `test/` driving the real surface.
 
 - **P0 — same-code backtest (no overrides).** N quarantined replays with an
   empty override set + the output-delta computation, report, and CLI. Zero new
-  execution risk; validates the aggregation/comparison/report plumbing; and it
+  execution risk (exactly the shipped replay risk, N times); validates the
+  aggregation/comparison/report plumbing; and it
   already catches **environment drift** — a moved unpinned tag, a rotated
   secret, or changed source data surface as changed/failed/ineligible runs.
   Independently useful: "is my pipeline deterministic over its recorded inputs?"
@@ -409,7 +410,7 @@ with an integration test in `test/` driving the real surface.
 - **Not topology backtesting.** Added/removed steps have no recorded baseline
   inputs; that stays `job diff` + `dev --once` territory.
 - **Not statistical tolerance in v1.** A delta is a delta; "within 0.1%"
-  thresholds are an open question, not a launch feature.
+  thresholds are open question 4, not a launch feature.
 
 ## Open Questions
 

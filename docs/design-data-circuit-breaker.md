@@ -26,8 +26,7 @@ the world duplicates alerts**: making every consumer validate its inputs and
 fail turns one bad extract into N red runs and N pages, burying the root
 cause under its own symptoms (the noise pattern agent-in-the-loop added
 `suppress_downstream_alerts` to fight after the fact). And **silent poison
-is worst**: with neither check, nobody is paged and the bad numbers reach
-a dashboard or a customer.
+is worst**: nobody is paged, and the bad numbers reach a dashboard.
 
 The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
 is a circuit breaker on the dataset: when what a step *produced* looks
@@ -215,9 +214,8 @@ Baselines are computed on read — median + p10/p90 over the last N clean
 `N = CAESIUM_BASELINE_WINDOW` (default 20); no materialized baseline table,
 since the window is ≤20 small rows per metric. **Cold start:** below
 `CAESIUM_BASELINE_MIN_SAMPLES` (default 5) samples, `deltaFromBaseline`
-assertions are **warn-only** (recorded, surfaced in the UI as "seeding",
-never holding); absolute bounds enforce from run one. Turning the feature
-on is safe by construction.
+assertions are **warn-only** (recorded, shown as "seeding", never holding);
+absolute bounds enforce from run one. Enabling is safe by construction.
 
 ### Dataset identity
 
@@ -340,8 +338,7 @@ via `runCLIStdout`, never the stream-merging capture.
   `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
   bundle carries the violation, baseline, and impact graph; `release_hold`
   joins the action catalog at tier 2 (tier 3 with tolerance windows);
-  `suppress_downstream_alerts` becomes largely unnecessary here since holds
-  alert once by construction.
+  `suppress_downstream_alerts` becomes largely unnecessary for this class.
 - **[`design-backtesting.md`](design-backtesting.md)** — assertions evaluate
   in backtests too, over metrics historical runs emitted: free regression
   signal ("this change would have tripped the breaker on 3 of the last 30
@@ -360,8 +357,8 @@ goes red like schema `fail`; disabled gate is inert.
 `CAESIUM_DATA_ASSERTIONS_ENABLED=true` is set in `just integration-up` so the
 path executes in CI. Distributed parity (worker path via
 `runtime_executor.go`; leader-safe gate under concurrent admission) and
-replay isolation (a quarantined replay neither trips nor releases holds)
-get their own scenarios.
+replay isolation (a quarantined replay never trips or releases holds) get
+their own scenarios.
 
 ## Phasing
 
