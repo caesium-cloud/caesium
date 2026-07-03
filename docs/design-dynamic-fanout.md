@@ -109,7 +109,9 @@ steps:
 ```
 
 Marker forms (parsed in the same single pass as output/branch markers,
-`parseMarkers`, `pkg/task/output.go:374`):
+`parseMarkers`, `pkg/task/output.go:374`); values are strings, trimmed,
+deduplicated preserving first-seen order (the `ParseBranches` posture,
+`pkg/task/output.go:295`):
 
 ```sh
 echo '##caesium::partitions ["2026-07-01","2026-07-02"]'   # JSON array
@@ -117,9 +119,6 @@ ls /drop/*.csv | while read f; do
   echo "##caesium::partition $f"                            # one per line
 done
 ```
-
-Values are strings, trimmed, deduplicated preserving first-seen order (the
-`ParseBranches` posture, `pkg/task/output.go:295`). Limits below.
 
 ## Scenario Walkthroughs
 
@@ -131,12 +130,12 @@ once all 400 are terminal.
 
 **2. Failure at partition 371, then retry.** With `failurePolicy: continue`,
 siblings keep running; the group resolves `failed`, `publish` skips under
-`all_success`, the run fails. The operator runs `caesium run retry <run>` —
-`RetryFromFailure` keeps succeeded/cached rows. `list-files` cache-hits (same
-inputs → same hash), so the 399 succeeded instances' identities (predecessor
-hash + partition value) are unchanged and **cache-hit**; only partition 371
-re-executes. The per-partition caching win needs no new cache machinery — just
-the partition folded into `HashInput` (below).
+`all_success`, the run fails. `caesium run retry <run>` (`RetryFromFailure`
+keeps succeeded/cached rows) re-runs only the failures: `list-files` cache-hits
+(same inputs → same hash), so the 399 succeeded instances' identities
+(predecessor hash + partition value) are unchanged and **cache-hit**; only
+partition 371 re-executes. No new cache machinery — just the partition folded
+into `HashInput` (below).
 
 **3. Empty drop.** `list-files` emits no partitions. With `onEmpty: skip` the
 group resolves `skipped` in the same transaction; `propagateSkipped` semantics
@@ -263,12 +262,9 @@ per-group counter tracks live instances.
 Add `Partition string` to `cache.HashInput` (`internal/cache/hash.go:266`),
 hashed as a `partition:<value>` line **only when non-empty** — the same
 omit-when-absent pattern as `ResolvedImageDigest` (hash.go:301-303), so
-existing cache entries for unfanned tasks keep their keys and no
-`CacheVersion` bump is needed. Mirror the field into `HashInputBlob`
-(hash.go:71) so `caesium why` can name the partition as the discriminating
-field.
-
-Two deliberate contracts:
+unfanned tasks keep their keys and no `CacheVersion` bump is needed. Mirror the
+field into `HashInputBlob` (hash.go:71) so `caesium why` can name the partition
+as the discriminating field. Two deliberate contracts:
 
 - **The partition value is injected env but hashed as a first-class field, not
   smuggled through `Env`.** Both executors deliberately exclude volatile
@@ -356,8 +352,7 @@ caesium job lint --path jobs/          # fanOut validation errors
 caesium dev --once --path job.yaml     # local fan-out with live group progress
 ```
 
-`--json` output on stdout, logs on stderr, per the repo's stdout-cleanliness
-gate (CLAUDE.md testing guidelines).
+`--json` output on stdout, logs on stderr, per the repo's stdout-cleanliness gate.
 
 ## Frontend (Caesium Console)
 
@@ -394,17 +389,16 @@ propagation to instances is mandatory (`TaskRun.Quarantine`, run.go:82).
 Per the repo gate, every surface ships with a `test/` integration scenario
 driving the real binary/server (no hand-seeded rows):
 
-1. Apply a fan-out job; producer emits 5 partitions; assert 5 instances run,
-   each sees `CAESIUM_PARTITION`, fan-in runs once, aggregate env visible
-   downstream.
+1. Happy path: producer emits 5 partitions; 5 instances run, each sees
+   `CAESIUM_PARTITION`; fan-in runs once with the aggregate env visible.
 2. Failure matrix: `fail_fast` cancels pending siblings; `continue` resolves
    the group failed after all siblings; downstream `all_done` still runs.
 3. Retry: fail one partition, `caesium run retry`, assert the 4 unchanged
    instances **cache-hit** (per-partition identity) and only one re-executes.
 4. `onEmpty` both modes; caps (1025 partitions fails the producer loudly).
-5. Distributed lane: expansion under `CAESIUM_EXECUTION_MODE=distributed`;
-   worker crash mid-group → lease reclaim → siblings unaffected; rate-limit
-   parking + drain with no over-issue.
+5. Distributed lane (`CAESIUM_EXECUTION_MODE=distributed`): expansion; worker
+   crash mid-group → lease reclaim, siblings unaffected; rate-limit parking +
+   drain with no over-issue.
 6. CLI: `run partitions --json` stdout clean and parseable (`runCLIStdout`,
    never the stream-merging capture); partition retry end-to-end.
 7. Playwright: grouped DAG node, partition table, per-partition retry.

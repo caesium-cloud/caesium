@@ -66,36 +66,34 @@ Quoting the six principles from [`roadmap.md`](roadmap.md):
 
 Read before designing; every later claim builds on these:
 
-- **`container.Spec` carries no resource fields.** Its complete field set is
-  `Env`, `WorkDir`, `Mounts`, `ResolvedVolumeMounts`, `Kubernetes`
-  (`pkg/container/spec.go:99-105`). No step, in any engine, can request or
-  limit CPU/memory today.
-- **No engine applies limits.** Docker `Create` builds a `HostConfig` only to
-  carry mounts (`internal/atom/docker/engine.go:112-115`) and never sets
-  `Resources`; the Kubernetes pod spec sets image/command/env/mounts and no
-  `Resources` (`internal/atom/kubernetes/engine.go:132-150`); podman likewise.
-- **`atom.ResourceFailure` is dead code.** It is defined
-  (`internal/atom/atom.go:134`) and the run store even has a human message
-  for it ("atom exhausted resources (e.g. OOM)",
-  `internal/run/store.go:2991`), but no engine ever returns it: all three
-  engines map exit codes through a `resultMap` where `137 → atom.Killed`
+- **`container.Spec` carries no resource fields** — its complete field set
+  is `Env`, `WorkDir`, `Mounts`, `ResolvedVolumeMounts`, `Kubernetes`
+  (`pkg/container/spec.go:99-105`) — and **no engine applies limits**:
+  Docker `Create` builds a `HostConfig` only to carry mounts
+  (`internal/atom/docker/engine.go:112-115`), the Kubernetes pod spec sets
+  no `Resources` (`internal/atom/kubernetes/engine.go:132-150`), podman
+  likewise. No step, in any engine, can request or limit CPU/memory today.
+- **`atom.ResourceFailure` is dead code.** Defined at
+  `internal/atom/atom.go:134`, with a human message already waiting in the
+  run store ("atom exhausted resources (e.g. OOM)",
+  `internal/run/store.go:2991`) — but no engine ever returns it. All three
+  map exit codes through a `resultMap` where `137 → atom.Killed`
   (`internal/atom/docker/docker.go:25-33`,
   `internal/atom/kubernetes/kubernetes.go:21-29`,
-  `internal/atom/podman/podman.go:27-35`). None consults Docker's
-  `State.OOMKilled` flag, Kubernetes' `ContainerStateTerminated.Reason ==
-  "OOMKilled"` (the terminated state is already fetched at
-  `internal/atom/kubernetes/atom.go:93-103` — only its `ExitCode` is read),
+  `internal/atom/podman/podman.go:27-35`); none consults Docker's
+  `State.OOMKilled`, Kubernetes' `ContainerStateTerminated.Reason ==
+  "OOMKilled"` (the terminated state is fetched at
+  `internal/atom/kubernetes/atom.go:93-103` but only its `ExitCode` read),
   or podman's `InspectContainerState.OOMKilled`. **An OOM today is recorded
   as `killed`, indistinguishable from an operator SIGKILL.**
 - **No stats collection.** The `Engine` interface is
-  Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — roadmap
-  §2.5's `Stats()` method does not exist, and `TaskRun`
-  (`internal/models/run.go:45-145`) has no memory/CPU columns and no exit
-  code. **This design therefore DEPENDS on §2.5's stats capture and scopes
-  Phase 0 to build the minimal slice it needs.**
+  Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — §2.5's
+  `Stats()` does not exist — and `TaskRun` (`internal/models/run.go:45-145`)
+  has no memory/CPU columns and no exit code. **This design DEPENDS on
+  §2.5's stats capture and scopes Phase 0 to the minimal slice it needs.**
 - **The retry loops are the escalation hook, and they are asymmetric.**
   Local: `internal/job/job.go:1055-1198` loops attempts
-  (`maxAttempts = Retries+1`, delay from `computeRetryDelay`,
+  (`maxAttempts = Retries+1`; `computeRetryDelay`,
   `internal/job/failure_policy.go:31-39`; persisted via `store.RetryTask`,
   `job.go:1182`) — but it only retries *execution errors*; a container that
   runs and exits unsuccessfully is completed with that result and returned
@@ -103,20 +101,19 @@ Read before designing; every later claim builds on these:
   (`internal/worker/runtime_executor.go:307-376`) *does* retry unsuccessful
   results — `executeTask` converts them to an error
   (`runtime_executor.go:584-585`) — persisting via `RetryTaskClaimed`
-  (`:356`). OOM escalation must make the OOM class retryable in the local
-  loop too, or the feature silently works only in distributed mode.
+  (`:356`). Escalation must make the OOM class retryable in the local loop
+  too, or the feature silently works only in distributed mode.
 - **Resource limits do not feed cache identity — because they can't exist
   yet.** `cache.HashInput` (`internal/cache/hash.go:266-287`) hashes
   image/command/env/mounts/K8s-identity-fields/predecessors/params. The
-  precedent we need exists: `KubernetesSpec.QueueName` is deliberately
+  needed precedent exists: `KubernetesSpec.QueueName` is deliberately
   excluded as "scheduling metadata, not an execution input"
   (`internal/cache/hash.go:329-336`, `pkg/container/spec.go:76-81`).
-- **In distributed mode the worker applies the spec.** The claimed worker
-  builds the container from `descriptor.ContainerSpec`
-  (`internal/worker/runtime_executor.go:153`) on its own node — resources
-  flowing through `container.Spec` reach workers with zero new plumbing, but
-  *escalation state must persist on the row*: a lease-expired task is
-  re-claimed by a worker that sees only `TaskRun.Attempt`.
+- **In distributed mode the worker applies the spec** from
+  `descriptor.ContainerSpec` (`internal/worker/runtime_executor.go:153`) on
+  its own node — resources in `container.Spec` reach workers with zero new
+  plumbing, but *escalation state must persist on the row*: a lease-expired
+  task is re-claimed by a worker that sees only `TaskRun.Attempt`.
 - **Git provenance exists for PR routing.** `Job` carries
   `ProvenanceSourceID/Repo/Ref/Commit/Path` (`internal/models/job.go:19-23`),
   maintained by the git sync in `internal/jobdef/git/`.
@@ -178,14 +175,14 @@ steps:
 Semantics, all lint-enforced (`caesium job lint`):
 
 - `resources` without `rightSizing` is valid: static limits, no learning.
-- `rightSizing` requires `resources` (there must be a declared baseline) and
+- `rightSizing` requires `resources` (a declared baseline) and
   `memory.max ≥ resources.memory ≥ memory.min`.
-- `mode: suggest` computes and surfaces recommendations but never mutates.
-  `auto` may apply them within `[min, max]` — and on git-synced jobs "apply"
-  *means opening a PR*, never a direct write (see Backend).
-- `onOOM` works in every mode including `off`-with-`onOOM` explicitly
-  declared; escalation is memory-only (CPU exhaustion throttles, it does not
-  kill — CPU is right-sized only via suggestions).
+- `suggest` computes recommendations but never mutates; `auto` may apply
+  within `[min, max]` — on git-synced jobs "apply" *means opening a PR*,
+  never a direct write (see Backend).
+- `onOOM` works in every mode, including alongside `mode: off`; escalation
+  is memory-only (CPU exhaustion throttles rather than kills — CPU is
+  right-sized only via suggestions).
 
 ## Backend
 
@@ -228,23 +225,21 @@ independently needs `TaskRun.ExitCode`):
 ### Applying `resources` through the engines
 
 Add `Resources *container.Resources` (`memory`, `cpu` as k8s-style quantity
-strings, parsed once at lint/apply) to `container.Spec`. Because `Step`
-embeds `container.Spec` inline (`pkg/jobdef/definition.go:214-247`) and
+strings, parsed at lint/apply) to `container.Spec`. Because `Step` embeds
+`container.Spec` inline (`pkg/jobdef/definition.go:214-247`) and
 `RuntimeSpecForStep` (`definition.go:959-1016`) persists the resolved spec
 onto the atom model, the field flows automatically: YAML → atom →
 `runner.spec` (local, `internal/job/job.go:555-559`) and YAML → execution
-descriptor → worker (`internal/worker/runtime_executor.go:153`). Engines map
-it natively:
+descriptor → worker. Engine mapping:
 
 - Docker/Podman: `HostConfig.Resources.Memory` / `NanoCPUs` (resp. specgen
   `ResourceLimits`). Honest limit: these are limits only — Docker has no
   admission, so oversubscription protection on plain hosts is the kernel's
   OOM killer, which is exactly the signal we now catch.
-- Kubernetes: `resources.requests = resources.limits` for memory (Guaranteed
-  semantics, no surprise eviction), `requests` only for CPU by default
-  (burstable CPU). Changing memory requests changes **Kueue admission**
-  arithmetic for `kueue:`-queued steps — disclosed in docs; the recommendation
-  UI shows the request delta for queued steps.
+- Kubernetes: `requests = limits` for memory (Guaranteed semantics),
+  `requests` only for CPU (burstable). Changing memory requests changes
+  **Kueue admission** arithmetic for `kueue:`-queued steps — disclosed; the
+  recommendation UI shows the request delta for queued steps.
 
 ### Cache identity: stated honestly
 
@@ -348,16 +343,14 @@ steady state.
 
 ### Data model & REST
 
-- `TaskRun` columns as in Phase 0 (stats, OOM, applied resources,
-  escalation level). No new tables in the core loop.
-- `resource_recommendations` (optional cache, Phase 3): job/task refs,
-  window stats JSON, suggested values, computed-at; recomputed lazily on
-  read staleness. Append-mostly, small.
+- `TaskRun` columns as in Phase 0 (stats, OOM, applied resources, escalation
+  level) — no new tables in the core loop; `resource_recommendations` is an
+  optional lazily-recomputed cache table in Phase 3.
 - Endpoints (Echo controllers beside `api/rest/controller/stats/`):
   - `GET /v1/jobs/:id/resources` — per-step declared vs observed
     (p50/p99/max/OOM count over window) + suggestion + utilization.
-  - `POST /v1/jobs/:id/resources/apply` — provenance-routed apply of the
-    current suggestion (operator-authenticated; body may narrow to steps).
+  - `POST /v1/jobs/:id/resources/apply` — provenance-routed apply
+    (operator-authenticated; body may narrow to steps).
   - `GET /v1/stats/resources` — fleet rollup: top overprovisioned steps,
     reclaimable bytes, OOM leaderboard. Complements §2.5's planned
     `/v1/jobs/:id/costs`, which multiplies these same columns by a cost
@@ -365,16 +358,15 @@ steady state.
 
 ### Config (env, `pkg/env/env.go`, envconfig pattern per `env.go:143`)
 
-- `CAESIUM_RESOURCE_STATS_ENABLED` (default `false`) — Phase 0 master gate
-  (stats sampling + OOM reclassification).
-- `CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL` (default `10s`).
+- `CAESIUM_RESOURCE_STATS_ENABLED` (default `false`) — Phase 0 gate (stats
+  sampling + OOM reclassification);
+  `CAESIUM_RESOURCE_STATS_SAMPLE_INTERVAL` (default `10s`).
 - `CAESIUM_RIGHT_SIZING_ENABLED` (default `false`) — recommendations,
   escalation, apply routes; off ⇒ no routes bound, `resources:` still
-  applies statically.
-- `CAESIUM_RIGHT_SIZING_WINDOW_RUNS` (20), `CAESIUM_RIGHT_SIZING_PERCENTILE`
-  (99), `CAESIUM_RIGHT_SIZING_HEADROOM` (0.2), `CAESIUM_RIGHT_SIZING_MIN_SAMPLES` (5).
-- `CAESIUM_GIT_WRITE_CREDENTIALS` (or extending the git-sync source config
-  with a write token) — enables the PR route; absent ⇒ degrade to suggest.
+  applies statically. Tuning: `..._WINDOW_RUNS` (20), `..._PERCENTILE` (99),
+  `..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5).
+- `CAESIUM_GIT_WRITE_CREDENTIALS` (or a write token on the git-sync source
+  config) — enables the PR route; absent ⇒ degrade to suggest.
 
 ## CLI
 
@@ -463,14 +455,14 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
 
 ## Phasing
 
-- **Phase 0 — See truthfully (no behavior change beyond result honesty).**
-  `Stats()` + sampling for Docker/Podman, terminated-state capture for K8s,
-  OOM reclassification to `ResourceFailure`, `TaskRun` columns incl.
-  `ExitCode`, Prometheus metrics. This *is* roadmap §2.5 items 1–2 and
-  co-delivers agent-doc Phase 0's exit-code need — build once.
+- **Phase 0 — See truthfully.** `Stats()` + sampling for Docker/Podman,
+  terminated-state capture for K8s, OOM reclassification to
+  `ResourceFailure`, `TaskRun` columns incl. `ExitCode`, Prometheus metrics.
+  This *is* roadmap §2.5 items 1–2 and co-delivers agent-doc Phase 0's
+  exit-code need — build once.
 - **Phase 1 — Declare.** `resources:` through all three engines, lint,
   descriptor schema bump, cache-identity exclusion test, distributed flow.
-  (Independently valuable: today Caesium cannot set limits at all.)
+  Independently valuable: today Caesium cannot set limits at all.
 - **Phase 2 — Escalate.** `onOOM` ladder in both executors, local-loop
   retryability fix, persisted escalation state, attempt-trail UI.
 - **Phase 3 — Suggest.** Recommendation engine, REST + `caesium job
@@ -481,20 +473,20 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
 ## Non-Goals (v1)
 
 - **No cluster autoscaling or bin-packing** — placement stays delegated
-  (Kueue for K8s; the kernel for plain hosts). Caesium sizes containers, it
+  (Kueue on K8s; the kernel on plain hosts). Caesium sizes containers, it
   does not schedule nodes.
 - **No mid-run resize** — no VPA-style in-place pod resize, even where K8s
   supports it; escalation happens *between attempts*, never inside one.
 - **No Beam/Dataflow-style resharding** of a running computation — the
   horizontal analog is
   [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory (whose
-  fan-out children inherit the template step's `resources`, a deliberate
+  fan-out children inherit the template step's `resources` — a deliberate
   composition point).
-- **No cost/dollar modeling** — that is §2.5's cost-model layer, which will
-  multiply the columns this design persists; substrate shared, scope not.
+- **No cost/dollar modeling** — §2.5's cost layer multiplies the columns
+  this design persists; substrate shared, scope not.
 - **No per-run manual resource overrides** — sizing is learned or declared,
-  not a run-start parameter (which would feed `HashInput` via params and
-  reopen the identity question by the back door).
+  not a run param (params feed `HashInput`, which would reopen the identity
+  question by the back door).
 
 ## Open Questions
 

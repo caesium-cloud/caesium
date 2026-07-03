@@ -49,33 +49,25 @@ next to the code review.
 
 A **backtest** is an aggregate over N quarantined replay runs, one per selected
 baseline production run, each executed with a **candidate override** applied to
-the reconstructed descriptors — a new image (by digest), a changed command, a
-changed schema, or param changes — plus an **output-delta computation** comparing
-each replay's task outputs against its baseline's recorded outputs.
+the reconstructed descriptors — a new image (by digest), a changed command or
+schema, or param changes — plus an **output-delta computation** comparing each
+replay's task outputs against its baseline's recorded outputs.
 
 ```
-baseline runs (last 30)          candidate (PR head)
-  ┌─ run 2026-06-03 ─┐
-  ├─ run 2026-06-04 ─┤   ×   image: transform:pr-412@sha256:…
-  ├─ …               ─┤
-  └─ run 2026-07-02 ─┘
-        │
-        ▼  N quarantined replays (descriptor-reconstructed, override applied)
-        ▼  per-run output delta (TaskRun.Output + output-ref digests, ignore-paths)
-        ▼
-  Backtest report: 28 unchanged · 2 changed · 0 failed  →  PR comment
+baseline runs (last 30)  ×  candidate image transform:pr-412@sha256:…
+   ▼  N quarantined replays (descriptor-reconstructed, override applied)
+   ▼  per-run output delta (TaskRun.Output + output-ref digests, ignore-paths)
+   Backtest report: 28 unchanged · 2 changed · 0 failed  →  PR comment
 ```
 
 Everything inherits the quarantined-replay safety model
 ([`design-quarantined-replay.md`](design-quarantined-replay.md)): replay runs are
 `Quarantine=true`, write no production cache, emit no lineage, fire no
 callbacks/notifications, pollute no metrics or run lists, and are gated by the
-baseline-recorded `replaySafe` mark. What backtesting *adds* — executing code that
-did **not** run at baseline — is the central new risk and gets its own section.
+baseline-recorded `replaySafe` mark. What backtesting *adds* — executing code
+that did **not** run at baseline — is the central new risk (see Safety).
 
 ## UX Example
-
-From a PR branch, against the server:
 
 ```sh
 $ caesium backtest --job daily-revenue --against last-30-runs \
@@ -156,13 +148,12 @@ Teams that want backtesting adopt `replaySafe: true` now so history accumulates.
 This does not exist today and must not be hand-waved. The shipped replay
 `Request` is `{BaselineRunID, Set, ReplayFingerprint}`
 (`internal/replay/replay.go:77`): **params are the only overridable input.**
-Image, command, env, schema all come pinned from the descriptor —
-`computeDescriptorHash` reads `desc.Runtime.Image` /
-`desc.Runtime.ResolvedImageDigest` / `desc.Runtime.Command` (replay.go:474-506),
-and `taskRunRecord` stamps the replay `TaskRun` from the same descriptor fields
-(replay.go:817-860). That pinning is the identical-code guarantee replay sells.
-
-Backtesting extends the request with a typed, per-step override set:
+Image, command, env, and schema all come pinned from the descriptor —
+`computeDescriptorHash` reads `desc.Runtime.Image` / `ResolvedImageDigest` /
+`Command` (replay.go:474-506), and `taskRunRecord` stamps the replay `TaskRun`
+from the same descriptor fields (replay.go:817-860). That pinning is the
+identical-code guarantee replay sells. Backtesting extends the request with a
+typed, per-step override set:
 
 ```go
 type StepOverride struct {
@@ -209,11 +200,10 @@ transfer. This is the top risk and is treated in Safety below.
 
 ### Output-delta computation
 
-`RunDiff` today is cache-bust attribution: it diffs persisted `HashInput` blobs
-and statuses (`internal/run/rundiff.go:91`, `DiffHashInputBlobs`) — it explains
-*why a task re-ran*, and for a backtest the answer is always "you changed the
-image", which is not the question. Backtest needs the other half: **did the
-outputs change?**
+`RunDiff` today is cache-bust attribution — it diffs persisted `HashInput` blobs
+and statuses (`internal/run/rundiff.go:91`, `DiffHashInputBlobs`), explaining
+*why a task re-ran*; for a backtest that answer is always "you changed the
+image". Backtest needs the other half: **did the outputs change?**
 
 - **Comparison anchor:** per task, baseline `TaskRun.Output` (typed JSON
   key→value map, ≤64 KB total per `pkg/task/output.go` `MaxOutputBytes`) vs the
@@ -381,13 +371,13 @@ push by default.
 ## Safety
 
 **The problem, front and center: quarantine does not sandbox the container, and
-the candidate code is by definition unvetted.** Shipped replay's risk story
-leaned on two facts: the re-executed code already ran in production once, and a
-human marked it `replaySafe`. Backtest keeps the second and *loses the first*.
-A candidate image runs with the baseline's real mounts, secrets (identity-
-verified, then resolved), network egress, and workload identity. A malicious or
-buggy candidate can write to the production warehouse 30 times. Caesium-internal
-suppression (cache/lineage/callbacks/metrics/SSE — all inherited, enforced at
+candidate code is by definition unvetted.** Shipped replay's risk story leaned
+on two facts — the code already ran in production once, and a human marked it
+`replaySafe`. Backtest keeps the second and *loses the first*: a candidate image
+runs with the baseline's real mounts, secrets, network egress, and workload
+identity, and a buggy or malicious candidate can write to the production
+warehouse 30 times. Caesium-internal suppression
+(cache/lineage/callbacks/metrics/SSE — inherited, enforced at
 `internal/worker/runtime_executor.go:116-124,288-352` and the `run.Store` metric
 gates) does nothing about external effects.
 
@@ -457,18 +447,17 @@ with an integration test in `test/` driving the real surface.
 ## Non-Goals
 
 - **Not CI for data quality.** Backtest compares candidate vs baseline over
-  *recorded history*; it does not judge whether tonight's fresh production data
-  is sane — that is the circuit-breaker problem
+  *recorded history*; judging whether tonight's fresh data is sane is the
+  circuit-breaker problem
   ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)).
-- **Not a staging environment.** No environment redirection, no synthetic data,
-  no alternate namespaces (explicitly cut from replay v1; still cut here).
+- **Not a staging environment.** No environment redirection, synthetic data, or
+  alternate namespaces (explicitly cut from replay v1; still cut here).
 - **Not row/column dataset diffing.** Deltas are over typed step outputs and
-  output-ref digests; value-level dataset diffs remain a Datafold/dbt handoff,
-  per the data-plane-memory non-goals.
-- **Not topology backtesting.** Added/removed steps and edge changes have no
-  recorded baseline inputs; that stays `job diff` + `dev --once` territory.
-- **Not statistical tolerance in v1.** A delta is a delta; "changed but within
-  0.1%" thresholds are an open question, not a launch feature.
+  output-ref digests; value-level dataset diffs remain a Datafold/dbt handoff.
+- **Not topology backtesting.** Added/removed steps have no recorded baseline
+  inputs; that stays `job diff` + `dev --once` territory.
+- **Not statistical tolerance in v1.** A delta is a delta; "within 0.1%"
+  thresholds are an open question, not a launch feature.
 
 ## Open Questions
 
@@ -491,20 +480,16 @@ with an integration test in `test/` driving the real surface.
 ## Related Documents
 
 - [`design-quarantined-replay.md`](design-quarantined-replay.md) — the inherited
-  safety model: quarantine carriers, suppression audit, `replaySafe`, descriptor
-  and secret-identity rules. Authoritative for every invariant backtest reuses.
+  safety model (quarantine carriers, suppression audit, `replaySafe`, descriptor
+  and secret-identity rules); authoritative for every invariant reused here.
 - [`design-data-plane-memory.md`](design-data-plane-memory.md) — the substrate
-  that recorded everything backtest replays: descriptors, HashInput blobs,
-  digests, output refs.
-- [`design-reproduce.md`](design-reproduce.md) — sibling proposal on the same
-  descriptor substrate: single-task, local, pull-one-run-onto-my-laptop
-  reproduction; backtest is the N-run, server-side, pre-merge counterpart.
+  that recorded everything backtest replays.
+- [`design-reproduce.md`](design-reproduce.md) — same descriptor substrate,
+  single-task local reproduction; backtest is the N-run server-side counterpart.
 - [`design-contract-enforcement.md`](design-contract-enforcement.md) — the
-  *static* half of pre-merge safety (schema/contract checks at lint/apply time);
-  backtest is the *dynamic* half (observed behavior over recorded history).
+  *static* half of pre-merge safety; backtest is the *dynamic* half.
 - [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) — runtime
   data-quality gating on fresh data; complementary, explicitly not this design.
-- [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) — the remediation
-  agent can attach a backtest report as machine-checkable evidence when proposing
-  a jobdef patch for human approval.
+- [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) — the agent can
+  attach a backtest report as evidence when proposing a jobdef patch.
 - [`roadmap.md`](roadmap.md) §2.1 — the PR-preview-runs Action this ships inside.
