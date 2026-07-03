@@ -131,7 +131,7 @@ steps:
       cpu:    {min: 250m,  max: "2"}
       onOOM: {factor: 1.5, maxEscalations: 2}
       # next OOM attempt = applied × factor (quantized);
-      # maxEscalations = extra OOM-only attempts beyond `retries`
+      # maxEscalations = extra OOM-only attempts beyond retries
 ```
 
 Semantics, lint-enforced: `resources` without `rightSizing` is valid (static
@@ -217,10 +217,10 @@ Hook: the existing per-attempt loops, both executors.
 - **Attempt budget.** At registration (`internal/run/store.go:1178-1180`
   stamps `MaxAttempts = Retries+1` today), stamp
   `MaxAttempts = Retries + 1 + onOOM.maxEscalations`. Escalation attempts
-  are *class-gated*: consumable only when the previous attempt classified as
-  OOM; a plain failure that exhausted `Retries` fails even if escalation
-  attempts remain. One accounting spine (the existing columns), with
-  `EscalationLevel` recording how many consumed attempts were escalations.
+  are *class-gated*: consumable only when the previous attempt classified
+  as OOM; a plain failure that exhausted `Retries` fails even if escalation
+  attempts remain. One accounting spine — the existing columns plus
+  `EscalationLevel`.
 - **Escalation step.** Next attempt's memory =
   `min(applied × factor, memory.max)`, quantized up to 64Mi. Already at
   `memory.max` ⇒ no attempt consumed: fail now, classified, trail attached —
@@ -233,10 +233,9 @@ Hook: the existing per-attempt loops, both executors.
   `EscalationLevel` and the next attempt's `AppliedResources`, so a
   re-claimed task resumes at the escalated size. The run-level
   `RetryFromFailure` (`internal/run/store.go:4614+`) resets `attempt` to 1
-  and must also reset escalation state. (Per the sibling doc's finding, that
-  path bypasses concurrency admission and `Job.Paused`; no new caller here.)
-  A success-after-escalation is also the strongest learning signal — see
-  the censored-observation rule below.
+  and must also reset escalation state. (Per the sibling doc's finding,
+  that path bypasses concurrency admission and `Job.Paused`; no new caller
+  here.)
 
 ### Recommendation engine
 
@@ -253,12 +252,13 @@ cpu     = same over CPU-seconds / duration (suggestion only)
 Guard rails: minimum sample count (default 5); downward suggestions
 suppressed while the §2.5 anomaly condition holds (latest run > 2× rolling
 average); OOM-killed attempts are censored observations (peak ≥ limit)
-forcing the suggestion to at least `applied × onOOM.factor`. Deliberately
+forcing the suggestion to at least `applied × onOOM.factor` — and a
+success-after-escalation is the strongest signal of all. Deliberately
 percentile-plus-headroom, not a model — boring, explainable, auditable.
 Quarantined replays and [`design-backtesting.md`](design-backtesting.md)
 runs are excluded (`quarantine IS NOT TRUE`, the established filter), as
-are backfill storms unless opted in — backfill inputs differ systematically
-from steady state.
+are backfill storms unless opted in — backfill inputs differ from steady
+state systematically.
 
 ### Applying: provenance-routed, reusing the agent-doc router
 
@@ -319,8 +319,8 @@ the attempt trail — per-attempt applied limits with OOM badges ("attempt 1
 OOMKilled at 1Gi → attempt 2 at 1.5Gi ✓"): the receipt-grade evidence view.
 **RunDetailPage** gets an anomaly ribbon when a run's peak exceeded 2× the
 rolling average (the §2.5 rule); the **stats page** gets a fleet reclaim
-view (top overprovisioned steps, reclaimable memory, OOM leaderboard), with
-a pending-suggestion count joining `useNavCounts.ts`.
+view (top overprovisioned steps, reclaimable memory, OOM leaderboard), a
+pending-suggestion count joining `useNavCounts.ts`.
 
 ## Safety
 
@@ -342,8 +342,7 @@ a pending-suggestion count joining `useNavCounts.ts`.
 - **Agent composition:** with the agent doc enabled, `oom` becomes a
   deterministic rule deferring to in-run escalation; an incident opens only
   when bounds exhaust, arriving pre-diagnosed ("OOMKilled at 4Gi and 6Gi;
-  bound max 6Gi; raise `memory.max`" — a tier-3 jobdef-patch proposal with
-  the trail attached).
+  raise `memory.max`" — a tier-3 jobdef-patch proposal, trail attached).
 
 ## Testing
 
@@ -393,10 +392,10 @@ precedent.
 ## Non-Goals (v1)
 
 - **No cluster autoscaling or bin-packing** — placement stays delegated
-  (Kueue on K8s; the kernel on plain hosts). Caesium sizes containers, not
-  nodes.
-- **No mid-run resize** — no VPA-style in-place pod resize, even where K8s
-  supports it; escalation happens *between attempts*, never inside one.
+  (Kueue on K8s; the kernel on plain hosts): Caesium sizes containers, not
+  nodes. **No mid-run resize** — no VPA-style in-place pod resize, even
+  where K8s supports it; escalation happens *between attempts*, never
+  inside one.
 - **No Beam/Dataflow-style resharding** of a running computation — the
   horizontal analog is
   [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory, whose
