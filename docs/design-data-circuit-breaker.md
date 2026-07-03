@@ -12,11 +12,10 @@
 Caesium's data contracts today are structural: `outputSchema` is validated
 post-task (`internal/run/schema_validation.go`), violations persist on the
 `TaskRun`, and `metadata.schemaValidation: warn|fail` decides whether the
-task goes red. That catches *shape* problems — not the failures that actually
-poison consumers: the extract "succeeds" on a truncated vendor file (900 rows
-instead of 10 million, schema perfectly valid); a join key goes 40% null
-after an upstream refactor; the watermark stops advancing and today's
-partition silently carries yesterday's data.
+task goes red. That catches *shape* problems — not the failures that
+actually poison consumers: the extract "succeeds" on a truncated vendor file
+(900 rows instead of 10 million, schema perfectly valid); a join key goes
+40% null after a refactor; the watermark stalls on yesterday's data.
 
 Three properties make this failure class worse than a red run. **Bad data
 propagates further than bad runs**: a failed task stops its own DAG, but a
@@ -135,8 +134,7 @@ Semantics: `warn` records the violation (like `schemaValidation: warn`);
 the work is done, and failing it would just invite a retry of the same data —
 but holds the dataset. A missing declared metric is itself a violation — a
 step that stops emitting `rowCount` must not silently pass. `caesium job
-lint` validates dataset names, `consumes` resolvability, percentage/duration
-syntax, and the `onViolation` enum.
+lint` validates dataset names, `consumes` resolvability, and syntax.
 
 ## Scenario walkthroughs
 

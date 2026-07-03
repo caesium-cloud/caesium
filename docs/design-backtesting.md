@@ -8,8 +8,7 @@ Pipeline changes are deployed on faith. CI proves the YAML lints and maybe that
 the job runs once against synthetic or staging data; the first real test is
 tonight's production run — production skew, month-end edge cases, the vendor
 file with the weird encoding. Staging data is not production data, so the
-regression is discovered by the *consumer*, and someone reconstructs it with
-`caesium run diff` after the fact.
+regression is discovered by the *consumer* and reconstructed after the fact.
 
 Every mainstream orchestrator has this gap, because none *records* what a
 production run consumed and produced in re-executable form. Caesium does: the
@@ -364,8 +363,8 @@ Layered posture, honest about which layers are enforcement and which are not:
 
 ## Testing
 
-Per the repo gate (CLAUDE.md), every new CLI command and REST endpoint ships
-with an integration test in `test/` driving the real surface.
+Per the repo gate, every new CLI command and REST endpoint ships with a `test/`
+integration test driving its real surface.
 
 - Integration (`just integration-test`, distributed server): seed a `replaySafe`
   job, run it N times with varying params/outputs. P0 (no override): 100%
@@ -379,8 +378,7 @@ with an integration test in `test/` driving the real surface.
 - Unit: override→hash plumbing (only the intended step's `HashInput` field
   changes; upstream hashes byte-identical), ignore-path globbing, fingerprint
   derivation, verdict classification, dry-run plan math.
-- E2e (Playwright): report view, heat strip, drill-down into RunDiffView, with
-  an auth-enabled lane.
+- E2e (Playwright): report view, heat strip, RunDiffView drill-down, auth lane.
 
 ## Phasing
 
@@ -395,7 +393,7 @@ with an integration test in `test/` driving the real surface.
   overrides with the safety gates above; the endpoint capability split;
   `--path candidate.job.yaml` delta extraction. This is the headline.
 - **P2 — PR-comment integration.** The §2.1 Action step, `--format markdown`,
-  dry-run-then-label cost guard. Console heat strip can land alongside P1.
+  the dry-run-then-label cost guard. Console heat strip lands alongside P1.
 
 ## Non-Goals
 
