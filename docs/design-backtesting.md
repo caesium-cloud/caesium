@@ -1,0 +1,510 @@
+# Design: Pipeline Backtesting — Regression-Test a Change Against Recorded Production History
+
+> Status: Brainstorm/Design — proposal for a pre-merge verb that replays a candidate change over the last N production runs' recorded inputs and reports output deltas per run. Composes shipped primitives (quarantined replay, execution descriptors, receipts, causal run diff); requires one significant piece of new machinery (controlled descriptor overrides) with its own safety analysis.
+
+## Problem
+
+Pipeline changes are deployed on faith. CI proves the YAML lints and maybe that
+the job runs once against synthetic or staging data; then it merges, and the
+first real test is tonight's production run — production skew, month-end edge
+cases, the vendor file with the weird encoding. Staging data is not production
+data, so the regression is discovered by the *consumer*: a dashboard shows wrong
+numbers, and someone runs `caesium run diff` after the fact.
+
+Every mainstream orchestrator has this gap, because none of them *records* what a
+production run consumed and produced in a re-executable form. Caesium does: the
+data-plane-memory substrate persists, per task run, an immutable
+`TaskExecutionDescriptor` (the complete effective runtime envelope —
+`internal/models/run.go:154`), the decomposed `HashInput` blob, typed step outputs
+(`TaskRun.Output`, `internal/models/run.go:80`), resolved image digests, and a
+content-addressed receipt (`internal/receipt/receipt.go`). Quarantined replay
+(`internal/replay/replay.go`) already re-executes a historical run from those
+descriptors with Caesium-internal side effects suppressed; causal run diff
+(`internal/run/rundiff.go`) already attributes *why* two runs differ.
+
+Backtesting is the composition: **before merge, replay the candidate change over
+the last N production runs' recorded inputs and report output deltas per run** —
+"your change alters output for 2 of 30 days; here is the diff" — as a PR comment,
+next to the code review.
+
+## Fit with Design Principles
+
+- **Declarative and GitOps-first (the star).** Roadmap §2.1 makes pipeline
+  changes *reviewable* (lint → visual DAG diff → preview run → PR comment);
+  backtesting makes them *testable against reality*. The unit under review is
+  the manifest + image in git; the test fixture is production history the server
+  already recorded. No other orchestrator can offer this in a PR check because
+  none has the recorded substrate.
+- **Container-native execution.** The candidate is just a different image/command
+  — no SDK, no test-harness contract.
+- **Zero-dependency simplicity.** Baselines, descriptors, outputs, and backtest
+  reports all live in the existing dqlite store.
+- **Smart by default.** Content-addressed caching makes N-run backtests
+  affordable: only the changed step and its downstream re-execute per baseline
+  run (see the cost model).
+- **Data engineering first.** "Does my refactor change the numbers?" is the
+  question data teams ask before every transform merge.
+
+## Overview
+
+A **backtest** is an aggregate over N quarantined replay runs, one per selected
+baseline production run, each executed with a **candidate override** applied to
+the reconstructed descriptors — a new image (by digest), a changed command, a
+changed schema, or param changes — plus an **output-delta computation** comparing
+each replay's task outputs against its baseline's recorded outputs.
+
+```
+baseline runs (last 30)          candidate (PR head)
+  ┌─ run 2026-06-03 ─┐
+  ├─ run 2026-06-04 ─┤   ×   image: transform:pr-412@sha256:…
+  ├─ …               ─┤
+  └─ run 2026-07-02 ─┘
+        │
+        ▼  N quarantined replays (descriptor-reconstructed, override applied)
+        ▼  per-run output delta (TaskRun.Output + output-ref digests, ignore-paths)
+        ▼
+  Backtest report: 28 unchanged · 2 changed · 0 failed  →  PR comment
+```
+
+Everything inherits the quarantined-replay safety model
+([`design-quarantined-replay.md`](design-quarantined-replay.md)): replay runs are
+`Quarantine=true`, write no production cache, emit no lineage, fire no
+callbacks/notifications, pollute no metrics or run lists, and are gated by the
+baseline-recorded `replaySafe` mark. What backtesting *adds* — executing code that
+did **not** run at baseline — is the central new risk and gets its own section.
+
+## UX Example
+
+From a PR branch, against the server:
+
+```sh
+$ caesium backtest --job daily-revenue --against last-30-runs \
+    --image transform=registry.corp/transform:pr-412 \
+    --ignore-output '*.generated_at' --server https://caesium.corp
+
+backtest bt_9f2c…  baselines: 30 selected, 27 eligible
+(3 skipped: 2 pre-date replaySafe, 1 cache proof expired)
+replaying 27 runs …  cache-hit tasks: 41  re-executed: 22
+
+RESULT: output changed in 2 of 27 runs
+  2026-06-30  transform.row_count   41 872 → 40 619  (-3.0%)
+  2026-05-31  transform.row_count   44 108 → 42 971  (-2.6%)
+  25 runs: byte-identical outputs (proven via output digests)
+drill down: caesium run diff --job-id … --left <baseline> --right <replay>
+```
+
+Rendered as a PR comment by the §2.1 Action:
+
+> ### Caesium backtest: `daily-revenue` × `transform:pr-412`
+> **Output changes in 2 of 27 replayed production runs** (3 ineligible)
+>
+> | Baseline run | Date | Verdict | Changed outputs |
+> |---|---|---|---|
+> | `run_88a1` | 2026-05-31 | ⚠ CHANGED | `transform.row_count` 44 108 → 42 971 |
+> | `run_90bc` | 2026-06-30 | ⚠ CHANGED | `transform.row_count` 41 872 → 40 619 |
+> | 25 runs | 2026-06-01 … 2026-07-02 | ✓ unchanged | — |
+>
+> Both changed runs are **month-end** runs. Cost: 22 tasks re-executed,
+> 41 served from cache. [Full report](…) · [Per-run diff](…)
+
+The month-end pattern jumping out of the run matrix *is the feature*: the
+regression only manifests on data shapes that staging never has.
+
+## Scenarios
+
+1. **Schema-mapping change backtests clean.** A vendor renamed a field; the fix
+   updates the extract mapping and `outputSchema`. Backtest over 30 runs: the 4
+   runs since the rename show the corrected outputs (expected, annotated by the
+   author); 26 older runs are byte-identical. The reviewer approves with
+   evidence instead of hope.
+2. **"Harmless" refactor changes month-end.** A transform rewrite "with no
+   behavior change" backtests unchanged on 28 of 30 runs — but both month-end
+   runs lose ~3% of rows: the refactor mishandles a partition that only exists
+   at month boundaries. Caught in review; the consumer never sees it.
+3. **Dependency bump changes nothing.** A base-image CVE bump
+   (`python:3.12.4 → 3.12.6`) backtests 30/30 byte-identical (output-ref digests
+   equal). Merge with confidence, receipt-grade evidence in the PR.
+
+## Backend Design
+
+### Baseline selection
+
+`--against last-30-runs` resolves server-side to the job's most recent terminal,
+**non-quarantined** production runs (`quarantine IS NOT TRUE`, the same predicate
+family the replay work added to all baseline-selecting queries). Alternatives:
+`--against 2026-06-01..2026-06-30`, or an explicit run-ID list.
+
+Each selected baseline is checked for **eligibility**, reusing replay's
+fail-closed validation (`internal/replay/replay.go` `Prepare`): every task run
+carries an `ExecutionDescriptor` at a supported schema version; tasks that would
+re-execute were recorded `replay_safe = true` **at baseline**
+(`TaskRun.ReplaySafe`, `internal/models/run.go:90` — read from the baseline row,
+never the live definition; a later apply cannot retroactively authorize an old
+run); secret identities re-verify (Vault version+HMAC / k8s resourceVersion; env
+provider fails closed); unchanged tasks have live cache proof (see retention
+below).
+
+An ineligible baseline is **reported and skipped**, never silently dropped
+("27 of 30 eligible", with per-run reasons); zero eligible baselines fails
+loudly. Consequence to state in docs and CLI help: **backtesting is only
+available for jobs that opted into `replaySafe`, and only over runs recorded
+since they did** — the mark and descriptors are captured at execution time.
+Teams that want backtesting adopt `replaySafe: true` now so history accumulates.
+
+### Descriptor overrides — the core new machinery
+
+This does not exist today and must not be hand-waved. The shipped replay
+`Request` is `{BaselineRunID, Set, ReplayFingerprint}`
+(`internal/replay/replay.go:77`): **params are the only overridable input.**
+Image, command, env, schema all come pinned from the descriptor —
+`computeDescriptorHash` reads `desc.Runtime.Image` /
+`desc.Runtime.ResolvedImageDigest` / `desc.Runtime.Command` (replay.go:474-506),
+and `taskRunRecord` stamps the replay `TaskRun` from the same descriptor fields
+(replay.go:817-860). That pinning is the identical-code guarantee replay sells.
+
+Backtesting extends the request with a typed, per-step override set:
+
+```go
+type StepOverride struct {
+    StepName string   // must match a descriptor Baseline.TaskName
+    Image    string   // resolved to a digest at backtest-create time
+    Command  []string // optional
+    OutputSchema / InputSchema / ValidationMode … // optional, P1
+}
+```
+
+Rules:
+
+- **Digest-resolved up front, once.** The candidate tag resolves to `sha256:…`
+  at backtest creation (reusing `internal/imagecheck/resolve.go`); all N replays
+  run that digest. Unresolvable images are refused, not degraded — a tag moving
+  mid-backtest would compare apples to oranges.
+- **Overrides flow into the hash honestly.** The overridden image digest/command
+  replaces the descriptor value *before* `computeDescriptorHash`, so the step's
+  identity changes, it re-executes, and downstream re-executes via the
+  `PredecessorHashes` cascade. Never hide an override from `HashInput` — that is
+  the false-hit bug class the replay design forbids.
+- **The replay TaskRun records both.** The stored descriptor keeps baseline
+  values (what was replayed *from*); the row's `Image` / `ResolvedImageDigest` /
+  `Command` carry the candidate (what actually ran); a new `DescriptorOverrides`
+  JSON column on the quarantined `JobRun` records the delta. `caesium why` /
+  `run diff` then attribute the re-run to the `image` field for free, because
+  the HashInput blob differs on exactly that field.
+- **`--path candidate.job.yaml`:** the CLI computes the step-level delta between
+  candidate jobdef and baseline descriptors and submits it as the same typed
+  override set — the API never trusts a whole jobdef. Structural changes (steps
+  added/removed, edges changed) are **rejected** with a pointer to
+  `caesium job diff` + `dev --once`: a new step has no recorded baseline inputs.
+- **Param overrides (`--set`)** reuse the existing mechanism unchanged — with its
+  known v1 cost: `RunParams` is hashed wholesale into every task, so any param
+  override re-runs the **full DAG** of every baseline run
+  (`planTasks(..., forceReexecute=true)`, replay.go:186-190/443). The CLI prints
+  this cost difference before dispatch.
+
+**New safety implication, stated plainly:** shipped replay executes *code that
+already ran in production once*; the `replaySafe` mark attested that code.
+A backtest executes **unvetted candidate code** against the baseline's real
+mounts, secrets, network, and workload identity — the attestation does not
+transfer. This is the top risk and is treated in Safety below.
+
+### Output-delta computation
+
+`RunDiff` today is cache-bust attribution: it diffs persisted `HashInput` blobs
+and statuses (`internal/run/rundiff.go:91`, `DiffHashInputBlobs`) — it explains
+*why a task re-ran*, and for a backtest the answer is always "you changed the
+image", which is not the question. Backtest needs the other half: **did the
+outputs change?**
+
+- **Comparison anchor:** per task, baseline `TaskRun.Output` (typed JSON
+  key→value map, ≤64 KB total per `pkg/task/output.go` `MaxOutputBytes`) vs the
+  replay task's `Output`. For large-object reference outputs (data-plane-memory
+  C5), compare the **content digests** carried by the reference — byte-identical
+  large outputs compare equal without moving data. A run-level roll-up digest
+  over sorted terminal task outputs gives a single per-run "unchanged"
+  attestation in the spirit of `internal/receipt` (deterministic,
+  degraded-honest).
+- **Verdicts per task:** `OUTPUT_UNCHANGED`; `OUTPUT_CHANGED` (per-key
+  before/after `FieldChange`s, reusing the shape from
+  `internal/run/whydiff.go`); `FAILED` (candidate errored where baseline
+  succeeded — always a reported regression); `NOT_COMPARED` (cache-hit; equal by
+  construction); `DEGRADED` (output missing on one side).
+- **Ignore-paths, or timestamps lie to you.** Outputs routinely embed
+  `generated_at`, run IDs, temp paths; without an ignore mechanism every
+  backtest reports 30/30 changed and the feature is noise. Job-level config plus
+  CLI override:
+
+  ```yaml
+  metadata:
+    backtest:
+      ignoreOutputs:
+        - "*.generated_at"        # any step, key generated_at
+        - "report.run_id"
+  ```
+
+  Ignored keys are excluded from the delta *and listed in the report as ignored*
+  so a reviewer sees what the comparison chose not to see. Glob-on-`step.key`
+  only; no regex-on-values in v1.
+
+### Cache-aware cost model (and the retention bound)
+
+Cost transparency is a first-class output, because the naive read is "30 × full
+DAG = never".
+
+- **Image/command override on step X:** only X and its transitive downstream
+  re-execute per baseline run; every upstream task keeps a byte-identical
+  `HashInput` and is served from baseline cache proof. A 6-step linear DAG with
+  the change in step 5 executes 2 + caches 4 per run — a ~3× win, larger for
+  wide DAGs with a leaf change. The report prints the actual split
+  (`22 re-executed / 41 cache-hit` above), and `caesium backtest --dry-run`
+  prints the full plan *without dispatching anything*, so the PR Action can post
+  cost before anyone approves execution.
+- **Param override:** full-DAG per run (wholesale `RunParams` hashing, above).
+  Honest and loud.
+- **Retention bounds backtest depth.** Verified reality: `JobRun`/`TaskRun` rows
+  (with their descriptors and outputs) are **not pruned today** — no run pruner
+  exists (only webhook/ingest event stores and rate-limit tokens have retention
+  pruners). But `TaskCache` entries expire via `CacheExpiresAt` +
+  `cache.Store.Prune()` (`internal/cache/store.go:173`), and the shipped replay
+  planner **hard-aborts** an unchanged, cache-enabled task whose entry is gone
+  (`replay.go:538`, `ErrUnavailableBaselineProof` "cache entry is unavailable or
+  expired"; only cache-*disabled* tasks fall back to the baseline
+  `TaskRun.Result`). So the practical window for cache-enabled jobs is
+  `min(N requested, runs younger than cache TTL)`. The eligibility report says
+  "run X skipped: cache proof expired (job TTL 168h)"; the docs say **size your
+  cache TTL to your desired backtest depth**. Relaxing the abort to trust the
+  durable baseline `TaskRun.Result` for cache-enabled tasks is a candidate
+  change in the replay layer, decided there, not silently here.
+
+### Scheduling & throttling
+
+N replays are N real container workloads. Backtest is a server-side aggregate
+feeding replays into the **existing** dispatch machinery under a cap
+(`CAESIUM_BACKTEST_MAX_PARALLEL_REPLAYS`, default 2), sequenced oldest-first so
+partial results are meaningful; the cap keeps quarantined work from starving
+production claims. Re-executing replay requires distributed execution mode today
+(`ErrReplayRequiresDistributedMode`, `api/rest/service/replay/replay.go:32,146`);
+backtest inherits that requirement for any run that isn't fully cache-served,
+and the error says so.
+
+### Data model
+
+```go
+type Backtest struct {          // internal/models
+    ID, JobID uuid.UUID
+    Status string               // pending|running|succeeded|failed|partial
+    Overrides, IgnorePaths datatypes.JSON
+    Fingerprint *string         // scoped idempotency (unique index), as replay
+    Requested, Eligible, Changed, Unchanged, Failed int
+}
+type BacktestRun struct {
+    BacktestID, BaselineRunID uuid.UUID
+    ReplayRunID *uuid.UUID      // null when skipped
+    Verdict, SkipReason string  // unchanged|changed|failed|skipped|degraded
+    OutputDelta datatypes.JSON  // per-task FieldChanges
+    TasksReexecuted, TasksCached int
+}
+```
+
+Creation is idempotent the way replay creation is: `Idempotency-Key` header,
+scoped fingerprint (job + baseline set + overrides + principal + key), insert
+before dispatch, resume on duplicate. Each child replay's fingerprint derives
+from backtest fingerprint + baseline run ID, so a crashed backtest resumes
+without double-executing any baseline.
+
+### REST
+
+- `POST /v1/jobs/:id/backtest` — baseline selector, overrides, ignore paths,
+  `dryRun`; `Idempotency-Key` required; returns `202` + backtest ID.
+- `GET /v1/jobs/:id/backtests/:btid` — the report (verdict matrix + deltas);
+  `GET /v1/jobs/:id/backtests` — list.
+- Drill-down reuses the shipped
+  `GET /v1/jobs/:id/runs/diff?left=<baseline>&right=<replay>` unchanged.
+
+Extending `POST …/runs/:run_id/replay` instead was rejected: its contract is
+"params-only, identical code", its body is deliberately closed
+(`DisallowUnknownFields`, `api/rest/controller/replay/replay.go:113`), and
+widening it would let existing replay callers smuggle code overrides under the
+old attestation. New capability, new endpoint, new authorization surface.
+
+## CLI
+
+- `caesium backtest --job <alias|id> --against last-30-runs
+  [--image step=ref] [--command step='…'] [--set k=v] [--path candidate.job.yaml]
+  [--ignore-output glob]… [--dry-run] [--json] [--format markdown]
+  [--idempotency-key k] [--timeout d]` — create, poll to terminal (client-side
+  loop like `replay --diff`), render the matrix. `--json` writes clean,
+  parseable stdout with logs on stderr (the repo's hard-learned rule);
+  `--format markdown` emits the PR-comment body directly.
+- `caesium backtest report <backtest-id> --job <id>` — re-render a stored report
+  (the Action's comment step; also how humans re-attach after a timeout).
+- Non-zero exit when any verdict is `changed`/`failed` unless `--allow-changes`
+  (intentional behavior changes render as *expected*, still shown).
+
+## CI Integration (roadmap §2.1)
+
+The §2.1 GitHub Action grows a fourth chained step: **lint → diff → backtest →
+comment**.
+
+```yaml
+- uses: caesium-cloud/caesium-action@v1
+  with:
+    server: ${{ vars.CAESIUM_SERVER }}
+    api-key: ${{ secrets.CAESIUM_API_KEY }}
+    steps: lint,diff,backtest,comment
+    backtest-against: last-30-runs
+    backtest-image: transform=ghcr.io/corp/transform:${{ github.sha }}
+```
+
+Auth reality: `AUTH_MODE` defaults to `none` (`pkg/env/env.go:169`). CI calling
+a production Caesium API to execute containers must not hit an unauthenticated
+server: the Action fails fast if auth is off, and the docs require
+`AUTH_MODE=api-key` plus a least-privilege `backtest`-capability key in CI
+secrets — the same requirement as the §2.1 preview-run story, solved once there.
+The candidate image must already be pushed (build & push → backtest). Cost
+guard: the Action posts the `--dry-run` plan first and requires a `backtest`
+label or explicit re-run to execute, so a busy repo doesn't burn 30 replays per
+push by default.
+
+## Frontend (Caesium Console)
+
+- **Backtest report view** (`/jobs/:id/backtests/:btid`): header (candidate
+  digest vs baseline range, cost split), then a **run-matrix heat strip** — one
+  cell per baseline run in date order: green unchanged / amber changed / red
+  failed / grey skipped. Month-end clustering becomes visible at a glance; that
+  strip is the screenshot people share.
+- A cell drills into the per-run view: output-delta table (before/after per
+  changed key, ignored keys listed) plus the existing **RunDiffView** reused
+  unchanged for causal detail — baseline left, replay right.
+- Job page gets a "Backtests" tab; a quarantined replay's run-detail page links
+  back to its owning backtest.
+
+## Safety
+
+**The problem, front and center: quarantine does not sandbox the container, and
+the candidate code is by definition unvetted.** Shipped replay's risk story
+leaned on two facts: the re-executed code already ran in production once, and a
+human marked it `replaySafe`. Backtest keeps the second and *loses the first*.
+A candidate image runs with the baseline's real mounts, secrets (identity-
+verified, then resolved), network egress, and workload identity. A malicious or
+buggy candidate can write to the production warehouse 30 times. Caesium-internal
+suppression (cache/lineage/callbacks/metrics/SSE — all inherited, enforced at
+`internal/worker/runtime_executor.go:116-124,288-352` and the `run.Store` metric
+gates) does nothing about external effects.
+
+Layered posture, honest about which layers are enforcement and which are not:
+
+1. **`replaySafe` remains the hard gate (enforced).** Baseline-recorded, shipped
+   semantics: no `--force`, no retroactive grant, request bodies cannot clear
+   quarantine — inherited verbatim. Backtest never touches a baseline without it.
+2. **`backtestMode: readOnly` job attestation (attestation, not enforcement).**
+   A job opts into candidate-code backtesting by declaring its steps
+   read-from-sources / write-only-declared-outputs. Caesium records and displays
+   this; it **cannot verify it** — a policy statement by the pipeline owner,
+   like `replaySafe` itself. Say exactly that in the docs.
+3. **Network-policy guidance (deployment-level enforcement, not Caesium's).**
+   Document running backtest replays under a NetworkPolicy/egress profile that
+   allows sources and blocks sinks, keyed off the descriptor's captured workload
+   identity. Caesium provides the hook (quarantined runs are identifiable), not
+   the firewall.
+4. **Authorization (enforced).** Creating a backtest with overrides requires a
+   higher-privilege API-key capability than params-only replay; idempotent
+   creation, bounded override sizes (mirroring the replay controller's caps),
+   digest-resolved images only.
+5. **Audit (enforced).** `Backtest.Overrides`, per-replay `DescriptorOverrides`,
+   and candidate digests are durable; each replay's descriptor still records the
+   baseline it deviated from. "What code ran under a backtest banner" is
+   answerable after the fact.
+
+P0 (same-code backtest, no overrides) carries **none** of the new risk — it is
+exactly the shipped replay risk, N times — a reason to phase it first.
+
+## Testing
+
+Per the repo gate (CLAUDE.md): every new CLI command and REST endpoint ships
+with an integration test in `test/` driving the real surface.
+
+- Integration (`just integration-test`, distributed server): seed a `replaySafe`
+  job, run it N times with varying params/outputs. P0 (no override): 100%
+  unchanged, all tasks cache-served; `--json` stdout clean and parseable via
+  `runCLIStdout`, stderr captured separately. P1: image override to a container
+  that emits different output for one param shape → exactly those runs
+  `changed`; assert re-executed/cached counts, zero production cache writes,
+  zero lineage rows, no metric drift (reuse the replay suppression assertions).
+  Failure path: candidate exits non-zero → `failed` verdict, non-zero CLI exit.
+  Eligibility: a pre-`replaySafe` baseline and an expired cache entry both
+  surface as `skipped` with reasons.
+- Unit: override→hash plumbing (only the intended step's `HashInput` field
+  changes; upstream hashes byte-identical), ignore-path globbing (ignored keys
+  listed), fingerprint derivation, verdict classification, dry-run plan math.
+- E2e (Playwright): report view, heat strip, drill-down into RunDiffView, with
+  an auth-enabled lane.
+
+## Phasing
+
+- **P0 — same-code backtest (no overrides).** N quarantined replays with an
+  empty override set + the output-delta computation, report, and CLI. Zero new
+  execution risk; validates the whole aggregation/comparison/report plumbing;
+  and it already catches **environment drift** — a moved unpinned tag, a rotated
+  secret, or changed source data all surface as changed/failed/ineligible runs.
+  Independently useful: "is my pipeline still deterministic over its recorded
+  inputs?"
+- **P1 — descriptor overrides.** Image (digest-resolved), command, and schema
+  overrides with the safety gates above; the endpoint capability split;
+  `--path candidate.job.yaml` delta extraction. This is the headline.
+- **P2 — PR-comment integration.** The §2.1 Action step, `--format markdown`,
+  dry-run-then-label cost guard. Console heat strip can land alongside P1.
+
+## Non-Goals
+
+- **Not CI for data quality.** Backtest compares candidate vs baseline over
+  *recorded history*; it does not judge whether tonight's fresh production data
+  is sane — that is the circuit-breaker problem
+  ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)).
+- **Not a staging environment.** No environment redirection, no synthetic data,
+  no alternate namespaces (explicitly cut from replay v1; still cut here).
+- **Not row/column dataset diffing.** Deltas are over typed step outputs and
+  output-ref digests; value-level dataset diffs remain a Datafold/dbt handoff,
+  per the data-plane-memory non-goals.
+- **Not topology backtesting.** Added/removed steps and edge changes have no
+  recorded baseline inputs; that stays `job diff` + `dev --once` territory.
+- **Not statistical tolerance in v1.** A delta is a delta; "changed but within
+  0.1%" thresholds are an open question, not a launch feature.
+
+## Open Questions
+
+1. Relax `replay.go:538` to trust durable baseline `TaskRun.Result`/`Output` for
+   cache-enabled unchanged tasks whose `TaskCache` row expired? Decouples
+   backtest depth from cache TTL, but touches replay's fail-closed proof rules —
+   decide in the replay design's terms.
+2. Per-step param dependency contracts (so `--set` backtests stop paying
+   full-DAG cost) — shared open item with replay v2.
+3. A `backtestServiceAccount` / egress-profile override for k8s: genuine
+   enforcement for safety layer 3, but breaks "runs with baseline identity" —
+   does a backtest want baseline identity or a deliberately weaker one?
+4. Output tolerance expressions (`transform.row_count: ±0.5%`) and
+   expected-change annotations reviewable in the PR itself.
+5. Backfill interplay: `last-30-runs` on a backfill-heavy job may pick 30
+   near-identical logical dates — need `--against distinct-params`?
+6. Report retention: TTL-prune `Backtest` rows like the ingest stores, or keep
+   forever like runs?
+
+## Related Documents
+
+- [`design-quarantined-replay.md`](design-quarantined-replay.md) — the inherited
+  safety model: quarantine carriers, suppression audit, `replaySafe`, descriptor
+  and secret-identity rules. Authoritative for every invariant backtest reuses.
+- [`design-data-plane-memory.md`](design-data-plane-memory.md) — the substrate
+  that recorded everything backtest replays: descriptors, HashInput blobs,
+  digests, output refs.
+- [`design-reproduce.md`](design-reproduce.md) — sibling proposal on the same
+  descriptor substrate: single-task, local, pull-one-run-onto-my-laptop
+  reproduction; backtest is the N-run, server-side, pre-merge counterpart.
+- [`design-contract-enforcement.md`](design-contract-enforcement.md) — the
+  *static* half of pre-merge safety (schema/contract checks at lint/apply time);
+  backtest is the *dynamic* half (observed behavior over recorded history).
+- [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) — runtime
+  data-quality gating on fresh data; complementary, explicitly not this design.
+- [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) — the remediation
+  agent can attach a backtest report as machine-checkable evidence when proposing
+  a jobdef patch for human approval.
+- [`roadmap.md`](roadmap.md) §2.1 — the PR-preview-runs Action this ships inside.
