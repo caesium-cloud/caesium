@@ -1577,15 +1577,26 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
-			if err := tx.Model(&models.TaskRun{}).
+			result := tx.Model(&models.TaskRun{}).
 				Where("job_run_id = ? AND task_id = ? AND status NOT IN ?", runID, taskID, terminalTaskStatuses()).
 				Updates(map[string]interface{}{
 					"status":                 string(TaskStatusRunning),
 					"runtime_id":             runtimeID,
 					"started_at":             now,
 					"rate_limit_retry_after": nil,
-				}).Error; err != nil {
-				return err
+				})
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				// The task is already terminal (e.g. cancelled by a concurrency
+				// replace while its orphaned container was starting), so the guarded
+				// UPDATE touched no rows. Skip the metric bump and the TypeTaskStarted
+				// event — emitting one here would publish a phantom task_started for a
+				// task that is still cancelled in the DB. Mirrors StartTaskClaimed's
+				// RowsAffected==0 gate (which returns a claim mismatch; a local no-op
+				// is benign, so return nil).
+				return nil
 			}
 			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
