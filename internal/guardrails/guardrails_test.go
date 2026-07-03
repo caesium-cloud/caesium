@@ -336,16 +336,25 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	root := repoRoot(t)
 
 	files := []string{
+		"docs/design-agent-in-the-loop.md",
 		"docs/design-airflow-parity.md",
+		"docs/design-backtesting.md",
 		"docs/design-concurrency-priority.md",
+		"docs/design-contract-enforcement.md",
+		"docs/design-data-circuit-breaker.md",
 		"docs/design-data-plane-memory.md",
 		"docs/design-database-locking-fix.md",
+		"docs/design-dynamic-fanout.md",
 		"docs/design-event-triggers.md",
+		"docs/design-freshness-scheduling.md",
 		"docs/design-incremental-execution.md",
 		"docs/design-quarantined-replay.md",
+		"docs/design-reproduce.md",
+		"docs/design-resource-right-sizing.md",
 		"docs/design-scaling-job-execution.md",
 		"docs/design-sla-management.md",
 		"docs/design-task-templates.md",
+		"docs/design-window-scheduling.md",
 		"docs/differentiation-strategy.md",
 	}
 

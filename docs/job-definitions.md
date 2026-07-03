@@ -368,6 +368,8 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Event-triggered workflow with content filtering (`event-trigger.job.yaml`).
   - Lifecycle-triggered chaining workflow (`event-chaining.job.yaml`).
   - Run-level concurrency skip policy (`concurrency-skip.job.yaml`).
+  - Run-level concurrency queue policy — durable overflow run-queue drained priority-first (`concurrency-queue.job.yaml`).
+  - Run-level concurrency replace-oldest policy — cancel the in-flight run and start fresh (`concurrency-replace.job.yaml`).
   - Priority and shared resource rate-limit scheduling (`priority-ratelimit.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.

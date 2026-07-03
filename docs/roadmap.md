@@ -113,6 +113,8 @@ Design system, status semantics, and full page refreshes shipped across PRs [#14
 
 **Hardening (active)**: a hands-on walkthrough of the shipped Console surfaced a batch of correctness defects (every cron shown "Invalid cron", double-listed Live Activity events, JobDefs "No steps" for multi-step manifests, undecoded command escapes, unsurfaced failed callbacks, and more). Fixes are tracked in [`exec-plans/active/console-v2-bug-sweep.md`](exec-plans/active/console-v2-bug-sweep.md).
 
+**Operator-loop refinement (follow-up, active)**: a focused UX review of the job-detail, run-detail, and DAG surfaces found the core operator loop (*what is this pipeline, is it healthy, what happened last run, let me act*) obscured — the run page leads with the reproducibility receipt and buries status/timeline/DAG/logs, healthy `SUCCEEDED` runs are dressed in red, the trigger fires with no params/confirmation, and the header overflows so `Pause` is clipped. The remediation is tracked in [`exec-plans/active/console-operator-loop-ux.md`](exec-plans/active/console-operator-loop-ux.md) (4 UI-first streams; overlaps the remaining UI surface of §3.4).
+
 ### 2.5 Cost Tracking & Resource Awareness
 
 **Current state**: Prometheus metrics track run counts and durations. No resource consumption data (CPU, memory) and no cost attribution.
@@ -204,6 +206,35 @@ steps:
 3. UI: timeline view with task state at each point, diff view with highlighted changes
 4. Root-cause trace: from a failed task, walk predecessors highlighting unexpected outputs or missing env vars
 
+### 3.5 Agent-in-the-Loop ETL Remediation
+
+**Current state**: When a pipeline fails, Caesium retries per declared policy, then notifies a human. Triage (reading logs, classifying the failure, deciding to wait/retry/patch/escalate) is entirely manual.
+
+**Target state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call.
+
+**Design doc**: [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
+
+**Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM).
+
+---
+
+## Phase 4: Data-Plane Differentiators (Design Wave)
+
+A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc; none is committed work. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
+
+Each design now has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams; the plans are eligible for the `exec-plan-wave` skill but no implementation wave has shipped.
+
+| Design | One-liner | Doc | Plan |
+|--------|-----------|-----|------|
+| Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
+| Dynamic fan-out | A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/active/dynamic-fanout.md) |
+| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
+| Freshness-driven scheduling | Declare freshness SLOs on datasets; derive execution from lineage + data arrival instead of cron guesses — the strategic flagship | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md) |
+| Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
+| Contract enforcement | Cross-job schema-compatibility checks at lint/diff/apply with named consumers and an intentional-break path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | [`contract-enforcement.md`](exec-plans/active/contract-enforcement.md) |
+| Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
+| `caesium reproduce` | Re-execute any historical task locally from its execution descriptor — production debugging on a laptop | [`design-reproduce.md`](design-reproduce.md) | [`reproduce.md`](exec-plans/active/reproduce.md) |
+
 ---
 
 ## Execution Priority
@@ -222,6 +253,8 @@ steps:
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
+| **P3** | 3.5 Agent-in-the-loop remediation | Converts the data-plane-memory substrate into autonomous ops. Phase 0 (diagnosed pages) is cheap and de-risks the rest. |
+| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling, contract enforcement, and right-sizing are the near-term standouts. |
 
 ---
 
@@ -259,3 +292,4 @@ Features that were previously on the roadmap and are now shipped:
 - [Design: Concurrency & Priority](design-concurrency-priority.md) — P1 scheduling controls
 - [Design: Task Templates](design-task-templates.md) — P2 reusable steps
 - [Design: SLA Management](design-sla-management.md) — P2 deadline tracking
+- [Design: Agent-in-the-Loop ETL Remediation](design-agent-in-the-loop.md) — P3 autonomous failure triage & remediation

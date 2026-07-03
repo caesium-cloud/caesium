@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: concurrency-queue
+  # This job's step runs longer than its 2-minute schedule, so a new run fires
+  # while the previous one is still active. With `strategy: queue` the overflow
+  # run is parked in a durable run-queue (never dropped) and drained as a slot
+  # frees. The dequeuer drains priority-first, so `priority: high` overflow is
+  # admitted ahead of lower-priority work waiting in the same queue.
+  priority: high
+  concurrency:
+    maxRuns: 1
+    strategy: queue
+trigger:
+  type: cron
+  configuration:
+    cron: "*/2 * * * *"
+    timezone: "UTC"
+steps:
+  - name: process-batch
+    image: alpine:3.23
+    # Sleeps past the 2-minute interval so overlapping fires queue up.
+    command: ["sh", "-c", "echo processing batch; sleep 150"]
