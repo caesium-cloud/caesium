@@ -72,9 +72,10 @@ Against the six principles from [`roadmap.md`](roadmap.md):
   as `killed`, indistinguishable from operator SIGKILL.**
 - **No stats collection.** The `Engine` interface is
   Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — §2.5's
-  `Stats()` does not exist — and `TaskRun` (`internal/models/run.go:45-145`)
-  has no memory/CPU columns and no exit code. **This design DEPENDS on §2.5
-  stats capture; Phase 0 scopes to the minimal slice it needs.**
+  `Stats()` does not exist — and `TaskRun`
+  (`internal/models/run.go:45-145`) has no memory/CPU columns and no exit
+  code. **This design DEPENDS on §2.5 stats capture; Phase 0 builds the
+  minimal slice it needs.**
 - **The retry loops are the escalation hook, and they are asymmetric.**
   Local: `internal/job/job.go:1055-1198` loops attempts (persisted via
   `store.RetryTask`, `job.go:1182`) — but only retries *execution errors*; a
@@ -95,13 +96,13 @@ Against the six principles from [`roadmap.md`](roadmap.md):
   state must persist on the row*: a lease-expired task is re-claimed by a
   worker that sees only `TaskRun.Attempt`. **Git provenance exists for PR
   routing**: `Job` carries `ProvenanceSourceID/Repo/Ref/Commit/Path`
-  (`internal/models/job.go:19-23`), maintained by `internal/jobdef/git/`.
+  (`internal/models/job.go:19-23`), maintained by the git sync.
 
 ## Overview
 
 Every attempt's peak memory, CPU seconds, OOM flag, and exit code are
-captured onto `task_runs` (Phase 0 = §2.5 items 1–2). Two consumers sit on
-that stream. **In-run:** an OOM-classified failure retries at
+captured onto `task_runs` (Phase 0 = §2.5 items 1–2), feeding two
+consumers. **In-run:** an OOM-classified failure retries at
 `memory × factor`, clamped to declared bounds — green run, or a classified
 failure handed to the agent/incident pipeline when bounds exhaust.
 **Across runs:** a recommendation engine computes `p99(peak) × headroom`
@@ -178,14 +179,14 @@ strings, parsed at lint/apply) to `container.Spec`. Because `Step` embeds
 `container.Spec` inline (`pkg/jobdef/definition.go:214-247`) and
 `RuntimeSpecForStep` (`definition.go:959-1016`) persists the resolved spec
 onto the atom model, the field flows automatically: YAML → atom →
-`runner.spec` (local, `internal/job/job.go:555-559`) and YAML → descriptor →
-worker. Docker/Podman map it to `HostConfig.Resources.Memory`/`NanoCPUs`
-(resp. specgen `ResourceLimits`) — limits only; Docker has no admission, so
-oversubscription protection on plain hosts is the kernel's OOM killer,
-exactly the signal we now catch. Kubernetes sets `requests = limits` for
-memory (Guaranteed semantics) and `requests` only for CPU; changing memory
-requests changes **Kueue admission** arithmetic for `kueue:`-queued steps —
-disclosed in the recommendation UI as a request delta.
+`runner.spec` (local, `internal/job/job.go:555-559`) and YAML →
+descriptor → worker. Docker/Podman map it to
+`HostConfig.Resources.Memory`/`NanoCPUs` (resp. specgen `ResourceLimits`) —
+limits only; Docker has no admission, so oversubscription protection on
+plain hosts is the kernel's OOM killer, exactly the signal we now catch.
+Kubernetes sets `requests = limits` for memory and `requests` only for CPU;
+changing memory requests changes **Kueue admission** arithmetic for
+`kueue:`-queued steps — disclosed in the recommendation UI.
 
 ### Cache identity: stated honestly
 
@@ -275,12 +276,11 @@ since a human merges.
 (`resource_recommendations` is an optional lazily-recomputed cache in
 Phase 3). Endpoints (Echo controllers beside `api/rest/controller/stats/`):
 `GET /v1/jobs/:id/resources` (per-step declared vs observed —
-p50/p99/max/OOM count over window — plus suggestion and utilization);
+p50/p99/max/OOM over window — plus suggestion and utilization);
 `POST /v1/jobs/:id/resources/apply` (provenance-routed,
-operator-authenticated; body may narrow to steps); `GET /v1/stats/resources`
-(fleet rollup: top overprovisioned steps, reclaimable bytes, OOM
-leaderboard — complements §2.5's planned `/v1/jobs/:id/costs`, which
-multiplies these columns by a cost model).
+operator-authenticated; body may narrow to steps);
+`GET /v1/stats/resources` (fleet rollup — complements §2.5's planned
+`/v1/jobs/:id/costs`, which multiplies these columns by a cost model).
 
 Env (`pkg/env/env.go`, envconfig pattern per `env.go:143`):
 `CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate) with
@@ -356,9 +356,9 @@ allocates N MiB (real OOMs against real Docker in CI):
 3. **Distributed lane:** escalation through the claimed worker path,
    including a forced re-claim mid-ladder (escalation level persists).
 4. **Recommendation math** (seed N real runs, assert the suggested value
-   through CLI and REST) and **provenance routing** (git-synced apply is
-   rejected/PR-routed; non-git round-trips `diff`/`apply`; auth-off refuses
-   direct apply).
+   via CLI and REST) and **provenance routing** (git-synced apply is
+   rejected/PR-routed; non-git round-trips `diff`/`apply`; auth-off
+   refuses direct apply).
 5. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
    stay pre-change (`killed`).
 
@@ -390,9 +390,8 @@ get Playwright e2e against the live backend, per precedent.
   where K8s supports it; escalation happens *between attempts*, never
   inside one.
 - **No Beam/Dataflow-style resharding** of a running computation — the
-  horizontal analog is
-  [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s territory, whose
-  fan-out children inherit the template step's `resources`.
+  horizontal analog is [`design-dynamic-fanout.md`](design-dynamic-fanout.md)'s
+  territory, whose fan-out children inherit the template step's `resources`.
 - **No cost/dollar modeling** — §2.5's cost layer multiplies the columns
   this design persists; substrate shared, scope not. **No per-run manual
   resource overrides** — sizing is learned or declared, not a run param
@@ -418,5 +417,5 @@ get Playwright e2e against the live backend, per precedent.
 5. **PR ergonomics.** One rolling Renovate-style PR per repo vs. discrete
    PRs per job? Interacts with how
    [`design-contract-enforcement.md`](design-contract-enforcement.md) and
-   the agent doc route proposals — a shared proposals channel may deserve
-   its own mini-design.
+   the agent doc route proposals — a shared channel may deserve its own
+   mini-design.
