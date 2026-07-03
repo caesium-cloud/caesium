@@ -1,12 +1,12 @@
 # Design: Cross-Job Contract Enforcement at Apply Time
 
 > Status: Brainstorm/Design — proposal for static, apply-time enforcement of
-> cross-job data contracts. No implementation yet. This is the static
-> complement to [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
-> scenario 2 (schema drift remediation) and the apply-time counterpart of
-> [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)'s runtime
-> enforcement. Companion roadmap items: §2.1 PR Preview Runs (the PR surface
-> this plugs into).
+> cross-job data contracts. No implementation yet. The static complement to
+> [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) scenario 2
+> (schema drift) and the apply-time counterpart of
+> [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md).
+> Companion roadmap item: §2.1 PR Preview Runs (the PR surface this plugs
+> into).
 
 ## Problem
 
@@ -92,19 +92,17 @@ Edge classes are ranked by confidence and enforced accordingly:
 ## What contract exists cross-job today (precision matters)
 
 Within a run, predecessor outputs reach a step as
-`CAESIUM_OUTPUT_<STEP>_<KEY>` env vars (`pkg/task/output.go` `BuildOutputEnv`)
-and `InputSchema` is keyed by *within-job predecessor step names*. **Neither
-crosses a job boundary.** Across jobs, the only Caesium-mediated channel is
-the lifecycle event payload: `run_completed` carries `Tasks[].Output`, and the
-consumer's `paramMapping` (e.g. `upstream_rows: "$.tasks[0].output.row_count"`)
-copies values into run params. Today's cross-job "contract" is therefore an
-undeclared, stringly-typed JSONPath into another team's run payload. This
-design (a) statically checks those paths against the producer's
-`outputSchema`, and (b) adds an explicit declaration so teams can state the
-contract instead of implying it. Dataset I/O that never transits the event
-payload (a step writes S3, another job reads S3) is invisible to Caesium
-except as lineage evidence — which is why declarations are the only path to
-*fail*-grade enforcement for dataset edges.
+`CAESIUM_OUTPUT_<STEP>_<KEY>` env vars (`pkg/task/output.go`
+`BuildOutputEnv`), and `InputSchema` is keyed by *within-job predecessor step
+names* — **neither crosses a job boundary**. Across jobs, the only
+Caesium-mediated channel is the lifecycle event payload described above, so
+today's cross-job "contract" is an undeclared, stringly-typed JSONPath into
+another team's run payload. This design statically checks those paths against
+the producer's `outputSchema`, and adds explicit declarations so teams can
+state the contract instead of implying it. Dataset I/O that never transits
+the event payload (a step writes S3, another job reads S3) is invisible to
+Caesium except as lineage evidence — which is why declarations are the only
+path to *fail*-grade enforcement for dataset edges.
 
 ## YAML: declared produces/consumes
 
@@ -136,9 +134,7 @@ steps:
           schemaFrom: output       # reuse this step's outputSchema…
           # schema: {...}          # …or declare an inline dataset schema
           version: 2               # bumped on intentional breaks
-```
-
-```yaml
+---
 # reporting-daily.job.yaml (consumer, team B)
 metadata:
   alias: reporting-daily
@@ -164,10 +160,9 @@ steps:
               customer_id: {type: string}
 ```
 
-Lint validates that `schemaFrom: output` refers to a step that declares an
-`outputSchema`, that schemas compile under the existing
-`santhosh-tekuri/jsonschema/v6` compiler, and that dataset names are
-well-formed.
+Lint validates that `schemaFrom: output` names a step with an
+`outputSchema`, that schemas compile under `santhosh-tekuri/jsonschema/v6`,
+and that dataset names are well-formed.
 
 ## Breaking-change semantics
 
@@ -175,22 +170,22 @@ Full JSON Schema compatibility is undecidable in general (schemas embed
 arbitrary boolean combinators), so the checker implements a **pragmatic
 subset** with an honest fourth verdict:
 
-- **Breaking** (error): a `required` field removed from the producer schema
-  or from `properties` entirely; a property's `type` narrowed or changed
-  (`string→integer`; `integer→number` is widening, allowed); `enum` values
-  removed; `additionalProperties` tightened to `false` when a consumer
-  requires a key outside `properties`; any consumed key (declared in
+- **Breaking** (error): a `required` field removed from the schema or from
+  `properties` entirely; a `type` narrowed or changed (`string→integer`;
+  `integer→number` is widening, allowed); `enum` values removed;
+  `additionalProperties` tightened to `false` when a consumer requires a key
+  outside `properties`; any consumed key (declared in
   `consumes.schema.required` or referenced by a `paramMapping` path) no
   longer satisfiable.
 - **Compatible** (pass): additive optional properties, new enum values,
   widened types, relaxed constraints, doc-only edits.
-- **Compatible-per-consumer**: strictly narrowing producer change that still
-  satisfies every *declared* consumer requirement (e.g. drops a field no one
-  consumes) passes with an informational note.
+- **Compatible-per-consumer**: a narrowing change that still satisfies every
+  *declared* consumer requirement (e.g. drops a field nobody consumes)
+  passes with an informational note.
 - **Unknown** (warn, never silently pass): any construct outside the subset —
-  `$ref`, `allOf`/`anyOf`/`oneOf`/`not`, `if/then/else`, `patternProperties`,
-  `dependentSchemas`. Message: "cannot prove compatibility for step X: schema
-  uses `anyOf`; verify manually or simplify."
+  `$ref`, `allOf`/`anyOf`/`oneOf`/`not`, `if/then/else`,
+  `patternProperties`, `dependentSchemas` — reported as "cannot prove
+  compatibility; verify manually or simplify."
 
 New machinery: `santhosh-tekuri/jsonschema/v6` gives us **compilation and
 instance validation only** (`pkg/task/schema.go` `ValidateOutput` checks a
@@ -224,20 +219,19 @@ Lint prints an informational line; diff annotates the edge "compatible
 `customer_id` genuinely must go. The escape hatch is explicit and two-sided:
 
 1. Producer bumps `datasets.produces[].version: 2` and applies with
-   `caesium job apply --allow-breaking dataset=lake.vendor_x_customers`.
-   The server records a `ContractAck` row (who, when, edge-set digest,
+   `caesium job apply --allow-breaking dataset=lake.vendor_x_customers`. The
+   server records a `ContractAck` row (actor, edge-set digest,
    `deprecationUntil` — default `CAESIUM_CONTRACT_DEPRECATION_WINDOW`, 14d).
-2. Every consumer's owning team is notified through the existing
+2. Every consumer's owning team is notified via the existing
    `internal/notification` pipeline (new `contract_break_declared` event
-   routed by `NotificationPolicy` job selectors — the same matching that
+   routed by `NotificationPolicy` job selectors, the same matching that
    routes failures to Slack), naming the field, window, and producer.
 3. During the window the check downgrades to warn for the acknowledged
-   edge-set digest only; consumers' own applies warn "consuming a deprecated
-   contract". When the window lapses, unmigrated consumers' next apply fails,
-   and the ack is spent — a *new* breaking change needs a new ack (the digest
-   pins the ack to the exact diff).
+   digest only; consumers' own applies warn "consuming a deprecated
+   contract". When the window lapses, unmigrated consumers' next apply
+   fails, and the ack is spent — a *new* breaking change needs a new ack.
 4. With auth enabled, `--allow-breaking` can be policy-restricted (producing
-   team's members or an operator role). See Ownership.
+   team or operator role). See Ownership.
 
 ## Backend
 
@@ -252,12 +246,12 @@ and substitutes incoming defs for their persisted versions):
    all jobs.
 2. **Trigger-chain inference** — reuse the lifecycle-pattern matching from
    `trigger_cycle.go` (`patternCanMatchCaesiumLifecycle`,
-   `triggerChainPatternSourceAlias`) for A→B edges; then statically parse B's
-   `paramMapping` values (already constrained by `simpleJSONPathPattern`) and
-   flag paths of shape `$.tasks[<i>].output.<key>` — those name concrete
-   producer output keys. Positional indexing is brittle: when the index can't
-   be resolved to a step, the key is checked against the union of A's step
-   `outputSchema`s and findings degrade to warn.
+   `triggerChainPatternSourceAlias`) for A→B edges; then statically parse
+   B's `paramMapping` values and flag paths of shape
+   `$.tasks[<i>].output.<key>` — those name concrete producer output keys.
+   Positional indexing is brittle: when the index can't be resolved to a
+   step, the key is checked against the union of A's step `outputSchema`s
+   and findings degrade to warn.
 3. **Lineage evidence** — distinct cross-job `(namespace, name)` pairs where
    one job's task runs wrote `direction='output'` and another's read
    `direction='input'` (the `QueryImpact` join, aggregated to job level),
@@ -282,25 +276,23 @@ trigger-cycle validator already does an equivalent full scan on every apply).
 - **`POST /v1/jobdefs/apply`**: the check runs **inside the importer's apply
   transaction** (`internal/jobdef/importer.go` `ApplyWithOptions` already
   wraps reconcile in `i.db.Transaction`), reading persisted consumers under
-  the same transaction that persists the producer — two racing applies
-  serialize on the store, so there is no TOCTOU window between check and
-  write. Breaking findings without a valid ack: HTTP 409 with the findings.
+  the same transaction that persists the producer — racing applies serialize
+  on the store, so there is no TOCTOU window between check and write.
+  Breaking findings without a valid ack: HTTP 409 with the findings.
 - **Batch semantics**: producer and consumers updated in one apply batch are
   checked as a set — a coordinated migration in one PR passes without an
-  ack, because the new consumer schemas are what the new producer schema is
-  checked against.
+  ack, since the new consumer schemas are the comparison target.
 
 ### Offline vs server lint — two honest modes
 
 CLI `caesium job lint` is offline today: it passes a `nil` DB to
 `ValidateTriggerChains` and prints *"trigger-cycle lint is file-scoped;
 cross-job cycles against persisted triggers are validated at apply"*
-(`cmd/job/lint.go`). Contract lint keeps that honesty:
-
-- **Offline (default)**: checks only edges derivable inside the linted file
-  set, and appends the same style of scope note for cross-job contracts.
-- **`--server`** (new flag): POSTs to `/v1/jobdefs/lint` and reports findings
-  against the persisted world. The §2.1 PR flow always uses server mode.
+(`cmd/job/lint.go`). Contract lint keeps that honesty: **offline** (default)
+checks only edges derivable inside the linted file set and appends the same
+style of scope note; **`--server`** (new flag) POSTs to `/v1/jobdefs/lint`
+and reports findings against the persisted world. The §2.1 PR flow always
+uses server mode.
 
 ### Config
 
@@ -313,12 +305,12 @@ cross-job cycles against persisted triggers are validated at apply"*
 ### Ownership and auth (advisory until auth is on)
 
 "Owned by team B" resolves from `metadata.labels.team` — already a live
-convention (`test/job_test.go` asserts `labels["team"]`, and labels ride on
-every run/event as `JobLabels`). With `CAESIUM_AUTH_MODE=none` (the default)
-ownership is **advisory**: messages name the team, notifications route by
-label, but anyone can pass `--allow-breaking`. With auth enabled, the ack
-endpoint can require an operator role or a key scoped to the producing job —
-same honesty the agent-in-the-loop design applies to its approval gates.
+convention (labels ride on every run/event as `JobLabels`). With
+`CAESIUM_AUTH_MODE=none` (the default) ownership is **advisory**: messages
+name the team, notifications route by label, but anyone can pass
+`--allow-breaking`. With auth enabled, the ack path can require an operator
+role or a key scoped to the producing job — the same honesty the
+agent-in-the-loop design applies to its approval gates.
 
 ## CLI
 
@@ -336,9 +328,9 @@ parseable, stderr for logs.
 
 The planned GitHub Action (`lint → diff → dev --once → comment`) gains a
 contract section: breaking findings render as a table (field, producer step,
-consumers, owning teams, chain source) in the PR comment, and the Action
+consumers, owning teams, edge source) in the PR comment, and the Action
 exits nonzero. `caesium job diff --format=markdown` includes the per-edge
-badges. This is where the feature earns its keep — review-time, in the
+badges. This is where the feature earns its keep — at review time, in the
 producer's repo, before merge.
 
 ## Frontend (Caesium Console)
@@ -394,12 +386,12 @@ Per the end-to-end gate in `CLAUDE.md`:
 - **Phase 0 — Visibility.** Graph derivation (all three edge classes),
   `GET /v1/contracts/graph`, `caesium contract graph`, warn-only findings in
   server lint. No enforcement, no new YAML.
-- **Phase 1 — Declarations + enforcement.** `datasets` block (coordinated
-  with freshness-scheduling), compat checker, apply-transaction enforcement,
-  `--allow-breaking` + `ContractAck` + deprecation notifications, CLI/CI
-  surfaces.
-- **Phase 2 — UI + PR polish.** Graph view, diff badges, §2.1 Action section,
-  auth-gated ack policy.
+- **Phase 1 — Declarations + enforcement.** `datasets` schema fields
+  (coordinated with freshness-scheduling), compat checker, apply-transaction
+  enforcement, `--allow-breaking` + `ContractAck` + deprecation
+  notifications, CLI/CI surfaces.
+- **Phase 2 — UI + PR polish.** Graph view, diff badges, §2.1 Action
+  section, auth-gated ack policy.
 
 ## Non-Goals (v1)
 

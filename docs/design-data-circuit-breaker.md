@@ -18,45 +18,43 @@ truncated vendor file (900 rows instead of 10 million, schema perfectly
 valid); a join key goes 40% null after an upstream refactor; the watermark
 stops advancing and today's partition silently carries yesterday's data.
 
-Three properties make this class of failure worse than a red run:
+Three properties make this failure class worse than a red run.
+**Bad data propagates further than bad runs**: a failed task stops its own
+DAG, but a *successful* task that emitted garbage feeds every
+lineage-downstream job on the next trigger, materializing the poison one hop
+further with every consumer that runs. **Failing the world duplicates
+alerts**: the blunt fix — every consumer validates its inputs and fails —
+turns one bad extract into N red runs and N pages, burying the root cause
+under its own symptoms (the noise pattern
+[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) added
+`suppress_downstream_alerts` to fight after the fact). And **silent poison is
+worst of all**: with neither check, nobody is paged and the bad numbers reach
+a dashboard or a customer.
 
-1. **Bad data propagates further than bad runs.** A failed task stops its own
-   DAG. A *successful* task that emitted garbage feeds every
-   lineage-downstream job on the next trigger, materializing the poison one
-   hop further with every consumer that runs.
-2. **Failing the world duplicates alerts.** The blunt fix — every consumer
-   validates its inputs and fails — turns one bad extract into N red runs and
-   N pages, burying the root cause under its own symptoms (the noise pattern
-   [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) added
-   `suppress_downstream_alerts` to fight after the fact).
-3. **Silent poison is worst of all.** With neither check, nobody is paged and
-   the bad numbers reach a dashboard or a customer.
-
-The failure is not run-shaped, it is *dataset*-shaped. The primitive Caesium
-is missing is a circuit breaker on the dataset: when the thing a step
-*produced* looks statistically wrong, mark the **dataset** held, let
-downstream jobs skip instead of consuming it, alert **once at the source**,
-and release the hold on human ack or the next clean run. This gives scenario
-3 of `design-agent-in-the-loop.md` (bad values) a native primitive instead of
-a playbook workaround, and is the runtime complement of the PR-time checks in
+The failure is not run-shaped, it is *dataset*-shaped. The missing primitive
+is a circuit breaker on the dataset: when what a step *produced* looks
+statistically wrong, mark the **dataset** held, let downstream jobs skip
+instead of consuming it, alert **once at the source**, and release on human
+ack or the next clean run. This gives scenario 3 of
+`design-agent-in-the-loop.md` (bad values) a native primitive instead of a
+playbook workaround, and is the runtime complement of the PR-time checks in
 `design-contract-enforcement.md`.
 
 ## Terminology: "hold", deliberately not "quarantine"
 
 Caesium already has a quarantine concept and it means something else.
-[`design-quarantined-replay.md`](design-quarantined-replay.md) defines
-**run quarantine**: a replay `JobRun`/`TaskRun` marked non-authoritative so it
-cannot write production cache, lineage, callbacks, or metrics. That marker is
-load-bearing in persisted columns (`JobRun.Quarantine`, `TaskRun.Quarantine`,
-`ExecutionEvent.Quarantine`), the live-bus field (`event.Event.Quarantine`,
-`internal/event/bus.go`), and `quarantine IS NOT TRUE` predicates across
-stats/watermark queries. Overloading it would be a correctness hazard: a
-reviewer seeing `Quarantine` must be able to assume "non-authoritative replay
-run" everywhere. This feature therefore uses **hold** exclusively —
-`DatasetHold` model, `dataset_held`/`dataset_released` events,
-`caesium dataset holds` CLI, "held" badges. A dataset is *held*; a replay run
-is *quarantined*. The two never share a column, an event field, or a YAML
-key; docs and UI copy follow the same rule.
+[`design-quarantined-replay.md`](design-quarantined-replay.md) defines **run
+quarantine**: a replay `JobRun`/`TaskRun` marked non-authoritative. That
+marker is load-bearing in persisted columns (`JobRun.Quarantine`,
+`TaskRun.Quarantine`, `ExecutionEvent.Quarantine`), the live-bus field
+(`event.Event.Quarantine`, `internal/event/bus.go`), and
+`quarantine IS NOT TRUE` predicates across stats/watermark queries.
+Overloading it would be a correctness hazard: a reviewer seeing `Quarantine`
+must be able to assume "non-authoritative replay run" everywhere. This
+feature therefore uses **hold** exclusively — `DatasetHold` model,
+`dataset_held`/`dataset_released` events, `caesium dataset holds` CLI, "held"
+badges. A dataset is *held*; a replay run is *quarantined*. The two never
+share a column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
@@ -152,18 +150,15 @@ markers in `pkg/task/output.go` `parseMarkers`):
 ##caesium::metrics {"dataset":"warehouse/transactions_daily","rowCount":10400312,"null_rate_customer_id":0.0003,"max_event_time":"2026-07-03T01:12:00Z","dedup_ratio":0.001}
 ```
 
-Semantics:
-
-- `onViolation: warn` — record the violation (like `schemaValidation: warn`),
-  no hold. `fail` — fail the task (existing red-run semantics). `hold` — the
-  task **succeeds** (the work is done; failing it would just invite a retry of
-  the same data) but the dataset is held.
-- Absolute bounds (`min`/`max`/`maxLag`) always enforce. `deltaFromBaseline`
-  enforces only once the baseline is seeded (below).
-- A missing declared metric is itself a violation (a step that stops emitting
-  `rowCount` must not silently pass).
-- `caesium job lint` validates: dataset names well-formed, `consumes` names
-  resolvable in the registry, percentage/duration syntax, `onViolation` enum.
+Semantics: `warn` records the violation (like `schemaValidation: warn`), no
+hold; `fail` fails the task (existing red-run semantics); `hold` lets the
+task **succeed** — the work is done, and failing it would just invite a retry
+of the same data — but holds the dataset. Absolute bounds (`min`/`max`/
+`maxLag`) always enforce; `deltaFromBaseline` enforces only once the baseline
+is seeded (below). A missing declared metric is itself a violation — a step
+that stops emitting `rowCount` must not silently pass. `caesium job lint`
+validates dataset names, `consumes` resolvability against the registry,
+percentage/duration syntax, and the `onViolation` enum.
 
 ## Scenario walkthroughs
 
@@ -200,14 +195,13 @@ re-produced, never unrelated holds.
 A fourth marker beside `output`, `output-ref`, and `branch`, parsed in the
 same single-pass `parseMarkers` scan. Payload: flat JSON object; `dataset`
 selects the declared dataset (omitted ⇒ the step's sole declared dataset,
-error if ambiguous); values must be JSON numbers or RFC3339 strings.
-Multiple lines merge last-write-wins per (dataset, metric), matching output
-semantics. Metrics count against their own cap (`MaxMetricsBytes = 16 KiB`,
-deliberately separate from the 64 KiB `MaxOutputBytes` so a chatty metrics
-emitter cannot evict real outputs, and vice versa). Malformed lines are
-skipped leniently like malformed output lines — but a declared assertion
-whose metric never arrives is a violation, so lenient parsing cannot mask a
-broken emitter.
+error if ambiguous); values are JSON numbers or RFC3339 strings; multiple
+lines merge last-write-wins per (dataset, metric). Metrics get their own cap
+(`MaxMetricsBytes = 16 KiB`, separate from the 64 KiB `MaxOutputBytes` so a
+chatty metrics emitter cannot evict real outputs, or vice versa). Malformed
+lines are skipped leniently like malformed output lines — but a declared
+assertion whose metric never arrives is a violation, so lenience cannot mask
+a broken emitter.
 
 ### Assertion evaluator (post-task pipeline)
 
@@ -271,23 +265,23 @@ the hold, and a lint hint flags declared datasets never observed in lineage.
 ### Downstream admission gate
 
 The check belongs at **run admission**, not task start. Admission is already
-the single durable, leader-safe decision point — `Store.admit()`
+the single durable, leader-safe decision point: `Store.admit()`
 (`internal/run/store.go:711`) resolves concurrency inside one transaction via
-an atomic conditional insert, and every path into a run (cron, event/chained
-triggers via `internal/trigger/event`, HTTP, manual, queue dequeue) funnels
-through run creation in the store. Gating there means one decision, once,
-recorded durably on the run — no per-node in-memory state, no cross-node
-TOCTOU. A task-start gate is rejected for v1: a hold landing mid-run would
-strand a half-executed DAG in an ambiguous state, and admission already
-bounds the exposure window to a single in-flight run.
+an atomic conditional insert, and every path into a run — cron, event/chained
+triggers (`internal/trigger/event`), HTTP, manual, queue dequeue — funnels
+through run creation in the store. Gating there means one decision, recorded
+durably on the run: no per-node in-memory state, no cross-node TOCTOU. A
+task-start gate is rejected for v1 — a hold landing mid-run would strand a
+half-executed DAG in an ambiguous state, and admission already bounds the
+exposure window to one in-flight run.
 
 Mechanics: before `admit()`, the store resolves the consuming job's declared
 `consumes` list and queries active `DatasetHold` rows **in the same
 transaction** that inserts the run. On a hit, the default disposition is
 **skip-with-reason**: the run is created directly in terminal `skipped`
-status with `SkipReason: dataset_hold:<ns>/<name>` — reusing the
+status with `SkipReason: dataset_hold:<ns>/<name>`, reusing the
 concurrency-skip machinery so run history shows *why* nothing ran (an
-invisible non-run would be silent-poison's evil twin) — and emits
+invisible non-run would be silent-poison's evil twin), and emits
 `run_held_upstream`. Per-job override:
 
 ```yaml
@@ -306,15 +300,15 @@ task starts do not re-check holds in v1 (documented limitation).
 
 ### Release semantics
 
-- **Human ack:** `POST /v1/datasets/holds/:id/release` with reason and
-  optional per-assertion tolerance windows. Audited (`AuditLog`).
-- **Clean run:** when the evaluator finishes a producing task with all
-  assertions passing, it releases any active hold on that dataset
-  (`release_reason: clean_run`) in the same transaction that records the
-  metrics. Configurable per dataset (`release: auto|manual`, default `auto`).
-- Release is level-triggered, not edge-triggered: downstream jobs simply pass
-  the gate on their next trigger. Caesium does not retroactively fire skipped
-  runs in v1 (an operator can retry them; `park` would change this later).
+**Human ack** — `POST /v1/datasets/holds/:id/release` with reason and
+optional per-assertion tolerance windows; audited (`AuditLog`). **Clean run**
+— when the evaluator finishes a producing task with all assertions passing,
+it releases any active hold on that dataset (`release_reason: clean_run`) in
+the same transaction that records the metrics; configurable per dataset
+(`release: auto|manual`, default `auto`). Release is level-triggered:
+downstream jobs simply pass the gate on their next trigger. Caesium does not
+retroactively fire skipped runs in v1 (operators can retry them; `park`
+changes this later).
 
 **Auth honesty.** Caesium defaults to `CAESIUM_AUTH_MODE=none`
 (`pkg/env/env.go:169`) — in that mode the release endpoint is an
@@ -329,15 +323,14 @@ when no authenticated principal is present.
 ### Events & notifications
 
 New bus types (`internal/event/bus.go`): `dataset_held`, `dataset_released`,
-`run_held_upstream`. All flow through the existing persisted-event store and
-notification subscriber (`internal/notification/subscriber.go`), so policies
-route them like any lifecycle event. Alert-once is structural: the page-worthy
-event is `dataset_held`, emitted exactly once per hold (repeat violations
+`run_held_upstream`, flowing through the existing persisted-event store and
+notification subscriber (`internal/notification/subscriber.go`) so policies
+route them like any lifecycle event. Alert-once is structural: `dataset_held`
+is the page-worthy event, emitted exactly once per hold (repeat violations
 increment the occurrence counter without re-emitting); `run_held_upstream`
-defaults to no-notify. This subsumes the N-downstream-pages problem at the
-source rather than suppressing it after the fact. Prometheus:
-`caesium_dataset_holds_total{reason}`, `caesium_dataset_holds_active`,
-`caesium_runs_held_upstream_total`, `caesium_data_assertions_total{result}`.
+defaults to no-notify. Prometheus: `caesium_dataset_holds_total{reason}`,
+`caesium_dataset_holds_active`, `caesium_runs_held_upstream_total`,
+`caesium_data_assertions_total{result}`.
 
 ### REST & env
 
@@ -365,38 +358,38 @@ machine-readable-output gate, asserted by integration tests using
 ## Frontend (Caesium Console)
 
 1. **Hold badges on the lineage graph.** `LineageGraph.tsx` marks held
-   dataset nodes (a "held" badge, visually distinct from both run-status
-   colors and replay-quarantine styling) and shades the downstream cone —
-   the hold's blast radius at a glance.
+   dataset nodes (a "held" badge, visually distinct from run-status colors
+   and replay-quarantine styling) and shades the downstream cone — the blast
+   radius at a glance.
 2. **Ack/release flow.** A hold panel (violated assertion, observed vs bound,
-   producing-run link, occurrence count) with Release — reason required,
+   producing-run link, occurrence count) with Release: reason required,
    optional tolerance picker. Active-holds count joins the nav badges
    (`useNavCounts.ts`).
 3. **Assertions on the run surface.** `RunDetailPage`/`TaskDetailPanel` show
    per-assertion results beside today's schema-violation display; each
-   `deltaFromBaseline` row gets a **baseline sparkline** (last-N values,
-   band, current point) so "10× normal" is visible, not inferred.
+   `deltaFromBaseline` row gets a **baseline sparkline** (last-N values, band,
+   current point) so "10× normal" is visible, not inferred.
 4. **Skipped-run clarity.** Gate-skipped runs render the held dataset as the
    skip reason, deep-linking to the hold.
 
 ## Interplay
 
 - **[`design-freshness-scheduling.md`](design-freshness-scheduling.md).**
-  Same `Dataset` registry. A held dataset is **not fresh** regardless of
-  watermark: holds are freshness-blocking, so a poisoned-but-recent partition
-  never satisfies a freshness trigger or advances downstream scheduling.
+  Same `Dataset` registry; a held dataset is **not fresh** regardless of
+  watermark — a poisoned-but-recent partition never satisfies a freshness
+  trigger or advances downstream scheduling.
 - **[`design-contract-enforcement.md`](design-contract-enforcement.md).**
-  That design is static/PR-time (schema drift caught at diff/apply); this is
-  the runtime breaker for what static analysis cannot see — the *values*.
-  One contract story, two enforcement points.
+  Static/PR-time enforcement there; this is the runtime breaker for what
+  static analysis cannot see — the *values*. One contract story, two
+  enforcement points.
 - **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md).**
-  `dataset_held` becomes an incident class (`data_quality_hold`); the triage
-  bundle carries the violation, baseline snapshot, and impact graph.
+  `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
+  bundle carries the violation, baseline snapshot, and impact graph;
   `release_hold` joins the action catalog at tier 2 (tier 3 with tolerance
-  windows); `suppress_downstream_alerts` becomes largely unnecessary for this
-  class since holds alert once by construction.
+  windows). `suppress_downstream_alerts` becomes largely unnecessary for this
+  class — holds alert once by construction.
 - **[`design-backtesting.md`](design-backtesting.md).** Assertions evaluate
-  in backtests too, over the metrics historical runs emitted — a free
+  in backtests too, over the metrics historical runs emitted — free
   regression signal ("this change would have tripped the breaker on 3 of the
   last 30 days") — with holds never opened from backtest runs, mirroring the
   replay-quarantine posture.
