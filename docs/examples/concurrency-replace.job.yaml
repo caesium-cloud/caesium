@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: concurrency-replace
+  # Only the freshest run matters (e.g. rebuilding a cache from the latest
+  # inputs). With `strategy: replace`, when a new run is admitted while an older
+  # one is still active, Caesium cancels the oldest active run — and its running
+  # tasks — then starts the new run fresh, keeping at most `maxRuns` active.
+  concurrency:
+    maxRuns: 1
+    strategy: replace
+trigger:
+  type: cron
+  configuration:
+    cron: "*/2 * * * *"
+    timezone: "UTC"
+steps:
+  - name: refresh-cache
+    image: alpine:3.23
+    # Sleeps past the 2-minute interval so the next fire supersedes this one.
+    command: ["sh", "-c", "echo refreshing cache from latest inputs; sleep 150"]
