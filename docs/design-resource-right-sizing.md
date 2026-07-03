@@ -146,8 +146,7 @@ right-sized via suggestions only).
 ### Phase 0 substrate: stats capture + honest OOM detection
 
 Roadmap §2.5's implementation-plan items 1–2, built here because everything
-else stands on it (and shared with the agent doc's Phase 0, which
-independently needs `TaskRun.ExitCode`):
+else stands on it (shared with the agent doc's Phase 0 `ExitCode` need):
 
 - **OOM detection per engine**, at the inspect each engine already does:
   Docker consults `InspectResponse.State.OOMKilled` in `Result()` before
