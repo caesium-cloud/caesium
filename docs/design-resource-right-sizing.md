@@ -324,36 +324,34 @@ per the repo rule that merged-stream captures hide leaks.
 
 ## Frontend (`ui/src/features/jobs/`)
 
-- **JobDetailPage: per-step Resources panel** — declared limit vs observed
-  peak sparkline, utilization %, suggestion badge ("declared 4Gi · p99
-  412Mi · suggest 512Mi"), one-click Apply (rendered as "Open PR" with a
-  diff preview on git-synced jobs).
-- **TaskDetailPanel / TaskMetadataPanel: attempt trail** — per-attempt
-  applied limits with OOM badges ("attempt 1 OOMKilled at 1Gi → attempt 2
-  at 1.5Gi ✓"): the receipt-grade evidence view.
-- **RunDetailPage: anomaly ribbon** when a run's peak exceeded 2× the
-  rolling average (the §2.5 anomaly rule). **Stats page: fleet reclaim
-  view** — top overprovisioned steps, reclaimable memory, OOM leaderboard;
-  pending-suggestion count joins `useNavCounts.ts`.
+**JobDetailPage** gains a per-step Resources panel: declared limit vs
+observed-peak sparkline, utilization %, suggestion badge ("declared 4Gi ·
+p99 412Mi · suggest 512Mi"), one-click Apply (rendered as "Open PR" with a
+diff preview on git-synced jobs). **TaskDetailPanel/TaskMetadataPanel** show
+the attempt trail — per-attempt applied limits with OOM badges ("attempt 1
+OOMKilled at 1Gi → attempt 2 at 1.5Gi ✓"): the receipt-grade evidence view.
+**RunDetailPage** gets an anomaly ribbon when a run's peak exceeded 2× the
+rolling average (the §2.5 rule); the **stats page** gets a fleet reclaim
+view (top overprovisioned steps, reclaimable memory, OOM leaderboard), with
+a pending-suggestion count joining `useNavCounts.ts`.
 
 ## Safety
 
 - **Bounds are absolute.** Escalation and auto-apply clamp to declared
   `[min, max]`; no bound, no auto behavior. Caesium does not discover
   cluster quota — a pod rejected by `ResourceQuota`/`LimitRange` surfaces as
-  `StartupFailure`; bounds are the operator's envelope, honestly not a
-  cluster guarantee.
+  `StartupFailure`; bounds are the operator's envelope, not a cluster
+  guarantee.
 - **Escalated attempts are accounted, visible, capped** — they extend
   `MaxAttempts` explicitly at registration, are class-gated to OOM, recorded
-  per attempt, and counted in `caesium_task_retries_total` plus a new
+  per attempt, and counted in `caesium_task_retries_total` plus
   `caesium_task_oom_escalations_total`. Downsizing is conservative: `auto`
-  downsizes only after a full OOM-free window, and an OOM after an auto
-  downsize reverts immediately and freezes downsizing for the cooldown.
-- **Cache identity disclosed** (above): limits are not execution inputs;
-  steps whose outputs depend on limits must opt out of caching.
-- **Auto never touches Git-owned truth directly** — provenance routing is
-  server-enforced, and direct apply requires an active auth mode
-  (`CAESIUM_AUTH_MODE` defaults to `none`, so this is a real gate).
+  downsizes only after a full OOM-free window; an OOM after an auto downsize
+  reverts immediately and freezes downsizing for the cooldown.
+- **Cache identity disclosed** (above); **auto never touches Git-owned truth
+  directly** — provenance routing is server-enforced, and direct apply
+  requires an active auth mode (`CAESIUM_AUTH_MODE` defaults to `none`, so
+  this is a real gate).
 - **Agent composition:** with the agent doc enabled, `oom` becomes a
   deterministic rule deferring to in-run escalation; an incident opens only
   when bounds exhaust, arriving pre-diagnosed ("OOMKilled at 4Gi and 6Gi;
