@@ -36,7 +36,6 @@ that force-starts the run at the latest safe moment regardless of signals. A
 run queue, priorities, atomic admission, SLA events) — not an autoscaler.
 
 ## Fit with Design Principles
-
 1. **Container-native.** Nothing changes about *what* runs — only *when*.
 2. **Declarative and GitOps-first.** The window is YAML on the trigger,
    lintable (`open + p95 + buffer ≤ deadline` satisfiability) and diffable.

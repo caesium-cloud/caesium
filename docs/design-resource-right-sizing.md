@@ -61,8 +61,8 @@ Read before designing; every later claim builds on these:
   `Kubernetes` (`pkg/container/spec.go:99-105`); Docker `Create` builds a
   `HostConfig` only for mounts (`internal/atom/docker/engine.go:112-115`),
   the K8s pod spec sets no `Resources`
-  (`internal/atom/kubernetes/engine.go:132-150`), podman likewise. No step,
-  in any engine, can request or limit CPU/memory today.
+  (`internal/atom/kubernetes/engine.go:132-150`), podman likewise. No step
+  can request or limit CPU/memory today, in any engine.
 - **`atom.ResourceFailure` is dead code.** Defined at
   `internal/atom/atom.go:134`, with a human message already waiting in the
   run store (`internal/run/store.go:2991`) — but no engine ever returns it.
@@ -139,13 +139,13 @@ steps:
         maxEscalations: 2        # extra OOM-only attempts beyond `retries`
 ```
 
-Semantics, all lint-enforced (`caesium job lint`): `resources` without
-`rightSizing` is valid (static limits, no learning); `rightSizing` requires
-`resources` and `memory.max ≥ resources.memory ≥ memory.min`; `suggest`
-never mutates, `auto` applies within `[min, max]` — and on git-synced jobs
-"apply" *means opening a PR*, never a direct write (see Backend); `onOOM`
-works in every mode, and escalation is memory-only (CPU exhaustion throttles
-rather than kills — CPU is right-sized via suggestions only).
+Semantics, lint-enforced: `resources` without `rightSizing` is valid (static
+limits); `rightSizing` requires `resources` and
+`memory.max ≥ resources.memory ≥ memory.min`; `suggest` never mutates,
+`auto` applies within `[min, max]` — on git-synced jobs "apply" *means
+opening a PR*, never a direct write (see Backend); `onOOM` works in every
+mode, and escalation is memory-only (CPU exhaustion throttles rather than
+kills — CPU is right-sized via suggestions only).
 
 ## Backend
 
