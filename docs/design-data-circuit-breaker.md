@@ -40,19 +40,19 @@ PR-time checks in `design-contract-enforcement.md`.
 
 ## Terminology: "hold", deliberately not "quarantine"
 
-Caesium already has a quarantine concept and it means something else.
+Caesium already has a quarantine concept and it means something else:
 [`design-quarantined-replay.md`](design-quarantined-replay.md) defines **run
-quarantine**: a replay `JobRun`/`TaskRun` marked non-authoritative. That
+quarantine** — a replay `JobRun`/`TaskRun` marked non-authoritative. That
 marker is load-bearing in persisted columns (`JobRun.Quarantine`,
 `TaskRun.Quarantine`, `ExecutionEvent.Quarantine`), the live-bus field
 (`event.Event.Quarantine`, `internal/event/bus.go`), and
 `quarantine IS NOT TRUE` predicates across stats/watermark queries.
-Overloading it would be a correctness hazard: a reviewer seeing `Quarantine`
+Overloading it would be a correctness hazard — a reviewer seeing `Quarantine`
 must be able to assume "non-authoritative replay run" everywhere. This
-feature therefore uses **hold** exclusively — `DatasetHold` model,
-`dataset_held`/`dataset_released` events, `caesium dataset holds` CLI, "held"
-badges. A dataset is *held*; a replay run is *quarantined*. The two never
-share a column, an event field, or a YAML key.
+feature therefore uses **hold** exclusively: `DatasetHold` model,
+`dataset_held`/`dataset_released` events, `caesium dataset holds` CLI. A
+dataset is *held*; a replay run is *quarantined*. The two never share a
+column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
@@ -87,20 +87,17 @@ re-emits, not for Caesium.
 
 ```
  task exits ─▶ parse markers (##caesium::output / ::metrics, pkg/task)
-                    │
-                    ▼
-            assertion evaluator (post-task, beside schema validation)
-             │ pass: record metrics, update baseline, release own hold
-             │ violation:
-             ├─ onViolation: warn|fail ─▶ existing schema-validation semantics
-             └─ onViolation: hold ─▶ DatasetHold row + dataset_held event
-                                        │                └─▶ ONE alert (policies)
-                                        ▼
-            downstream run-admission gate (run store, same tx as admit):
-              job consumes held dataset? ─▶ skip with reason, non-paging event
-                                        ▼
-            release: human ack (CLI/UI/REST) or next clean run of producer
-                     ─▶ dataset_released, gate reopens
+                 ▼
+   assertion evaluator (post-task, beside schema validation)
+     │ pass ─▶ record metrics, update baseline, release own hold
+     ├─ violation, onViolation: warn|fail ─▶ existing schema semantics
+     └─ violation, onViolation: hold ─▶ DatasetHold + dataset_held event
+                 ▼                                 └─▶ ONE alert (policies)
+   downstream run-admission gate (run store, same tx as admit):
+     job consumes held dataset? ─▶ skip with reason, non-paging event
+                 ▼
+   release: human ack (CLI/UI/REST) or next clean producer run
+            ─▶ dataset_released, gate reopens
 ```
 
 ## YAML
@@ -116,26 +113,25 @@ steps:
   - name: load-transactions
     image: etl/load:1.4
     produces:
-      - dataset: warehouse/transactions_daily     # registry identity
+      - dataset: warehouse/transactions_daily  # registry identity
         assertions:
-          rowCount:                                # from metrics key "rowCount"
-            min: 1000                              # absolute floor, always enforced
-            deltaFromBaseline: 50%                 # |value − median(last N)| ≤ 50%
+          rowCount:                             # from metrics key "rowCount"
+            min: 1000                           # absolute floor, always on
+            deltaFromBaseline: 50%              # |value − median(last N)| ≤ 50%
           nullRate:
-            metric: null_rate_customer_id          # step-chosen metric key
+            metric: null_rate_customer_id       # step-chosen metric key
             max: 0.02
           freshness:
-            watermark: max_event_time              # RFC3339 metric
+            watermark: max_event_time           # RFC3339 metric
             maxLag: 26h
           custom:
-            - metric: dedup_ratio                  # any scalar the step emits
+            - metric: dedup_ratio               # any scalar the step emits
               max: 0.05
-        onViolation: hold                          # hold | warn | fail
-
+        onViolation: hold                       # hold | warn | fail
   - name: publish-report
     image: etl/report:2.0
     consumes:
-      - dataset: warehouse/transactions_daily      # admission gate input
+      - dataset: warehouse/transactions_daily  # admission gate input
 ```
 
 The step self-reports on stdout (one line, JSON, same parse pass as the other
@@ -201,18 +197,16 @@ a broken emitter.
 Runs exactly where schema validation runs today — after marker capture, in
 both executors (`internal/job/job.go` calls `run.ValidateTaskOutputSchema` at
 ~1072; `internal/worker/runtime_executor.go` at ~595). A sibling
-`run.EvaluateDataAssertions(store, runID, taskID, metrics, assertions)`:
-(1) persists emitted metrics as `DatasetMetric` rows — including undeclared
-metrics, free baseline history for assertions added later; (2) loads the
-rolling baseline for each `deltaFromBaseline` assertion; (3) evaluates and
+`run.EvaluateDataAssertions(...)`: (1) persists emitted metrics as
+`DatasetMetric` rows — including undeclared metrics, free baseline history
+for assertions added later; (2) loads rolling baselines; (3) evaluates and
 persists violations (a `DataViolation` shape parallel to `SchemaViolations`)
 on the `TaskRun`; (4) dispatches `onViolation` — `warn` logs + persists,
 `fail` returns an error the executors escalate exactly as schema `fail` mode,
 `hold` opens the hold via idempotent upsert (one *active* hold per dataset;
 repeat violations append occurrences rather than re-alerting).
-
-Replay-quarantined runs (`TaskRun.Quarantine`) are excluded completely: no
-metrics recorded, no baselines advanced, no holds opened or released — a
+Replay-quarantined runs (`TaskRun.Quarantine`) are excluded completely — no
+metrics recorded, no baselines advanced, no holds opened or released; a
 what-if must not trip or clear a production breaker.
 
 ### Data model (`internal/models/`)
@@ -256,15 +250,15 @@ the hold; a lint hint flags declared datasets never observed in lineage.
 ### Downstream admission gate
 
 The check belongs at **run admission**, not task start. Admission is already
-the single durable, leader-safe decision point: `Store.admit()`
+the durable, leader-safe decision point: `Store.admit()`
 (`internal/run/store.go:711`) resolves concurrency inside one transaction via
 an atomic conditional insert, and every path into a run — cron, event/chained
 triggers (`internal/trigger/event`), HTTP, manual, queue dequeue — funnels
-through run creation in the store. Gating there means one decision, recorded
-durably on the run: no per-node in-memory state, no cross-node TOCTOU. A
-task-start gate is rejected for v1 — a hold landing mid-run would strand a
-half-executed DAG in an ambiguous state, and admission already bounds the
-exposure window to one in-flight run.
+through run creation in the store. One decision, recorded durably on the run:
+no per-node in-memory state, no cross-node TOCTOU. A task-start gate is
+rejected for v1 — a hold landing mid-run would strand a half-executed DAG in
+an ambiguous state, and admission already bounds exposure to one in-flight
+run.
 
 Mechanics: before `admit()`, the store resolves the consuming job's declared
 `consumes` list and queries active `DatasetHold` rows **in the same
@@ -336,26 +330,24 @@ caesium dataset release <ns>/<name> [--reason ...] [--tolerate <assertion>=<dur>
 caesium dataset metrics <ns>/<name> --metric rowCount [--json]
 ```
 
-`--json` output goes to stdout, clean and parseable — per the repo's
-machine-readable-output gate, asserted by integration tests using
-`runCLIStdout`, never the stream-merging capture.
+`--json` goes to stdout, clean and parseable — asserted by integration tests
+via `runCLIStdout`, never the stream-merging capture.
 
 ## Frontend (Caesium Console)
 
 1. **Hold badges on the lineage graph.** `LineageGraph.tsx` marks held
-   dataset nodes (a "held" badge, visually distinct from run-status colors
-   and replay-quarantine styling) and shades the downstream cone — the blast
+   dataset nodes (a "held" badge, distinct from run-status colors and
+   replay-quarantine styling) and shades the downstream cone — the blast
    radius at a glance.
-2. **Ack/release flow.** A hold panel (violated assertion, observed vs bound,
-   producing-run link, occurrence count) with Release: reason required,
-   optional tolerance picker. Active-holds count joins the nav badges
-   (`useNavCounts.ts`).
+2. **Ack/release flow.** A hold panel (violated assertion, observed vs
+   bound, producing-run link, occurrence count) with Release: reason
+   required, optional tolerance picker. Active-holds count joins the nav
+   badges (`useNavCounts.ts`); gate-skipped runs render the held dataset as
+   their skip reason, deep-linking to the hold.
 3. **Assertions on the run surface.** `RunDetailPage`/`TaskDetailPanel` show
    per-assertion results beside today's schema-violation display; each
-   `deltaFromBaseline` row gets a **baseline sparkline** (last-N values, band,
-   current point) so "10× normal" is visible, not inferred.
-4. **Skipped-run clarity.** Gate-skipped runs render the held dataset as the
-   skip reason, deep-linking to the hold.
+   `deltaFromBaseline` row gets a **baseline sparkline** (last-N values,
+   band, current point) so "10× normal" is visible, not inferred.
 
 ## Interplay
 
@@ -368,16 +360,16 @@ machine-readable-output gate, asserted by integration tests using
   static analysis cannot see — the *values*. One contract story, two
   enforcement points.
 - **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md).**
-  `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
-  bundle carries the violation, baseline snapshot, and impact graph;
+  `dataset_held` becomes an incident class (`data_quality_hold`) whose
+  triage bundle carries the violation, baseline, and impact graph;
   `release_hold` joins the action catalog at tier 2 (tier 3 with tolerance
-  windows). `suppress_downstream_alerts` becomes largely unnecessary for this
-  class — holds alert once by construction.
+  windows). `suppress_downstream_alerts` becomes largely unnecessary here —
+  holds alert once by construction.
 - **[`design-backtesting.md`](design-backtesting.md).** Assertions evaluate
   in backtests too, over the metrics historical runs emitted — free
-  regression signal ("this change would have tripped the breaker on 3 of the
-  last 30 days") — with holds never opened from backtest runs, mirroring the
-  replay-quarantine posture.
+  regression signal ("this change would have tripped the breaker on 3 of
+  the last 30 days") — with holds never opened from backtest runs, mirroring
+  the replay-quarantine posture.
 
 ## Testing
 
@@ -398,13 +390,13 @@ get their own scenarios.
 ## Phasing
 
 - **Phase 0 — Observe.** Marker parsing, `DatasetMetric` persistence,
-  registry table, baseline read API, metrics CLI/UI sparkline. No enforcement;
-  seeds baselines while the rest is reviewed.
+  registry table, baseline read API, metrics CLI/UI sparkline. No
+  enforcement; seeds baselines while the rest is reviewed.
 - **Phase 1 — Assert.** Evaluator with `warn|fail`, violations persisted,
   lint. Feature-complete for teams that only want red runs.
-- **Phase 2 — Break the circuit.** `DatasetHold`, admission gate,
-  skip-with-reason, release (ack + clean-run), events/notifications, holds
-  CLI/UI. The headline release.
+- **Phase 2 — Break the circuit.** `DatasetHold`, admission gate, release
+  (ack + clean-run), events/notifications, holds CLI/UI. The headline
+  release.
 - **Phase 3 — Ergonomics & reach.** `park` disposition with release-drain,
   agent actions + incident class, freshness integration, backtest evaluation.
 
@@ -426,15 +418,15 @@ get their own scenarios.
 
 1. **Identity unification.** Should declared registry names *replace* the
    heuristic lineage names for declaring steps (mapper prefers `produces`
-   over path-derivation), so holds and impact queries share one spine from
-   day one? Leaning yes — it also fixes lineage-name instability.
-2. **Multi-producer datasets.** Two jobs writing one dataset: does a clean
-   run of producer B release a hold opened by producer A? Proposal: only the
-   holding producer's clean run auto-releases; others require ack.
-3. **Partition-scoped holds.** Holding `transactions_daily/2026-07-03` rather
-   than the whole dataset needs partition identity in the registry — likely
-   arriving with freshness scheduling's watermark work; the hold schema
-   should reserve an optional partition key now.
+   over path-derivation), so holds and impact queries share one spine?
+   Leaning yes — it also fixes lineage-name instability.
+2. **Multi-producer datasets.** Does a clean run of producer B release a
+   hold opened by producer A? Proposal: only the holding producer's clean
+   run auto-releases; others require ack.
+3. **Partition-scoped holds.** Holding `transactions_daily/2026-07-03`
+   rather than the whole dataset needs partition identity in the registry —
+   likely arriving with freshness scheduling's watermark work; the hold
+   schema should reserve an optional partition key now.
 4. **Tenancy.** When multi-tenancy (roadmap §3.1) lands, holds and the
    registry scope per namespace; models carry a nullable tenant column from
    day one, as agent-in-the-loop already commits to.

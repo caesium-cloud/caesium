@@ -5,11 +5,11 @@
 ## Problem
 
 Pipeline changes are deployed on faith. CI proves the YAML lints and maybe that
-the job runs once against synthetic or staging data; then it merges, and the
-first real test is tonight's production run — production skew, month-end edge
-cases, the vendor file with the weird encoding. Staging data is not production
-data, so the regression is discovered by the *consumer*: a dashboard shows wrong
-numbers, and someone runs `caesium run diff` after the fact.
+the job runs once against synthetic or staging data; the first real test is
+tonight's production run — production skew, month-end edge cases, the vendor
+file with the weird encoding. Staging data is not production data, so the
+regression is discovered by the *consumer*, and someone reconstructs it with
+`caesium run diff` after the fact.
 
 Every mainstream orchestrator has this gap, because none *records* what a
 production run consumed and produced in re-executable form. Caesium does: the
@@ -72,11 +72,9 @@ that did **not** run at baseline — is the central new risk (see Safety).
 $ caesium backtest --job daily-revenue --against last-30-runs \
     --image transform=registry.corp/transform:pr-412 \
     --ignore-output '*.generated_at' --server https://caesium.corp
-
 backtest bt_9f2c…  baselines: 30 selected, 27 eligible
 (3 skipped: 2 pre-date replaySafe, 1 cache proof expired)
 replaying 27 runs …  cache-hit tasks: 41  re-executed: 22
-
 RESULT: output changed in 2 of 27 runs
   2026-06-30  transform.row_count   41 872 → 40 619  (-3.0%)
   2026-05-31  transform.row_count   44 108 → 42 971  (-2.6%)
@@ -136,10 +134,9 @@ below).
 
 An ineligible baseline is **reported and skipped**, never silently dropped
 ("27 of 30 eligible", with per-run reasons); zero eligible baselines fails
-loudly. Consequence to state in docs and CLI help: **backtesting is only
+loudly. State the consequence in docs and CLI help: **backtesting is only
 available for jobs that opted into `replaySafe`, and only over runs recorded
-since they did** — the mark and descriptors are captured at execution time.
-Teams that want backtesting adopt `replaySafe: true` now so history accumulates.
+since they did** — teams adopt `replaySafe: true` now so history accumulates.
 
 ### Descriptor overrides — the core new machinery
 
@@ -171,30 +168,29 @@ Rules:
 - **Overrides flow into the hash honestly.** The overridden image digest/command
   replaces the descriptor value *before* `computeDescriptorHash`, so the step's
   identity changes, it re-executes, and downstream re-executes via the
-  `PredecessorHashes` cascade. Never hide an override from `HashInput` — that is
-  the false-hit bug class the replay design forbids.
+  `PredecessorHashes` cascade. Never hide an override from `HashInput` — the
+  false-hit bug class the replay design forbids.
 - **The replay TaskRun records both.** The stored descriptor keeps baseline
-  values (what was replayed *from*); the row's `Image` / `ResolvedImageDigest` /
-  `Command` carry the candidate (what actually ran); a new `DescriptorOverrides`
-  JSON column on the quarantined `JobRun` records the delta. `caesium why` /
-  `run diff` then attribute the re-run to the `image` field for free, because
-  the HashInput blob differs on exactly that field.
+  values; the row's `Image`/`ResolvedImageDigest`/`Command` carry the candidate;
+  a new `DescriptorOverrides` JSON column on the quarantined `JobRun` records
+  the delta. `caesium why` / `run diff` then attribute the re-run to the `image`
+  field for free — the HashInput blob differs on exactly that field.
 - **`--path candidate.job.yaml`:** the CLI computes the step-level delta between
   candidate jobdef and baseline descriptors and submits it as the same typed
   override set — the API never trusts a whole jobdef. Structural changes (steps
   added/removed, edges changed) are **rejected** with a pointer to
   `caesium job diff` + `dev --once`: a new step has no recorded baseline inputs.
-- **Param overrides (`--set`)** reuse the existing mechanism unchanged — with its
+- **Param overrides (`--set`)** reuse the existing mechanism unchanged, with its
   known v1 cost: `RunParams` is hashed wholesale into every task, so any param
   override re-runs the **full DAG** of every baseline run
   (`planTasks(..., forceReexecute=true)`, replay.go:186-190/443). The CLI prints
   this cost difference before dispatch.
 
-**New safety implication, stated plainly:** shipped replay executes *code that
-already ran in production once*; the `replaySafe` mark attested that code.
-A backtest executes **unvetted candidate code** against the baseline's real
-mounts, secrets, network, and workload identity — the attestation does not
-transfer. This is the top risk and is treated in Safety below.
+**New safety implication, stated plainly:** shipped replay executes code that
+already ran in production once; `replaySafe` attested that code. A backtest
+executes **unvetted candidate code** against the baseline's real mounts,
+secrets, network, and workload identity — the attestation does not transfer.
+This is the top risk; see Safety.
 
 ### Output-delta computation
 
@@ -321,29 +317,28 @@ comment**.
     api-key: ${{ secrets.CAESIUM_API_KEY }}
     steps: lint,diff,backtest,comment
     backtest-against: last-30-runs
-    backtest-image: transform=ghcr.io/corp/transform:${{ github.sha }}
+    backtest-image: transform=ghcr.io/corp/t:${{ github.sha }}
 ```
 
 Auth reality: `AUTH_MODE` defaults to `none` (`pkg/env/env.go:169`). CI calling
 a production Caesium API to execute containers must not hit an unauthenticated
-server: the Action fails fast if auth is off, and the docs require
-`AUTH_MODE=api-key` plus a least-privilege `backtest`-capability key in CI
-secrets — the same requirement as the §2.1 preview-run story, solved once there.
-The candidate image must already be pushed (build & push → backtest). Cost
-guard: the Action posts the `--dry-run` plan first and requires a `backtest`
-label or explicit re-run to execute, so a busy repo doesn't burn 30 replays per
-push by default.
+server: the Action fails fast if auth is off; docs require `AUTH_MODE=api-key`
+plus a least-privilege `backtest`-capability key in CI secrets — the same
+requirement as the §2.1 preview-run story, solved once there. The candidate
+image must already be pushed (build & push → backtest). Cost guard: the Action
+posts the `--dry-run` plan first and requires a `backtest` label or explicit
+re-run to execute, so a busy repo doesn't burn 30 replays per push.
 
 ## Frontend (Caesium Console)
 
 - **Backtest report view** (`/jobs/:id/backtests/:btid`): header (candidate
   digest vs baseline range, cost split), then a **run-matrix heat strip** — one
   cell per baseline run in date order: green unchanged / amber changed / red
-  failed / grey skipped. Month-end clustering becomes visible at a glance; that
-  strip is the screenshot people share.
+  failed / grey skipped. Month-end clustering is visible at a glance; that strip
+  is the screenshot people share.
 - A cell drills into the per-run view: output-delta table (before/after per
-  changed key, ignored keys listed) plus the existing **RunDiffView** reused
-  unchanged for causal detail — baseline left, replay right.
+  changed key, ignored keys listed) plus the existing **RunDiffView**, reused
+  unchanged — baseline left, replay right.
 - Job page gets a "Backtests" tab; a quarantined replay's run-detail page links
   back to its owning backtest.
 
@@ -387,22 +382,21 @@ exactly the shipped replay risk, N times — a reason to phase it first.
 
 ## Testing
 
-Per the repo gate (CLAUDE.md): every new CLI command and REST endpoint ships
+Per the repo gate (CLAUDE.md), every new CLI command and REST endpoint ships
 with an integration test in `test/` driving the real surface.
 
 - Integration (`just integration-test`, distributed server): seed a `replaySafe`
   job, run it N times with varying params/outputs. P0 (no override): 100%
-  unchanged, all tasks cache-served; `--json` stdout clean and parseable via
-  `runCLIStdout`, stderr captured separately. P1: image override to a container
-  that emits different output for one param shape → exactly those runs
-  `changed`; assert re-executed/cached counts, zero production cache writes,
-  zero lineage rows, no metric drift (reuse the replay suppression assertions).
-  Failure path: candidate exits non-zero → `failed` verdict, non-zero CLI exit.
-  Eligibility: a pre-`replaySafe` baseline and an expired cache entry both
-  surface as `skipped` with reasons.
+  unchanged, all cache-served; `--json` stdout clean and parseable via
+  `runCLIStdout`, stderr separate. P1: image override to a container that emits
+  different output for one param shape → exactly those runs `changed`; assert
+  re-executed/cached counts, zero production cache writes, zero lineage rows, no
+  metric drift (reuse the replay suppression assertions). Candidate exiting
+  non-zero → `failed` verdict, non-zero CLI exit. A pre-`replaySafe` baseline
+  and an expired cache entry both surface as `skipped` with reasons.
 - Unit: override→hash plumbing (only the intended step's `HashInput` field
-  changes; upstream hashes byte-identical), ignore-path globbing (ignored keys
-  listed), fingerprint derivation, verdict classification, dry-run plan math.
+  changes; upstream hashes byte-identical), ignore-path globbing, fingerprint
+  derivation, verdict classification, dry-run plan math.
 - E2e (Playwright): report view, heat strip, drill-down into RunDiffView, with
   an auth-enabled lane.
 
@@ -439,9 +433,8 @@ with an integration test in `test/` driving the real surface.
 ## Open Questions
 
 1. Relax `replay.go:538` to trust durable baseline `TaskRun.Result`/`Output` for
-   cache-enabled unchanged tasks whose `TaskCache` row expired? Decouples
-   backtest depth from cache TTL, but touches replay's fail-closed proof rules —
-   decide in the replay design's terms.
+   cache-enabled unchanged tasks whose `TaskCache` row expired? Decouples depth
+   from cache TTL but touches replay's fail-closed proof rules — decide there.
 2. Per-step param dependency contracts (so `--set` backtests stop paying
    full-DAG cost) — shared open item with replay v2.
 3. A `backtestServiceAccount` / egress-profile override for k8s: genuine
