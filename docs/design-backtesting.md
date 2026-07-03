@@ -103,9 +103,9 @@ regression only manifests on data shapes staging never has.
    change" backtests unchanged on 28 of 30 runs — but both month-end runs lose
    ~3% of rows: it mishandles a partition that only exists at month boundaries.
    Caught in review; the consumer never sees it.
-3. **Dependency bump changes nothing.** A base-image CVE bump
-   (`python:3.12.4 → 3.12.6`) backtests 30/30 byte-identical (output-ref digests
-   equal). Merge with confidence, receipt-grade evidence in the PR.
+3. **Dependency bump changes nothing.** A base-image CVE bump backtests 30/30
+   byte-identical (output-ref digests equal). Merge with confidence,
+   receipt-grade evidence in the PR.
 
 ## Backend Design
 
@@ -127,9 +127,9 @@ tasks have live cache proof (see retention below).
 
 An ineligible baseline is **reported and skipped**, never silently dropped
 ("27 of 30 eligible", with per-run reasons); zero eligible baselines fails
-loudly. State the consequence in docs and CLI help: **backtesting is only
-available for jobs that opted into `replaySafe`, and only over runs recorded
-since they did** — teams adopt `replaySafe: true` now so history accumulates.
+loudly. State the consequence plainly: **backtesting is only available for jobs
+that opted into `replaySafe`, and only over runs recorded since they did** —
+teams adopt `replaySafe: true` now so history accumulates.
 
 ### Descriptor overrides — the core new machinery
 

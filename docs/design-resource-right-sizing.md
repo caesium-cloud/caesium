@@ -103,17 +103,16 @@ Read before designing; every later claim builds on these:
 
 ## Overview
 
-```
-run completes ─▶ stats capture per attempt (peak mem / cpu-secs / oom flag /
-                 exit code → task_runs columns)          [Phase 0 = §2.5 1–2]
-     │ OOM on attempt k               │ history (last N runs)
-     ▼                                ▼
-retry escalation: next attempt   recommendation: p99(peak) × headroom,
-at mem × factor, clamped to      quantized, clamped to declared bounds
-bounds → green run (bounds        ├─ suggest ─▶ CLI / UI / REST
-exhaust → classified fail,        └─ auto ────▶ provenance-routed apply:
-agent/incident hand-off)             git PR | jobdefs apply | degrade
-```
+Every attempt's peak memory, CPU seconds, OOM flag, and exit code are
+captured onto `task_runs` (Phase 0 = §2.5 items 1–2). Two consumers sit on
+that stream. **In-run:** an OOM-classified failure retries at
+`memory × factor`, clamped to declared bounds — green run, or a classified
+failure handed to the agent/incident pipeline when bounds exhaust.
+**Across runs:** a recommendation engine computes `p99(peak) × headroom`
+over the last N runs, quantized and clamped to bounds; `suggest` surfaces it
+via CLI/UI/REST, `auto` applies it through a provenance router — Git PR for
+git-synced jobs, `jobdefs` apply otherwise, degrade-to-suggest without write
+credentials.
 
 ## YAML
 
