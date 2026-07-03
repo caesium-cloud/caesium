@@ -32,10 +32,9 @@ The proposal: jobs declare an execution **window** plus a completion
 **deadline** ("start any time between 00:00 and 05:00, finish by 06:00");
 Caesium picks the start moment using predicted duration (p95 from history),
 cluster load, optional cost/carbon signals, and priority — with a hard rule
-that force-starts the run at the latest safe moment regardless of signals.
-This is a **queueing/scheduling policy over machinery that already exists**
-(durable run queue, priorities, atomic admission, SLA events) — not an
-autoscaler, and it never places tasks on nodes.
+that force-starts the run at the latest safe moment regardless of signals. A
+**queueing/scheduling policy over machinery that already exists** (durable
+run queue, priorities, atomic admission, SLA events) — not an autoscaler.
 
 ## Fit with Design Principles
 
@@ -128,9 +127,9 @@ the executor's listing loop needs `window` added (`executor.go:38-42`).
 schedule/timezone parsing (`cron.ParseSchedule`, cron.go:222-254). `Listen`
 waits for the next window *open* exactly as cron waits for its tick
 (cron.go:82-104) — but on fire it does **not** launch the job; it inserts a
-parked row stamped with logical date, open, effective close, and deadline in
-the configured location. The in-process `time.After` is only an optimization
-to park promptly; correctness never depends on it.
+parked row stamped with logical date, open, effective close, and deadline.
+The in-process `time.After` is only an optimization to park promptly;
+correctness never depends on it.
 
 ### Parked rows: extend `run_queue`
 
@@ -283,8 +282,8 @@ logs — the hard-won CLAUDE.md rule). Precedent: `caesium job queue`
 - **Job detail**: planned-start badge on the trigger summary (`parked ·
   starts ≈02:00 · forced 04:58`), rationale as tooltip/expando.
 - **Run detail / history**: a horizontal window bar per run — window span,
-  planned start, actual start (colored planned/forced), actual end, deadline
-  tick — showing at a glance how much elasticity was used.
+  planned start, actual start (colored planned/forced), actual end, and
+  deadline tick — showing at a glance how much elasticity was used.
 
 ## Safety
 
@@ -329,12 +328,11 @@ endpoint ships with an integration test in `test/` driving the real surface.
   `GET /v1/window/parked` and `caesium job window`), force-starts by
   latest-safe-start, and completes; `--json` stdout clean and parseable via
   `runCLIStdout` (never the stream-merging `runCLIRaw`); restart the server
-  mid-window — the parked run survives and still starts; cold-start job (no
-  history) starts at window open.
+  mid-window — the parked run survives and still starts; cold-start job
+  starts at window open.
 - **Unit**: p95 + cold-start floor; forceAt derivation incl. `close` cap; DST
   cases; rationale strings; signal parsing + TTL fail-open; reconciler
-  idempotency. Injectable clock; integration uses short real windows, not
-  mocked time.
+  idempotency. Injectable clock; integration uses short real windows.
 
 ## Phasing
 

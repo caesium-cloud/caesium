@@ -100,9 +100,9 @@ against actual data is a job for an auditing *step*, not for Caesium.
 
 Assertions attach to a **declared produced dataset** on the step. The
 `produces:` block is the declared-dataset registry — explicitly the *same*
-YAML and model substrate as [`design-freshness-scheduling.md`](design-freshness-scheduling.md):
-one registry keyed `(namespace, name)`, read by freshness scheduling for
-watermarks and by this feature for holds. Neither design ships a private copy.
+YAML and model substrate as [`design-freshness-scheduling.md`](design-freshness-scheduling.md),
+one registry keyed `(namespace, name)` read there for watermarks and here for
+holds; neither design ships a private copy.
 
 ```yaml
 steps:
@@ -111,18 +111,13 @@ steps:
     produces:
       - dataset: warehouse/transactions_daily  # registry identity
         assertions:
-          rowCount:                             # from metrics key "rowCount"
-            min: 1000                           # absolute floor, always on
-            deltaFromBaseline: 50%              # |value − median(last N)| ≤ 50%
-          nullRate:
-            metric: null_rate_customer_id       # step-chosen metric key
-            max: 0.02
-          freshness:
-            watermark: max_event_time           # RFC3339 metric
-            maxLag: 26h
+          # min is an absolute floor (always on); deltaFromBaseline means
+          # |value − median(last N clean runs)| must be ≤ 50% of the median.
+          rowCount: {min: 1000, deltaFromBaseline: 50%}
+          nullRate: {metric: null_rate_customer_id, max: 0.02}
+          freshness: {watermark: max_event_time, maxLag: 26h}  # RFC3339 metric
           custom:
-            - metric: dedup_ratio               # any scalar the step emits
-              max: 0.05
+            - {metric: dedup_ratio, max: 0.05}  # any scalar the step emits
         onViolation: hold                       # hold | warn | fail
   - name: publish-report
     image: etl/report:2.0
@@ -140,23 +135,22 @@ markers in `pkg/task/output.go` `parseMarkers`):
 Semantics: `warn` records the violation (like `schemaValidation: warn`);
 `fail` fails the task (red-run semantics); `hold` lets the task **succeed** —
 the work is done, and failing it would just invite a retry of the same data —
-but holds the dataset. Absolute bounds always enforce; `deltaFromBaseline`
-only once the baseline is seeded (below). A missing declared metric is itself
-a violation — a step that stops emitting `rowCount` must not silently pass.
-`caesium job lint` validates dataset names, `consumes` resolvability,
-percentage/duration syntax, and the `onViolation` enum.
+but holds the dataset. A missing declared metric is itself a violation — a
+step that stops emitting `rowCount` must not silently pass. `caesium job
+lint` validates dataset names, `consumes` resolvability, percentage/duration
+syntax, and the `onViolation` enum.
 
 ## Scenario walkthroughs
 
 **1. Truncated feed / bad values.** Nightly load writes 10M rows but 3 bad
 rows upstream corrupted the dedup pass — `dedup_ratio` comes back `0.31`
 against `max: 0.05`. The task succeeds; the evaluator opens a `DatasetHold`
-on `warehouse/transactions_daily` and fires **one** alert naming the
-dataset, producing run, and violated assertion with observed-vs-bound
-values. Overnight, four downstream jobs trigger on their crons; each is
+on `warehouse/transactions_daily` and fires **one** alert naming the dataset,
+producing run, and violated assertion with observed-vs-bound values.
+Overnight, four downstream jobs trigger on their crons; each is
 admission-gated and skips with reason
-`dataset_hold:warehouse/transactions_daily` (non-paging). Morning page
-count: one, at the source, with the blast radius attached.
+`dataset_hold:warehouse/transactions_daily` (non-paging). Morning page count:
+one, at the source, with the blast radius attached.
 
 **2. False positive: month-end.** On July 31 the row count legitimately
 lands 10× baseline; `deltaFromBaseline: 50%` trips. The operator checks the
@@ -210,8 +204,8 @@ what-if must not trip or clear a production breaker.
   way concurrency admission is (one conditional INSERT, leader-safe under
   dqlite's Raft serialization); held-by job/run/task refs; violation JSON
   (assertion, observed, bound, baseline snapshot); occurrence count;
-  released-at/by/reason (`ack|clean_run`) + release-run ref; tolerance
-  entries (assertion → expiry).
+  released-at/by/reason + release-run ref; tolerance entries (assertion →
+  expiry).
 - `DatasetMetric` — task-run ref (CASCADE like `LineageDataset`), namespace,
   name, metric, float value (watermarks as epoch seconds), created-at;
   pruned past `CAESIUM_DATASET_METRIC_RETENTION` (default 90d).

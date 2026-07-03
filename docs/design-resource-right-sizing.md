@@ -88,16 +88,16 @@ Read before designing; every later claim builds on these:
   container that runs and exits unsuccessfully is completed with that result
   and returned without retry (`job.go:1161-1163`). The distributed worker
   loop (`internal/worker/runtime_executor.go:307-376`) *does* retry
-  unsuccessful results — `executeTask` converts them to errors
-  (`runtime_executor.go:584-585`), persisting via `RetryTaskClaimed`
-  (`:356`). Escalation must make the OOM class retryable in the local loop
-  too, or the feature silently works only in distributed mode.
+  unsuccessful results — `executeTask` converts them to errors (`:584-585`),
+  persisting via `RetryTaskClaimed` (`:356`). Escalation must make the OOM
+  class retryable in the local loop too, or it silently works only in
+  distributed mode.
 - **Resource limits do not feed cache identity — they can't exist yet.**
   `cache.HashInput` (`internal/cache/hash.go:266-287`) hashes
   image/command/env/mounts/K8s-identity-fields/predecessors/params. The
   needed precedent exists: `KubernetesSpec.QueueName` is deliberately
   excluded as "scheduling metadata, not an execution input"
-  (`internal/cache/hash.go:329-336`, `pkg/container/spec.go:76-81`).
+  (`hash.go:329-336`, `pkg/container/spec.go:76-81`).
 - **Distributed workers apply the spec** from `descriptor.ContainerSpec`
   (`internal/worker/runtime_executor.go:153`) on their own node — resources
   in `container.Spec` reach workers with zero new plumbing, but *escalation
@@ -250,9 +250,8 @@ Hook: the existing per-attempt loops, both executors.
   `RetryFromFailure` (`internal/run/store.go:4614+`) resets `attempt` to 1
   and must also reset escalation state. (Per the sibling doc's finding, that
   path bypasses concurrency admission and `Job.Paused`; no new caller here.)
-- **Feedback into learning.** OOM-killed attempts are censored observations
-  (peak ≥ limit), so suggestions rise even when sampling missed the spike —
-  a success-after-escalation is the strongest recommendation signal.
+  A success-after-escalation is also the strongest learning signal — see the
+  censored-observation rule below.
 
 ### Recommendation engine
 
@@ -268,9 +267,11 @@ cpu     = same over CPU-seconds / duration (suggestion only)
 
 Guard rails: minimum sample count (default 5); downward suggestions
 suppressed while the §2.5 anomaly condition holds (latest run > 2× rolling
-average); `oom_inferred` censored points force the suggestion to at least
-`applied × onOOM.factor`. Deliberately percentile-plus-headroom, not a
-model — boring, explainable, auditable. Quarantined replays and runs from
+average); OOM-killed attempts are censored observations (peak ≥ limit) that
+force the suggestion to at least `applied × onOOM.factor`, so suggestions
+rise even when sampling missed the spike. Deliberately
+percentile-plus-headroom, not a model — boring, explainable, auditable.
+Quarantined replays and runs from
 [`design-backtesting.md`](design-backtesting.md) are excluded
 (`quarantine IS NOT TRUE`, the established filter), as are backfill storms
 unless opted in — backfill inputs differ systematically from steady state.
@@ -328,7 +329,7 @@ caesium job resources --all --format markdown # fleet report / PR-body ready
 
 `--json` goes to stdout, clean and parseable — asserted with the
 stream-separating `runCLIStdout` helper (`test/data_plane_e2e_test.go:31`),
-per the repo's hard-won rule that merged-stream captures hide leaks.
+per the repo rule that merged-stream captures hide leaks.
 
 ## Frontend (`ui/src/features/jobs/`)
 
