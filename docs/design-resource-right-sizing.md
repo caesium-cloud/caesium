@@ -224,9 +224,8 @@ Hook: the existing per-attempt loops, both executors.
   `MaxAttempts = Retries + 1 + onOOM.maxEscalations`. Escalation attempts
   are *class-gated*: consumable only when the previous attempt classified as
   OOM; a plain failure that exhausted `Retries` fails even if escalation
-  attempts remain. One accounting spine (the existing
-  `Attempt`/`MaxAttempts` columns), with `EscalationLevel` recording how
-  many consumed attempts were escalations.
+  attempts remain. One accounting spine (the existing columns), with
+  `EscalationLevel` recording how many consumed attempts were escalations.
 - **Escalation step.** Next attempt's memory =
   `min(applied × factor, memory.max)`, quantized up to 64Mi. Already at
   `memory.max` ⇒ no attempt consumed: fail now, classified, trail attached —
@@ -258,14 +257,13 @@ cpu     = same over CPU-seconds / duration (suggestion only)
 
 Guard rails: minimum sample count (default 5); downward suggestions
 suppressed while the §2.5 anomaly condition holds (latest run > 2× rolling
-average); OOM-killed attempts are censored observations (peak ≥ limit) that
-force the suggestion to at least `applied × onOOM.factor`, so suggestions
-rise even when sampling missed the spike. Deliberately
+average); OOM-killed attempts are censored observations (peak ≥ limit)
+forcing the suggestion to at least `applied × onOOM.factor`. Deliberately
 percentile-plus-headroom, not a model — boring, explainable, auditable.
-Quarantined replays and runs from
-[`design-backtesting.md`](design-backtesting.md) are excluded
-(`quarantine IS NOT TRUE`, the established filter), as are backfill storms
-unless opted in — backfill inputs differ systematically from steady state.
+Quarantined replays and [`design-backtesting.md`](design-backtesting.md)
+runs are excluded (`quarantine IS NOT TRUE`, the established filter), as
+are backfill storms unless opted in — backfill inputs differ systematically
+from steady state.
 
 ### Applying: provenance-routed, reusing the agent-doc router
 
@@ -299,14 +297,13 @@ leaderboard — complements §2.5's planned `/v1/jobs/:id/costs`, which
 multiplies these columns by a cost model).
 
 Env (`pkg/env/env.go`, envconfig pattern per `env.go:143`):
-`CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate: sampling +
-OOM reclassification) with `..._SAMPLE_INTERVAL` (10s);
-`CAESIUM_RIGHT_SIZING_ENABLED` (default `false` — recommendations,
-escalation, apply routes; off ⇒ no routes bound, `resources:` still applies
-statically) with tuning `..._WINDOW_RUNS` (20), `..._PERCENTILE` (99),
-`..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5); `CAESIUM_GIT_WRITE_CREDENTIALS`
-(or a write token on the git-sync source) enables the PR route — absent,
-degrade to suggest.
+`CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate) with
+`..._SAMPLE_INTERVAL` (10s); `CAESIUM_RIGHT_SIZING_ENABLED` (default
+`false` — recommendations, escalation, apply routes; off ⇒ no routes bound,
+`resources:` still applies statically) with tuning `..._WINDOW_RUNS` (20),
+`..._PERCENTILE` (99), `..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5);
+`CAESIUM_GIT_WRITE_CREDENTIALS` (or a write token on the git-sync source)
+enables the PR route — absent, degrade to suggest.
 
 ## CLI
 
@@ -380,10 +377,10 @@ allocates a configurable number of MiB (real OOMs against real Docker in CI):
 5. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
    stay pre-change (`killed`).
 
-K8s result-mapping and metrics-API degradation are unit-tested with fake pod
-statuses (CI has no cluster; a kind lane is a follow-up). Feature envs are
-enabled in `just integration-up` so the paths execute in CI; UI panels get
-Playwright e2e against the live backend, per the data-plane-memory-ui
+K8s result-mapping and metrics-API degradation are unit-tested with fake
+pod statuses (CI has no cluster; a kind lane is a follow-up). Feature envs
+are enabled in `just integration-up` so the paths execute in CI; UI panels
+get Playwright e2e against the live backend, per the data-plane-memory-ui
 precedent.
 
 ## Phasing
@@ -397,10 +394,9 @@ precedent.
   Independently valuable: today Caesium cannot set limits at all.
 - **Phase 2 — Escalate.** `onOOM` ladder in both executors, local-loop
   retryability fix, persisted escalation state, attempt-trail UI.
-- **Phase 3 — Suggest.** Recommendation engine, REST + `caesium job
-  resources`, JobDetail panel, fleet view.
-- **Phase 4 — Apply.** Provenance-routed auto/`--apply`, Git-PR proposals,
-  downsizing cooldowns, agent-incident composition.
+- **Phase 3 — Suggest.** Recommendation engine, REST + CLI, JobDetail
+  panel, fleet view. **Phase 4 — Apply.** Provenance-routed auto/`--apply`,
+  Git-PR proposals, downsizing cooldowns, agent-incident composition.
 
 ## Non-Goals (v1)
 
@@ -438,5 +434,5 @@ precedent.
 5. **PR ergonomics.** One rolling Renovate-style PR per repo vs. discrete
    PRs per job? Interacts with how
    [`design-contract-enforcement.md`](design-contract-enforcement.md) and
-   the agent doc route proposals — a shared "Caesium proposals" channel may
-   deserve its own mini-design.
+   the agent doc route proposals — a shared proposals channel may deserve
+   its own mini-design.
