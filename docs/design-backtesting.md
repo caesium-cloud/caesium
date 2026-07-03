@@ -88,7 +88,8 @@ As a PR comment (§2.1 Action):
 > | 25 runs | 2026-06-01 … 2026-07-02 | ✓ unchanged | — |
 >
 > Both changed runs are **month-end**. Cost: 22 tasks re-executed, 41 cached.
-> [Full report](…) · [Per-run diff](…)
+> `Full report` and `Per-run diff` links resolve to the backtest report UI
+> (`/ui/jobs/<alias>/backtests/<id>`).
 
 The month-end pattern jumping out of the run matrix *is* the feature: this
 regression only manifests on data shapes staging never has.
@@ -307,9 +308,10 @@ The §2.1 Action grows a fourth chained step — **lint → diff → backtest �
     backtest-image: transform=ghcr.io/corp/t:${{ github.sha }}
 ```
 
-Auth reality: `AUTH_MODE` defaults to `none` (`pkg/env/env.go:169`). CI calling
-a production Caesium API to execute containers must not hit an unauthenticated
-server: the Action fails fast if auth is off; docs require `AUTH_MODE=api-key`
+Auth reality: `CAESIUM_AUTH_MODE` defaults to `none` (`pkg/env/env.go:169`).
+CI calling a production Caesium API to execute containers must not hit an
+unauthenticated server: the Action fails fast if auth is off; docs require
+`CAESIUM_AUTH_MODE=api-key`
 plus a least-privilege `backtest`-capability key in CI secrets — the §2.1
 preview-run story's requirement, solved once there. The candidate image must
 already be pushed (build & push → backtest). Cost guard: the Action posts the
