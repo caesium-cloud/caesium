@@ -33,13 +33,10 @@ silently loads nulls — at 3 a.m. Wednesday. The runtime gate works exactly as
 designed and is still the wrong place to discover the problem. The
 agent-in-the-loop design remediates that page; this design prevents it:
 **the 3 a.m. failure becomes a lint error in the producer's PR**, with the
-consumer and its owning team named:
-
-```
-BREAKING: vendor-x-daily step "export" outputSchema removes required field
-"customer_id" consumed by reporting-daily step "load" (owner: team=b,
-via event-trigger chain vendor-x-daily → reporting-daily).
-```
+consumer and its owning team named — *"BREAKING: vendor-x-daily step
+`export` removes required field `customer_id` consumed by reporting-daily
+step `load` (owner: team=b, via event-trigger chain vendor-x-daily →
+reporting-daily)."*
 
 ## Fit with Design Principles
 
@@ -64,15 +61,13 @@ via event-trigger chain vendor-x-daily → reporting-daily).
         │
   caesium job lint/diff/apply → POST /v1/jobdefs/{lint,diff,apply}
         │
-  ┌─────▼────────────────────────────────────────────┐
-  │ Contract graph derivation — edges =              │
+  ┌─────▼─ contract graph derivation ────────────────┐
   │  1. declared  produces/consumes dataset blocks   │
   │  2. inferred  event-trigger chains + paramMapping│
   │  3. evidence  lineage_datasets (observed runs)   │
-  └─────┬────────────────────────────────────────────┘
-  ┌─────▼────────────────────────────────────────────┐
-  │ Schema compat checker: new producer schema vs    │
-  │ old schema + each consumer's declared requirement│
+  ├─────── schema compat checker ────────────────────┤
+  │ new producer schema vs old schema + each         │
+  │ consumer's declared requirement:                 │
   │ breaking → error   unknown → warn   ok → pass    │
   └─────┬────────────────────────────────────────────┘
         ▼
@@ -155,8 +150,6 @@ steps:
           schema:                  # what THIS consumer requires — a subset,
             type: object           # not a copy of the producer's schema
             required: [customer_id]
-            properties:
-              customer_id: {type: string}
 ```
 
 Lint validates that `schemaFrom: output` names a step with an
@@ -364,20 +357,18 @@ producer's repo, before merge.
 
 ## Testing
 
-Per the end-to-end gate in `CLAUDE.md`:
-
-- `pkg/jobdef/schemacompat` unit tests: table-driven verdict matrix (removed
-  required, type narrow/widen, enum shrink/grow, additive optional, each
-  unknown construct → unknown), plus fuzzing so no schema crashes the walker.
-- Integration tests in `test/` driving the real surface — apply producer +
-  consumer, then: (a) breaking change → apply 409 naming consumer and team,
-  via CLI with `runCLIStdout` asserting clean parseable `--json`; (b)
-  additive change applies; (c) `--allow-breaking` incl. notification emission
-  and window expiry; (d) coordinated one-batch migration passes; (e)
-  paramMapping-inferred edge catches a removed output key with no
-  declarations; (f) `CAESIUM_CONTRACT_ENFORCEMENT` unset ⇒ fully inert.
-  Enable the gate in `just integration-up` so the path executes in CI. UI
-  badges and graph view get Playwright e2e against the live backend.
+Per the end-to-end gate in `CLAUDE.md`: `pkg/jobdef/schemacompat` gets a
+table-driven verdict matrix (removed required, type narrow/widen, enum
+shrink/grow, additive optional, each unknown construct → unknown) plus
+fuzzing so no schema crashes the walker. Integration tests in `test/` drive
+the real surface — apply producer + consumer, then: (a) breaking change →
+apply 409 naming consumer and team, via CLI with `runCLIStdout` asserting
+clean parseable `--json`; (b) additive change applies; (c) `--allow-breaking`
+incl. notification emission and window expiry; (d) coordinated one-batch
+migration passes; (e) paramMapping-inferred edge catches a removed output
+key with no declarations; (f) `CAESIUM_CONTRACT_ENFORCEMENT` unset ⇒ fully
+inert. Enable the gate in `just integration-up` so the path executes in CI.
+UI badges and the graph view get Playwright e2e against a live backend.
 
 ## Phasing
 
@@ -407,14 +398,13 @@ Per the end-to-end gate in `CLAUDE.md`:
 
 1. **Payload-shape contracts for event params.** Should consumers declare a
    schema for the *trigger event payload* itself (not just datasets),
-   formalizing today's `paramMapping` extraction? Leaning yes, later phase —
-   it turns the inferred-edge check into a declared one.
+   formalizing today's `paramMapping` extraction? Leaning yes, later phase.
 2. **Evidence-edge decay.** How long does a lineage-observed edge keep
    warning after the consumer stops reading the dataset? Tie to
    `lineage_datasets` pruning, or a dedicated `lastSeen` horizon?
-3. **Namespace interplay (roadmap §3.1).** Cross-namespace contract edges
-   should probably require declarations (no inference across tenant
-   boundaries); decide before multi-tenancy lands.
+3. **Namespace interplay (roadmap §3.1).** Cross-namespace edges should
+   probably require declarations (no inference across tenant boundaries);
+   decide before multi-tenancy lands.
 4. **Ack UX under GitOps.** For git-synced jobs, should the ack live in the
    YAML (`datasets.produces[].breakingChangeAck`) so the escape hatch itself
    is PR-reviewed, rather than a CLI flag? Leaning YAML-first there,
