@@ -51,6 +51,9 @@ var lintCmd = &cobra.Command{
 		if err := internaljobdef.ValidateTriggerChains(cmd.Context(), nil, defs); err != nil {
 			return err
 		}
+		if err := internaljobdef.ValidateDatasetGraph(cmd.Context(), nil, defs); err != nil {
+			return err
+		}
 
 		if !lintCheckSecrets {
 			if err := writeCmdOut(cmd, "Validated %d job definition(s)\n", len(defs)); err != nil {

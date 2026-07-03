@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
@@ -150,6 +151,9 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 				return err
 			}
 			if err := i.reconcileCallbacksTx(tx, jobModel.ID, def.Callbacks); err != nil {
+				return err
+			}
+			if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
 				return err
 			}
 			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
@@ -929,6 +933,21 @@ func callbackSignature(cbType models.CallbackType, cfg string) string {
 	return string(cbType) + "\x00" + cfg
 }
 
+// reconcileDatasetDeclarationsTx rebuilds this job's slice of the declared
+// dataset graph from the manifest. Rebuilding (rather than diffing) means a
+// declaration removed from the manifest is pruned. Declarations are scheduling
+// metadata only and never touch the cache identity or the execution path.
+func (i *Importer) reconcileDatasetDeclarationsTx(tx *gorm.DB, jobModel *models.Job, def *schema.Definition) error {
+	decls, err := freshness.BuildDeclarations(def, jobModel.ID, jobModel.Alias)
+	if err != nil {
+		return fmt.Errorf("dataset declarations: %w", err)
+	}
+	if err := freshness.ReplaceForJobTx(tx, jobModel.ID, decls); err != nil {
+		return fmt.Errorf("dataset declarations: %w", err)
+	}
+	return nil
+}
+
 func (i *Importer) softDeleteAtomsTx(tx *gorm.DB, atomIDs []uuid.UUID) error {
 	if len(atomIDs) == 0 {
 		return nil
@@ -961,6 +980,12 @@ func (i *Importer) retireJobsTx(tx *gorm.DB, jobs []*models.Job) error {
 	}
 
 	if err := tx.Where("job_id IN ?", jobIDs).Delete(&models.Callback{}).Error; err != nil {
+		return err
+	}
+
+	// dataset_declarations is a rebuilt-from-manifest projection, so a retired
+	// job's declarations are hard-deleted rather than left dangling.
+	if err := freshness.DeleteForJobsTx(tx, jobIDs); err != nil {
 		return err
 	}
 
