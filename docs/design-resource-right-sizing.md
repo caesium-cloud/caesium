@@ -82,15 +82,13 @@ Against the six principles from [`roadmap.md`](roadmap.md):
   and returned without retry (`job.go:1161-1163`). The distributed worker
   loop (`internal/worker/runtime_executor.go:307-376`) *does* retry
   unsuccessful results — `executeTask` converts them to errors (`:584-585`),
-  persisting via `RetryTaskClaimed` (`:356`). Escalation must make the OOM
-  class retryable in the local loop too, or it silently works only in
-  distributed mode.
+  persisting via `RetryTaskClaimed` (`:356`). Escalation must make OOM
+  results retryable locally too, or it works only in distributed mode.
 - **Resource limits do not feed cache identity — they can't exist yet.**
   `cache.HashInput` (`internal/cache/hash.go:266-287`) hashes
   image/command/env/mounts/K8s-identity-fields/predecessors/params. The
-  needed precedent exists: `KubernetesSpec.QueueName` is deliberately
-  excluded as "scheduling metadata, not an execution input"
-  (`hash.go:329-336`, `pkg/container/spec.go:76-81`).
+  needed precedent exists: `KubernetesSpec.QueueName` is excluded as
+  "scheduling metadata, not an execution input" (`hash.go:329-336`).
 - **Distributed workers apply the spec** from `descriptor.ContainerSpec`
   (`internal/worker/runtime_executor.go:153`) on their own node — resources
   in `container.Spec` reach workers with zero new plumbing, but *escalation
@@ -134,13 +132,13 @@ steps:
       # maxEscalations = extra OOM-only attempts beyond retries
 ```
 
-Semantics, lint-enforced: `resources` without `rightSizing` is valid (static
-limits); `rightSizing` requires `resources` and
+Semantics, lint-enforced: `resources` without `rightSizing` is valid
+(static limits); `rightSizing` requires `resources` and
 `memory.max ≥ resources.memory ≥ memory.min`; `suggest` never mutates,
 `auto` applies within `[min, max]` — on git-synced jobs "apply" *means
-opening a PR*, never a direct write (see Backend); `onOOM` works in every
-mode, and escalation is memory-only (CPU exhaustion throttles rather than
-kills — CPU is right-sized via suggestions only).
+opening a PR*, never a direct write; `onOOM` works in every mode, and
+escalation is memory-only (CPU throttles rather than kills — CPU is
+right-sized via suggestions only).
 
 ## Backend
 
@@ -193,14 +191,13 @@ disclosed in the recommendation UI as a request delta.
 ### Cache identity: stated honestly
 
 `resources` (and per-attempt escalated values) are **excluded from
-`HashInput`**, following the QueueName precedent
-(`internal/cache/hash.go:329-336`): if limits fed the hash, every
+`HashInput`**, per the QueueName precedent: if limits fed the hash, every
 right-sizing change would bust the cache and recompute the downstream DAG —
 the feature would punish its own adoption. Consequences: an escalated retry
 keeps the *same* identity as the failed attempt (correct — the computation
 is unchanged; retries already share one hash, computed before the attempt
-loop, `internal/job/job.go:998`); `caesium why`/`run diff` never attribute a
-re-run to a limits change; a cached success is reusable under any limits.
+loop, `internal/job/job.go:998`); `caesium why`/`run diff` never attribute
+a re-run to a limits change; a cached success is reusable under any limits.
 The honest counter-case: unlike QueueName, limits **are visible inside the
 container** (cgroup files; JVM `MaxRAMPercentage`-style self-sizing) — a
 step whose *output* depends on its memory limit is non-deterministic under
@@ -242,11 +239,11 @@ Hook: the existing per-attempt loops, both executors.
 Computed on read (no new store, no background fleet scans):
 
 ```
-window  = last N successful runs of (job, task name)   [default N=20],
+window  = last N successful runs of (job, task name)  [default N=20],
           reset when the descriptor's image digest changes
 suggest = quantize_up( p99(peak_mem over window) × (1 + headroom) ),
-          clamped to [memory.min, memory.max]; never below max(window)
-cpu     = same over CPU-seconds / duration (suggestion only)
+          clamped to [min, max]; never below max(window)
+cpu     = same over CPU-seconds/duration (suggestion only)
 ```
 
 Guard rails: minimum sample count (default 5); downward suggestions
@@ -291,11 +288,11 @@ multiplies these columns by a cost model).
 Env (`pkg/env/env.go`, envconfig pattern per `env.go:143`):
 `CAESIUM_RESOURCE_STATS_ENABLED` (default `false` — Phase 0 gate) with
 `..._SAMPLE_INTERVAL` (10s); `CAESIUM_RIGHT_SIZING_ENABLED` (default
-`false` — recommendations, escalation, apply routes; off ⇒ no routes bound,
-`resources:` still applies statically) with tuning `..._WINDOW_RUNS` (20),
+`false` — recommendations, escalation, apply routes; off ⇒ no routes
+bound, `resources:` still applies statically) with `..._WINDOW_RUNS` (20),
 `..._PERCENTILE` (99), `..._HEADROOM` (0.2), `..._MIN_SAMPLES` (5);
-`CAESIUM_GIT_WRITE_CREDENTIALS` (or a write token on the git-sync source)
-enables the PR route — absent, degrade to suggest.
+`CAESIUM_GIT_WRITE_CREDENTIALS` enables the PR route — absent, degrade to
+suggest.
 
 ## CLI
 
@@ -354,11 +351,11 @@ allocates N MiB (real OOMs against real Docker in CI):
    128Mi → result `resource_failure`, `OOMKilled=true`, exit code and peak
    stats recorded; assert via `GET /v1/jobs/:id/resources` and
    `caesium job resources --json` (stdout-clean via `runCLIStdout`).
-2. **Escalation green-run:** workload needing ~100Mi at a 64Mi limit with
-   `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt trail,
-   `AppliedResources`, `EscalationLevel`, and an identical cache hash across
-   attempts. **Bounds exhaustion:** max below need → classified failure; a
-   plain non-OOM failure does NOT consume escalation attempts.
+2. **Escalation green-run:** ~100Mi workload at a 64Mi limit with
+   `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt
+   trail, `AppliedResources`, `EscalationLevel`, identical cache hash
+   across attempts. **Bounds exhaustion:** max below need → classified
+   failure; a plain non-OOM failure does NOT consume escalation attempts.
 3. **Distributed lane:** escalation through the claimed worker path,
    including a forced re-claim mid-ladder (escalation level persists).
 4. **Recommendation math** (seed N real runs, assert the suggested value
