@@ -46,10 +46,9 @@ identity).
 2. **Declarative and GitOps-first.** `produces`/`consumes`/`freshness` are
    jobdef fields — linted, diffed, PR-reviewed, reconstructable from
    manifests alone.
-3. **Zero-dependency simplicity.** The registry and state machine are dqlite
-   tables; arrival signals ride the shipped event ingestion. **No built-in
-   S3/SFTP pollers** — external arrival is event push or a documented
-   sensor-container pattern.
+3. **Zero-dependency simplicity.** The registry and state machine are
+   dqlite tables; arrival signals ride the shipped event ingestion. **No
+   built-in S3/SFTP pollers** — arrival is event push or a sensor container.
 4. **Smart by default.** Skip-when-fresh composes with the shipped cache:
    the cache makes a no-op run cheap; freshness makes it free (no run).
 5. **Data engineering first.** Freshness SLOs on datasets are the native
@@ -189,9 +188,9 @@ cron tick is skipped with a recorded reason; the dataset board shows
 notification hits `/v1/hooks/*`, the arrival advances, the evaluator
 reacts, and the chain refreshes. Nobody was paged. If
 `analytics.orders_daily` crosses `maxStaleness` first, `freshness_violated`
-escalates with the diagnosis — *"12h stale because vendor file never
-arrived"* — not a stack trace. The agent design's `data_unavailable`
-incident class largely dissolves here.
+escalates with the diagnosis — *"12h stale, vendor file never arrived"* —
+not a stack trace. The agent design's `data_unavailable` incident class
+largely dissolves here.
 
 ### 2. Fan-in: run once, when all three upstreams have arrived
 
@@ -237,8 +236,7 @@ OpenLineage is on) validate declarations and flag drift. Freshness does
 - `DatasetDeclaration` — job/step refs, namespace+name, direction, SLO
   fields, watermark key, arrival binding JSON. Rebuilt on apply.
 - `DatasetState` — one row per dataset (natural key namespace+name):
-  `watermark`, `advanced_at`, `verified_at`, `status`, `reason`,
-  `last_run_id`. Small, hot, updated transactionally.
+  `watermark`, `advanced_at`, `verified_at`, `status`, `reason`, `last_run_id`.
 - `DatasetDerivation` — append-only audit of every evaluator decision:
   dataset, decision (`derived|skipped_fresh|skipped_upstream|
   skipped_admission|skipped_active_run`), consumed-watermark snapshot,
@@ -253,8 +251,8 @@ Three ways a dataset advances, all existing surfaces:
 2. **External event**: an ingested event (`POST /v1/events`, keyed by
    `CAESIUM_EVENT_INGEST_API_KEY`, or a `/v1/hooks/*` webhook such as an S3
    notification) matches a source's `arrival` binding; the watermark is
-   JSONPath-extracted. `caesium event push` covers scripting;
-   `caesium dataset advance` covers operators.
+   JSONPath-extracted. `caesium event push` and `caesium dataset advance`
+   cover scripting and operators.
 3. **Sensor-container pattern** (documented, not built in): a small cron
    job whose only step polls SFTP/S3/a table and, on new data, emits the
    watermark output for the source dataset it produces. The poller is just
@@ -336,10 +334,9 @@ output goes to stdout, clean and parseable, per the repo testing gate.
 
 New feature dir `ui/src/features/datasets/`:
 
-1. **Dataset freshness board** (`/datasets`, nav-level): every declared
-   dataset with status chip, staleness age vs SLO bar, producing job, and
-   the `stale-upstream` reason — the consumer-facing answer to "is my table
-   up to date", readable without understanding DAGs.
+1. **Dataset freshness board** (`/datasets`, nav-level): status chip,
+   staleness-vs-SLO bar, producing job, and the `stale-upstream` reason —
+   the consumer-facing "is my table up to date", readable without DAGs.
 2. **Lineage graph colored by freshness**: the existing `LineageGraph`
    component (`ui/src/features/jobs/LineageGraph.tsx`) gains a freshness
    overlay — "everything downstream of vendor-x is amber" at a glance;
@@ -378,8 +375,8 @@ New feature dir `ui/src/features/datasets/`:
 - **Circuit breaker / contracts**: quarantined datasets
   ([`design-data-circuit-breaker.md`](design-data-circuit-breaker.md)) are
   never fresh; contract violations
-  ([`design-contract-enforcement.md`](design-contract-enforcement.md)) can,
-  per policy, block the advance so downstream never freshens off bad data.
+  ([`design-contract-enforcement.md`](design-contract-enforcement.md)) can
+  block the advance so downstream never freshens off bad data.
 - **Dynamic fan-out** ([`design-dynamic-fanout.md`](design-dynamic-fanout.md)):
   per-partition watermarks are the natural extension, out of v1 scope.
 
@@ -403,8 +400,7 @@ ships with an integration test in `test/` driving the real surface, with
   cycle is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
 - Evaluator leader-gating unit tests (fake `LeaderCheck`, the dequeuer's
   pattern); disabled-gate inertness. Playwright e2e for the dataset board
-  and lineage overlay against a live backend (data-plane-memory-ui
-  precedent).
+  and lineage overlay against a live backend (data-plane-memory-ui precedent).
 
 ## Phasing
 

@@ -12,7 +12,6 @@
 
 Cron makes users encode a *guess* about the best start time, when what they
 actually know is a *constraint* about the finish time:
-
 - **Thundering herd at 00:00.** Every nightly job fires at `0 0 * * *`; the
   cluster spikes, then idles for hours. The cron trigger starts them all in
   the same tick (`internal/trigger/cron/cron.go:133-145` — one goroutine per
@@ -64,7 +63,6 @@ run queue, priorities, atomic admission, SLA events) — not an autoscaler.
         ▼ start = store.AdmitRun(...)  (normal atomic admission —
                                         concurrency/priority still apply)
  run executes exactly like any cron-triggered run
-
  forceAt = deadline − p95(duration) − buffer     (the LATEST SAFE START)
 ```
 
@@ -111,9 +109,8 @@ the executor's listing loop needs `window` added (`executor.go:38-42`).
    the P1 load gate: all forty park at 00:00 and are released in priority
    order while running-task count stays under the ceiling.
 2. **Carbon-aware batch.** A weekly rebuild declares `objective: cheapest`
-   with a static carbon calendar (or a webhook feed posted into `/v1/events`)
-   and starts in the greenest hour of its window — unless the valley never
-   comes, in which case the force rule fires anyway.
+   with a static carbon calendar (or a webhook feed into `/v1/events`) and
+   starts in the greenest hour of its window — or the force rule fires.
 3. **Deadline force-start.** `deadline 06:00`, p95 = 50m, buffer = 15m;
    signals red all night. At 04:55 the scheduler stops caring, forces the
    start, emits `window_forced`; the run completes ~05:45, in deadline.
@@ -190,10 +187,10 @@ concurrency; see Safety.
 
 **Restart safety & missed opens.** On becoming leader and on every tick, the
 scheduler reconciles: compute each window job's most recent open ≤ now in its
-timezone; if the window is still feasible and no run/parked row exists for
-that logical date (unique index ⇒ idempotent), park it — forcing immediately
-if `now ≥ forceAt`. Mirrors cron catchup's watermark approach (`fireCatchup`,
-cron.go:150-197), but driven from the durable table, not process memory.
+timezone; if still feasible and no run/parked row exists for that logical
+date (unique index ⇒ idempotent), park it — forcing immediately if `now ≥
+forceAt`. Mirrors cron catchup (`fireCatchup`, cron.go:150-197), but driven
+from the durable table, not process memory.
 
 ### Duration predictor
 
@@ -202,9 +199,9 @@ succeeded, non-quarantined runs — the same duration query shape the stats
 service uses (`completed_at − started_at` over `job_runs`,
 `api/rest/service/stats/stats.go:72-77`).
 
-- **Why p95, not EWMA:** the SLA design proposes an EWMA predictor for
-  *at-risk detection*; a *safety margin* wants a conservative upper quantile.
-  If `internal/sla/predictor.go` ships, consume quantiles from that shared
+- **Why p95, not EWMA:** the SLA design's EWMA predictor targets *at-risk
+  detection*; a *safety margin* wants a conservative upper quantile. If
+  `internal/sla/predictor.go` ships, consume quantiles from that shared
   package — one engine, two consumers.
 - **Cold start (required policy):** fewer than 3 completed runs → no p95 →
   `forceAt = windowOpen`: **the run starts at window open**, degrading to
@@ -216,7 +213,6 @@ service uses (`completed_at − started_at` over `job_runs`,
 ### Signal sources (zero-dependency, pluggable)
 
 One interface, three shipped implementations, selected by env:
-
 1. **Static calendar** — `CAESIUM_WINDOW_SIGNAL_CALENDAR`: JSON mapping
    day-of-week/hour to a relative cost score. Zero I/O.
 2. **Event-ingested feed** — operators POST `signal.cost` / `signal.carbon`
@@ -255,10 +251,10 @@ bus/store events: `window_planned`, `window_forced`, `window_deadline_at_risk`.
 - **REST**: `GET /v1/jobs/:id/window` — config, p95 + sample count, derived
   `latest_safe_start`, current plan (`planned|parked|forced|none`), rationale,
   sampled signals; `GET /v1/window/parked` — all parked rows.
-- **Env** (envconfig, `pkg/env/env.go` pattern):
-  `CAESIUM_WINDOW_SCHEDULING_ENABLED` (`false`), `_CHECK_INTERVAL` (`15s`),
-  `_DEFAULT_BUFFER` (`10m`), `_P95_SAMPLES` (`20`), `_LOAD_MAX_RUNNING`
-  (`0` = off), `_SIGNAL_CALENDAR`, `_SIGNAL_TTL` (`1h`).
+- **Env** (envconfig, `pkg/env/env.go` pattern): `CAESIUM_WINDOW_` +
+  `SCHEDULING_ENABLED` (`false`), `CHECK_INTERVAL` (`15s`), `DEFAULT_BUFFER`
+  (`10m`), `P95_SAMPLES` (`20`), `LOAD_MAX_RUNNING` (`0` = off),
+  `SIGNAL_CALENDAR`, `SIGNAL_TTL` (`1h`).
 
 ## CLI
 
@@ -309,17 +305,16 @@ store.go:3708-3718; roadmap §1.4); one that queues instead of starting emits
 high-priority jobs claim signal valleys first — but every parked row owns a
 force time, so a low-priority job is delayed only until its own
 latest-safe-start, never starved past it. Priority shapes *where in the
-window* a run lands, never *whether* it runs. The scheduler also holds no new
-write authority — it only inserts runs through the same admission path
-triggers use — so leader-gating plus the atomic conditional insert (no
-cross-node TOCTOU) makes the worst failover outcome a run starting one tick
-late, never twice.
+window* a run lands, never *whether* it runs. The scheduler holds no new
+write authority — it only inserts runs through the admission path triggers
+use — so leader-gating plus the atomic conditional insert (no cross-node
+TOCTOU) makes the worst failover outcome one tick of delay, never a double
+start.
 
 ## Testing
 
 Per the repo's end-to-end gate (CLAUDE.md), every new CLI command and REST
 endpoint ships with an integration test in `test/` driving the real surface.
-
 - **Integration** (`-tags=integration`, with
   `CAESIUM_WINDOW_SCHEDULING_ENABLED=true` added to `just integration-up` —
   config-gated features must be enabled there or CI proves nothing): apply a
@@ -352,7 +347,7 @@ endpoint ships with an integration test in `test/` driving the real surface.
 - **No bin-packing.** Node placement stays with the engines; on Kubernetes,
   quota-aware admission is already delegated to Kueue
   (`pkg/jobdef/definition.go:192-198`).
-- **No per-step windows.** The window is a run-level property.
+- **No per-step windows.** The window is run-level.
 
 ## Relationship to Sibling Designs
 
@@ -371,8 +366,8 @@ endpoint ships with an integration test in `test/` driving the real surface.
   detection reused verbatim; its proposed predictive-ETA engine should become
   the shared quantile provider.
 - [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) —
-  `window_deadline_at_risk` / `window_forced` are incident inputs;
-  "reschedule within window" is a natural bounded playbook verb.
+  `window_deadline_at_risk` / `window_forced` are incident inputs; "reschedule
+  within window" is a natural bounded playbook verb.
 
 ## Open Questions
 
