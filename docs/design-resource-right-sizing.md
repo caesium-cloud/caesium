@@ -42,8 +42,8 @@ Against the six principles from [`roadmap.md`](roadmap.md):
    *proposed as a Git PR* — Caesium never silently diverges the DB from Git.
 3. **"Zero-dependency simplicity."** Stats are columns on `task_runs`;
    recommendations compute from history in dqlite. Prometheus metrics are
-   *exported*, never *required*. Disclosed exception: k8s peak-memory
-   capture needs metrics-server, degrading gracefully without.
+   *exported*, never *required*. (One disclosed exception in Phase 0: k8s
+   peak capture needs metrics-server, degrading gracefully without.)
 4. **"Smart by default."** Stats on ⇒ every step gets observed-vs-declared
    visibility free; escalation/auto-apply are opt-in with declared bounds.
 5. **"Data engineering first."** Recurring batch runs give a stable
@@ -66,15 +66,15 @@ Against the six principles from [`roadmap.md`](roadmap.md):
   All three map exit codes through a `resultMap` where `137 → atom.Killed`
   (`internal/atom/docker/docker.go:25-33`, `kubernetes/kubernetes.go:21-29`,
   `podman/podman.go:27-35`); none consults Docker's `State.OOMKilled`, K8s'
-  `ContainerStateTerminated.Reason == "OOMKilled"` (fetched at
+  `Terminated.Reason == "OOMKilled"` (fetched at
   `internal/atom/kubernetes/atom.go:93-103` but only its `ExitCode` read),
   or podman's `InspectContainerState.OOMKilled`. **An OOM today is recorded
   as `killed`, indistinguishable from operator SIGKILL.**
 - **No stats collection.** The `Engine` interface is
   Get/List/Create/Wait/Stop/Logs (`internal/atom/atom.go:27-34`) — §2.5's
   `Stats()` does not exist — and `TaskRun` (`internal/models/run.go:45-145`)
-  has no memory/CPU columns and no exit code. **This design DEPENDS on
-  §2.5's stats capture and scopes Phase 0 to the minimal slice it needs.**
+  has no memory/CPU columns and no exit code. **This design DEPENDS on §2.5
+  stats capture; Phase 0 scopes to the minimal slice it needs.**
 - **The retry loops are the escalation hook, and they are asymmetric.**
   Local: `internal/job/job.go:1055-1198` loops attempts (persisted via
   `store.RetryTask`, `job.go:1182`) — but only retries *execution errors*; a
@@ -107,10 +107,9 @@ that stream. **In-run:** an OOM-classified failure retries at
 `memory × factor`, clamped to declared bounds — green run, or a classified
 failure handed to the agent/incident pipeline when bounds exhaust.
 **Across runs:** a recommendation engine computes `p99(peak) × headroom`
-over the last N runs, quantized and clamped to bounds; `suggest` surfaces
-it via CLI/UI/REST, `auto` applies it through a provenance router — Git PR
-for git-synced jobs, `jobdefs` apply otherwise, degrade-to-suggest without
-write credentials.
+over the last N runs, clamped to bounds; `suggest` surfaces it via
+CLI/UI/REST, `auto` applies it through a provenance router (Git PR /
+`jobdefs` apply / degrade-to-suggest).
 
 ## YAML
 
@@ -189,7 +188,7 @@ oversubscription protection on plain hosts is the kernel's OOM killer,
 exactly the signal we now catch. Kubernetes sets `requests = limits` for
 memory (Guaranteed semantics) and `requests` only for CPU; changing memory
 requests changes **Kueue admission** arithmetic for `kueue:`-queued steps —
-disclosed, and the recommendation UI shows the request delta.
+disclosed in the recommendation UI as a request delta.
 
 ### Cache identity: stated honestly
 
@@ -307,8 +306,8 @@ caesium job resources --all --format markdown # fleet report / PR-body ready
 ```
 
 `--json` goes to stdout, clean and parseable — asserted with the
-stream-separating `runCLIStdout` helper (`test/data_plane_e2e_test.go:31`),
-per the repo rule that merged-stream captures hide leaks.
+stream-separating `runCLIStdout` (`test/data_plane_e2e_test.go:31`), per
+the repo rule that merged-stream captures hide leaks.
 
 ## Frontend (`ui/src/features/jobs/`)
 
@@ -349,8 +348,8 @@ a pending-suggestion count joining `useNavCounts.ts`.
 ## Testing
 
 Integration-first, per the repo gate — every surface driven for real in
-`test/` against the live server, with a small stress image in `build/` that
-allocates a configurable number of MiB (real OOMs against real Docker in CI):
+`test/` against the live server, using a small `build/` stress image that
+allocates N MiB (real OOMs against real Docker in CI):
 
 1. **Stats capture + OOM classification:** run at a 64Mi limit allocating
    128Mi → result `resource_failure`, `OOMKilled=true`, exit code and peak
