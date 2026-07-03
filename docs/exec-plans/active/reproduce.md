@@ -159,6 +159,13 @@ B2 adds real local execution.
       by recorded `ResolvedImageDigest` (mutable tag → pull by tag, marked
       **DEGRADED**), execute the recorded command in the reconstructed environment,
       and parse `##caesium::output` markers from stdout via `pkgtask.ParseMarkers`.
+      **Registry-auth failure is a first-class, actionable error, not a stack
+      trace:** the operator's local Docker daemon may lack credentials for the
+      private registry the digest lives in, so a failed pull exits `2` with guidance
+      naming the registry host and pointing at `docker login <host>` or `--image
+      <local-ref>` to run against a locally built/pulled image instead. A
+      `execute_test.go` case asserts the pull-auth-failure message includes the
+      registry and the `--image` hint.
       Ride `internal/localrun` by synthesizing a one-step definition (design Open
       Question #2 lean — gets timeouts, marker parsing, and log capture at behavioral
       parity with `caesium dev`); run exactly once, single-shot (design Open Question

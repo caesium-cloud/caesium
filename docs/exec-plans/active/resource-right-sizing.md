@@ -226,15 +226,21 @@ unsuccessful results), so escalation needs a local-loop retryability fix or it
 works only in distributed mode.
 
 - [ ] C1. Make OOM (`resource_failure`) results retryable in the local loop and
-      stamp the escalation budget. At registration
-      (`internal/run/store.go` stamps `MaxAttempts = Retries+1` today), stamp
-      `MaxAttempts = Retries + 1 + onOOM.maxEscalations`. Escalation attempts are
-      **class-gated**: consumable only when the previous attempt classified as
-      OOM; a plain failure that exhausted `Retries` fails even with escalation
-      attempts remaining. Fix `internal/job/job.go` so an OOM-classified
-      unsuccessful result re-enters the attempt loop locally. Gate the whole
-      escalation behavior behind `CAESIUM_RIGHT_SIZING_ENABLED` (default `false`,
-      added here — this is the earliest stream that needs it).
+      grant the escalation budget **dynamically**. Leave the registration stamp at
+      today's `MaxAttempts = Retries+1` (`internal/run/store.go`); do **not**
+      pre-stamp `Retries + 1 + onOOM.maxEscalations`. Pre-stamping breaks the
+      terminal invariant for the common case — a task that fails *normally* stops at
+      `Retries+1` attempts, leaving `Attempts < MaxAttempts` forever, so run views,
+      monitoring, and "is this run done?" checks read it as still-active. Instead,
+      **only when an OOM escalation actually fires**, atomically bump `MaxAttempts`
+      by 1 (bounded so the total escalation grants never exceed
+      `onOOM.maxEscalations`). Escalation grants are **class-gated**: a bump happens
+      only when the previous attempt classified as OOM; a plain failure that
+      exhausted `Retries` terminates at `Attempts == MaxAttempts` with no bump. Fix
+      `internal/job/job.go` so an OOM-classified unsuccessful result re-enters the
+      attempt loop locally. Gate the whole escalation behavior behind
+      `CAESIUM_RIGHT_SIZING_ENABLED` (default `false`, added here — this is the
+      earliest stream that needs it).
       Files: `internal/job/job.go`, `internal/run/store.go`, `pkg/env/env.go`.
       Depends on: A1 (the `EscalationLevel`/`AppliedResources` columns +
       `ExitCode`/`OOMKilled` classification), B1/B2 (the `resources` field to
@@ -469,8 +475,9 @@ D1 → D2 → D3. E1 → E2. F1, F2 parallel (F2 also needs C2).
   (A in W1, C in W3). B3 also touches `runtime_executor.go:153` (descriptor
   apply) in W2 — different region, but flag the A→B→C ordering on this file.
 - `internal/run/store.go` — A1 (column persistence + registration `MaxAttempts`
-  stamp) and C1/C2 (`MaxAttempts = Retries+1+maxEscalations`, `RetryTaskClaimed`
-  escalation persist, `RetryFromFailure` reset). **Sequence A → C**.
+  stamp) and C1/C2 (dynamic `MaxAttempts` bump on actual OOM escalation — never a
+  pre-stamp — `RetryTaskClaimed` escalation persist, `RetryFromFailure` reset).
+  **Sequence A → C**.
 - `internal/models/run.go` (`TaskRun`) — **only A1** adds columns (including
   `EscalationLevel`/`AppliedResources` that C writes). No same-file collision; C
   writes existing columns.

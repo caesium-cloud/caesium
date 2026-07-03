@@ -199,7 +199,15 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       are served raw), so add a scrubber that does exact removal of every resolved
       `secret://` value in the task's env plus high-entropy token heuristics, run
       before any log text enters a triage bundle, an agent-readable endpoint, or an
-      escalation message. Until the scrubber is in, bundles carry no raw log text.
+      escalation message. **Guard against over-redaction:** a resolved secret whose
+      value is short or a common literal (e.g. `true`, `false`, a small integer, a
+      dictionary word like `password`) would blanket-replace unrelated log text and
+      destroy readability — so skip exact-match replacement for values below a
+      minimum length (e.g. 6 chars) and for a small denylist of common boolean/
+      numeric/word literals, relying on the structured-env knowledge that these came
+      from a `secret://` ref rather than blind string matching. A `scrubber_test.go`
+      case asserts a secret value of `"true"` does not scrub every `true` in the log.
+      Until the scrubber is in, bundles carry no raw log text.
       Files: new `internal/incident/scrubber.go` (+ `scrubber_test.go`).
 - [ ] A6. Add the persisted-timer supervisor behind the durable `RemediationTimer`
       model — every existing delay in Caesium is an in-process `time.NewTimer`

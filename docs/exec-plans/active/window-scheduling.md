@@ -189,6 +189,12 @@ never bypasses concurrency. Depends on Stream A (the trigger, columns, and
       (`CAESIUM_WINDOW_P95_SAMPLES`, default 20) succeeded, non-quarantined runs,
       using the same `completed_at − started_at` duration shape the stats service
       uses (`api/rest/service/stats/stats.go:72-77`, tz/driver-aware `durationExpr`).
+      **Exclude cache-short-circuited runs** (a fully cached run finishes in
+      near-zero wall time): mixing them into the sample skews p95 *downward*, so the
+      scheduler would pick a `latest` start too late and blow the deadline the first
+      time the run actually executes. Filter them out (a cache-hit run records no
+      real task duration) so p95 reflects genuine execution cost; if that leaves
+      fewer than the cold-start minimum, degrade as below.
       **Cold-start policy (required):** fewer than 3 completed runs → no p95 →
       caller degrades to `forceAt = windowOpen` (starts at open, i.e. cron
       behavior); `metadata.runTimeout`, when set, caps the assumed duration.

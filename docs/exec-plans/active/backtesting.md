@@ -136,10 +136,17 @@ job-scoped async-operation shape of backfill (`internal/backfill/store.go`,
       Files: new `internal/models/backtest.go`, `internal/models/models.go`,
       new `internal/backtest/store.go` (+ `store_test.go`), `pkg/env/env.go`.
 - [ ] A2. Implement baseline selection + per-baseline eligibility. Resolve
-      `--against last-30-runs` server-side to the job's most recent terminal
-      **non-quarantined** production runs (`quarantine IS NOT TRUE`, the predicate
-      the replay work added to baseline-selecting queries); support the date-range
-      and explicit run-ID-list alternatives. Check each selected baseline for
+      `--against last-30-runs` server-side to the job's most recent
+      **succeeded**, **non-quarantined** production runs (`quarantine IS NOT TRUE`,
+      the predicate the replay work added to baseline-selecting queries). **Default
+      to succeeded baselines, not merely terminal ones:** a failed baseline has no
+      trustworthy recorded output, so diffing a succeeded candidate against it yields
+      meaningless `OUTPUT_CHANGED`/`DEGRADED` verdicts and noise. An explicit
+      `--include-failed-baselines` opt-in may widen the set for the "does my fix make
+      the failing run pass?" question, but then each such baseline is labeled
+      `baseline-failed` in the report so its delta is read as expected, not a
+      regression. Support the date-range and explicit run-ID-list alternatives
+      (which take the runs as given, still labeling any non-succeeded ones). Check each selected baseline for
       eligibility by **reusing replay's fail-closed validation**
       (`internal/replay/replay.go` `Prepare`): every task run carries an
       `ExecutionDescriptor` at a supported schema version; tasks that would

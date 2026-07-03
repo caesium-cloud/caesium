@@ -69,17 +69,24 @@ disagreements. The job-definition contract lives in
 `onUpstreamHold` metadata — a schema change (new structs + `Validate()`), gated
 so the fields are inert when `CAESIUM_DATA_ASSERTIONS_ENABLED=false`.
 
-**Shared `Dataset` registry — coordinate with `freshness-scheduling.md`.** The
-design is explicit that the declared-dataset registry (`produces:` keyed
+**Shared `DatasetDeclaration` registry — coordinate with `freshness-scheduling.md`.**
+The design is explicit that the declared-dataset registry (`produces:` keyed
 `(namespace, name)`) is the **same YAML and model substrate** as
 [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md); "whichever
-design lands first creates it, the other extends it." The
-[`freshness-scheduling`](freshness-scheduling.md) plan's Stream A owns a
+design lands first creates it, the other extends it." To keep the two plans from
+colliding on the base table, the canonical names are freshness's: the model is
+**`DatasetDeclaration`** in `internal/models/dataset_declaration.go` (table
+`dataset_declarations`), and the jobdef `produces`/`consumes` entries key the
+dataset identity on **`name`** (not `dataset`) — matching
+[`freshness-scheduling.md`](freshness-scheduling.md) Stream A and the
+[`contract-enforcement.md`](contract-enforcement.md) plan, both of which use `name`.
+The [`freshness-scheduling`](freshness-scheduling.md) plan's Stream A owns the
 `dataset_declarations` registry model + the `Metadata.Datasets` jobdef block; this
 plan's Stream A owns the assertion/`consumes` half of the same registry. **Neither
-ships a private copy of the base registry table.** Whichever plan's registry item
-merges first creates the registry model + jobdef `produces` scaffold; the second
-plan's item extends it (adds columns / fields) rather than redefining it. If a
+ships a private copy of the base registry table, and neither introduces a second
+`Dataset` model.** Whichever plan's registry item merges first creates the
+`DatasetDeclaration` model + jobdef `produces` scaffold; the second plan's item
+extends it (adds columns / fields) rather than redefining it. If a
 Stream-A item here finds the base registry already merged by freshness, it
 **extends** — see the Sequencing section's cross-plan note. The
 [`contract-enforcement`](contract-enforcement.md) plan reads the same `consumes`
@@ -100,7 +107,7 @@ freshness/backtest reach) is recorded as deferred.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Observability substrate — `##caesium::metrics` marker, `Dataset`/`DatasetMetric` models, jobdef `produces`/`consumes`/`assertions` schema + lint, metrics persistence in both executors, baseline read, master env gate (Phase 0) | **P0** | Not started |
+| A | Observability substrate — `##caesium::metrics` marker, `DatasetDeclaration`/`DatasetMetric` models, jobdef `produces`/`consumes`/`assertions` schema + lint, metrics persistence in both executors, baseline read, master env gate (Phase 0) | **P0** | Not started |
 | B | Assertion evaluator — `run.EvaluateDataAssertions` with rolling baselines, cold-start warn-only, `warn`/`fail` dispatch, `DataViolation` persistence (Phase 1) | **P0** | Not started |
 | C | Circuit breaker — `DatasetHold` model + partial-unique guard, hold-open path, downstream admission gate, release (clean-run + fail-closed ack), bus events + alert-once (Phase 2) | **P0** | Not started |
 | D | Operator surface — `GET /v1/datasets*` reads + `caesium dataset list/holds/release/metrics` CLI | P1 | Not started |
@@ -132,29 +139,37 @@ breaker (C) are reviewed.
       a chatty emitter can't evict real outputs); malformed lines are skipped
       leniently like malformed output lines.
       Files: `pkg/task/output.go` (+ `output_test.go`).
-- [ ] A2. Add the `Dataset` declared-registry model, the `DatasetMetric` model,
+- [ ] A2. Add the `DatasetDeclaration` declared-registry model (canonical name
+      shared with `freshness-scheduling` Stream A), the `DatasetMetric` model,
       and register both in the `models.All` slice (`internal/models/models.go`).
       `DatasetMetric` — task-run ref (`CASCADE` like `LineageDataset`), namespace,
       name, metric, float value (watermarks stored as epoch seconds), created-at;
       pruned past `CAESIUM_DATASET_METRIC_RETENTION` (default `2160h`/90d) by an
       env-gated background pruner started in `cmd/start/start.go` (mirror an
-      existing pruner). `Dataset` — namespace, name, declaring job/step, spec JSON;
+      existing pruner). The base registry model is **`DatasetDeclaration`** (table
+      `dataset_declarations`) — namespace, name, declaring job/step, spec JSON;
       nullable tenant column from day one (design open-question 4). **Coordinate
       with `freshness-scheduling` Stream A on the base registry table** (see the
       Source-Of-Truth Note): if freshness's `dataset_declarations` registry has
-      already merged, this item **extends** it with the assertion/spec columns
-      rather than creating a second registry. These are catalog/observability
-      tables, **not** hot per-run tables — do NOT add them to `hotPathModels()` /
-      `hotTables`.
-      Files: new `internal/models/dataset.go`, new
+      already merged, this item **extends** `internal/models/dataset_declaration.go`
+      with the assertion/spec columns rather than creating a second `Dataset`
+      registry; if this item merges first, it creates `DatasetDeclaration` under the
+      canonical name. `DatasetMetric` (baseline samples) is this plan's own table.
+      These are catalog/observability tables, **not** hot per-run tables — do NOT
+      add them to `hotPathModels()` / `hotTables`.
+      Files: `internal/models/dataset_declaration.go` (create-or-extend, canonical
+      name shared with freshness Stream A), new
       `internal/models/dataset_metric.go`, `internal/models/models.go`,
       `pkg/env/env.go`, `cmd/start/start.go`.
       Depends on: A1 (the marker the metrics come from).
 - [ ] A3. Add the jobdef schema for `produces`/`consumes`: a step-level
-      `produces []ProducedDataset{dataset, assertions{rowCount, nullRate,
+      `produces []ProducedDataset{name, assertions{rowCount, nullRate,
       freshness, custom[]}, onViolation ∈ warn|fail|hold, release ∈ auto|manual}`
-      and `consumes []ConsumedDataset{dataset}`, plus `metadata.onUpstreamHold ∈
-      skip|run` (default `skip`). Wire the structs + `Validate()` + the dual
+      and `consumes [name...]`, plus `metadata.onUpstreamHold ∈
+      skip|run` (default `skip`). The base `produces`/`consumes` block keyed on
+      `name` (plus `freshness`/`watermark`) is owned by `freshness-scheduling` Stream
+      A; this item adds the `assertions`/`onViolation`/`release` fields to
+      `ProducedDataset` — it does not rename the identity key or fork the struct. Wire the structs + `Validate()` + the dual
       `Step`/`rawStep` declaration + `UnmarshalYAML` in `pkg/jobdef/definition.go`,
       `pkg/jobdef/schema.go`, and `internal/jobdef/runtime/spec.go`. `caesium job
       lint` validates dataset names, `consumes` resolvability against declared
@@ -404,7 +419,7 @@ the `ui/**` conditional gate.
 - **N-1** runs last, after A–E ship, so the roadmap/schema/design docs reflect
   reality.
 
-**Cross-PLAN order (shared `Dataset` registry):** the base declared-registry table
+**Cross-PLAN order (shared `DatasetDeclaration` registry):** the base declared-registry table
 + jobdef `produces` scaffold is shared with
 [`freshness-scheduling`](freshness-scheduling.md) Stream A. Whichever plan's Stream-A
 registry item merges first **creates** the registry model; the second **extends**
@@ -429,7 +444,7 @@ C1 → C2 and C1 → C3 (parallel), then C4. D1 → D2. E1 → E2.
   **sequential across waves** (A → B → C), never same-wave; no parallel edit.
 - `internal/run/store.go` — B1 (`SaveDataViolations` + `DataViolations` column) and
   C2 (admission gate) both edit it; B (W2) before C (W3), so no same-wave collision.
-- `internal/models/models.go` — A2 (`Dataset`, `DatasetMetric`) and C1
+- `internal/models/models.go` — A2 (`DatasetDeclaration`, `DatasetMetric`) and C1
   (`DatasetHold`) append to the order-sensitive `All` slice; A2 (W1) before C1 (W3).
 - `pkg/jobdef/definition.go` — **A3 only in this plan** (the dual `Step`/`rawStep`
   declaration + `Validate()`). **Cross-plan true-conflict** with
@@ -489,7 +504,7 @@ The plan is done when **all** of these hold:
 
 1. **Stream A — the observability substrate** is live: a step emits
    `##caesium::metrics` (capped at 16 KiB, last-write-wins), the metrics persist as
-   `DatasetMetric` rows against the declared `Dataset` registry, `produces`/
+   `DatasetMetric` rows against the declared `DatasetDeclaration` registry, `produces`/
    `consumes`/`assertions` lint clean, and the master `CAESIUM_DATA_ASSERTIONS_ENABLED`
    gate is reported by `GET /system/features`. Closed by a `test/` integration
    scenario: a metrics-emitting run persists metrics readable via
@@ -528,7 +543,7 @@ The plan is done when **all** of these hold:
    in `docs/README.md` (backtick form).
 8. **Cross-cutting:** `docs/roadmap.md`, `docs/design-data-circuit-breaker.md`, and
    this plan's per-stream `## Progress` entries reflect every shipped stream and
-   match the merged PRs; the shared `Dataset` registry stays a single table
+   match the merged PRs; the shared `DatasetDeclaration` registry stays a single table
    coordinated with `freshness-scheduling` (no duplicate registry). (Phase 3
    ergonomics remain explicitly deferred — not a gate here.)
 
@@ -555,7 +570,7 @@ The plan is done when **all** of these hold:
   the design of record. Source of truth for intent and scope.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 Data-Plane Differentiators — the
   "Data circuit breaker" entry this plan closes.
-- [`freshness-scheduling.md`](freshness-scheduling.md) — **shares the `Dataset`
+- [`freshness-scheduling.md`](freshness-scheduling.md) — **shares the `DatasetDeclaration`
   registry table + jobdef `produces` substrate**; coordinate on who creates vs.
   extends (see Source-Of-Truth Note).
 - [`contract-enforcement.md`](contract-enforcement.md) — the static/PR-time half of

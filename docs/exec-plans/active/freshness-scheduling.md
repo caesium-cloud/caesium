@@ -194,12 +194,20 @@ pending decision.
       RFC3339/numeric values, only when it increases — a regression is recorded,
       never advances; the monotonic guard); a successful run with an unchanged
       watermark updates `verified_at`, not `advanced_at`; freshness is evaluated
-      against `max(advanced_at, verified_at)`. Backfill runs MUST NOT advance a
+      against `max(advanced_at, verified_at)`. **Opaque-string watermarks** (git
+      SHAs, UUIDs — no orderable relation) cannot use value comparison, so "any
+      change advances" would let a *late-finishing older run* clobber a newer
+      watermark with a stale value. Gate opaque advances by the **producing run's
+      ordering** instead: persist the advancing run's start/completion time (or a
+      monotonic sequence) alongside the watermark and only overwrite when the
+      incoming run is newer than the one that set the current value; an
+      out-of-order opaque write is recorded and dropped, exactly as a numeric
+      regression is. Backfill runs MUST NOT advance a
       watermark (monotonic guard — mirror the cron-catchup
       `LatestSuccessfulCronRun` reasoning: derivations ignore backfill runs).
       Pure state logic, fully unit-tested (change vs no-change, monotonic
-      regression, RFC3339 vs numeric vs opaque-string, verify-only refresh,
-      backfill-never-advances).
+      regression, RFC3339 vs numeric vs opaque-string, out-of-order opaque write
+      dropped, verify-only refresh, backfill-never-advances).
       Files: new `internal/freshness/state.go` (+ `state_test.go`).
       Depends on: B1.
 - [ ] B3. Capture watermarks and the **consumed-watermark set** at run
