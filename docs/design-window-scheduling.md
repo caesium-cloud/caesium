@@ -160,11 +160,11 @@ process-local, so the row is the run's only representation.
 
 `internal/windowsched`, structured like the run-queue dequeuer: ticker,
 `DrainOnce`, and the same leadership gate — `LeaderCheck` wired to
-`dqlite.IsLocalLeader` exactly as the dequeuer is
-(`internal/runqueue/dequeuer.go:21,94-103`; `cmd/start/start.go:177-184`), so
-only the dqlite leader releases window rows and two nodes never double-start
-a parked run; claim columns + stale reclaim cover leader death mid-release.
-Each tick, for parked rows ordered `priority DESC, (deadline − now − p95) ASC`:
+`dqlite.IsLocalLeader` (`internal/runqueue/dequeuer.go:21,94-103`;
+`cmd/start/start.go:177-184`) — so only the leader releases window rows and
+two nodes never double-start a parked run; claim columns + stale reclaim
+cover leader death mid-release. Each tick, for parked rows ordered
+`priority DESC, (deadline − now − p95) ASC`:
 
 ```
 p95     := predictor.P95(jobID)
@@ -182,11 +182,11 @@ Deliberate: **a gate chain with recorded rationale, not a weighted score** —
 every decision explainable in one sentence (`"parked: cluster at 41/32
 running tasks; forecast valley 02:00; force at 04:55"`).
 
-**Release** = `store.AdmitRun(jobID, triggerID, ...)`
-(`internal/run/store.go:1044`) with the parked row's params, priority, and
-logical date — the run passes normal atomic admission (`store.admit`,
-store.go:711-778; single conditional `INSERT ... WHERE count(active) <
-maxRuns`, store.go:780-809). Never bypasses concurrency; see Safety.
+**Release** = `store.AdmitRun(...)` (`internal/run/store.go:1044`) with the
+parked row's params, priority, and logical date — the run passes normal
+atomic admission (`store.admit`, store.go:711-778; single conditional
+`INSERT ... WHERE count(active) < maxRuns`, store.go:780-809). Never bypasses
+concurrency; see Safety.
 
 **Restart safety & missed opens.** On becoming leader and on every tick, the
 scheduler reconciles: compute each window job's most recent open ≤ now in its
@@ -245,9 +245,8 @@ Deadline *enforcement before the fact* is this design; deadline *alerting
 after the fact* is shipped — the watcher already emits `sla_missed` for
 duration and completedBy SLAs (`watcher.go:119-128, 136-246`). `job apply`
 derives an implicit `sla.completedBy` from the window deadline when the job
-declares no SLA, so a blown deadline produces the standard `sla_missed` event
-with zero new alerting machinery. New bus/store events: `window_planned`,
-`window_forced`, `window_deadline_at_risk`.
+declares no SLA, so a blown deadline alerts with zero new machinery. New
+bus/store events: `window_planned`, `window_forced`, `window_deadline_at_risk`.
 
 ### Models, REST, env
 
@@ -297,14 +296,14 @@ deadline.** A *start* guarantee — completion stays probabilistic (regressions
 beyond p95, saturated cluster), exactly what `sla_missed` +
 `window_deadline_at_risk` flag.
 
-**Concurrency admission interplay.** A window start — including a forced one —
-still passes `store.admit()` (store.go:711): `maxRuns` can queue, skip, or
-fail it per the job's strategy. Deliberate (admission invariants have one
+**Concurrency admission interplay.** A window start — including a forced
+one — still passes `store.admit()` (store.go:711): `maxRuns` can queue, skip,
+or fail it per the job's strategy. Deliberate (admission invariants have one
 owner), but it makes the guarantee conditional on admission. Mitigations:
 forced releases are stamped priority `high` so the dequeuer and distributed
 claimer drain them first (`ORDER BY priority DESC, created_at ASC`,
-store.go:3708-3718; roadmap §1.4); a forced release that lands in the
-concurrency queue instead of starting emits `window_deadline_at_risk`.
+store.go:3708-3718; roadmap §1.4); one that queues instead of starting emits
+`window_deadline_at_risk`.
 
 **Starvation & priority.** Parked rows are evaluated priority-first, so
 high-priority jobs claim signal valleys first — but every parked row owns a
@@ -379,9 +378,8 @@ endpoint ships with an integration test in `test/` driving the real surface.
 
 1. **Weighted scoring vs. gate chain** — is an explainable gate chain enough,
    or do heterogeneous fleets need tunable coefficients? Deferred until P2.
-2. **Separate `window_queue` table?** Reusing `run_queue` shares claim/reclaim
-   machinery but overloads one table behind a discriminator; split if
-   window-specific state grows.
+2. **Separate `window_queue` table?** Reusing `run_queue` shares claim
+   machinery but overloads one table; split if window-specific state grows.
 3. **Global vs. per-job load ceiling** — a single cluster ceiling is crude;
    per-namespace fairness belongs to roadmap §3.1, not here.
 4. **Quantile choice** — heavy-tailed jobs may want p99 (`durationQuantile`?).

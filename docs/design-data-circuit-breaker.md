@@ -188,14 +188,14 @@ both executors (`internal/job/job.go` calls `run.ValidateTaskOutputSchema` at
 `run.EvaluateDataAssertions(...)`: (1) persists emitted metrics as
 `DatasetMetric` rows — including undeclared metrics, free baseline history
 for assertions added later; (2) loads rolling baselines; (3) evaluates and
-persists violations (a `DataViolation` shape parallel to `SchemaViolations`)
-on the `TaskRun`; (4) dispatches `onViolation` — `warn` logs + persists,
-`fail` returns an error the executors escalate exactly as schema `fail` mode,
-`hold` opens the hold via idempotent upsert (one *active* hold per dataset;
-repeat violations append occurrences rather than re-alerting).
-Replay-quarantined runs (`TaskRun.Quarantine`) are excluded completely — no
-metrics recorded, no baselines advanced, no holds opened or released; a
-what-if must not trip or clear a production breaker.
+persists violations (a `DataViolation` shape parallel to `SchemaViolations`);
+(4) dispatches `onViolation` — `warn` logs + persists, `fail` returns an
+error the executors escalate exactly as schema `fail` mode, `hold` opens the
+hold via idempotent upsert (one *active* hold per dataset; repeat violations
+append occurrences rather than re-alerting). Replay-quarantined runs
+(`TaskRun.Quarantine`) are excluded completely — no metrics, no baselines, no
+holds opened or released; a what-if must not trip or clear a production
+breaker.
 
 ### Data model (`internal/models/`)
 
@@ -241,11 +241,10 @@ the durable, leader-safe decision point: `Store.admit()`
 (`internal/run/store.go:711`) resolves concurrency inside one transaction via
 an atomic conditional insert, and every path into a run — cron, event/chained
 triggers (`internal/trigger/event`), HTTP, manual, queue dequeue — funnels
-through run creation in the store. One decision, recorded durably on the run:
-no per-node in-memory state, no cross-node TOCTOU. A task-start gate is
-rejected for v1 — a hold landing mid-run would strand a half-executed DAG in
-an ambiguous state, and admission already bounds exposure to one in-flight
-run.
+through run creation in the store. One decision, recorded durably on the run;
+no per-node state, no cross-node TOCTOU. A task-start gate is rejected for v1
+— a hold landing mid-run would strand a half-executed DAG, and admission
+already bounds exposure to one in-flight run.
 
 Mechanics: before `admit()`, the store resolves the consuming job's declared
 `consumes` list and queries active `DatasetHold` rows **in the same
@@ -321,9 +320,8 @@ via `runCLIStdout`, never the stream-merging capture.
 ## Frontend (Caesium Console)
 
 1. **Hold badges on the lineage graph.** `LineageGraph.tsx` marks held
-   dataset nodes (a "held" badge, distinct from run-status colors and
-   replay-quarantine styling) and shades the downstream cone — the blast
-   radius at a glance.
+   dataset nodes (distinct from run-status colors and replay-quarantine
+   styling) and shades the downstream cone — the blast radius at a glance.
 2. **Ack/release flow.** A hold panel (violated assertion, observed vs
    bound, producing-run link, occurrence count) with Release: reason
    required, optional tolerance picker. Active-holds count joins the nav
