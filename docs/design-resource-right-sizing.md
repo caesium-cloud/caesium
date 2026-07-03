@@ -109,10 +109,10 @@ that stream. **In-run:** an OOM-classified failure retries at
 `memory × factor`, clamped to declared bounds — green run, or a classified
 failure handed to the agent/incident pipeline when bounds exhaust.
 **Across runs:** a recommendation engine computes `p99(peak) × headroom`
-over the last N runs, quantized and clamped to bounds; `suggest` surfaces it
-via CLI/UI/REST, `auto` applies it through a provenance router — Git PR for
-git-synced jobs, `jobdefs` apply otherwise, degrade-to-suggest without write
-credentials.
+over the last N runs, quantized and clamped to bounds; `suggest` surfaces
+it via CLI/UI/REST, `auto` applies it through a provenance router — Git PR
+for git-synced jobs, `jobdefs` apply otherwise, degrade-to-suggest without
+write credentials.
 
 ## YAML
 
@@ -184,15 +184,14 @@ strings, parsed at lint/apply) to `container.Spec`. Because `Step` embeds
 `container.Spec` inline (`pkg/jobdef/definition.go:214-247`) and
 `RuntimeSpecForStep` (`definition.go:959-1016`) persists the resolved spec
 onto the atom model, the field flows automatically: YAML → atom →
-`runner.spec` (local, `internal/job/job.go:555-559`) and YAML → execution
-descriptor → worker. Docker/Podman map it to `HostConfig.Resources.Memory` /
-`NanoCPUs` (resp. specgen `ResourceLimits`) — limits only; Docker has no
-admission, so oversubscription protection on plain hosts is the kernel's OOM
-killer, exactly the signal we now catch. Kubernetes sets
-`requests = limits` for memory (Guaranteed semantics) and `requests` only
-for CPU; changing memory requests changes **Kueue admission** arithmetic for
-`kueue:`-queued steps — disclosed, and the recommendation UI shows the
-request delta for queued steps.
+`runner.spec` (local, `internal/job/job.go:555-559`) and YAML → descriptor →
+worker. Docker/Podman map it to `HostConfig.Resources.Memory`/`NanoCPUs`
+(resp. specgen `ResourceLimits`) — limits only; Docker has no admission, so
+oversubscription protection on plain hosts is the kernel's OOM killer,
+exactly the signal we now catch. Kubernetes sets `requests = limits` for
+memory (Guaranteed semantics) and `requests` only for CPU; changing memory
+requests changes **Kueue admission** arithmetic for `kueue:`-queued steps —
+disclosed, and the recommendation UI shows the request delta.
 
 ### Cache identity: stated honestly
 
@@ -208,12 +207,11 @@ re-run to a limits change; a cached success is reusable under any limits.
 The honest counter-case: unlike QueueName, limits **are visible inside the
 container** (cgroup files; JVM `MaxRAMPercentage`-style self-sizing) — a
 step whose *output* depends on its memory limit is non-deterministic under
-this rule. Escape hatches: `cache: false`, or a cache `version` bump with
-the limits change; we document this rather than pretending limits are
-invisible. Receipts stay truthful without identity impact:
-`AppliedResources` and the escalation trail land on the TaskRun/descriptor
-(a descriptor schema bump — v1 has no resources field), so
-`caesium receipt get` shows what actually ran.
+this rule; escape hatches are `cache: false` or a cache `version` bump, and
+we document this rather than pretending limits are invisible. Receipts stay
+truthful without identity impact: `AppliedResources` and the escalation
+trail land on the TaskRun/descriptor (a descriptor schema bump — v1 has no
+resources field), so `caesium receipt get` shows what actually ran.
 
 ### OOM retry escalation
 
