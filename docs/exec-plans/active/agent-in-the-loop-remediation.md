@@ -85,18 +85,31 @@ resource-right-sizing lands its detection, and that limit is recorded, not hidde
 
 ## Progress (as of 2026-07-03)
 
-No implementation waves have shipped yet. The plan was published from the
-`design-agent-in-the-loop.md` design of record; the first wave is the next
-eligible run of the `exec-plan-wave` skill against this doc. The design is
-explicitly phased (0→3); the recommended first wave lands Stream A (Phase-0
-incident core + substrate) plus the harness fake-agent image, which unblocks
-every other stream.
+The plan was published from the `design-agent-in-the-loop.md` design of record.
+The design is explicitly phased (0→3); Wave 1 landed Stream A, the entire Phase-0
+incident core + substrate, which unblocks every other stream.
+
+### Wave 1 — Stream A Phase-0 substrate (shipped)
+
+- **Stream A** (A1–A6) shipped in [#278](https://github.com/caesium-cloud/caesium/pull/278)
+  (merge `1237117`): the six incident GORM models (each nullable-`namespace`,
+  registered in `models.All`), `TaskRun.ExitCode` capture across all three
+  engines via `atom.Atom.ExitCode() *int` (nil = no code captured), the
+  deterministic no-LLM classifier, the leader-gated dedupe incident subscriber +
+  atomic-conditional-insert store + status machine + cooldown +
+  terminal-verified remediate-on-success, the secret-leak log scrubber (with
+  over-redaction + hex-token guards), and the durable leader-gated timer
+  supervisor. All gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` (default off)
+  — nothing activates until a later wave wires behavior on. Review: Greptile 5/5;
+  fixes folded in for the `run_completed`-wildcard-remediation bug (task-scoped
+  matching) and the exit-code `0`-sentinel bug (nullable `*int`). Streams B–U +
+  H-1 + N-1 remain for later waves.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Incident core + Phase-0 substrate — 5 GORM models, `TaskRun.ExitCode`, classifier, leader-gated dedupe subscriber, log scrubber, persisted-timer store, feature gate | **P0** | Not started |
+| A | Incident core + Phase-0 substrate — 5 GORM models, `TaskRun.ExitCode`, classifier, leader-gated dedupe subscriber, log scrubber, persisted-timer store, feature gate | **P0** | **Shipped** (Wave 1, #278) |
 | B | Action executor + tiered catalog + retry safety valves + `apply_jobdef_patch` provenance router | P1 | Not started |
 | C | Agent runtime — session supervisor (atom.Engine), triage bundle, scoped short-lived token, `/v1/agent/*` REST tool surface | P1 | Not started |
 | D | Approval gates + incident REST reads + `ai_agent` dispatch channel | P1 | Not started |
@@ -119,7 +132,7 @@ substrate the design is explicit that Phase 0 must build before any autonomy: th
 store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` +
 `metrics.go`), so it merges first.
 
-- [ ] A1. Add the five new GORM models plus the persisted-timer model, registered
+- [x] A1. Add the five new GORM models plus the persisted-timer model, registered
       in `models.All`. `Incident` (job/run/task refs, `Class`, `Status`, dedupe
       key, attempt counter, opened/closed ts, resolution summary),
       `AgentSession` (incident ref, profile, engine + container/atom id, persisted
@@ -139,7 +152,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       new `internal/models/approval_request.go`, new
       `internal/models/agent_profile.go`, new `internal/models/remediation_timer.go`,
       `internal/models/models.go`.
-- [ ] A2. Capture the raw exit code and emit the schema-violation event the
+- [x] A2. Capture the raw exit code and emit the schema-violation event the
       classifier reads. Add an `ExitCode` column to `TaskRun`
       (`internal/models/run.go`, beside the existing `SchemaViolations` at
       `run.go:119`) populated at task completion in **all three engines** (each
@@ -153,7 +166,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       Files: `internal/models/run.go`, `internal/atom/docker/engine.go`,
       `internal/atom/kubernetes/engine.go`, `internal/atom/podman/engine.go`,
       `internal/run/schema_validation.go`, `internal/event/bus.go`.
-- [ ] A3. Implement the deterministic classifier (**no LLM**): map `atom.Result`
+- [x] A3. Implement the deterministic classifier (**no LLM**): map `atom.Result`
       (`StartupFailure`/`ResourceFailure` → `transient_infra`),
       `TaskRun.SchemaViolations` → `schema_violation`, `run_timed_out`/`sla_missed`
       → `sla_risk`, and a **configurable exit-code + log-tail regex table**
@@ -162,7 +175,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       unit-tested (each class, the regex table, the fallback).
       Files: new `internal/incident/classifier.go` (+ `classifier_test.go`).
       Depends on: A2 (the `ExitCode` column + `schema_violation_recorded` event).
-- [ ] A4. Add the leader-gated incident subscriber, dedupe/correlation engine,
+- [x] A4. Add the leader-gated incident subscriber, dedupe/correlation engine,
       status machine, and incident store, wired at startup behind the master
       gate. The subscriber consumes `task_failed`, `run_failed`, `run_timed_out`,
       `sla_missed`, and `schema_violation_recorded`; it is **leader-gated**
@@ -194,7 +207,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       Acceptance probe (integration): a `task_failed` on a gated job opens exactly
       one incident on a single-node server; a second independent failure with the
       same key appends an occurrence rather than opening a twin.
-- [ ] A5. Build the free-text log scrubber. Free-text scrubbing does not exist
+- [x] A5. Build the free-text log scrubber. Free-text scrubbing does not exist
       today (`HashInputBlob` redacts structured env maps at hash time; run logs
       are served raw), so add a scrubber that does exact removal of every resolved
       `secret://` value in the task's env plus high-entropy token heuristics, run
@@ -209,7 +222,7 @@ store. Largest blast radius (models + engines + `cmd/start/start.go` + `env.go` 
       case asserts a secret value of `"true"` does not scrub every `true` in the log.
       Until the scrubber is in, bundles carry no raw log text.
       Files: new `internal/incident/scrubber.go` (+ `scrubber_test.go`).
-- [ ] A6. Add the persisted-timer supervisor behind the durable `RemediationTimer`
+- [x] A6. Add the persisted-timer supervisor behind the durable `RemediationTimer`
       model — every existing delay in Caesium is an in-process `time.NewTimer`
       lost on restart/failover, so `snooze_retry` needs a durable row and a
       leader-gated sweeper that fires due timers. Timers are **owned by their
