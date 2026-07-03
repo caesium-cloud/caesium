@@ -124,10 +124,9 @@ fail-closed validation (`internal/replay/replay.go` `Prepare`): every task run
 carries an `ExecutionDescriptor` at a supported schema version; tasks that would
 re-execute were recorded `replay_safe = true` **at baseline**
 (`TaskRun.ReplaySafe`, `internal/models/run.go:90` — read from the baseline row,
-never the live definition; a later apply cannot retroactively authorize an old
-run); secret identities re-verify (Vault version+HMAC / k8s resourceVersion; env
-provider fails closed); unchanged tasks have live cache proof (see retention
-below).
+never the live definition, so a later apply cannot retroactively authorize an
+old run); secret identities re-verify (env provider fails closed); unchanged
+tasks have live cache proof (see retention below).
 
 An ineligible baseline is **reported and skipped**, never silently dropped
 ("27 of 30 eligible", with per-run reasons); zero eligible baselines fails
@@ -205,10 +204,10 @@ image". Backtest needs the other half: **did the outputs change?**
   attestation in the spirit of `internal/receipt` (deterministic,
   degraded-honest).
 - **Verdicts per task:** `OUTPUT_UNCHANGED`; `OUTPUT_CHANGED` (per-key
-  before/after `FieldChange`s, reusing the shape from
-  `internal/run/whydiff.go`); `FAILED` (candidate errored where baseline
-  succeeded — always a reported regression); `NOT_COMPARED` (cache-hit; equal by
-  construction); `DEGRADED` (output missing on one side).
+  before/after `FieldChange`s, the `internal/run/whydiff.go` shape); `FAILED`
+  (candidate errored where baseline succeeded — always a reported regression);
+  `NOT_COMPARED` (cache-hit; equal by construction); `DEGRADED` (output missing
+  on one side).
 - **Ignore-paths, or timestamps lie to you.** Outputs routinely embed
   `generated_at`, run IDs, temp paths; without an ignore mechanism every
   backtest reports 30/30 changed and the feature is noise. Job-level config

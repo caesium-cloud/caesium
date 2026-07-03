@@ -41,17 +41,16 @@ PR-time checks in `design-contract-enforcement.md`.
 
 Caesium already has a quarantine concept and it means something else:
 [`design-quarantined-replay.md`](design-quarantined-replay.md) defines **run
-quarantine** — a replay `JobRun`/`TaskRun` marked non-authoritative. That
-marker is load-bearing in persisted columns (`JobRun.Quarantine`,
+quarantine** — a replay `JobRun`/`TaskRun` marked non-authoritative — and
+that marker is load-bearing in persisted columns (`JobRun.Quarantine`,
 `TaskRun.Quarantine`, `ExecutionEvent.Quarantine`), the live-bus field
-(`event.Event.Quarantine`, `internal/event/bus.go`), and
-`quarantine IS NOT TRUE` predicates across stats/watermark queries.
-Overloading it would be a correctness hazard — a reviewer seeing `Quarantine`
-must be able to assume "non-authoritative replay run" everywhere. This
-feature therefore uses **hold** exclusively: `DatasetHold` model,
-`dataset_held`/`dataset_released` events, `caesium dataset holds` CLI. A
-dataset is *held*; a replay run is *quarantined*. The two never share a
-column, an event field, or a YAML key.
+(`event.Event.Quarantine`), and `quarantine IS NOT TRUE` query predicates.
+Overloading it would be a correctness hazard — a reviewer seeing
+`Quarantine` must be able to assume "non-authoritative replay run"
+everywhere. This feature therefore uses **hold** exclusively: `DatasetHold`
+model, `dataset_held`/`dataset_released` events, `caesium dataset holds`
+CLI. A dataset is *held*; a replay run is *quarantined*; the two never share
+a column, an event field, or a YAML key.
 
 ## Fit with Design Principles
 
@@ -262,24 +261,24 @@ status with `SkipReason: dataset_hold:<ns>/<name>`, reusing the
 concurrency-skip machinery so run history shows *why* nothing ran (an
 invisible non-run would be silent-poison's evil twin), and emits
 `run_held_upstream`. A per-job override, `metadata.onUpstreamHold: skip|run`
-(default `skip`), lets a consumer opt out — e.g. a monitoring job that
-*wants* to read held data. A third disposition — `park`, holding the run in
-the durable `run_queue` and draining on release — is deferred to Phase 3: the
-queue's dequeuer is concurrency-driven today and correct hold-release
-draining needs its own leader-gated wiring. Trigger rules are unaffected: the
-gate acts at run granularity, before any task exists, so a gate-skipped run
-looks to trigger chaining exactly like a concurrency-skipped run does today.
-Mid-run task starts do not re-check holds in v1 (documented limitation).
+(default `skip`), lets a consumer opt out (e.g. a monitoring job that *wants*
+held data). A third disposition — `park` in the durable `run_queue`, draining
+on release — is deferred to Phase 3: the dequeuer is concurrency-driven today
+and hold-release draining needs its own leader-gated wiring. Trigger rules
+are unaffected: the gate acts at run granularity, before any task exists, so
+a gate-skipped run looks to trigger chaining exactly like a
+concurrency-skipped run does today. Mid-run task starts do not re-check
+holds in v1 (documented limitation).
 
 ### Release semantics
 
 **Human ack** — `POST /v1/datasets/holds/:id/release` with reason and
 optional per-assertion tolerance windows; audited (`AuditLog`). **Clean run**
-— when the evaluator finishes a producing task with all assertions passing,
-it releases any active hold on that dataset (`release_reason: clean_run`) in
-the same transaction that records the metrics; configurable per dataset
-(`release: auto|manual`, default `auto`). Release is level-triggered:
-downstream jobs simply pass the gate on their next trigger. Caesium does not
+— when a producing task finishes with all assertions passing, the evaluator
+releases any active hold on that dataset (`release_reason: clean_run`) in the
+same transaction that records the metrics; configurable per dataset
+(`release: auto|manual`, default `auto`). Release is level-triggered —
+downstream jobs simply pass the gate on their next trigger; Caesium does not
 retroactively fire skipped runs in v1 (operators can retry them; `park`
 changes this later).
 
@@ -343,25 +342,24 @@ via `runCLIStdout`, never the stream-merging capture.
 
 ## Interplay
 
-- **[`design-freshness-scheduling.md`](design-freshness-scheduling.md).**
-  Same `Dataset` registry; a held dataset is **not fresh** regardless of
-  watermark — a poisoned-but-recent partition never satisfies a freshness
+- **[`design-freshness-scheduling.md`](design-freshness-scheduling.md)** —
+  same `Dataset` registry; a held dataset is **not fresh** regardless of
+  watermark, so a poisoned-but-recent partition never satisfies a freshness
   trigger or advances downstream scheduling.
-- **[`design-contract-enforcement.md`](design-contract-enforcement.md).**
-  Static/PR-time enforcement there; this is the runtime breaker for what
-  static analysis cannot see — the *values*. One contract story, two
+- **[`design-contract-enforcement.md`](design-contract-enforcement.md)** —
+  static/PR-time enforcement there; this is the runtime breaker for what
+  static analysis cannot see, the *values*. One contract story, two
   enforcement points.
-- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md).**
-  `dataset_held` becomes an incident class (`data_quality_hold`) whose
-  triage bundle carries the violation, baseline, and impact graph;
-  `release_hold` joins the action catalog at tier 2 (tier 3 with tolerance
-  windows). `suppress_downstream_alerts` becomes largely unnecessary here —
-  holds alert once by construction.
-- **[`design-backtesting.md`](design-backtesting.md).** Assertions evaluate
-  in backtests too, over the metrics historical runs emitted — free
-  regression signal ("this change would have tripped the breaker on 3 of
-  the last 30 days") — with holds never opened from backtest runs, mirroring
-  the replay-quarantine posture.
+- **[`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)** —
+  `dataset_held` becomes an incident class (`data_quality_hold`) whose triage
+  bundle carries the violation, baseline, and impact graph; `release_hold`
+  joins the action catalog at tier 2 (tier 3 with tolerance windows).
+  `suppress_downstream_alerts` becomes largely unnecessary here — holds
+  alert once by construction.
+- **[`design-backtesting.md`](design-backtesting.md)** — assertions evaluate
+  in backtests too, over metrics historical runs emitted: free regression
+  signal ("this change would have tripped the breaker on 3 of the last 30
+  days"), with holds never opened from backtest runs.
 
 ## Testing
 

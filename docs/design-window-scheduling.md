@@ -135,9 +135,9 @@ to park promptly; correctness never depends on it.
 ### Parked rows: extend `run_queue`
 
 The durable `run_queue` table (`internal/models/run_queue.go:12-21`) already
-provides restart durability, a `claimed_by`/`claimed_at` claim protocol with
-stale-claim reclaim (`internal/runqueue/dequeuer.go:125-141`), and a
-priority-ordered drain index. Add nullable columns:
+provides restart durability, a claim protocol with stale-claim reclaim
+(`internal/runqueue/dequeuer.go:125-141`), and a priority-ordered drain
+index. Add nullable columns:
 
 ```go
 // models.RunQueue additions (all NULL for ordinary concurrency-queued rows)
@@ -235,13 +235,12 @@ One interface, three shipped implementations, selected by env:
 Window open resolves through the cron schedule evaluated in the configured
 location (as `nextTick` does today, cron.go:325-331); `deadline`/`close` via
 `time.Date` in the same location on the logical date. robfig/cron v1.2.0 has
-no native tz support — Caesium already owns location conversion. Policies
-(tested): spring-forward gap → first valid instant after it; ambiguous
+no native tz support — Caesium already owns location conversion. Tested
+policies: spring-forward gap → first valid instant after it; ambiguous
 fall-back → first occurrence (earlier UTC — conservative for a deadline);
 DST-collapsed window (`open ≥ forceAt`) → park and immediately force with a
-`window_collapsed` warning. The shipped `sla.completedBy` resolver is
-UTC-only HH:MM (`watcher.go:386-400`); window deadlines are tz-aware from day
-one and do not reuse it.
+`window_collapsed` warning. The shipped `sla.completedBy` resolver is UTC-only
+HH:MM (`watcher.go:386-400`); window deadlines are tz-aware and don't reuse it.
 
 ### SLA integration (reuse, don't duplicate)
 
@@ -278,8 +277,8 @@ Why:               cluster 12/32 running (green); cost signal 0.71 now,
 ```
 
 `--json` emits the REST payload on **stdout** (machine output separated from
-logs — the hard-won rule in CLAUDE.md). Subcommand precedent: `caesium job
-queue` (`cmd/job/queue.go`).
+logs — the hard-won CLAUDE.md rule). Precedent: `caesium job queue`
+(`cmd/job/queue.go`).
 
 ## Frontend
 
@@ -389,8 +388,7 @@ endpoint ships with an integration test in `test/` driving the real surface.
    window-specific state grows.
 3. **Global vs. per-job load ceiling** — a single cluster ceiling is crude;
    per-namespace fairness belongs to roadmap §3.1, not here.
-4. **Quantile choice** — heavy-tailed jobs may want p99; possibly a
-   `durationQuantile` knob.
+4. **Quantile choice** — heavy-tailed jobs may want p99 (`durationQuantile`?).
 5. **Backfills** — backfill runs bypass ordinary concurrency accounting
    (store.go:723-728); should backfilled logical dates respect windows?
    Leaning immediate execution (operator intent is explicit).
