@@ -174,10 +174,23 @@ task failure already carries the violations).
 
 Pipeline per event:
 
-1. **Dedupe/correlate.** Key on `(job_id, task_name, failure_class)` with a
-   cooldown window; a retry of the same failing task folds into the open
-   incident rather than opening a new one. A `run_failed` following a
-   `task_failed` we already own is correlated, not duplicated.
+1. **Dedupe/correlate.** Correlation key is `(job_id, task_name,
+   failure_class)`, with explicit run-boundary rules so high-frequency jobs
+   don't blur execution contexts:
+   - Declared retries within the same `run_id`, and the run-level
+     `run_failed` that follows a `task_failed` we already own, fold into the
+     owning incident.
+   - Agent-initiated runs (stamped with `RemediationIncidentID`) always fold
+     into their owning incident, regardless of key.
+   - An *independent* new run (e.g. the next cron tick) failing with the same
+     key while an incident is open does not spawn a parallel incident or a
+     second agent session; it is appended to the open incident as a distinct
+     **occurrence** (run-scoped, so per-run state is never mixed), and the
+     incident's remediation target advances to the newest failed run.
+     Recurrence count is itself triage signal.
+   - A cooldown window applies only after an incident closes, suppressing an
+     immediate re-open storm for the same key; after cooldown, a fresh
+     failure opens a fresh incident.
 2. **Classify.** A deterministic, cheap classifier — no LLM — maps signals to
    a `failure_class`:
    - `atom.Result` (`StartupFailure`, `ResourceFailure` vs `Failure`)
@@ -267,7 +280,7 @@ machinery that already exists:
 | `extend_sla_once` | 2 | SLA watcher interplay |
 | `skip_task` (mark failed task skipped, honor trigger rules) | 3 | new store op |
 | `override_schema_gate` (one run) | 3 | schema-validation bypass, recorded |
-| `apply_jobdef_patch` (schema/image/cron change) | 3 | `jobdefs/diff` + `apply`, or a Git PR when git-sync provenance exists |
+| `apply_jobdef_patch` (schema/image/cron change) | 3 | routed by provenance: Git PR for git-synced jobs, `jobdefs/diff` + `apply` otherwise (see below) |
 | `escalate` (page with RCA) | 1 | notification channels (Slack/PagerDuty/email/webhook) |
 
 Tier semantics come from the playbook: tier 1 defaults to autonomous, tier 2
@@ -280,6 +293,16 @@ lineage, no callbacks, no stats pollution; see
 can *empirically verify* a hypothesis fix before proposing it. "I replayed
 with the relaxed mapping and it succeeds" is a far stronger approval card than
 "I think this will work."
+
+`apply_jobdef_patch` is **provenance-routed, enforced server-side**: for jobs
+with git-sync provenance (the `Job` model's git fields), a direct database
+apply is *rejected* — the next sync cycle would silently revert it and leave
+Git and the database out of agreement. For those jobs the approved patch must
+flow as a Git PR against the source repo (or, when no git credentials are
+configured for write, the action degrades to `escalate` with the rendered
+diff attached). Only jobs without authoritative git provenance take the
+direct `jobdefs/diff` + `apply` path. The agent cannot choose the route; the
+executor derives it from provenance.
 
 ### Declarative policy
 
@@ -331,10 +354,14 @@ if follow-up work is needed.
   counter, opened/closed timestamps, resolution summary.
 - `AgentSession` — incident ref, profile, atom-run ref (the agent container's
   own run record), token id, budget counters, terminal state.
-- `AgentAction` — session ref (nullable for `actor=policy|human`), type,
-  params JSON, tier, status (`proposed|approved|rejected|executed|failed`),
-  result JSON, actor, timestamps. **This is the audit spine.**
-- `ApprovalRequest` — action ref, approvers hint, decision, decider, expiry.
+- `AgentAction` — incident ref (**non-nullable**: the timeline must
+  reconstruct even for actions with no session, i.e. `actor=policy|human`),
+  session ref (nullable), type, params JSON, tier, status
+  (`proposed|approved|rejected|executed|failed`), result JSON, actor,
+  timestamps. **This is the audit spine.**
+- `ApprovalRequest` — action ref (parent incident resolves through the
+  action's incident ref, which the approval endpoints validate against the
+  `:id` in the route), approvers hint, decision, decider, expiry.
 - `AgentProfile` — name, image/engine/limits, secret refs, budgets, defaults.
 
 All flow through `models.All` AutoMigrate as usual; incidents and actions are

@@ -336,6 +336,7 @@ func TestPlanningAndHistoricalDocsCarryStatusBanner(t *testing.T) {
 	root := repoRoot(t)
 
 	files := []string{
+		"docs/design-agent-in-the-loop.md",
 		"docs/design-airflow-parity.md",
 		"docs/design-concurrency-priority.md",
 		"docs/design-data-plane-memory.md",
