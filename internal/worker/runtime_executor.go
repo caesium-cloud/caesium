@@ -537,6 +537,13 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// state and would report Result=Unknown for the kubernetes engine.
 	a = finalAtom
 
+	// Capture the raw exit code before Result() folds it into a coarse status and
+	// the incident classifier loses it. Best-effort: a persistence failure must
+	// not fail an otherwise-complete task.
+	if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.TaskID, a.ExitCode()); err != nil {
+		log.Warn("failed to persist task exit code", "task_id", taskRun.TaskID, "error", err)
+	}
+
 	// Parse structured task output and branch markers in a single pass
 	// over the log stream (no full buffering). Logs must be fetched before
 	// engine.Stop runs, because Stop tears down the underlying container/pod.

@@ -86,6 +86,7 @@ type fakeMonitorAtom struct {
 func (a *fakeMonitorAtom) ID() string           { return a.id }
 func (a *fakeMonitorAtom) State() atom.State    { return atom.Stopped }
 func (a *fakeMonitorAtom) Result() atom.Result  { return a.result }
+func (a *fakeMonitorAtom) ExitCode() *int       { return nil }
 func (a *fakeMonitorAtom) CreatedAt() time.Time { return time.Time{} }
 func (a *fakeMonitorAtom) StartedAt() time.Time { return time.Time{} }
 func (a *fakeMonitorAtom) StoppedAt() time.Time { return time.Time{} }

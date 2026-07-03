@@ -860,6 +860,12 @@ func (j *job) Run(ctx context.Context) error {
 			a = result.atom
 			log.Info("atom finished", "job_id", j.id, "task_id", taskID, "atom_id", a.ID(), "result", a.Result())
 
+			// Capture the raw exit code before Result() folds it into a coarse
+			// status and the incident classifier loses it. Best-effort.
+			if exitErr := store.SetTaskExitCode(runID, taskID, a.ExitCode()); exitErr != nil {
+				log.Warn("failed to persist task exit code", "task_id", taskID, "error", exitErr)
+			}
+
 			// Parse both structured outputs and branch markers in a single
 			// pass over the log stream (no full buffering).
 			var taskOutput map[string]string

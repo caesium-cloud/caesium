@@ -490,6 +490,29 @@ var (
 		},
 		[]string{"reason"},
 	)
+
+	// IncidentsTotal counts incident lifecycle transitions by failure class and
+	// resulting status. The class label is bounded by the classifier's fixed set
+	// of failure classes and status by the incident status machine, so cardinality
+	// is bounded (agent-in-the-loop remediation, Phase 0).
+	IncidentsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_incidents_total",
+			Help: "Total incident lifecycle transitions by failure class and status.",
+		},
+		[]string{"class", "status"},
+	)
+
+	// IncidentResolutionSeconds measures time from incident open to a terminal
+	// disposition, labelled by failure class.
+	IncidentResolutionSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "caesium_incident_resolution_seconds",
+			Help:    "Time from incident open to terminal disposition in seconds, by failure class.",
+			Buckets: []float64{1, 5, 30, 60, 300, 900, 1800, 3600, 14400, 86400},
+		},
+		[]string{"class"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -546,6 +569,8 @@ func Register() {
 			DispatchSentTotal,
 			CompleteReportFailedTotal,
 			CompleteRetryableTotal,
+			IncidentsTotal,
+			IncidentResolutionSeconds,
 		)
 	})
 }

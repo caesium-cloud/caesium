@@ -44,4 +44,16 @@ var All = []interface{}{
 	// follow Job (FK parent). Rebuilt from the manifest on every apply; not a
 	// hot per-run table.
 	&DatasetDeclaration{},
+	// Agent-in-the-loop remediation (Phase 0) incident substrate. These are
+	// append-mostly, low-volume catalog tables — NOT hot per-run tables, so they
+	// are deliberately absent from hotPathModels()/hotTables. Parents precede
+	// children so AutoMigrate can build FK constraints: Incident and AgentProfile
+	// first, then AgentSession (FK incident+profile), AgentAction (FK
+	// incident+session), ApprovalRequest (FK action), RemediationTimer (FK incident).
+	&Incident{},
+	&AgentProfile{},
+	&AgentSession{},
+	&AgentAction{},
+	&ApprovalRequest{},
+	&RemediationTimer{},
 }

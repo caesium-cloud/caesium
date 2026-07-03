@@ -43,6 +43,11 @@ const (
 	TypeRunRetried        Type = "run_retried"
 	TypeRunTimedOut       Type = "run_timed_out"
 	TypeSLAMissed         Type = "sla_missed"
+	// TypeSchemaViolationRecorded is emitted when a task's output violates its
+	// declared schema in "warn" mode — the task does NOT fail, so the incident
+	// manager would otherwise never see the violation. In "fail" mode the task
+	// failure already carries the violations, so no separate event is emitted.
+	TypeSchemaViolationRecorded Type = "schema_violation_recorded"
 )
 
 // Event represents a system event.

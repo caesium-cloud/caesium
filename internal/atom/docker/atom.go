@@ -38,6 +38,16 @@ func (c *Atom) Result() atom.Result {
 	return atom.Unknown
 }
 
+// ExitCode returns the raw Docker container exit code, preserved for the
+// incident classifier before Result() folds it into a coarse Result.
+func (c *Atom) ExitCode() *int {
+	if c.metadata.State == nil {
+		return nil
+	}
+	code := c.metadata.State.ExitCode
+	return &code
+}
+
 // CreatedAt returns the UTC time the Atom was created.
 func (c *Atom) CreatedAt() time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, c.metadata.Created)

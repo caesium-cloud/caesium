@@ -2135,6 +2135,16 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSn
 		}).Error
 }
 
+// SetTaskExitCode persists the raw process exit code the engine reported at
+// task completion onto the task run. The incident classifier reads this
+// alongside SchemaViolations/Result to bucket a failure into a failure_class.
+// Best-effort: a nil-safe no-op when the row is gone.
+func (s *Store) SetTaskExitCode(runID, taskID uuid.UUID, exitCode *int) error {
+	return s.db.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Update("exit_code", exitCode).Error
+}
+
 // SaveSchemaViolations persists schema validation violations for a task run.
 func (s *Store) SaveSchemaViolations(runID, taskID uuid.UUID, violations []pkgtask.SchemaViolation) error {
 	if len(violations) == 0 {
