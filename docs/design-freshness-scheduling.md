@@ -27,16 +27,16 @@ why 3 a.m. pages exist:
   a runbook, if anywhere.
 
 Freshness-driven scheduling inverts the declaration. Jobs declare the
-datasets their steps produce and consume, and a freshness SLO on each output
-("at most 6h stale"). Caesium derives execution from that graph: **run**
-when upstream data has arrived and my output is stale against its SLO;
-**don't run** when nothing changed (the dataset is fresh — skip entirely);
-**don't page** when upstream is late — the dataset shows
-`stale-upstream: waiting on raw.vendor_x`, an observable state with a
-reason, not a failed run. Escalation happens on *SLO risk*, not on a step's
-exit code. Materialize/Dagster-freshness-policies energy, but
-container-native (the contract stays stdout markers + YAML, no SDK) and
-zero-dependency (dqlite rows, the existing event router and cache identity).
+datasets their steps produce and consume, and a freshness SLO on each
+output ("at most 6h stale"). Caesium derives execution from that graph:
+**run** when upstream data has arrived and my output is stale against its
+SLO; **don't run** when nothing changed; **don't page** when upstream is
+late — the dataset shows `stale-upstream: waiting on raw.vendor_x`, an
+observable state with a reason, not a failed run. Escalation happens on
+*SLO risk*, not a step's exit code. Materialize/Dagster-freshness-policies
+energy, but container-native (the contract stays stdout markers + YAML, no
+SDK) and zero-dependency (dqlite rows, the existing event router and cache
+identity).
 
 ## Fit with Design Principles
 
@@ -77,10 +77,6 @@ zero-dependency (dqlite rows, the existing event router and cache identity).
               violated ───────▶ freshness_violated event
                                 (notifications + agent incident)
 ```
-
-A derivation flows through the same admission path as every other run, and
-staleness states are persisted rows — surviving restart and failover,
-observable in the UI and CLI.
 
 ## What exists today (honest inventory)
 
@@ -215,9 +211,8 @@ not three (derivations dedupe on the consumed-watermark set).
 finds `analytics.orders_daily` fresh and no upstream advance since the last
 run — the tick is skipped and recorded (`skipped_fresh`). Where the shipped
 cache would have started a run and cache-hit every task (cheap), freshness
-starts nothing (free). When upstream advanced but the cache would hit
-anyway, the run still derives and the cache does its job — the layers
-compose rather than compete.
+starts nothing (free); when a run does derive unnecessarily, the cache still
+does its job — the layers compose rather than compete.
 
 ## Backend
 
@@ -230,8 +225,8 @@ watermark}]`) and `metadata.datasets.sources` for external datasets
 `consumes` name must be produced in the applied set, declared as a source,
 or marked `external: true`; exactly one job produces a given dataset (any
 number consume); the declared graph must be acyclic **across jobs** — a
-dataset cycle is a derivation cycle, the same check class as event-trigger
-static cycle detection.
+dataset cycle is a derivation cycle (the event-trigger static-cycle check
+class).
 
 Apply upserts declarations into a new `dataset_declarations` table: the
 *declared* graph, independent of and complementary to the *observed*
@@ -264,8 +259,8 @@ Three ways a dataset advances, all existing surfaces:
    `caesium dataset advance` covers operators.
 3. **Sensor-container pattern** (documented, not built in): a small cron
    job whose only step polls SFTP/S3/a table and, on new data, emits the
-   watermark output for the source dataset it produces. Caesium stays
-   zero-dependency; the poller is just a container.
+   watermark output for the source dataset it produces. The poller is just
+   a container; Caesium stays zero-dependency.
 
 ### The freshness evaluator (leader-gated, durable)
 
@@ -350,8 +345,8 @@ New feature dir `ui/src/features/datasets/`:
    up to date", readable without understanding DAGs.
 2. **Lineage graph colored by freshness**: the existing `LineageGraph`
    component (`ui/src/features/jobs/LineageGraph.tsx`) gains a freshness
-   overlay — "everything downstream of vendor-x is amber" at a glance.
-   Declared edges render even before the first run.
+   overlay — "everything downstream of vendor-x is amber" at a glance;
+   declared edges render before the first run.
 3. **Job detail — "why did/didn't this run"**: a derivations panel rendering
    `DatasetDerivation` rows: *"18:00 tick skipped — analytics.orders_daily
    fresh (2h/6h)"*, *"04:31 derived by raw.vendor_x advance"*. Run detail

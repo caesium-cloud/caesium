@@ -142,10 +142,10 @@ This does not exist today and must not be hand-waved. The shipped replay
 (`internal/replay/replay.go:77`): **params are the only overridable input.**
 Image, command, env, and schema all come pinned from the descriptor —
 `computeDescriptorHash` reads `desc.Runtime.Image` / `ResolvedImageDigest` /
-`Command` (replay.go:474-506), and `taskRunRecord` stamps the replay `TaskRun`
-from the same descriptor fields (replay.go:817-860). That pinning is the
-identical-code guarantee replay sells. Backtesting extends the request with a
-typed, per-step override set:
+`Command` (replay.go:474-506) and `taskRunRecord` stamps the replay `TaskRun`
+from the same fields (replay.go:817-860); that pinning is the identical-code
+guarantee replay sells. Backtesting extends the request with a typed, per-step
+override set:
 
 ```go
 type StepOverride struct {
@@ -224,12 +224,12 @@ DAG = never".
 
 - **Image/command override on step X:** only X and its transitive downstream
   re-execute per baseline run; every upstream task keeps a byte-identical
-  `HashInput` and is served from baseline cache proof. A 6-step linear DAG with
-  the change in step 5 executes 2 + caches 4 per run — a ~3× win, larger for
-  wide DAGs with a leaf change. The report prints the actual split
-  (`22 re-executed / 41 cache-hit` above), and `caesium backtest --dry-run`
-  prints the full plan *without dispatching anything*, so the PR Action can post
-  cost before anyone approves execution.
+  `HashInput` and is served from baseline cache proof. A 6-step linear DAG
+  changed at step 5 executes 2 + caches 4 per run — a ~3× win, larger for wide
+  DAGs with a leaf change. The report prints the actual split (`22 re-executed /
+  41 cache-hit` above); `caesium backtest --dry-run` prints the full plan
+  *without dispatching anything*, so the PR Action can post cost before anyone
+  approves execution.
 - **Param override:** full-DAG per run (wholesale `RunParams` hashing, above).
   Honest and loud.
 - **Retention bounds backtest depth.** Verified reality: `JobRun`/`TaskRun` rows
@@ -399,11 +399,10 @@ with an integration test in `test/` driving the real surface.
 
 - **P0 — same-code backtest (no overrides).** N quarantined replays with an
   empty override set + the output-delta computation, report, and CLI. Zero new
-  execution risk; validates the whole aggregation/comparison/report plumbing;
-  and it already catches **environment drift** — a moved unpinned tag, a rotated
-  secret, or changed source data all surface as changed/failed/ineligible runs.
-  Independently useful: "is my pipeline still deterministic over its recorded
-  inputs?"
+  execution risk; validates the aggregation/comparison/report plumbing; and it
+  already catches **environment drift** — a moved unpinned tag, a rotated
+  secret, or changed source data surface as changed/failed/ineligible runs.
+  Independently useful: "is my pipeline deterministic over its recorded inputs?"
 - **P1 — descriptor overrides.** Image (digest-resolved), command, and schema
   overrides with the safety gates above; the endpoint capability split;
   `--path candidate.job.yaml` delta extraction. This is the headline.

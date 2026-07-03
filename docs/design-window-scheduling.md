@@ -96,9 +96,8 @@ steps:
   guarantee), `latest` (park until latest-safe-start — freshest inputs at
   deadline), `cheapest` (wait for signal valleys, P1/P2).
 - Lint: `deadline` after open (modulo rollover), `close < deadline`, cron
-  valid per the existing 5-field parser
-  (`internal/trigger/cron/cron.go:61-67`, robfig/cron v1.2.0), timezone via
-  `time.LoadLocation` (as `extractLocation`, cron.go:268-287).
+  valid per the existing 5-field parser (`internal/trigger/cron/cron.go:61-67`,
+  robfig/cron v1.2.0), timezone via `time.LoadLocation` (cron.go:268-287).
 
 The alternative — `type: cron` plus a `window:` sibling block — was rejected:
 a cron trigger's contract is "fire at this minute," and an annotation turning
@@ -110,15 +109,15 @@ the executor's listing loop needs `window` added (`executor.go:38-42`).
 
 1. **Nightly warehouse load spread across the cluster valley.** Forty jobs
    pinned at `0 0 * * *` become `window 00:00 → 05:00, deadline 06:00` with
-   the P1 load gate. All forty park at 00:00; the scheduler releases them in
-   priority order while running-task count stays under the ceiling.
+   the P1 load gate: all forty park at 00:00 and are released in priority
+   order while running-task count stays under the ceiling.
 2. **Carbon-aware batch.** A weekly rebuild declares `objective: cheapest`
    with a static carbon calendar (or a webhook feed posted into `/v1/events`)
    and starts in the greenest hour of its window — unless the valley never
    comes, in which case the force rule fires anyway.
 3. **Deadline force-start.** `deadline 06:00`, p95 = 50m, buffer = 15m;
-   signals stay red all night. At 04:55 the scheduler stops caring, forces
-   the start, emits `window_forced`; the run completes ~05:45, in deadline.
+   signals red all night. At 04:55 the scheduler stops caring, forces the
+   start, emits `window_forced`; the run completes ~05:45, in deadline.
 
 ## Backend
 
@@ -195,16 +194,15 @@ maxRuns`, store.go:780-809). Never bypasses concurrency; see Safety.
 scheduler reconciles: compute each window job's most recent open ≤ now in its
 timezone; if the window is still feasible and no run/parked row exists for
 that logical date (unique index ⇒ idempotent), park it — forcing immediately
-if `now ≥ forceAt`. This mirrors cron catchup's watermark approach
-(`fireCatchup`, cron.go:150-197) but is driven from the durable table, not
-process memory.
+if `now ≥ forceAt`. Mirrors cron catchup's watermark approach (`fireCatchup`,
+cron.go:150-197), but driven from the durable table, not process memory.
 
 ### Duration predictor
 
 `internal/windowsched/predictor.go`: p95 over the last N (default 20)
 succeeded, non-quarantined runs — the same duration query shape the stats
-service uses (`api/rest/service/stats/stats.go:72-77`,
-`completed_at − started_at` over `job_runs`).
+service uses (`completed_at − started_at` over `job_runs`,
+`api/rest/service/stats/stats.go:72-77`).
 
 - **Why p95, not EWMA:** the SLA design proposes an EWMA predictor for
   *at-risk detection*; a *safety margin* wants a conservative upper quantile.
@@ -271,7 +269,6 @@ with zero new alerting machinery. New bus/store events: `window_planned`,
 
 ```
 $ caesium job window nightly-warehouse-load
-Job:               nightly-warehouse-load
 Window:            00:00 → 05:00 America/New_York (deadline 06:00)
 Predicted p95:     47m  (18 samples)
 Latest safe start: 04:58  (deadline − p95 − 15m buffer)
@@ -294,33 +291,33 @@ queue` (`cmd/job/queue.go`).
 
 ## Safety
 
-**Deadline guarantee (proof sketch).** Let δ = tick interval, α =
-admission+claim latency, D = deadline, P = p95, B = buffer. The force rule
-releases by `t ≤ D − P − B + δ`; the run starts by `t + α` and, with
-probability ≥ the p95 coverage (≈0.95 under stationarity), completes by
-`D − B + δ + α`. Choosing `B > δ + α` (defaults: 10m vs 15s + subsecond
-admission) yields: **Caesium initiates the start early enough that a
-p95-or-faster run completes before the deadline.** A *start* guarantee —
-completion stays probabilistic (regressions beyond p95, saturated cluster),
-which is exactly what `sla_missed` + `window_deadline_at_risk` flag.
+**Deadline guarantee (proof sketch).** Let δ = tick interval, α = admission
+latency, D = deadline, P = p95, B = buffer. The force rule releases by
+`t ≤ D − P − B + δ`; the run starts by `t + α` and, with probability ≥ the
+p95 coverage (≈0.95 under stationarity), completes by `D − B + δ + α`. With
+`B > δ + α` (defaults: 10m vs 15s + subsecond admission): **Caesium initiates
+the start early enough that a p95-or-faster run completes before the
+deadline.** A *start* guarantee — completion stays probabilistic (regressions
+beyond p95, saturated cluster), exactly what `sla_missed` +
+`window_deadline_at_risk` flag.
 
 **Concurrency admission interplay.** A window start — including a forced one —
 still passes `store.admit()` (store.go:711): `maxRuns` can queue, skip, or
-fail it per the job's declared strategy. Deliberate (admission invariants have
-one owner), but it makes the guarantee conditional on admission. Mitigations:
-forced releases are stamped priority `high` so the run-queue dequeuer and
-distributed claimer drain them first (`ORDER BY priority DESC, created_at
-ASC`, store.go:3708-3718; roadmap §1.4); a forced release that lands in the
+fail it per the job's strategy. Deliberate (admission invariants have one
+owner), but it makes the guarantee conditional on admission. Mitigations:
+forced releases are stamped priority `high` so the dequeuer and distributed
+claimer drain them first (`ORDER BY priority DESC, created_at ASC`,
+store.go:3708-3718; roadmap §1.4); a forced release that lands in the
 concurrency queue instead of starting emits `window_deadline_at_risk`.
 
 **Starvation & priority.** Parked rows are evaluated priority-first, so
 high-priority jobs claim signal valleys first — but every parked row owns a
 force time, so a low-priority job is delayed only until its own
 latest-safe-start, never starved past it. Priority shapes *where in the
-window* a run lands, never *whether* it runs. And the scheduler holds no new
-write authority: it only inserts runs through the same admission path
-triggers use, so with leader-gating plus the atomic conditional insert (no
-cross-node TOCTOU) the worst failover outcome is a run starting one tick
+window* a run lands, never *whether* it runs. The scheduler also holds no new
+write authority — it only inserts runs through the same admission path
+triggers use — so leader-gating plus the atomic conditional insert (no
+cross-node TOCTOU) makes the worst failover outcome a run starting one tick
 late, never twice.
 
 ## Testing
