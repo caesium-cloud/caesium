@@ -212,6 +212,23 @@ steps:
 
 ---
 
+## Phase 4: Data-Plane Differentiators (Design Wave)
+
+A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc; none is committed work. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
+
+| Design | One-liner | Doc |
+|--------|-----------|-----|
+| Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) |
+| Dynamic fan-out | A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) |
+| Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) |
+| Freshness-driven scheduling | Declare freshness SLOs on datasets; derive execution from lineage + data arrival instead of cron guesses — the strategic flagship | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) |
+| Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) |
+| Contract enforcement | Cross-job schema-compatibility checks at lint/diff/apply with named consumers and an intentional-break path | [`design-contract-enforcement.md`](design-contract-enforcement.md) |
+| Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) |
+| `caesium reproduce` | Re-execute any historical task locally from its execution descriptor — production debugging on a laptop | [`design-reproduce.md`](design-reproduce.md) |
+
+---
+
 ## Execution Priority
 
 | Priority | Feature | Rationale |
@@ -229,6 +246,7 @@ steps:
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
 | **P3** | 3.5 Agent-in-the-loop remediation | Converts the data-plane-memory substrate into autonomous ops. Phase 0 (diagnosed pages) is cheap and de-risks the rest. |
+| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling, contract enforcement, and right-sizing are the near-term standouts. |
 
 ---
 
