@@ -113,6 +113,16 @@ func TestValidateDatasetsRejectsBadInputs(t *testing.T) {
 			want: "maxStaleness",
 		},
 		{
+			name: "non-positive freshness duration",
+			yaml: datasetStep(`produces: [{name: a, freshness: "-6h"}]`),
+			want: "freshness \"-6h\" must be a positive duration",
+		},
+		{
+			name: "zero maxStaleness duration",
+			yaml: datasetStep(`produces: [{name: a, maxStaleness: "0s"}]`),
+			want: "maxStaleness \"0s\" must be a positive duration",
+		},
+		{
 			name: "watermark without key",
 			yaml: datasetStep(`produces: [{name: a, watermark: {}}]`),
 			want: "watermark.key is required",

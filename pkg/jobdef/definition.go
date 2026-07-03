@@ -557,8 +557,12 @@ func validateDatasets(d *Definition) error {
 			}
 			sources[name] = struct{}{}
 			if strings.TrimSpace(src.ExpectedEvery) != "" {
-				if _, err := time.ParseDuration(src.ExpectedEvery); err != nil {
+				dur, err := time.ParseDuration(src.ExpectedEvery)
+				if err != nil {
 					return fmt.Errorf("metadata.datasets.sources[%d].expectedEvery %q must be a valid duration: %w", i, src.ExpectedEvery, err)
+				}
+				if dur <= 0 {
+					return fmt.Errorf("metadata.datasets.sources[%d].expectedEvery %q must be a positive duration", i, src.ExpectedEvery)
 				}
 			}
 			if src.Arrival != nil {
@@ -594,13 +598,21 @@ func validateDatasets(d *Definition) error {
 			}
 			produced[name] = struct{}{}
 			if strings.TrimSpace(p.Freshness) != "" {
-				if _, err := time.ParseDuration(p.Freshness); err != nil {
+				dur, err := time.ParseDuration(p.Freshness)
+				if err != nil {
 					return fmt.Errorf("steps[%d].datasets.produces[%d].freshness %q must be a valid duration: %w", i, j, p.Freshness, err)
+				}
+				if dur <= 0 {
+					return fmt.Errorf("steps[%d].datasets.produces[%d].freshness %q must be a positive duration", i, j, p.Freshness)
 				}
 			}
 			if strings.TrimSpace(p.MaxStaleness) != "" {
-				if _, err := time.ParseDuration(p.MaxStaleness); err != nil {
+				dur, err := time.ParseDuration(p.MaxStaleness)
+				if err != nil {
 					return fmt.Errorf("steps[%d].datasets.produces[%d].maxStaleness %q must be a valid duration: %w", i, j, p.MaxStaleness, err)
+				}
+				if dur <= 0 {
+					return fmt.Errorf("steps[%d].datasets.produces[%d].maxStaleness %q must be a positive duration", i, j, p.MaxStaleness)
 				}
 			}
 			if p.Watermark != nil && strings.TrimSpace(p.Watermark.Key) == "" {
