@@ -84,6 +84,9 @@ func (s *IntegrationTestSuite) TestRunConcurrencyStrategies() {
 	})
 
 	s.Run("queue reclaims stale claim", func() {
+		if s.engineType == "kubernetes" {
+			s.T().Skipf("stale-claim reclaim setup writes run_queue directly; dqlite binds to POD_IP under CAESIUM_TEST_ENGINE=%s and is not port-forward-reachable; covered on the docker + podman lanes", s.engineType)
+		}
 		job := s.applyConcurrencyJob("queue", `sleep 3`)
 		firstStatus, firstRunID := s.postConcurrencyRun(job.ID)
 		s.Equal(http.StatusAccepted, firstStatus)

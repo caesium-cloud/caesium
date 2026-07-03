@@ -500,7 +500,7 @@ jobs:
             -v $(pwd):/bld/caesium \
             -e CAESIUM_TEST_ENGINE=podman \
             -e CAESIUM_CLI_PATH=/bld/caesium/.tmp/caesium-cli/caesium \
-            --network=host \
+            --network=container:caesium-server-podman \
             -w /bld/caesium \
             caesiumcloud/caesium-builder:${{ env.IMAGE_TAG }}-amd64-full \
             sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -timeout 10m'
