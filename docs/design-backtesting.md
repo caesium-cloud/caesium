@@ -31,8 +31,8 @@ the last N production runs' recorded inputs and report output deltas per run** �
 - **Declarative and GitOps-first (the star).** Roadmap §2.1 makes pipeline
   changes *reviewable* (lint → visual DAG diff → preview run → PR comment);
   backtesting makes them *testable against reality*. The unit under review is
-  the manifest + image in git; the test fixture is production history the server
-  already recorded. No other orchestrator can offer this in a PR check.
+  the manifest + image in git; the test fixture is production history the
+  server already recorded. No other orchestrator can offer this in a PR check.
 - **Container-native execution.** The candidate is just a different
   image/command — no SDK, no test-harness contract.
 - **Zero-dependency simplicity.** Baselines, descriptors, outputs, and reports
