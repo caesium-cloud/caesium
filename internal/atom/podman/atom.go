@@ -30,6 +30,12 @@ func (a *Atom) Result() atom.Result {
 	return atom.Unknown
 }
 
+// ExitCode returns the raw Podman container exit code, preserved for the
+// incident classifier before Result() folds it into a coarse Result.
+func (a *Atom) ExitCode() int {
+	return int(a.metadata.State.ExitCode)
+}
+
 func (a *Atom) CreatedAt() time.Time {
 	return a.metadata.Created
 }

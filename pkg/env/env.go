@@ -276,6 +276,16 @@ type Environment struct {
 	// fast failover.  Default false — when off, completions take the proven
 	// SQL-advancement path (B2), byte-identical.  Requires RUN_OWNER_ENABLED.
 	RunOwnerInMemory bool `envconfig:"RUN_OWNER_IN_MEMORY" default:"false"`
+
+	// Agent-in-the-loop remediation (Phase 0). The whole feature is gated behind
+	// CAESIUM_AGENT_REMEDIATION_ENABLED — a deployment that never enables it pays
+	// nothing (the leader-gated incident subscriber and timer sweeper are not
+	// started). Default false.
+	AgentRemediationEnabled bool `envconfig:"AGENT_REMEDIATION_ENABLED" default:"false"`
+	// CAESIUM_AGENT_INCIDENT_COOLDOWN suppresses re-opening an incident for the
+	// same (job, task, class) key within this window after the previous one
+	// closed, damping flapping. Default 15m.
+	AgentIncidentCooldown time.Duration `envconfig:"AGENT_INCIDENT_COOLDOWN" default:"15m"`
 }
 
 // SSOEnabled reports whether any SSO provider is configured.

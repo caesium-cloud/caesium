@@ -15,6 +15,13 @@ type Atom interface {
 	ID() string
 	State() State
 	Result() Result
+	// ExitCode returns the raw process exit code the underlying container/pod
+	// reported. Result() folds this code into a coarse Result and discards it;
+	// ExitCode preserves the raw value for the incident classifier. It returns 0
+	// when the atom never produced an exit code (still running, or the engine
+	// could not read one) — callers that must distinguish "code 0" from "no code"
+	// should also consult State().
+	ExitCode() int
 	CreatedAt() time.Time
 	StartedAt() time.Time
 	StoppedAt() time.Time

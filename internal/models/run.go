@@ -117,7 +117,15 @@ type TaskRun struct {
 	// SchemaValidation snapshots the job's schema validation mode onto the task run.
 	SchemaValidation string `gorm:"type:text;not null;default:''" json:"-"`
 	// SchemaViolations stores any output schema violations detected at runtime.
-	SchemaViolations        datatypes.JSON `gorm:"type:json" json:"schema_violations,omitempty"`
+	SchemaViolations datatypes.JSON `gorm:"type:json" json:"schema_violations,omitempty"`
+	// ExitCode is the raw process exit code the container/pod reported at task
+	// completion. Every engine folds this code into an atom.Result and discards
+	// it today; this column preserves it so the incident classifier can map
+	// exit-code + log-tail patterns to a failure_class (design Phase 0). Nullable:
+	// unset (NULL) when the task never produced an exit code (engine wait error,
+	// startup failure before a code was assigned). A value of 0 is a real,
+	// captured success code — distinct from NULL "never captured".
+	ExitCode                *int           `gorm:"type:integer" json:"exit_code,omitempty"`
 	ExecutionDescriptor     datatypes.JSON `gorm:"type:json" json:"-"`
 	LogText                 string         `gorm:"type:text" json:"-"`
 	LogTruncated            bool           `gorm:"not null;default:false" json:"-"`

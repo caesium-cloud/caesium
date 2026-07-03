@@ -24,6 +24,7 @@ import (
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
 	"github.com/caesium-cloud/caesium/internal/jobdef/runtime"
@@ -444,6 +445,30 @@ func start(cmd *cobra.Command, args []string) error {
 			if err := watcher.Start(ctx); err != nil && ctx.Err() == nil {
 				log.Error("notification watcher exited", "error", err)
 			}
+		})
+	}
+
+	// --- Agent-in-the-Loop Remediation (Phase 0 incident substrate) ---
+	//
+	// The whole feature is gated behind CAESIUM_AGENT_REMEDIATION_ENABLED; a
+	// deployment that never enables it starts neither the incident subscriber nor
+	// the timer sweeper and pays nothing. Both are leader-gated
+	// (dqlite.IsLocalLeader, like the run-queue dequeuer) so an N-node cluster
+	// opens exactly one incident per failure and fires each durable timer once.
+	if vars.AgentRemediationEnabled {
+		incConn := db.Connection()
+		incidentSub := incident.NewSubscriber(bus, incConn, dqlite.IsLocalLeader, vars.AgentIncidentCooldown)
+		runAsync(func() {
+			log.Info("launching incident subscriber", "cooldown", vars.AgentIncidentCooldown)
+			if err := incidentSub.Start(ctx); err != nil && ctx.Err() == nil {
+				log.Error("incident subscriber exited", "error", err)
+			}
+		})
+
+		timerSweeper := incident.NewTimerSupervisor(incConn, dqlite.IsLocalLeader, 0)
+		runAsync(func() {
+			log.Info("launching incident timer sweeper")
+			timerSweeper.Run(ctx)
 		})
 	}
 

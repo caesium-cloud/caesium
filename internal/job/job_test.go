@@ -763,6 +763,7 @@ type fakeAtom struct {
 	engine    atom.Engine
 	state     atom.State
 	result    atom.Result
+	exitCode  int
 	createdAt time.Time
 	startedAt time.Time
 	stoppedAt time.Time
@@ -771,6 +772,7 @@ type fakeAtom struct {
 func (a *fakeAtom) ID() string           { return a.id }
 func (a *fakeAtom) State() atom.State    { return a.state }
 func (a *fakeAtom) Result() atom.Result  { return a.result }
+func (a *fakeAtom) ExitCode() int        { return a.exitCode }
 func (a *fakeAtom) CreatedAt() time.Time { return a.createdAt }
 func (a *fakeAtom) StartedAt() time.Time { return a.startedAt }
 func (a *fakeAtom) StoppedAt() time.Time { return a.stoppedAt }
