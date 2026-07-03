@@ -220,20 +220,11 @@ image". Backtest needs the other half: **did the outputs change?**
   construction); `DEGRADED` (output missing on one side).
 - **Ignore-paths, or timestamps lie to you.** Outputs routinely embed
   `generated_at`, run IDs, temp paths; without an ignore mechanism every
-  backtest reports 30/30 changed and the feature is noise. Job-level config plus
-  CLI override:
-
-  ```yaml
-  metadata:
-    backtest:
-      ignoreOutputs:
-        - "*.generated_at"        # any step, key generated_at
-        - "report.run_id"
-  ```
-
-  Ignored keys are excluded from the delta *and listed in the report as ignored*
-  so a reviewer sees what the comparison chose not to see. Glob-on-`step.key`
-  only; no regex-on-values in v1.
+  backtest reports 30/30 changed and the feature is noise. Job-level config
+  (`metadata.backtest.ignoreOutputs: ["*.generated_at", "report.run_id"]`) plus
+  CLI override. Ignored keys are excluded from the delta *and listed in the
+  report as ignored*, so a reviewer sees what the comparison chose not to see.
+  Glob-on-`step.key` only; no regex-on-values in v1.
 
 ### Cache-aware cost model (and the retention bound)
 

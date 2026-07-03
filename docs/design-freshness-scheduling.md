@@ -419,18 +419,18 @@ ships with an integration test in `test/` driving the real surface, with
   `caesium dataset list --json` (stdout captured separately via
   `runCLIStdout`, parseable) show `unknown` → run → `fresh`.
 - Arrival: `caesium event push` matching a source binding advances the
-  watermark and a derived run starts; a second identical push derives
-  nothing (dedupe).
-- Stale-upstream: expire the SLO with no arrival; assert the status,
+  watermark and a derived run starts; an identical second push derives
+  nothing.
+- Stale-upstream: expire the SLO with no arrival; assert the status, the
   `dataset_freshness_at_risk` emission, and **zero** runs started.
 - Skip-when-fresh: a cron tick with fresh outputs records `skipped_fresh`
   and no run; an unchanged-watermark success updates `verified_at` only.
-- Cascade + guards: a three-job chain refreshes end-to-end; a declared cycle
-  is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
+- Cascade + guards: a three-job chain refreshes end-to-end; a declared
+  cycle is rejected at lint; a runtime cycle exhausts `_trigger_depth`.
 - Evaluator leader-gating unit tests (fake `LeaderCheck`, the dequeuer's
-  pattern) and disabled-gate inertness (no routes, no goroutine).
-- Playwright e2e for the dataset board and lineage overlay against a live
-  backend, matching the data-plane-memory-ui precedent.
+  pattern); disabled-gate inertness. Playwright e2e for the dataset board
+  and lineage overlay against a live backend, matching the
+  data-plane-memory-ui precedent.
 
 ## Phasing
 

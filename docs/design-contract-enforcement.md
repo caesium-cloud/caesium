@@ -46,17 +46,16 @@ via event-trigger chain vendor-x-daily → reporting-daily).
 1. **Container-native execution.** Pure control-plane analysis over declared
    schemas; nothing changes about what runs in containers.
 2. **Declarative and GitOps-first.** Contracts are YAML, enforced where
-   GitOps changes land: lint, diff, apply, the PR flow (roadmap §2.1). A
-   breaking change is reviewable *as a diff annotation*.
+   GitOps changes land — lint, diff, apply, the PR flow (roadmap §2.1) — and
+   a breaking change is reviewable as a diff annotation.
 3. **Zero-dependency simplicity.** The graph derives from data the server
    already holds (persisted jobdefs, triggers, lineage rows) plus one small
-   new table for break acknowledgments. No new services.
+   table for break acknowledgments. No new services.
 4. **Smart by default.** Edges are *inferred* from trigger chaining and
    lineage evidence before anyone declares a dataset block; declarations
    upgrade warnings to hard guarantees.
-5. **Data engineering first.** Contract enforcement with breaking-change
-   semantics is the schema-registry discipline data teams already want from
-   an orchestrator.
+5. **Data engineering first.** Breaking-change semantics on data contracts
+   is the schema-registry discipline data teams already expect.
 
 ## Overview
 
@@ -93,16 +92,16 @@ Edge classes are ranked by confidence and enforced accordingly:
 
 Within a run, predecessor outputs reach a step as
 `CAESIUM_OUTPUT_<STEP>_<KEY>` env vars (`pkg/task/output.go`
-`BuildOutputEnv`), and `InputSchema` is keyed by *within-job predecessor step
-names* — **neither crosses a job boundary**. Across jobs, the only
-Caesium-mediated channel is the lifecycle event payload described above, so
+`BuildOutputEnv`), and `InputSchema` is keyed by *within-job predecessor
+step names* — **neither crosses a job boundary**. Across jobs, the only
+Caesium-mediated channel is the lifecycle event payload described above:
 today's cross-job "contract" is an undeclared, stringly-typed JSONPath into
-another team's run payload. This design statically checks those paths against
-the producer's `outputSchema`, and adds explicit declarations so teams can
-state the contract instead of implying it. Dataset I/O that never transits
-the event payload (a step writes S3, another job reads S3) is invisible to
-Caesium except as lineage evidence — which is why declarations are the only
-path to *fail*-grade enforcement for dataset edges.
+another team's run payload. This design statically checks those paths
+against the producer's `outputSchema` and adds explicit declarations.
+Dataset I/O that never transits the event payload (a step writes S3, another
+job reads S3) is invisible to Caesium except as lineage evidence — which is
+why declarations are the only path to *fail*-grade enforcement for dataset
+edges.
 
 ## YAML: declared produces/consumes
 
@@ -210,9 +209,9 @@ Nobody gets paged.
 
 ### 2. Additive change passes
 
-Team A adds optional `customer_segment`. Checker verdict: compatible.
-Lint prints an informational line; diff annotates the edge "compatible
-(additive)"; apply proceeds. Consumers change nothing.
+Team A adds optional `customer_segment`. Verdict: compatible. Lint prints an
+informational line, diff annotates the edge "compatible (additive)", apply
+proceeds. Consumers change nothing.
 
 ### 3. Intentional break: version bump + deprecation window + notification
 
@@ -342,9 +341,8 @@ producer's repo, before merge.
    already lints then diffs pasted YAML; its diff tab gains
    breaking/compatible/unknown badges per edge from `contractFindings`, with
    named consumers and teams inline. Apply is disabled on breaking findings
-   unless an ack reason is entered (which applies with the ack).
-3. **Dataset detail** — consumers list, current schema version, open
-   deprecation windows, unmigrated consumers.
+   unless an ack reason is entered.
+3. **Dataset detail** — consumers, schema version, open deprecation windows.
 
 ## Interplay
 
