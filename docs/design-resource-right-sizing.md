@@ -366,23 +366,22 @@ Integration-first, per the repo gate — every surface driven for real in
 `test/` against the live server, with a small stress image in `build/` that
 allocates a configurable number of MiB (real OOMs against real Docker in CI):
 
-1. **Stats capture:** run a job, assert `peak_memory_bytes`/`cpu_seconds`
-   populated via `GET /v1/jobs/:id/resources` and `caesium job resources
-   --json` (stdout-clean via `runCLIStdout`).
-2. **OOM classification:** 64Mi limit, allocate 128Mi → result
-   `resource_failure`, `OOMKilled=true`, exit code recorded.
-3. **Escalation green-run:** workload needing ~100Mi at a 64Mi limit with
+1. **Stats capture + OOM classification:** run at a 64Mi limit allocating
+   128Mi → result `resource_failure`, `OOMKilled=true`, exit code and peak
+   stats recorded; assert via `GET /v1/jobs/:id/resources` and
+   `caesium job resources --json` (stdout-clean via `runCLIStdout`).
+2. **Escalation green-run:** workload needing ~100Mi at a 64Mi limit with
    `onOOM: {factor: 2}` → attempt 2 at 128Mi succeeds; assert attempt trail,
    `AppliedResources`, `EscalationLevel`, and an identical cache hash across
    attempts. **Bounds exhaustion:** max below need → classified failure; a
    plain non-OOM failure does NOT consume escalation attempts.
-4. **Distributed lane:** escalation through the claimed worker path,
+3. **Distributed lane:** escalation through the claimed worker path,
    including a forced re-claim mid-ladder (escalation level persists).
-5. **Recommendation math** (seed N real runs, assert the suggested value
+4. **Recommendation math** (seed N real runs, assert the suggested value
    through CLI and REST) and **provenance routing** (git-synced apply is
    rejected/PR-routed; non-git round-trips `diff`/`apply`; auth-off refuses
    direct apply).
-6. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
+5. **Gates off ⇒ inert:** no columns written, no routes bound, OOM results
    stay pre-change (`killed`).
 
 K8s result-mapping and metrics-API degradation are unit-tested with fake pod

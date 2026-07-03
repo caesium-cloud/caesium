@@ -161,8 +161,8 @@ to seasonality — seasonal baseline *models* are out of scope.
 **3. Clean rerun auto-releases.** The vendor re-ships the file; the operator
 retries the producing run. All assertions pass, so the evaluator releases
 the hold (`release_reason: clean_run`, recording which run cleared it) and
-downstream flows on the next trigger — no ack required. A clean run releases
-only holds on datasets it re-produced, never unrelated holds.
+downstream flows on the next trigger — no ack required. A clean run only
+releases holds on datasets it re-produced, never unrelated ones.
 
 ## Backend design
 
@@ -224,10 +224,10 @@ keyed `(namespace, name, direction)` per task run
 (`internal/models/lineage_dataset.go`), with names heuristically derived
 from path-like output values or synthesized as `alias.step.output`
 (`internal/lineage/mapper.go`). Heuristic names are too unstable to hang
-holds on; the declared registry fixes identity. Where a declared name
-matches observed lineage rows, the impact graph (`internal/lineage/impact.go`
-`QueryImpact`) attaches blast-radius data to the hold; a lint hint flags
-declared datasets never observed in lineage.
+holds on; the declared registry fixes identity. Where a declared name matches
+observed lineage rows, the impact graph (`internal/lineage/impact.go`
+`QueryImpact`) attaches blast-radius data to the hold; lint flags declared
+datasets never observed in lineage.
 
 ### Downstream admission gate
 
@@ -392,12 +392,11 @@ their own scenarios.
    over path-derivation), so holds and impact queries share one spine?
    Leaning yes — it also fixes lineage-name instability.
 2. **Multi-producer datasets.** Does a clean run of producer B release a
-   hold opened by producer A? Proposal: only the holding producer's clean
-   run auto-releases; others require ack.
+   hold opened by producer A? Proposal: no — only the holder's clean run.
 3. **Partition-scoped holds.** Holding `transactions_daily/2026-07-03`
    rather than the whole dataset needs partition identity in the registry —
    likely arriving with freshness scheduling's watermark work; the hold
    schema should reserve an optional partition key now.
 4. **Tenancy.** When multi-tenancy (roadmap §3.1) lands, holds and the
    registry scope per namespace; models carry a nullable tenant column from
-   day one, as agent-in-the-loop already commits to for incidents.
+   day one, as agent-in-the-loop already commits to.
