@@ -171,8 +171,8 @@ Rules:
 - **`--path candidate.job.yaml`:** the CLI computes the step-level delta between
   candidate jobdef and baseline descriptors and submits it as the same typed
   override set — the API never trusts a whole jobdef. Structural changes (steps
-  added/removed, edges changed) are **rejected** with a pointer to
-  `caesium job diff` + `dev --once`: a new step has no recorded baseline inputs.
+  added/removed, edges changed) are **rejected** toward `caesium job diff` +
+  `dev --once`: a new step has no recorded baseline inputs.
 - **Param overrides (`--set`)** reuse the existing mechanism unchanged, with its
   known v1 cost: `RunParams` is hashed wholesale into every task, so any param
   override re-runs the **full DAG** of every baseline run
@@ -243,12 +243,12 @@ DAG = never".
 
 N replays are N real container workloads. Backtest feeds replays into the
 **existing** dispatch machinery, gated by `CAESIUM_BACKTEST_ENABLED` (default
-`false`) and capped by `CAESIUM_BACKTEST_MAX_PARALLEL_REPLAYS` (default 2),
+`false`), capped by `CAESIUM_BACKTEST_MAX_PARALLEL_REPLAYS` (default 2), and
 sequenced oldest-first so partial results are meaningful; the cap keeps
 quarantined work from starving production claims. Re-executing replay requires
-distributed execution mode (`ErrReplayRequiresDistributedMode`,
+distributed mode (`ErrReplayRequiresDistributedMode`,
 `api/rest/service/replay/replay.go:32,146`); backtest inherits that for any run
-that isn't fully cache-served.
+not fully cache-served.
 
 ### Data model
 
@@ -423,8 +423,7 @@ integration test driving its real surface.
    expected-change annotations reviewable in the PR itself.
 5. Backfill interplay: `last-30-runs` on a backfill-heavy job may pick 30
    near-identical logical dates — need `--against distinct-params`?
-6. Report retention: TTL-prune `Backtest` rows like the ingest stores, or keep
-   forever like runs?
+6. Report retention: TTL-prune `Backtest` rows, or keep forever like runs?
 
 ## Related Documents
 
