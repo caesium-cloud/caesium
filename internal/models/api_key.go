@@ -72,6 +72,28 @@ func (k *APIKey) IsExpired() bool {
 }
 
 // KeyScope represents optional resource scoping for an API key.
+//
+// A key carries at most one kind of restriction. Jobs restricts a normal
+// principal to a set of job aliases (checked by the deny-by-default route-scope
+// switch). Agent, when present, marks the key as a short-lived agent-session
+// credential bound to exactly one incident's /v1/agent/* tool surface; an agent
+// key is valid for nothing else, regardless of its Jobs field.
 type KeyScope struct {
+	Jobs  []string    `json:"jobs,omitempty"`
+	Agent *AgentClaim `json:"agent,omitempty"`
+}
+
+// AgentClaim binds an API key to a single incident's agent tool surface. It is
+// minted by the incident manager (an unscoped, server-side principal) for one
+// agent session and expires with that session. The read scope is FROZEN at
+// incident open: Jobs is the static job allowlist the incident manager
+// snapshotted from the lineage-impact graph (excluding edges derived from the
+// failing run's own outputs). The agent cannot widen it — server-side
+// enforcement is the boundary, not the prompt.
+type AgentClaim struct {
+	// IncidentID is the only incident whose /v1/agent/* routes this key may call.
+	IncidentID uuid.UUID `json:"incident_id"`
+	// Jobs is the frozen job allowlist governing which jobs' read-only context
+	// (logs, why, run history) the agent may pull through the context routes.
 	Jobs []string `json:"jobs,omitempty"`
 }

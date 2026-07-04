@@ -2,6 +2,7 @@ package incident
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -87,6 +88,15 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		}
 	}
 
+	// Freeze the agent read-scope allowlist at open. Computed by this
+	// leader-gated incident manager (an unscoped server principal) from the
+	// lineage-impact graph, EXCLUDING edges derived from the failing run's own
+	// outputs. On a fold-in (append) the existing incident keeps its already
+	// frozen value; the value computed here is only persisted when this insert
+	// wins the atomic conditional create below, so the allowlist is truly frozen
+	// at FIRST open. Best-effort: an empty result degrades to the job's own alias.
+	allowedJobs := marshalAllowlist(FreezeAllowlist(ctx, s.db, p.JobID, p.RunID))
+
 	activeKey := key
 	inc := &models.Incident{
 		ID:                     uuid.New(),
@@ -102,6 +112,7 @@ func (s *Store) OpenOrAppend(ctx context.Context, p OpenParams) (*models.Inciden
 		OccurrenceCount:        1,
 		BackfillID:             p.BackfillID,
 		RemediationTargetRunID: p.RemediationTargetRunID,
+		AllowedJobs:            allowedJobs,
 		LastError:              p.LastError,
 		Evidence:               p.Evidence,
 		OpenedAt:               now,
@@ -340,4 +351,72 @@ func (s *Store) ClaimTimer(ctx context.Context, id uuid.UUID) (bool, error) {
 		return false, res.Error
 	}
 	return res.RowsAffected == 1, nil
+}
+
+// AllowedJobsForIncident returns the frozen agent read-scope allowlist for an
+// incident (the job aliases the incident manager snapshotted at open). The
+// incident's own job alias is guaranteed present when it was resolvable at open.
+func (s *Store) AllowedJobsForIncident(ctx context.Context, incidentID uuid.UUID) ([]string, error) {
+	var inc models.Incident
+	if err := s.db.WithContext(ctx).Select("allowed_jobs").First(&inc, "id = ?", incidentID).Error; err != nil {
+		return nil, err
+	}
+	return unmarshalAllowlist(inc.AllowedJobs), nil
+}
+
+// CountActiveAgentSessions returns the number of non-terminal agent sessions
+// (pending or running) across all incidents. The leader-gated dispatcher uses
+// this to enforce the global concurrent-session cap.
+func (s *Store) CountActiveAgentSessions(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).
+		Model(&models.AgentSession{}).
+		Where("state IN ?", []models.AgentSessionState{
+			models.AgentSessionStatePending,
+			models.AgentSessionStateRunning,
+		}).
+		Count(&n).Error
+	return n, err
+}
+
+// CountActiveAgentSessionsForJob returns the number of non-terminal agent
+// sessions bound to incidents of the given job. The dispatcher uses this to
+// enforce the per-job concurrent-session cap (default 1).
+func (s *Store) CountActiveAgentSessionsForJob(ctx context.Context, jobID uuid.UUID) (int64, error) {
+	var n int64
+	err := s.db.WithContext(ctx).
+		Model(&models.AgentSession{}).
+		Joins("JOIN incidents ON incidents.id = agent_sessions.incident_id").
+		Where("incidents.job_id = ? AND agent_sessions.state IN ?", jobID, []models.AgentSessionState{
+			models.AgentSessionStatePending,
+			models.AgentSessionStateRunning,
+		}).
+		Count(&n).Error
+	return n, err
+}
+
+// marshalAllowlist encodes a frozen job allowlist as JSON for persistence. An
+// empty list is stored as an empty JSON array so the column is unambiguously
+// "frozen, and empty" rather than "not yet computed" (NULL).
+func marshalAllowlist(jobs []string) datatypes.JSON {
+	if jobs == nil {
+		jobs = []string{}
+	}
+	b, err := json.Marshal(jobs)
+	if err != nil {
+		return nil
+	}
+	return datatypes.JSON(b)
+}
+
+// unmarshalAllowlist decodes a persisted allowlist, tolerating NULL/empty.
+func unmarshalAllowlist(raw datatypes.JSON) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var jobs []string
+	if err := json.Unmarshal(raw, &jobs); err != nil {
+		return nil
+	}
+	return jobs
 }

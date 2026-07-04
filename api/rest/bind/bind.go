@@ -2,6 +2,7 @@ package bind
 
 import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
+	agentctrl "github.com/caesium-cloud/caesium/api/rest/controller/agent"
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
@@ -189,6 +190,16 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	// lineage impact (data-plane-memory C2)
 	{
 		g.GET("/lineage/impact", lineagectrl.Impact)
+	}
+
+	// agent tool surface (agent-in-the-loop-remediation Stream C). All routes are
+	// gated by the auth middleware's agent-scope switch, which restricts an
+	// agent-session token to exactly its own incident's /v1/agent/* routes.
+	{
+		g.GET("/agent/incidents/:id/bundle", agentctrl.Bundle)
+		g.GET("/agent/incidents/:id/context/*", agentctrl.Context)
+		g.POST("/agent/incidents/:id/actions", agentctrl.Actions)
+		g.POST("/agent/incidents/:id/notes", agentctrl.Notes)
 	}
 }
 

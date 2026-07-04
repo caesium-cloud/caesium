@@ -79,6 +79,15 @@ type Incident struct {
 	// remediated. It advances when a new occurrence folds in.
 	RemediationTargetRunID *uuid.UUID `gorm:"type:uuid" json:"remediation_target_run_id,omitempty"`
 
+	// AllowedJobs is the FROZEN job allowlist that scopes the agent's read
+	// surface for this incident, computed by the incident manager (an unscoped
+	// server principal) from the lineage-impact graph at open time — excluding
+	// edges derived from the failing run's own outputs so attacker-crafted
+	// ##caesium::output refs cannot widen it. It is a JSON array of job aliases.
+	// The agent's scoped token carries a copy; this column is the durable source
+	// of truth the session supervisor mints from and the bundle reports.
+	AllowedJobs datatypes.JSON `gorm:"type:json" json:"allowed_jobs,omitempty"`
+
 	// LastError is the failing task's error text captured at open, for the feed.
 	LastError string `gorm:"type:text" json:"last_error,omitempty"`
 	// ResolutionSummary is a short human/agent summary written at close.

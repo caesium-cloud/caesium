@@ -470,6 +470,27 @@ func start(cmd *cobra.Command, args []string) error {
 			log.Info("launching incident timer sweeper")
 			timerSweeper.Run(ctx)
 		})
+
+		// --- Agent session supervisor (Stream C: agent runtime) ---
+		//
+		// The supervisor drives a profile image through the existing atom.Engine
+		// as an AgentSession (deliberately NOT a JobRun), minting a scoped,
+		// short-lived credential per session and enforcing the concurrent-session
+		// caps against the shared store (leader-node placement in v1). It is
+		// registered process-wide; the incident manager / action executor (Streams
+		// B, E) obtain it to dispatch a triage session once a playbook admits one.
+		sessionSupervisor := incident.NewSupervisor(incConn, authSvc, incident.DefaultEngineFactory, incident.SupervisorConfig{
+			APIBaseURL:               strings.TrimSpace(vars.APIExternalURL),
+			SessionTimeout:           vars.AgentSessionTimeout,
+			MaxConcurrentSessions:    vars.AgentMaxConcurrentSessions,
+			PerJobConcurrentSessions: 1,
+		})
+		incident.SetSessionSupervisor(sessionSupervisor)
+		log.Info("agent session supervisor ready",
+			"max_concurrent_sessions", vars.AgentMaxConcurrentSessions,
+			"session_timeout", vars.AgentSessionTimeout,
+			"default_profile", vars.AgentDefaultProfile,
+		)
 	}
 
 	importer := jobdef.NewImporter(db.Connection())
