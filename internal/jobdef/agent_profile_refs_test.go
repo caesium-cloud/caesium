@@ -8,6 +8,7 @@ import (
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func remediationDefinition(alias, profile string) schema.Definition {
@@ -76,5 +77,62 @@ func TestValidateAgentProfileRefs_AcceptsExistingProfile(t *testing.T) {
 	}).Error)
 
 	defs := []schema.Definition{remediationDefinition("j", "default-triage")}
+	require.NoError(t, ValidateAgentProfileRefs(context.Background(), db, defs))
+}
+
+// TestValidateAgentProfileRefs_TriageOnlyAlwaysValid proves the shipped
+// default profile resolves even against a DB where no row has been seeded, so
+// lint/apply of a job referencing it never fails on a fresh server.
+func TestValidateAgentProfileRefs_TriageOnlyAlwaysValid(t *testing.T) {
+	t.Parallel()
+
+	db := openTriggerCycleTestDB(t)
+	defs := []schema.Definition{remediationDefinition("j", models.DefaultTriageOnlyProfileName)}
+	require.NoError(t, ValidateAgentProfileRefs(context.Background(), db, defs))
+}
+
+func remediationDefinitionWithEscalation(alias, profile, channel string) schema.Definition {
+	def := remediationDefinition(alias, profile)
+	def.Metadata.Remediation.Escalation = &schema.RemediationEscalation{
+		Channel: channel,
+		After:   "15m",
+	}
+	return def
+}
+
+func TestValidateAgentProfileRefs_RejectsUnknownEscalationChannel(t *testing.T) {
+	t.Parallel()
+
+	db := openTriggerCycleTestDB(t)
+	require.NoError(t, db.Create(&models.AgentProfile{
+		ID:    uuid.New(),
+		Name:  "default-triage",
+		Image: "caesiumcloud/triage-agent:latest",
+	}).Error)
+
+	defs := []schema.Definition{remediationDefinitionWithEscalation("j", "default-triage", "ghost-channel")}
+	err := ValidateAgentProfileRefs(context.Background(), db, defs)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), `"ghost-channel"`)
+	require.Contains(t, err.Error(), "does not reference an existing notification channel")
+}
+
+func TestValidateAgentProfileRefs_AcceptsExistingEscalationChannel(t *testing.T) {
+	t.Parallel()
+
+	db := openTriggerCycleTestDB(t)
+	require.NoError(t, db.Create(&models.AgentProfile{
+		ID:    uuid.New(),
+		Name:  "default-triage",
+		Image: "caesiumcloud/triage-agent:latest",
+	}).Error)
+	require.NoError(t, db.Create(&models.NotificationChannel{
+		ID:     uuid.New(),
+		Name:   "data-oncall",
+		Type:   models.ChannelTypeWebhook,
+		Config: datatypes.JSON(`{"url":"https://example.com/hook"}`),
+	}).Error)
+
+	defs := []schema.Definition{remediationDefinitionWithEscalation("j", "default-triage", "data-oncall")}
 	require.NoError(t, ValidateAgentProfileRefs(context.Background(), db, defs))
 }

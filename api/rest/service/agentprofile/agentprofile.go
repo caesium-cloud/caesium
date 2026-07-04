@@ -27,11 +27,11 @@ var (
 	ErrProfileNameConflict = errors.New("agent profile name conflict")
 )
 
-// DefaultTriageOnlyProfileName is the shipped zero-risk default profile: tier
-// 0 (deterministic rules only) plus escalate, so teams can adopt
-// agent-in-the-loop remediation incrementally without granting any
-// autonomous action. See docs/design-agent-in-the-loop.md.
-const DefaultTriageOnlyProfileName = "triage-only"
+// DefaultTriageOnlyProfileName is the shipped zero-risk default profile name.
+// It is defined canonically on the model so internal/jobdef's server-side
+// lint can treat it as always resolvable; re-exported here for callers of
+// this package.
+const DefaultTriageOnlyProfileName = models.DefaultTriageOnlyProfileName
 
 // allowedSecretProviders is the set of secret:// providers a SecretRefs entry
 // may reference. It mirrors the providers internal/jobdef/secret resolves
@@ -57,19 +57,42 @@ type service struct {
 	db  *gorm.DB
 }
 
-var seedDefaultsOnce sync.Once
+// seededDefaults uses double-checked locking rather than sync.Once so a
+// transient seed failure (e.g. the DB not yet reachable on the first call)
+// is retried on the next New() instead of being permanently swallowed: the
+// "done" flag is set only after a successful seed.
+var (
+	seedMu   sync.RWMutex
+	seededOK bool
+)
 
-// New returns a new AgentProfile service. The first call in the process
-// lazily seeds the shipped triage-only default profile (idempotent —
-// guarded by the unique name index as well as sync.Once) so a fresh
-// deployment has a zero-risk profile to reference without an operator having
-// to author one by hand.
+// New returns a new AgentProfile service. It lazily seeds the shipped
+// triage-only default profile (idempotent — guarded by the unique name index
+// as well as the double-checked flag) so a fresh deployment has a zero-risk
+// profile to reference without an operator having to author one by hand. A
+// failed seed is retried on a later call.
 func New(ctx context.Context) Service {
 	conn := db.Connection()
-	seedDefaultsOnce.Do(func() {
-		_ = SeedDefaults(context.Background(), conn)
-	})
+	ensureSeeded(conn)
 	return &service{ctx: ctx, db: conn}
+}
+
+func ensureSeeded(conn *gorm.DB) {
+	seedMu.RLock()
+	done := seededOK
+	seedMu.RUnlock()
+	if done {
+		return
+	}
+
+	seedMu.Lock()
+	defer seedMu.Unlock()
+	if seededOK {
+		return
+	}
+	if err := SeedDefaults(context.Background(), conn); err == nil {
+		seededOK = true
+	}
 }
 
 // --- Request types ---
@@ -282,9 +305,10 @@ func validateEngine(engine models.AtomEngine) (models.AtomEngine, error) {
 }
 
 // validateSecretRefs checks that every value is a syntactically valid
-// secret:// URI from a known provider. It never resolves the value — only
-// the reference is stored, exactly like other secret-bearing job-definition
-// config (internal/jobdef/secret).
+// secret:// URI from a known provider and writes the trimmed value back into
+// the map so the stored reference is clean. It never resolves the value —
+// only the reference is stored, exactly like other secret-bearing
+// job-definition config (internal/jobdef/secret).
 func validateSecretRefs(refs map[string]string) error {
 	for key, ref := range refs {
 		ref = strings.TrimSpace(ref)
@@ -301,6 +325,7 @@ func validateSecretRefs(refs map[string]string) error {
 		if _, ok := allowedSecretProviders[parsed.Provider]; !ok {
 			return fmt.Errorf("%w: secret_refs[%q] has unsupported provider %q", ErrInvalidProfile, key, parsed.Provider)
 		}
+		refs[key] = ref
 	}
 	return nil
 }
@@ -348,10 +373,12 @@ func marshalJSONMapString(m map[string]string) (datatypes.JSON, error) {
 // (tier 0 + escalate; zero-risk) if it does not already exist, so a fresh
 // deployment always has one AgentProfile a job can reference to adopt
 // remediation incrementally. Safe to call concurrently / repeatedly: the
-// unique name index makes the create a no-op race rather than a duplicate.
+// unique name index makes the create a no-op race rather than a duplicate. A
+// nil connection is a retryable failure (not a silent no-op) so ensureSeeded
+// tries again once the DB is reachable rather than marking seeding done.
 func SeedDefaults(ctx context.Context, conn *gorm.DB) error {
 	if conn == nil {
-		return nil
+		return errors.New("agentprofile: cannot seed defaults with a nil database connection")
 	}
 	var existing models.AgentProfile
 	err := conn.WithContext(ctx).Where("name = ?", DefaultTriageOnlyProfileName).First(&existing).Error

@@ -2,6 +2,7 @@ package agentprofile
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -132,6 +133,58 @@ func (s *AgentProfileSuite) TestCreateRejectsUnsupportedSecretProvider() {
 func (s *AgentProfileSuite) TestSeedDefaultsIsIdempotent() {
 	s.Require().NoError(SeedDefaults(context.Background(), s.db))
 	s.Require().NoError(SeedDefaults(context.Background(), s.db))
+
+	var profiles []models.AgentProfile
+	s.Require().NoError(s.db.Where("name = ?", DefaultTriageOnlyProfileName).Find(&profiles).Error)
+	s.Len(profiles, 1)
+}
+
+func (s *AgentProfileSuite) TestDefaultTriageOnlyProfileNameMatchesModel() {
+	s.Equal(models.DefaultTriageOnlyProfileName, DefaultTriageOnlyProfileName)
+}
+
+func (s *AgentProfileSuite) TestCreateTrimsSecretRefValue() {
+	svc := s.svc()
+	created, err := svc.Create(&CreateRequest{
+		Name:       "trim-secret",
+		Image:      "img",
+		SecretRefs: map[string]string{"key": "  secret://env/AGENT_KEY  "},
+	})
+	s.Require().NoError(err)
+
+	fetched, err := svc.Get(created.ID)
+	s.Require().NoError(err)
+	var refs map[string]string
+	s.Require().NoError(json.Unmarshal(fetched.SecretRefs, &refs))
+	s.Equal("secret://env/AGENT_KEY", refs["key"], "stored secret ref should be trimmed")
+}
+
+// TestEnsureSeededRetriesAfterFailure proves seeding is retryable rather than
+// permanently swallowed on a transient failure: a nil DB fails to seed and
+// leaves the done flag unset, so a later ensureSeeded with a live DB succeeds.
+func (s *AgentProfileSuite) TestEnsureSeededRetriesAfterFailure() {
+	seedMu.Lock()
+	seededOK = false
+	seedMu.Unlock()
+	s.T().Cleanup(func() {
+		seedMu.Lock()
+		seededOK = false
+		seedMu.Unlock()
+	})
+
+	// A failed seed (nil conn) must not set the done flag.
+	ensureSeeded(nil)
+	seedMu.RLock()
+	doneAfterFail := seededOK
+	seedMu.RUnlock()
+	s.False(doneAfterFail, "a failed seed must leave the retry flag unset")
+
+	// A subsequent seed against a live DB succeeds and materializes the row.
+	ensureSeeded(s.db)
+	seedMu.RLock()
+	doneAfterSuccess := seededOK
+	seedMu.RUnlock()
+	s.True(doneAfterSuccess)
 
 	var profiles []models.AgentProfile
 	s.Require().NoError(s.db.Where("name = ?", DefaultTriageOnlyProfileName).Find(&profiles).Error)

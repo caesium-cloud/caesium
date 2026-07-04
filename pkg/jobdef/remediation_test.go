@@ -119,6 +119,39 @@ func TestValidateRemediation_ParamOverridesMustMatchDefaultParams(t *testing.T) 
 	}
 }
 
+func TestValidateRemediation_PerClassKeyCanonicalized(t *testing.T) {
+	y := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: j
+  remediation:
+    profile: default-triage
+    classes: [unknown]
+    autonomy:
+      perClass:
+        "  auth_failure  ":
+          allow: [notify, escalate]
+trigger:
+  type: cron
+  configuration: {expression: "0 * * * *"}
+steps:
+  - name: extract
+    image: etl:1.4
+`
+	def, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	pc := def.Metadata.Remediation.Autonomy.PerClass
+	if _, ok := pc["auth_failure"]; !ok {
+		t.Fatalf("expected canonical key \"auth_failure\", got keys %v", pc)
+	}
+	if _, ok := pc["  auth_failure  "]; ok {
+		t.Fatalf("expected untrimmed key to be dropped, got keys %v", pc)
+	}
+}
+
 func TestValidateRemediation_PerClassUnknownClass(t *testing.T) {
 	y := strings.Replace(remediationJob, "auth_failure:", "bogus_class:", 1)
 	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "perClass key") {

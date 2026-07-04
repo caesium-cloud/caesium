@@ -170,19 +170,26 @@ func serviceError(err error) error {
 	}
 }
 
+// maxListLimit caps the page size a client may request, so an oversized
+// limit can't force an unbounded scan/allocation.
+const maxListLimit = 1000
+
 func parseListRequest(c *echo.Context) (*svc.ListRequest, error) {
 	req := &svc.ListRequest{}
 
 	if limit := c.QueryParam("limit"); limit != "" {
-		v, err := strconv.ParseUint(limit, 10, 64)
+		v, err := strconv.ParseUint(limit, 10, 32)
 		if err != nil {
 			return nil, err
+		}
+		if v > maxListLimit {
+			v = maxListLimit
 		}
 		req.Limit = v
 	}
 
 	if offset := c.QueryParam("offset"); offset != "" {
-		v, err := strconv.ParseUint(offset, 10, 64)
+		v, err := strconv.ParseUint(offset, 10, 32)
 		if err != nil {
 			return nil, err
 		}

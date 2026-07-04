@@ -773,14 +773,25 @@ func validateRemediationAutonomy(a *RemediationAutonomy, defaultParams map[strin
 		}
 	}
 
-	for class, policy := range a.PerClass {
-		name := strings.TrimSpace(class)
-		if !isKnownRemediationClass(name) {
-			return fmt.Errorf("metadata.remediation.autonomy.perClass key %q is not a known failure class", class)
+	if len(a.PerClass) > 0 {
+		// Rebuild the map with trimmed/canonical keys so runtime lookups
+		// (PerClass["auth_failure"]) hit even when the YAML key carried
+		// surrounding whitespace.
+		normalized := make(map[string]RemediationClassPolicy, len(a.PerClass))
+		for class, policy := range a.PerClass {
+			name := strings.TrimSpace(class)
+			if !isKnownRemediationClass(name) {
+				return fmt.Errorf("metadata.remediation.autonomy.perClass key %q is not a known failure class", class)
+			}
+			if _, dup := normalized[name]; dup {
+				return fmt.Errorf("metadata.remediation.autonomy.perClass key %q duplicates another entry", class)
+			}
+			if err := validateRemediationActionList(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].allow", name), policy.Allow); err != nil {
+				return err
+			}
+			normalized[name] = policy
 		}
-		if err := validateRemediationActionList(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].allow", class), policy.Allow); err != nil {
-			return err
-		}
+		a.PerClass = normalized
 	}
 
 	if err := validateRemediationActionList("metadata.remediation.autonomy.requireApproval", a.RequireApproval); err != nil {

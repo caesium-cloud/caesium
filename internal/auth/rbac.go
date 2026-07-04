@@ -69,6 +69,8 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/notifications/channels/:id":        models.RoleViewer,
 	"GET /v1/notifications/policies":            models.RoleViewer,
 	"GET /v1/notifications/policies/:id":        models.RoleViewer,
+	"GET /v1/agentprofiles":                     models.RoleViewer,
+	"GET /v1/agentprofiles/:id":                 models.RoleViewer,
 	"POST /v1/jobdefs/lint":                     models.RoleViewer,
 	"POST /v1/jobdefs/diff":                     models.RoleViewer,
 	"GET /v1/lineage/impact":                    models.RoleViewer,
@@ -102,6 +104,9 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/notifications/policies":       models.RoleOperator,
 	"PATCH /v1/notifications/policies/:id":  models.RoleOperator,
 	"DELETE /v1/notifications/policies/:id": models.RoleOperator,
+	"POST /v1/agentprofiles":                models.RoleOperator,
+	"PATCH /v1/agentprofiles/:id":           models.RoleOperator,
+	"DELETE /v1/agentprofiles/:id":          models.RoleOperator,
 
 	// Admin
 	"PUT /v1/logs/level":            models.RoleAdmin,
