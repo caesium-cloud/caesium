@@ -123,6 +123,19 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	}
 
 	// Snapshot the consumed-input watermarks once for the whole run.
+	//
+	// KNOWN LIMITATION (v1, per plan B3 — "capture the consumed-watermark set at
+	// run completion"): this reads each input's CURRENT watermark at completion
+	// time, not the input view the run actually consumed at start. If an input
+	// advances mid-run, the produced dataset records the newer input watermark
+	// even though this run never saw it, which can make a freshness comparison
+	// over-report the output as caught-up. This field is WRITE-ONLY today — its
+	// only reader is the freshness evaluator (Stream C), which does not exist
+	// yet. The correct input-view sourcing (snapshot input watermarks at
+	// TypeRunStarted, keyed by run, and read them back here) belongs to the
+	// evaluator stream, where the read semantics and the run-start seam live;
+	// until then completion-time capture is the accepted v1 behavior. See
+	// docs/exec-plans/active/freshness-scheduling.md (Stream C, C2 at-risk).
 	consumed := c.consumedSnapshot(ctx, consumedNames)
 
 	for i := range produced {
@@ -244,6 +257,11 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 
 // consumedSnapshot reads the current watermark of every consumed dataset in a
 // single query (no per-name N+1), keyed on the nil→” namespace mapping.
+//
+// This is a completion-time read: it reflects each input's watermark now, not
+// as-of the producing run's start. See the KNOWN LIMITATION note at the call
+// site — the input-view-at-consumption refinement is owned by the evaluator
+// stream (Stream C), the field's only reader.
 func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[string]string {
 	if len(names) == 0 {
 		return nil
