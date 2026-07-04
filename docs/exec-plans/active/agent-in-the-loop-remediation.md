@@ -167,7 +167,7 @@ Streams F, G, U (+ H-1, N-1) remain for later waves.
 | C | Agent runtime — session supervisor (atom.Engine), triage bundle, scoped short-lived token, `/v1/agent/*` REST tool surface | P1 | **Shipped** (Wave 2, #284) |
 | D | Approval gates + incident REST reads + `ai_agent` dispatch channel | P1 | **Shipped** (Wave 2, #283) |
 | E | Declarative policy — jobdef `metadata.remediation` block + `AgentProfile` CRUD + offline/server lint | P1 | **Shipped** (Wave 2, #282) |
-| F | MCP surface — `/v1/agent/mcp` JSON-RPC/streamable-HTTP over the same handlers | P2 | Not started |
+| F | MCP surface — `/v1/agent/incidents/:id/mcp` JSON-RPC over the same service layer | P2 | **Shipped** (Wave 3, W3-δ) |
 | G | CLI — `caesium incident …` + `caesium agent profile …` | P2 | Not started |
 | U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | Not started |
 | H-1 | Harness — deterministic fake agent image + integration server gate wiring | — | **Shipped** (W3-eta: fake image + auth lane) |
@@ -494,17 +494,24 @@ stream owns the job-schema addition and the server-side profile resource.
 
 ### Stream F — MCP surface
 
-- [ ] F1. Expose the same tool surface over MCP's streamable-HTTP transport at
-      `/v1/agent/mcp` (POST-carried JSON-RPC 2.0 with an optional SSE channel) so
-      off-the-shelf agents (Claude Code, Agent SDK apps) connect without glue code.
+- [x] F1. Expose the same tool surface over MCP's streamable-HTTP transport at
+      `/v1/agent/incidents/:id/mcp` (POST-carried JSON-RPC 2.0, one synchronous
+      response per call) so off-the-shelf agents connect without glue code.
       Honest cost: Caesium has no JSON-RPC/MCP dependency today, so this is a small
       vendored MCP server layer or hand-rolled JSON-RPC 2.0 inside Echo over the
-      **same handler layer** as Stream C, plus **exempting the route from the
-      server's 30s write timeout**. REST ships first (Stream C); MCP follows.
+      **same service layer** as Stream C. The incident id stays in the path so the
+      existing agent-token incident confinement applies; the endpoint is
+      synchronous and stays under the server's existing 30s write timeout.
       Files: new `api/rest/controller/agent/mcp.go`, new `internal/mcp/`
-      (JSON-RPC layer), `api/rest/bind/bind.go`, `api/api.go` (write-timeout
-      exemption for the MCP route).
+      (JSON-RPC layer), `api/rest/bind/bind.go`, `internal/auth/rbac.go`, and
+      `test/agent_mcp_test.go`.
       Depends on: C4.
+      W3-delta note (2026-07-04): implemented as synchronous JSON-RPC 2.0 at
+      `POST /v1/agent/incidents/:id/mcp`, reusing `api/rest/service/agent`
+      directly. The incident id is path-only (not accepted in JSON-RPC params),
+      no SSE/write-timeout exemption was added, and the route is registered in
+      `endpointPolicy` at `RoleRunner` because MCP multiplexes read and write
+      tools over one POST.
 
 ### Stream G — CLI
 
@@ -625,7 +632,7 @@ primary evidence — nothing is prose-only.
   prerequisite for B4 and U3.
 - **Stream E**: E1 (jobdef block) is independent of the runtime (leaf); E2
   (AgentProfile CRUD) depends on A1.
-- **Stream F** (MCP) depends on C4 (reuses the same handler layer).
+- **Stream F** (MCP) depends on C4 (reuses the same service layer).
 - **Stream G**: G1 depends on D1 + D2; G2 depends on E2.
 - **Stream U** (UI): U1 depends on D2; U2→U1; U3 depends on U2 + D1; U4→U2; U5→U1.
 - **H-1** is largely independent (build image + justfile/CI + test harness) but
@@ -681,7 +688,8 @@ E1 standalone; E2 after A1. U1 → U2 → (U3, U4); U5 after U1.
 - `cmd/execute.go` — G1 + G2 append command groups (additive, both W3).
 - `internal/event/bus.go` — A2 (`schema_violation_recorded`) and D2 (the four SSE
   incident event types) both add event types. A2 (W1) before D2 (W2); additive.
-- `api/api.go` — only F1 (W3) touches it (write-timeout exemption); no conflict.
+- `api/api.go` — F1 no longer touches it; MCP is synchronous under the existing
+  write timeout.
 - `ui/src/router.tsx`, `ui/src/lib/api.ts`, `ui/src/components/layout/Sidebar.tsx`
   — U1–U5 append (same stream U); additive list edits.
 
@@ -757,8 +765,8 @@ The plan is done when **all** of these hold:
    lint verifies profile references inside the apply transaction, and `AgentProfile`
    CRUD + the shipped `triage-only` default profile exist. Closed by a lint
    scenario + an AgentProfile CRUD scenario.
-6. **Stream F — the MCP surface** exposes the tool set at `/v1/agent/mcp` over
-   JSON-RPC/streamable-HTTP with the write-timeout exemption. Closed by an MCP
+6. **Stream F — the MCP surface** exposes the tool set at
+   `/v1/agent/incidents/:id/mcp` over synchronous JSON-RPC 2.0. Closed by an MCP
    protocol-level integration test.
 7. **Stream G — the CLI** ships `caesium incident …` and `caesium agent profile …`
    driving the real endpoints, asserted via `runCLIStdout` (clean, parseable stdout

@@ -235,6 +235,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/agent/incidents/:id/context/*", agentctrl.Context)
 		g.POST("/agent/incidents/:id/actions", agentctrl.Actions)
 		g.POST("/agent/incidents/:id/notes", agentctrl.Notes)
+		g.POST("/agent/incidents/:id/mcp", agentctrl.MCP)
 	}
 }
 
