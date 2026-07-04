@@ -65,7 +65,7 @@ func mkTaskRun(t *testing.T, db *gorm.DB, runID uuid.UUID) uuid.UUID {
 		TaskID:    uuid.New(),
 		AtomID:    uuid.New(),
 		Engine:    models.AtomEngineDocker,
-		Image:     "busybox",
+		Image:     "busybox:1.36.1",
 		Command:   "echo",
 		Status:    "succeeded",
 		CreatedAt: now,

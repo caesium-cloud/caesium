@@ -270,20 +270,26 @@ func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 	require.Equal(t, int64(1), count)
 }
 
-// cancelEngine signals when Create runs, then blocks in Wait on the context so
-// the test can cancel the parent mid-session.
+// cancelEngine signals once it has ENTERED Wait — i.e. after the supervisor's
+// "mark running" persist has already completed on the healthy parent context —
+// then blocks on the context so the test can cancel the parent mid-session. By
+// signalling from Wait rather than Create, no DB write ever executes on the
+// cancelled context (the single-connection in-memory SQLite would otherwise
+// evict the poisoned connection and drop the schema); only the ctx-wait here and
+// finalize's DETACHED persist are exercised by the cancellation — which is
+// exactly the production property under test.
 type cancelEngine struct {
-	created chan struct{}
+	waiting chan struct{}
 	stopped bool
 }
 
 func (e *cancelEngine) Get(*atom.EngineGetRequest) (atom.Atom, error)     { return nil, nil }
 func (e *cancelEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) { return nil, nil }
 func (e *cancelEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
-	e.created <- struct{}{}
 	return &fakeAtom{id: "atom-" + req.Name, result: atom.Success}, nil
 }
 func (e *cancelEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	e.waiting <- struct{}{}
 	<-req.Context.Done()
 	return nil, req.Context.Err()
 }
@@ -309,7 +315,7 @@ func TestSupervisorFinalizeOnCancelledContext(t *testing.T) {
 	require.NoError(t, db.Create(profile).Error)
 
 	creds := &fakeCreds{}
-	engine := &cancelEngine{created: make(chan struct{}, 1)}
+	engine := &cancelEngine{waiting: make(chan struct{}, 1)}
 	sup := NewSupervisor(db, creds, func(context.Context, models.AtomEngine) (atom.Engine, error) {
 		return engine, nil
 	}, SupervisorConfig{SessionTimeout: time.Hour})
@@ -321,8 +327,10 @@ func TestSupervisorFinalizeOnCancelledContext(t *testing.T) {
 		done <- sess
 	}()
 
-	// Cancel only once the container is up and the supervisor is blocked in Wait.
-	<-engine.created
+	// Cancel only once the supervisor has recorded the session running and is
+	// blocked in Wait — so the cancellation lands on the ctx-wait and finalize's
+	// detached persist, never on a live DB write.
+	<-engine.waiting
 	cancel()
 
 	session := <-done
