@@ -73,12 +73,18 @@ These are baked into the skill (do not deviate):
   `$REPO_ROOT/.claude/worktrees/agent-<id>` (do not spawn
   fresh worktrees because the branch is checked out there). **Codex streams
   in a parallel wave are the exception**: do NOT use `isolation: "worktree"`
-  for them — the forwarder agent's worktree gets auto-cleaned out from under
-  the detached codex job (see `PLAYBOOK.md` Phase 3 § codex
-  "Worktree-auto-clean race"). The orchestrator creates
-  `.claude/worktrees/agent-<wave>-<stream>` itself (branch
-  `worktree-agent-<wave>-<stream>`) and dispatches `codex-companion task
-  --background` directly into it.
+  for them (the forwarder agent's worktree gets auto-cleaned out from under a
+  detached job). The orchestrator creates the worktree itself —
+  `.claude/worktrees/agent-<plan-slug>-<wave>-<stream>`, branch
+  `worktree-agent-<plan-slug>-<wave>-<stream>` (**always include the plan slug**:
+  a bare `<wave>-<stream>` name — e.g. `worktree-agent-w3-alpha` — collides with
+  an earlier plan's same-named branch still on the remote, and the collision only
+  surfaces as a rejected push at publish time) — and dispatches **`codex exec`**
+  into it via a `Bash` `run_in_background` call (NOT `codex-companion task
+  --background`, whose detached job-worker fails to start on current codex-cli —
+  see `PLAYBOOK.md` Phase 3 § codex). `codex exec` runs the agent in-process in
+  the worktree cwd; the orchestrator gets a background-task completion
+  notification, then verifies + publishes in Phase 4.5.
 - **PR title format**: `<Imperative subject> (<plan-slug> <wave>-<stream>)` —
   e.g. `Add event-trigger evaluation engine (event-triggers W1-α)`. GitHub
   appends `(#NNN)` on squash-merge (caesium's house style is a plain
