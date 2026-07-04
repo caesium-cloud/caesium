@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useLayoutEffect } from "react";
+import { useState, useEffect, useRef, useCallback, useLayoutEffect, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -15,7 +15,8 @@ import { cn, formatDurationNs, formatKeyValueMap } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { api, type JobTask, type TaskRun } from "@/lib/api";
+import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
+import { api, type Incident, type JobTask, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
 import { TaskWhyView } from "./TaskWhyView";
 import { isTaskCached } from "./cache-utils";
@@ -27,6 +28,7 @@ interface TaskDetailPanelProps {
   taskType?: string;
   jobId: string;
   runId: string;
+  incidents?: Incident[];
   onClose: () => void;
 }
 
@@ -44,6 +46,7 @@ export function TaskDetailPanel({
   taskType,
   jobId,
   runId,
+  incidents = [],
   onClose,
 }: TaskDetailPanelProps) {
   const queryClient = useQueryClient();
@@ -197,6 +200,16 @@ export function TaskDetailPanel({
           <X className="h-4 w-4" />
         </Button>
       </div>
+
+      {incidents.length > 0 ? (
+        <div className="border-b border-border/60 p-3">
+          <IncidentRibbon
+            incidents={incidents}
+            label="Task incident"
+            testId="task-incident-ribbon"
+          />
+        </div>
+      ) : null}
 
       {/* Tab bar */}
       <div className="flex border-b border-border/60 px-2">
@@ -394,7 +407,7 @@ function TabButton({
 }: {
   active: boolean;
   onClick: () => void;
-  icon: React.ReactNode;
+  icon: ReactNode;
   label: string;
 }) {
   return (

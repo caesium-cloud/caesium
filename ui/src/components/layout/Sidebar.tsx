@@ -1,4 +1,6 @@
+import { useEffect } from "react";
 import { Link } from "@tanstack/react-router";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   BarChart,
   Database,
@@ -6,11 +8,15 @@ import {
   LayoutDashboard,
   Radio,
   Server,
+  Siren,
   type LucideIcon,
 } from "lucide-react";
 import { AtomLogo } from "@/components/brand/atom-logo";
+import { INCIDENT_EVENT_TYPES, isAwaitingApproval } from "@/features/incidents/incident-utils";
 import { useNavCounts } from "@/features/jobs/useNavCounts";
 import { useClusterHealth, type ClusterHealthState } from "@/features/system/useClusterHealth";
+import { api } from "@/lib/api";
+import { events } from "@/lib/events";
 import { cn } from "@/lib/utils";
 
 interface NavItem {
@@ -64,14 +70,52 @@ function CountBadge({ value }: { value: number | null }) {
 }
 
 export function Sidebar() {
+  const queryClient = useQueryClient();
   const counts = useNavCounts();
   const health = useClusterHealth();
   const stateMeta = STATE_META[health.state];
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
+  });
+  const incidentsEnabled = features?.agent_remediation_enabled === true;
+
+  const { data: incidentNav } = useQuery({
+    queryKey: ["incidents", "nav"],
+    queryFn: () => api.getIncidents({ limit: 200 }),
+    enabled: incidentsEnabled,
+    placeholderData: (previous) => previous,
+    refetchInterval: 30_000,
+  });
+
+  useEffect(() => {
+    if (!incidentsEnabled) return;
+    const onIncidentEvent = () => {
+      queryClient.invalidateQueries({ queryKey: ["incidents", "nav"] });
+      queryClient.invalidateQueries({ queryKey: ["incidents", "summary"] });
+    };
+    INCIDENT_EVENT_TYPES.forEach((type) => events.subscribe(type, onIncidentEvent));
+    return () => {
+      INCIDENT_EVENT_TYPES.forEach((type) => events.unsubscribe(type, onIncidentEvent));
+    };
+  }, [incidentsEnabled, queryClient]);
+
+  const activeIncidentCount =
+    incidentNav?.incidents.filter(
+      (incident) =>
+        incident.status === "open" ||
+        incident.status === "triaging" ||
+        isAwaitingApproval(incident),
+    ).length ?? null;
 
   const navItems: NavItem[] = [
     { to: "/jobs", label: "Jobs", icon: LayoutDashboard, count: counts.jobs },
     { to: "/triggers", label: "Triggers", icon: Radio, count: counts.triggers },
     { to: "/atoms", label: "Atoms", icon: Database, count: counts.atoms },
+    ...(incidentsEnabled
+      ? [{ to: "/incidents", label: "Incidents", icon: Siren, count: activeIncidentCount }]
+      : []),
     { to: "/stats", label: "Stats", icon: BarChart, count: null },
     { to: "/system", label: "System", icon: Server, count: null },
     { to: "/jobdefs", label: "JobDefs", icon: FileCode2, count: null },

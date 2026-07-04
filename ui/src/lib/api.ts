@@ -249,6 +249,121 @@ export interface DailyStats {
   success_rate: number;
 }
 
+export type IncidentStatus =
+  | "open"
+  | "triaging"
+  | "awaiting_approval"
+  | "remediated"
+  | "escalated"
+  | "closed"
+  | "suppressed"
+  | "abandoned"
+  | string;
+
+export interface Incident {
+  id: string;
+  namespace?: string;
+  job_id: string;
+  run_id?: string;
+  task_id?: string;
+  task_name?: string;
+  class: string;
+  status: IncidentStatus;
+  dedupe_key: string;
+  occurrence_count: number;
+  attempt: number;
+  backfill_id?: string;
+  remediation_target_run_id?: string;
+  allowed_jobs?: unknown;
+  last_error?: string;
+  resolution_summary?: string;
+  evidence?: unknown;
+  opened_at: string;
+  closed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AgentActionStatus = "proposed" | "approved" | "rejected" | "executed" | "failed" | string;
+export type AgentActionActor = "policy" | "agent" | "human" | string;
+
+export interface AgentAction {
+  id: string;
+  namespace?: string;
+  incident_id: string;
+  session_id?: string;
+  type: string;
+  params?: unknown;
+  tier: number;
+  status: AgentActionStatus;
+  result?: unknown;
+  actor: AgentActionActor;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ApprovalDecision = "pending" | "approved" | "rejected" | "expired" | string;
+
+export interface ApprovalRequest {
+  id: string;
+  namespace?: string;
+  incident_id: string;
+  action_id: string;
+  approvers_hint?: string;
+  decision: ApprovalDecision;
+  decider?: string;
+  reason?: string;
+  expires_at?: string;
+  decided_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AgentSessionState = "pending" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled" | string;
+
+export interface AgentSession {
+  id: string;
+  namespace?: string;
+  incident_id: string;
+  profile_id?: string;
+  engine?: string;
+  atom_id?: string;
+  container_id?: string;
+  token_id?: string;
+  state: AgentSessionState;
+  session_log?: string;
+  actions_used: number;
+  tokens_used: number;
+  started_at?: string;
+  completed_at?: string;
+  created_at: string;
+  updated_at: string;
+  extra?: unknown;
+}
+
+export interface IncidentListParams {
+  status?: string;
+  class?: string;
+  needs_approval?: boolean;
+  job_id?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface IncidentList {
+  incidents: Incident[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface IncidentDetail {
+  incident: Incident;
+  actions: AgentAction[];
+  approvals: ApprovalRequest[];
+  sessions: AgentSession[];
+}
+
 export interface HealthCheckResult {
   status?: string;
   latency_ms?: number;
@@ -276,6 +391,7 @@ export interface Node {
 export interface SystemFeatures {
   database_console_enabled: boolean;
   log_console_enabled: boolean;
+  agent_remediation_enabled: boolean;
   external_url?: string;
 }
 
@@ -738,7 +854,7 @@ function replayErrorKind(status: number, message: string): ApiErrorKind | undefi
   }
 }
 
-function queryString(params: Record<string, string | number | undefined>): string {
+function queryString(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined) {
@@ -862,6 +978,35 @@ export const api = {
   pruneCache: () => request<CachePruneResponse>("/cache/prune", { method: "POST" }),
   getSystemNodes: () => request<Node[]>("/system/nodes"),
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
+  getIncidents: (params: IncidentListParams = {}) => {
+    const query = queryString({
+      status: params.status,
+      class: params.class,
+      needs_approval: params.needs_approval,
+      job_id: params.job_id,
+      limit: params.limit,
+      offset: params.offset,
+    });
+    return request<IncidentList>(`/incidents${query ? `?${query}` : ""}`);
+  },
+  getIncident: (id: string) =>
+    request<IncidentDetail>(`/incidents/${encodeURIComponent(id)}`),
+  approveIncident: (id: string, approvalId: string, reason?: string) =>
+    request<ApprovalRequest>(
+      `/incidents/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}/approve`,
+      {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      },
+    ),
+  rejectIncident: (id: string, approvalId: string, reason?: string) =>
+    request<ApprovalRequest>(
+      `/incidents/${encodeURIComponent(id)}/approvals/${encodeURIComponent(approvalId)}/reject`,
+      {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      },
+    ),
   lintJobDef: (yaml: string) =>
     request<LintResponse>("/jobdefs/lint", {
       method: "POST",

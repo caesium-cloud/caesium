@@ -4,6 +4,7 @@ import { api } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TrendChart } from "./components/TrendChart";
 import { FailureAtomsChart } from "./components/FailureAtomsChart";
+import { IncidentAnalytics } from "./components/IncidentAnalytics";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Table,
@@ -21,6 +22,12 @@ export function StatsPage() {
   const { data: stats, isLoading, error } = useQuery({
     queryKey: ["stats", "summary", window],
     queryFn: () => api.getStatsSummary(window),
+  });
+
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
   });
 
   if (error) {
@@ -82,6 +89,8 @@ export function StatsPage() {
           </CardContent>
         </Card>
       </div>
+
+      {features?.agent_remediation_enabled === true ? <IncidentAnalytics /> : null}
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card className="bg-midnight/30 border-graphite/30">

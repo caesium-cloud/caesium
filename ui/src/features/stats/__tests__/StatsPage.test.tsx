@@ -7,6 +7,7 @@ import type { StatsResponse } from '@/lib/api';
 vi.mock('@/lib/api', () => {
   const mockApi = {
     getStatsSummary: vi.fn(),
+    getSystemFeatures: vi.fn(),
   };
   return { api: mockApi, ApiError: class extends Error { status: number; constructor(s: number, m: string) { super(m); this.status = s; } } };
 });
@@ -57,6 +58,11 @@ function createWrapper() {
 describe('StatsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(api.getSystemFeatures).mockResolvedValue({
+      database_console_enabled: false,
+      log_console_enabled: false,
+      agent_remediation_enabled: false,
+    });
   });
 
   it('shows loading state', () => {
