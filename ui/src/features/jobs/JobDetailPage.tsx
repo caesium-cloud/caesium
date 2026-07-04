@@ -306,7 +306,7 @@ export function JobDetailPage() {
   useEffect(() => {
     if (features?.agent_remediation_enabled !== true) return;
     const onIncidentEvent = (e: CaesiumEvent) => {
-      if (e.job_id && e.job_id !== jobId) return;
+      if (e?.job_id && e.job_id !== jobId) return;
       queryClient.invalidateQueries({ queryKey: ["incidents", "job", jobId] });
     };
     INCIDENT_EVENT_TYPES.forEach((type) => events.subscribe(type, onIncidentEvent));

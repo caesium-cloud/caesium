@@ -100,16 +100,19 @@ export function IncidentDetailPage() {
 
   const detail = detailQuery.data;
   const incident = detail?.incident;
-  const actions = detail?.actions ?? [];
-  const approvals = detail?.approvals ?? [];
-  const sessions = detail?.sessions ?? [];
+  const actions = useMemo(() => detail?.actions ?? [], [detail?.actions]);
+  const approvals = useMemo(() => detail?.approvals ?? [], [detail?.approvals]);
+  const sessions = useMemo(() => detail?.sessions ?? [], [detail?.sessions]);
   const jobAliases = useMemo(() => buildJobAliasMap(jobsQuery.data), [jobsQuery.data]);
   const actionById = useMemo(() => {
     const map = new Map<string, AgentAction>();
     actions.forEach((action) => map.set(action.id, action));
     return map;
   }, [actions]);
-  const pendingApprovals = approvals.filter((approval) => approval.decision === "pending");
+  const pendingApprovals = useMemo(
+    () => approvals.filter((approval) => approval.decision === "pending"),
+    [approvals],
+  );
   const timeline = useMemo(
     () => (incident ? buildTimeline(incident, sessions, actions, approvals, actionById) : []),
     [actionById, actions, approvals, incident, sessions],

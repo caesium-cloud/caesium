@@ -81,7 +81,7 @@ export function RunDetailPage() {
   });
 
   const { data: runIncidentList } = useQuery({
-    queryKey: ["incidents", "run", jobId, runId],
+    queryKey: ["incidents", "job", jobId],
     queryFn: () => api.getIncidents({ job_id: jobId, limit: 200 }),
     enabled: features?.agent_remediation_enabled === true,
     refetchInterval: 30_000,
@@ -186,14 +186,15 @@ export function RunDetailPage() {
 
   useEffect(() => {
     if (features?.agent_remediation_enabled !== true) return;
-    const onIncidentEvent = () => {
-      queryClient.invalidateQueries({ queryKey: ["incidents", "run", jobId, runId] });
+    const onIncidentEvent = (e: CaesiumEvent) => {
+      if (e?.job_id && e.job_id !== jobId) return;
+      queryClient.invalidateQueries({ queryKey: ["incidents", "job", jobId] });
     };
     INCIDENT_EVENT_TYPES.forEach((type) => events.subscribe(type, onIncidentEvent));
     return () => {
       INCIDENT_EVENT_TYPES.forEach((type) => events.unsubscribe(type, onIncidentEvent));
     };
-  }, [features?.agent_remediation_enabled, jobId, queryClient, runId]);
+  }, [features?.agent_remediation_enabled, jobId, queryClient]);
 
   const taskMetadata = useMemo(() => {
     const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string; rate_limit_retry_after?: string }> = {};

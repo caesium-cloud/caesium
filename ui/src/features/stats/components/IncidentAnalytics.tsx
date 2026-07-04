@@ -33,7 +33,10 @@ export function IncidentAnalytics() {
     staleTime: 30_000,
   });
 
-  const incidentIds = (incidentsQuery.data?.incidents ?? []).slice(0, detailLimit).map((incident) => incident.id);
+  const incidentIds = useMemo(
+    () => (incidentsQuery.data?.incidents ?? []).slice(0, detailLimit).map((incident) => incident.id),
+    [incidentsQuery.data?.incidents],
+  );
   const detailQueries = useQueries({
     queries: incidentIds.map((id) => ({
       queryKey: ["incident", id],
@@ -43,9 +46,13 @@ export function IncidentAnalytics() {
     })),
   });
 
-  const details = detailQueries
-    .map((query) => query.data)
-    .filter((detail): detail is IncidentDetail => Boolean(detail));
+  const details = useMemo(
+    () =>
+      detailQueries
+        .map((query) => query.data)
+        .filter((detail): detail is IncidentDetail => Boolean(detail)),
+    [detailQueries],
+  );
   const analytics = useMemo(
     () => buildIncidentAnalytics(incidentsQuery.data?.incidents ?? [], details),
     [details, incidentsQuery.data?.incidents],

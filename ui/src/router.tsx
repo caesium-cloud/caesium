@@ -95,10 +95,11 @@ const incidentsRoute = createRoute({
     if (typeof search.status === "string") out.status = search.status;
     if (typeof search.class === "string") out.class = search.class;
     if (typeof search.job_id === "string") out.job_id = search.job_id;
+    // The backend only supports a truthy needs_approval filter (awaiting-approval);
+    // a falsy value is not a distinct server-side filter, so normalize it away
+    // rather than persisting a URL that claims a filter the page never applies.
     if (search.needs_approval === true || search.needs_approval === "true") {
       out.needs_approval = true;
-    } else if (search.needs_approval === false || search.needs_approval === "false") {
-      out.needs_approval = false;
     }
     return out;
   },
