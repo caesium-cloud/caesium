@@ -225,7 +225,7 @@ integration-test-agent:
     {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
     admin_key=""; \
     tries=0; \
-    until admin_key="$({{ container_cli }} logs {{ agent_it_container }} 2>&1 | awk '/csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; exit } }')" && [ -n "$admin_key" ]; do \
+    until admin_key="$({{ container_cli }} logs {{ agent_it_container }} 2>&1 | awk '/csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; exit } }' | tr -d '\r')" && [ -n "$admin_key" ]; do \
         tries=$((tries + 1)); \
         if [ "$tries" -gt 30 ]; then \
             echo "Agent auth bootstrap admin key did not appear in server logs"; \

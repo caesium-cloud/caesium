@@ -17,10 +17,14 @@ fi
 [ -n "$incident_id" ] || fail "CAESIUM_INCIDENT_ID is required"
 [ -n "${CAESIUM_AGENT_TOKEN:-}" ] || fail "CAESIUM_AGENT_TOKEN is required"
 
+bundle_file=""
+note_file=""
+action_file=""
+trap 'rm -f "${bundle_file:-}" "${note_file:-}" "${action_file:-}"' EXIT
+
 bundle_file="$(mktemp)"
 note_file="$(mktemp)"
 action_file="$(mktemp)"
-trap 'rm -f "$bundle_file" "$note_file" "$action_file"' EXIT
 
 auth_header="Authorization: Bearer ${CAESIUM_AGENT_TOKEN}"
 
@@ -78,7 +82,16 @@ jq -e '.id and .type == "note" and .status == "executed"' "$note_file" >/dev/nul
 action_payload="$(jq -nc --arg task_name "$task_name" \
   '{type: "skip_task", params: {task_name: $task_name}}')"
 post_json "${api_url}/v1/agent/incidents/${incident_id}/actions" "$action_payload" "$action_file"
-jq -e '.disposition and .action.id and .action.type == "skip_task"' "$action_file" >/dev/null ||
-  fail "action response shape assertion failed"
+# skip_task is a tier-3 (approval-gated) action: it is recorded and routed to the
+# approval gate, never auto-executed. A correct disposition is therefore
+# "proposed" (audit-spine stub, or executor pending approval) or
+# "awaiting_approval" — but never "executed"/"failed"/absent, which would signal
+# a contract violation or a silent remediation error slipping past the lane.
+jq -e '
+  .action.id and
+  .action.type == "skip_task" and
+  (.disposition == "proposed" or .disposition == "awaiting_approval")
+' "$action_file" >/dev/null ||
+  fail "action disposition assertion failed (skip_task is tier-3; expected proposed or awaiting_approval)"
 
 echo "triage-agent: completed scripted triage for incident ${incident_id}"
