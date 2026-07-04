@@ -46,7 +46,12 @@ func MCP(c *echo.Context) error {
 		},
 	}
 
-	return c.JSON(http.StatusOK, mcp.Handle(c.Request().Body, dispatcher))
+	resp, respond := mcp.Handle(c.Request().Body, dispatcher)
+	if !respond {
+		// JSON-RPC notifications carry no id and MUST NOT receive a response.
+		return c.NoContent(http.StatusAccepted)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 type getContextArgs struct {

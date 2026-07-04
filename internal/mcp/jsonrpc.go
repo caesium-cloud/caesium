@@ -43,13 +43,25 @@ type Error struct {
 	Message string `json:"message"`
 }
 
-// Handle decodes one JSON-RPC request from r and dispatches it.
-func Handle(r io.Reader, d Dispatcher) Response {
+// IsNotification reports whether the request is a JSON-RPC 2.0 notification: a
+// request with no "id" member. Notifications MUST NOT receive a response.
+func (r Request) IsNotification() bool {
+	return len(r.ID) == 0
+}
+
+// Handle decodes one JSON-RPC request from r and dispatches it. The returned
+// bool reports whether a response should be written back to the client:
+// JSON-RPC notifications (requests without an "id") MUST NOT receive a
+// response, so callers must suppress the response body when it is false.
+func Handle(r io.Reader, d Dispatcher) (Response, bool) {
 	req, rpcErr := decodeRequest(r)
 	if rpcErr != nil {
-		return ErrorResponse(nil, rpcErr)
+		return ErrorResponse(nil, rpcErr), true
 	}
-	return d.Dispatch(req)
+	if req.IsNotification() {
+		return Response{}, false
+	}
+	return d.Dispatch(req), true
 }
 
 // SuccessResponse builds a JSON-RPC success envelope.
@@ -83,6 +95,9 @@ func InternalError() *Error {
 }
 
 func decodeRequest(r io.Reader) (Request, *Error) {
+	if r == nil {
+		return Request{}, &Error{Code: CodeParseError, Message: "parse error"}
+	}
 	dec := json.NewDecoder(r)
 
 	var req Request
