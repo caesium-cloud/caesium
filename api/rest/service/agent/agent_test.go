@@ -114,3 +114,29 @@ func TestHistoryEnforcesAllowlist(t *testing.T) {
 	_, err = svc.History(inc, "vendor-x", []string{"vendor-x"})
 	require.NoError(t, err)
 }
+
+// TestHistoryEmptyAllowlistDeniesCrossJob is the security regression for the
+// "empty means unrestricted" footgun: an agent token whose frozen allowlist is
+// EMPTY may read only its own incident's job, never any other job's history.
+func TestHistoryEmptyAllowlistDeniesCrossJob(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	jobID := seedJob(t, db, "vendor-x")
+	seedJob(t, db, "other-job")
+	inc := seedIncident(t, db, jobID)
+
+	svc := &Service{ctx: context.Background(), db: db}
+
+	// Empty allowlist must NOT open every job — a cross-job read is refused.
+	_, err := svc.History(inc, "other-job", nil)
+	require.ErrorIs(t, err, ErrForbiddenJob)
+	_, err = svc.History(inc, "other-job", []string{})
+	require.ErrorIs(t, err, ErrForbiddenJob)
+
+	// The incident's own job stays readable even with an empty allowlist.
+	_, err = svc.History(inc, "vendor-x", nil)
+	require.NoError(t, err)
+	_, err = svc.History(inc, "", nil)
+	require.NoError(t, err)
+}

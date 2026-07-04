@@ -190,3 +190,152 @@ func (e *slowEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 	<-req.Context.Done()
 	return nil, req.Context.Err()
 }
+
+// blockingEngine keeps every session "running" until release is closed, so a
+// batch of concurrent dispatches genuinely overlap and exercise the cap.
+type blockingEngine struct {
+	release chan struct{}
+}
+
+func (e *blockingEngine) Get(*atom.EngineGetRequest) (atom.Atom, error)     { return nil, nil }
+func (e *blockingEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) { return nil, nil }
+func (e *blockingEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	return &fakeAtom{id: "atom-" + req.Name, result: atom.Success}, nil
+}
+func (e *blockingEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	select {
+	case <-e.release:
+		return &fakeAtom{id: req.ID, result: atom.Success}, nil
+	case <-req.Context.Done():
+		return nil, req.Context.Err()
+	}
+}
+func (e *blockingEngine) Stop(*atom.EngineStopRequest) error { return nil }
+func (e *blockingEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// TestSupervisorDispatchCapRaceNeverOvershoots proves the cap-check → slot
+// reservation is atomic: N concurrent dispatches against a cap of 1 admit
+// exactly one session and reject the rest, and exactly one session row exists.
+func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ctx := context.Background()
+
+	tr := mkTrigger(t, db)
+	jobID := mkJob(t, db, tr, "vendor-x")
+	store := NewStore(db)
+	inc, _, err := store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "extract", Class: ClassUnknown})
+	require.NoError(t, err)
+
+	profile := &models.AgentProfile{ID: uuid.New(), Name: "triage", Image: "x", Engine: models.AtomEngineDocker}
+	require.NoError(t, db.Create(profile).Error)
+
+	engine := &blockingEngine{release: make(chan struct{})}
+	sup := NewSupervisor(db, &fakeCreds{}, func(context.Context, models.AtomEngine) (atom.Engine, error) {
+		return engine, nil
+	}, SupervisorConfig{MaxConcurrentSessions: 1, PerJobConcurrentSessions: 1, SessionTimeout: time.Minute})
+
+	const n = 8
+	type outcome struct {
+		session *models.AgentSession
+		err     error
+	}
+	results := make(chan outcome, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			sess, err := sup.Dispatch(ctx, inc, profile)
+			results <- outcome{session: sess, err: err}
+		}()
+	}
+
+	// The winner blocks in Wait until released; the losers reject immediately.
+	// Collect the n-1 cap rejections first, then release the winner.
+	capRejections := 0
+	for capRejections < n-1 {
+		r := <-results
+		require.ErrorIs(t, r.err, ErrGlobalSessionCap)
+		capRejections++
+	}
+	close(engine.release)
+
+	winner := <-results
+	require.NoError(t, winner.err)
+	require.NotNil(t, winner.session)
+
+	// Exactly one session row ever existed — the cap was never overshot.
+	var count int64
+	require.NoError(t, db.Model(&models.AgentSession{}).Count(&count).Error)
+	require.Equal(t, int64(1), count)
+}
+
+// cancelEngine signals when Create runs, then blocks in Wait on the context so
+// the test can cancel the parent mid-session.
+type cancelEngine struct {
+	created chan struct{}
+	stopped bool
+}
+
+func (e *cancelEngine) Get(*atom.EngineGetRequest) (atom.Atom, error)     { return nil, nil }
+func (e *cancelEngine) List(*atom.EngineListRequest) ([]atom.Atom, error) { return nil, nil }
+func (e *cancelEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
+	e.created <- struct{}{}
+	return &fakeAtom{id: "atom-" + req.Name, result: atom.Success}, nil
+}
+func (e *cancelEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
+	<-req.Context.Done()
+	return nil, req.Context.Err()
+}
+func (e *cancelEngine) Stop(*atom.EngineStopRequest) error { e.stopped = true; return nil }
+func (e *cancelEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
+	return io.NopCloser(strings.NewReader("")), nil
+}
+
+// TestSupervisorFinalizeOnCancelledContext proves that a cancelled parent
+// context still drives the session to a terminal state AND revokes the scoped
+// token — a cancelled ctx must never leak a live credential.
+func TestSupervisorFinalizeOnCancelledContext(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	tr := mkTrigger(t, db)
+	jobID := mkJob(t, db, tr, "vendor-x")
+	store := NewStore(db)
+	inc, _, err := store.OpenOrAppend(context.Background(), OpenParams{JobID: jobID, TaskName: "extract", Class: ClassUnknown})
+	require.NoError(t, err)
+
+	profile := &models.AgentProfile{ID: uuid.New(), Name: "triage", Image: "x", Engine: models.AtomEngineDocker}
+	require.NoError(t, db.Create(profile).Error)
+
+	creds := &fakeCreds{}
+	engine := &cancelEngine{created: make(chan struct{}, 1)}
+	sup := NewSupervisor(db, creds, func(context.Context, models.AtomEngine) (atom.Engine, error) {
+		return engine, nil
+	}, SupervisorConfig{SessionTimeout: time.Hour})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan *models.AgentSession, 1)
+	go func() {
+		sess, _ := sup.Run(ctx, inc, profile)
+		done <- sess
+	}()
+
+	// Cancel only once the container is up and the supervisor is blocked in Wait.
+	<-engine.created
+	cancel()
+
+	session := <-done
+	require.NotNil(t, session)
+
+	// The session is terminal (cancelled) and persisted despite the cancelled ctx.
+	var got models.AgentSession
+	require.NoError(t, db.First(&got, "id = ?", session.ID).Error)
+	require.Equal(t, models.AgentSessionStateCancelled, got.State)
+	require.NotNil(t, got.CompletedAt)
+
+	// The scoped token was revoked — no leaked live credential.
+	require.Len(t, creds.revoked, 1)
+	require.NotNil(t, got.TokenID)
+	require.Equal(t, *got.TokenID, creds.revoked[0])
+}

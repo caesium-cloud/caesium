@@ -226,7 +226,14 @@ func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.
 	edges := make([]BundleDAGEdge, 0, len(edgeRows))
 	for i := range edgeRows {
 		e := edgeRows[i]
-		edges = append(edges, BundleDAGEdge{From: nameByID[e.FromTaskID], To: nameByID[e.ToTaskID]})
+		// Skip an edge whose endpoint task is missing (e.g. soft-deleted) so a
+		// dangling reference can't produce an edge with an empty task name.
+		from, fromOK := nameByID[e.FromTaskID]
+		to, toOK := nameByID[e.ToTaskID]
+		if !fromOK || !toOK {
+			continue
+		}
+		edges = append(edges, BundleDAGEdge{From: from, To: to})
 	}
 
 	return job, tasks, edges, nil

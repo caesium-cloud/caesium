@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/atom"
@@ -103,6 +104,14 @@ type Supervisor struct {
 	creds     AgentCredentialManager
 	newEngine EngineFactory
 	cfg       SupervisorConfig
+
+	// dispatchMu serializes the cap-check → slot-reservation critical section so
+	// concurrent Dispatch calls cannot both pass the cap and overshoot
+	// MaxConcurrentSessions. It is held only across counting + creating the
+	// pending session row (the point at which the slot becomes visible to the
+	// next dispatcher's count), never across the long-running engine execution,
+	// so genuinely-concurrent sessions still run in parallel up to the cap.
+	dispatchMu sync.Mutex
 }
 
 // sessionSupervisor is the process-wide session supervisor, set at startup
@@ -130,44 +139,71 @@ func NewSupervisor(db *gorm.DB, creds AgentCredentialManager, factory EngineFact
 	}
 }
 
-// Dispatch enforces the concurrent-session caps against the shared store, then
-// launches a session for the incident. It returns ErrGlobalSessionCap /
-// ErrJobSessionCap without launching when a cap is already reached — the caller
-// leaves the incident open to queue for later triage rather than dropping it.
+// Dispatch enforces the concurrent-session caps and launches a session for the
+// incident. The cap-check and the slot reservation (creating the pending
+// session row) are performed atomically under dispatchMu, so concurrent
+// dispatches cannot both pass the cap and overshoot MaxConcurrentSessions. It
+// returns ErrGlobalSessionCap / ErrJobSessionCap without launching when a cap
+// is already reached — the caller leaves the incident open to queue for later
+// triage rather than dropping it.
 func (s *Supervisor) Dispatch(ctx context.Context, inc *models.Incident, profile *models.AgentProfile) (*models.AgentSession, error) {
 	if profile == nil {
 		return nil, ErrNoProfile
 	}
 
-	globalActive, err := s.store.CountActiveAgentSessions(ctx)
+	session, minted, err := s.reserveWithCaps(ctx, inc, profile)
 	if err != nil {
 		return nil, err
 	}
-	if globalActive >= int64(s.cfg.MaxConcurrentSessions) {
-		return nil, ErrGlobalSessionCap
-	}
-
-	jobActive, err := s.store.CountActiveAgentSessionsForJob(ctx, inc.JobID)
-	if err != nil {
-		return nil, err
-	}
-	if jobActive >= int64(s.cfg.PerJobConcurrentSessions) {
-		return nil, ErrJobSessionCap
-	}
-
-	return s.Run(ctx, inc, profile)
+	return s.execute(ctx, session, minted, inc, profile), nil
 }
 
-// Run mints a scoped token, records the AgentSession, launches the profile image
-// through the engine, waits under a wall-clock budget, persists the container
-// log, stops the container, sets the terminal state, and revokes the token so it
-// never outlives the session. It is synchronous (the caller owns goroutine
-// lifecycle) and cap enforcement is the caller's job via Dispatch.
+// Run launches a session WITHOUT cap enforcement (used by callers that gate
+// concurrency elsewhere, and by tests). It reserves a slot (mint + create the
+// pending session row) then drives the container to a terminal state.
 func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *models.AgentProfile) (*models.AgentSession, error) {
 	if profile == nil {
 		return nil, ErrNoProfile
 	}
+	session, minted, err := s.reserve(ctx, inc, profile)
+	if err != nil {
+		return nil, err
+	}
+	return s.execute(ctx, session, minted, inc, profile), nil
+}
 
+// reserveWithCaps performs the cap-check → slot-reservation critical section
+// under dispatchMu. The pending session row it creates counts toward
+// CountActiveAgentSessions, so once this returns (lock released) the next
+// dispatcher observes the reserved slot and is refused if that pushed it to the
+// cap. The lock is NOT held across the engine execution.
+func (s *Supervisor) reserveWithCaps(ctx context.Context, inc *models.Incident, profile *models.AgentProfile) (*models.AgentSession, *auth.CreateKeyResponse, error) {
+	s.dispatchMu.Lock()
+	defer s.dispatchMu.Unlock()
+
+	globalActive, err := s.store.CountActiveAgentSessions(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	if globalActive >= int64(s.cfg.MaxConcurrentSessions) {
+		return nil, nil, ErrGlobalSessionCap
+	}
+
+	jobActive, err := s.store.CountActiveAgentSessionsForJob(ctx, inc.JobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if jobActive >= int64(s.cfg.PerJobConcurrentSessions) {
+		return nil, nil, ErrJobSessionCap
+	}
+
+	return s.reserve(ctx, inc, profile)
+}
+
+// reserve mints the scoped credential and creates the pending AgentSession row.
+// It is the "slot reservation" step: after it returns, the session counts as
+// active. Callers that enforce caps (reserveWithCaps) hold dispatchMu around it.
+func (s *Supervisor) reserve(ctx context.Context, inc *models.Incident, profile *models.AgentProfile) (*models.AgentSession, *auth.CreateKeyResponse, error) {
 	allowlist := unmarshalAllowlist(inc.AllowedJobs)
 
 	// Mint a scoped credential valid slightly past the wall-clock budget so a
@@ -175,13 +211,12 @@ func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *mod
 	// regardless.
 	minted, err := s.creds.MintAgentSessionKey(inc.ID, allowlist, s.cfg.SessionTimeout+time.Minute)
 	if err != nil {
-		return nil, fmt.Errorf("incident: mint agent session key: %w", err)
+		return nil, nil, fmt.Errorf("incident: mint agent session key: %w", err)
 	}
-	var tokenID *uuid.UUID
-	if minted.Key != nil {
-		id := minted.Key.ID
-		tokenID = &id
+	if minted == nil || minted.Key == nil {
+		return nil, nil, errors.New("incident: mint agent session key returned no key")
 	}
+	tokenID := minted.Key.ID
 
 	engineType := profile.Engine
 	if engineType == "" {
@@ -195,21 +230,30 @@ func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *mod
 		IncidentID: inc.ID,
 		ProfileID:  &profile.ID,
 		Engine:     engineType,
-		TokenID:    tokenID,
+		TokenID:    &tokenID,
 		State:      models.AgentSessionStatePending,
 		CreatedAt:  now,
 		UpdatedAt:  now,
 	}
 	if err := s.db.WithContext(ctx).Create(session).Error; err != nil {
-		s.revoke(tokenID)
-		return nil, fmt.Errorf("incident: create agent session: %w", err)
+		s.revoke(&tokenID)
+		return nil, nil, fmt.Errorf("incident: create agent session: %w", err)
 	}
+	return session, minted, nil
+}
 
-	// From here on, always finalize the session and revoke the token.
-	engine, err := s.newEngine(ctx, engineType)
+// execute drives a reserved session's container to a terminal state: launches
+// the profile image, waits under the wall-clock budget, persists the log, stops
+// the container, and finalizes (terminal state + token revocation). It always
+// finalizes, even on error, so no reserved slot leaks a live token.
+func (s *Supervisor) execute(ctx context.Context, session *models.AgentSession, minted *auth.CreateKeyResponse, inc *models.Incident, profile *models.AgentProfile) *models.AgentSession {
+	tokenID := session.TokenID
+
+	engine, err := s.newEngine(ctx, session.Engine)
 	if err != nil {
-		s.finalize(ctx, session, models.AgentSessionStateFailed, "", tokenID)
-		return session, fmt.Errorf("incident: resolve engine: %w", err)
+		log.Error("incident: resolve agent engine", "session_id", session.ID, "error", err)
+		s.finalize(session, models.AgentSessionStateFailed, "", tokenID)
+		return session
 	}
 
 	spec := container.Spec{Env: s.sessionEnv(inc, minted.Plaintext, profile)}
@@ -219,8 +263,9 @@ func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *mod
 		Spec:  spec,
 	})
 	if err != nil {
-		s.finalize(ctx, session, models.AgentSessionStateFailed, "", tokenID)
-		return session, fmt.Errorf("incident: create agent container: %w", err)
+		log.Error("incident: create agent container", "session_id", session.ID, "error", err)
+		s.finalize(session, models.AgentSessionStateFailed, "", tokenID)
+		return session
 	}
 
 	// Mark running with the container/atom identity for the UI.
@@ -254,8 +299,8 @@ func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *mod
 	}
 
 	state := terminalState(final.Result(), waitErr, waitCtx.Err())
-	s.finalize(ctx, session, state, logText, tokenID)
-	return session, nil
+	s.finalize(session, state, logText, tokenID)
+	return session
 }
 
 // sessionEnv builds the container environment. The scoped token, the incident
@@ -292,8 +337,15 @@ func (s *Supervisor) captureLogs(engine atom.Engine, atomID string, since time.T
 }
 
 // finalize writes the terminal state + session log and revokes the scoped token
-// so the credential dies with the session.
-func (s *Supervisor) finalize(ctx context.Context, session *models.AgentSession, state models.AgentSessionState, logText string, tokenID *uuid.UUID) {
+// so the credential dies with the session. It runs on a DETACHED context (not
+// the caller's, which may be cancelled by shutdown or a client disconnect) so
+// termination and — critically — token revocation always complete: a cancelled
+// parent context must never leave the session non-terminal or leak a live
+// agent credential.
+func (s *Supervisor) finalize(session *models.AgentSession, state models.AgentSessionState, logText string, tokenID *uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	completed := time.Now().UTC()
 	session.State = state
 	session.SessionLog = logText

@@ -56,7 +56,15 @@ func (s *Service) FailingLog(inc *models.Incident) (string, bool, error) {
 func (s *Service) History(inc *models.Incident, jobAlias string, allowed []string) ([]RunSummary, error) {
 	jobID := inc.JobID
 	if jobAlias != "" {
-		if !jobInAllowlist(jobAlias, allowed) {
+		// The incident's own job is always readable; ANY other job must be
+		// explicitly listed in the frozen allowlist. An empty allowlist therefore
+		// permits ONLY the incident's own job — empty is never "allow any" (the
+		// same "empty means unrestricted" footgun closed in authorizeAgentScope).
+		ownAlias, err := s.incidentJobAlias(inc.JobID)
+		if err != nil {
+			return nil, err
+		}
+		if jobAlias != ownAlias && !jobInAllowlist(jobAlias, allowed) {
 			return nil, ErrForbiddenJob
 		}
 		var job models.Job
@@ -97,13 +105,21 @@ func (s *Service) Why(inc *models.Incident, task string) (*runstorage.WhyExplana
 	return whysvc.New(s.ctx).WithDatabase(s.db).Why(*inc.RunID, task)
 }
 
-// jobInAllowlist reports whether jobAlias is within the frozen allowlist. An
-// empty allowlist (no scoped principal, e.g. an unscoped operator or auth
-// disabled) imposes no restriction; a non-empty allowlist restricts strictly.
-func jobInAllowlist(jobAlias string, allowed []string) bool {
-	if len(allowed) == 0 {
-		return true
+// incidentJobAlias resolves the alias of the incident's own job (always readable
+// through the context passthroughs regardless of the frozen allowlist).
+func (s *Service) incidentJobAlias(jobID uuid.UUID) (string, error) {
+	var job models.Job
+	if err := s.db.WithContext(s.ctx).Select("alias").First(&job, "id = ?", jobID).Error; err != nil {
+		return "", err
 	}
+	return job.Alias, nil
+}
+
+// jobInAllowlist reports whether jobAlias is EXPLICITLY within the frozen
+// allowlist. An empty allowlist matches nothing — it is never treated as
+// "unrestricted", so a scoped agent token with an empty frozen list can read no
+// cross-job context (only the incident's own job, handled by the caller).
+func jobInAllowlist(jobAlias string, allowed []string) bool {
 	for _, a := range allowed {
 		if a == jobAlias {
 			return true
