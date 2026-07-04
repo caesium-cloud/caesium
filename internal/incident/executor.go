@@ -148,6 +148,9 @@ func (e *Executor) Execute(ctx context.Context, req ActionRequest) (*models.Agen
 	if err != nil {
 		return nil, fmt.Errorf("incident: load incident for action: %w", err)
 	}
+	if inc == nil {
+		return nil, errors.New("incident: incident not found")
+	}
 
 	dec := req.Playbook.decide(req.Type, tier)
 
@@ -192,6 +195,9 @@ func (e *Executor) ExecutePolicy(ctx context.Context, incidentID uuid.UUID, acti
 	inc, err := e.store.Get(ctx, incidentID)
 	if err != nil {
 		return nil, fmt.Errorf("incident: load incident for policy action: %w", err)
+	}
+	if inc == nil {
+		return nil, errors.New("incident: incident not found")
 	}
 	action := e.newAction(inc, ActionRequest{
 		IncidentID: incidentID,

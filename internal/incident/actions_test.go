@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -129,16 +130,17 @@ func TestEscalateDispatches(t *testing.T) {
 	require.Equal(t, "pagerduty", ops.escalate[0].channel)
 }
 
+// A rerun_with_params targeting the incident's OWN job (explicit but in-boundary)
+// is allowed.
 func TestRerunWithParamsExplicitJobID(t *testing.T) {
 	_, store, ops, exec := newExecutorTest(t)
 	inc, _ := seedIncident(t, store)
-	otherJob := uuid.New()
 
 	_, err := exec.Execute(context.Background(), ActionRequest{
 		IncidentID: inc.ID,
 		Type:       ActionTypeRerunWithParams,
 		Params: ActionParams{
-			JobID:     &otherJob,
+			JobID:     &inc.JobID, // same job — in boundary
 			Overrides: map[string]string{"k": "v"},
 		},
 		Playbook: Playbook{
@@ -148,5 +150,62 @@ func TestRerunWithParamsExplicitJobID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, ops.rerun, 1)
-	require.Equal(t, otherJob, ops.rerun[0].jobID)
+	require.Equal(t, inc.JobID, ops.rerun[0].jobID)
+}
+
+// An allowed action whose params.JobID points at a DIFFERENT job is refused at
+// the incident boundary and recorded failed — even though the action is allowed.
+func TestExecuteRefusesCrossBoundaryJobTarget(t *testing.T) {
+	_, store, ops, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+	otherJob := uuid.New()
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypePauseJob,
+		Params:     ActionParams{JobID: &otherJob},
+		Playbook:   Playbook{Allow: map[string]bool{ActionTypePauseJob: true}},
+	})
+	require.ErrorIs(t, err, ErrCrossBoundaryTarget)
+	require.Equal(t, models.AgentActionStatusFailed, action.Status)
+	require.Empty(t, ops.setPaused, "a cross-boundary target must never dispatch")
+}
+
+// An allowed retry whose params.RunID belongs to another job is refused at the
+// incident boundary.
+func TestExecuteRefusesCrossBoundaryRunTarget(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+
+	// A run owned by an unrelated job.
+	otherRun := uuid.New()
+	now := time.Now().UTC()
+	require.NoError(t, db.Create(&models.JobRun{
+		ID: otherRun, JobID: uuid.New(), Status: "failed", StartedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeRetryFromFailure,
+		Params:     ActionParams{RunID: &otherRun},
+		Playbook:   Playbook{},
+	})
+	require.ErrorIs(t, err, ErrCrossBoundaryTarget)
+	require.Equal(t, models.AgentActionStatusFailed, action.Status)
+	require.Empty(t, ops.retryFromFailure, "a cross-boundary run target must never retry")
+}
+
+// A run target that does not exist is treated as cross-boundary (fail closed).
+func TestExecuteRefusesUnknownRunTarget(t *testing.T) {
+	_, store, ops, exec := newExecutorTest(t)
+	inc, _ := seedIncident(t, store)
+	ghost := uuid.New()
+
+	_, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeRetryFromFailure,
+		Params:     ActionParams{RunID: &ghost},
+	})
+	require.ErrorIs(t, err, ErrCrossBoundaryTarget)
+	require.Empty(t, ops.retryFromFailure)
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // Typed action catalog (design-agent-in-the-loop.md). The agent never gets
@@ -149,6 +150,41 @@ type ActionOps interface {
 // errNoOps signals a dispatching action with no ActionOps configured.
 var errNoOps = errors.New("incident: no action ops configured")
 
+// ErrCrossBoundaryTarget is returned when an action names a run or job that does
+// not belong to the incident's own job. The incident boundary is the security
+// boundary: an action allowed for incident X must never reach across it to
+// retry, pause, rerun, or clear the cache of an unrelated job/run — even if the
+// playbook allows that action type. Recorded as a failed AgentAction.
+var ErrCrossBoundaryTarget = errors.New("incident: action target crosses the incident boundary")
+
+// verifyActionBoundary rejects any explicit run/job target that does not belong
+// to the incident's job. It runs before every dispatch. Empty targets are
+// in-boundary by construction (resolveRunID/resolveJobID fall back to the
+// incident's own run/job). Namespace is not yet a column on Job/JobRun (it lands
+// with multi-tenancy, design Open Question 4); until then job-id identity is the
+// enforced boundary and the incident's namespace travels with its own job.
+func (e *Executor) verifyActionBoundary(ctx context.Context, inc *models.Incident, params ActionParams) error {
+	if params.JobID != nil && *params.JobID != uuid.Nil && *params.JobID != inc.JobID {
+		return fmt.Errorf("%w: job %s is not incident job %s", ErrCrossBoundaryTarget, *params.JobID, inc.JobID)
+	}
+	if params.RunID != nil && *params.RunID != uuid.Nil {
+		var jr models.JobRun
+		err := e.store.DB().WithContext(ctx).
+			Select("id", "job_id").
+			First(&jr, "id = ?", *params.RunID).Error
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return fmt.Errorf("%w: run %s not found", ErrCrossBoundaryTarget, *params.RunID)
+			}
+			return err
+		}
+		if jr.JobID != inc.JobID {
+			return fmt.Errorf("%w: run %s belongs to job %s, not incident job %s", ErrCrossBoundaryTarget, *params.RunID, jr.JobID, inc.JobID)
+		}
+	}
+	return nil
+}
+
 // resolveRunID picks the params run id, falling back to the incident's
 // remediation target then its run.
 func resolveRunID(inc *models.Incident, params ActionParams) (uuid.UUID, error) {
@@ -176,6 +212,11 @@ func resolveJobID(inc *models.Incident, params ActionParams) uuid.UUID {
 // result to record on the action row. The playbook is consulted only where an
 // action needs it (rerun_with_params override whitelist).
 func (e *Executor) dispatch(ctx context.Context, actionType string, inc *models.Incident, action *models.AgentAction, params ActionParams, pb Playbook) (map[string]any, error) {
+	// Enforce the incident boundary before any dispatch: an explicit run/job
+	// target must belong to the incident's job.
+	if err := e.verifyActionBoundary(ctx, inc, params); err != nil {
+		return nil, err
+	}
 	switch actionType {
 	case ActionTypeRetryFromFailure:
 		runID, err := resolveRunID(inc, params)
