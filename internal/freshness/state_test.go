@@ -3,6 +3,8 @@ package freshness
 import (
 	"context"
 	"encoding/json"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -129,6 +131,25 @@ func TestApplyContract(t *testing.T) {
 			wantWM:   "sha-xyz",
 			advanced: tPtr(t0.Add(time.Hour)),
 		},
+		{
+			// 9007199254740992 = 2^53 (float64's last exactly-representable int);
+			// 2^53+1 rounds to 2^53 as a float64, so a float compare would tie.
+			// int64 parsing keeps them distinct -> a real advance.
+			name:     "large-int increase advances beyond float64 exact range",
+			state:    models.DatasetState{Watermark: "9007199254740992", AdvancedAt: tPtr(t0)},
+			in:       AdvanceInput{Name: "d", Watermark: "9007199254740993", RunID: run, CompletedAt: t0.Add(time.Hour)},
+			want:     OutcomeAdvanced,
+			wantWM:   "9007199254740993",
+			advanced: tPtr(t0.Add(time.Hour)),
+		},
+		{
+			name:     "large-int regression dropped where float64 would tie",
+			state:    models.DatasetState{Watermark: "9007199254740993", AdvancedAt: tPtr(t0)},
+			in:       AdvanceInput{Name: "d", Watermark: "9007199254740992", RunID: run, CompletedAt: t0.Add(time.Hour)},
+			want:     OutcomeRegressionDropped,
+			wantWM:   "9007199254740993",
+			advanced: tPtr(t0),
+		},
 	}
 
 	for _, tc := range cases {
@@ -225,11 +246,51 @@ func TestAdvancePersistsAndVerifies(t *testing.T) {
 		t.Fatalf("last_run_id = %v, want %v", got.LastRunID, run2)
 	}
 
-	// Only one row per dataset (natural key enforced in code).
+	// Only one row per dataset (natural key enforced by the unique index).
 	var count int64
 	db.Model(&models.DatasetState{}).Where("name = ?", "staging.orders").Count(&count)
 	if count != 1 {
 		t.Fatalf("row count = %d, want 1", count)
+	}
+}
+
+// TestAdvanceConcurrentSingleRow proves two concurrent Advance calls for the
+// same previously-unknown dataset collapse into exactly one row (the ON CONFLICT
+// upsert on the natural-key unique index), never a duplicate.
+func TestAdvanceConcurrentSingleRow(t *testing.T) {
+	db := openRegistryDB(t)
+	s := NewStore(db)
+	ctx := context.Background()
+
+	const n = 8
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			// Distinct increasing numeric watermarks so every call is a valid
+			// advance; the winner is whichever commits last.
+			_, errs[i] = s.Advance(ctx, AdvanceInput{
+				Name:        "hot.dataset",
+				Watermark:   strconv.Itoa(100 + i),
+				RunID:       uuid.New(),
+				CompletedAt: t0.Add(time.Duration(i) * time.Minute),
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent advance %d failed: %v", i, err)
+		}
+	}
+
+	var count int64
+	db.Model(&models.DatasetState{}).Where("name = ?", "hot.dataset").Count(&count)
+	if count != 1 {
+		t.Fatalf("concurrent advances produced %d rows, want exactly 1", count)
 	}
 }
 

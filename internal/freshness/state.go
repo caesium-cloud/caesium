@@ -12,10 +12,22 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // errEmptyDatasetName guards every state write: a dataset must be named.
 var errEmptyDatasetName = errors.New("freshness: dataset name is required")
+
+// nsValue maps a nil (unset) namespace to the empty string, matching the
+// DatasetState.Namespace NOT-NULL-default-” column. Every state query and write
+// keys on this value so the (namespace, name) UNIQUE index is reliable — SQLite
+// treats NULLs as distinct, so a nullable namespace would defeat the index.
+func nsValue(namespace *string) string {
+	if namespace == nil {
+		return ""
+	}
+	return strings.TrimSpace(*namespace)
+}
 
 // Outcome is the result of an Advance/Verify decision — the observable record of
 // what the watermark contract did. Regressions and out-of-order opaque writes
@@ -133,7 +145,7 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 		// (backfill, regression, out-of-order) leaves state exactly as-is and
 		// must never create a row for a previously-unknown dataset.
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
-			if err := tx.Save(&state).Error; err != nil {
+			if err := upsertState(tx, &state); err != nil {
 				return err
 			}
 		}
@@ -144,6 +156,23 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 		return AdvanceResult{}, err
 	}
 	return res, nil
+}
+
+// upsertState writes an advance/verify result race-safely. It keys on the
+// (namespace, name) UNIQUE index rather than the primary key, so two concurrent
+// Advance calls for the same previously-unknown dataset collapse into exactly
+// one row (the losing INSERT becomes an UPDATE) instead of racing to create a
+// duplicate. ConsumedWatermarks is deliberately excluded from the update set —
+// Advance never manages it; RecordConsumed owns that column, so a concurrent
+// snapshot is never clobbered by an advance.
+func upsertState(tx *gorm.DB, state *models.DatasetState) error {
+	return tx.Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
+		DoUpdates: clause.AssignmentColumns([]string{
+			"watermark", "watermark_run_at", "advanced_at", "verified_at",
+			"status", "reason", "last_run_id", "updated_at",
+		}),
+	}).Create(state).Error
 }
 
 // applyContract mutates state per the watermark contract and returns the
@@ -177,10 +206,10 @@ func applyContract(state *models.DatasetState, in AdvanceInput) AdvanceResult {
 		return AdvanceResult{Outcome: OutcomeVerified}
 	}
 
-	// Changed value: gate by ordering. Orderable values (numeric / RFC3339)
-	// compare by value; opaque values compare by producing-run order.
-	if cur, next, ok := orderableCompare(state.Watermark, in.Watermark); ok {
-		if next > cur {
+	// Changed value: gate by ordering. Orderable values (integer / float /
+	// RFC3339) compare by value; opaque values compare by producing-run order.
+	if greater, ok := orderableGreater(state.Watermark, in.Watermark); ok {
+		if greater {
 			advance(state, in, runID)
 			return AdvanceResult{Outcome: OutcomeAdvanced}
 		}
@@ -221,23 +250,41 @@ func nonNilRun(runID uuid.UUID) *uuid.UUID {
 	return &r
 }
 
-// orderableCompare returns comparable float ordinals for cur/next when BOTH
-// parse as the same orderable kind (numeric, else RFC3339). ok is false for
-// opaque strings (git SHAs, UUIDs) or mixed kinds, which must be gated by run
-// order instead of value.
-func orderableCompare(cur, next string) (curOrd, nextOrd float64, ok bool) {
-	if cf, err1 := strconv.ParseFloat(strings.TrimSpace(cur), 64); err1 == nil {
-		if nf, err2 := strconv.ParseFloat(strings.TrimSpace(next), 64); err2 == nil {
-			return cf, nf, true
+// orderableGreater reports whether next is strictly greater than cur when BOTH
+// parse as the same orderable kind. It tries int64, then uint64, then float64,
+// then RFC3339 — integer parsing FIRST so large watermarks (e.g. nanosecond
+// timestamps beyond 2^53) compare exactly, without the float64 rounding that
+// would silently treat 9007199254740993 and 9007199254740992 as equal. ok is
+// false for opaque strings (git SHAs, UUIDs) or mixed kinds, which must be gated
+// by producing-run order instead of value.
+func orderableGreater(cur, next string) (greater, ok bool) {
+	cur = strings.TrimSpace(cur)
+	next = strings.TrimSpace(next)
+
+	if ci, err1 := strconv.ParseInt(cur, 10, 64); err1 == nil {
+		if ni, err2 := strconv.ParseInt(next, 10, 64); err2 == nil {
+			return ni > ci, true
 		}
-		return 0, 0, false
+		return false, false
+	}
+	if cu, err1 := strconv.ParseUint(cur, 10, 64); err1 == nil {
+		if nu, err2 := strconv.ParseUint(next, 10, 64); err2 == nil {
+			return nu > cu, true
+		}
+		return false, false
+	}
+	if cf, err1 := strconv.ParseFloat(cur, 64); err1 == nil {
+		if nf, err2 := strconv.ParseFloat(next, 64); err2 == nil {
+			return nf > cf, true
+		}
+		return false, false
 	}
 	if ct, err1 := parseRFC3339(cur); err1 == nil {
 		if nt, err2 := parseRFC3339(next); err2 == nil {
-			return float64(ct.UnixNano()), float64(nt.UnixNano()), true
+			return nt.After(ct), true
 		}
 	}
-	return 0, 0, false
+	return false, false
 }
 
 func parseRFC3339(v string) (time.Time, error) {
@@ -248,20 +295,16 @@ func parseRFC3339(v string) (time.Time, error) {
 	return time.Parse(time.RFC3339, v)
 }
 
-// loadOrInitState find-or-creates the state row for a dataset on its natural
-// key. It enforces single-row-per-dataset in code because a nullable-namespace
-// UNIQUE index is unreliable under SQLite (NULLs compare distinct).
+// loadOrInitState loads the state row for a dataset on its natural key, or
+// returns a fresh (unpersisted) row when none exists yet. The nil namespace is
+// mapped to ” so the query keys on the same value the NOT-NULL column stores;
+// race-safe single-row creation is handled by upsertState's ON CONFLICT.
 func loadOrInitState(tx *gorm.DB, namespace *string, name string) (models.DatasetState, error) {
+	ns := nsValue(namespace)
 	var state models.DatasetState
-	q := tx.Where("name = ?", name)
-	if namespace == nil {
-		q = q.Where("namespace IS NULL")
-	} else {
-		q = q.Where("namespace = ?", *namespace)
-	}
 	// Find (not Take/First) so a miss is RowsAffected==0, not an error-logged
 	// ErrRecordNotFound — the "unknown dataset" case is the common path.
-	res := q.Limit(1).Find(&state)
+	res := tx.Where("namespace = ? AND name = ?", ns, name).Limit(1).Find(&state)
 	if res.Error != nil {
 		return models.DatasetState{}, res.Error
 	}
@@ -270,7 +313,7 @@ func loadOrInitState(tx *gorm.DB, namespace *string, name string) (models.Datase
 	}
 	return models.DatasetState{
 		ID:        uuid.New(),
-		Namespace: namespace,
+		Namespace: ns,
 		Name:      name,
 		Status:    models.DatasetStatusUnknown,
 	}, nil
@@ -278,8 +321,9 @@ func loadOrInitState(tx *gorm.DB, namespace *string, name string) (models.Datase
 
 // RecordConsumed snapshots the consumed-input watermarks onto a produced
 // dataset's state, so "is my output up to date with my inputs" is a pure row
-// comparison. It is a no-op when there are no consumed inputs. Called at
-// producing-run completion after Advance.
+// comparison. It updates ONLY the consumed_watermarks column (never a full-row
+// Save) so a concurrent Advance is not clobbered. A no-op when the produced
+// dataset has no state row yet (nothing to attach the snapshot to).
 func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name string, consumed map[string]string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -289,14 +333,9 @@ func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name stri
 	if err != nil {
 		return err
 	}
-	return s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		state, err := loadOrInitState(tx, namespace, name)
-		if err != nil {
-			return err
-		}
-		state.ConsumedWatermarks = datatypes.JSON(blob)
-		return tx.Save(&state).Error
-	})
+	return s.db.WithContext(ctx).Model(&models.DatasetState{}).
+		Where("namespace = ? AND name = ?", nsValue(namespace), name).
+		Update("consumed_watermarks", datatypes.JSON(blob)).Error
 }
 
 // Get returns the state row for a dataset, or (zero, false, nil) when none
@@ -304,13 +343,9 @@ func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name stri
 func (s *Store) Get(ctx context.Context, namespace *string, name string) (models.DatasetState, bool, error) {
 	name = strings.TrimSpace(name)
 	var state models.DatasetState
-	q := s.db.WithContext(ctx).Where("name = ?", name)
-	if namespace == nil {
-		q = q.Where("namespace IS NULL")
-	} else {
-		q = q.Where("namespace = ?", *namespace)
-	}
-	res := q.Limit(1).Find(&state)
+	res := s.db.WithContext(ctx).
+		Where("namespace = ? AND name = ?", nsValue(namespace), name).
+		Limit(1).Find(&state)
 	if res.Error != nil {
 		return models.DatasetState{}, false, res.Error
 	}

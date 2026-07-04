@@ -32,13 +32,15 @@ const (
 type DatasetState struct {
 	ID uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 
-	// Namespace is nullable (reserved for cross-instance datasets, unused in v1).
-	// Name is the dataset identity the whole feature keys on. The (namespace,
-	// name) pair is the natural key; the store find-or-creates on it (SQLite
-	// treats NULLs as distinct in a UNIQUE index, so the index below documents
-	// intent while the store enforces single-row-per-dataset in a transaction).
-	Namespace *string `gorm:"type:text;index:idx_dataset_state_identity,priority:1" json:"namespace,omitempty"`
-	Name      string  `gorm:"type:text;not null;index:idx_dataset_state_identity,priority:2" json:"name"`
+	// Namespace is reserved for cross-instance datasets (unused in v1) and Name
+	// is the dataset identity the whole feature keys on. Together they are the
+	// natural key, enforced by a real UNIQUE index — Namespace is NOT NULL with a
+	// '' default (rather than nullable) precisely so the unique index is reliable
+	// under SQLite, which treats NULLs as distinct in a UNIQUE index and would
+	// otherwise let two rows share one dataset identity. The store maps a nil
+	// namespace to '' on every query.
+	Namespace string `gorm:"type:text;not null;default:'';uniqueIndex:idx_dataset_state_identity,priority:1" json:"namespace,omitempty"`
+	Name      string `gorm:"type:text;not null;uniqueIndex:idx_dataset_state_identity,priority:2" json:"name"`
 
 	// Watermark is the current high-water value emitted by the producing step
 	// (or an arrival binding). Empty until the dataset first advances.

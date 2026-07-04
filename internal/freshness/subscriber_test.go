@@ -16,7 +16,7 @@ import (
 // seedProducingRun writes the minimal run-completion surface: a produced +
 // consumed declaration, a task, its succeeded task run carrying the emitted
 // ##caesium::output, and the job run row (with optional backfill).
-func seedProducingRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output map[string]string, backfill *uuid.UUID) {
+func seedProducingRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output map[string]string, backfill *uuid.UUID, watermarkKey string) {
 	t.Helper()
 	taskID := uuid.New()
 	now := t0.Add(time.Hour)
@@ -45,7 +45,7 @@ func seedProducingRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output 
 	must(db.Create(&models.DatasetDeclaration{
 		ID: uuid.New(), JobID: jobID, JobAlias: "orders-daily", StepName: "extract",
 		Name: "staging.orders", Direction: models.DatasetDirectionProduces,
-		Freshness: "8h", WatermarkKey: "max_order_ts",
+		Freshness: "8h", WatermarkKey: watermarkKey,
 	}).Error)
 	must(db.Create(&models.DatasetDeclaration{
 		ID: uuid.New(), JobID: jobID, JobAlias: "orders-daily", StepName: "extract",
@@ -65,7 +65,7 @@ func TestCapturerAdvancesAndSnapshotsConsumed(t *testing.T) {
 
 	jobID, runID := uuid.New(), uuid.New()
 	wm := "2026-07-03T04:31:00Z"
-	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": wm}, nil)
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": wm}, nil, "max_order_ts")
 
 	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
@@ -98,7 +98,7 @@ func TestCapturerBackfillNeverAdvances(t *testing.T) {
 
 	jobID, runID := uuid.New(), uuid.New()
 	bf := uuid.New()
-	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, &bf)
+	seedProducingRun(t, db, jobID, runID, map[string]string{"max_order_ts": "2026-07-03T04:31:00Z"}, &bf, "max_order_ts")
 
 	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
@@ -107,14 +107,18 @@ func TestCapturerBackfillNeverAdvances(t *testing.T) {
 	}
 }
 
+// TestCapturerDegradedVerifiesWithoutWatermarkKey covers the legitimate degraded
+// mode: the produced dataset declares NO watermark key, so a successful run
+// refreshes verified_at against completion time (conflating "ran" with
+// "advanced", the design's honest limitation).
 func TestCapturerDegradedVerifiesWithoutWatermarkKey(t *testing.T) {
 	db := openRegistryDB(t)
 	c := NewCapturer(event.New(), db)
 	ctx := context.Background()
 
 	jobID, runID := uuid.New(), uuid.New()
-	// The step emits no max_order_ts key: degraded mode.
-	seedProducingRun(t, db, jobID, runID, map[string]string{"rows": "42"}, nil)
+	// No declared watermark key -> degraded verify.
+	seedProducingRun(t, db, jobID, runID, map[string]string{"rows": "42"}, nil, "")
 
 	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
@@ -130,5 +134,40 @@ func TestCapturerDegradedVerifiesWithoutWatermarkKey(t *testing.T) {
 	}
 	if st.AdvancedAt != nil {
 		t.Fatalf("degraded mode must not advance")
+	}
+}
+
+// TestCapturerMissingDeclaredWatermarkSkips covers fix 5: a produced dataset that
+// DECLARES a watermark key but whose step OMITS it must NOT be degraded-verified
+// (that would mark a stale value fresh). State is left untouched.
+func TestCapturerMissingDeclaredWatermarkSkips(t *testing.T) {
+	db := openRegistryDB(t)
+	c := NewCapturer(event.New(), db)
+	ctx := context.Background()
+
+	jobID, runID := uuid.New(), uuid.New()
+	// Declares max_order_ts but the step emits only "rows".
+	seedProducingRun(t, db, jobID, runID, map[string]string{"rows": "42"}, nil, "max_order_ts")
+
+	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+	if _, ok, err := c.store.Get(ctx, nil, "staging.orders"); err != nil || ok {
+		t.Fatalf("declared-but-absent watermark must leave state untouched (ok=%v err=%v)", ok, err)
+	}
+}
+
+// TestDecodeOutputPreservesLargeInts proves the ##caesium::output decode keeps a
+// large integer watermark exact (UseNumber), not rounded through float64.
+func TestDecodeOutputPreservesLargeInts(t *testing.T) {
+	raw := datatypes.JSON([]byte(`{"wm":9007199254740993,"name":"orders.parquet","flag":true}`))
+	out := decodeOutput(raw)
+	if out["wm"] != "9007199254740993" {
+		t.Fatalf("large int watermark = %q, want 9007199254740993 (float64 would round)", out["wm"])
+	}
+	if out["name"] != "orders.parquet" {
+		t.Fatalf("string value = %q, want orders.parquet", out["name"])
+	}
+	if out["flag"] != "true" {
+		t.Fatalf("bool value = %q, want true", out["flag"])
 	}
 }

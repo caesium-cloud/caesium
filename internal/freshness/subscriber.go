@@ -1,6 +1,7 @@
 package freshness
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"time"
@@ -88,7 +89,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		return
 	}
 
-	backfill, completedAt, err := c.runTiming(evt.RunID)
+	backfill, completedAt, err := c.runTiming(ctx, evt.RunID)
 	if err != nil {
 		log.Error("freshness: capture failed to read run timing", "run_id", evt.RunID, "error", err)
 		return
@@ -133,7 +134,19 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		}
 		watermark := ""
 		if p.WatermarkKey != "" {
-			watermark = step.output[p.WatermarkKey]
+			val, emitted := step.output[p.WatermarkKey]
+			if !emitted {
+				// The dataset DECLARES a watermark key but the producing step
+				// did not emit it: the run failed to produce its required
+				// output. This is NOT degraded mode (that is only for datasets
+				// with no declared key) — refreshing verified_at here would
+				// mark a stale value fresh. Leave state untouched and record the
+				// miss.
+				log.Warn("freshness: producing step omitted its declared watermark output",
+					"dataset", p.Name, "step", p.StepName, "watermark_key", p.WatermarkKey, "run_id", evt.RunID)
+				continue
+			}
+			watermark = val
 		}
 		res, err := c.store.Advance(ctx, AdvanceInput{
 			Namespace:   p.Namespace,
@@ -166,13 +179,13 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 
 // runTiming reports whether the run is a backfill and its effective completion
 // time (falling back to started_at, then now).
-func (c *Capturer) runTiming(runID uuid.UUID) (backfill bool, completedAt time.Time, err error) {
+func (c *Capturer) runTiming(ctx context.Context, runID uuid.UUID) (backfill bool, completedAt time.Time, err error) {
 	var row struct {
 		BackfillID  *uuid.UUID
 		CompletedAt *time.Time
 		StartedAt   time.Time
 	}
-	if err = c.db.Table("job_runs").
+	if err = c.db.WithContext(ctx).Table("job_runs").
 		Select("backfill_id", "completed_at", "started_at").
 		Where("id = ?", runID).Take(&row).Error; err != nil {
 		return false, time.Time{}, err
@@ -231,39 +244,52 @@ func (c *Capturer) stepOutputs(ctx context.Context, runID uuid.UUID) (map[string
 	return out, nil
 }
 
-// consumedSnapshot reads the current watermark of each consumed dataset.
+// consumedSnapshot reads the current watermark of every consumed dataset in a
+// single query (no per-name N+1), keyed on the nil→” namespace mapping.
 func (c *Capturer) consumedSnapshot(ctx context.Context, names []string) map[string]string {
 	if len(names) == 0 {
 		return nil
 	}
-	snapshot := make(map[string]string, len(names))
-	for _, name := range names {
-		if _, dup := snapshot[name]; dup {
+	// Dedupe before the IN query.
+	seen := make(map[string]struct{}, len(names))
+	uniq := make([]string, 0, len(names))
+	for _, n := range names {
+		if _, dup := seen[n]; dup {
 			continue
 		}
-		st, ok, err := c.store.Get(ctx, c.namespace, name)
-		if err != nil {
-			log.Error("freshness: capture failed to read consumed state", "dataset", name, "error", err)
-			continue
-		}
-		if ok {
-			snapshot[name] = st.Watermark
-		}
+		seen[n] = struct{}{}
+		uniq = append(uniq, n)
 	}
-	if len(snapshot) == 0 {
+
+	var rows []models.DatasetState
+	if err := c.db.WithContext(ctx).
+		Where("namespace = ? AND name IN ?", nsValue(c.namespace), uniq).
+		Find(&rows).Error; err != nil {
+		log.Error("freshness: capture failed to read consumed state", "error", err)
 		return nil
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	snapshot := make(map[string]string, len(rows))
+	for i := range rows {
+		snapshot[rows[i].Name] = rows[i].Watermark
 	}
 	return snapshot
 }
 
-// decodeOutput parses a task run's ##caesium::output blob into string values,
-// coercing non-string scalars so a numeric watermark survives round-tripping.
+// decodeOutput parses a task run's ##caesium::output blob into string values.
+// It decodes with json.Number (UseNumber) rather than json.Unmarshal so a large
+// integer watermark (e.g. a nanosecond timestamp beyond float64's exact range)
+// keeps its precise string form instead of being rounded through float64.
 func decodeOutput(raw datatypes.JSON) map[string]string {
 	if len(raw) == 0 {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var typed map[string]interface{}
-	if err := json.Unmarshal(raw, &typed); err != nil {
+	if err := dec.Decode(&typed); err != nil {
 		return nil
 	}
 	out := make(map[string]string, len(typed))
@@ -273,8 +299,6 @@ func decodeOutput(raw datatypes.JSON) map[string]string {
 			out[k] = val
 		case json.Number:
 			out[k] = val.String()
-		case float64:
-			out[k] = trimFloat(val)
 		case bool:
 			if val {
 				out[k] = "true"
@@ -284,9 +308,4 @@ func decodeOutput(raw datatypes.JSON) map[string]string {
 		}
 	}
 	return out
-}
-
-func trimFloat(f float64) string {
-	b, _ := json.Marshal(f)
-	return string(b)
 }
