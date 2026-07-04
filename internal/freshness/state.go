@@ -134,22 +134,121 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 	}
 	in.RunOrder = order.UTC()
 
+	const maxAttempts = 5
+	var (
+		res AdvanceResult
+		err error
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		res, err = s.advanceTx(ctx, in)
+		if err == nil {
+			return res, nil
+		}
+		// Retry only the narrow race window (row created/removed between our
+		// read and our conditional write) and transient store-busy errors;
+		// everything else propagates immediately.
+		if errors.Is(err, errStateRaceRetry) || isBusyErr(err) {
+			continue
+		}
+		return AdvanceResult{}, err
+	}
+	return AdvanceResult{}, err
+}
+
+// advanceTx runs one attempt of the advance/verify contract in a single
+// transaction. It is race-safe against a concurrent Advance for the SAME
+// dataset — not merely against duplicate rows, but against a lost UPDATE of the
+// watermark VALUE:
+//
+//  1. Read the current row (no lock) and run the contract against it.
+//  2. A dropped outcome (backfill / regression / out-of-order) writes nothing.
+//     This is safe under a concurrent writer because a concurrent Advance only
+//     moves the watermark FORWARD, so re-deciding against a newer value would
+//     still drop.
+//  3. An advance/verify must write. We first `INSERT ... ON CONFLICT DO NOTHING`
+//     (fresh id, so only the (namespace,name) unique index can conflict). If the
+//     insert created the row we are the first observation and are done. If it
+//     CONFLICTED, the row already exists (pre-existing, or a concurrent
+//     first-writer) — and the INSERT statement has now taken the transaction's
+//     write lock, so we re-SELECT the authoritative row under that lock, re-run
+//     the full contract against ITS current watermark, and write only if it
+//     still advances/verifies. A regression exposed by the re-read is dropped.
+//
+// The net invariant: after any set of concurrent Advances the stored watermark
+// is the max per the ordering contract, and every non-advancing attempt is
+// recorded-and-dropped.
+func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, error) {
 	var res AdvanceResult
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		state, err := loadOrInitState(tx, in.Namespace, in.Name)
+		current, existed, err := loadState(tx, in.Namespace, in.Name)
 		if err != nil {
 			return err
 		}
-		res = applyContract(&state, in)
-		// Only persist when the contract changed state. A dropped write
-		// (backfill, regression, out-of-order) leaves state exactly as-is and
-		// must never create a row for a previously-unknown dataset.
+
+		base := current
+		if !existed {
+			base = models.DatasetState{
+				ID:        uuid.New(),
+				Namespace: nsValue(in.Namespace),
+				Name:      in.Name,
+				Status:    models.DatasetStatusUnknown,
+			}
+		}
+		res = applyContract(&base, in)
+
+		// Dropped writes never touch state and never create a row.
+		if res.Outcome != OutcomeAdvanced && res.Outcome != OutcomeVerified {
+			res.State = current
+			return nil
+		}
+
+		// Write path. Attempt an atomic create; a fresh id ensures only the
+		// (namespace,name) unique index can be the conflict target.
+		insert := base
+		insert.ID = uuid.New()
+		created := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "namespace"}, {Name: "name"}},
+			DoNothing: true,
+		}).Create(&insert)
+		if created.Error != nil {
+			return created.Error
+		}
+		if created.RowsAffected == 1 {
+			// We created the row as the first observation.
+			res.State = insert
+			return nil
+		}
+
+		// Conflict: the row exists and the INSERT above took the write lock.
+		// Re-read the authoritative row under the lock and re-decide.
+		authoritative, ok, err := loadState(tx, in.Namespace, in.Name)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// Row vanished between the conflict and the re-read (deletion race);
+			// retry the whole transaction.
+			return errStateRaceRetry
+		}
+		res = applyContract(&authoritative, in)
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
-			if err := upsertState(tx, &state); err != nil {
+			// ConsumedWatermarks is deliberately excluded — RecordConsumed owns
+			// that column, so a concurrent snapshot is never clobbered here.
+			if err := tx.Model(&models.DatasetState{}).
+				Where("id = ?", authoritative.ID).
+				Updates(map[string]interface{}{
+					"watermark":        authoritative.Watermark,
+					"watermark_run_at": authoritative.WatermarkRunAt,
+					"advanced_at":      authoritative.AdvancedAt,
+					"verified_at":      authoritative.VerifiedAt,
+					"status":           authoritative.Status,
+					"reason":           authoritative.Reason,
+					"last_run_id":      authoritative.LastRunID,
+				}).Error; err != nil {
 				return err
 			}
 		}
-		res.State = state
+		res.State = authoritative
 		return nil
 	})
 	if err != nil {
@@ -158,21 +257,18 @@ func (s *Store) Advance(ctx context.Context, in AdvanceInput) (AdvanceResult, er
 	return res, nil
 }
 
-// upsertState writes an advance/verify result race-safely. It keys on the
-// (namespace, name) UNIQUE index rather than the primary key, so two concurrent
-// Advance calls for the same previously-unknown dataset collapse into exactly
-// one row (the losing INSERT becomes an UPDATE) instead of racing to create a
-// duplicate. ConsumedWatermarks is deliberately excluded from the update set —
-// Advance never manages it; RecordConsumed owns that column, so a concurrent
-// snapshot is never clobbered by an advance.
-func upsertState(tx *gorm.DB, state *models.DatasetState) error {
-	return tx.Clauses(clause.OnConflict{
-		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
-		DoUpdates: clause.AssignmentColumns([]string{
-			"watermark", "watermark_run_at", "advanced_at", "verified_at",
-			"status", "reason", "last_run_id", "updated_at",
-		}),
-	}).Create(state).Error
+// errStateRaceRetry signals the outer retry loop that a benign row-vanished race
+// occurred and the transaction should be re-run.
+var errStateRaceRetry = errors.New("freshness: dataset state row changed under a concurrent write; retry")
+
+// isBusyErr reports whether err is a transient SQLite/dqlite lock-contention
+// error worth retrying (rather than a real failure).
+func isBusyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "locked") || strings.Contains(msg, "busy")
 }
 
 // applyContract mutates state per the watermark contract and returns the
@@ -295,28 +391,19 @@ func parseRFC3339(v string) (time.Time, error) {
 	return time.Parse(time.RFC3339, v)
 }
 
-// loadOrInitState loads the state row for a dataset on its natural key, or
-// returns a fresh (unpersisted) row when none exists yet. The nil namespace is
-// mapped to ” so the query keys on the same value the NOT-NULL column stores;
-// race-safe single-row creation is handled by upsertState's ON CONFLICT.
-func loadOrInitState(tx *gorm.DB, namespace *string, name string) (models.DatasetState, error) {
+// loadState loads the state row for a dataset on its natural key, reporting
+// whether it existed. The nil namespace is mapped to ” so the query keys on the
+// same value the NOT-NULL column stores.
+func loadState(tx *gorm.DB, namespace *string, name string) (models.DatasetState, bool, error) {
 	ns := nsValue(namespace)
 	var state models.DatasetState
 	// Find (not Take/First) so a miss is RowsAffected==0, not an error-logged
 	// ErrRecordNotFound — the "unknown dataset" case is the common path.
 	res := tx.Where("namespace = ? AND name = ?", ns, name).Limit(1).Find(&state)
 	if res.Error != nil {
-		return models.DatasetState{}, res.Error
+		return models.DatasetState{}, false, res.Error
 	}
-	if res.RowsAffected > 0 {
-		return state, nil
-	}
-	return models.DatasetState{
-		ID:        uuid.New(),
-		Namespace: ns,
-		Name:      name,
-		Status:    models.DatasetStatusUnknown,
-	}, nil
+	return state, res.RowsAffected > 0, nil
 }
 
 // RecordConsumed snapshots the consumed-input watermarks onto a produced

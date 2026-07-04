@@ -137,22 +137,36 @@ func TestCapturerDegradedVerifiesWithoutWatermarkKey(t *testing.T) {
 	}
 }
 
-// TestCapturerMissingDeclaredWatermarkSkips covers fix 5: a produced dataset that
-// DECLARES a watermark key but whose step OMITS it must NOT be degraded-verified
-// (that would mark a stale value fresh). State is left untouched.
+// TestCapturerMissingDeclaredWatermarkSkips covers a produced dataset that
+// DECLARES a watermark key but whose step does not supply a usable value — the
+// key is either absent OR emitted as an empty/whitespace string. None is
+// degraded mode (that is only for datasets with no declared key), so refreshing
+// verified_at would mark a stale value fresh. State must be left untouched.
 func TestCapturerMissingDeclaredWatermarkSkips(t *testing.T) {
-	db := openRegistryDB(t)
-	c := NewCapturer(event.New(), db)
-	ctx := context.Background()
+	cases := []struct {
+		name   string
+		output map[string]string
+	}{
+		{"absent key", map[string]string{"rows": "42"}},
+		{"empty value", map[string]string{"max_order_ts": ""}},
+		{"whitespace value", map[string]string{"max_order_ts": "   "}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRegistryDB(t)
+			c := NewCapturer(event.New(), db)
+			ctx := context.Background()
 
-	jobID, runID := uuid.New(), uuid.New()
-	// Declares max_order_ts but the step emits only "rows".
-	seedProducingRun(t, db, jobID, runID, map[string]string{"rows": "42"}, nil, "max_order_ts")
+			jobID, runID := uuid.New(), uuid.New()
+			// Declares max_order_ts; the step supplies no usable value.
+			seedProducingRun(t, db, jobID, runID, tc.output, nil, "max_order_ts")
 
-	c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+			c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
-	if _, ok, err := c.store.Get(ctx, nil, "staging.orders"); err != nil || ok {
-		t.Fatalf("declared-but-absent watermark must leave state untouched (ok=%v err=%v)", ok, err)
+			if _, ok, err := c.store.Get(ctx, nil, "staging.orders"); err != nil || ok {
+				t.Fatalf("declared-but-unusable watermark must leave state untouched (ok=%v err=%v)", ok, err)
+			}
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -135,13 +136,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		watermark := ""
 		if p.WatermarkKey != "" {
 			val, emitted := step.output[p.WatermarkKey]
-			if !emitted {
-				// The dataset DECLARES a watermark key but the producing step
-				// did not emit it: the run failed to produce its required
-				// output. This is NOT degraded mode (that is only for datasets
-				// with no declared key) — refreshing verified_at here would
-				// mark a stale value fresh. Leave state untouched and record the
-				// miss.
+			// A declared watermark key that is absent OR emitted as an empty
+			// value means the run did not produce its required output. This is
+			// NOT degraded mode (that is only for datasets with no declared
+			// key) — refreshing verified_at here would mark a stale value fresh.
+			// Leave state untouched and record the miss.
+			if !emitted || strings.TrimSpace(val) == "" {
 				log.Warn("freshness: producing step omitted its declared watermark output",
 					"dataset", p.Name, "step", p.StepName, "watermark_key", p.WatermarkKey, "run_id", evt.RunID)
 				continue

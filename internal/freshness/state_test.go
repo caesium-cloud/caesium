@@ -294,6 +294,66 @@ func TestAdvanceConcurrentSingleRow(t *testing.T) {
 	}
 }
 
+// TestAdvanceRaceValueNotLost proves the fix for the stale-conflict lost update:
+// when two Advances for the same NEW dataset race with an older value A and a
+// newer value B, the stored watermark is always B — a late-committing A never
+// clobbers B (the regression guard holds under the ON CONFLICT re-read). Run
+// many iterations with a fresh DB each time so both commit orders are exercised.
+func TestAdvanceRaceValueNotLost(t *testing.T) {
+	const (
+		older = "1"
+		newer = "2"
+	)
+	for iter := 0; iter < 60; iter++ {
+		db := openRegistryDB(t)
+		s := NewStore(db)
+		ctx := context.Background()
+
+		var wg sync.WaitGroup
+		for _, wm := range []string{older, newer} {
+			wg.Add(1)
+			go func(wm string) {
+				defer wg.Done()
+				if _, err := s.Advance(ctx, AdvanceInput{
+					Name: "race.dataset", Watermark: wm, RunID: uuid.New(), CompletedAt: t0,
+				}); err != nil {
+					t.Errorf("iter %d advance %q: %v", iter, wm, err)
+				}
+			}(wm)
+		}
+		wg.Wait()
+
+		got, ok, err := s.Get(ctx, nil, "race.dataset")
+		if err != nil || !ok {
+			t.Fatalf("iter %d get: %v ok=%v", iter, err, ok)
+		}
+		if got.Watermark != newer {
+			t.Fatalf("iter %d stored watermark = %q, want %q (older clobbered newer)", iter, got.Watermark, newer)
+		}
+	}
+}
+
+// TestAdvanceBothOrdersNewerWins asserts the invariant deterministically for
+// both sequential orders: older-then-newer advances; newer-then-older drops.
+func TestAdvanceBothOrdersNewerWins(t *testing.T) {
+	for _, ord := range [][2]string{{"1", "2"}, {"2", "1"}} {
+		db := openRegistryDB(t)
+		s := NewStore(db)
+		ctx := context.Background()
+		for _, wm := range ord {
+			if _, err := s.Advance(ctx, AdvanceInput{
+				Name: "d", Watermark: wm, RunID: uuid.New(), CompletedAt: t0,
+			}); err != nil {
+				t.Fatalf("advance %q: %v", wm, err)
+			}
+		}
+		got, _, _ := s.Get(ctx, nil, "d")
+		if got.Watermark != "2" {
+			t.Fatalf("order %v: stored = %q, want 2", ord, got.Watermark)
+		}
+	}
+}
+
 // TestRecordConsumed snapshots consumed watermarks onto the produced state row.
 func TestRecordConsumed(t *testing.T) {
 	db := openRegistryDB(t)
