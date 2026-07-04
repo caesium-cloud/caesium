@@ -148,6 +148,12 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 			}
 			watermark = val
 		}
+		// Consumed rides the Advance transaction (AdvanceInput.Consumed) so the
+		// snapshot is written atomically with — and tied to — the accepted
+		// advance/verify. A separate follow-up write could let an overlapping
+		// run's later snapshot land on top of another run's winning watermark;
+		// folding it in means a run that loses the watermark race also does not
+		// write its input snapshot.
 		res, err := c.store.Advance(ctx, AdvanceInput{
 			Namespace:   p.Namespace,
 			Name:        p.Name,
@@ -156,6 +162,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 			RunOrder:    completedAt,
 			CompletedAt: completedAt,
 			Backfill:    backfill,
+			Consumed:    consumed,
 		})
 		if err != nil {
 			log.Error("freshness: advance failed", "dataset", p.Name, "run_id", evt.RunID, "error", err)
@@ -164,15 +171,6 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 		if res.Outcome == OutcomeRegressionDropped || res.Outcome == OutcomeOutOfOrderDropped {
 			log.Warn("freshness: watermark write dropped",
 				"dataset", p.Name, "outcome", string(res.Outcome), "run_id", evt.RunID, "watermark", watermark)
-		}
-		// Backfill runs never touch state, so there is nothing to snapshot.
-		if backfill {
-			continue
-		}
-		if len(consumed) > 0 {
-			if err := c.store.RecordConsumed(ctx, p.Namespace, p.Name, consumed); err != nil {
-				log.Error("freshness: record consumed failed", "dataset", p.Name, "run_id", evt.RunID, "error", err)
-			}
 		}
 	}
 }

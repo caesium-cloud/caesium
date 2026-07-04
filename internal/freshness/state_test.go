@@ -354,6 +354,62 @@ func TestAdvanceBothOrdersNewerWins(t *testing.T) {
 	}
 }
 
+// TestAdvanceConsumedTiedToWinningRun proves the consumed snapshot is atomic
+// with the accepted advance: under two overlapping completed runs for the same
+// produced dataset, the final row's watermark, last_run_id, AND
+// consumed_watermarks ALL come from the same winning run — never a cross-run
+// mix where one run's watermark sits beside another run's input snapshot.
+func TestAdvanceConsumedTiedToWinningRun(t *testing.T) {
+	type run struct {
+		wm       string
+		runID    uuid.UUID
+		consumed map[string]string
+	}
+	for iter := 0; iter < 60; iter++ {
+		db := openRegistryDB(t)
+		s := NewStore(db)
+		ctx := context.Background()
+
+		r1, r2 := uuid.New(), uuid.New()
+		runs := []run{
+			{wm: "1", runID: r1, consumed: map[string]string{"in": "a1"}}, // older
+			{wm: "2", runID: r2, consumed: map[string]string{"in": "a2"}}, // newer (winner)
+		}
+
+		var wg sync.WaitGroup
+		for _, rn := range runs {
+			wg.Add(1)
+			go func(rn run) {
+				defer wg.Done()
+				if _, err := s.Advance(ctx, AdvanceInput{
+					Name: "d", Watermark: rn.wm, RunID: rn.runID, CompletedAt: t0, Consumed: rn.consumed,
+				}); err != nil {
+					t.Errorf("iter %d advance run %v: %v", iter, rn.runID, err)
+				}
+			}(rn)
+		}
+		wg.Wait()
+
+		got, ok, err := s.Get(ctx, nil, "d")
+		if err != nil || !ok {
+			t.Fatalf("iter %d get: %v ok=%v", iter, err, ok)
+		}
+		if got.Watermark != "2" {
+			t.Fatalf("iter %d watermark = %q, want 2", iter, got.Watermark)
+		}
+		if got.LastRunID == nil || *got.LastRunID != r2 {
+			t.Fatalf("iter %d last_run_id = %v, want winning run %v", iter, got.LastRunID, r2)
+		}
+		var consumed map[string]string
+		if err := json.Unmarshal(got.ConsumedWatermarks, &consumed); err != nil {
+			t.Fatalf("iter %d unmarshal consumed: %v (raw=%s)", iter, err, string(got.ConsumedWatermarks))
+		}
+		if consumed["in"] != "a2" {
+			t.Fatalf("iter %d consumed = %v, want winning run's a2 (cross-run snapshot mix)", iter, consumed)
+		}
+	}
+}
+
 // TestRecordConsumed snapshots consumed watermarks onto the produced state row.
 func TestRecordConsumed(t *testing.T) {
 	db := openRegistryDB(t)

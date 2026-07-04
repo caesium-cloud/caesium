@@ -78,6 +78,16 @@ type AdvanceInput struct {
 	// verified_at and for degraded-mode advances.
 	CompletedAt time.Time
 
+	// Consumed is the snapshot of this dataset's declared-input watermarks as of
+	// this producing run. It is persisted onto consumed_watermarks in the SAME
+	// transaction that ACCEPTS the advance/verify, tied to the accepted run — so
+	// when this Advance loses the race (a newer run's watermark wins under the
+	// conflict re-read), this run's input snapshot is NOT written either, and the
+	// winning run's snapshot stays authoritative. Empty means "leave the column
+	// untouched" (a produced dataset with no consumed inputs). Never written for
+	// a dropped outcome (backfill / regression / out-of-order).
+	Consumed map[string]string
+
 	// Backfill marks a backfill run: it never advances a watermark.
 	Backfill bool
 }
@@ -196,16 +206,25 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		}
 		res = applyContract(&base, in)
 
-		// Dropped writes never touch state and never create a row.
+		// Dropped writes never touch state and never create a row — and never
+		// write this run's consumed snapshot, so a losing run cannot leave its
+		// input snapshot behind on the winning run's row.
 		if res.Outcome != OutcomeAdvanced && res.Outcome != OutcomeVerified {
 			res.State = current
 			return nil
 		}
 
+		// The consumed snapshot is written in THIS same accepting transaction,
+		// tied to the accepted advance/verify — not as a separate follow-up.
+		consumedBlob, hasConsumed := consumedJSON(in.Consumed)
+
 		// Write path. Attempt an atomic create; a fresh id ensures only the
 		// (namespace,name) unique index can be the conflict target.
 		insert := base
 		insert.ID = uuid.New()
+		if hasConsumed {
+			insert.ConsumedWatermarks = consumedBlob
+		}
 		created := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "namespace"}, {Name: "name"}},
 			DoNothing: true,
@@ -232,19 +251,26 @@ func (s *Store) advanceTx(ctx context.Context, in AdvanceInput) (AdvanceResult, 
 		}
 		res = applyContract(&authoritative, in)
 		if res.Outcome == OutcomeAdvanced || res.Outcome == OutcomeVerified {
-			// ConsumedWatermarks is deliberately excluded — RecordConsumed owns
-			// that column, so a concurrent snapshot is never clobbered here.
+			updates := map[string]interface{}{
+				"watermark":        authoritative.Watermark,
+				"watermark_run_at": authoritative.WatermarkRunAt,
+				"advanced_at":      authoritative.AdvancedAt,
+				"verified_at":      authoritative.VerifiedAt,
+				"status":           authoritative.Status,
+				"reason":           authoritative.Reason,
+				"last_run_id":      authoritative.LastRunID,
+			}
+			// Consumed rides the accepted advance so watermark, last_run_id, and
+			// consumed_watermarks all come from THIS (winning) run. It is only
+			// written when this run advances/verifies under the re-read — a run
+			// that loses the race here leaves the winner's snapshot untouched.
+			if hasConsumed {
+				updates["consumed_watermarks"] = consumedBlob
+				authoritative.ConsumedWatermarks = consumedBlob
+			}
 			if err := tx.Model(&models.DatasetState{}).
 				Where("id = ?", authoritative.ID).
-				Updates(map[string]interface{}{
-					"watermark":        authoritative.Watermark,
-					"watermark_run_at": authoritative.WatermarkRunAt,
-					"advanced_at":      authoritative.AdvancedAt,
-					"verified_at":      authoritative.VerifiedAt,
-					"status":           authoritative.Status,
-					"reason":           authoritative.Reason,
-					"last_run_id":      authoritative.LastRunID,
-				}).Error; err != nil {
+				Updates(updates).Error; err != nil {
 				return err
 			}
 		}
@@ -406,11 +432,29 @@ func loadState(tx *gorm.DB, namespace *string, name string) (models.DatasetState
 	return state, res.RowsAffected > 0, nil
 }
 
-// RecordConsumed snapshots the consumed-input watermarks onto a produced
-// dataset's state, so "is my output up to date with my inputs" is a pure row
-// comparison. It updates ONLY the consumed_watermarks column (never a full-row
-// Save) so a concurrent Advance is not clobbered. A no-op when the produced
-// dataset has no state row yet (nothing to attach the snapshot to).
+// consumedJSON marshals a consumed-watermark snapshot. It returns ok=false for
+// an empty snapshot (a produced dataset with no consumed inputs), which callers
+// treat as "leave consumed_watermarks untouched". map[string]string never fails
+// to marshal, so a marshal error is treated as an empty snapshot.
+func consumedJSON(consumed map[string]string) (datatypes.JSON, bool) {
+	if len(consumed) == 0 {
+		return nil, false
+	}
+	blob, err := json.Marshal(consumed)
+	if err != nil {
+		return nil, false
+	}
+	return datatypes.JSON(blob), true
+}
+
+// RecordConsumed snapshots the consumed-input watermarks onto an EXISTING
+// produced dataset's state as a standalone write, for the consumed-only path
+// where no advance is happening (e.g. an operator/manual surface). The normal
+// producing-run path folds the snapshot into Advance (see AdvanceInput.Consumed)
+// so watermark, last_run_id, and consumed_watermarks are written atomically and
+// a losing run never clobbers the winner's snapshot. This updates ONLY the
+// consumed_watermarks column (never a full-row Save) so a concurrent Advance is
+// not clobbered, and is a no-op when the dataset has no state row yet.
 func (s *Store) RecordConsumed(ctx context.Context, namespace *string, name string, consumed map[string]string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
