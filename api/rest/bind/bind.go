@@ -8,6 +8,7 @@ import (
 	blamectrl "github.com/caesium-cloud/caesium/api/rest/controller/blame"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
+	incidentctrl "github.com/caesium-cloud/caesium/api/rest/controller/incident"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
 	jobcache "github.com/caesium-cloud/caesium/api/rest/controller/job/cache"
 	jobqueue "github.com/caesium-cloud/caesium/api/rest/controller/job/queue"
@@ -189,6 +190,19 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 	// lineage impact (data-plane-memory C2)
 	{
 		g.GET("/lineage/impact", lineagectrl.Impact)
+	}
+
+	// incidents — operator read API + tier-3 approval decisions
+	// (agent-in-the-loop D1/D2). Bound ONLY when the remediation feature is
+	// enabled; pkg/env validate() guarantees an active auth mode in that case, so
+	// the approval routes are never reachable unauthenticated. Agent session
+	// tokens are additionally rejected on the approval routes in authorizeScope.
+	if env.Variables().AgentRemediationEnabled {
+		ic := incidentctrl.New(bus)
+		g.GET("/incidents", ic.List)
+		g.GET("/incidents/:id", ic.Get)
+		g.POST("/incidents/:id/approvals/:approval_id/approve", ic.Approve)
+		g.POST("/incidents/:id/approvals/:approval_id/reject", ic.Reject)
 	}
 }
 

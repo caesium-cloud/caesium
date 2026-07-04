@@ -432,6 +432,14 @@ func start(cmd *cobra.Command, args []string) error {
 		notifSub.RegisterSender(models.ChannelTypeSlack, notification.NewSlackSender())
 		notifSub.RegisterSender(models.ChannelTypeEmail, notification.NewEmailSender())
 		notifSub.RegisterSender(models.ChannelTypePagerDuty, notification.NewPagerDutySender())
+		// ai_agent dispatch channel (agent-in-the-loop D3): a policy-driven second
+		// path into the incident manager. Only registered when the remediation
+		// feature is enabled, so an ai_agent channel configured without the master
+		// gate never silently opens incidents. Leader-gated (like the incident
+		// subscriber) so an N-node cluster opens one incident per matched event.
+		if vars.AgentRemediationEnabled {
+			notifSub.RegisterSender(models.ChannelTypeAIAgent, notification.NewAIAgentSender(conn, dqlite.IsLocalLeader))
+		}
 		runAsync(func() {
 			log.Info("launching notification subscriber")
 			if err := notifSub.Start(ctx); err != nil && ctx.Err() == nil {

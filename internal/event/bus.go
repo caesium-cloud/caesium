@@ -48,6 +48,14 @@ const (
 	// manager would otherwise never see the violation. In "fail" mode the task
 	// failure already carries the violations, so no separate event is emitted.
 	TypeSchemaViolationRecorded Type = "schema_violation_recorded"
+
+	// Incident lifecycle events (agent-in-the-loop D2). Emitted on the existing
+	// /events stream so the Console incidents surface (Stream U) can live-update
+	// the feed, timeline, and approval inbox without polling.
+	TypeIncidentOpened        Type = "incident_opened"
+	TypeIncidentStatusChanged Type = "incident_status_changed"
+	TypeAgentActionRecorded   Type = "agent_action_recorded"
+	TypeApprovalRequested     Type = "approval_requested"
 )
 
 // Event represents a system event.

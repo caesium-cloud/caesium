@@ -72,6 +72,9 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/jobdefs/lint":                     models.RoleViewer,
 	"POST /v1/jobdefs/diff":                     models.RoleViewer,
 	"GET /v1/lineage/impact":                    models.RoleViewer,
+	// Incident operator read API (agent-in-the-loop D2).
+	"GET /v1/incidents":     models.RoleViewer,
+	"GET /v1/incidents/:id": models.RoleViewer,
 
 	// Runner
 	"POST /v1/jobs/:id/run":                      models.RoleRunner,
@@ -102,6 +105,10 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/notifications/policies":       models.RoleOperator,
 	"PATCH /v1/notifications/policies/:id":  models.RoleOperator,
 	"DELETE /v1/notifications/policies/:id": models.RoleOperator,
+	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
+	// session tokens are additionally rejected outright in authorizeScope.
+	"POST /v1/incidents/:id/approvals/:id/approve": models.RoleOperator,
+	"POST /v1/incidents/:id/approvals/:id/reject":  models.RoleOperator,
 
 	// Admin
 	"PUT /v1/logs/level":            models.RoleAdmin,
