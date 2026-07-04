@@ -125,8 +125,44 @@ sequenced last so scheduling behavior only changes after the substrate is proven
   where the field's only reader lives. A real source-level bug was fixed en route:
   `pkg/task` `ParseOutput`/`parseMarkers` stringified JSON `null`/objects/arrays to
   `"<nil>"`/`"map[...]"`; they are now dropped (scalar-only), which also stops null
-  polluting `CAESIUM_OUTPUT_*` env vars and `outputSchema` validation. Streams C–G +
-  H-1 remain for later waves.
+  polluting `CAESIUM_OUTPUT_*` env vars and `outputSchema` validation.
+
+### Wave 3 — Streams C, D, E + H-1 (shipped)
+
+- **Stream C** (C1–C3) shipped in [#289](https://github.com/caesium-cloud/caesium/pull/289)
+  (merge `794763c`): the leader-gated freshness **evaluator** (mirrors the run-queue
+  dequeuer; leader gate inside the per-tick fn) — observe-only state machine
+  (`fresh`/`stale`/`stale-upstream`/`violated`), a reactive fast path over the
+  **declared registry** (not the OpenLineage-only `QueryImpact`), and P2 derivation
+  via `AdmitRun` with `_trigger_depth` + fan-in dedupe. Wires the previously-unstarted
+  Stream-B capturer AND the evaluator under `CAESIUM_FRESHNESS_ENABLED`; adds the
+  `caesium_dataset_staleness_seconds{dataset}` / `_derivations_total{dataset,decision}`
+  / `caesium_freshness_violations_total{dataset}` metrics and the `freshness_violated`
+  / `dataset_freshness_at_risk` bus events. Review: Greptile fixed two P1s
+  (namespace-qualified consumed-watermark keys; verify-only/degraded upstream can now
+  bootstrap a first derivation) plus the mandated `{dataset}` metric labels. Gate:
+  `just integration-test` green with the evaluator live (`unknown` → run → `fresh`).
+- **Stream D** (D1) shipped in [#288](https://github.com/caesium-cloud/caesium/pull/288)
+  (merge `a5be903`): **arrival signals** — a parallel observer on **both** `POST /v1/events`
+  and `POST /v1/hooks/*` extracts `arrival.watermark` (JSONPath) and calls
+  `state.Advance` (`RunID` nil, idempotent). Introduced `internal/eventmatch` (a leaf
+  package holding the shared event-pattern matcher + JSONPath helpers) so
+  `internal/freshness` reuses them without importing `internal/trigger/event` — that
+  edge would close a `jobdef → freshness → trigger/event → job → jobdef` import cycle.
+- **Stream E** (E1–E2) shipped in [#290](https://github.com/caesium-cloud/caesium/pull/290)
+  (merge `9822ab0`): the base `/v1/datasets*` REST family (list + status filter,
+  get, derivations audit, manual advance) and the `caesium dataset` CLI
+  (list/status/advance, clean-stdout JSON). Routes are **ungated** (serve
+  declared-graph datasets in `unknown` state). Added RBAC `endpointPolicy` entries for
+  the four routes; fixed a dqlite "unknown data type" on the declaration pagination by
+  deduping distinct `(namespace,name)` in Go (dqlite can't return `MAX()`/`COALESCE()`
+  aggregate columns).
+- **H-1** shipped in [#287](https://github.com/caesium-cloud/caesium/pull/287)
+  (merge `00b5825`): `CAESIUM_FRESHNESS_ENABLED=true` on the integration lanes
+  (Docker/distributed/ui-e2e/helm/CI), mirroring the OpenLineage precedent.
+
+Streams **F** (Console UI) and **G** (scheduling behavior — skip-when-fresh /
+`trigger: {type: freshness}`) plus **N-1** (docs) remain for Wave 4.
 
 ### Stream Status
 
@@ -134,9 +170,9 @@ sequenced last so scheduling behavior only changes after the substrate is proven
 |--------|-------|----------|--------|
 | A | Jobdef `datasets` schema, declared registry (`dataset_declarations`), cross-job cycle + single-producer lint | **P0** | **Shipped** (Wave 1, #277) |
 | B | Dataset state substrate — `DatasetState` + `DatasetDerivation` models, state store, watermark advance/verify contract, consumed-watermark capture | **P0** | **Shipped** (Wave 2, #280) |
-| C | Freshness evaluator — leader-gated durable loop + reactive fast path, observe-only state machine, then P2 derivation to run starts | **P0** → P2 | Not started |
-| D | Arrival signals — source `arrival` event-binding bridged through the event router to advance dataset state | **P0** | Not started |
-| E | Dataset REST + CLI operator surface — `GET /v1/datasets*`, `POST …/advance`, `caesium dataset list/status/advance` | **P0** | Not started |
+| C | Freshness evaluator — leader-gated durable loop + reactive fast path, observe-only state machine, then P2 derivation to run starts | **P0** → P2 | **Shipped** (Wave 3, #289) |
+| D | Arrival signals — source `arrival` event-binding bridged through the event router to advance dataset state | **P0** | **Shipped** (Wave 3, #288) |
+| E | Dataset REST + CLI operator surface — `GET /v1/datasets*`, `POST …/advance`, `caesium dataset list/status/advance` | **P0** | **Shipped** (Wave 3, #290) |
 | F | Console UI — dataset freshness board, lineage freshness overlay, "why did/didn't this run" derivations panel | P1 | Not started |
 | G | Scheduling behavior — skip-when-fresh (P1) + `trigger: {type: freshness}` (P2) | P1 → P2 | Not started |
 | H-1 | Integration harness — `CAESIUM_FRESHNESS_ENABLED=true` on the live integration server | — | **Shipped** (W3-eta: just/CI/helm env mirrors) |

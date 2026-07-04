@@ -156,7 +156,41 @@ have unit + middleware coverage but **no end-to-end `test/` integration scenario
 The only integration test that ships is the disabled-gate inertness check (routes 404
 when the flag is off). H-1 must stand up the auth-enabled lane so these paths execute in
 CI; until it lands, treat agent/approval **integration** coverage as a known gap.
-Streams F, G, U (+ H-1, N-1) remain for later waves.
+Streams F, G, U (+ H-1, N-1) remained after Wave 2; **H-1 and Streams F, G, U
+shipped in Wave 3 (below)**, which stood up the auth-enabled integration lane and
+closed the integration-coverage gap noted above.
+
+### Wave 3 — Streams F, G, U + H-1 (shipped)
+
+- **Stream F** (F1) shipped in [#291](https://github.com/caesium-cloud/caesium/pull/291)
+  (merge `5817eeb`): the **MCP tool surface** — `POST /v1/agent/incidents/:id/mcp`
+  (hand-rolled JSON-RPC 2.0 in `internal/mcp` over the Stream-C service layer). The
+  incident id is taken from the URL **path** (a body-carried id is rejected) so the
+  shipped per-incident scope confinement applies unchanged — a flat `/v1/agent/mcp`
+  would have been a cross-incident privilege-escalation hole; registered at
+  `RoleRunner` with a matching `endpointPolicy` entry. Review: JSON-RPC notifications
+  (no `id`) no longer get a reply (202 Accepted); nil-reader decode guard.
+- **Stream G** (G1–G2) shipped in [#286](https://github.com/caesium-cloud/caesium/pull/286)
+  (merge `31a7dce`): the **CLI** — `caesium incident` (list/get/approve/reject; no
+  `escalate` endpoint exists) and `caesium agentprofile` (list/get/apply against
+  `/v1/agentprofiles`, PATCH update), clean-stdout JSON. Review: `apply` only PATCHes
+  on an explicit `--id` so a copied profile document can't clobber an existing one
+  (Greptile P1).
+- **Stream U** (U1–U5) shipped in [#292](https://github.com/caesium-cloud/caesium/pull/292)
+  (merge `32d6cf5`): the **Console incidents surface** — filterable feed, incident
+  triage timeline (deep-linking the shipped Why/Log/Lineage/RunDiff/Replay views),
+  tier-3 approval cards, run/task incident ribbons + agent-activity, and fleet
+  analytics; gated on `agent_remediation_enabled`, live via the `/events` SSE stream.
+  Review: React Query cache-key/memoization fixes; harness:
+  `CAESIUM_AGENT_REMEDIATION_ENABLED` added to the `ui-e2e-auth` lane (justfile + CI).
+- **H-1** shipped in [#287](https://github.com/caesium-cloud/caesium/pull/287)
+  (merge `00b5825`): the deterministic **fake triage-agent image**
+  (`build/Dockerfile.triage-agent`, pinned `alpine:3.23`) and a **separate**
+  auth-enabled integration lane (`integration-test-agent` + a `needs: builder` CI
+  job) so agent approval flows run under real `api-key` auth without 401ing the
+  shared no-auth suite.
+
+Only **N-1** (docs — roadmap §3.5, design banner, schema reference, examples) remains.
 
 ### Stream Status
 
@@ -167,9 +201,9 @@ Streams F, G, U (+ H-1, N-1) remain for later waves.
 | C | Agent runtime — session supervisor (atom.Engine), triage bundle, scoped short-lived token, `/v1/agent/*` REST tool surface | P1 | **Shipped** (Wave 2, #284) |
 | D | Approval gates + incident REST reads + `ai_agent` dispatch channel | P1 | **Shipped** (Wave 2, #283) |
 | E | Declarative policy — jobdef `metadata.remediation` block + `AgentProfile` CRUD + offline/server lint | P1 | **Shipped** (Wave 2, #282) |
-| F | MCP surface — `/v1/agent/incidents/:id/mcp` JSON-RPC over the same service layer | P2 | **Shipped** (Wave 3, W3-δ) |
-| G | CLI — `caesium incident …` + `caesium agent profile …` | P2 | Not started |
-| U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | Not started |
+| F | MCP surface — `/v1/agent/incidents/:id/mcp` JSON-RPC over the same service layer | P2 | **Shipped** (Wave 3, #291) |
+| G | CLI — `caesium incident …` + `caesium agentprofile …` | P2 | **Shipped** (Wave 3, #286) |
+| U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | **Shipped** (Wave 3, #292) |
 | H-1 | Harness — deterministic fake agent image + integration server gate wiring | — | **Shipped** (W3-eta: fake image + auth lane) |
 | N-1 | Docs — roadmap §3.5 flip, design banner, schema reference (`remediation` block), examples, README | — | Not started |
 
