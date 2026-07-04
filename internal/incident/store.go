@@ -395,6 +395,89 @@ func (s *Store) CountActiveAgentSessionsForJob(ctx context.Context, jobID uuid.U
 	return n, err
 }
 
+// CapExceeded distinguishes which concurrent-session cap a reservation failed.
+type CapExceeded int
+
+const (
+	// CapNone means the reservation succeeded (no cap exceeded).
+	CapNone CapExceeded = iota
+	// CapGlobal means the global concurrent-session cap was already reached.
+	CapGlobal
+	// CapPerJob means the per-job concurrent-session cap was already reached.
+	CapPerJob
+)
+
+// ReserveAgentSession atomically reserves a slot for a new agent session AT THE
+// DATABASE, so the concurrent-session caps hold across processes and nodes — an
+// in-process mutex cannot serialize two supervisors on different nodes (or a
+// leader-failover split-brain window). It conditionally inserts the pending
+// session row in a SINGLE statement, guarded by both the global and per-job
+// active-session counts; the count and the insert therefore evaluate atomically
+// under SQLite/dqlite's serialized-writer semantics, so two concurrent
+// reservations cannot both observe "under cap" and both insert.
+//
+// The active-session predicate (state IN pending|running) matches
+// CountActiveAgentSessions / CountActiveAgentSessionsForJob EXACTLY, so the
+// reservation and the counters always agree on what "active" means.
+//
+// It returns which cap (if any) blocked the reservation. On CapNone the pending
+// row identified by session.ID exists and counts as active.
+func (s *Store) ReserveAgentSession(ctx context.Context, session *models.AgentSession, jobID uuid.UUID, globalCap, perJobCap int) (CapExceeded, error) {
+	pending := string(models.AgentSessionStatePending)
+	running := string(models.AgentSessionStateRunning)
+
+	var tokenID any
+	if session.TokenID != nil {
+		tokenID = *session.TokenID
+	}
+	var profileID any
+	if session.ProfileID != nil {
+		profileID = *session.ProfileID
+	}
+	var namespace any
+	if session.Namespace != nil {
+		namespace = *session.Namespace
+	}
+
+	// Single-statement conditional insert. SQLite/dqlite serializes writers, so
+	// the COUNT subqueries and the INSERT are atomic relative to any concurrent
+	// reservation on the same database, across processes.
+	const q = `
+INSERT INTO agent_sessions (id, namespace, incident_id, profile_id, engine, token_id, state, actions_used, tokens_used, created_at, updated_at)
+SELECT ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?
+WHERE (SELECT COUNT(*) FROM agent_sessions WHERE state IN (?, ?)) < ?
+  AND (
+    SELECT COUNT(*) FROM agent_sessions ss
+    JOIN incidents ii ON ii.id = ss.incident_id
+    WHERE ii.job_id = ? AND ss.state IN (?, ?)
+  ) < ?`
+
+	res := s.db.WithContext(ctx).Exec(q,
+		session.ID, namespace, session.IncidentID, profileID, string(session.Engine), tokenID, string(session.State), session.CreatedAt, session.UpdatedAt,
+		pending, running, globalCap,
+		jobID, pending, running, perJobCap,
+	)
+	if res.Error != nil {
+		return CapNone, res.Error
+	}
+	if res.RowsAffected == 1 {
+		return CapNone, nil
+	}
+
+	// The insert was refused by the guard. Diagnose which cap blocked it so the
+	// caller can return the right sentinel. This is post-hoc and purely
+	// informational — correctness (no overshoot) already came from the atomic
+	// insert above, not from these counts.
+	globalActive, err := s.CountActiveAgentSessions(ctx)
+	if err != nil {
+		return CapGlobal, nil //nolint:nilerr // best-effort diagnosis; reservation already failed
+	}
+	if globalActive >= int64(globalCap) {
+		return CapGlobal, nil
+	}
+	return CapPerJob, nil
+}
+
 // marshalAllowlist encodes a frozen job allowlist as JSON for persistence. An
 // empty list is stored as an empty JSON array so the column is unambiguously
 // "frozen, and empty" rather than "not yet computed" (NULL).

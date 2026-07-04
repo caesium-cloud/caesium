@@ -156,6 +156,42 @@ func TestSupervisorDispatchEnforcesGlobalCap(t *testing.T) {
 	require.ErrorIs(t, err, ErrGlobalSessionCap)
 }
 
+// TestSupervisorDispatchEnforcesPerJobCap proves the per-job cap is enforced by
+// the DB reservation (and diagnosed to the ErrJobSessionCap sentinel) even when
+// the global cap has headroom.
+func TestSupervisorDispatchEnforcesPerJobCap(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	ctx := context.Background()
+
+	tr := mkTrigger(t, db)
+	jobID := mkJob(t, db, tr, "vendor-x")
+	store := NewStore(db)
+	inc, _, err := store.OpenOrAppend(ctx, OpenParams{JobID: jobID, TaskName: "extract", Class: ClassUnknown})
+	require.NoError(t, err)
+
+	// One running session for this job's incident occupies the per-job slot.
+	now := time.Now().UTC()
+	require.NoError(t, db.Create(&models.AgentSession{
+		ID:         uuid.New(),
+		IncidentID: inc.ID,
+		State:      models.AgentSessionStateRunning,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}).Error)
+
+	profile := &models.AgentProfile{ID: uuid.New(), Name: "triage", Image: "x", Engine: models.AtomEngineDocker}
+	require.NoError(t, db.Create(profile).Error)
+
+	// Global cap has headroom (5); only the per-job cap (1) is binding.
+	sup := NewSupervisor(db, &fakeCreds{}, func(context.Context, models.AtomEngine) (atom.Engine, error) {
+		return &fakeEngine{result: atom.Success}, nil
+	}, SupervisorConfig{MaxConcurrentSessions: 5, PerJobConcurrentSessions: 1})
+
+	_, err = sup.Dispatch(ctx, inc, profile)
+	require.ErrorIs(t, err, ErrJobSessionCap)
+}
+
 func TestSupervisorRunTimeoutMarksTimedOut(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -215,9 +251,14 @@ func (e *blockingEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }
 
-// TestSupervisorDispatchCapRaceNeverOvershoots proves the cap-check → slot
-// reservation is atomic: N concurrent dispatches against a cap of 1 admit
-// exactly one session and reject the rest, and exactly one session row exists.
+// TestSupervisorDispatchCapRaceNeverOvershoots proves the cap holds ACROSS
+// SUPERVISOR INSTANCES — the cross-process property an in-process mutex cannot
+// provide. It constructs N separate Supervisor structs (each with its own
+// mutex and its own credential minter) that SHARE ONE DATABASE, then dispatches
+// them concurrently against a global cap of 1. Correctness must come from the
+// DB-atomic conditional reservation, not the mutex: exactly one is admitted,
+// N-1 get ErrGlobalSessionCap, exactly one session row exists, and exactly one
+// token is minted (no leaked live credentials).
 func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
@@ -232,33 +273,41 @@ func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 	profile := &models.AgentProfile{ID: uuid.New(), Name: "triage", Image: "x", Engine: models.AtomEngineDocker}
 	require.NoError(t, db.Create(profile).Error)
 
-	engine := &blockingEngine{release: make(chan struct{})}
-	sup := NewSupervisor(db, &fakeCreds{}, func(context.Context, models.AtomEngine) (atom.Engine, error) {
-		return engine, nil
-	}, SupervisorConfig{MaxConcurrentSessions: 1, PerJobConcurrentSessions: 1, SessionTimeout: time.Minute})
-
 	const n = 8
+	release := make(chan struct{})
+
+	// N distinct supervisors (distinct mutexes, distinct minters), one shared DB.
+	supers := make([]*Supervisor, n)
+	credsList := make([]*fakeCreds, n)
+	for i := 0; i < n; i++ {
+		credsList[i] = &fakeCreds{}
+		supers[i] = NewSupervisor(db, credsList[i], func(context.Context, models.AtomEngine) (atom.Engine, error) {
+			return &blockingEngine{release: release}, nil
+		}, SupervisorConfig{MaxConcurrentSessions: 1, PerJobConcurrentSessions: 1, SessionTimeout: time.Minute})
+	}
+
 	type outcome struct {
 		session *models.AgentSession
 		err     error
 	}
 	results := make(chan outcome, n)
 	for i := 0; i < n; i++ {
+		sup := supers[i]
 		go func() {
 			sess, err := sup.Dispatch(ctx, inc, profile)
 			results <- outcome{session: sess, err: err}
 		}()
 	}
 
-	// The winner blocks in Wait until released; the losers reject immediately.
-	// Collect the n-1 cap rejections first, then release the winner.
+	// The lone winner blocks in Wait until released; the losers reject at the DB
+	// reservation. Collect the n-1 cap rejections first, then release the winner.
 	capRejections := 0
 	for capRejections < n-1 {
 		r := <-results
 		require.ErrorIs(t, r.err, ErrGlobalSessionCap)
 		capRejections++
 	}
-	close(engine.release)
+	close(release)
 
 	winner := <-results
 	require.NoError(t, winner.err)
@@ -268,6 +317,13 @@ func TestSupervisorDispatchCapRaceNeverOvershoots(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&models.AgentSession{}).Count(&count).Error)
 	require.Equal(t, int64(1), count)
+
+	// Exactly one token was minted across all supervisors — no extra live creds.
+	totalMinted := 0
+	for _, c := range credsList {
+		totalMinted += len(c.minted)
+	}
+	require.Equal(t, 1, totalMinted)
 }
 
 // cancelEngine signals once it has ENTERED Wait — i.e. after the supervisor's

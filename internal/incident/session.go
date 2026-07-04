@@ -172,32 +172,65 @@ func (s *Supervisor) Run(ctx context.Context, inc *models.Incident, profile *mod
 	return s.execute(ctx, session, minted, inc, profile), nil
 }
 
-// reserveWithCaps performs the cap-check → slot-reservation critical section
-// under dispatchMu. The pending session row it creates counts toward
-// CountActiveAgentSessions, so once this returns (lock released) the next
-// dispatcher observes the reserved slot and is refused if that pushed it to the
-// cap. The lock is NOT held across the engine execution.
+// reserveWithCaps enforces the concurrent-session caps and reserves a slot. The
+// cap-check and the pending-row insert are atomic AT THE DATABASE (a single
+// conditional INSERT-SELECT-WHERE via Store.ReserveAgentSession), so the cap
+// holds across processes and nodes — an in-process mutex cannot serialize two
+// supervisors on different nodes, nor a leader-failover split-brain window.
+// dispatchMu is kept purely as a cheap intra-process fast path; correctness now
+// comes from the DB conditional write, not the mutex.
+//
+// The token is minted only AFTER the slot is reserved, so a cap rejection never
+// leaves a minted credential behind.
 func (s *Supervisor) reserveWithCaps(ctx context.Context, inc *models.Incident, profile *models.AgentProfile) (*models.AgentSession, *auth.CreateKeyResponse, error) {
 	s.dispatchMu.Lock()
 	defer s.dispatchMu.Unlock()
 
-	globalActive, err := s.store.CountActiveAgentSessions(ctx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if globalActive >= int64(s.cfg.MaxConcurrentSessions) {
-		return nil, nil, ErrGlobalSessionCap
+	engineType := profile.Engine
+	if engineType == "" {
+		engineType = models.AtomEngineDocker
 	}
 
-	jobActive, err := s.store.CountActiveAgentSessionsForJob(ctx, inc.JobID)
+	now := time.Now().UTC()
+	session := &models.AgentSession{
+		ID:         uuid.New(),
+		Namespace:  inc.Namespace,
+		IncidentID: inc.ID,
+		ProfileID:  &profile.ID,
+		Engine:     engineType,
+		State:      models.AgentSessionStatePending,
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+
+	capHit, err := s.store.ReserveAgentSession(ctx, session, inc.JobID, s.cfg.MaxConcurrentSessions, s.cfg.PerJobConcurrentSessions)
 	if err != nil {
 		return nil, nil, err
 	}
-	if jobActive >= int64(s.cfg.PerJobConcurrentSessions) {
+	switch capHit {
+	case CapGlobal:
+		return nil, nil, ErrGlobalSessionCap
+	case CapPerJob:
 		return nil, nil, ErrJobSessionCap
 	}
 
-	return s.reserve(ctx, inc, profile)
+	// Slot reserved (the pending row exists and counts as active). Now mint the
+	// scoped credential and attach it. If minting fails, finalize the reserved
+	// session as failed so the slot is released rather than stuck pending.
+	minted, err := s.creds.MintAgentSessionKey(inc.ID, unmarshalAllowlist(inc.AllowedJobs), s.cfg.SessionTimeout+time.Minute)
+	if err != nil {
+		s.finalize(session, models.AgentSessionStateFailed, "", nil)
+		return nil, nil, fmt.Errorf("incident: mint agent session key: %w", err)
+	}
+	if minted == nil || minted.Key == nil {
+		s.finalize(session, models.AgentSessionStateFailed, "", nil)
+		return nil, nil, errors.New("incident: mint agent session key returned no key")
+	}
+	tokenID := minted.Key.ID
+	session.TokenID = &tokenID
+	s.persist(ctx, session, map[string]any{"token_id": tokenID, "updated_at": time.Now().UTC()})
+
+	return session, minted, nil
 }
 
 // reserve mints the scoped credential and creates the pending AgentSession row.
