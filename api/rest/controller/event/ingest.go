@@ -13,6 +13,7 @@ import (
 
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	eventsvc "github.com/caesium-cloud/caesium/api/rest/service/event"
+	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	triggerevent "github.com/caesium-cloud/caesium/internal/trigger/event"
@@ -38,6 +39,11 @@ type ingestResponse struct {
 
 var routeEvent = func(ctx context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
 	return triggerevent.DefaultRouter().Route(ctx, evt)
+}
+
+var observeEventArrival = func(ctx context.Context, evt *models.IngestedEvent) error {
+	_, err := freshnesspkg.DefaultArrivalObserver().Observe(ctx, evt)
+	return err
 }
 
 var eventIngestRateLimiters = authmw.NewIPRateLimiters(15*time.Minute, eventIngestRateLimitConfig)
@@ -89,6 +95,9 @@ func (ctrl *Controller) Ingest(c *echo.Context) error {
 	}
 	if result == nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error")
+	}
+	if err := observeEventArrival(c.Request().Context(), evt); err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 	metrics.EventsIngestedTotal.WithLabelValues("ingest").Inc()
 

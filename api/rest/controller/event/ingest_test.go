@@ -21,6 +21,7 @@ func TestIngestRoutesEventWithAPIKey(t *testing.T) {
 	require.NoError(t, env.Process())
 
 	original := routeEvent
+	originalArrival := observeEventArrival
 	routeEvent = func(_ context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
 		require.Equal(t, "order.created", evt.Type)
 		require.Equal(t, "integration", evt.Source)
@@ -34,7 +35,11 @@ func TestIngestRoutesEventWithAPIKey(t *testing.T) {
 			},
 		}, nil
 	}
-	t.Cleanup(func() { routeEvent = original })
+	observeEventArrival = func(context.Context, *models.IngestedEvent) error { return nil }
+	t.Cleanup(func() {
+		routeEvent = original
+		observeEventArrival = originalArrival
+	})
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/events", strings.NewReader(`{
 		"type":"order.created",

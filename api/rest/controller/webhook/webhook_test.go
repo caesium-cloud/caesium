@@ -47,11 +47,14 @@ func (s stubJobLister) List(*jsvc.ListRequest) (models.Jobs, error) {
 func stubWebhookRouter(t *testing.T, fn func(context.Context, *models.IngestedEvent) (*triggerevent.RouteResult, error)) {
 	t.Helper()
 	original := routeWebhookEvent
+	originalArrival := observeWebhookArrival
 	originalRecorder := recordWebhookReceipt
 	routeWebhookEvent = fn
+	observeWebhookArrival = func(context.Context, *models.IngestedEvent) error { return nil }
 	recordWebhookReceipt = func(context.Context, *models.WebhookEvent) error { return nil }
 	t.Cleanup(func() {
 		routeWebhookEvent = original
+		observeWebhookArrival = originalArrival
 		recordWebhookReceipt = originalRecorder
 	})
 }

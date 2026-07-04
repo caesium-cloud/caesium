@@ -340,7 +340,7 @@ router, same `_trigger_depth` as the shipped event triggers; freshness adds the
 No built-in S3/SFTP pollers (design Non-goal) — arrival is event push, a
 `/v1/hooks/*` webhook, or a sensor container.
 
-- [ ] D1. Bridge matched arrival events into a dataset advance: when an
+- [x] D1. Bridge matched arrival events into a dataset advance: when an
       ingested event (`POST /v1/events` keyed by `CAESIUM_EVENT_INGEST_API_KEY`,
       or a `/v1/hooks/*` webhook) matches a source's `arrival.event`
       pattern/filter, JSONPath-extract `arrival.watermark` and call
@@ -357,6 +357,12 @@ No built-in S3/SFTP pollers (design Non-goal) — arrival is event push, a
       Test: `caesium event push` matching a source binding advances the watermark
       and (once C3 is in) a derived run starts; an identical second push derives
       nothing.
+      Done (W3-β): added an arrival observer over source declarations, wired it
+      after both `/v1/events` and `/v1/hooks/*` event routing, reused the shipped
+      matcher plus the event JSONPath resolver for watermarks, and added an
+      integration scenario that proves duplicate event payloads do not move
+      `advanced_at`. The observer reads declarations per event rather than
+      caching, so apply/reload hooks do not need a new Stream-D edit.
 
 ### Stream E — Dataset REST + CLI operator surface (P0)
 
