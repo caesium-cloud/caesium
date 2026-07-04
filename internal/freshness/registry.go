@@ -161,6 +161,17 @@ func (r *Registry) ListAll(ctx context.Context) ([]models.DatasetDeclaration, er
 	return out, nil
 }
 
+// ListArrivalSources returns source declarations that carry an arrival binding.
+func (r *Registry) ListArrivalSources(ctx context.Context) ([]models.DatasetDeclaration, error) {
+	var out []models.DatasetDeclaration
+	if err := r.db.WithContext(ctx).
+		Where("direction = ? AND arrival_binding IS NOT NULL", models.DatasetDirectionSource).
+		Find(&out).Error; err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ListByJob returns the declarations owned by a single job.
 func (r *Registry) ListByJob(ctx context.Context, jobID uuid.UUID) ([]models.DatasetDeclaration, error) {
 	var out []models.DatasetDeclaration

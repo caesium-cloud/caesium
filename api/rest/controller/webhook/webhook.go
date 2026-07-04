@@ -14,6 +14,7 @@ import (
 	triggersvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	eventstore "github.com/caesium-cloud/caesium/internal/event"
+	freshnesspkg "github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -54,6 +55,11 @@ type triggerFailure struct {
 
 var routeWebhookEvent = func(ctx context.Context, evt *models.IngestedEvent) (*triggerevent.RouteResult, error) {
 	return triggerevent.DefaultRouter().Route(ctx, evt)
+}
+
+var observeWebhookArrival = func(ctx context.Context, evt *models.IngestedEvent) error {
+	_, err := freshnesspkg.DefaultArrivalObserver().Observe(ctx, evt)
+	return err
 }
 
 var recordWebhookReceipt = func(ctx context.Context, receipt *models.WebhookEvent) error {
@@ -143,6 +149,9 @@ func ReceiveWithServices(c *echo.Context, trigSvc TriggerLister, jobSvc JobListe
 		metrics.EventBridgeFailuresTotal.WithLabelValues("webhook").Inc()
 	default:
 		metrics.EventsIngestedTotal.WithLabelValues("webhook").Inc()
+		if err := observeWebhookArrival(c.Request().Context(), ingested); err != nil {
+			log.Warn("webhook arrival observer failed", "path", path, "event_id", ingested.ID, "error", err)
+		}
 	}
 
 	httpRunsStarted := 0
