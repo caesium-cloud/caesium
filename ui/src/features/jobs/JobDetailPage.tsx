@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange, History, List, ListOrdered, Pause, Play, Settings2, FileText, Zap } from "lucide-react";
+import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, Pause, Play, Settings2, ShieldCheck, Zap } from "lucide-react";
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
@@ -10,6 +10,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
+import { INCIDENT_EVENT_TYPES, formatIncidentClass, incidentAge, incidentSummary, isResolvedIncident } from "@/features/incidents/incident-utils";
 import {
   Dialog,
   DialogContent,
@@ -25,7 +27,7 @@ import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
+import { api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
 
@@ -98,6 +100,19 @@ export function JobDetailPage() {
     queryKey: ["trigger", job?.trigger_id],
     queryFn: () => (job?.trigger_id ? api.getTrigger(job.trigger_id) : Promise.resolve(null)),
     enabled: !!job?.trigger_id,
+  });
+
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
+  });
+
+  const { data: jobIncidentList } = useQuery({
+    queryKey: ["incidents", "job", jobId],
+    queryFn: () => api.getIncidents({ job_id: jobId, limit: 200 }),
+    enabled: features?.agent_remediation_enabled === true,
+    refetchInterval: 30_000,
   });
 
   const isLoading = isLoadingJob || isLoadingRuns || isLoadingDAG || isLoadingAtoms || isLoadingTasks || isLoadingTrigger;
@@ -288,6 +303,18 @@ export function JobDetailPage() {
     };
   }, [featuredRunId, jobId, queryClient]);
 
+  useEffect(() => {
+    if (features?.agent_remediation_enabled !== true) return;
+    const onIncidentEvent = (e: CaesiumEvent) => {
+      if (e.job_id && e.job_id !== jobId) return;
+      queryClient.invalidateQueries({ queryKey: ["incidents", "job", jobId] });
+    };
+    INCIDENT_EVENT_TYPES.forEach((type) => events.subscribe(type, onIncidentEvent));
+    return () => {
+      INCIDENT_EVENT_TYPES.forEach((type) => events.unsubscribe(type, onIncidentEvent));
+    };
+  }, [features?.agent_remediation_enabled, jobId, queryClient]);
+
   const activeRun = featuredRun?.status === "running" ? featuredRun : activeRunSummary;
   const featuredRunTasks = useMemo(() => buildTaskRunMap(featuredRun?.tasks), [featuredRun?.tasks]);
   const taskMetadata = useMemo(() => buildTaskStatusMap(featuredRun?.tasks), [featuredRun?.tasks]);
@@ -308,6 +335,11 @@ export function JobDetailPage() {
 
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? featuredRunTasks[selectedTaskId] : undefined;
+  const jobIncidents = jobIncidentList?.incidents ?? [];
+  const activeIncidents = jobIncidents.filter((incident) => !isResolvedIncident(incident));
+  const selectedTaskIncidents = selectedTaskId
+    ? jobIncidents.filter((incident) => incidentMatchesTask(incident, selectedTaskId, selectedTask?.name))
+    : [];
 
   return (
     <div className="space-y-4">
@@ -393,6 +425,10 @@ export function JobDetailPage() {
 
       <RunQueuePanel rows={queueRows} isLoading={isLoadingQueue} />
 
+      {features?.agent_remediation_enabled === true ? (
+        <RemediationOverview job={job} incidents={jobIncidents} activeIncidents={activeIncidents} />
+      ) : null}
+
       {/* DAG — fills to bottom of viewport */}
       <div
         ref={dagContainerRef}
@@ -463,6 +499,7 @@ export function JobDetailPage() {
             taskType={dag?.nodes?.find(n => n.id === selectedTaskId)?.type}
             jobId={jobId}
             runId={featuredRun.id}
+            incidents={selectedTaskIncidents}
             onClose={() => handleNodeSelect(null)}
           />
         ) : null}
@@ -577,6 +614,86 @@ function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: 
           Loading queued runs...
         </div>
       )}
+    </div>
+  );
+}
+
+function RemediationOverview({
+  job,
+  incidents,
+  activeIncidents,
+}: {
+  job: Job;
+  incidents: Incident[];
+  activeIncidents: Incident[];
+}) {
+  const policyFields = remediationPolicyFields(job, incidents, activeIncidents);
+  const recentIncidents = [...incidents]
+    .sort((a, b) => new Date(b.opened_at).getTime() - new Date(a.opened_at).getTime())
+    .slice(0, 5);
+
+  return (
+    <div className="grid gap-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+      <div className="space-y-3" data-testid="job-incident-history">
+        <IncidentRibbon
+          incidents={activeIncidents}
+          label="Active job incident"
+          testId="job-incident-ribbon"
+        />
+        <Card className="border-graphite/40 bg-midnight/30">
+          <CardHeader className="border-b border-graphite/40 pb-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <FileWarning className="h-4 w-4 text-warning" />
+              Incident history
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-0">
+            {recentIncidents.length > 0 ? (
+              <div className="divide-y divide-border/40">
+                {recentIncidents.map((incident) => (
+                  <Link
+                    key={incident.id}
+                    to="/incidents/$incidentId"
+                    params={{ incidentId: incident.id }}
+                    className="grid gap-3 px-4 py-3 text-sm transition-colors hover:bg-graphite/10 md:grid-cols-[140px_120px_minmax(0,1fr)] md:items-center"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge status={incident.status} size="sm" />
+                      <span className="font-mono text-[10px] text-text-4">{incidentAge(incident)}</span>
+                    </div>
+                    <Badge variant="outline" className="w-fit border-warning/30 bg-warning/10 text-[10px] text-warning">
+                      {formatIncidentClass(incident.class)}
+                    </Badge>
+                    <div className="min-w-0">
+                      <div className="truncate text-xs text-text-2">{incidentSummary(incident)}</div>
+                      <div className="mt-0.5 font-mono text-[10px] text-text-4">#{shortId(incident.id)}</div>
+                    </div>
+                  </Link>
+                ))}
+              </div>
+            ) : (
+              <div className="p-4 text-sm text-text-3">No remediation incidents recorded for this job.</div>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
+      <Card className="h-fit border-cyan-glow/25 bg-cyan-glow/5" data-testid="job-remediation-policy">
+        <CardHeader className="border-b border-cyan-glow/15 pb-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <ShieldCheck className="h-4 w-4 text-cyan-glow" />
+            Remediation policy
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-3 p-4">
+          {policyFields.map(([key, value]) => (
+            <div key={key}>
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-text-3">{key}</div>
+              <div className="mt-1 break-words font-mono text-xs text-text-1">{value}</div>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -758,6 +875,33 @@ function buildTaskRunMap(tasks?: TaskRun[]) {
     map[task.task_id] = task;
   });
   return map;
+}
+
+function remediationPolicyFields(
+  job: Job,
+  incidents: Incident[],
+  activeIncidents: Incident[],
+): Array<[string, string]> {
+  const fields: Array<[string, string]> = [
+    ["feature", "enabled"],
+    ["incidents", `${activeIncidents.length} active / ${incidents.length} total`],
+    ["observed classes", formatObservedClasses(incidents)],
+  ];
+  Object.entries({ ...(job.labels ?? {}), ...(job.annotations ?? {}) }).forEach(([key, value]) => {
+    if (key.toLowerCase().includes("remediation")) {
+      fields.push([key, String(value)]);
+    }
+  });
+  return fields;
+}
+
+function formatObservedClasses(incidents: Incident[]): string {
+  const classes = [...new Set(incidents.map((incident) => formatIncidentClass(incident.class)))];
+  return classes.length > 0 ? classes.join(", ") : "none observed";
+}
+
+function incidentMatchesTask(incident: Incident, taskId: string, taskName?: string): boolean {
+  return incident.task_id === taskId || incident.task_name === taskId || Boolean(taskName && incident.task_name === taskName);
 }
 
 function renderRunStatus(status: string) {

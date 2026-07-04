@@ -2,6 +2,8 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { AppShell } from "./components/layout/AppShell";
 import { AtomsPage } from "./features/atoms/AtomsPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
+import { IncidentDetailPage } from "./features/incidents/IncidentDetailPage";
+import { IncidentsPage } from "./features/incidents/IncidentsPage";
 import { LogConsolePage } from "./features/logs/LogConsolePage";
 import { JobDefsPage } from "./features/jobdefs/JobDefsPage";
 import { BlameRoutePage } from "./features/jobs/BlameView";
@@ -13,6 +15,7 @@ import { RunDiffRoutePage } from "./features/jobs/RunDiffView";
 import { StatsPage } from "./features/stats/StatsPage";
 import { SystemPage } from "./features/system/SystemPage";
 import { TriggersPage } from "./features/triggers/TriggersPage";
+import { api } from "./lib/api";
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -72,6 +75,44 @@ const lineageRoute = createRoute({
   component: LineageRoutePage,
 });
 
+async function requireAgentRemediationEnabled() {
+  const features = await api.getSystemFeatures();
+  if (!features.agent_remediation_enabled) {
+    throw redirect({ to: "/jobs" });
+  }
+}
+
+const incidentsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "incidents",
+  validateSearch: (search: Record<string, unknown>) => {
+    const out: {
+      status?: string;
+      class?: string;
+      job_id?: string;
+      needs_approval?: boolean;
+    } = {};
+    if (typeof search.status === "string") out.status = search.status;
+    if (typeof search.class === "string") out.class = search.class;
+    if (typeof search.job_id === "string") out.job_id = search.job_id;
+    if (search.needs_approval === true || search.needs_approval === "true") {
+      out.needs_approval = true;
+    } else if (search.needs_approval === false || search.needs_approval === "false") {
+      out.needs_approval = false;
+    }
+    return out;
+  },
+  loader: requireAgentRemediationEnabled,
+  component: IncidentsPage,
+});
+
+const incidentDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "incidents/$incidentId",
+  loader: requireAgentRemediationEnabled,
+  component: IncidentDetailPage,
+});
+
 const statsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "stats",
@@ -128,6 +169,8 @@ const routeTree = rootRoute.addChildren([
   runDiffRoute,
   runDetailRoute,
   lineageRoute,
+  incidentsRoute,
+  incidentDetailRoute,
   statsRoute,
   triggersRoute,
   atomsRoute,

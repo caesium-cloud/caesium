@@ -528,7 +528,7 @@ existing job/run surfaces. Live updates ride the existing SSE `/events` stream
 (the new event types from D2). Every claim in the timeline is one click from
 primary evidence — nothing is prose-only.
 
-- [ ] U1. Add the Incidents page (`/incidents`, nav-level): filterable feed
+- [x] U1. Add the Incidents page (`/incidents`, nav-level): filterable feed
       (status, class, job, needs-approval), each row showing job alias, failing
       task, class badge, status, age, and a one-line agent summary; open-incident +
       awaiting-approval counts as a top-nav badge. Add the route + nav entry + an
@@ -537,7 +537,10 @@ primary evidence — nothing is prose-only.
       `ui/src/router.tsx`, `ui/src/components/layout/Sidebar.tsx`,
       `ui/src/lib/api.ts`.
       Depends on: D2.
-- [ ] U2. Add the incident-detail triage timeline (the centerpiece): a vertical
+      Note: W3-ζ added the feature-gated `/incidents` board, filters, job-alias
+      hydration, active/pending nav badge, incident API DTOs/methods, and SSE
+      invalidation.
+- [x] U2. Add the incident-detail triage timeline (the centerpiece): a vertical
       timeline interleaving the triggering failure, classification, each agent
       observation (notes deep-linking to the existing `TaskWhyView`, `LogViewer`,
       `LineageGraph`, `RunDiffView`, `ReplayDialog` components), each action
@@ -545,7 +548,10 @@ primary evidence — nothing is prose-only.
       Files: new `ui/src/features/incidents/IncidentDetailPage.tsx`,
       `ui/src/router.tsx`.
       Depends on: U1.
-- [ ] U3. Add approval cards / inbox: tier-3 proposals render as decision cards —
+      Note: W3-ζ added the feature-gated incident detail route, evidence tabs
+      wired to the existing job evidence components, session/action/approval
+      timeline entries, and resolution rendering.
+- [x] U3. Add approval cards / inbox: tier-3 proposals render as decision cards —
       `apply_jobdef_patch` as an inline YAML diff (reuse jobdefs diff rendering),
       `rerun_with_params` with the exact overrides + the recompute-cost disclosure,
       `skip_task` with the DAG highlighting what becomes reachable/skipped —
@@ -554,7 +560,10 @@ primary evidence — nothing is prose-only.
       Files: new `ui/src/features/incidents/ApprovalCard.tsx`,
       `ui/src/features/incidents/IncidentDetailPage.tsx`, `ui/src/lib/api.ts`.
       Depends on: U2 + D1.
-- [ ] U4. Add the run/task incident ribbons and agent-activity view: a
+      Note: W3-ζ added reusable approval cards, type-specific tier-3 previews,
+      approve/reject mutations with reason, and pending approval inboxes on the
+      board and detail page.
+- [x] U4. Add the run/task incident ribbons and agent-activity view: a
       `RunDetailPage`/`TaskDetailPanel` incident ribbon (status, timeline link,
       "retry by incident #42" badges on agent-initiated runs); a `JobDetailPage`
       incident history + read-only remediation-policy summary; and a live
@@ -565,7 +574,11 @@ primary evidence — nothing is prose-only.
       `ui/src/features/jobs/JobDetailPage.tsx`, new
       `ui/src/features/incidents/AgentActivity.tsx`.
       Depends on: U2.
-- [ ] U5. Add the fleet-analytics additions to the stats page: incidents by class
+      Note: W3-ζ added run/task/job incident ribbons, task-panel incident
+      context, job incident history, a read-only remediation-policy panel, and
+      an agent-activity panel with persisted session logs plus a disabled
+      take-over affordance because no take-over REST endpoint ships in D2.
+- [x] U5. Add the fleet-analytics additions to the stats page: incidents by class
       over time, autonomous-resolution rate, MTTR with/without agent, pages
       avoided, top recurring incidents, and token/cost per profile if the image
       reports usage — driven by the D2 reads and the
@@ -574,6 +587,9 @@ primary evidence — nothing is prose-only.
       Files: `ui/src/features/stats/StatsPage.tsx`, new
       `ui/src/features/stats/components/IncidentAnalytics.tsx`, `ui/src/lib/api.ts`.
       Depends on: U1.
+      Note: W3-ζ added feature-gated incident analytics on the stats page using
+      incident list/detail reads for class trends, autonomous rate, MTTR splits,
+      pages avoided, recurring keys, and profile token/cost summaries.
 
 ## Harness Strengthening
 

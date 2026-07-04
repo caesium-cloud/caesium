@@ -14,8 +14,10 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
+import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
+import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
+import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
@@ -70,6 +72,19 @@ export function RunDetailPage() {
       });
       return map;
     },
+  });
+
+  const { data: features } = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
+  });
+
+  const { data: runIncidentList } = useQuery({
+    queryKey: ["incidents", "run", jobId, runId],
+    queryFn: () => api.getIncidents({ job_id: jobId, limit: 200 }),
+    enabled: features?.agent_remediation_enabled === true,
+    refetchInterval: 30_000,
   });
 
   const isLoading = isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks;
@@ -169,6 +184,17 @@ export function RunDetailPage() {
     };
   }, [jobId, runId, queryClient]);
 
+  useEffect(() => {
+    if (features?.agent_remediation_enabled !== true) return;
+    const onIncidentEvent = () => {
+      queryClient.invalidateQueries({ queryKey: ["incidents", "run", jobId, runId] });
+    };
+    INCIDENT_EVENT_TYPES.forEach((type) => events.subscribe(type, onIncidentEvent));
+    return () => {
+      INCIDENT_EVENT_TYPES.forEach((type) => events.unsubscribe(type, onIncidentEvent));
+    };
+  }, [features?.agent_remediation_enabled, jobId, queryClient, runId]);
+
   const taskMetadata = useMemo(() => {
     const metadata: Record<string, { status: string; started_at?: string; completed_at?: string; error?: string; rate_limit_retry_after?: string }> = {};
     run?.tasks?.forEach((task) => {
@@ -211,6 +237,14 @@ export function RunDetailPage() {
       .slice(0, COMPARE_RUN_PICKER_LIMIT);
   }, [jobRuns, runId]);
 
+  const runIncidents = useMemo(
+    () =>
+      (runIncidentList?.incidents ?? []).filter(
+        (incident) => incident.run_id === runId || incident.remediation_target_run_id === runId,
+      ),
+    [runIncidentList?.incidents, runId],
+  );
+
   const triggerMutation = useMutation({
     mutationFn: () => api.triggerJob(jobId),
     onSuccess: (newRun) => {
@@ -236,6 +270,9 @@ export function RunDetailPage() {
 
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? runTasks[selectedTaskId] : undefined;
+  const selectedTaskIncidents = selectedTaskId
+    ? runIncidents.filter((incident) => incidentMatchesTask(incident, selectedTaskId, selectedTask?.name))
+    : [];
   const isLive = run.status === "running";
   const canLaunchReplay = principal.role === null || principal.canRunner;
   const replayGateReason = principal.role !== null && !principal.canRunner ? "Requires runner role" : undefined;
@@ -401,6 +438,12 @@ export function RunDetailPage() {
         <RunCacheSummary run={run} />
       </div>
 
+      <IncidentRibbon
+        incidents={runIncidents}
+        label="Run incident"
+        testId="run-incident-ribbon"
+      />
+
       <ReceiptPanel jobId={jobId} runId={runId} />
 
       {/* Gantt timeline */}
@@ -482,12 +525,17 @@ export function RunDetailPage() {
             taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
             jobId={jobId}
             runId={runId}
+            incidents={selectedTaskIncidents}
             onClose={() => setSelectedTaskId(null)}
           />
         ) : null}
       </div>
     </div>
   );
+}
+
+function incidentMatchesTask(incident: Incident, taskId: string, taskName?: string): boolean {
+  return incident.task_id === taskId || incident.task_name === taskId || Boolean(taskName && incident.task_name === taskName);
 }
 
 function runSortTimestamp(run: JobRun): number {
