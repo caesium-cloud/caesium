@@ -39,8 +39,9 @@ var successTypes = []event.Type{
 
 // Subscriber is the leader-gated incident manager. It consumes failure events,
 // classifies each, and opens/correlates an incident; it consumes success events
-// to close incidents as remediated when a later run succeeds. It never invokes
-// an LLM or takes an autonomous action.
+// to close incidents as remediated when a later run succeeds. When a remediator
+// is wired (SetRemediator, behind the master gate) it also runs the Phase-0
+// deterministic rules on incident open; it never invokes an LLM.
 type Subscriber struct {
 	bus         event.Bus
 	db          *gorm.DB
@@ -48,6 +49,11 @@ type Subscriber struct {
 	classifier  *Classifier
 	leaderCheck LeaderCheck
 	cooldown    time.Duration
+	// executor + rules drive the Phase-0 deterministic remediation on incident
+	// open. Both are nil unless SetRemediator is called, so default-off
+	// deployments and tests take no autonomous action.
+	executor *Executor
+	rules    *Rules
 }
 
 // NewSubscriber constructs an incident subscriber.
@@ -60,6 +66,17 @@ func NewSubscriber(bus event.Bus, db *gorm.DB, leaderCheck LeaderCheck, cooldown
 		leaderCheck: leaderCheck,
 		cooldown:    cooldown,
 	}
+}
+
+// SetRemediator wires the deterministic-rule executor and rule table so that
+// opening an incident whose class maps to a deterministic rule
+// (auto_retry_backoff / snooze_until_cron) runs that rule as an actor=policy
+// action — the live Phase-0 autonomous path. Only invoked behind the master gate
+// (CAESIUM_AGENT_REMEDIATION_ENABLED) from cmd/start. A subscriber without a
+// remediator opens and classifies incidents but takes no autonomous action.
+func (s *Subscriber) SetRemediator(executor *Executor, rules *Rules) {
+	s.executor = executor
+	s.rules = rules
 }
 
 // Start subscribes to the failure and success event types and processes them
@@ -222,6 +239,19 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		"outcome", outcome,
 		"occurrences", inc.OccurrenceCount,
 	)
+
+	// Phase-0 deterministic remediation: only on a freshly OPENED incident (not on
+	// an appended recurrence, which would double-fire the rule), run the class's
+	// deterministic rule as an actor=policy action if one matches and a remediator
+	// is wired. Firing only on open keeps the loop bounded: a retried run that
+	// fails again appends an occurrence and does not re-fire.
+	if outcome == OutcomeOpened && s.executor != nil && s.rules != nil {
+		if _, matched, rerr := s.executor.ApplyDeterministicRule(ctx, inc, s.rules); rerr != nil {
+			log.Warn("incident: deterministic rule failed", "incident_id", inc.ID, "class", class, "error", rerr)
+		} else if matched {
+			log.Info("incident: deterministic rule applied", "incident_id", inc.ID, "class", class)
+		}
+	}
 }
 
 // handleSuccess closes open incidents whose job/task later ran green — the

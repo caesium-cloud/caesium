@@ -513,6 +513,19 @@ var (
 		},
 		[]string{"class"},
 	)
+
+	// AgentActionsTotal counts remediation actions recorded by the incident action
+	// executor, by action type, tier, and actor (policy|agent|human). The type
+	// label is bounded by the fixed typed-action catalog, tier by {0,1,2,3}, and
+	// actor by the fixed actor set, so cardinality is bounded (agent-in-the-loop
+	// remediation, Stream B).
+	AgentActionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_agent_actions_total",
+			Help: "Total remediation actions recorded by the incident action executor, by action type, tier, and actor.",
+		},
+		[]string{"type", "tier", "actor"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -571,6 +584,7 @@ func Register() {
 			CompleteRetryableTotal,
 			IncidentsTotal,
 			IncidentResolutionSeconds,
+			AgentActionsTotal,
 		)
 	})
 }
