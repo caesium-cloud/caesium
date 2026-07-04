@@ -177,7 +177,45 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 	return fc
 }
 
+// runHasFailedTask reports whether the run has at least one task_run in the
+// terminal failed state. Task runs finalize to their terminal state BEFORE the
+// run itself finalizes, so a failed task is already visible in task_runs when
+// the run_failed event is processed. Keying on the DB task_runs status (not the
+// incidents table) avoids racing the concurrent task-attributed incident open.
+func (s *Subscriber) runHasFailedTask(ctx context.Context, runID uuid.UUID) bool {
+	var n int64
+	if err := s.db.WithContext(ctx).
+		Model(&models.TaskRun{}).
+		// "failed" is the terminal task_run status the run store writes on task
+		// failure (run.TaskStatusFailed); referenced as a literal here to avoid an
+		// internal/run → internal/incident import cycle.
+		Where("job_run_id = ? AND status = ?", runID, "failed").
+		Count(&n).Error; err != nil {
+		log.Warn("incident: could not check for failed task runs", "run_id", runID, "error", err)
+		return false
+	}
+	return n > 0
+}
+
 func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
+	// A failing run publishes BOTH task_failed (carrying the failing TaskID) and
+	// run_failed (no TaskID). Both route here, but taskName only resolves for the
+	// task-bearing event, so they produce two distinct dedupe keys
+	// (job|task|class vs job||class) and open two incidents for one failure —
+	// double-counting the failure as two remediation-dispatch candidates and
+	// showing a phantom "task unknown" incident. Suppress the redundant run-level
+	// twin: when a run_failed carries no task attribution and the run already has
+	// a failed task_run, the task_failed event already opened the task-attributed
+	// incident. Genuinely run-level failures with no failed task (infra/setup
+	// errors), and run_timed_out / sla_missed, are preserved and still open a
+	// run-level incident.
+	if evt.Type == event.TypeRunFailed && evt.TaskID == uuid.Nil && evt.RunID != uuid.Nil {
+		if s.runHasFailedTask(ctx, evt.RunID) {
+			log.Debug("incident: suppressing redundant run-level failure; run has a failed task", "run_id", evt.RunID)
+			return
+		}
+	}
+
 	fc := s.resolveContext(ctx, evt)
 	if fc.jobID == uuid.Nil {
 		log.Warn("incident: could not resolve job for failure event", "type", evt.Type, "run_id", evt.RunID)
