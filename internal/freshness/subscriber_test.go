@@ -18,6 +18,15 @@ import (
 // ##caesium::output, and the job run row (with optional backfill).
 func seedProducingRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output map[string]string, backfill *uuid.UUID, watermarkKey string) {
 	t.Helper()
+	outBlob, _ := json.Marshal(output)
+	seedProducingRunRaw(t, db, jobID, runID, outBlob, backfill, watermarkKey)
+}
+
+// seedProducingRunRaw is seedProducingRun with a raw ##caesium::output blob, so
+// tests can seed non-scalar JSON values (null, object, array) that a
+// map[string]string can't express.
+func seedProducingRunRaw(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, rawOutput []byte, backfill *uuid.UUID, watermarkKey string) {
+	t.Helper()
 	taskID := uuid.New()
 	now := t0.Add(time.Hour)
 
@@ -30,11 +39,10 @@ func seedProducingRun(t *testing.T, db *gorm.DB, jobID, runID uuid.UUID, output 
 
 	must(db.Create(&models.Task{ID: taskID, JobID: jobID, AtomID: uuid.New(), Name: "extract"}).Error)
 
-	outBlob, _ := json.Marshal(output)
 	must(db.Create(&models.TaskRun{
 		ID: uuid.New(), JobRunID: runID, TaskID: taskID, AtomID: uuid.New(),
 		Engine: "docker", Image: "etl:1.4", Command: "run", Status: taskRunTerminalSucceeded,
-		CacheHit: false, Output: datatypes.JSON(outBlob), CreatedAt: now, UpdatedAt: now,
+		CacheHit: false, Output: datatypes.JSON(rawOutput), CreatedAt: now, UpdatedAt: now,
 	}).Error)
 
 	must(db.Create(&models.JobRun{
@@ -183,5 +191,55 @@ func TestDecodeOutputPreservesLargeInts(t *testing.T) {
 	}
 	if out["flag"] != "true" {
 		t.Fatalf("bool value = %q, want true", out["flag"])
+	}
+}
+
+// TestDecodeOutputDropsNonScalar proves decodeOutput drops non-scalar JSON
+// values (null, object, array): its type switch handles only string / number /
+// bool, so any other JSON type matches no case and the key is omitted entirely
+// (never coerced to a string like "<nil>"). A sibling scalar key still survives.
+func TestDecodeOutputDropsNonScalar(t *testing.T) {
+	raw := datatypes.JSON([]byte(`{"nul":null,"obj":{"x":1},"arr":[1,2],"ok":"v"}`))
+	out := decodeOutput(raw)
+	for _, k := range []string{"nul", "obj", "arr"} {
+		if v, present := out[k]; present {
+			t.Fatalf("non-scalar key %q should be dropped, got %q", k, v)
+		}
+	}
+	if out["ok"] != "v" {
+		t.Fatalf("scalar sibling = %q, want v", out["ok"])
+	}
+}
+
+// TestCapturerNonScalarDeclaredWatermarkSkips proves that when a producing step
+// emits its DECLARED watermark key as a non-scalar JSON value (null, object, or
+// array), the capture leaves dataset state UNTOUCHED — identical to an omitted
+// key. decodeOutput drops the key, so the guard sees it as not-emitted: no
+// Advance, no verified_at refresh, no "<nil>" opaque watermark ever stored.
+func TestCapturerNonScalarDeclaredWatermarkSkips(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"null value", `{"max_order_ts": null}`},
+		{"object value", `{"max_order_ts": {"x": 1}}`},
+		{"array value", `{"max_order_ts": [1, 2]}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRegistryDB(t)
+			c := NewCapturer(event.New(), db)
+			ctx := context.Background()
+
+			jobID, runID := uuid.New(), uuid.New()
+			// Declares max_order_ts; the step emits it as a non-scalar value.
+			seedProducingRunRaw(t, db, jobID, runID, []byte(tc.raw), nil, "max_order_ts")
+
+			c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
+
+			if _, ok, err := c.store.Get(ctx, nil, "staging.orders"); err != nil || ok {
+				t.Fatalf("non-scalar declared watermark must leave state untouched (ok=%v err=%v)", ok, err)
+			}
+		})
 	}
 }
