@@ -111,6 +111,9 @@ func (ctrl *Controller) emitDecisionEvents(result *svc.DecideResult) {
 // parseDecisionReason reads the optional {"reason": "..."} body without failing
 // the request when the body is empty or not JSON.
 func parseDecisionReason(c *echo.Context) string {
+	if c.Request().Body == nil {
+		return ""
+	}
 	var body decisionBody
 	if err := json.NewDecoder(c.Request().Body).Decode(&body); err != nil {
 		return ""

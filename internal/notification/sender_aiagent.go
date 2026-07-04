@@ -3,7 +3,9 @@ package notification
 import (
 	"context"
 	"encoding/json"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/log"
@@ -11,6 +13,19 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
+
+// aiAgentFailureTypes are the only event types the ai_agent sender opens
+// incidents for — the same failure set the leader-gated incident subscriber
+// consumes. A policy could legitimately fan a SUCCESS event (run_completed,
+// task_succeeded) to an ai_agent channel; opening an incident for a healthy run
+// would be bogus, so success events are skipped.
+var aiAgentFailureTypes = map[event.Type]struct{}{
+	event.TypeTaskFailed:              {},
+	event.TypeRunFailed:               {},
+	event.TypeRunTimedOut:             {},
+	event.TypeSLAMissed:               {},
+	event.TypeSchemaViolationRecorded: {},
+}
 
 // AIAgentLeaderCheck reports whether this node hosts the cluster leader. The
 // ai_agent sender is leader-gated so that — unlike the per-node notification
@@ -33,23 +48,31 @@ type AIAgentSender struct {
 	store       *incident.Store
 	classifier  *incident.Classifier
 	leaderCheck AIAgentLeaderCheck
+	cooldown    time.Duration
 }
 
 // NewAIAgentSender constructs an ai_agent sender over db. leaderCheck may be nil
-// (single-node / tests), in which case the sender always acts.
-func NewAIAgentSender(db *gorm.DB, leaderCheck AIAgentLeaderCheck) *AIAgentSender {
+// (single-node / tests), in which case the sender always acts. cooldown is the
+// configured CAESIUM_AGENT_INCIDENT_COOLDOWN so flap suppression applies to this
+// dispatch path too, matching the main subscriber.
+func NewAIAgentSender(db *gorm.DB, leaderCheck AIAgentLeaderCheck, cooldown time.Duration) *AIAgentSender {
 	return &AIAgentSender{
 		db:          db,
 		store:       incident.NewStore(db),
 		classifier:  incident.NewClassifier(),
 		leaderCheck: leaderCheck,
+		cooldown:    cooldown,
 	}
 }
 
-// Send routes a matched notification event into the incident manager by opening
-// or appending an incident for the failing job/task. Non-failure payloads (a
-// policy could match run_completed) resolve to no incident and are ignored.
+// Send routes a matched FAILURE event into the incident manager by opening or
+// appending an incident for the failing job/task. Success events (a policy could
+// fan run_completed / task_succeeded to an ai_agent channel) are skipped — they
+// must never manufacture an incident for a healthy run.
 func (s *AIAgentSender) Send(ctx context.Context, ch models.NotificationChannel, payload Payload) error {
+	if _, ok := aiAgentFailureTypes[payload.EventType]; !ok {
+		return nil
+	}
 	if !s.isLeader(ctx) {
 		return nil
 	}
@@ -123,6 +146,7 @@ func (s *AIAgentSender) Send(ctx context.Context, ch models.NotificationChannel,
 		Evidence:               aiAgentEvidence(ch.Name, class, exitCode),
 		BackfillID:             backfillID,
 		RemediationTargetRunID: runID,
+		Cooldown:               s.cooldown,
 	})
 	if err != nil {
 		return err

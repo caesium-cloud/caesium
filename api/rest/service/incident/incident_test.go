@@ -2,6 +2,8 @@ package incident
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +136,7 @@ func TestApproveResolvesAndResumesIncident(t *testing.T) {
 	require.ErrorIs(t, err, ErrApprovalNotPending)
 }
 
-func TestRejectRecordsReason(t *testing.T) {
+func TestRejectEscalatesAndDoesNotResumeTriage(t *testing.T) {
 	svc, db := newTestService(t)
 	inc, action, approval := seedAwaitingApproval(t, db, uuid.New(), "auth_failure")
 
@@ -142,10 +144,84 @@ func TestRejectRecordsReason(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, models.ApprovalDecisionRejected, res.Approval.Decision)
 	require.Equal(t, "unsafe patch", res.Approval.Reason)
+	require.True(t, res.StatusChanged)
 
+	// A rejection must NOT resume triaging (which would let the agent re-propose
+	// the same action) — it escalates so a human owns the incident.
+	require.Equal(t, models.IncidentStatusEscalated, res.Incident.Status)
+	var reloadedInc models.Incident
+	require.NoError(t, db.First(&reloadedInc, "id = ?", inc.ID).Error)
+	require.Equal(t, models.IncidentStatusEscalated, reloadedInc.Status)
+
+	// The rejected action is stamped rejected (excluded from any re-proposal).
 	var reloaded models.AgentAction
 	require.NoError(t, db.First(&reloaded, "id = ?", action.ID).Error)
 	require.Equal(t, models.AgentActionStatusRejected, reloaded.Status)
+}
+
+func TestConcurrentDecideRaceHasSingleWinner(t *testing.T) {
+	svc, db := newTestService(t)
+	inc, action, approval := seedAwaitingApproval(t, db, uuid.New(), "schema_violation")
+
+	// Two operators race to decide the same approval: exactly one must win; the
+	// others must be refused (ErrApprovalNotPending) so the audit is never
+	// overwritten by a later commit.
+	const racers = 8
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		wins    int
+		refused int
+		winner  models.ApprovalDecision
+	)
+	start := make(chan struct{})
+	for i := 0; i < racers; i++ {
+		decision := models.ApprovalDecisionApproved
+		if i%2 == 1 {
+			decision = models.ApprovalDecisionRejected
+		}
+		wg.Add(1)
+		go func(d models.ApprovalDecision) {
+			defer wg.Done()
+			<-start
+			var derr error
+			if d == models.ApprovalDecisionApproved {
+				_, derr = svc.Approve(inc.ID, approval.ID, "op", "")
+			} else {
+				_, derr = svc.Reject(inc.ID, approval.ID, "op", "")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case derr == nil:
+				wins++
+				winner = d
+			case errors.Is(derr, ErrApprovalNotPending):
+				refused++
+			default:
+				t.Errorf("unexpected error: %v", derr)
+			}
+		}(decision)
+	}
+	close(start)
+	wg.Wait()
+
+	require.Equal(t, 1, wins, "exactly one decision may succeed")
+	require.Equal(t, racers-1, refused, "all other deciders must be refused")
+
+	// The persisted decision matches the sole winner and is no longer pending.
+	var finalApproval models.ApprovalRequest
+	require.NoError(t, db.First(&finalApproval, "id = ?", approval.ID).Error)
+	require.Equal(t, winner, finalApproval.Decision)
+
+	// The audit-spine action mirror matches the winner too (no drift).
+	var finalAction models.AgentAction
+	require.NoError(t, db.First(&finalAction, "id = ?", action.ID).Error)
+	expected := models.AgentActionStatusApproved
+	if winner == models.ApprovalDecisionRejected {
+		expected = models.AgentActionStatusRejected
+	}
+	require.Equal(t, expected, finalAction.Status)
 }
 
 func TestDecideRejectsIncidentMismatch(t *testing.T) {

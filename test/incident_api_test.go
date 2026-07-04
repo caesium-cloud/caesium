@@ -122,6 +122,37 @@ func TestIncidentOperatorAPIAndApprovalGate(t *testing.T) {
 	// Re-deciding a resolved approval is a conflict.
 	status, _ = postWithBearer(t, approveURL, operator.Plaintext, nil)
 	require.Equal(t, http.StatusConflict, status)
+
+	// D1: a rejection on a fresh proposal ESCALATES the incident (a human owns
+	// it) rather than resuming triaging — the agent cannot re-propose the action.
+	key2 := jobID.String() + "|load|schema_violation"
+	inc2 := models.Incident{
+		ID: uuid.New(), JobID: jobID, TaskName: "load", Class: "schema_violation",
+		Status: models.IncidentStatusAwaitingApproval, DedupeKey: key2, ActiveDedupeKey: &key2,
+		OccurrenceCount: 1, OpenedAt: now, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, conn.Create(&inc2).Error)
+	action2 := models.AgentAction{
+		ID: uuid.New(), IncidentID: inc2.ID, Type: "override_schema_gate", Tier: 3,
+		Status: models.AgentActionStatusProposed, Actor: models.AgentActionActorAgent,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, conn.Create(&action2).Error)
+	approval2 := models.ApprovalRequest{
+		ID: uuid.New(), IncidentID: inc2.ID, ActionID: action2.ID,
+		Decision: models.ApprovalDecisionPending, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, conn.Create(&approval2).Error)
+
+	rejectURL := server.URL + "/v1/incidents/" + inc2.ID.String() + "/approvals/" + approval2.ID.String() + "/reject"
+	status, body = postWithBearer(t, rejectURL, operator.Plaintext, []byte(`{"reason":"schema drift is not benign"}`))
+	require.Equal(t, http.StatusOK, status, body)
+
+	status, body = getWithBearer(t, server.URL+"/v1/incidents/"+inc2.ID.String(), operator.Plaintext)
+	require.Equal(t, http.StatusOK, status, body)
+	require.NoError(t, json.Unmarshal([]byte(body), &detail))
+	require.Equal(t, models.ApprovalDecisionRejected, detail.Approvals[0].Decision)
+	require.Equal(t, models.IncidentStatusEscalated, detail.Incident.Status)
 }
 
 func postWithBearer(t *testing.T, target, token string, body []byte) (int, string) {

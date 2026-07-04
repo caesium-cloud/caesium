@@ -15,7 +15,7 @@ func TestAIAgentSenderOpensIncident(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
 
-	sender := NewAIAgentSender(db, nil) // nil leader check = always act
+	sender := NewAIAgentSender(db, nil, 0) // nil leader check = always act
 	jobID := uuid.New()
 
 	err := sender.Send(context.Background(), models.NotificationChannel{Name: "triage"}, Payload{
@@ -50,7 +50,7 @@ func TestAIAgentSenderLeaderGated(t *testing.T) {
 
 	// A non-leader node must NOT open incidents — the leader gate avoids N-node
 	// duplicate work (the store's atomic insert is the correctness backstop).
-	sender := NewAIAgentSender(db, func(context.Context) (bool, error) { return false, nil })
+	sender := NewAIAgentSender(db, func(context.Context) (bool, error) { return false, nil }, 0)
 
 	err := sender.Send(context.Background(), models.NotificationChannel{Name: "triage"}, Payload{
 		EventType: event.TypeTaskFailed,
@@ -62,4 +62,25 @@ func TestAIAgentSenderLeaderGated(t *testing.T) {
 	var count int64
 	require.NoError(t, db.Model(&models.Incident{}).Count(&count).Error)
 	require.Equal(t, int64(0), count)
+}
+
+// TestAIAgentSenderSkipsSuccessEvents proves the sender never manufactures an
+// incident for a healthy run: a policy could fan a success event to an ai_agent
+// channel, and those must be ignored (only failure-class events open incidents).
+func TestAIAgentSenderSkipsSuccessEvents(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	sender := NewAIAgentSender(db, nil, 0)
+
+	for _, et := range []event.Type{event.TypeRunCompleted, event.TypeTaskSucceeded} {
+		require.NoError(t, sender.Send(context.Background(), models.NotificationChannel{Name: "triage"}, Payload{
+			EventType: et,
+			JobID:     uuid.New(),
+		}))
+	}
+
+	var count int64
+	require.NoError(t, db.Model(&models.Incident{}).Count(&count).Error)
+	require.Equal(t, int64(0), count, "success events must not open incidents")
 }

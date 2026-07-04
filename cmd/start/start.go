@@ -438,7 +438,7 @@ func start(cmd *cobra.Command, args []string) error {
 		// gate never silently opens incidents. Leader-gated (like the incident
 		// subscriber) so an N-node cluster opens one incident per matched event.
 		if vars.AgentRemediationEnabled {
-			notifSub.RegisterSender(models.ChannelTypeAIAgent, notification.NewAIAgentSender(conn, dqlite.IsLocalLeader))
+			notifSub.RegisterSender(models.ChannelTypeAIAgent, notification.NewAIAgentSender(conn, dqlite.IsLocalLeader, vars.AgentIncidentCooldown))
 		}
 		runAsync(func() {
 			log.Info("launching notification subscriber")
