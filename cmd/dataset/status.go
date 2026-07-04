@@ -41,7 +41,7 @@ type datasetDerivation struct {
 }
 
 var statusCmd = &cobra.Command{
-	Use:   "status <namespace.name>",
+	Use:   "status <name> [--namespace <ns>]",
 	Short: "Show one freshness dataset state",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

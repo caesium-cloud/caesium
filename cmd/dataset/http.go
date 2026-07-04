@@ -55,20 +55,17 @@ func datasetPath(namespace, name string) string {
 	return "/v1/datasets/" + url.PathEscape(nsSegment) + "/" + url.PathEscape(name)
 }
 
+// splitDatasetRef resolves a dataset argument into (namespace, name). Dataset
+// names are free-form identifiers that routinely contain dots (e.g.
+// "raw.vendor_x"), and the namespace is a separate, distinct axis (unused in
+// v1), so the whole argument is taken as the name. A namespace, when needed, is
+// supplied explicitly via --namespace rather than parsed out of the name.
 func splitDatasetRef(raw string) (string, string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", "", fmt.Errorf("dataset reference is required")
+	name := strings.TrimSpace(raw)
+	if name == "" {
+		return "", "", fmt.Errorf("dataset name is required")
 	}
-	ns, name, ok := strings.Cut(raw, ".")
-	if !ok {
-		return "", raw, nil
-	}
-	ns = strings.TrimSpace(ns)
-	name = strings.TrimSpace(name)
-	if ns == "" || name == "" {
-		return "", "", fmt.Errorf("dataset reference must be <namespace.name> or <name>")
-	}
+	ns := strings.TrimSpace(namespaceFlag)
 	if ns == "_" {
 		ns = ""
 	}

@@ -235,6 +235,7 @@ func (s *Service) Derivations(p DerivationsParams) (*DerivationsResult, error) {
 	var rows []models.DatasetDerivation
 	if err := q.
 		Order("created_at DESC").
+		Order("id DESC").
 		Limit(limit).
 		Offset(offset).
 		Find(&rows).Error; err != nil {
@@ -303,11 +304,20 @@ func normalizePagination(rawLimit, rawOffset int) (int, int) {
 }
 
 func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64, error) {
+	// Collapse duplicate declarations (the same dataset is commonly declared by
+	// multiple jobs) in the database via GROUP BY, so the LIMIT applies to
+	// distinct datasets and the count reflects distinct datasets rather than raw
+	// declaration rows. Grouping on COALESCE(namespace, '') keeps NULL and empty
+	// namespaces on the same logical dataset.
 	q := s.db.WithContext(s.ctx).
 		Model(&models.DatasetDeclaration{}).
+		Select("COALESCE(namespace, '') AS namespace, name, MAX(created_at) AS created_at, MAX(updated_at) AS updated_at").
 		Where("direction IN ?", declarationDirections).
-		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))")
+		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))").
+		Group("COALESCE(namespace, ''), name")
 
+	// With a GROUP BY present, gorm's Count returns the number of groups
+	// (distinct datasets), which is the total we want.
 	var total int64
 	if err := q.Count(&total).Error; err != nil {
 		return nil, 0, err
@@ -315,21 +325,15 @@ func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64
 
 	var decls []models.DatasetDeclaration
 	if err := q.
-		Order("updated_at DESC").
+		Order("MAX(updated_at) DESC").
 		Limit(limit).
 		Find(&decls).Error; err != nil {
 		return nil, 0, err
 	}
 
-	out := make([]models.DatasetState, 0)
-	seen := make(map[string]struct{}, len(decls))
+	out := make([]models.DatasetState, 0, len(decls))
 	for _, decl := range decls {
 		ns := declNamespaceValue(decl.Namespace)
-		key := datasetKey(ns, decl.Name)
-		if _, ok := seen[key]; ok {
-			continue
-		}
-		seen[key] = struct{}{}
 		out = append(out, unknownState(ns, decl.Name, decl.CreatedAt, decl.UpdatedAt))
 	}
 	return out, total, nil
@@ -371,6 +375,7 @@ func (s *Service) latestDerivation(namespace, name string) (models.DatasetDeriva
 	q := s.db.WithContext(s.ctx).
 		Where("name = ?", strings.TrimSpace(name)).
 		Order("created_at DESC").
+		Order("id DESC").
 		Limit(1)
 	q = withDerivationNamespace(q, namespace)
 	res := q.Find(&derivation)
@@ -427,10 +432,6 @@ func declNamespaceValue(namespace *string) string {
 		return ""
 	}
 	return strings.TrimSpace(*namespace)
-}
-
-func datasetKey(namespace, name string) string {
-	return strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(name)
 }
 
 func paginateStates(rows []models.DatasetState, limit, offset int) []models.DatasetState {

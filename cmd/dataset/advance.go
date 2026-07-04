@@ -14,7 +14,7 @@ import (
 var advanceWatermark string
 
 var advanceCmd = &cobra.Command{
-	Use:   "advance <namespace.name> --watermark <value>",
+	Use:   "advance <name> --watermark <value> [--namespace <ns>]",
 	Short: "Manually advance a freshness dataset watermark",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {

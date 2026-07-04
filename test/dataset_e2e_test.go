@@ -123,6 +123,24 @@ func (s *IntegrationTestSuite) TestDatasetRESTAndCLIListSurfacesManualAdvance() 
 	s.Equal("advanced", cliAdvanced.Outcome)
 	s.Equal(cliName, cliAdvanced.State.Name)
 	s.Equal(cliWatermark, cliAdvanced.State.Watermark)
+
+	// A dataset name that contains dots (e.g. "raw.vendor_x") must round-trip as
+	// a single name in the empty namespace, not be split into namespace.name.
+	dottedName := fmt.Sprintf("raw.vendor_%d", time.Now().UnixNano())
+	dottedWatermark := fmt.Sprintf("%d", time.Now().UnixNano())
+	dottedAdvanceOut, err := s.runCLIStdout("dataset", "advance", dottedName, "--watermark", dottedWatermark, "--server", s.caesiumURL)
+	s.Require().NoError(err)
+	var dottedAdvanced datasetAdvanceResponse
+	s.Require().NoError(json.Unmarshal([]byte(dottedAdvanceOut), &dottedAdvanced))
+	s.Equal(dottedName, dottedAdvanced.State.Name)
+	s.Equal("", dottedAdvanced.State.Namespace)
+
+	dottedStatusOut, err := s.runCLIStdout("dataset", "status", dottedName, "--json", "--server", s.caesiumURL)
+	s.Require().NoError(err)
+	var dottedStatus datasetDetailResponse
+	s.Require().NoError(json.Unmarshal([]byte(dottedStatusOut), &dottedStatus))
+	s.Equal(dottedName, dottedStatus.State.Name)
+	s.Equal(dottedWatermark, dottedStatus.State.Watermark)
 }
 
 func findDatasetState(rows []datasetStateResponse, namespace, name string) (datasetStateResponse, bool) {
