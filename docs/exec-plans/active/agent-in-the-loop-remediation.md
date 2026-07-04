@@ -102,8 +102,8 @@ incident core + substrate, which unblocks every other stream.
   supervisor. All gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` (default off)
   — nothing activates until a later wave wires behavior on. Review: Greptile 5/5;
   fixes folded in for the `run_completed`-wildcard-remediation bug (task-scoped
-  matching) and the exit-code `0`-sentinel bug (nullable `*int`). Streams B–U +
-  H-1 + N-1 remain for later waves.
+  matching) and the exit-code `0`-sentinel bug (nullable `*int`). Streams B–E
+  shipped in Wave 2 (see below); Streams F, G, U + H-1 + N-1 remain for later waves.
 
 ### Wave 2 — Streams B–E remediation surface (shipped)
 

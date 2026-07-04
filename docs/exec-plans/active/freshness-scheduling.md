@@ -102,8 +102,8 @@ sequenced last so scheduling behavior only changes after the substrate is proven
   (single-producer, consume-resolution, cross-job acyclicity) wired into
   `caesium job lint` and the REST lint controller. This is the shared substrate
   the `data-circuit-breaker` and `contract-enforcement` plans extend. Review:
-  Greptile 5/5; duration-positivity validation added per Gemini. Streams B–G +
-  H-1 remain for later waves.
+  Greptile 5/5; duration-positivity validation added per Gemini. Stream B shipped
+  in Wave 2 (see below); Streams C–G + H-1 remain for later waves.
 
 ### Wave 2 — Stream B dataset-state substrate (shipped)
 
