@@ -481,6 +481,7 @@ ui-e2e-auth: build-release
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
     tries=0
     until node -e "fetch('http://127.0.0.1:{{ port }}/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
