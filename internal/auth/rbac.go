@@ -90,11 +90,13 @@ var endpointPolicy = map[string]models.Role{
 	// per-incident binding is enforced separately by the deny-by-default scope
 	// switch (api/middleware/auth_scope.go), which 403s an agent token on any
 	// route outside its own incident. Reads sit at viewer, mutating tool calls
-	// (propose/execute an action, append a note) at runner.
+	// (propose/execute an action, append a note) at runner. MCP multiplexes both
+	// read and write tools over one POST, so it is agent/runner-only.
 	"GET /v1/agent/incidents/:id/bundle":    models.RoleViewer,
 	"GET /v1/agent/incidents/:id/context/*": models.RoleViewer,
 	"POST /v1/agent/incidents/:id/actions":  models.RoleRunner,
 	"POST /v1/agent/incidents/:id/notes":    models.RoleRunner,
+	"POST /v1/agent/incidents/:id/mcp":      models.RoleRunner,
 
 	// Runner
 	"POST /v1/jobs/:id/run":                      models.RoleRunner,
