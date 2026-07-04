@@ -4,6 +4,10 @@ LICENSE
 
 docs
 build
+# Re-include the triage-agent script: build/ is ignored, but the fake-agent
+# image (build/Dockerfile.triage-agent, built with the repo root as context)
+# COPYs this file, so it must remain in the build context.
+!build/triage-agent.sh
 tools
 **/*_test.go
 caesium
