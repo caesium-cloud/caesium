@@ -83,7 +83,11 @@ test("incidents board filters a live failure and opens the detail timeline", asy
   await page.getByTestId("incident-status-filter").selectOption(incident.status);
   await page.getByTestId("incident-class-filter").selectOption(incident.class);
 
-  const row = page.getByTestId("incident-row").filter({ hasText: alias }).first();
+  // Target the specific incident row by id: the classifier can open more than one
+  // incident for a single failing run (a minimal one plus the task-attributed one),
+  // so filtering by alias + .first() can select a different incident than
+  // waitForIncident returned and then navigate to the wrong detail URL.
+  const row = page.locator(`a[data-testid="incident-row"][href$="/incidents/${incident.id}"]`);
   await expect(row).toBeVisible({ timeout: 30_000 });
   // The classifier opens a minimal incident and attributes the failing task_name
   // asynchronously, so the board row can still show the pre-enrichment task
