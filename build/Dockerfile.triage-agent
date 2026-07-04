@@ -1,0 +1,10 @@
+FROM alpine:3.23
+
+RUN apk add --no-cache ca-certificates curl jq && \
+    adduser -D -H -u 10001 triage
+
+COPY build/triage-agent.sh /usr/local/bin/triage-agent
+RUN chmod 0755 /usr/local/bin/triage-agent
+
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/triage-agent"]

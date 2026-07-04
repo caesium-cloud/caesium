@@ -452,6 +452,7 @@ func (s *IntegrationTestSuite) doJSONRequest(method, target string, body io.Read
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	s.authorize(req)
 
 	//nolint:bodyclose // Response body ownership is transferred to the caller.
 	return http.DefaultClient.Do(req)

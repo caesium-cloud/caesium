@@ -182,6 +182,23 @@ jobs:
       - name: Distributed integration tests (amd64)
         run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-distributed
 
+  build-and-integration-test-agent-auth:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: docker/setup-docker-action@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Agent auth integration tests (amd64)
+        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-agent
+
   build-and-integration-test-arm64:
     needs: builder-arm64
     runs-on: ubuntu-24.04-arm
@@ -245,6 +262,7 @@ jobs:
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+            -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
@@ -307,6 +325,7 @@ jobs:
             -e CAESIUM_AUTH_REQUIRE_TLS=false \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+            -e CAESIUM_FRESHNESS_ENABLED=true \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
           tries=0
@@ -485,6 +504,7 @@ jobs:
             -e CAESIUM_LOG_LEVEL=debug \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+            -e CAESIUM_FRESHNESS_ENABLED=true \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
       - name: Extract caesium CLI
@@ -522,6 +542,7 @@ jobs:
       - ui-e2e-auth
       - build-and-integration-test
       - build-and-integration-test-distributed
+      - build-and-integration-test-agent-auth
       - build-and-integration-test-arm64
       - helm-lint
       - helm-integration-test

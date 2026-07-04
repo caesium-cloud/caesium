@@ -170,7 +170,7 @@ Streams F, G, U (+ H-1, N-1) remain for later waves.
 | F | MCP surface — `/v1/agent/mcp` JSON-RPC/streamable-HTTP over the same handlers | P2 | Not started |
 | G | CLI — `caesium incident …` + `caesium agent profile …` | P2 | Not started |
 | U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | Not started |
-| H-1 | Harness — deterministic fake agent image + integration server gate wiring | — | Not started |
+| H-1 | Harness — deterministic fake agent image + integration server gate wiring | — | **Shipped** (W3-eta: fake image + auth lane) |
 | N-1 | Docs — roadmap §3.5 flip, design banner, schema reference (`remediation` block), examples, README | — | Not started |
 
 ## Streams
@@ -577,7 +577,7 @@ primary evidence — nothing is prose-only.
 
 ## Harness Strengthening
 
-- [ ] H-1. Build the deterministic **fake agent image** (`build/`) — the linchpin
+- [x] H-1. Build the deterministic **fake agent image** (`build/`) — W3-eta note: pinned fake image, dedicated auth lane, and bearer-aware helpers landed — the linchpin
       of the integration suite: a small script image that reads the triage bundle,
       asserts its shape, and emits a **scripted action sequence** via the real
       `/v1/agent/*` API (and, once Stream F lands, an MCP protocol-level test
