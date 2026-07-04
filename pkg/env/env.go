@@ -155,28 +155,31 @@ type Environment struct {
 	// this is an operator guard against a runaway producer pinning arbitrarily
 	// large BYO storage, not a correctness control. A reference whose reported
 	// size exceeds this is rejected and the step's other outputs still apply.
-	OutputRefMaxBytes         ByteSize      `envconfig:"OUTPUT_REF_MAX_BYTES" default:"0"`
-	OpenLineageEnabled        bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
-	OpenLineageTransport      string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
-	OpenLineageURL            string        `envconfig:"OPEN_LINEAGE_URL" default:""`
-	OpenLineageNamespace      string        `envconfig:"OPEN_LINEAGE_NAMESPACE" default:"caesium"`
-	OpenLineageHeaders        string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
-	OpenLineageFilePath       string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
-	OpenLineageTimeout        time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
-	OpenLineageRetryAttempts  uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
-	WebhookMaxBodySize        ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
-	WebhookRateLimitPerMinute int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
-	WebhookRateLimitBurst     int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
-	EventRetention            time.Duration `envconfig:"EVENT_RETENTION" default:"168h"`
-	WebhookEventRetention     time.Duration `envconfig:"WEBHOOK_EVENT_RETENTION" default:"168h"`
-	MaxTriggerDepth           int           `envconfig:"MAX_TRIGGER_DEPTH" default:"10"`
-	RateLimitPrunerEnabled    bool          `envconfig:"RATE_LIMIT_PRUNER_ENABLED" default:"false"`
-	RateLimitPruneInterval    time.Duration `envconfig:"RATE_LIMIT_PRUNE_INTERVAL" default:"1m"`
-	RunQueueEnabled           bool          `envconfig:"RUN_QUEUE_ENABLED" default:"false"`
-	RunQueueDequeuerEnabled   bool          `envconfig:"RUN_QUEUE_DEQUEUER_ENABLED" default:"false"`
-	RunQueueDequeueInterval   time.Duration `envconfig:"RUN_QUEUE_DEQUEUE_INTERVAL" default:"1s"`
-	RunQueueClaimStaleAfter   time.Duration `envconfig:"RUN_QUEUE_CLAIM_STALE_AFTER" default:"2m"`
-	RunQueueMaxDepth          int           `envconfig:"RUN_QUEUE_MAX_DEPTH" default:"100"`
+	OutputRefMaxBytes              ByteSize      `envconfig:"OUTPUT_REF_MAX_BYTES" default:"0"`
+	OpenLineageEnabled             bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
+	OpenLineageTransport           string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
+	OpenLineageURL                 string        `envconfig:"OPEN_LINEAGE_URL" default:""`
+	OpenLineageNamespace           string        `envconfig:"OPEN_LINEAGE_NAMESPACE" default:"caesium"`
+	OpenLineageHeaders             string        `envconfig:"OPEN_LINEAGE_HEADERS" default:""`
+	OpenLineageFilePath            string        `envconfig:"OPEN_LINEAGE_FILE_PATH" default:"/var/lib/caesium/lineage.ndjson"`
+	OpenLineageTimeout             time.Duration `envconfig:"OPEN_LINEAGE_TIMEOUT" default:"5s"`
+	OpenLineageRetryAttempts       uint          `envconfig:"OPEN_LINEAGE_RETRY_ATTEMPTS" default:"3"`
+	WebhookMaxBodySize             ByteSize      `envconfig:"WEBHOOK_MAX_BODY_SIZE" default:"1MB"`
+	WebhookRateLimitPerMinute      int           `envconfig:"WEBHOOK_RATE_LIMIT_PER_MINUTE" default:"120"`
+	WebhookRateLimitBurst          int           `envconfig:"WEBHOOK_RATE_LIMIT_BURST" default:"20"`
+	EventRetention                 time.Duration `envconfig:"EVENT_RETENTION" default:"168h"`
+	WebhookEventRetention          time.Duration `envconfig:"WEBHOOK_EVENT_RETENTION" default:"168h"`
+	MaxTriggerDepth                int           `envconfig:"MAX_TRIGGER_DEPTH" default:"10"`
+	RateLimitPrunerEnabled         bool          `envconfig:"RATE_LIMIT_PRUNER_ENABLED" default:"false"`
+	RateLimitPruneInterval         time.Duration `envconfig:"RATE_LIMIT_PRUNE_INTERVAL" default:"1m"`
+	RunQueueEnabled                bool          `envconfig:"RUN_QUEUE_ENABLED" default:"false"`
+	RunQueueDequeuerEnabled        bool          `envconfig:"RUN_QUEUE_DEQUEUER_ENABLED" default:"false"`
+	RunQueueDequeueInterval        time.Duration `envconfig:"RUN_QUEUE_DEQUEUE_INTERVAL" default:"1s"`
+	RunQueueClaimStaleAfter        time.Duration `envconfig:"RUN_QUEUE_CLAIM_STALE_AFTER" default:"2m"`
+	RunQueueMaxDepth               int           `envconfig:"RUN_QUEUE_MAX_DEPTH" default:"100"`
+	FreshnessEnabled               bool          `envconfig:"FRESHNESS_ENABLED" default:"false"`
+	FreshnessEvalInterval          time.Duration `envconfig:"FRESHNESS_EVAL_INTERVAL" default:"1m"`
+	FreshnessMaxDerivationsPerTick int           `envconfig:"FRESHNESS_MAX_DERIVATIONS_PER_TICK" default:"50"`
 
 	// Notification Watcher
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
