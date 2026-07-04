@@ -112,9 +112,12 @@ func (p ActionParams) encode() datatypes.JSON {
 func (p ActionParams) delay() time.Duration  { return time.Duration(p.DelaySeconds) * time.Second }
 func (p ActionParams) extend() time.Duration { return time.Duration(p.ExtendSeconds) * time.Second }
 
-// snoozePayload is persisted on a snooze_retry durable timer.
+// snoozePayload is persisted on a snooze_retry durable timer. Rearm counts how
+// many times a retryable refusal (e.g. the job was paused when the timer fired)
+// re-armed a fresh timer; it is capped so a permanently-paused job cannot loop.
 type snoozePayload struct {
 	RunID uuid.UUID `json:"run_id"`
+	Rearm int       `json:"rearm,omitempty"`
 }
 
 // ActionOps is the server-side operations surface the tier-1/2 catalog dispatches

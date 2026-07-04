@@ -53,6 +53,14 @@ var ErrUnknownAction = errors.New("incident: unknown action type")
 // action (not autonomously allowed and not routed to approval).
 var ErrActionNotPermitted = errors.New("incident: action not permitted by playbook")
 
+// ErrRetryDeferred marks a retry refused by a transient, retryable admission
+// condition — the job is paused, or a concurrency slot is not yet free — that
+// will clear on its own. ActionOps.RetryFromFailure implementations return it
+// (wrapping the underlying cause) so a fired snooze_retry timer re-arms instead
+// of being consumed and lost. A non-ErrRetryDeferred error is treated as a
+// permanent failure.
+var ErrRetryDeferred = errors.New("incident: retry deferred; retry once the condition clears")
+
 // Playbook is the effective, resolved remediation policy the executor enforces
 // for one incident. Stream E produces it from metadata.remediation overriding
 // the AgentProfile defaults; here it is purely the enforcement input. A zero
@@ -310,10 +318,101 @@ func (e *Executor) fireSnoozeRetry(ctx context.Context, timer models.Remediation
 	if e.ops == nil {
 		return errors.New("incident: no action ops configured for snooze_retry")
 	}
-	if err := e.ops.RetryFromFailure(ctx, payload.RunID); err != nil {
-		return fmt.Errorf("incident: snooze_retry fire: %w", err)
+	err := e.ops.RetryFromFailure(ctx, payload.RunID)
+	if err == nil {
+		return nil
 	}
+	// The supervisor already claimed this timer as fired. A retryable refusal
+	// (job paused, or capacity not yet free) means the retry never happened, so
+	// consuming the timer would silently drop the remediation. Re-arm a fresh
+	// timer with bounded backoff instead so the retry lands once the condition
+	// clears; a permanent failure (e.g. the run is gone) is consumed as before.
+	if errors.Is(err, ErrRetryDeferred) {
+		return e.rearmSnooze(ctx, timer, payload, err)
+	}
+	return fmt.Errorf("incident: snooze_retry fire: %w", err)
+}
+
+// snooze re-arm bounds: exponential backoff base × 2^rearm, capped, with a hard
+// re-arm ceiling so a job left paused forever cannot re-arm indefinitely.
+const (
+	snoozeRearmBackoffBase = time.Minute
+	snoozeRearmBackoffMax  = time.Hour
+	maxSnoozeRearm         = 12
+)
+
+// snoozeRearmBackoff returns the bounded backoff before the nth re-arm.
+func snoozeRearmBackoff(rearm int) time.Duration {
+	d := snoozeRearmBackoffBase
+	for i := 1; i < rearm && d < snoozeRearmBackoffMax; i++ {
+		d *= 2
+	}
+	if d > snoozeRearmBackoffMax {
+		return snoozeRearmBackoffMax
+	}
+	return d
+}
+
+// rearmSnooze schedules a fresh snooze timer after a retryable refusal, recording
+// the re-arm on the audit spine. Beyond maxSnoozeRearm it gives up (records a
+// failed action and returns the cause so the sweeper logs it), so a permanently
+// paused job cannot loop forever.
+func (e *Executor) rearmSnooze(ctx context.Context, timer models.RemediationTimer, payload snoozePayload, cause error) error {
+	if payload.Rearm >= maxSnoozeRearm {
+		e.recordSnoozeEvent(ctx, timer, models.AgentActionStatusFailed, map[string]any{
+			"run_id":     payload.RunID.String(),
+			"rearm":      payload.Rearm,
+			"gave_up":    true,
+			"last_error": cause.Error(),
+		})
+		return fmt.Errorf("incident: snooze_retry exhausted %d re-arms: %w", maxSnoozeRearm, cause)
+	}
+	next := payload
+	next.Rearm++
+	fireAt := time.Now().UTC().Add(snoozeRearmBackoff(next.Rearm))
+	newTimer, err := e.store.ScheduleTimer(ctx, timer.IncidentID, TimerKindSnoozeRetry, fireAt, encodeJSON(next), timer.ActionID, timer.Namespace)
+	if err != nil {
+		return fmt.Errorf("incident: re-arm snooze timer: %w", err)
+	}
+	e.recordSnoozeEvent(ctx, timer, models.AgentActionStatusExecuted, map[string]any{
+		"run_id":        payload.RunID.String(),
+		"rearm":         next.Rearm,
+		"deferred":      true,
+		"reason":        cause.Error(),
+		"next_timer_id": newTimer.ID.String(),
+		"fire_at":       fireAt.Format(time.RFC3339),
+	})
+	log.Info("incident: snooze_retry deferred; re-armed",
+		"incident_id", timer.IncidentID,
+		"run_id", payload.RunID,
+		"rearm", next.Rearm,
+		"fire_at", fireAt,
+		"reason", cause,
+	)
 	return nil
+}
+
+// recordSnoozeEvent appends a policy AgentAction row documenting a snooze re-arm
+// or give-up, so the deferral is observable on the incident timeline.
+func (e *Executor) recordSnoozeEvent(ctx context.Context, timer models.RemediationTimer, status models.AgentActionStatus, result map[string]any) {
+	now := time.Now().UTC()
+	action := &models.AgentAction{
+		ID:         uuid.New(),
+		Namespace:  timer.Namespace,
+		IncidentID: timer.IncidentID,
+		Type:       ActionTypeSnoozeRetry,
+		Tier:       TierAutonomous,
+		Status:     status,
+		Actor:      models.AgentActionActorPolicy,
+		Result:     encodeJSON(result),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := e.store.DB().WithContext(ctx).Create(action).Error; err != nil {
+		log.Warn("incident: failed to record snooze re-arm event", "incident_id", timer.IncidentID, "error", err)
+		return
+	}
+	e.observe(action)
 }
 
 // encodeJSON marshals v into datatypes.JSON, returning nil on nil/empty or error.

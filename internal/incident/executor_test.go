@@ -398,3 +398,108 @@ func mustJSON(t *testing.T, v any) []byte {
 	require.NoError(t, err)
 	return b
 }
+
+func pendingTimers(t *testing.T, db *gorm.DB, incidentID uuid.UUID) []models.RemediationTimer {
+	t.Helper()
+	var timers []models.RemediationTimer
+	require.NoError(t, db.Where("incident_id = ? AND status = ?", incidentID, models.RemediationTimerStatusPending).Find(&timers).Error)
+	return timers
+}
+
+func decodeSnoozePayload(t *testing.T, raw []byte) snoozePayload {
+	t.Helper()
+	var p snoozePayload
+	require.NoError(t, json.Unmarshal(raw, &p))
+	return p
+}
+
+// A snooze_retry whose job is paused (retryable refusal) must NOT consume the
+// timer and drop the retry: it re-arms a fresh pending timer, and once the job
+// is unpaused the re-armed timer's fire retries successfully.
+func TestSnoozeRetryRearmsOnDeferredThenSucceeds(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, runID := seedIncident(t, store)
+
+	// Simulate a paused job: the retry is deferred, not permanently failed.
+	ops.retryErr = ErrRetryDeferred
+
+	action, err := exec.Execute(context.Background(), ActionRequest{
+		IncidentID: inc.ID,
+		Type:       ActionTypeSnoozeRetry,
+		Params:     ActionParams{DelaySeconds: 2700},
+		Playbook:   Playbook{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, models.AgentActionStatusExecuted, action.Status)
+
+	pend := pendingTimers(t, db, inc.ID)
+	require.Len(t, pend, 1)
+	original := pend[0]
+
+	// Backdate + sweep: the deferred retry must re-arm a NEW pending timer, not
+	// vanish.
+	require.NoError(t, db.Model(&models.RemediationTimer{}).Where("id = ?", original.ID).
+		Update("fire_at", time.Now().UTC().Add(-time.Minute)).Error)
+	sup := NewTimerSupervisor(db, nil, time.Second)
+	exec.RegisterTimerHandlers(sup)
+	require.NoError(t, sup.SweepOnce(context.Background()))
+
+	// The original attempt was made (and deferred) — the run is NOT yet retried.
+	require.Equal(t, []uuid.UUID{runID}, ops.retryFromFailure)
+
+	// The original timer is consumed (fired) but a fresh pending timer re-armed
+	// for the same run, rearm=1.
+	var originalAfter models.RemediationTimer
+	require.NoError(t, db.First(&originalAfter, "id = ?", original.ID).Error)
+	require.Equal(t, models.RemediationTimerStatusFired, originalAfter.Status)
+
+	rearmed := pendingTimers(t, db, inc.ID)
+	require.Len(t, rearmed, 1, "a retryable refusal must leave exactly one pending re-armed timer")
+	require.NotEqual(t, original.ID, rearmed[0].ID)
+	rp := decodeSnoozePayload(t, rearmed[0].Payload)
+	require.Equal(t, runID, rp.RunID)
+	require.Equal(t, 1, rp.Rearm)
+
+	// The re-arm is observable on the audit spine as a policy snooze_retry row
+	// (distinct from the original agent-scheduled snooze action).
+	var rearmActions int64
+	require.NoError(t, db.Model(&models.AgentAction{}).
+		Where("incident_id = ? AND type = ? AND actor = ? AND status = ?",
+			inc.ID, ActionTypeSnoozeRetry, models.AgentActionActorPolicy, models.AgentActionStatusExecuted).
+		Count(&rearmActions).Error)
+	require.Equal(t, int64(1), rearmActions, "the re-arm must be recorded on the timeline")
+
+	// Job unpaused: the re-armed timer's fire now retries successfully.
+	ops.retryErr = nil
+	require.NoError(t, db.Model(&models.RemediationTimer{}).Where("id = ?", rearmed[0].ID).
+		Update("fire_at", time.Now().UTC().Add(-time.Minute)).Error)
+	require.NoError(t, sup.SweepOnce(context.Background()))
+
+	require.Equal(t, []uuid.UUID{runID, runID}, ops.retryFromFailure, "the re-armed timer retried the run")
+	require.Empty(t, pendingTimers(t, db, inc.ID), "no timers left pending after a successful retry")
+}
+
+// Beyond the re-arm ceiling a permanently-deferred snooze gives up: no new timer,
+// a failed audit row, and an error surfaced to the sweeper.
+func TestSnoozeRetryRearmGivesUpAtCeiling(t *testing.T) {
+	db, store, ops, exec := newExecutorTest(t)
+	inc, runID := seedIncident(t, store)
+	ops.retryErr = ErrRetryDeferred
+
+	timer := models.RemediationTimer{
+		IncidentID: inc.ID,
+		Namespace:  inc.Namespace,
+		Payload:    mustJSON(t, snoozePayload{RunID: runID, Rearm: maxSnoozeRearm}),
+	}
+	err := exec.fireSnoozeRetry(context.Background(), timer)
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrRetryDeferred)
+
+	require.Empty(t, pendingTimers(t, db, inc.ID), "at the ceiling no further timer is armed")
+
+	var gaveUp int64
+	require.NoError(t, db.Model(&models.AgentAction{}).
+		Where("incident_id = ? AND type = ? AND status = ?", inc.ID, ActionTypeSnoozeRetry, models.AgentActionStatusFailed).
+		Count(&gaveUp).Error)
+	require.Equal(t, int64(1), gaveUp)
+}

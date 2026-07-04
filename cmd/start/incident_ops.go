@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/google/uuid"
 )
@@ -34,6 +36,12 @@ func newIncidentActionOps(runStore *run.Store) *incidentActionOps {
 
 func (o *incidentActionOps) RetryFromFailure(_ context.Context, runID uuid.UUID) error {
 	_, err := o.runStore.RetryFromFailureAdmitted(runID)
+	// A paused job or an exhausted concurrency slot is a transient, retryable
+	// refusal: surface it as incident.ErrRetryDeferred so a fired snooze_retry
+	// timer re-arms instead of dropping the retry.
+	if err != nil && (errors.Is(err, run.ErrJobPaused) || errors.Is(err, run.ErrMaxConcurrentRunsReached)) {
+		return fmt.Errorf("%w: %v", incident.ErrRetryDeferred, err)
+	}
 	return err
 }
 
