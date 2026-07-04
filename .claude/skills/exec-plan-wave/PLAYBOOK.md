@@ -164,20 +164,20 @@ If the wave invocation specifies codex sub-agents (e.g. "use the codex plugin"),
 
 - **⚠️ Worktree-auto-clean race — dispatch codex into an orchestrator-owned worktree, NOT `Agent(isolation: "worktree")`.** When you spawn codex via `Agent({subagent_type: "codex:codex-rescue", isolation: "worktree"})`, the worktree is owned by the spawned *forwarder* agent. That forwarder dispatches the detached codex job and then completes within seconds-to-minutes — and when it completes, the harness **auto-cleans its worktree if it looks unchanged**. The detached codex job frequently hasn't staged anything that early, so the worktree (judged unchanged) is removed out from under the still-starting job; the job then dies with zero work or self-rescues by copying to `/private/tmp/caesium-agent-<id>-impl`. This is a **dispatch-time race**.
 
-  **Fix (use this as the default for codex waves):** the orchestrator creates the worktree itself and dispatches `codex-companion` directly into it — no `Agent` wrapper, so there is no forwarder and nothing to auto-clean:
+  **Fix (use this as the default for codex waves) — dispatch `codex exec` directly, NOT the `codex-companion` background job manager.** The companion's `task --background` spawns a detached job-worker that, on the current codex-cli, dies instantly with `failed to load configuration: No such file or directory (os error 2)` — while the interactive `codex exec` path is unaffected (this is NOT a codex-cli version regression; the same error is recorded against much older plugin versions — see the § "codex-companion background dispatch" note below). Drive `codex exec` yourself, one detached run per stream, via a `Bash` `run_in_background` call — no `Agent` wrapper, no forwarder, no detached companion worker, nothing to auto-clean:
 
   ```sh
-  companion=$(ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)
-  wt="$REPO_ROOT/.claude/worktrees/agent-<wave>-<stream>"   # e.g. agent-w3-beta; keep the agent-* prefix so Phase 7.5b prunes it
-  git worktree add "$wt" -b "worktree-agent-<wave>-<stream>" master       # orchestrator owns this worktree → never auto-cleaned
-  pf=$(mktemp)                                                            # write the filled prompt to a file to avoid shell-quoting hell
-  cat > "$pf" <<'PROMPT'
-  <filled-in stream-agent-prompt-codex.md body>
-  PROMPT
-  ( cd "$wt" && node "$companion" task --background --write -- "$(cat "$pf")" )   # prints the job id; codex runs detached and survives this Bash call
+  wt="$REPO_ROOT/.claude/worktrees/agent-<plan-slug>-<wave>-<stream>"     # ALWAYS include the plan slug — a bare agent-<wave>-<stream> collides with a prior plan's branch on the remote; keep the agent-* prefix so Phase 7.5b prunes it
+  git worktree add "$wt" -b "worktree-agent-<plan-slug>-<wave>-<stream>" master   # orchestrator owns this worktree
+  pf="$SCRATCH/codex-<stream>-prompt.md"                                  # write the filled stream-agent-prompt-codex.md body to a scratch file (Write tool)
+  # ...then run EACH stream as its OWN Bash run_in_background call. ⚠️ cd INTO the worktree first —
+  # a missing cd runs codex in the MAIN checkout (it edits master's tree, not the branch):
+  #   cd "$wt" && cat "$pf" | codex exec --skip-git-repo-check > "$SCRATCH/codex-<stream>.log" 2>&1
   ```
 
-  Do all streams' `git worktree add` + detached spawns in one Bash batch. Poll the codex state dir for `$wt` (enumerate the newest `~/.claude/plugins/data/codex-openai-codex/state/agent-*` dirs after dispatch and read their `state.json`, or `cd "$wt" && node "$companion" status <job-id> --json`). The PR branch is the `worktree-agent-<wave>-<stream>` you created; Phase 4.5 publishes straight from `$wt`; Phase 7.5b prunes `agent-*` worktrees by PR state. On this path there is **no forwarder and no premature task-completion notification** — the `state.json` poll (pid alive + `phase`/`updatedAt`) is the only completion signal.
+  `codex exec` reads the prompt from stdin and runs the agent to completion in the worktree cwd (with the user's configured model/effort). You get one background-task completion notification per stream; on completion, inspect the worktree `git status --short` + the log's final report, then verify + publish in Phase 4.5. Confirm each run's cwd once right after dispatch (`lsof -a -p <pid> -d cwd` or `git -C "$wt" status`) — a mis-targeted run is the one dispatch failure mode left. The companion-specific guidance below (`status`/`resume`/hung-job/pid) applies ONLY if you fall back to the companion; with `codex exec`, the harness's background-task lifecycle replaces it.
+
+  Do all streams' `git worktree add` + detached spawns in one Bash batch. Poll the codex state dir for `$wt` (enumerate the newest `~/.claude/plugins/data/codex-openai-codex/state/agent-*` dirs after dispatch and read their `state.json`, or `cd "$wt" && node "$companion" status <job-id> --json`). The PR branch is the `worktree-agent-<plan-slug>-<wave>-<stream>` you created; Phase 4.5 publishes straight from `$wt`; Phase 7.5b prunes `agent-*` worktrees by PR state. On this path there is **no forwarder and no premature task-completion notification** — the `state.json` poll (pid alive + `phase`/`updatedAt`) is the only completion signal.
 
 - **codex-rescue is a thin forwarder.** It dispatches one codex job via `codex-companion task --background --write` and exits, regardless of "stay alive and poll" instructions. The orchestrator MUST poll codex job status itself. Resolve the companion path at runtime: `companion=$(ls ~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs | sort -V | tail -1)`. Job state lives at `~/.claude/plugins/data/codex-openai-codex/state/agent-<id>-<hash>/state.json`; read those directly for `status`/`phase`/`updatedAt`. `cancel <job-id>` from the worktree cwd to stop a stuck job.
 
@@ -637,13 +637,30 @@ git worktree prune
 
 Also prune `/private/tmp/caesium-*-bridge` and `/private/tmp/caesium-agent-*-impl` (codex sandbox fallback worktrees), and any `.claude/worktrees/agent-*` whose `git -C ... status` errors (rsync-recovery shells, post-publish).
 
-### Step 7.5c: Do NOT prune
+### Step 7.5c: Delete merged remote branches
+
+`gh pr merge --delete-branch` does NOT reliably delete the remote branch when the local branch is worktree-locked (see the "Common gotchas" note), so `worktree-agent-*` branches accumulate on origin and — because the codex path names branches deterministically — collide with a later wave's same-named branch. After the merge train, delete this wave's remote branches and sweep prior waves' strays:
+
+```sh
+git remote prune origin
+git branch -r | sed 's|.*origin/||' | grep '^worktree-agent-' | sort -u | while IFS= read -r b; do
+  [ -z "$b" ] && continue
+  # NEVER delete a branch with an open PR (an in-flight concurrent wave)
+  [ "$(gh pr list --head "$b" --state open --json number --jq 'length')" = "0" ] || { echo "SKIP $b (open PR)"; continue; }
+  git push origin --delete "$b" && echo "deleted remote $b"
+done
+git remote prune origin
+```
+
+Deleting a squash-merged branch is safe — the content is in `master` and the PR preserves the head SHA. Do a per-branch open-PR check (above) rather than a blind bulk delete, and never sweep non-`worktree-agent-*` branches (`sync-*`, `claude/*`) here. Note: a single multi-ref `git push origin --delete a b c …` aborts if any ref is already gone from the remote — delete per-branch after `git remote prune origin`, not in one batch.
+
+### Step 7.5d: Do NOT prune
 
 - Worktrees the operator created manually (e.g. a sibling clone like `../caesium-<feature>/` outside `$REPO_ROOT`) — user-owned. Surface their existence in the final report if disk pressure remains; never auto-prune without explicit consent.
 - Active claude-code chat worktrees (`.claude/worktrees/<adjective-name>/` like `adoring-pascal` — not `agent-*`).
 - The main checkout (`$REPO_ROOT/`).
 
-### Step 7.5d: Verify reclaim
+### Step 7.5e: Verify reclaim
 
 ```sh
 du -sh $REPO_ROOT/.claude/worktrees
@@ -716,7 +733,7 @@ Use the format from `SKILL.md` § Output. Be terse. Include all PR URLs and call
 
 ## Common gotchas
 
-- **`gh pr merge --delete-branch` exit code 1**: the remote branch IS deleted; only local-branch deletion failed (worktree using it). The merge IS done. Do not retry.
+- **`gh pr merge --delete-branch` exit code 1**: the merge IS done — do not retry — but do NOT assume the remote branch was deleted. When the local branch is checked out in a worktree, `gh` often fails the local delete AND skips the remote delete, so `worktree-agent-*` branches pile up on origin (this wave left 49). Verify with `git ls-remote --heads origin <branch>` and clean leftovers in Phase 7.5c. The worktree-directory cleanup (Phase 7.5a) is separate and always needed.
 - **`gh pr view <pr> --json merged`**: `merged` is not a valid field; use `mergedAt` (truthy when merged).
 - **Sleeping after a push before retrying merge**: GitHub's `mergeStateStatus` doesn't update instantly. After a conflict-resolution push, sleep ~5s before re-attempting `gh pr merge`.
 - **`UNSTABLE` `mergeStateStatus`**: normal for "mergeable but at least one non-required check failed" — caesium has no required checks, so a squash-merge succeeds anyway (subject to the CODEOWNER review gate).
@@ -726,6 +743,7 @@ Use the format from `SKILL.md` § Output. Be terse. Include all PR URLs and call
 - **arch-specific failures**: check both `unit-test` and `unit-test-arm64` (and both `build-and-integration-test` jobs). An arm64-only failure is real, not a flake.
 - **builder is the CI root**: if `builder`/`builder-arm64` fails, every dependent job is skipped — diagnose the builder job first; downstream "failures" may just be "skipped".
 - **Codex publish + verify is the orchestrator's job by default**: codex sandbox blocks DNS for github.com AND has no Docker, so it can run none of caesium's verify chain. The codex stream prompt tells the agent to gofmt + stage + STOP; Phase 4.5 runs `just lint` + `just unit-test` and publishes. Three worktree shapes to handle: standard, `/private/tmp/caesium-agent-<id>-impl` (on `master`), and already-committed.
+- **§ codex-companion background dispatch is unreliable — use `codex exec`**: `node codex-companion.mjs task --background` spawns a detached job-worker that dies at thread start with `failed to load configuration: No such file or directory (os error 2)` (~440ms after dispatch), while `codex exec` from the same shell works. It is NOT a codex-cli version regression (the identical error is recorded against much older plugin versions in `~/.claude/plugins/data/codex-openai-codex/state/`); the trigger is the detached-worker environment inherited from a sandboxed sub-agent shell. Dispatch codex streams via `codex exec` piped from a prompt file inside a `Bash run_in_background` call (Phase 3 § codex), and rely on the harness's background-task completion notifications for status instead of `codex-companion status`. `codex exec` respects the user's `~/.codex/config.toml` (model/effort/sandbox), so the model is set by config, not a per-dispatch flag.
 - **Worktrees share a git stash store**: a `git stash` from one worktree can be popped into a sibling, silently corrupting foreign work. Stream agents commit WIP (`git add -A && git commit -m "wip" --no-verify`, then `git reset HEAD~1`) instead. Codified in the stream prompts.
 - **Security stub-on-merge is a P0**: an agent stubbing `validateSignature` / `ValidateKey` / `HasRole` / `CheckScope` / a `subtle.ConstantTimeCompare` / the SAML `recordAssertion` / the OIDC nonce check AND merging ships a forgery / privilege-escalation / replay hole. Treat these as merge-blocking; re-dispatch as a fix-forward (sonnet → opus) before Phase 7. Verify any "dep would conflict" stub-justification against `go.mod`/`go.sum` first.
 - **`docs/roadmap.md` is lowercase**: there is NO `ROADMAP.md`. A dashboard sync that edits "ROADMAP.md" creates a duplicate file. Always edit `docs/roadmap.md`.
