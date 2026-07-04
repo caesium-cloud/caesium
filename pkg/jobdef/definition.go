@@ -123,6 +123,14 @@ type Metadata struct {
 	// Datasets declares the external source datasets this job's steps consume.
 	// It is scheduling metadata for freshness and does not affect the cache hash.
 	Datasets *MetadataDatasets `yaml:"datasets,omitempty" json:"datasets,omitempty"`
+	// Remediation declares this job's opt-in to autonomous incident
+	// remediation (agent-in-the-loop-remediation Stream E): which
+	// AgentProfile to use, which failure classes are in scope, the tiered
+	// action catalog the agent (or a deterministic rule) may exercise
+	// autonomously, and the escalation fallback. It is server-enforced
+	// scheduling/policy metadata, not a step-execution input, and does not
+	// affect the cache hash.
+	Remediation *MetadataRemediation `yaml:"remediation,omitempty" json:"remediation,omitempty"`
 }
 
 // Concurrency controls admission of new runs for the same job.
@@ -285,6 +293,154 @@ type SourceDataset struct {
 // datasets the job's steps consume.
 type MetadataDatasets struct {
 	Sources []SourceDataset `yaml:"sources,omitempty" json:"sources,omitempty"`
+}
+
+// Failure class names accepted by metadata.remediation.classes and the keys
+// of metadata.remediation.autonomy.perClass. These must stay in sync with
+// internal/incident.FailureClass (the deterministic classifier, Stream A);
+// pkg/jobdef duplicates the vocabulary rather than importing internal/incident
+// so offline `caesium job lint` (and this package generally) stays free of a
+// dependency on the incident runtime.
+const (
+	RemediationClassTransientInfra  = "transient_infra"
+	RemediationClassSchemaViolation = "schema_violation"
+	RemediationClassSLARisk         = "sla_risk"
+	RemediationClassDataUnavailable = "data_unavailable"
+	RemediationClassAuthFailure     = "auth_failure"
+	RemediationClassOOM             = "oom"
+	RemediationClassQuota           = "quota"
+	RemediationClassUnknown         = "unknown"
+)
+
+// remediationClasses is the lookup set backing isKnownRemediationClass.
+var remediationClasses = map[string]struct{}{
+	RemediationClassTransientInfra:  {},
+	RemediationClassSchemaViolation: {},
+	RemediationClassSLARisk:         {},
+	RemediationClassDataUnavailable: {},
+	RemediationClassAuthFailure:     {},
+	RemediationClassOOM:             {},
+	RemediationClassQuota:           {},
+	RemediationClassUnknown:         {},
+}
+
+// Remediation action names accepted by metadata.remediation.autonomy.allow,
+// .perClass[].allow, and .requireApproval. These name the typed action
+// catalog docs/design-agent-in-the-loop.md defines for Stream B's executor
+// (tier 1/2 autonomous actions, tier-3 approval-gated producers, plus the
+// terminal `escalate`); pkg/jobdef validates job-declared policy names
+// against this list without depending on Stream B's executor package.
+const (
+	RemediationActionAutoRetryBackoff         = "auto_retry_backoff"
+	RemediationActionSnoozeUntilCron          = "snooze_until_cron"
+	RemediationActionSnoozeRetry              = "snooze_retry"
+	RemediationActionRetryFromFailure         = "retry_from_failure"
+	RemediationActionRetryCallbacks           = "retry_callbacks"
+	RemediationActionNotify                   = "notify"
+	RemediationActionQuarantineReplay         = "quarantine_replay"
+	RemediationActionRerunWithParams          = "rerun_with_params"
+	RemediationActionPauseJob                 = "pause_job"
+	RemediationActionUnpauseJob               = "unpause_job"
+	RemediationActionClearCacheEntry          = "clear_cache_entry"
+	RemediationActionSuppressDownstreamAlerts = "suppress_downstream_alerts"
+	RemediationActionExtendSLAOnce            = "extend_sla_once"
+	RemediationActionSkipTask                 = "skip_task"
+	RemediationActionOverrideSchemaGate       = "override_schema_gate"
+	RemediationActionApplyJobdefPatch         = "apply_jobdef_patch"
+	RemediationActionEscalate                 = "escalate"
+)
+
+// remediationActions is the lookup set backing isKnownRemediationAction.
+var remediationActions = map[string]struct{}{
+	RemediationActionAutoRetryBackoff:         {},
+	RemediationActionSnoozeUntilCron:          {},
+	RemediationActionSnoozeRetry:              {},
+	RemediationActionRetryFromFailure:         {},
+	RemediationActionRetryCallbacks:           {},
+	RemediationActionNotify:                   {},
+	RemediationActionQuarantineReplay:         {},
+	RemediationActionRerunWithParams:          {},
+	RemediationActionPauseJob:                 {},
+	RemediationActionUnpauseJob:               {},
+	RemediationActionClearCacheEntry:          {},
+	RemediationActionSuppressDownstreamAlerts: {},
+	RemediationActionExtendSLAOnce:            {},
+	RemediationActionSkipTask:                 {},
+	RemediationActionOverrideSchemaGate:       {},
+	RemediationActionApplyJobdefPatch:         {},
+	RemediationActionEscalate:                 {},
+}
+
+func isKnownRemediationClass(name string) bool {
+	_, ok := remediationClasses[name]
+	return ok
+}
+
+func isKnownRemediationAction(name string) bool {
+	_, ok := remediationActions[name]
+	return ok
+}
+
+// RemediationClassPolicy narrows the allowed action set for one failure class,
+// e.g. metadata.remediation.autonomy.perClass.auth_failure.allow.
+type RemediationClassPolicy struct {
+	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+}
+
+// RemediationAutonomy is the tiered-autonomy policy within a remediation
+// block: which actions may execute without a human, the whitelist of
+// rerun_with_params overrides, per-class narrowing, and which actions always
+// require approval regardless of tier.
+type RemediationAutonomy struct {
+	// Allow lists the actions this job permits to run autonomously (subject
+	// to each action's own tier semantics — tier 3 always creates an
+	// ApprovalRequest no matter what allow contains).
+	Allow []string `yaml:"allow,omitempty" json:"allow,omitempty"`
+	// ParamOverrides whitelists the rerun_with_params values allowed per
+	// trigger.defaultParams key. Every key must name an existing
+	// trigger.defaultParams entry.
+	ParamOverrides map[string][]string `yaml:"paramOverrides,omitempty" json:"paramOverrides,omitempty"`
+	// PerClass optionally narrows the allow list for a specific failure class.
+	PerClass map[string]RemediationClassPolicy `yaml:"perClass,omitempty" json:"perClass,omitempty"`
+	// RequireApproval lists actions that must create an ApprovalRequest for
+	// this job even if the action's own default tier would otherwise permit
+	// autonomous execution.
+	RequireApproval []string `yaml:"requireApproval,omitempty" json:"requireApproval,omitempty"`
+}
+
+// RemediationEscalation configures the forced hand-off when remediation does
+// not resolve an incident within the wall-clock cap.
+type RemediationEscalation struct {
+	// Channel names a NotificationChannel (server-side state; unverified by
+	// offline lint, same posture as Profile).
+	Channel string `yaml:"channel,omitempty" json:"channel,omitempty"`
+	// After is the wall-clock cap, as a Go duration string, before the
+	// incident is force-escalated to Channel.
+	After string `yaml:"after,omitempty" json:"after,omitempty"`
+}
+
+// MetadataRemediation is the job-level opt-in to autonomous incident
+// remediation (docs/design-agent-in-the-loop.md "Declarative policy"). It is
+// policy metadata enforced server-side by the incident manager and executor
+// (Streams A-D); it never participates in step-execution cache identity.
+type MetadataRemediation struct {
+	// Profile references an AgentProfile by name. AgentProfile is
+	// server-side state (api/rest/controller/agentprofile), so offline
+	// `caesium job lint` cannot verify this reference — it emits a scope
+	// note instead. Server-side lint (POST /v1/jobdefs/lint) and the apply
+	// transaction both verify it.
+	Profile string `yaml:"profile" json:"profile"`
+	// Classes lists the failure classes this policy applies to.
+	Classes []string `yaml:"classes,omitempty" json:"classes,omitempty"`
+	// MaxAttempts bounds how many remediation attempts an incident may take
+	// before it force-escalates.
+	MaxAttempts int `yaml:"maxAttempts,omitempty" json:"maxAttempts,omitempty"`
+	// Autonomy declares which actions may run without a human and under what
+	// constraints.
+	Autonomy *RemediationAutonomy `yaml:"autonomy,omitempty" json:"autonomy,omitempty"`
+	// Escalation configures the forced hand-off when remediation doesn't
+	// resolve the incident within Escalation.After.
+	Escalation *RemediationEscalation `yaml:"escalation,omitempty" json:"escalation,omitempty"`
 }
 
 // Step defines an execution step.
@@ -527,6 +683,136 @@ func (d *Definition) Validate() error {
 	}
 	if err := validateDatasets(d); err != nil {
 		return err
+	}
+	if err := validateRemediation(d); err != nil {
+		return err
+	}
+	return nil
+}
+
+// validateRemediation performs single-definition validation of the
+// metadata.remediation block: class/action names are known, maxAttempts is
+// non-negative, autonomy.paramOverrides keys exist in trigger.defaultParams,
+// autonomy.perClass keys are known classes, and escalation.after (if set)
+// parses as a positive Go duration. It deliberately cannot verify
+// Profile or Escalation.Channel — those name server-side resources
+// (AgentProfile, NotificationChannel) that do not exist at parse time; the
+// offline lint scope note (cmd/job/lint.go) names this gap, and server-side
+// lint (internal/jobdef.ValidateAgentProfileRefs, invoked from
+// POST /v1/jobdefs/lint and the apply transaction) closes it. The block is
+// policy metadata and never enters the cache identity hash.
+func validateRemediation(d *Definition) error {
+	r := d.Metadata.Remediation
+	if r == nil {
+		return nil
+	}
+
+	r.Profile = strings.TrimSpace(r.Profile)
+	if r.Profile == "" {
+		return fmt.Errorf("metadata.remediation.profile is required")
+	}
+
+	if len(r.Classes) == 0 {
+		return fmt.Errorf("metadata.remediation.classes must contain at least one entry")
+	}
+	seenClasses := make(map[string]struct{}, len(r.Classes))
+	for i, raw := range r.Classes {
+		name := strings.TrimSpace(raw)
+		if !isKnownRemediationClass(name) {
+			return fmt.Errorf("metadata.remediation.classes[%d] %q is not a known failure class", i, raw)
+		}
+		if _, dup := seenClasses[name]; dup {
+			return fmt.Errorf("metadata.remediation.classes[%d] %q duplicates another entry", i, raw)
+		}
+		seenClasses[name] = struct{}{}
+		r.Classes[i] = name
+	}
+
+	if r.MaxAttempts < 0 {
+		return fmt.Errorf("metadata.remediation.maxAttempts must be >= 0")
+	}
+
+	if r.Autonomy != nil {
+		if err := validateRemediationAutonomy(r.Autonomy, d.Trigger.DefaultParams); err != nil {
+			return err
+		}
+	}
+
+	if r.Escalation != nil {
+		r.Escalation.Channel = strings.TrimSpace(r.Escalation.Channel)
+		after := strings.TrimSpace(r.Escalation.After)
+		if r.Escalation.Channel == "" && after == "" {
+			return fmt.Errorf("metadata.remediation.escalation requires channel and/or after")
+		}
+		if after != "" {
+			dur, err := time.ParseDuration(after)
+			if err != nil {
+				return fmt.Errorf("metadata.remediation.escalation.after %q must be a valid duration: %w", after, err)
+			}
+			if dur <= 0 {
+				return fmt.Errorf("metadata.remediation.escalation.after %q must be a positive duration", after)
+			}
+		}
+		r.Escalation.After = after
+	}
+
+	return nil
+}
+
+func validateRemediationAutonomy(a *RemediationAutonomy, defaultParams map[string]string) error {
+	if err := validateRemediationActionList("metadata.remediation.autonomy.allow", a.Allow); err != nil {
+		return err
+	}
+
+	for key, values := range a.ParamOverrides {
+		if _, ok := defaultParams[key]; !ok {
+			return fmt.Errorf("metadata.remediation.autonomy.paramOverrides key %q does not match any trigger.defaultParams key", key)
+		}
+		if len(values) == 0 {
+			return fmt.Errorf("metadata.remediation.autonomy.paramOverrides[%q] must list at least one allowed value", key)
+		}
+	}
+
+	if len(a.PerClass) > 0 {
+		// Rebuild the map with trimmed/canonical keys so runtime lookups
+		// (PerClass["auth_failure"]) hit even when the YAML key carried
+		// surrounding whitespace.
+		normalized := make(map[string]RemediationClassPolicy, len(a.PerClass))
+		for class, policy := range a.PerClass {
+			name := strings.TrimSpace(class)
+			if !isKnownRemediationClass(name) {
+				return fmt.Errorf("metadata.remediation.autonomy.perClass key %q is not a known failure class", class)
+			}
+			if _, dup := normalized[name]; dup {
+				return fmt.Errorf("metadata.remediation.autonomy.perClass key %q duplicates another entry", class)
+			}
+			if err := validateRemediationActionList(fmt.Sprintf("metadata.remediation.autonomy.perClass[%q].allow", name), policy.Allow); err != nil {
+				return err
+			}
+			normalized[name] = policy
+		}
+		a.PerClass = normalized
+	}
+
+	if err := validateRemediationActionList("metadata.remediation.autonomy.requireApproval", a.RequireApproval); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateRemediationActionList(field string, actions []string) error {
+	seen := make(map[string]struct{}, len(actions))
+	for i, raw := range actions {
+		name := strings.TrimSpace(raw)
+		if !isKnownRemediationAction(name) {
+			return fmt.Errorf("%s[%d] %q is not a known remediation action", field, i, raw)
+		}
+		if _, dup := seen[name]; dup {
+			return fmt.Errorf("%s[%d] %q duplicates another entry", field, i, raw)
+		}
+		seen[name] = struct{}{}
+		actions[i] = name
 	}
 	return nil
 }

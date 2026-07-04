@@ -69,6 +69,9 @@ var lintCmd = &cobra.Command{
 			if err := writeLintTriggerScopeNote(cmd); err != nil {
 				return err
 			}
+			if err := writeLintRemediationScopeNote(cmd, defs); err != nil {
+				return err
+			}
 			return nil
 		}
 
@@ -93,6 +96,9 @@ var lintCmd = &cobra.Command{
 		if err := writeLintTriggerScopeNote(cmd); err != nil {
 			return err
 		}
+		if err := writeLintRemediationScopeNote(cmd, defs); err != nil {
+			return err
+		}
 		return nil
 	},
 }
@@ -114,6 +120,21 @@ func init() {
 
 func writeLintTriggerScopeNote(cmd *cobra.Command) error {
 	return writeCmdOut(cmd, "Note: trigger-cycle lint is file-scoped; cross-job cycles against persisted triggers are validated at apply.\n")
+}
+
+// writeLintRemediationScopeNote prints the offline-lint scope gap for
+// metadata.remediation: profile (an AgentProfile reference) and
+// escalation.channel (a NotificationChannel reference) name server-side
+// resources this offline pass has no database connection to verify. Only
+// emitted when at least one definition actually declares a remediation
+// block, so jobs that don't use the feature see no extra noise.
+func writeLintRemediationScopeNote(cmd *cobra.Command, defs []jobdef.Definition) error {
+	for i := range defs {
+		if defs[i].Metadata.Remediation != nil {
+			return writeCmdOut(cmd, "Note: metadata.remediation.profile / escalation.channel references are unverified offline; verified by server-side lint (POST /v1/jobdefs/lint) and at apply.\n")
+		}
+	}
+	return nil
 }
 
 func buildLintResolver() (*secret.MultiResolver, error) {

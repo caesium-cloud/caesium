@@ -8,6 +8,15 @@ import (
 	"gorm.io/gorm"
 )
 
+// DefaultTriageOnlyProfileName is the shipped zero-risk default AgentProfile:
+// tier 0 (deterministic rules only) plus escalate, so teams can adopt
+// agent-in-the-loop remediation incrementally without granting any autonomous
+// action. It is a built-in name: a job's metadata.remediation.profile may
+// reference it and server-side lint/apply treats it as always resolvable even
+// before the row is seeded, so a fresh server never rejects the advertised
+// default. See docs/design-agent-in-the-loop.md.
+const DefaultTriageOnlyProfileName = "triage-only"
+
 // AgentProfile is the server-side resource declaring how a remediation agent
 // runs: its container image/engine, resource limits, model-credential
 // secret:// references, session budgets, and the default playbook. It is

@@ -3,6 +3,7 @@ package bind
 import (
 	authmw "github.com/caesium-cloud/caesium/api/middleware"
 	agentctrl "github.com/caesium-cloud/caesium/api/rest/controller/agent"
+	agentprofilectrl "github.com/caesium-cloud/caesium/api/rest/controller/agentprofile"
 	"github.com/caesium-cloud/caesium/api/rest/controller/atom"
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
@@ -181,6 +182,16 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/notifications/policies", notifctrl.CreatePolicy)
 		g.PATCH("/notifications/policies/:id", notifctrl.UpdatePolicy)
 		g.DELETE("/notifications/policies/:id", notifctrl.DeletePolicy)
+	}
+
+	// agent profiles (agent-in-the-loop-remediation E2): the AgentProfile
+	// server-side resource metadata.remediation.profile references.
+	{
+		g.GET("/agentprofiles", agentprofilectrl.List)
+		g.GET("/agentprofiles/:id", agentprofilectrl.Get)
+		g.POST("/agentprofiles", agentprofilectrl.Create)
+		g.PATCH("/agentprofiles/:id", agentprofilectrl.Update)
+		g.DELETE("/agentprofiles/:id", agentprofilectrl.Delete)
 	}
 
 	// nodes
