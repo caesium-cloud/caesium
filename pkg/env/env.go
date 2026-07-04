@@ -55,6 +55,22 @@ func validate() error {
 		return fmt.Errorf("CAESIUM_WAKEUP_FANOUT_MODE must be one of: full, gossip")
 	}
 
+	// Agent-in-the-loop master gate (D1 security precondition). Caesium defaults
+	// to CAESIUM_AUTH_MODE=none, which attaches NO auth middleware at all — every
+	// route becomes an unauthenticated request. The tier-3 approval routes
+	// (POST /v1/incidents/:id/approvals/:approval_id/{approve,reject}) and the
+	// agent tool surface must never be reachable without authentication, or the
+	// agent container itself (which has network reach to the API) could approve
+	// its own proposal. So the master gate refuses to enable the feature unless an
+	// authentication mode is active (api-key or any SSO provider). This keeps the
+	// design invariant "tier 3 always terminates at a human" true.
+	if variables.AgentRemediationEnabled {
+		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
+		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
+			return fmt.Errorf("CAESIUM_AGENT_REMEDIATION_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider so the tier-3 approval routes are not reachable without authentication")
+		}
+	}
+
 	return nil
 }
 
