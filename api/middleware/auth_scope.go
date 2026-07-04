@@ -27,6 +27,16 @@ const LineageImpactScopedDenyMessage = "lineage impact is a global cross-job que
 // must resolve to one run owner before any events are streamed.
 const EventsScopedDenyMessage = "event stream requires an in-scope run_id for scoped principals"
 
+// AgentRoutePrefix is the only route prefix an agent-session credential may
+// reach. Everything outside it is denied outright for agent tokens.
+const AgentRoutePrefix = "/v1/agent/"
+
+// AgentScopeDenyMessage is the 403 reason returned when an agent-session token
+// is used on any route outside its incident's /v1/agent/* tool surface (a
+// non-agent route, or a different incident's agent route). Exported so the auth
+// and integration tests assert against the single source of truth.
+const AgentScopeDenyMessage = "agent session token is scoped to its own incident's /v1/agent/* tool surface"
+
 type scopeAuditContext struct {
 	jobAliases []string
 }
@@ -45,6 +55,20 @@ func GetAllowedJobAliases(c *echo.Context) []string {
 }
 
 func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routePath string) (*scopeAuditContext, error) {
+	// Agent-session credentials are intercepted FIRST and are fully
+	// self-contained: an agent token is valid only for its own incident's
+	// /v1/agent/* routes and nothing else. This check must precede the
+	// job-scope path because an agent key carries an empty job list — treating
+	// it as "unrestricted" (the len==0 branch below) would be a privilege
+	// escalation, letting an agent token reach every unscoped route.
+	agentClaim, err := auth.DecodeAgentClaim(scopeJSON)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	}
+	if agentClaim != nil {
+		return authorizeAgentScope(c, agentClaim, routePath)
+	}
+
 	scopeJobs, err := auth.ScopeJobs(scopeJSON)
 	if err != nil {
 		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
@@ -132,6 +156,46 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	}
 
 	return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+}
+
+// authorizeAgentScope enforces an agent-session credential's incident binding.
+// The token is valid ONLY for /v1/agent/incidents/:id/* routes whose :id equals
+// the incident the token was minted for. Two negative properties are the whole
+// point of this arm:
+//
+//   - Cross-route denial: any route outside /v1/agent/* (a normal job route, the
+//     approval routes, /v1/lineage/impact, /v1/database/*) is 403'd — an agent
+//     token can never act as a general principal.
+//   - Cross-incident denial: an agent token minted for incident X hitting
+//     incident Y's agent routes is 403'd — the incident id in the path must match
+//     the frozen claim exactly.
+//
+// On success the frozen job allowlist is injected into the request context so the
+// read-only context handlers can gate which jobs' logs/why/history the agent may
+// pull. Server-side enforcement here is the security boundary; the agent's
+// prompt is not.
+func authorizeAgentScope(c *echo.Context, claim *auth.AgentClaimView, routePath string) (*scopeAuditContext, error) {
+	if !strings.HasPrefix(routePath, AgentRoutePrefix) {
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+
+	incParam := strings.TrimSpace(c.Param("id"))
+	if incParam == "" {
+		// An agent route with no incident id in scope is not part of the
+		// per-incident tool surface an agent token may reach.
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+	incID, err := uuid.Parse(incParam)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "invalid incident id")
+	}
+	if incID != claim.IncidentID {
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+
+	allowed := append([]string(nil), claim.Jobs...)
+	c.Set(ContextKeyAllowedJobAliases, allowed)
+	return &scopeAuditContext{jobAliases: allowed}, nil
 }
 
 func resolveScopedJobAlias(c *echo.Context, svc *auth.Service, routePath string) (string, error) {
