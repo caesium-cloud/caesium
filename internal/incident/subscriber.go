@@ -177,7 +177,57 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 	return fc
 }
 
+// runHasTaskAttributedIncident reports whether a task-attributed incident (one
+// carrying a resolved TaskID) already exists for the run — i.e. the task_failed
+// event already opened the task incident. Suppression keys on this INCIDENT, not
+// on the task_runs table, so a task_failed that was dropped (bus buffer
+// overflow) or never handled does NOT silently swallow the run failure: with no
+// task incident, the run_failed still opens one, preserving remediation dispatch
+// and operator visibility. A missed incident is worse than a rare duplicate.
+//
+// Race-safety: the incident subscriber drains the bus on a single FIFO goroutine
+// and task_failed is published before run_failed — the owner finalizes the run
+// via store.Complete only AFTER CompleteTaskOwner has committed and published the
+// task terminal event (internal/run/owner_manager.go) — so the task-attributed
+// incident is already committed and visible by the time run_failed is processed.
+//
+// On a query error it FAILS OPEN (returns false → the run-level incident opens):
+// a rare transient error yielding a rare duplicate is a safer degradation than a
+// rare missed incident.
+func (s *Subscriber) runHasTaskAttributedIncident(ctx context.Context, runID uuid.UUID) bool {
+	var n int64
+	if err := s.db.WithContext(ctx).
+		Model(&models.Incident{}).
+		Where("run_id = ? AND task_id IS NOT NULL", runID).
+		Count(&n).Error; err != nil {
+		log.Warn("incident: could not check for task-attributed incident; opening run-level incident", "run_id", runID, "error", err)
+		return false
+	}
+	return n > 0
+}
+
 func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
+	// A failing run publishes BOTH task_failed (carrying the failing TaskID) and
+	// run_failed (no TaskID). Both route here, but taskName only resolves for the
+	// task-bearing event, so they produce two distinct dedupe keys
+	// (job|task|class vs job||class) and open two incidents for one failure —
+	// double-counting the failure as two remediation-dispatch candidates and
+	// showing a phantom "task unknown" incident. Suppress the redundant run-level
+	// twin: when a run_failed carries no task attribution and a task-attributed
+	// incident already exists for the run, the task_failed event already opened
+	// it. Keying on the incident (not on the failed task_run) means a dropped or
+	// unhandled task_failed leaves no incident to suppress against, so the
+	// run_failed still opens one — no silently missed incident. Genuinely
+	// run-level failures with no task incident (infra/setup errors), and
+	// run_timed_out / sla_missed, are preserved and still open a run-level
+	// incident.
+	if evt.Type == event.TypeRunFailed && evt.TaskID == uuid.Nil && evt.RunID != uuid.Nil {
+		if s.runHasTaskAttributedIncident(ctx, evt.RunID) {
+			log.Debug("incident: suppressing redundant run-level failure; task-attributed incident exists", "run_id", evt.RunID)
+			return
+		}
+	}
+
 	fc := s.resolveContext(ctx, evt)
 	if fc.jobID == uuid.Nil {
 		log.Warn("incident: could not resolve job for failure event", "type", evt.Type, "run_id", evt.RunID)

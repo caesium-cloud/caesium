@@ -74,6 +74,15 @@ test("incidents board filters a live failure and opens the detail timeline", asy
   await waitForFailedRun(request, job.id, run.id, authHeaders(keys.viewer));
   const incident = await waitForIncident(request, job.id, run.id, authHeaders(keys.viewer));
 
+  // One failing run opens exactly one incident. A run publishes both task_failed
+  // and run_failed; the classifier dedupes the run-level twin so operators never
+  // see a phantom "task unknown" incident and remediation isn't dispatched twice.
+  // waitForFailedRun above guarantees the run finalized (both events emitted).
+  const runIncidents = await incidentsForRun(request, job.id, run.id, authHeaders(keys.viewer));
+  expect(runIncidents).toHaveLength(1);
+  expect(runIncidents[0].id).toBe(incident.id);
+  expect(runIncidents[0].task_name).toBeTruthy();
+
   await loginAtUrl(page, `/incidents?job_id=${job.id}`, keys.viewer);
   await expect(page.getByRole("heading", { name: "Incidents", exact: true })).toBeVisible({
     timeout: 30_000,
@@ -83,17 +92,16 @@ test("incidents board filters a live failure and opens the detail timeline", asy
   await page.getByTestId("incident-status-filter").selectOption(incident.status);
   await page.getByTestId("incident-class-filter").selectOption(incident.class);
 
-  // Target the specific incident row by id: the classifier can open more than one
-  // incident for a single failing run (a minimal one plus the task-attributed one),
-  // so filtering by alias + .first() can select a different incident than
-  // waitForIncident returned and then navigate to the wrong detail URL.
+  // Target the specific incident row by id (robust even if an unrelated run's
+  // incident shares the filtered board): filtering by alias + .first() could
+  // select a different incident than waitForIncident returned and navigate to the
+  // wrong detail URL.
   const row = page.locator(`a[data-testid="incident-row"][href$="/incidents/${incident.id}"]`);
   await expect(row).toBeVisible({ timeout: 30_000 });
-  // The classifier opens a minimal incident and attributes the failing task_name
-  // asynchronously, so the board row can still show the pre-enrichment task
-  // (shortId fallback) within this window even though the incident API already
-  // reports it. Task attribution is verified below on the detail timeline
-  // (refetched per-incident), so we don't assert the exact row task text here.
+  // The board row may briefly render a shortId task fallback before the incident
+  // list query resolves the task_name, so we don't assert the exact row task text
+  // here; task attribution is verified below on the detail timeline (refetched
+  // per-incident).
   await expect(row).toContainText(incident.class.replaceAll("_", " "));
   await row.click();
 
@@ -230,9 +238,9 @@ async function waitForIncident(
       return `HTTP ${response.status()}`;
     }
     const body = (await response.json()) as IncidentListResponse;
-    latest =
-      body.incidents.find((candidate) => candidate.run_id === runId && candidate.task_name) ??
-      body.incidents.find((candidate) => candidate.run_id === runId);
+    // One failing run now opens exactly one incident (the task-attributed one),
+    // so no task_name-preference fallback is needed — take the run's incident.
+    latest = body.incidents.find((candidate) => candidate.run_id === runId);
     return latest?.id ?? "";
   }, {
     timeout: 60_000,
@@ -242,6 +250,22 @@ async function waitForIncident(
     throw new Error(`incident not found for run ${runId}`);
   }
   return latest;
+}
+
+// incidentsForRun returns the incidents attributed to a single run, filtering the
+// job-scoped list client-side (the list API filters by job_id, not run_id).
+async function incidentsForRun(
+  request: APIRequestContext,
+  jobId: string,
+  runId: string,
+  headers: Record<string, string>,
+): Promise<E2EIncident[]> {
+  const response = await request.get(`/v1/incidents?job_id=${jobId}&limit=20`, { headers });
+  if (!response.ok()) {
+    throw new Error(`failed to list incidents: ${response.status()} ${await response.text()}`);
+  }
+  const body = (await response.json()) as IncidentListResponse;
+  return body.incidents.filter((candidate) => candidate.run_id === runId);
 }
 
 function envString(name: string): string | null {

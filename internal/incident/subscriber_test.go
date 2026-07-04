@@ -82,6 +82,104 @@ func TestSubscriberOpensClassifiedIncident(t *testing.T) {
 	require.Equal(t, 1, inc.OccurrenceCount)
 }
 
+// TestSubscriberDedupesRunLevelTwin drives the dual-event path a real failing
+// run produces: it publishes BOTH task_failed (task-attributed) and run_failed
+// (no TaskID) for one run. Before the fix these routed to two distinct dedupe
+// keys (job|task|class and job||class) and opened two incidents. Exactly one
+// incident — the task-attributed one — must remain.
+func TestSubscriberDedupesRunLevelTwin(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+
+	jobID, runID, taskID := seedFailedTask(t, db, "Error: permission denied reading /secure")
+
+	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID, RunID: runID, TaskID: taskID, Timestamp: time.Now()})
+	bus.Publish(event.Event{Type: event.TypeRunFailed, JobID: jobID, RunID: runID, Timestamp: time.Now()})
+
+	// Sentinel: an independent failure published after the run_failed above. A
+	// single subscriber goroutine drains the bus FIFO, so once the sentinel's
+	// incident exists the run_failed has already been handled — making the
+	// "exactly one incident for the run" assertion deterministic rather than a
+	// race against an unprocessed event.
+	jobID2, runID2, taskID2 := seedFailedTask(t, db, "Error: permission denied reading /other")
+	bus.Publish(event.Event{Type: event.TypeTaskFailed, JobID: jobID2, RunID: runID2, TaskID: taskID2, Timestamp: time.Now()})
+
+	require.Eventually(t, func() bool {
+		var n int64
+		if err := db.Model(&models.Incident{}).Where("job_id = ?", jobID2).Count(&n).Error; err != nil {
+			return false
+		}
+		return n == 1
+	}, 3*time.Second, 10*time.Millisecond)
+
+	// Exactly one incident for the first run, and it is the task-attributed one.
+	var incidents []models.Incident
+	require.NoError(t, db.Where("job_id = ?", jobID).Find(&incidents).Error)
+	require.Len(t, incidents, 1)
+	require.Equal(t, "extract", incidents[0].TaskName)
+	require.NotNil(t, incidents[0].TaskID)
+	require.Equal(t, taskID, *incidents[0].TaskID)
+}
+
+// TestSubscriberOpensRunLevelIncidentWithNoFailedTask guards the preserve case:
+// a run_failed with NO failed task_run (an infra/setup failure that never
+// produced a failing task) is genuinely run-level and must still open one
+// incident.
+func TestSubscriberOpensRunLevelIncidentWithNoFailedTask(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+
+	now := time.Now().UTC()
+	jobID := uuid.New()
+	runID := uuid.New()
+	require.NoError(t, db.Create(&models.JobRun{
+		ID: runID, JobID: jobID, Status: "failed", StartedAt: now, CreatedAt: now, UpdatedAt: now,
+	}).Error)
+
+	bus.Publish(event.Event{Type: event.TypeRunFailed, JobID: jobID, RunID: runID, Timestamp: time.Now()})
+	waitForIncidents(t, db, 1)
+
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, models.IncidentStatusOpen, inc.Status)
+	require.Equal(t, "", inc.TaskName)
+	require.Nil(t, inc.TaskID)
+}
+
+// TestSubscriberOpensRunLevelIncidentWhenTaskFailedDropped guards against a
+// silently missed incident: a failed task_run is committed, but its task_failed
+// event never reaches the subscriber (bus overflow / crash between publish and
+// handle), so NO task-attributed incident was opened. The run_failed must still
+// open exactly one incident. This is precisely why suppression keys on the
+// incident, not on the task_runs table — a committed failed task_run with no
+// incident behind it must not swallow the run failure.
+func TestSubscriberOpensRunLevelIncidentWhenTaskFailedDropped(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+
+	// The failed task_run exists, but we publish ONLY run_failed (the task_failed
+	// event was "dropped").
+	jobID, runID, _ := seedFailedTask(t, db, "Error: permission denied reading /secure")
+
+	bus.Publish(event.Event{Type: event.TypeRunFailed, JobID: jobID, RunID: runID, Timestamp: time.Now()})
+	waitForIncidents(t, db, 1)
+
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, models.IncidentStatusOpen, inc.Status)
+	require.NotNil(t, inc.RunID)
+	require.Equal(t, runID, *inc.RunID)
+	// The run-level incident (no task attribution) was correctly opened.
+	require.Equal(t, "", inc.TaskName)
+	require.Nil(t, inc.TaskID)
+}
+
 func TestSubscriberAppendsOccurrenceNoTwin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
