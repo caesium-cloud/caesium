@@ -30,6 +30,9 @@ config:
       value: "true"
     - name: CAESIUM_OPEN_LINEAGE_TRANSPORT
       value: console
+    # Enable freshness so dataset-state integration scenarios exercise the live evaluator.
+    - name: CAESIUM_FRESHNESS_ENABLED
+      value: "true"
 
 kubernetes:
   engine:

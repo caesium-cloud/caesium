@@ -35,6 +35,7 @@ type IntegrationTestSuite struct {
 	engineType          string // "docker", "podman", or "kubernetes"
 	manualTriggerAPIKey string
 	eventIngestAPIKey   string
+	authAPIKey          string
 }
 
 func (s *IntegrationTestSuite) SetupSuite() {
@@ -72,6 +73,12 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	s.eventIngestAPIKey = os.Getenv("CAESIUM_EVENT_INGEST_API_KEY")
 	if s.eventIngestAPIKey == "" {
 		s.eventIngestAPIKey = "integration-test-key"
+	}
+	for _, envName := range []string{"CAESIUM_API_KEY", "CAESIUM_AUTH_ADMIN_KEY", "CAESIUM_OPERATOR_BEARER_TOKEN"} {
+		if token := strings.TrimSpace(os.Getenv(envName)); token != "" {
+			s.authAPIKey = token
+			break
+		}
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -351,9 +358,17 @@ func (s *IntegrationTestSuite) doRequest(method, target string, body io.Reader) 
 	if err != nil {
 		return nil, err
 	}
+	s.authorize(req)
 
 	//nolint:bodyclose // Response body ownership is transferred to the caller.
 	return http.DefaultClient.Do(req)
+}
+
+func (s *IntegrationTestSuite) authorize(req *http.Request) {
+	if s.authAPIKey == "" || req.Header.Get("Authorization") != "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+s.authAPIKey)
 }
 
 func (s *IntegrationTestSuite) doManualTriggerRequest(method, target string, body io.Reader) (*http.Response, error) {
@@ -361,6 +376,7 @@ func (s *IntegrationTestSuite) doManualTriggerRequest(method, target string, bod
 	if err != nil {
 		return nil, err
 	}
+	s.authorize(req)
 	req.Header.Set("X-Caesium-API-Key", s.manualTriggerAPIKey)
 	return http.DefaultClient.Do(req)
 }
@@ -370,6 +386,7 @@ func (s *IntegrationTestSuite) doEventIngestRequest(method, target string, body 
 	if err != nil {
 		return nil, err
 	}
+	s.authorize(req)
 	req.Header.Set("X-Caesium-API-Key", s.eventIngestAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	return http.DefaultClient.Do(req)

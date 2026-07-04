@@ -13,6 +13,7 @@ target_arch := if platform == "linux/arm64" { "arm64" } else if platform == "lin
 bld_dir := "/bld/caesium"
 repo_dir := `pwd`
 it_container := "caesium-server-test"
+agent_it_container := "caesium-server-agent-test"
 uid := `id -u`
 
 # Podman support: set CAESIUM_PODMAN=true to use podman and localhost-prefixed local image refs.
@@ -24,12 +25,16 @@ podman_sock := if xdg_runtime_dir != "" { xdg_runtime_dir + "/podman/podman.sock
 default_sock := if podman == "true" { podman_sock } else { "/var/run/docker.sock" }
 local_image_ref := if podman == "true" { "localhost/" + repo + "/" + image } else { repo + "/" + image }
 local_builder_ref := if podman == "true" { "localhost/" + repo + "/" + builder_image } else { repo + "/" + builder_image }
+triage_agent_image := repo + "/triage-agent"
+local_triage_agent_ref := if podman == "true" { "localhost/" + triage_agent_image } else { triage_agent_image }
 publish_image_ref := repo + "/" + image
 publish_builder_ref := repo + "/" + builder_image
 sock := env("CAESIUM_SOCK", default_sock)
 port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
+agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
+agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
 # images into the cluster's containerd. Port 5050 sidesteps the macOS
@@ -109,6 +114,12 @@ build-test: builder
         --target test \
         -t {{ local_image_ref }}:{{ tag }}-test \
         -f {{ dockerfile }} .
+
+build-triage-agent: validate-platform
+    {{ container_cli }} build --platform {{ platform }} \
+        -t {{ local_triage_agent_ref }}:{{ tag }} \
+        -t {{ triage_agent_image }}:latest \
+        -f build/Dockerfile.triage-agent .
 
 push:
     docker push {{ publish_image_ref }}:{{ tag }}
@@ -202,8 +213,68 @@ integration-test-distributed:
       exit 1; \
     fi
 
+integration-test-agent:
+    just tag={{ tag }} integration-up-agent
+    @cli_dir={{ repo_dir }}/.tmp/caesium-cli; \
+    rm -rf "$cli_dir"; \
+    mkdir -p "$cli_dir"; \
+    cli_ctr=$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true); \
+    trap '{{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"' EXIT; \
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
+    chmod +x "$cli_dir/caesium"; \
+    {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
+    admin_key=""; \
+    tries=0; \
+    until admin_key="$({{ container_cli }} logs {{ agent_it_container }} 2>&1 | awk '/csk_/ { for (i = 1; i <= NF; i++) if ($i ~ /^csk_/) { print $i; exit } }')" && [ -n "$admin_key" ]; do \
+        tries=$((tries + 1)); \
+        if [ "$tries" -gt 30 ]; then \
+            echo "Agent auth bootstrap admin key did not appear in server logs"; \
+            {{ container_cli }} logs {{ agent_it_container }} || true; \
+            {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+            exit 1; \
+        fi; \
+        sleep 1; \
+    done; \
+    printf '::add-mask::%s\n' "$admin_key"; \
+    tries=0; \
+    until curl -fsS -H "Authorization: Bearer $admin_key" http://127.0.0.1:{{ port }}/v1/agentprofiles >/dev/null; do \
+        tries=$((tries + 1)); \
+        if [ "$tries" -gt 30 ]; then \
+            echo "Agent auth lane did not become ready or seed the default profile"; \
+            {{ container_cli }} logs {{ agent_it_container }} || true; \
+            {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+            exit 1; \
+        fi; \
+        sleep 1; \
+    done; \
+    if {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli/caesium \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_AUTH_ADMIN_KEY="$admin_key" \
+        -e CAESIUM_API_KEY="$admin_key" \
+        -e CAESIUM_AGENT_AUTH_LANE=true \
+        -e CAESIUM_TRIAGE_AGENT_IMAGE={{ triage_agent_image }}:latest \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --network=container:{{ agent_it_container }} \
+        -w {{ bld_dir }} \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ agent_integration_run }}" -timeout 10m'; then \
+      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+    else \
+      echo "agent auth integration tests failed; caesium server logs:"; \
+      {{ container_cli }} logs {{ agent_it_container }} || true; \
+      {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi
+
 integration-down:
     {{ container_cli }} rm -f {{ it_container }}
+
+integration-down-agent:
+    {{ container_cli }} rm -f {{ agent_it_container }}
 
 # Run integration tests against a Caesium server using the Podman engine.
 # Requires Podman to be installed and the Podman socket to be active
@@ -222,6 +293,7 @@ integration-test-podman: build
         -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
         -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
         -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
@@ -262,6 +334,7 @@ integration-up: build-test
         -e CAESIUM_DATABASE_SHARDS=4 \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
         -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
@@ -285,6 +358,7 @@ integration-up-distributed: build-test
         -e CAESIUM_DATABASE_SHARDS=4 \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
         -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
@@ -304,6 +378,34 @@ integration-up-distributed: build-test
         -e CAESIUM_RUN_QUEUE_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        {{ local_image_ref }}:{{ tag }}-test start
+
+integration-up-agent: build-test build-triage-agent
+    {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
+    {{ container_cli }} run -d --platform {{ platform }} \
+        --name {{ agent_it_container }} \
+        --privileged \
+        -p {{ port }}:8080 \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_AUTH_MODE=api-key \
+        -e CAESIUM_AUTH_KEY_HASH_SECRET=agent-integration-auth-key-hash-secret-000001 \
+        -e CAESIUM_AUTH_REQUIRE_TLS=false \
+        -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
+        -e CAESIUM_AGENT_DEFAULT_PROFILE=triage-only \
+        -e CAESIUM_AGENT_MAX_CONCURRENT_SESSIONS=1 \
+        -e CAESIUM_AGENT_SESSION_TIMEOUT=45s \
+        -e CAESIUM_AGENT_INCIDENT_COOLDOWN=1s \
+        -e CAESIUM_API_EXTERNAL_URL={{ agent_api_external_url }} \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         {{ local_image_ref }}:{{ tag }}-test start
 
 lint: builder-full
@@ -341,6 +443,7 @@ ui-e2e: build-release
             -e CAESIUM_MANUAL_TRIGGER_API_KEY=e2e-test-key \
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+            -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
@@ -377,6 +480,7 @@ ui-e2e-auth: build-release
         -e CAESIUM_AUTH_REQUIRE_TLS=false \
         -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
         --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
     tries=0
     until node -e "fetch('http://127.0.0.1:{{ port }}/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"; do
@@ -457,6 +561,8 @@ k8s-distributed: build-release k8s-registry-up
             --set image.pullPolicy=Always \
             --set config.extraEnv[0].name=CAESIUM_EXECUTION_MODE \
             --set config.extraEnv[0].value=distributed \
+            --set config.extraEnv[1].name=CAESIUM_FRESHNESS_ENABLED \
+            --set-string config.extraEnv[1].value=true \
             --set kubernetes.engine.enabled=true \
             --set persistence.enabled=false \
             --wait

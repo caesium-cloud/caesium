@@ -139,7 +139,7 @@ sequenced last so scheduling behavior only changes after the substrate is proven
 | E | Dataset REST + CLI operator surface — `GET /v1/datasets*`, `POST …/advance`, `caesium dataset list/status/advance` | **P0** | Not started |
 | F | Console UI — dataset freshness board, lineage freshness overlay, "why did/didn't this run" derivations panel | P1 | Not started |
 | G | Scheduling behavior — skip-when-fresh (P1) + `trigger: {type: freshness}` (P2) | P1 → P2 | Not started |
-| H-1 | Integration harness — `CAESIUM_FRESHNESS_ENABLED=true` on the live integration server | — | Not started |
+| H-1 | Integration harness — `CAESIUM_FRESHNESS_ENABLED=true` on the live integration server | — | **Shipped** (W3-eta: just/CI/helm env mirrors) |
 | N-1 | Docs — roadmap Phase 4 flip, design banner, schema references, examples, README | — | Not started |
 
 ## Streams
@@ -459,7 +459,7 @@ from day one so the later extension does not require a migration rewrite.
 
 ## Harness Strengthening
 
-- [ ] H-1. Ensure the integration server exercises the real freshness path: set
+- [x] H-1. Ensure the integration server exercises the real freshness path (W3-eta note: shared/distributed/UI/podman/helm env mirrors set): set
       `CAESIUM_FRESHNESS_ENABLED=true` on the `just integration-up` /
       `just integration-test` server (mirroring the lineage
       `CAESIUM_OPEN_LINEAGE_ENABLED` precedent the `CLAUDE.md` gate calls out —
