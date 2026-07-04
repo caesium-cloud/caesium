@@ -239,9 +239,11 @@ For each codex stream:
 
 ### Step 4.5a: Locate the worktree
 
+**With the `codex exec` default (Phase 3), the worktree is the standard `agent-<plan-slug>-<wave>-<stream>` you created — the first row below.** The `/private/tmp/caesium-agent-<id>-impl` and rsync-recovery shapes are `codex-companion`-fallback artifacts (codex making its own copy when the sandbox can't reach the worktree's git metadata) and do NOT occur with `codex exec`; the `<id>` in those rows is the codex *job* id, not the worktree name.
+
 | Symptom | Worktree location | How to detect |
 |---|---|---|
-| Standard | `$REPO_ROOT/.claude/worktrees/agent-<id>/` | `git -C .claude/worktrees/agent-<id> status --short` lists modified/untracked files |
+| Standard (`codex exec`) | `$REPO_ROOT/.claude/worktrees/agent-<plan-slug>-<wave>-<stream>/` | `git -C "$wt" status --short` lists modified/untracked files |
 | /private/tmp fallback | `/private/tmp/caesium-agent-<id>-impl/` | The orchestrator's worktree is clean/absent; `ls -d /private/tmp/caesium-agent-<id>*` finds the temp clone (on `master`) |
 | Already committed locally | Same as above, but `git log master..HEAD` is non-empty | Codex's `git commit` succeeded but the push failed; commit is preserved |
 | Worktree never materialized (rsync recovery) | `.claude/worktrees/agent-<id>/` exists as a plain dir (not a git worktree) | `git worktree list` lacks `agent-<id>`; `git -C <path> status` errors; the dir is a flat copy of the repo minus `.git/` |
@@ -267,7 +269,7 @@ If they pass: codex's work is credible enough to publish.
 Standard worktree case:
 
 ```sh
-cd $REPO_ROOT/.claude/worktrees/agent-<id>
+cd $REPO_ROOT/.claude/worktrees/agent-<plan-slug>-<wave>-<stream>
 git add -A
 git status --short
 git commit -m "$(cat <<'EOF'
@@ -553,7 +555,7 @@ After each merge:
 
 If `gh pr merge` returns `Pull Request has merge conflicts`:
 
-1. cd to the PR's worktree (`$REPO_ROOT/.claude/worktrees/agent-<id>`).
+1. cd to the PR's worktree (`$REPO_ROOT/.claude/worktrees/agent-<id>` for general-purpose streams, `agent-<plan-slug>-<wave>-<stream>` for codex streams).
 2. `git fetch origin master && git merge --no-commit --no-ff origin/master`
 3. `grep -n "<<<<<<< \|>>>>>>> \|^=======$" <conflicted_files>` to find conflict regions.
 4. Resolve via `Read` + `Edit`. Common caesium patterns:
