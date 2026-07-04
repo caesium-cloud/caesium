@@ -85,9 +85,11 @@ test("incidents board filters a live failure and opens the detail timeline", asy
 
   const row = page.getByTestId("incident-row").filter({ hasText: alias }).first();
   await expect(row).toBeVisible({ timeout: 30_000 });
-  if (incident.task_name) {
-    await expect(row).toContainText(incident.task_name);
-  }
+  // The classifier opens a minimal incident and attributes the failing task_name
+  // asynchronously, so the board row can still show the pre-enrichment task
+  // (shortId fallback) within this window even though the incident API already
+  // reports it. Task attribution is verified below on the detail timeline
+  // (refetched per-incident), so we don't assert the exact row task text here.
   await expect(row).toContainText(incident.class.replaceAll("_", " "));
   await row.click();
 
