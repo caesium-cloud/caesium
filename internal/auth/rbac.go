@@ -78,6 +78,13 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/incidents":     models.RoleViewer,
 	"GET /v1/incidents/:id": models.RoleViewer,
 
+	// Dataset freshness operator surface (freshness-scheduling E1). Reads are
+	// viewer; the manual watermark advance is a data-plane write at runner.
+	"GET /v1/datasets":                     models.RoleViewer,
+	"GET /v1/datasets/:id/:id":             models.RoleViewer,
+	"GET /v1/datasets/:id/:id/derivations": models.RoleViewer,
+	"POST /v1/datasets/:id/:id/advance":    models.RoleRunner,
+
 	// Agent tool surface (/v1/agent/*). Reachable by an unscoped operator/admin
 	// AND by an agent-session credential minted at the runner role; the
 	// per-incident binding is enforced separately by the deny-by-default scope

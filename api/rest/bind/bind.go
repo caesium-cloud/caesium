@@ -9,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	blamectrl "github.com/caesium-cloud/caesium/api/rest/controller/blame"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
+	datasetctrl "github.com/caesium-cloud/caesium/api/rest/controller/dataset"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
 	incidentctrl "github.com/caesium-cloud/caesium/api/rest/controller/incident"
 	"github.com/caesium-cloud/caesium/api/rest/controller/job"
@@ -129,6 +130,15 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/jobdefs/apply", jobdef.Apply)
 		g.POST("/jobdefs/lint", jobdef.Lint)
 		g.POST("/jobdefs/diff", jobdef.Diff)
+	}
+
+	// datasets
+	{
+		dc := datasetctrl.New()
+		g.GET("/datasets", dc.List)
+		g.GET("/datasets/:ns/:name", dc.Get)
+		g.GET("/datasets/:ns/:name/derivations", dc.Derivations)
+		g.POST("/datasets/:ns/:name/advance", dc.Advance)
 	}
 
 	// triggers
