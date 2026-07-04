@@ -172,8 +172,8 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 			}
 
 			admitter := &fakeRunAdmitter{t: t, db: db, handled: false}
-			beforeDecision := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, tc.wantDecision)
-			beforeViolation := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, models.DatasetStatusViolated)
+			beforeDecision := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, "out", tc.wantDecision)
+			beforeViolation := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, "out", models.DatasetStatusViolated)
 			eval := NewEvaluator(Config{
 				DB:                    db,
 				Bus:                   bus,
@@ -195,16 +195,16 @@ func TestEvaluatorStatusComputation(t *testing.T) {
 			if state.Status != tc.wantStatus {
 				t.Fatalf("status = %q, want %q (reason: %s)", state.Status, tc.wantStatus, state.Reason)
 			}
-			if got := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, tc.wantDecision); got != beforeDecision+1 {
+			if got := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, "out", tc.wantDecision); got != beforeDecision+1 {
 				t.Fatalf("derivation metric = %v, want %v", got, beforeDecision+1)
 			}
 			if tc.wantMetric {
-				if got := metrictest.GaugeValue(t, metrics.DatasetStalenessSeconds); got != 1800 {
+				if got := metrictest.GaugeValue(t, metrics.DatasetStalenessSeconds.WithLabelValues("out")); got != 1800 {
 					t.Fatalf("staleness gauge = %v, want 1800", got)
 				}
 			}
 			if tc.wantStatus == models.DatasetStatusViolated {
-				if got := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, models.DatasetStatusViolated); got != beforeViolation+1 {
+				if got := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, "out", models.DatasetStatusViolated); got != beforeViolation+1 {
 					t.Fatalf("violation metric = %v, want %v", got, beforeViolation+1)
 				}
 				requireEventType(t, events, event.TypeFreshnessViolated)

@@ -146,6 +146,15 @@ func (e *Evaluator) Run(ctx context.Context) {
 	}
 }
 
+func (e *Evaluator) isReactiveType(t event.Type) bool {
+	for _, rt := range e.reactiveTypes {
+		if t == rt {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Evaluator) subscribeReactive(ctx context.Context) (<-chan event.Event, error) {
 	if e.bus == nil || len(e.reactiveTypes) == 0 {
 		return nil, nil
@@ -170,7 +179,7 @@ func (e *Evaluator) EvaluateDatasetNames(ctx context.Context, names []string) er
 }
 
 func (e *Evaluator) EvaluateEvent(ctx context.Context, evt event.Event) error {
-	if evt.Type != event.TypeRunCompleted || evt.JobID == uuid.Nil {
+	if !e.isReactiveType(evt.Type) || evt.JobID == uuid.Nil {
 		return nil
 	}
 	if e.leaderCheck != nil {
@@ -284,7 +293,7 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		}
 	}
 	if seen {
-		metrics.DatasetStalenessSeconds.Set(staleness.Seconds())
+		metrics.DatasetStalenessSeconds.WithLabelValues(datasetParamName(decl.Namespace, decl.Name)).Set(staleness.Seconds())
 	}
 
 	switch status {
@@ -397,24 +406,36 @@ func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.Datase
 		if name == "" {
 			continue
 		}
+		// Key on (namespace,name) identity so two inputs sharing a name across
+		// namespaces do not collide in the consumed-watermark snapshot. For the
+		// v1 default (empty namespace) this is just the name.
+		key := datasetParamName(consume.Namespace, name)
 		state, ok, err := e.store.Get(ctx, consume.Namespace, name)
 		if err != nil {
 			return false, nil, "", err
 		}
+		watermark := ""
+		observed := false
 		if ok {
-			current[name] = state.Watermark
-		} else {
-			current[name] = ""
+			watermark = state.Watermark
+			_, observed = FreshAt(state)
 		}
-		previous, hadPrevious := lastConsumed[name]
+		current[key] = watermark
+		previous, hadPrevious := lastConsumed[key]
 		if !hadPrevious {
-			if strings.TrimSpace(current[name]) == "" {
-				waiting = append(waiting, name)
+			// No prior consumption record. The upstream is ready to bootstrap a
+			// first derivation if it has a watermark to consume OR has been
+			// observed successfully in degraded (verify-only) mode with an empty
+			// watermark. Only block when it has never been observed at all —
+			// otherwise a watermarkless-but-fresh upstream would deadlock its
+			// consumers at stale-upstream forever.
+			if strings.TrimSpace(watermark) == "" && !observed {
+				waiting = append(waiting, key)
 			}
 			continue
 		}
-		if !watermarkAdvancedPast(previous, current[name]) {
-			waiting = append(waiting, name)
+		if !watermarkAdvancedPast(previous, watermark) {
+			waiting = append(waiting, key)
 		}
 	}
 	if len(waiting) > 0 {
@@ -530,7 +551,7 @@ func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDec
 	if strings.TrimSpace(decision) == "" {
 		return nil
 	}
-	metrics.DatasetDerivationsTotal.WithLabelValues(decision).Inc()
+	metrics.DatasetDerivationsTotal.WithLabelValues(datasetParamName(decl.Namespace, decl.Name), decision).Inc()
 	return e.db.WithContext(ctx).Create(&models.DatasetDerivation{
 		ID:                 uuid.New(),
 		Namespace:          decl.Namespace,
@@ -585,7 +606,7 @@ func (e *Evaluator) publishAtRiskOncePerWindow(ctx context.Context, decl models.
 }
 
 func (e *Evaluator) publishFreshnessViolation(decl models.DatasetDeclaration, status, reason string, staleness, freshness, maxStaleness time.Duration, now time.Time) {
-	metrics.FreshnessViolationsTotal.WithLabelValues(status).Inc()
+	metrics.FreshnessViolationsTotal.WithLabelValues(datasetParamName(decl.Namespace, decl.Name), status).Inc()
 	e.publishEvent(event.TypeFreshnessViolated, decl, status, reason, staleness, freshness, maxStaleness, now)
 	e.publishEvent(event.TypeSLAMissed, decl, status, reason, staleness, freshness, maxStaleness, now)
 }
