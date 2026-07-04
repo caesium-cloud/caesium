@@ -107,10 +107,11 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 
+		// Only an explicit --id selects PATCH (update by ID). A file-embedded
+		// `id` must NOT force an update: a profile document copied across
+		// environments would otherwise clobber an existing profile with the same
+		// ID instead of creating a new one (greptile P1, #286).
 		id := strings.TrimSpace(applyID)
-		if id == "" {
-			id = strings.TrimSpace(profile.ID)
-		}
 
 		method := http.MethodPost
 		wantStatus := http.StatusCreated
