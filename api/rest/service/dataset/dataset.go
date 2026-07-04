@@ -304,39 +304,39 @@ func normalizePagination(rawLimit, rawOffset int) (int, int) {
 }
 
 func (s *Service) declarationOnlyStates(limit int) ([]models.DatasetState, int64, error) {
-	// Collapse duplicate declarations (the same dataset is commonly declared by
-	// multiple jobs) in the database via GROUP BY, so the LIMIT applies to
-	// distinct datasets and the count reflects distinct datasets rather than raw
-	// declaration rows. Grouping on COALESCE(namespace, '') keeps NULL and empty
-	// namespaces on the same logical dataset.
-	q := s.db.WithContext(s.ctx).
+	// A dataset is commonly declared by multiple jobs; we want distinct
+	// (namespace, name) datasets so the LIMIT and total reflect datasets rather
+	// than raw declaration rows. We dedup in Go rather than via a SQL GROUP BY:
+	// dqlite cannot return computed/aggregate result columns (MAX(...),
+	// COALESCE(...)) and fails such a query with "unknown data type". The
+	// declared-but-stateless set is bounded (one row per job/dataset
+	// declaration), so fetching plain columns and deduping in-process is cheap.
+	var decls []models.DatasetDeclaration
+	if err := s.db.WithContext(s.ctx).
 		Model(&models.DatasetDeclaration{}).
-		Select("COALESCE(namespace, '') AS namespace, name, MAX(created_at) AS created_at, MAX(updated_at) AS updated_at").
 		Where("direction IN ?", declarationDirections).
 		Where("NOT EXISTS (SELECT 1 FROM dataset_states ds WHERE ds.name = dataset_declarations.name AND ds.namespace = COALESCE(dataset_declarations.namespace, ''))").
-		Group("COALESCE(namespace, ''), name")
-
-	// With a GROUP BY present, gorm's Count returns the number of groups
-	// (distinct datasets), which is the total we want.
-	var total int64
-	if err := q.Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-
-	var decls []models.DatasetDeclaration
-	if err := q.
-		Order("MAX(updated_at) DESC").
-		Limit(limit).
+		Order("updated_at DESC").
 		Find(&decls).Error; err != nil {
 		return nil, 0, err
 	}
 
-	out := make([]models.DatasetState, 0, len(decls))
+	seen := make(map[string]struct{}, len(decls))
+	out := make([]models.DatasetState, 0)
 	for _, decl := range decls {
 		ns := declNamespaceValue(decl.Namespace)
-		out = append(out, unknownState(ns, decl.Name, decl.CreatedAt, decl.UpdatedAt))
+		key := ns + "\x00" + decl.Name
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		// updated_at DESC ordering means the first row for a (ns, name) is the
+		// most recently touched declaration — mirrors the old MAX(updated_at).
+		if len(out) < limit {
+			out = append(out, unknownState(ns, decl.Name, decl.CreatedAt, decl.UpdatedAt))
+		}
 	}
-	return out, total, nil
+	return out, int64(len(seen)), nil
 }
 
 func (s *Service) getState(namespace, name string) (models.DatasetState, bool, error) {
