@@ -24,6 +24,7 @@ import (
 	dispatchpki "github.com/caesium-cloud/caesium/internal/dispatch/pki"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/executor"
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/internal/jobdef/git"
@@ -186,6 +187,29 @@ func start(cmd *cobra.Command, args []string) error {
 		runAsync(func() {
 			log.Info("launching run queue dequeuer", "interval", vars.RunQueueDequeueInterval, "stale_claim_after", vars.RunQueueClaimStaleAfter, "max_depth", vars.RunQueueMaxDepth)
 			dequeuer.Run(ctx)
+		})
+	}
+	if vars.FreshnessEnabled {
+		conn := db.Connection()
+		capturer := freshness.NewCapturer(bus, conn)
+		evaluator := freshness.NewEvaluator(freshness.Config{
+			DB:                    conn,
+			Bus:                   bus,
+			RunStore:              runStore,
+			Interval:              vars.FreshnessEvalInterval,
+			MaxDerivationsPerTick: vars.FreshnessMaxDerivationsPerTick,
+			MaxTriggerDepth:       vars.MaxTriggerDepth,
+			LeaderCheck:           dqlite.IsLocalLeader,
+		})
+		runAsync(func() {
+			log.Info("launching freshness capturer")
+			if err := capturer.Start(ctx); err != nil && ctx.Err() == nil {
+				log.Error("freshness capturer exited", "error", err)
+			}
+		})
+		runAsync(func() {
+			log.Info("launching freshness evaluator", "interval", vars.FreshnessEvalInterval, "max_derivations_per_tick", vars.FreshnessMaxDerivationsPerTick)
+			evaluator.Run(ctx)
 		})
 	}
 

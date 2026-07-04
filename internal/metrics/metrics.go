@@ -245,6 +245,30 @@ var (
 		[]string{"job_alias"},
 	)
 
+	DatasetStalenessSeconds = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "caesium_dataset_staleness_seconds",
+			Help: "Most recently evaluated dataset staleness in seconds.",
+		},
+		[]string{"dataset"},
+	)
+
+	DatasetDerivationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_dataset_derivations_total",
+			Help: "Total freshness evaluator decisions by bounded decision enum.",
+		},
+		[]string{"dataset", "decision"},
+	)
+
+	FreshnessViolationsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_freshness_violations_total",
+			Help: "Total freshness max-staleness violations by bounded status enum.",
+		},
+		[]string{"dataset", "status"},
+	)
+
 	// Auth metrics
 
 	AuthRequestsTotal = prometheus.NewCounterVec(
@@ -559,6 +583,9 @@ func Register() {
 			RunReplacedTotal,
 			RunQueueDepth,
 			RunQueueWaitSeconds,
+			DatasetStalenessSeconds,
+			DatasetDerivationsTotal,
+			FreshnessViolationsTotal,
 			AuthRequestsTotal,
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,

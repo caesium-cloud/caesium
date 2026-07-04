@@ -1,0 +1,399 @@
+package freshness
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	metrictest "github.com/caesium-cloud/caesium/internal/metrics/testutil"
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
+)
+
+type fakeRunAdmitter struct {
+	t       *testing.T
+	db      *gorm.DB
+	handled bool
+	err     error
+	calls   int
+	runIDs  []uuid.UUID
+}
+
+func (f *fakeRunAdmitter) AdmitRun(jobID uuid.UUID, triggerID *uuid.UUID, opts ...runstorage.StartOption) (*runstorage.JobRun, bool, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, true, f.err
+	}
+	if !f.handled {
+		return nil, false, nil
+	}
+
+	var startOpts runstorage.StartOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&startOpts)
+		}
+	}
+	params, err := json.Marshal(startOpts.Params)
+	if err != nil {
+		f.t.Fatalf("marshal params: %v", err)
+	}
+	now := time.Now().UTC()
+	runID := uuid.New()
+	row := models.JobRun{
+		ID:        runID,
+		JobID:     jobID,
+		Status:    string(runstorage.StatusRunning),
+		Params:    datatypes.JSON(params),
+		StartedAt: now,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if triggerID != nil {
+		row.TriggerID = *triggerID
+	}
+	if err := f.db.Create(&row).Error; err != nil {
+		f.t.Fatalf("create admitted run: %v", err)
+	}
+	f.runIDs = append(f.runIDs, runID)
+	return &runstorage.JobRun{ID: runID, JobID: jobID, Status: runstorage.StatusRunning, Params: startOpts.Params}, true, nil
+}
+
+func TestEvaluatorLeaderGateSkipsNonLeader(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	jobID := seedFreshnessJob(t, db, "leader-gate")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "out", "1h", ""),
+	)
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		LeaderCheck: func(context.Context) (bool, error) {
+			return false, nil
+		},
+		Now: func() time.Time { return t0.Add(2 * time.Hour) },
+	})
+
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if admitter.calls != 0 {
+		t.Fatalf("non-leader admitted %d runs, want 0", admitter.calls)
+	}
+	var derivations int64
+	if err := db.Model(&models.DatasetDerivation{}).Count(&derivations).Error; err != nil {
+		t.Fatalf("count derivations: %v", err)
+	}
+	if derivations != 0 {
+		t.Fatalf("non-leader wrote %d derivations, want 0", derivations)
+	}
+}
+
+func TestEvaluatorStatusComputation(t *testing.T) {
+	now := t0.Add(3 * time.Hour)
+
+	cases := []struct {
+		name          string
+		freshness     string
+		maxStaleness  string
+		outputAt      time.Time
+		consumedAtRun map[string]string
+		inputs        map[string]string
+		wantStatus    string
+		wantDecision  string
+		wantMetric    bool
+	}{
+		{
+			name:         "fresh",
+			freshness:    "1h",
+			outputAt:     now.Add(-30 * time.Minute),
+			wantStatus:   models.DatasetStatusFresh,
+			wantDecision: models.DatasetDecisionSkippedFresh,
+			wantMetric:   true,
+		},
+		{
+			name:          "stale",
+			freshness:     "1h",
+			outputAt:      now.Add(-2 * time.Hour),
+			consumedAtRun: map[string]string{"raw": "10"},
+			inputs:        map[string]string{"raw": "11"},
+			wantStatus:    models.DatasetStatusStale,
+			wantDecision:  models.DatasetDecisionSkippedAdmission,
+		},
+		{
+			name:          "stale-upstream",
+			freshness:     "1h",
+			outputAt:      now.Add(-2 * time.Hour),
+			consumedAtRun: map[string]string{"raw": "10"},
+			inputs:        map[string]string{"raw": "10"},
+			wantStatus:    models.DatasetStatusStaleUpstream,
+			wantDecision:  models.DatasetDecisionSkippedUpstream,
+		},
+		{
+			name:         "violated",
+			freshness:    "1h",
+			maxStaleness: "2h",
+			outputAt:     now.Add(-3 * time.Hour),
+			wantStatus:   models.DatasetStatusViolated,
+			wantDecision: models.DatasetDecisionSkippedAdmission,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openRegistryDB(t)
+			ctx := context.Background()
+			jobID := seedFreshnessJob(t, db, "status-"+tc.name)
+			decls := []models.DatasetDeclaration{produceDecl(jobID, "out", tc.freshness, tc.maxStaleness)}
+			if tc.consumedAtRun != nil || tc.inputs != nil {
+				decls = append(decls, consumeDecl(jobID, "raw"))
+			}
+			seedDeclarations(t, db, decls...)
+			seedState(t, db, "out", "100", tc.outputAt, tc.consumedAtRun)
+			for name, watermark := range tc.inputs {
+				seedState(t, db, name, watermark, tc.outputAt.Add(time.Hour), nil)
+			}
+
+			bus := event.New()
+			events, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeFreshnessViolated, event.TypeSLAMissed}})
+			if err != nil {
+				t.Fatalf("subscribe: %v", err)
+			}
+
+			admitter := &fakeRunAdmitter{t: t, db: db, handled: false}
+			beforeDecision := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, "out", tc.wantDecision)
+			beforeViolation := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, "out", models.DatasetStatusViolated)
+			eval := NewEvaluator(Config{
+				DB:                    db,
+				Bus:                   bus,
+				RunStore:              admitter,
+				MaxDerivationsPerTick: 50,
+				Now:                   func() time.Time { return now },
+			})
+			if err := eval.EvaluateOnce(ctx); err != nil {
+				t.Fatalf("evaluate: %v", err)
+			}
+
+			state, ok, err := NewStore(db).Get(ctx, nil, "out")
+			if err != nil {
+				t.Fatalf("get state: %v", err)
+			}
+			if !ok {
+				t.Fatalf("state row missing")
+			}
+			if state.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q (reason: %s)", state.Status, tc.wantStatus, state.Reason)
+			}
+			if got := metrictest.CounterValue(t, metrics.DatasetDerivationsTotal, "out", tc.wantDecision); got != beforeDecision+1 {
+				t.Fatalf("derivation metric = %v, want %v", got, beforeDecision+1)
+			}
+			if tc.wantMetric {
+				if got := metrictest.GaugeValue(t, metrics.DatasetStalenessSeconds.WithLabelValues("out")); got != 1800 {
+					t.Fatalf("staleness gauge = %v, want 1800", got)
+				}
+			}
+			if tc.wantStatus == models.DatasetStatusViolated {
+				if got := metrictest.CounterValue(t, metrics.FreshnessViolationsTotal, "out", models.DatasetStatusViolated); got != beforeViolation+1 {
+					t.Fatalf("violation metric = %v, want %v", got, beforeViolation+1)
+				}
+				requireEventType(t, events, event.TypeFreshnessViolated)
+				requireEventType(t, events, event.TypeSLAMissed)
+			}
+		})
+	}
+}
+
+func TestEvaluatorFanInDerivesOneRunAndDedupesActiveWatermarks(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "fanin")
+	seedDeclarations(t, db,
+		produceDecl(jobID, "out", "1h", ""),
+		consumeDecl(jobID, "raw.a"),
+		consumeDecl(jobID, "raw.b"),
+		consumeDecl(jobID, "raw.c"),
+	)
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), map[string]string{
+		"raw.a": "1",
+		"raw.b": "1",
+		"raw.c": "1",
+	})
+	seedState(t, db, "raw.a", "2", now.Add(-time.Minute), nil)
+	seedState(t, db, "raw.b", "2", now.Add(-time.Minute), nil)
+	seedState(t, db, "raw.c", "2", now.Add(-time.Minute), nil)
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate 1: %v", err)
+	}
+	if admitter.calls != 1 {
+		t.Fatalf("admit calls after first eval = %d, want 1", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate 2: %v", err)
+	}
+	if admitter.calls != 1 {
+		t.Fatalf("admit calls after dedupe eval = %d, want 1", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
+}
+
+func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJob(t, db, "admission")
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true, err: runstorage.ErrRunQueued}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+
+	admitter.err = errors.New("boom")
+	if err := eval.EvaluateOnce(ctx); err == nil {
+		t.Fatalf("expected non-admission error to propagate")
+	}
+}
+
+func seedFreshnessJob(t *testing.T, db *gorm.DB, alias string) uuid.UUID {
+	t.Helper()
+	now := time.Now().UTC()
+	triggerID := uuid.New()
+	trigger := models.Trigger{
+		ID:            triggerID,
+		Alias:         alias + "-trigger",
+		Type:          models.TriggerTypeCron,
+		Configuration: `{"expression":"0 0 31 2 *"}`,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := db.Create(&trigger).Error; err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	jobID := uuid.New()
+	job := models.Job{
+		ID:        jobID,
+		Alias:     alias,
+		TriggerID: triggerID,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(&job).Error; err != nil {
+		t.Fatalf("create job: %v", err)
+	}
+	return jobID
+}
+
+func seedDeclarations(t *testing.T, db *gorm.DB, decls ...models.DatasetDeclaration) {
+	t.Helper()
+	if len(decls) == 0 {
+		return
+	}
+	if err := db.Create(&decls).Error; err != nil {
+		t.Fatalf("create declarations: %v", err)
+	}
+}
+
+func produceDecl(jobID uuid.UUID, name, freshness, maxStaleness string) models.DatasetDeclaration {
+	now := t0
+	return models.DatasetDeclaration{
+		ID:           uuid.New(),
+		JobID:        jobID,
+		JobAlias:     "job-" + jobID.String(),
+		StepName:     "produce",
+		Name:         name,
+		Direction:    models.DatasetDirectionProduces,
+		Freshness:    freshness,
+		MaxStaleness: maxStaleness,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+}
+
+func consumeDecl(jobID uuid.UUID, name string) models.DatasetDeclaration {
+	now := t0
+	return models.DatasetDeclaration{
+		ID:        uuid.New(),
+		JobID:     jobID,
+		JobAlias:  "job-" + jobID.String(),
+		StepName:  "produce",
+		Name:      name,
+		Direction: models.DatasetDirectionConsumes,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+}
+
+func seedState(t *testing.T, db *gorm.DB, name, watermark string, freshAt time.Time, consumed map[string]string) {
+	t.Helper()
+	blob, err := json.Marshal(consumed)
+	if err != nil {
+		t.Fatalf("marshal consumed: %v", err)
+	}
+	state := models.DatasetState{
+		ID:                 uuid.New(),
+		Namespace:          "",
+		Name:               name,
+		Watermark:          watermark,
+		AdvancedAt:         &freshAt,
+		Status:             models.DatasetStatusUnknown,
+		ConsumedWatermarks: datatypes.JSON(blob),
+		CreatedAt:          freshAt,
+		UpdatedAt:          freshAt,
+	}
+	if err := db.Create(&state).Error; err != nil {
+		t.Fatalf("create state %s: %v", name, err)
+	}
+}
+
+func assertDerivationCount(t *testing.T, db *gorm.DB, decision string, want int64) {
+	t.Helper()
+	var count int64
+	if err := db.Model(&models.DatasetDerivation{}).Where("decision = ?", decision).Count(&count).Error; err != nil {
+		t.Fatalf("count derivations: %v", err)
+	}
+	if count != want {
+		t.Fatalf("derivation count for %s = %d, want %d", decision, count, want)
+	}
+}
+
+func requireEventType(t *testing.T, events <-chan event.Event, typ event.Type) {
+	t.Helper()
+	select {
+	case evt := <-events:
+		if evt.Type != typ {
+			t.Fatalf("event type = %q, want %q", evt.Type, typ)
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for event %q", typ)
+	}
+}

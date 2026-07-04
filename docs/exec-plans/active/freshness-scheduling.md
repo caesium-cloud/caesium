@@ -266,7 +266,7 @@ per-dataset state machine. It ships **observe-only** first (P0: computes
 **nothing**), then gains derivation (P2). Gated behind `CAESIUM_FRESHNESS_ENABLED`
 (default `false`): off means no goroutine, no routes, declarations lint-only.
 
-- [ ] C1. Add the leader-gated evaluator skeleton + observe-only state machine:
+- [x] C1. Add the leader-gated evaluator skeleton + observe-only state machine:
       a loop constructed with `LeaderCheck: dqlite.IsLocalLeader` (mirror
       `internal/runqueue/dequeuer.go`) ticking every
       `CAESIUM_FRESHNESS_EVAL_INTERVAL` (default `1m`), env-gated by
@@ -294,7 +294,10 @@ per-dataset state machine. It ships **observe-only** first (P0: computes
       apply a two-job graph → a dataset transitions `unknown` → run → `fresh`,
       and an expired SLO with no arrival shows `stale-upstream` with **zero** runs
       started.
-- [ ] C2. Add the reactive fast path: subscribe to dataset-advance events and
+      Note: W3-alpha added the leader-gated evaluator loop, env gate/interval/cap,
+      targeted status updates, derivation audit rows, freshness events, metrics,
+      and startup wiring; the Capturer is started under the freshness gate.
+- [x] C2. Add the reactive fast path: subscribe to dataset-advance events and
       immediately evaluate the affected downstream slice (reuse the
       `internal/lineage/impact.go:82` `QueryImpact` traversal shape over the
       declared registry), with the timer loop from C1 remaining the correctness
@@ -302,7 +305,10 @@ per-dataset state machine. It ships **observe-only** first (P0: computes
       with the per-tick derivation cap so a single advance can't storm.
       Files: `internal/freshness/evaluator.go`, `internal/event/` (subscribe).
       Depends on: C1.
-- [ ] C3. **P2 — derivation to run starts:** a `stale` decision derives a run
+      Note: W3-alpha evaluates produced and declared downstream datasets from
+      lifecycle advance signals using the declared registry graph, with the
+      same per-tick derivation budget as the timer path.
+- [x] C3. **P2 — derivation to run starts:** a `stale` decision derives a run
       for the producing job. Derived runs are stamped `_trigger_depth` exactly
       like event-chained runs (so a refresh cascade rides the shipped
       `CAESIUM_MAX_TRIGGER_DEPTH` runaway guard and a cycle past lint still
@@ -321,6 +327,9 @@ per-dataset state machine. It ships **observe-only** first (P0: computes
       Depends on: C2.
       Test: fan-in three-advance → one run; a runtime cycle exhausts
       `_trigger_depth`; an admission-blocked derivation records the skip.
+      Note: W3-alpha derives stale/violated-ready outputs through `AdmitRun`,
+      stamps `_trigger_depth`, `logical_date`, `_derived_from_dataset`, and the
+      consumed-watermark JSON, and records admission/active-run skips.
 
 ### Stream D — Arrival signals: external event → dataset advance (P0)
 
