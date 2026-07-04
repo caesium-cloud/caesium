@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"github.com/caesium-cloud/caesium/cmd/agentprofile"
 	"github.com/caesium-cloud/caesium/cmd/auth"
 	"github.com/caesium-cloud/caesium/cmd/backfill"
 	"github.com/caesium-cloud/caesium/cmd/blame"
@@ -8,6 +9,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/dataset"
 	"github.com/caesium-cloud/caesium/cmd/dev"
 	"github.com/caesium-cloud/caesium/cmd/event"
+	"github.com/caesium-cloud/caesium/cmd/incident"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	"github.com/caesium-cloud/caesium/cmd/receipt"
 	"github.com/caesium-cloud/caesium/cmd/run"
@@ -20,6 +22,7 @@ import (
 )
 
 var cmds = []*cobra.Command{
+	agentprofile.Cmd,
 	auth.Cmd,
 	backfill.Cmd,
 	blame.Cmd,
@@ -27,6 +30,7 @@ var cmds = []*cobra.Command{
 	dataset.Cmd,
 	dev.Cmd,
 	event.Cmd,
+	incident.Cmd,
 	job.Cmd,
 	receipt.Cmd,
 	run.Cmd,
