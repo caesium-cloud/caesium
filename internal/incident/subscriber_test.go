@@ -150,6 +150,36 @@ func TestSubscriberOpensRunLevelIncidentWithNoFailedTask(t *testing.T) {
 	require.Nil(t, inc.TaskID)
 }
 
+// TestSubscriberOpensRunLevelIncidentWhenTaskFailedDropped guards against a
+// silently missed incident: a failed task_run is committed, but its task_failed
+// event never reaches the subscriber (bus overflow / crash between publish and
+// handle), so NO task-attributed incident was opened. The run_failed must still
+// open exactly one incident. This is precisely why suppression keys on the
+// incident, not on the task_runs table — a committed failed task_run with no
+// incident behind it must not swallow the run failure.
+func TestSubscriberOpensRunLevelIncidentWhenTaskFailedDropped(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	bus := event.New()
+	startSubscriber(t, bus, db, 0)
+
+	// The failed task_run exists, but we publish ONLY run_failed (the task_failed
+	// event was "dropped").
+	jobID, runID, _ := seedFailedTask(t, db, "Error: permission denied reading /secure")
+
+	bus.Publish(event.Event{Type: event.TypeRunFailed, JobID: jobID, RunID: runID, Timestamp: time.Now()})
+	waitForIncidents(t, db, 1)
+
+	var inc models.Incident
+	require.NoError(t, db.First(&inc).Error)
+	require.Equal(t, models.IncidentStatusOpen, inc.Status)
+	require.NotNil(t, inc.RunID)
+	require.Equal(t, runID, *inc.RunID)
+	// The run-level incident (no task attribution) was correctly opened.
+	require.Equal(t, "", inc.TaskName)
+	require.Nil(t, inc.TaskID)
+}
+
 func TestSubscriberAppendsOccurrenceNoTwin(t *testing.T) {
 	db := testutil.OpenTestDB(t)
 	t.Cleanup(func() { testutil.CloseDB(db) })
