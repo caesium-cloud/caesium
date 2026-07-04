@@ -3,11 +3,13 @@ package freshness
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -211,19 +213,22 @@ func TestDecodeOutputDropsNonScalar(t *testing.T) {
 	}
 }
 
-// TestCapturerNonScalarDeclaredWatermarkSkips proves that when a producing step
-// emits its DECLARED watermark key as a non-scalar JSON value (null, object, or
-// array), the capture leaves dataset state UNTOUCHED — identical to an omitted
-// key. decodeOutput drops the key, so the guard sees it as not-emitted: no
-// Advance, no verified_at refresh, no "<nil>" opaque watermark ever stored.
+// TestCapturerNonScalarDeclaredWatermarkSkips drives the REAL producer surface:
+// a step emits its DECLARED watermark key as a non-scalar JSON value (null,
+// object, or array). The marker parser (task.ParseOutput) — which is what
+// actually writes task_runs.output — DROPS such values, so the stored blob has
+// the key absent. The capturer then sees it as not-emitted and leaves dataset
+// state UNTOUCHED: no Advance, no verified_at refresh, no "<nil>" opaque
+// watermark. This asserts the end-to-end marker -> stored blob -> capturer path,
+// not a raw shape the pipeline can no longer produce.
 func TestCapturerNonScalarDeclaredWatermarkSkips(t *testing.T) {
 	cases := []struct {
-		name string
-		raw  string
+		name       string
+		markerJSON string
 	}{
-		{"null value", `{"max_order_ts": null}`},
-		{"object value", `{"max_order_ts": {"x": 1}}`},
-		{"array value", `{"max_order_ts": [1, 2]}`},
+		{"null value", `{"max_order_ts": null, "rows": "5"}`},
+		{"object value", `{"max_order_ts": {"x": 1}, "rows": "5"}`},
+		{"array value", `{"max_order_ts": [1, 2], "rows": "5"}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -231,9 +236,22 @@ func TestCapturerNonScalarDeclaredWatermarkSkips(t *testing.T) {
 			c := NewCapturer(event.New(), db)
 			ctx := context.Background()
 
+			// The marker parser is the real producer of task_runs.output.
+			parsed, err := task.ParseOutput(strings.NewReader("##caesium::output " + tc.markerJSON))
+			if err != nil {
+				t.Fatalf("ParseOutput: %v", err)
+			}
+			if v, present := parsed["max_order_ts"]; present {
+				t.Fatalf("producer must drop the non-scalar watermark, but stored %q", v)
+			}
+			blob, err := json.Marshal(parsed)
+			if err != nil {
+				t.Fatalf("marshal parsed output: %v", err)
+			}
+
 			jobID, runID := uuid.New(), uuid.New()
-			// Declares max_order_ts; the step emits it as a non-scalar value.
-			seedProducingRunRaw(t, db, jobID, runID, []byte(tc.raw), nil, "max_order_ts")
+			// Seed EXACTLY what the producer path stores (watermark key absent).
+			seedProducingRunRaw(t, db, jobID, runID, blob, nil, "max_order_ts")
 
 			c.handleRunCompleted(ctx, event.Event{Type: event.TypeRunCompleted, JobID: jobID, RunID: runID})
 
