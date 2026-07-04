@@ -129,6 +129,27 @@ func (s *EnvTestSuite) TestLDAPEnvironmentOverrides() {
 	assert.Equal(s.T(), 15*time.Second, Variables().AuthLDAPTimeout)
 }
 
+func (s *EnvTestSuite) TestAgentRemediationRequiresAuthMode() {
+	// D1 security precondition: enabling the remediation feature under the default
+	// CAESIUM_AUTH_MODE=none (no auth middleware) must fail, so the tier-3 approval
+	// routes are never reachable without authentication.
+	s.T().Setenv("CAESIUM_AGENT_REMEDIATION_ENABLED", "true")
+	err := Process()
+	s.Require().Error(err)
+	assert.Contains(s.T(), err.Error(), "CAESIUM_AGENT_REMEDIATION_ENABLED")
+
+	// With an active auth mode the precondition is satisfied.
+	s.T().Setenv("CAESIUM_AUTH_MODE", "api-key")
+	assert.NoError(s.T(), Process())
+}
+
+func (s *EnvTestSuite) TestAgentRemediationSatisfiedBySSO() {
+	// An SSO provider is an active auth mode even when CAESIUM_AUTH_MODE=none.
+	s.T().Setenv("CAESIUM_AGENT_REMEDIATION_ENABLED", "true")
+	s.T().Setenv("CAESIUM_AUTH_OIDC_ENABLED", "true")
+	assert.NoError(s.T(), Process())
+}
+
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
 	s.T().Setenv("CAESIUM_PORT", "not_a_port")
 	assert.NotNil(s.T(), Process())

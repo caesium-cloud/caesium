@@ -55,6 +55,22 @@ func validate() error {
 		return fmt.Errorf("CAESIUM_WAKEUP_FANOUT_MODE must be one of: full, gossip")
 	}
 
+	// Agent-in-the-loop master gate (D1 security precondition). Caesium defaults
+	// to CAESIUM_AUTH_MODE=none, which attaches NO auth middleware at all — every
+	// route becomes an unauthenticated request. The tier-3 approval routes
+	// (POST /v1/incidents/:id/approvals/:approval_id/{approve,reject}) and the
+	// agent tool surface must never be reachable without authentication, or the
+	// agent container itself (which has network reach to the API) could approve
+	// its own proposal. So the master gate refuses to enable the feature unless an
+	// authentication mode is active (api-key or any SSO provider). This keeps the
+	// design invariant "tier 3 always terminates at a human" true.
+	if variables.AgentRemediationEnabled {
+		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
+		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
+			return fmt.Errorf("CAESIUM_AGENT_REMEDIATION_ENABLED requires an active authentication mode: set CAESIUM_AUTH_MODE=api-key or enable an SSO provider so the tier-3 approval routes are not reachable without authentication")
+		}
+	}
+
 	return nil
 }
 
@@ -286,6 +302,16 @@ type Environment struct {
 	// same (job, task, class) key within this window after the previous one
 	// closed, damping flapping. Default 15m.
 	AgentIncidentCooldown time.Duration `envconfig:"AGENT_INCIDENT_COOLDOWN" default:"15m"`
+	// CAESIUM_AGENT_MAX_CONCURRENT_SESSIONS caps globally-active agent sessions,
+	// enforced by the leader-gated session dispatcher (not per-process, which an
+	// N-node cluster would multiply). Default 1.
+	AgentMaxConcurrentSessions int `envconfig:"AGENT_MAX_CONCURRENT_SESSIONS" default:"1"`
+	// CAESIUM_AGENT_SESSION_TIMEOUT is the wall-clock budget a single agent
+	// session may run before it is forcibly stopped and marked timed_out.
+	AgentSessionTimeout time.Duration `envconfig:"AGENT_SESSION_TIMEOUT" default:"10m"`
+	// CAESIUM_AGENT_DEFAULT_PROFILE optionally names a bootstrap AgentProfile the
+	// session supervisor launches and whose playbook the triage bundle surfaces.
+	AgentDefaultProfile string `envconfig:"AGENT_DEFAULT_PROFILE" default:""`
 }
 
 // SSOEnabled reports whether any SSO provider is configured.

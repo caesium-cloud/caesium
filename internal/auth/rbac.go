@@ -74,6 +74,20 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/jobdefs/lint":                     models.RoleViewer,
 	"POST /v1/jobdefs/diff":                     models.RoleViewer,
 	"GET /v1/lineage/impact":                    models.RoleViewer,
+	// Incident operator read API (agent-in-the-loop D2).
+	"GET /v1/incidents":     models.RoleViewer,
+	"GET /v1/incidents/:id": models.RoleViewer,
+
+	// Agent tool surface (/v1/agent/*). Reachable by an unscoped operator/admin
+	// AND by an agent-session credential minted at the runner role; the
+	// per-incident binding is enforced separately by the deny-by-default scope
+	// switch (api/middleware/auth_scope.go), which 403s an agent token on any
+	// route outside its own incident. Reads sit at viewer, mutating tool calls
+	// (propose/execute an action, append a note) at runner.
+	"GET /v1/agent/incidents/:id/bundle":    models.RoleViewer,
+	"GET /v1/agent/incidents/:id/context/*": models.RoleViewer,
+	"POST /v1/agent/incidents/:id/actions":  models.RoleRunner,
+	"POST /v1/agent/incidents/:id/notes":    models.RoleRunner,
 
 	// Runner
 	"POST /v1/jobs/:id/run":                      models.RoleRunner,
@@ -107,6 +121,10 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/agentprofiles":                models.RoleOperator,
 	"PATCH /v1/agentprofiles/:id":           models.RoleOperator,
 	"DELETE /v1/agentprofiles/:id":          models.RoleOperator,
+	// Tier-3 approval decisions (agent-in-the-loop D1). Operator-gated; agent
+	// session tokens are additionally rejected outright in authorizeScope.
+	"POST /v1/incidents/:id/approvals/:id/approve": models.RoleOperator,
+	"POST /v1/incidents/:id/approvals/:id/reject":  models.RoleOperator,
 
 	// Admin
 	"PUT /v1/logs/level":            models.RoleAdmin,

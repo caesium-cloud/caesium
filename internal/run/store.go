@@ -242,6 +242,10 @@ var (
 	ErrRunSkipped               = errors.New("run: skipped by concurrency policy")
 	ErrRunQueued                = errors.New("run: queued by concurrency policy")
 	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
+	// ErrJobPaused is returned by RetryFromFailureAdmitted when an agent-initiated
+	// retry is refused because the job is paused. A human pause outranks an agent
+	// retry (design-agent-in-the-loop.md, retry safety valves).
+	ErrJobPaused = errors.New("run: cannot retry while job is paused")
 )
 
 type admissionDecision int
@@ -4647,9 +4651,93 @@ func effectiveTaskHash(hash, effectiveHash string) string {
 	return hash
 }
 
+// readmitRetryTx flips a terminal run back to running as part of a retry. For a
+// manual retry (admit=false) it is an unconditional UPDATE. For an agent retry
+// (admit=true) on a non-quarantine job that declares a concurrency policy, it is
+// a QUEUE-semantics conditional UPDATE: the flip takes effect only if the active
+// running count for the job is under maxRuns, so an agent retry can never exceed
+// the declared concurrency nor replace-cancel a live run. On a full job it
+// returns ErrMaxConcurrentRunsReached and leaves the run terminal.
+func (s *Store) readmitRetryTx(tx *gorm.DB, jobRun *models.JobRun, admit bool) error {
+	unconditional := func() error {
+		return tx.Model(jobRun).Updates(map[string]interface{}{
+			"status":       string(StatusRunning),
+			"completed_at": nil,
+			"error":        "",
+		}).Error
+	}
+	if !admit || jobRun.Quarantine {
+		return unconditional()
+	}
+	cfg, hasPolicy, err := s.concurrencyConfigTx(tx, jobRun.JobID)
+	if err != nil {
+		return err
+	}
+	if !hasPolicy {
+		return unconditional()
+	}
+	// Conditional flip: succeed only if a slot is free. The run being retried is
+	// currently terminal so it is not in the active count; id <> ? excludes it
+	// defensively. The quarantine <> true / backfill_id IS NULL predicates mirror
+	// the admission count used by insertRunIfSlotTx so agent retries admit against
+	// the same slot definition as new runs.
+	res := tx.Exec(`
+UPDATE job_runs
+SET status = ?, completed_at = NULL, error = ''
+WHERE id = ?
+	AND status IN (?, ?)
+	AND (
+		SELECT count(*)
+		FROM job_runs
+		WHERE job_id = ?
+			AND status = ?
+			AND quarantine <> true
+			AND backfill_id IS NULL
+			AND id <> ?
+	) < ?`,
+		string(StatusRunning),
+		jobRun.ID,
+		string(StatusFailed), string(StatusSucceeded),
+		jobRun.JobID,
+		string(StatusRunning),
+		jobRun.ID,
+		cfg.maxRuns,
+	)
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected != 1 {
+		return ErrMaxConcurrentRunsReached
+	}
+	return nil
+}
+
 // RetryFromFailure resets a failed run so that previously-succeeded and cached
 // tasks are preserved and only failed/pending/skipped tasks are re-executed.
+// This is the manual/human retry entry point (caesium run retry); it performs no
+// concurrency re-admission and does not consult Job.Paused — a human retrying a
+// paused job's run is a deliberate human decision.
 func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
+	return s.retryFromFailure(runID, false)
+}
+
+// RetryFromFailureAdmitted is the admit-aware retry entry point used by the
+// incident action executor's retry actions (retry_from_failure, snooze_retry,
+// retry_callbacks re-run). It adds the two safety valves the plain
+// RetryFromFailure store call lacks (design-agent-in-the-loop.md):
+//
+//  1. It refuses while the job is Paused (returns ErrJobPaused) — a human pause
+//     outranks an agent retry.
+//  2. It re-admits against metadata.concurrency using QUEUE semantics regardless
+//     of the job's declared strategy: the run is flipped back to running only if
+//     a concurrency slot is free (returns ErrMaxConcurrentRunsReached otherwise).
+//     An agent retry must never replace-cancel a live run, nor race the next cron
+//     tick for a slot admission never granted.
+func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
+	return s.retryFromFailure(runID, true)
+}
+
+func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	pendingEvents := make([]event.Event, 0, 2)
 	var jobID uuid.UUID
 	var quarantine bool
@@ -4667,12 +4755,20 @@ func (s *Store) RetryFromFailure(runID uuid.UUID) (*JobRun, error) {
 		jobID = jobRun.JobID
 		quarantine = jobRun.Quarantine
 
+		// Safety valve 1 (agent retries only): a human pause outranks an agent
+		// retry, so refuse while the owning job is paused.
+		if admit {
+			var job models.Job
+			if err := tx.Select("paused").First(&job, "id = ?", jobRun.JobID).Error; err != nil {
+				return err
+			}
+			if job.Paused {
+				return ErrJobPaused
+			}
+		}
+
 		// 2. Reset the job run status to running.
-		if err := tx.Model(&jobRun).Updates(map[string]interface{}{
-			"status":       string(StatusRunning),
-			"completed_at": nil,
-			"error":        "",
-		}).Error; err != nil {
+		if err := s.readmitRetryTx(tx, &jobRun, admit); err != nil {
 			return err
 		}
 

@@ -44,6 +44,13 @@ var All = []interface{}{
 	// follow Job (FK parent). Rebuilt from the manifest on every apply; not a
 	// hot per-run table.
 	&DatasetDeclaration{},
+	// dataset_states / dataset_derivations are the freshness state substrate
+	// (freshness B1). DatasetState carries a soft last_run_id reference so it
+	// follows Job/JobRun; DatasetDerivation follows it. Neither is a hot per-run
+	// table (written at run completion + by the evaluator, not on the hot path),
+	// so both are deliberately absent from hotPathModels()/hotTables.
+	&DatasetState{},
+	&DatasetDerivation{},
 	// Agent-in-the-loop remediation (Phase 0) incident substrate. These are
 	// append-mostly, low-volume catalog tables — NOT hot per-run tables, so they
 	// are deliberately absent from hotPathModels()/hotTables. Parents precede

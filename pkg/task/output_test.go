@@ -74,6 +74,33 @@ func TestParseOutput_NonStringValues_CoercedToStrings(t *testing.T) {
 	assert.Equal(t, "0.95", result["ratio"])
 }
 
+func TestParseOutput_NonScalarValues_Dropped(t *testing.T) {
+	// JSON null, objects, and arrays are not meaningful scalar output values.
+	// They must be dropped (no entry), never coerced to "<nil>" / "map[...]" /
+	// "[...]" — that garbage would flow into CAESIUM_OUTPUT_* env vars,
+	// outputSchema validation, lineage, and the freshness watermark store.
+	logs := strings.NewReader(`##caesium::output {"nul": null, "obj": {"x": 1}, "arr": [1, 2], "ok": "kept"}
+`)
+	result, err := ParseOutput(logs)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"ok": "kept"}, result)
+	assert.NotContains(t, result, "nul")
+	assert.NotContains(t, result, "obj")
+	assert.NotContains(t, result, "arr")
+}
+
+func TestParseMarkers_NonScalarValues_Dropped(t *testing.T) {
+	logs := strings.NewReader(`##caesium::output {"nul": null, "obj": {"x": 1}, "arr": [1, 2], "ok": "kept"}
+`)
+	m, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.NotNil(t, m)
+	assert.Equal(t, "kept", m.Output["ok"])
+	assert.NotContains(t, m.Output, "nul")
+	assert.NotContains(t, m.Output, "obj")
+	assert.NotContains(t, m.Output, "arr")
+}
+
 func TestParseOutput_MalformedJSON_Skipped(t *testing.T) {
 	logs := strings.NewReader(`##caesium::output not valid json
 ##caesium::output {"valid": "data"}

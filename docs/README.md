@@ -45,6 +45,12 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 - [design-resource-right-sizing.md](design-resource-right-sizing.md): Learned resource right-sizing — per-step memory/CPU recommendations from run history plus OOM retry escalation (proposed; exec plan `exec-plans/active/resource-right-sizing.md`).
 - [design-dynamic-fanout.md](design-dynamic-fanout.md): Dynamic fan-out — runtime partition markers materialize data-proportional parallel task instances with per-partition caching (proposed; exec plan `exec-plans/active/dynamic-fanout.md`).
 - [design-window-scheduling.md](design-window-scheduling.md): Deadline-window scheduling — run within a declared window, choosing the start via load/cost/carbon signals with a deadline-safe latest start (proposed; exec plan `exec-plans/active/window-scheduling.md`).
+
+## Active Exec Plans
+
+Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill.
+
+- `exec-plans/active/console-v2-bug-sweep.md`: Correctness/accuracy bug-fix sweep for the shipped Caesium Console v2 web UI (cron validation, Live Activity feed, JobDefs lint, command decoding, run-detail callbacks/timeline, and display consistency).
 - `exec-plans/active/console-operator-loop-ux.md`: Operator-loop UX refinement of the job-detail, run-detail, and DAG surfaces (follow-up to the shipped Console v2 refresh; 4 UI-first streams).
 
 ## Load Testing

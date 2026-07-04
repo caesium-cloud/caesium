@@ -213,6 +213,38 @@ func validSHA256Ref(s string) bool {
 
 var initialScannerBuffer = make([]byte, 0, 64*1024)
 
+// scalarOutputValue coerces a decoded ##caesium::output value to its stored
+// string form, but ONLY for scalar JSON types (string, number, bool). It
+// returns ok=false — the value is DROPPED, no entry stored — for JSON null
+// (decodes to nil), objects (map[string]any), and arrays ([]any).
+//
+// This is deliberate: fmt.Sprintf("%v", v) over an arbitrary decoded value
+// turned a JSON null into the literal string "<nil>", an object into
+// "map[...]", and an array into "[...]" — garbage that then flowed into
+// CAESIUM_OUTPUT_* env vars, outputSchema validation, lineage, and (as a real
+// watermark) the freshness state store. Only scalars are meaningful output
+// values, so null/object/array are treated as "not emitted". The scalar
+// whitelist mirrors internal/freshness.decodeOutput so the producer and the
+// freshness consumer agree.
+func scalarOutputValue(v any) (string, bool) {
+	switch val := v.(type) {
+	case string:
+		return val, true
+	case bool:
+		return fmt.Sprintf("%v", val), true
+	case float64:
+		// json.Unmarshal into map[string]any decodes numbers as float64;
+		// preserve the existing %v number stringification.
+		return fmt.Sprintf("%v", val), true
+	case json.Number:
+		// Defensive: a UseNumber decoder would yield json.Number.
+		return val.String(), true
+	default:
+		// nil (JSON null), map[string]any (object), []any (array): dropped.
+		return "", false
+	}
+}
+
 // ParseOutput reads container log output and extracts structured key-value
 // pairs from lines matching the ##caesium::output marker protocol.
 //
@@ -262,7 +294,9 @@ func ParseOutput(logs io.Reader) (map[string]string, error) {
 		}
 
 		for k, v := range raw {
-			result[k] = fmt.Sprintf("%v", v)
+			if s, ok := scalarOutputValue(v); ok {
+				result[k] = s
+			}
 		}
 	}
 
@@ -402,7 +436,9 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Marke
 				var raw map[string]any
 				if err := json.Unmarshal([]byte(payload), &raw); err == nil {
 					for k, v := range raw {
-						output[k] = fmt.Sprintf("%v", v)
+						if s, ok := scalarOutputValue(v); ok {
+							output[k] = s
+						}
 					}
 				}
 			}
