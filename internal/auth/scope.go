@@ -45,6 +45,48 @@ func DecodeScope(scopeJSON []byte) (*models.KeyScope, error) {
 	return &scope, nil
 }
 
+// AgentClaimView is the normalized, package-local view of an agent-session
+// claim returned to callers (the auth middleware) so they need not import the
+// models package to enforce the incident binding.
+type AgentClaimView struct {
+	IncidentID uuid.UUID
+	Jobs       []string
+}
+
+// DecodeAgentClaim returns the agent-session claim carried by a scope payload,
+// or nil when the key is not an agent-session credential. It deliberately does
+// NOT run the job-normalization early-return that DecodeScope applies (a scope
+// with an agent claim and no Jobs is a valid, maximally-restricted agent key,
+// not an unrestricted key), so callers MUST check for an agent claim before
+// treating an empty ScopeJobs result as "unrestricted".
+func DecodeAgentClaim(scopeJSON []byte) (*AgentClaimView, error) {
+	if len(scopeJSON) == 0 {
+		return nil, nil
+	}
+	var scope models.KeyScope
+	if err := json.Unmarshal(scopeJSON, &scope); err != nil {
+		return nil, err
+	}
+	if scope.Agent == nil || scope.Agent.IncidentID == uuid.Nil {
+		return nil, nil
+	}
+	seen := make(map[string]struct{}, len(scope.Agent.Jobs))
+	jobs := make([]string, 0, len(scope.Agent.Jobs))
+	for _, alias := range scope.Agent.Jobs {
+		alias = strings.TrimSpace(alias)
+		if alias == "" {
+			continue
+		}
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		jobs = append(jobs, alias)
+	}
+	sort.Strings(jobs)
+	return &AgentClaimView{IncidentID: scope.Agent.IncidentID, Jobs: jobs}, nil
+}
+
 // ScopeJobs returns the normalized scoped job aliases or nil when unrestricted.
 func ScopeJobs(scopeJSON []byte) ([]string, error) {
 	scope, err := DecodeScope(scopeJSON)

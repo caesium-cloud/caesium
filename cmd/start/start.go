@@ -465,7 +465,16 @@ func start(cmd *cobra.Command, args []string) error {
 	// opens exactly one incident per failure and fires each durable timer once.
 	if vars.AgentRemediationEnabled {
 		incConn := db.Connection()
+
+		// The action executor backs the deterministic Phase-0 remediation and the
+		// durable snooze_retry timer with the admit-aware retry entry point. It is
+		// shared by the subscriber (deterministic rules on incident open) and the
+		// timer sweeper (RegisterTimerHandlers), so the snooze_retry handler fires
+		// instead of being claimed-and-skipped.
+		incExecutor := incident.NewExecutor(incident.NewStore(incConn), newIncidentActionOps(run.NewStore(incConn)))
+
 		incidentSub := incident.NewSubscriber(bus, incConn, dqlite.IsLocalLeader, vars.AgentIncidentCooldown)
+		incidentSub.SetRemediator(incExecutor, incident.DefaultRuleSet())
 		runAsync(func() {
 			log.Info("launching incident subscriber", "cooldown", vars.AgentIncidentCooldown)
 			if err := incidentSub.Start(ctx); err != nil && ctx.Err() == nil {
@@ -474,10 +483,32 @@ func start(cmd *cobra.Command, args []string) error {
 		})
 
 		timerSweeper := incident.NewTimerSupervisor(incConn, dqlite.IsLocalLeader, 0)
+		incExecutor.RegisterTimerHandlers(timerSweeper)
 		runAsync(func() {
 			log.Info("launching incident timer sweeper")
 			timerSweeper.Run(ctx)
 		})
+
+		// --- Agent session supervisor (Stream C: agent runtime) ---
+		//
+		// The supervisor drives a profile image through the existing atom.Engine
+		// as an AgentSession (deliberately NOT a JobRun), minting a scoped,
+		// short-lived credential per session and enforcing the concurrent-session
+		// caps against the shared store (leader-node placement in v1). It is
+		// registered process-wide; the incident manager / action executor (Streams
+		// B, E) obtain it to dispatch a triage session once a playbook admits one.
+		sessionSupervisor := incident.NewSupervisor(incConn, authSvc, incident.DefaultEngineFactory, incident.SupervisorConfig{
+			APIBaseURL:               strings.TrimSpace(vars.APIExternalURL),
+			SessionTimeout:           vars.AgentSessionTimeout,
+			MaxConcurrentSessions:    vars.AgentMaxConcurrentSessions,
+			PerJobConcurrentSessions: 1,
+		})
+		incident.SetSessionSupervisor(sessionSupervisor)
+		log.Info("agent session supervisor ready",
+			"max_concurrent_sessions", vars.AgentMaxConcurrentSessions,
+			"session_timeout", vars.AgentSessionTimeout,
+			"default_profile", vars.AgentDefaultProfile,
+		)
 	}
 
 	importer := jobdef.NewImporter(db.Connection())

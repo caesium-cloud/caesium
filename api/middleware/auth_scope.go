@@ -34,6 +34,16 @@ const EventsScopedDenyMessage = "event stream requires an in-scope run_id for sc
 // against the single source of truth.
 const ApprovalAgentTokenDenyMessage = "agent session tokens may not approve or reject remediation actions"
 
+// AgentRoutePrefix is the only route prefix an agent-session credential may
+// reach. Everything outside it is denied outright for agent tokens.
+const AgentRoutePrefix = "/v1/agent/"
+
+// AgentScopeDenyMessage is the 403 reason returned when an agent-session token
+// is used on any route outside its incident's /v1/agent/* tool surface (a
+// non-agent route, or a different incident's agent route). Exported so the auth
+// and integration tests assert against the single source of truth.
+const AgentScopeDenyMessage = "agent session token is scoped to its own incident's /v1/agent/* tool surface"
+
 // isIncidentApprovalRoute reports whether routePath is one of the tier-3 approval
 // decision routes. The path is already normalised (parametric segments collapsed
 // to :id), so both approve and reject share this prefix:
@@ -42,35 +52,6 @@ const ApprovalAgentTokenDenyMessage = "agent session tokens may not approve or r
 //	POST /v1/incidents/:id/approvals/:id/reject
 func isIncidentApprovalRoute(routePath string) bool {
 	return strings.HasPrefix(routePath, "/v1/incidents/:id/approvals/")
-}
-
-// scopeHasAgentClaim reports whether an API-key scope carries the per-session
-// agent claim minted by the incident manager for an agent session (Stream C1).
-// Agent tokens are detected STRUCTURALLY — by the presence of the agent claim in
-// the scope JSON — rather than by a Go type, so the rejection holds regardless of
-// the claim's internal shape and without a compile-time dependency on C1's field.
-// A normal job-alias scope ({"jobs":[...]}) carries neither key, so legitimate
-// operator/runner keys are never mistaken for agents. Both likely claim names
-// from the design language ("agent claim type" / "agent session token") are
-// accepted so the check catches C1's representation either way.
-func scopeHasAgentClaim(scopeJSON []byte) bool {
-	if len(scopeJSON) == 0 {
-		return false
-	}
-	var probe struct {
-		Agent        json.RawMessage `json:"agent"`
-		AgentSession json.RawMessage `json:"agent_session"`
-	}
-	if err := json.Unmarshal(scopeJSON, &probe); err != nil {
-		return false
-	}
-	return isPresentJSON(probe.Agent) || isPresentJSON(probe.AgentSession)
-}
-
-// isPresentJSON reports whether a raw JSON field is present and non-null.
-func isPresentJSON(raw json.RawMessage) bool {
-	trimmed := bytes.TrimSpace(raw)
-	return len(trimmed) > 0 && string(trimmed) != "null"
 }
 
 type scopeAuditContext struct {
@@ -91,13 +72,29 @@ func GetAllowedJobAliases(c *echo.Context) []string {
 }
 
 func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routePath string) (*scopeAuditContext, error) {
-	// D1 security precondition: reject agent session tokens on the tier-3 approval
-	// routes OUTRIGHT. This runs BEFORE the unscoped early-return below so an agent
-	// token whose frozen job allowlist happens to be empty (len(scopeJobs) == 0)
-	// cannot slip through — the agent claim, not the job list, is what disqualifies
-	// it. An agent may never approve or reject its own proposed action.
-	if isIncidentApprovalRoute(routePath) && scopeHasAgentClaim(scopeJSON) {
-		return nil, echo.NewHTTPError(http.StatusForbidden, ApprovalAgentTokenDenyMessage)
+	// Agent-session credentials are intercepted FIRST and are fully
+	// self-contained: an agent token is valid only for its own incident's
+	// /v1/agent/* routes and nothing else (Stream C1). This check must precede the
+	// job-scope path because an agent key carries an empty job list — treating it
+	// as "unrestricted" (the len==0 branch below) would be a privilege escalation,
+	// letting an agent token reach every unscoped route.
+	agentClaim, err := auth.DecodeAgentClaim(scopeJSON)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+	}
+	if agentClaim != nil {
+		// D1 security precondition (composes with C1's confinement): an agent may
+		// NEVER approve or reject its own proposed action. Return the specific,
+		// audited approval-route denial here — before the general agent-scope
+		// confinement below. Both would 403 an agent on an approval route (that
+		// route is not under /v1/agent/*), so this neither widens nor narrows the
+		// boundary; it names the reason precisely. tier 3 always terminates at a
+		// human.
+		if isIncidentApprovalRoute(routePath) {
+			return nil, echo.NewHTTPError(http.StatusForbidden, ApprovalAgentTokenDenyMessage)
+		}
+		// C1: confine the agent token to its own incident's /v1/agent/* surface.
+		return authorizeAgentScope(c, agentClaim, routePath)
 	}
 
 	scopeJobs, err := auth.ScopeJobs(scopeJSON)
@@ -187,6 +184,46 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	}
 
 	return nil, echo.NewHTTPError(http.StatusForbidden, "insufficient permissions")
+}
+
+// authorizeAgentScope enforces an agent-session credential's incident binding.
+// The token is valid ONLY for /v1/agent/incidents/:id/* routes whose :id equals
+// the incident the token was minted for. Two negative properties are the whole
+// point of this arm:
+//
+//   - Cross-route denial: any route outside /v1/agent/* (a normal job route, the
+//     approval routes, /v1/lineage/impact, /v1/database/*) is 403'd — an agent
+//     token can never act as a general principal.
+//   - Cross-incident denial: an agent token minted for incident X hitting
+//     incident Y's agent routes is 403'd — the incident id in the path must match
+//     the frozen claim exactly.
+//
+// On success the frozen job allowlist is injected into the request context so the
+// read-only context handlers can gate which jobs' logs/why/history the agent may
+// pull. Server-side enforcement here is the security boundary; the agent's
+// prompt is not.
+func authorizeAgentScope(c *echo.Context, claim *auth.AgentClaimView, routePath string) (*scopeAuditContext, error) {
+	if !strings.HasPrefix(routePath, AgentRoutePrefix) {
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+
+	incParam := strings.TrimSpace(c.Param("id"))
+	if incParam == "" {
+		// An agent route with no incident id in scope is not part of the
+		// per-incident tool surface an agent token may reach.
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+	incID, err := uuid.Parse(incParam)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusBadRequest, "invalid incident id")
+	}
+	if incID != claim.IncidentID {
+		return nil, echo.NewHTTPError(http.StatusForbidden, AgentScopeDenyMessage)
+	}
+
+	allowed := append([]string(nil), claim.Jobs...)
+	c.Set(ContextKeyAllowedJobAliases, allowed)
+	return &scopeAuditContext{jobAliases: allowed}, nil
 }
 
 func resolveScopedJobAlias(c *echo.Context, svc *auth.Service, routePath string) (string, error) {

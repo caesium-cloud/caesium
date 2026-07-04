@@ -302,6 +302,16 @@ type Environment struct {
 	// same (job, task, class) key within this window after the previous one
 	// closed, damping flapping. Default 15m.
 	AgentIncidentCooldown time.Duration `envconfig:"AGENT_INCIDENT_COOLDOWN" default:"15m"`
+	// CAESIUM_AGENT_MAX_CONCURRENT_SESSIONS caps globally-active agent sessions,
+	// enforced by the leader-gated session dispatcher (not per-process, which an
+	// N-node cluster would multiply). Default 1.
+	AgentMaxConcurrentSessions int `envconfig:"AGENT_MAX_CONCURRENT_SESSIONS" default:"1"`
+	// CAESIUM_AGENT_SESSION_TIMEOUT is the wall-clock budget a single agent
+	// session may run before it is forcibly stopped and marked timed_out.
+	AgentSessionTimeout time.Duration `envconfig:"AGENT_SESSION_TIMEOUT" default:"10m"`
+	// CAESIUM_AGENT_DEFAULT_PROFILE optionally names a bootstrap AgentProfile the
+	// session supervisor launches and whose playbook the triage bundle surfaces.
+	AgentDefaultProfile string `envconfig:"AGENT_DEFAULT_PROFILE" default:""`
 }
 
 // SSOEnabled reports whether any SSO provider is configured.
