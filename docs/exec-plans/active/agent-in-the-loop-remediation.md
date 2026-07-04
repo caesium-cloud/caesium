@@ -508,7 +508,7 @@ stream owns the job-schema addition and the server-side profile resource.
 
 ### Stream G — CLI
 
-- [ ] G1. Add the `caesium incident` command group: `list [--status] [--class]`,
+- [x] G1. Add the `caesium incident` command group: `list [--status] [--class]`,
       `get <id>` (timeline: observations, actions, evidence), `approve <id>
       --approval <id>`, `reject <id> --approval <id> [--reason]`, `escalate <id>`
       (force hand-off, close the agent session). Machine output (`--json`) goes to
@@ -516,10 +516,18 @@ stream owns the job-schema addition and the server-side profile resource.
       integration gate; append the group to the `cmds` slice in `cmd/execute.go`.
       Files: new `cmd/incident/`, `cmd/execute.go`.
       Depends on: D1 + D2.
-- [ ] G2. Add the `caesium agent profile` command group: `list`, `get`, `apply`,
+      W3-ε note: shipped `list/get/approve/reject` against the verified
+      `/v1/incidents` routes; no `escalate` command was added because no REST
+      endpoint exists. Added a stdout-clean integration check for `incident list
+      --json` in the remediation-enabled auth lane.
+- [x] G2. Add the `caesium agent profile` command group: `list`, `get`, `apply`,
       appended to `cmd/execute.go`. `--json` to clean stdout.
       Files: new `cmd/agent/`, `cmd/execute.go`.
       Depends on: E2.
+      W3-ε note: shipped `caesium agentprofile` against `/v1/agentprofiles`;
+      `apply` creates with POST or updates by ID with PATCH. Added a
+      stdout-clean integration check for the bare-array `agentprofile list
+      --json` response.
 
 ### Stream U — Console incidents surface
 
