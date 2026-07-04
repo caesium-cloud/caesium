@@ -381,19 +381,22 @@ plan's items add files and append route lines to it. The two plans' `bind.go` /
 `--json` output goes to **stdout, clean and parseable**, captured separately from
 stderr per the `CLAUDE.md` gate.
 
-- [ ] E1. Add the dataset read + advance REST: `GET /v1/datasets` (list +
+- [x] E1. Add the dataset read + advance REST: `GET /v1/datasets` (list +
       `status` filter, bounded/paginated), `GET /v1/datasets/:ns/:name` (state,
       SLO, producing job), `GET /v1/datasets/:ns/:name/derivations` (the
       `DatasetDerivation` decision audit — why/why-not), and
       `POST /v1/datasets/:ns/:name/advance` (manual arrival, auth-scoped, reusing
       the shipped API-key convention). Controller + service + the route lines in
-      `Protected()` (`api/rest/bind/bind.go:57`). The reads serve declared-graph
+      `Protected()` (`api/rest/bind/bind.go`). The reads serve declared-graph
       datasets before any run exists (`unknown` state), not just observed ones.
       Files: new `api/rest/controller/dataset/`, new
       `api/rest/service/dataset/`, `api/rest/bind/bind.go`.
       Depends on: B1 (state/derivation models) + A2 (declarations) + B2 (state
       store).
-- [ ] E2. Add the `caesium dataset` CLI group appended to the `cmds` slice in
+      Note: implemented service/controller package, ungated `Protected()` route
+      block, declared-only `unknown` reads, `/_/name` empty-namespace path
+      convention, and the manual advance path through `freshness.Store.Advance`.
+- [x] E2. Add the `caesium dataset` CLI group appended to the `cmds` slice in
       `cmd/execute.go`: `caesium dataset list [--status stale|violated|…] [--json]`,
       `caesium dataset status <namespace.name> [--json]` (state, SLO, last
       decision), and `caesium dataset advance <namespace.name> --watermark <v>`
@@ -402,6 +405,10 @@ stderr per the `CLAUDE.md` gate.
       push`/`caesium trigger events` CLI hygiene).
       Files: new `cmd/dataset/`, `cmd/execute.go`.
       Depends on: E1.
+      Note: implemented the base `cmd/dataset` group with list/status/advance,
+      `cliutil.WritePrettyJSON` for machine output, a timed HTTP client, bearer
+      API-key resolution, first-dot namespace splitting, and the `_` empty-namespace
+      path convention shared with REST.
 
 ### Stream F — Console UI: dataset board, lineage overlay, derivations panel
 
