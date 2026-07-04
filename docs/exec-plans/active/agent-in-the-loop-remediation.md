@@ -1,6 +1,6 @@
 # Agent-in-the-Loop ETL Remediation — Autonomous Failure Triage & Bounded Remediation
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 When a pipeline fails today, Caesium retries per declared policy and then pages a
 human, who reads logs, classifies the failure, picks a remediation from a small
@@ -83,7 +83,7 @@ in its Phase 0 (`atom.ResourceFailure` is defined at
 regex/exit-code classifier works; the `oom` class stays best-effort until
 resource-right-sizing lands its detection, and that limit is recorded, not hidden.
 
-## Progress (as of 2026-07-03)
+## Progress (as of 2026-07-04)
 
 The plan was published from the `design-agent-in-the-loop.md` design of record.
 The design is explicitly phased (0→3); Wave 1 landed Stream A, the entire Phase-0
@@ -102,18 +102,71 @@ incident core + substrate, which unblocks every other stream.
   supervisor. All gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` (default off)
   — nothing activates until a later wave wires behavior on. Review: Greptile 5/5;
   fixes folded in for the `run_completed`-wildcard-remediation bug (task-scoped
-  matching) and the exit-code `0`-sentinel bug (nullable `*int`). Streams B–U +
-  H-1 + N-1 remain for later waves.
+  matching) and the exit-code `0`-sentinel bug (nullable `*int`). Streams B–E
+  shipped in Wave 2 (see below); Streams F, G, U + H-1 + N-1 remain for later waves.
+
+### Wave 2 — Streams B–E remediation surface (shipped)
+
+Wave 2 landed the full bounded-remediation surface, all inert behind
+`CAESIUM_AGENT_REMEDIATION_ENABLED` (unset by default):
+
+- **Stream B** (B1–B4) — [#281](https://github.com/caesium-cloud/caesium/pull/281):
+  the action-executor skeleton + deterministic rules, the two retry safety valves
+  (`RetryFromFailureAdmitted` queue-only re-admission + `ErrJobPaused`), the tier-1/2
+  typed catalog (`snooze_retry` with re-arming exponential backoff on retryable
+  refusal), and the tier-3 producers routed through the approval gate. Cross-incident
+  action boundary (`verifyActionBoundary`/`ErrCrossBoundaryTarget`: a mutating action's
+  target run/job must belong to its own incident; unknown run fails closed). Adds the
+  `AgentActionsTotal` metric. Greptile 5/5.
+- **Stream C** (C1–C4) — [#284](https://github.com/caesium-cloud/caesium/pull/284):
+  the scoped short-lived agent credential (`AgentClaim{IncidentID, Jobs}`, runner role,
+  hard expiry), the frozen job allowlist (excludes the failing run's own outputs), the
+  session supervisor over `atom.Engine`, the triage bundle, and the `/v1/agent/*` tool
+  surface — all confined to the incident's frozen allowlist by `authorizeAgentScope`
+  (intercepts the agent claim BEFORE the unscoped `len==0` branch). The session cap is a
+  **DB-atomic conditional reservation** (`ReserveAgentSession` — count + pending-row
+  insert in one `INSERT…SELECT…WHERE` statement) so global/per-job caps hold across
+  nodes, not just within one supervisor process. Greptile 5/5.
+- **Stream D** (D1–D3) — [#283](https://github.com/caesium-cloud/caesium/pull/283):
+  the tier-3 approve/reject gate (transactional decision + audit-`AgentAction` mirror +
+  incident resume; conditional decision update → re-decide 409, mismatch 404), the
+  operator incident read API (`GET /v1/incidents{,/:id}`), and the `ai_agent` dispatch
+  sender (leader-gated, failure-events only, opens/appends via the shared store — no bus
+  re-publish loop). Agent tokens are rejected on approval routes via C1's authoritative
+  `auth.DecodeAgentClaim`, so an agent can never approve its own action; `pkg/env`
+  `validate()` refuses remediation under `AUTH_MODE=none`. Greptile 5/5.
+- **Stream E** (E1–E2) — [#282](https://github.com/caesium-cloud/caesium/pull/282):
+  the jobdef `metadata.remediation` block + `validateRemediation`, and `AgentProfile`
+  CRUD (REST + retryable default-profile seeding) with server-side profile /
+  escalation-channel ref validation (`ValidateAgentProfileRefs`) and offline lint notes.
+  Greptile 5/5.
+
+**Security invariant (holds across the whole surface): empty scope/allowlist is
+DENY, never allow.** An empty frozen allowlist permits only the incident's *own* job
+(never cross-job history), and a job-scoped agent token is deny-by-default — closing the
+"empty = unrestricted" footgun that recurred at several seams (scope authorization,
+allowlist history reads, approval-route agent-token rejection).
+
+**Deferred — H-1 (auth-enabled integration harness):** the fake agent image +
+`CAESIUM_AGENT_REMEDIATION_ENABLED=true` on a live *auth-mode* integration server did
+NOT ship in Wave 2. Because the shared integration server runs `AUTH_MODE=none` and
+Stream D's own precondition (correctly) refuses remediation under no-auth, the D1/D2
+happy-path (approve/reject/list/detail with auth on) and the full agent-session path
+have unit + middleware coverage but **no end-to-end `test/` integration scenario yet**.
+The only integration test that ships is the disabled-gate inertness check (routes 404
+when the flag is off). H-1 must stand up the auth-enabled lane so these paths execute in
+CI; until it lands, treat agent/approval **integration** coverage as a known gap.
+Streams F, G, U (+ H-1, N-1) remain for later waves.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Incident core + Phase-0 substrate — 5 GORM models, `TaskRun.ExitCode`, classifier, leader-gated dedupe subscriber, log scrubber, persisted-timer store, feature gate | **P0** | **Shipped** (Wave 1, #278) |
-| B | Action executor + tiered catalog + retry safety valves + `apply_jobdef_patch` provenance router | P1 | Not started |
-| C | Agent runtime — session supervisor (atom.Engine), triage bundle, scoped short-lived token, `/v1/agent/*` REST tool surface | P1 | Not started |
-| D | Approval gates + incident REST reads + `ai_agent` dispatch channel | P1 | Not started |
-| E | Declarative policy — jobdef `metadata.remediation` block + `AgentProfile` CRUD + offline/server lint | P1 | Not started |
+| B | Action executor + tiered catalog + retry safety valves + `apply_jobdef_patch` provenance router | P1 | **Shipped** (Wave 2, #281) |
+| C | Agent runtime — session supervisor (atom.Engine), triage bundle, scoped short-lived token, `/v1/agent/*` REST tool surface | P1 | **Shipped** (Wave 2, #284) |
+| D | Approval gates + incident REST reads + `ai_agent` dispatch channel | P1 | **Shipped** (Wave 2, #283) |
+| E | Declarative policy — jobdef `metadata.remediation` block + `AgentProfile` CRUD + offline/server lint | P1 | **Shipped** (Wave 2, #282) |
 | F | MCP surface — `/v1/agent/mcp` JSON-RPC/streamable-HTTP over the same handlers | P2 | Not started |
 | G | CLI — `caesium incident …` + `caesium agent profile …` | P2 | Not started |
 | U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | Not started |
@@ -245,7 +298,7 @@ through the approval gate. Tier semantics come from the playbook: tier 1 default
 autonomous, tier 2 autonomous only if explicitly allowed, **tier 3 always
 produces an `ApprovalRequest`, never auto-executed in v1 regardless of config**.
 
-- [ ] B1. Add the action-executor skeleton + the deterministic rules. The executor
+- [x] B1. Add the action-executor skeleton + the deterministic rules. The executor
       validates a typed action against the effective playbook and executes it
       server-side, recording every attempt as an `AgentAction` row with the right
       `actor`/`tier`/`status`. Phase 0 deterministic rules (`auto_retry_backoff`,
@@ -255,7 +308,7 @@ produces an `ApprovalRequest`, never auto-executed in v1 regardless of config**.
       Files: new `internal/incident/executor.go` (+ `executor_test.go`), new
       `internal/incident/rules.go`, `internal/metrics/metrics.go`.
       Depends on: A1 (models) + A4 (incident store).
-- [ ] B2. Add the two retry safety valves the underlying store call lacks.
+- [x] B2. Add the two retry safety valves the underlying store call lacks.
       `store.RetryFromFailure` (`internal/run/store.go:4642`) flips a terminal run
       back to `running` **without** concurrency admission (`admit()` runs only on
       new-run creation) and **without** consulting `Job.Paused`. The executor's
@@ -268,7 +321,7 @@ produces an `ApprovalRequest`, never auto-executed in v1 regardless of config**.
       Files: `internal/incident/executor.go`, `internal/run/store.go`
       (an admit-aware retry entry point).
       Depends on: B1.
-- [ ] B3. Implement the tier-1/2 typed action catalog: `snooze_retry` (deferred
+- [x] B3. Implement the tier-1/2 typed action catalog: `snooze_retry` (deferred
       `retry_from_failure` on a persisted `RemediationTimer`), `retry_from_failure`,
       `retry_callbacks`, `notify` (structured channel update via
       `internal/notification` senders), `quarantine_replay` (what-if with `--set`
@@ -284,7 +337,7 @@ produces an `ApprovalRequest`, never auto-executed in v1 regardless of config**.
       Files: `internal/incident/executor.go`, new
       `internal/incident/actions.go` (+ `actions_test.go`).
       Depends on: B1 + B2 + A6 (persisted timer for `snooze_retry`).
-- [ ] B4. Implement the tier-3 producers, all routed through the approval gate
+- [x] B4. Implement the tier-3 producers, all routed through the approval gate
       (Stream D) and **never auto-executed**: `skip_task` (new store op, honoring
       trigger rules — flag its `all_success`/`all_done` + cache-identity
       interaction per design Open Question 3), `override_schema_gate` (one-run
@@ -309,7 +362,7 @@ profile's image through the existing `atom.Engine` but is **deliberately not a
 exhaust). This stream owns the session supervisor, the triage bundle, the new
 scoped-token enforcement, and the `/v1/agent/*` REST tool surface.
 
-- [ ] C1. Add the scoped, short-lived agent credential. Today's `KeyScope`
+- [x] C1. Add the scoped, short-lived agent credential. Today's `KeyScope`
       (`internal/models/api_key.go:74`) carries only a job-alias list checked by a
       deny-by-default route switch (`api/middleware/auth_scope.go`), so this is new
       enforcement work: add a per-session agent claim type plus explicit switch
@@ -325,7 +378,7 @@ scoped-token enforcement, and the `/v1/agent/*` REST tool surface.
       Files: `internal/models/api_key.go`, `api/middleware/auth_scope.go`,
       `internal/incident/store.go` (freeze the allowlist at open).
       Depends on: A1 + A4.
-- [ ] C2. Add the session supervisor. A small supervisor drives the profile image
+- [x] C2. Add the session supervisor. A small supervisor drives the profile image
       through `atom.Engine` directly (create → wait → logs → stop) with wall-clock
       enforcement and persisted session logs for the UI, materialized as an
       `AgentSession` record, **not** a run. In distributed mode it runs on the
@@ -338,7 +391,7 @@ scoped-token enforcement, and the `/v1/agent/*` REST tool surface.
       Files: new `internal/incident/session.go` (+ `session_test.go`),
       `pkg/env/env.go`, `cmd/start/start.go`.
       Depends on: A1 + A4 + C1.
-- [ ] C3. Build the triage bundle + `GET /v1/agent/incidents/:id/bundle`. A JSON
+- [x] C3. Build the triage bundle + `GET /v1/agent/incidents/:id/bundle`. A JSON
       document the agent fetches once at startup (env injection can't carry it —
       log tails are capped at 1 MiB, over the ~128 KiB per-variable limit — and
       engine mounts can't deliver a server-generated file to a remote kubelet):
@@ -351,7 +404,7 @@ scoped-token enforcement, and the `/v1/agent/*` REST tool surface.
       `api/rest/controller/agent/bundle.go`, new `api/rest/service/agent/`,
       `api/rest/bind/bind.go`.
       Depends on: A4 + A5 + C1.
-- [ ] C4. Add the rest of the `/v1/agent/*` tool surface, all scoped to the
+- [x] C4. Add the rest of the `/v1/agent/*` tool surface, all scoped to the
       incident's frozen job allowlist: `GET /v1/agent/incidents/:id/context/*`
       (read-only passthroughs — logs, why, run diff, receipt, run history),
       `POST /v1/agent/incidents/:id/actions` (propose/execute a typed action via
@@ -369,7 +422,7 @@ The human-decision layer, the operator read API, and the second dispatch path.
 The approval gate is deliberately the same primitive roadmap §3.2 needs for
 step-level approval gates — build it once here, reuse it later.
 
-- [ ] D1. Add the tier-3 approval flow. Tier-3 actions create an incident-scoped
+- [x] D1. Add the tier-3 approval flow. Tier-3 actions create an incident-scoped
       `ApprovalRequest`; resolve via
       `POST /v1/incidents/:id/approvals/:approval_id/{approve,reject}` (audited,
       auth-scoped to an operator role). Two hard preconditions keep "tier 3 always
@@ -386,7 +439,7 @@ step-level approval gates — build it once here, reuse it later.
       `api/middleware/auth_scope.go` (reject agent tokens on approval routes),
       `pkg/env/env.go` (auth-mode precondition in `validate()`).
       Depends on: A1 + A4.
-- [ ] D2. Add the incident operator read API: `GET /v1/incidents`
+- [x] D2. Add the incident operator read API: `GET /v1/incidents`
       (filter by status/class/job/needs-approval, bounded + paginated),
       `GET /v1/incidents/:id` (the full timeline — observations, actions,
       approvals, evidence links), and the SSE event types the UI subscribes to
@@ -395,7 +448,7 @@ step-level approval gates — build it once here, reuse it later.
       Files: `api/rest/controller/incident/`, `api/rest/service/incident/`,
       `api/rest/bind/bind.go`, `internal/event/bus.go` (new SSE event types).
       Depends on: A1 + A4.
-- [ ] D3. Make the reserved `ChannelTypeAIAgent = "ai_agent"`
+- [x] D3. Make the reserved `ChannelTypeAIAgent = "ai_agent"`
       (`internal/models/notification.go:19`, accepted by `ValidChannelTypes()` but
       with no registered sender) real: register an `ai_agent` sender in
       `cmd/start/start.go` (beside the webhook/slack/email/pagerduty registrations
@@ -412,7 +465,7 @@ step-level approval gates — build it once here, reuse it later.
 What the agent is allowed to do is declared in YAML and reviewed in PRs. This
 stream owns the job-schema addition and the server-side profile resource.
 
-- [ ] E1. Add the `metadata.remediation` block to the job definition:
+- [x] E1. Add the `metadata.remediation` block to the job definition:
       `profile`, `classes`, `maxAttempts`, `autonomy` (`allow`, `paramOverrides`
       whitelist, `perClass` narrowing, `requireApproval`), and `escalation`
       (`channel`, `after`). Extend `Metadata` in `pkg/jobdef/definition.go` +
@@ -427,7 +480,7 @@ stream owns the job-schema addition and the server-side profile resource.
       existing `HashInput`, which already hashes params).
       Files: `pkg/jobdef/definition.go`, `pkg/jobdef/schema.go`,
       `internal/jobdef/runtime/spec.go` (carry the block through), `cmd/job/lint.go`.
-- [ ] E2. Add the `AgentProfile` server-side resource: REST CRUD (like notification
+- [x] E2. Add the `AgentProfile` server-side resource: REST CRUD (like notification
       channels — image/engine/limits, `secret://` model-credential refs, session
       budgets, default playbook), **server-side lint** (`POST /v1/jobdefs/lint`
       verifies `profile:` references) enforced inside the apply transaction, and the

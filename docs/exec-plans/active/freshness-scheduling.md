@@ -1,6 +1,6 @@
 # Data-Freshness Scheduling — Schedule on Data, Not Time
 
-Last updated: 2026-07-03
+Last updated: 2026-07-04
 
 Caesium schedules on time today: a cron expression is a *guess about when
 data will have arrived*, and the guess is what produces 3 a.m. pages — a late
@@ -82,7 +82,7 @@ Non-goals (no built-in pollers, no data-quality judgment, one watermark per
 dataset, nullable `namespace` column but no cross-instance datasets in v1) are
 hard boundaries — an item that crosses one stops and reconciles first.
 
-## Progress (as of 2026-07-03)
+## Progress (as of 2026-07-04)
 
 The plan was published from the
 [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md) design
@@ -102,7 +102,30 @@ sequenced last so scheduling behavior only changes after the substrate is proven
   (single-producer, consume-resolution, cross-job acyclicity) wired into
   `caesium job lint` and the REST lint controller. This is the shared substrate
   the `data-circuit-breaker` and `contract-enforcement` plans extend. Review:
-  Greptile 5/5; duration-positivity validation added per Gemini. Streams B–G +
+  Greptile 5/5; duration-positivity validation added per Gemini. Stream B shipped
+  in Wave 2 (see below); Streams C–G + H-1 remain for later waves.
+
+### Wave 2 — Stream B dataset-state substrate (shipped)
+
+- **Stream B** (B1–B3) shipped in [#280](https://github.com/caesium-cloud/caesium/pull/280):
+  the `DatasetState` (natural-key `namespace`+`name`, non-null namespace + unique
+  identity index) and append-only `DatasetDerivation` models; the transactional
+  `freshness.Store` advance/verify contract (advance only on watermark **change**;
+  numeric/RFC3339 monotonic via `orderableGreater` — int64/uint64 before float64 so
+  nanosecond timestamps keep precision; opaque strings gated by producing-run order;
+  backfill never advances; verify-only refresh on unchanged/degraded); and the
+  `run_completed` `Capturer` that advances produced datasets and snapshots consumed
+  inputs. The consumed snapshot rides the `Advance` transaction (`AdvanceInput.Consumed`)
+  so it is tied to the accepted advance, not an unguarded follow-up. Review: Greptile
+  5/5 after several concurrency rounds (find-or-create race, upsert lost-update,
+  float64 precision, empty/whitespace/null watermark, cross-run snapshot mismatch).
+  **Known limitation (documented in code):** the consumed snapshot is a
+  completion-time read, not the run's input view at start; the correct sourcing
+  (snapshot at `TypeRunStarted`) is deferred to the evaluator stream (Stream C),
+  where the field's only reader lives. A real source-level bug was fixed en route:
+  `pkg/task` `ParseOutput`/`parseMarkers` stringified JSON `null`/objects/arrays to
+  `"<nil>"`/`"map[...]"`; they are now dropped (scalar-only), which also stops null
+  polluting `CAESIUM_OUTPUT_*` env vars and `outputSchema` validation. Streams C–G +
   H-1 remain for later waves.
 
 ### Stream Status
@@ -110,7 +133,7 @@ sequenced last so scheduling behavior only changes after the substrate is proven
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Jobdef `datasets` schema, declared registry (`dataset_declarations`), cross-job cycle + single-producer lint | **P0** | **Shipped** (Wave 1, #277) |
-| B | Dataset state substrate — `DatasetState` + `DatasetDerivation` models, state store, watermark advance/verify contract, consumed-watermark capture | **P0** | Not started |
+| B | Dataset state substrate — `DatasetState` + `DatasetDerivation` models, state store, watermark advance/verify contract, consumed-watermark capture | **P0** | **Shipped** (Wave 2, #280) |
 | C | Freshness evaluator — leader-gated durable loop + reactive fast path, observe-only state machine, then P2 derivation to run starts | **P0** → P2 | Not started |
 | D | Arrival signals — source `arrival` event-binding bridged through the event router to advance dataset state | **P0** | Not started |
 | E | Dataset REST + CLI operator surface — `GET /v1/datasets*`, `POST …/advance`, `caesium dataset list/status/advance` | **P0** | Not started |
@@ -189,7 +212,7 @@ output advanced". Everything the evaluator needs is in dqlite so failover
 resumes on a new leader — no in-process timer is ever the only record of a
 pending decision.
 
-- [ ] B1. Add the `DatasetState` model (natural key `namespace`+`name`:
+- [x] B1. Add the `DatasetState` model (natural key `namespace`+`name`:
       `watermark`, `advanced_at`, `verified_at`, `status`, `reason`,
       `last_run_id`) and the append-only `DatasetDerivation` model (dataset,
       `decision` enum `derived|skipped_fresh|skipped_upstream|skipped_admission|
@@ -199,7 +222,7 @@ pending decision.
       `DatasetDerivation` after it). Neither is a hot per-run table.
       Files: new `internal/models/dataset_state.go`, new
       `internal/models/dataset_derivation.go`, `internal/models/models.go`.
-- [ ] B2. Implement the state store + advance/verify contract in
+- [x] B2. Implement the state store + advance/verify contract in
       `internal/freshness/state.go`: `Advance(ns, name, watermark, runID)` moves
       `advanced_at` **only when the watermark value changes** (for
       RFC3339/numeric values, only when it increases — a regression is recorded,
@@ -221,7 +244,7 @@ pending decision.
       dropped, verify-only refresh, backfill-never-advances).
       Files: new `internal/freshness/state.go` (+ `state_test.go`).
       Depends on: B1.
-- [ ] B3. Capture watermarks and the **consumed-watermark set** at run
+- [x] B3. Capture watermarks and the **consumed-watermark set** at run
       completion: when a producing step (non-cached success) emits its declared
       `watermark.key` output, call `state.Advance`; when it succeeds with an
       unchanged/absent key, refresh `verified_at` (degraded mode — no watermark
