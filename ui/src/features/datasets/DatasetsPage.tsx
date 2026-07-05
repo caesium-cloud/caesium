@@ -1,9 +1,17 @@
 import { useMemo, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
 import { useQueries, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, Database, GitBranch, History } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronLeft,
+  ChevronRight,
+  Database,
+  GitBranch,
+  History,
+} from "lucide-react";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -31,6 +39,10 @@ import {
 
 const datasetsRouteApi = getRouteApi("/datasets");
 
+// Backend caps a single /datasets page at 200 rows (maxListLimit), so the board
+// pages through the feed by offset rather than fetching an unbounded slice.
+const PAGE_SIZE = 50;
+
 type DatasetsSearch = {
   status?: DatasetStatusFilter;
   namespace?: string;
@@ -43,18 +55,32 @@ export function DatasetsPage() {
   const statusFilter = normalizeStatusFilter(search.status);
   const selectedNamespace = search.namespace ?? "";
   const selectedName = cleanDatasetParam(search.name);
+  const [page, setPage] = useState(0);
+
+  // Reset to the first page whenever the status filter changes so the offset
+  // never points past the end of a narrower result set. Adjusting state during
+  // render (rather than in an effect) is React's recommended pattern for
+  // deriving state from a changed input and avoids a cascading-render pass.
+  const [pagedFilter, setPagedFilter] = useState(statusFilter);
+  if (pagedFilter !== statusFilter) {
+    setPagedFilter(statusFilter);
+    setPage(0);
+  }
 
   const listQuery = useQuery({
-    queryKey: ["datasets", "list", statusFilter],
+    queryKey: ["datasets", "list", statusFilter, page],
     queryFn: () =>
       api.getDatasets({
         status: statusFilter === "all" ? undefined : statusFilter,
-        limit: 50,
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
       }),
     placeholderData: (previous) => previous,
     refetchInterval: 30_000,
   });
 
+  const total = listQuery.data?.total ?? 0;
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const rows = useMemo(() => listQuery.data?.datasets ?? [], [listQuery.data]);
   const detailQueries = useQueries({
     queries: rows.map((state) => {
@@ -134,6 +160,17 @@ export function DatasetsPage() {
             statusFilter={statusFilter}
             onSelect={selectDataset}
           />
+          {!listQuery.isLoading && !listQuery.error && total > PAGE_SIZE ? (
+            <BoardPagination
+              page={page}
+              totalPages={totalPages}
+              rangeStart={total === 0 ? 0 : page * PAGE_SIZE + 1}
+              rangeEnd={Math.min((page + 1) * PAGE_SIZE, total)}
+              total={total}
+              onPrev={() => setPage((current) => Math.max(0, current - 1))}
+              onNext={() => setPage((current) => Math.min(totalPages - 1, current + 1))}
+            />
+          ) : null}
         </section>
 
         <aside className="space-y-4">
@@ -319,6 +356,60 @@ function DatasetBoard({
   );
 }
 
+function BoardPagination({
+  page,
+  totalPages,
+  rangeStart,
+  rangeEnd,
+  total,
+  onPrev,
+  onNext,
+}: {
+  page: number;
+  totalPages: number;
+  rangeStart: number;
+  rangeEnd: number;
+  total: number;
+  onPrev: () => void;
+  onNext: () => void;
+}) {
+  return (
+    <div
+      className="flex items-center justify-between gap-3 border-t border-border/50 px-4 py-2.5 text-xs text-text-3"
+      data-testid="datasets-pagination"
+    >
+      <span data-testid="datasets-pagination-range">
+        Showing {rangeStart}-{rangeEnd} of {total}
+      </span>
+      <div className="flex items-center gap-2">
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onPrev}
+          disabled={page === 0}
+          aria-label="Previous page"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </Button>
+        <span className="px-1 tabular-nums">
+          Page {page + 1} of {totalPages}
+        </span>
+        <Button
+          variant="outline"
+          size="icon"
+          className="h-7 w-7"
+          onClick={onNext}
+          disabled={page >= totalPages - 1}
+          aria-label="Next page"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function DatasetIdentity({ state }: { state: DatasetState }) {
   const namespace = datasetNamespace(state);
   return (
@@ -394,7 +485,7 @@ function StalenessBar({
 }) {
   const [nowMs] = useState(() => Date.now());
   const slo = freshnessSLO(detail);
-  const percent = stalenessPercent(state, slo);
+  const percent = stalenessPercent(state, slo, nowMs);
   const observedAt = effectiveObservedAt(state);
   const tone = freshnessTone(state.status);
 

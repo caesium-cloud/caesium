@@ -1,6 +1,6 @@
 import { type FormEvent, memo, useCallback, useMemo, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import ReactFlow, {
   Background,
   BaseEdge,
@@ -120,17 +120,50 @@ export function LineageGraph({
     enabled: hasDataset && !isScoped,
   });
 
-  const freshnessQuery = useQuery({
-    queryKey: ["datasets", "lineage-overlay"],
-    queryFn: () => api.getDatasets({ limit: 200 }),
-    enabled: hasDataset && !isScoped && freshnessEnabled,
-    staleTime: 30_000,
+  // Overlay freshness on exactly the datasets present in this lineage graph (the
+  // root plus each downstream node) rather than a first-N page of /datasets — a
+  // page cap left nodes beyond the first 200 unstyled even when stale.
+  const overlayTargets = useMemo(() => {
+    if (!impactQuery.data) {
+      return [] as Array<{ namespace: string; name: string }>;
+    }
+    const seen = new Set<string>();
+    const targets: Array<{ namespace: string; name: string }> = [];
+    const push = (ns: string, datasetName: string) => {
+      const key = datasetKey(ns, datasetName);
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      targets.push({ namespace: ns, name: datasetName });
+    };
+    push(impactQuery.data.root_namespace, impactQuery.data.root_name);
+    (impactQuery.data.downstream ?? []).forEach((node) =>
+      push(node.dataset_namespace, node.dataset_name),
+    );
+    return targets;
+  }, [impactQuery.data]);
+
+  const freshnessQueries = useQueries({
+    queries: overlayTargets.map((target) => ({
+      queryKey: ["datasets", "detail", target.namespace, target.name],
+      queryFn: () => api.getDataset(target.namespace, target.name),
+      enabled: freshnessEnabled && !isScoped,
+      staleTime: 30_000,
+    })),
   });
 
-  const freshnessByDataset = useMemo(
-    () => datasetStateMap(freshnessQuery.data?.datasets ?? []),
-    [freshnessQuery.data?.datasets],
-  );
+  const freshnessByDataset = useMemo(() => {
+    const map = new Map<string, DatasetState>();
+    freshnessQueries.forEach((query, index) => {
+      const target = overlayTargets[index];
+      const state = query.data?.state;
+      if (target && state) {
+        map.set(datasetKey(target.namespace, target.name), state);
+      }
+    });
+    return map;
+  }, [freshnessQueries, overlayTargets]);
 
   const graph = useMemo(() => {
     if (!impactQuery.data) {
@@ -270,14 +303,6 @@ function lineageImpactNodeTestId(namespace: string, name: string, jobId?: string
 
 function lineageImpactEdgeTestId(sourceName: string, targetName: string, index: number) {
   return `lineage-edge:${sourceName}:${targetName}:${index}`;
-}
-
-function datasetStateMap(states: DatasetState[]) {
-  const map = new Map<string, DatasetState>();
-  states.forEach((state) => {
-    map.set(datasetKey(state.namespace, state.name), state);
-  });
-  return map;
 }
 
 function LineageHeader() {

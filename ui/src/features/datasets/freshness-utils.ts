@@ -86,6 +86,30 @@ export function displayNamespace(namespace: string | undefined): string {
   return namespace?.trim() || "_";
 }
 
+/**
+ * Resolve a `consumed_watermarks` map key to a routable dataset target.
+ *
+ * The backend keys that map with `datasetParamName` (internal/freshness):
+ * `"<namespace>.<name>"` when the consumed dataset carries a namespace, or the
+ * bare `"<name>"` when it does not. Dataset names themselves contain dots
+ * (e.g. `raw.vendor_x`, `staging.orders`), and declarations parsed from job
+ * definitions never populate a namespace today — so in practice every key is a
+ * bare, possibly-dotted name, and a bare-dot `namespace.name` key is not
+ * unambiguously splittable back into its parts.
+ *
+ * We therefore resolve the consumed dataset by NAME in the default namespace
+ * (`namespace: undefined`) rather than guessing a split point or reusing the
+ * *selected* dataset's namespace — a consumed source can live in a different
+ * namespace than the dataset consuming it, so reusing the selected namespace
+ * navigates to the wrong dataset / a 404.
+ */
+export function consumedDatasetTarget(key: string): {
+  namespace: string | undefined;
+  name: string;
+} {
+  return { namespace: undefined, name: key.trim() };
+}
+
 export function normalizeStatusFilter(value: unknown): DatasetStatusFilter {
   return DATASET_STATUS_FILTERS.some((entry) => entry.key === value)
     ? (value as DatasetStatusFilter)

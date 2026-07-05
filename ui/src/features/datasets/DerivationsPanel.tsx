@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { api, type DatasetDerivation, type DatasetProducingJob } from "@/lib/api";
 import { cn, shortId } from "@/lib/utils";
-import { decisionLabel, displayNamespace } from "./freshness-utils";
+import { consumedDatasetTarget, decisionLabel, displayNamespace } from "./freshness-utils";
 
 interface DerivationsPanelProps {
   namespace: string | undefined;
@@ -68,12 +68,7 @@ export function DerivationsPanel({ namespace, name, producingJob }: DerivationsP
   return (
     <div className="space-y-3" data-testid="dataset-derivations-panel">
       {rows.map((row) => (
-        <DerivationRow
-          key={row.id}
-          row={row}
-          selectedNamespace={namespace}
-          producingJob={producingJob}
-        />
+        <DerivationRow key={row.id} row={row} producingJob={producingJob} />
       ))}
     </div>
   );
@@ -81,11 +76,9 @@ export function DerivationsPanel({ namespace, name, producingJob }: DerivationsP
 
 function DerivationRow({
   row,
-  selectedNamespace,
   producingJob,
 }: {
   row: DatasetDerivation;
-  selectedNamespace: string | undefined;
   producingJob?: DatasetProducingJob;
 }) {
   const consumed = Object.entries(row.consumed_watermarks ?? {});
@@ -121,19 +114,22 @@ function DerivationRow({
             Consumed arrivals
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {consumed.map(([datasetName, watermark]) => (
-              <Link
-                key={`${datasetName}:${watermark}`}
-                to="/datasets"
-                search={{ status: undefined, namespace: selectedNamespace || undefined, name: datasetName }}
-                className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-card px-2 py-1 text-[11px] text-text-2 transition-colors hover:border-cyan/40 hover:text-cyan-glow"
-                title={`${displayNamespace(selectedNamespace)} / ${datasetName} @ ${watermark}`}
-              >
-                <GitBranch className="h-3 w-3 shrink-0" />
-                <span className="truncate font-mono">{datasetName}</span>
-                <span className="max-w-[9rem] truncate font-mono text-text-4">{watermark}</span>
-              </Link>
-            ))}
+            {consumed.map(([datasetKey, watermark]) => {
+              const target = consumedDatasetTarget(datasetKey);
+              return (
+                <Link
+                  key={`${datasetKey}:${watermark}`}
+                  to="/datasets"
+                  search={{ status: undefined, namespace: target.namespace, name: target.name }}
+                  className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-card px-2 py-1 text-[11px] text-text-2 transition-colors hover:border-cyan/40 hover:text-cyan-glow"
+                  title={`${displayNamespace(target.namespace)} / ${target.name} @ ${watermark}`}
+                >
+                  <GitBranch className="h-3 w-3 shrink-0" />
+                  <span className="truncate font-mono">{target.name}</span>
+                  <span className="max-w-[9rem] truncate font-mono text-text-4">{watermark}</span>
+                </Link>
+              );
+            })}
           </div>
         </div>
       ) : null}
@@ -158,18 +154,14 @@ function derivationSentence(row: DatasetDerivation): string {
   const consumed = Object.keys(row.consumed_watermarks ?? {});
   if (row.decision === "derived") {
     if (consumed.length > 0) {
-      return `${decisionTimestamp(row)} derived by ${consumed.join(", ")} advance`;
+      return `Derived by ${consumed.join(", ")} advance`;
     }
-    return `${decisionTimestamp(row)} derived a freshness run`;
+    return "Derived a freshness run";
   }
   if (row.reason) {
-    return `${decisionTimestamp(row)} tick skipped - ${row.reason}`;
+    return `Tick skipped - ${row.reason}`;
   }
-  return `${decisionTimestamp(row)} tick skipped - ${decisionLabel(row.decision)}`;
-}
-
-function decisionTimestamp(row: DatasetDerivation): string {
-  return formatClock(row.created_at);
+  return `Tick skipped - ${decisionLabel(row.decision)}`;
 }
 
 function formatClock(value: string): string {
