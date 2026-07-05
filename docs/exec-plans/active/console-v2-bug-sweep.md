@@ -85,7 +85,7 @@ the `/v1/triggers` payload is correct — each trigger is `{id, alias, type,
 configuration}` where `configuration` is a JSON **string** the UI must parse
 (`internal/models/trigger.go`).
 
-- [ ] A1. Fix the cron validator so valid 5-field POSIX expressions render
+- [x] A1. Fix the cron validator so valid 5-field POSIX expressions render
       their next-fire time instead of "Invalid cron" — the `NextFire`
       component's `try` around `cronParser.parse(expression, …)` throws and
       falls through to the "Invalid cron" span for **every** expression.
@@ -112,7 +112,9 @@ configuration}` where `configuration` is a JSON **string** the UI must parse
       cron-parser import at line 19, expr extraction ~391), new
       `ui/src/features/triggers/__tests__/TriggersPage.test.tsx` (or a
       cron-util unit test).
-- [ ] A2. Render `event` triggers (and any non-cron / non-http type) as a
+      Note: root cause was `schedule` configs falling through to raw JSON; fixed
+      with shared trigger parsing plus cron util and page/e2e coverage.
+- [x] A2. Render `event` triggers (and any non-cron / non-http type) as a
       human-readable summary in the schedule column instead of dumping the raw
       configuration JSON (`{"defaultParams":{"chain_name":"nightly-…`
       truncated). Add an explicit `type === "event"` branch that parses the
@@ -123,6 +125,8 @@ configuration}` where `configuration` is a JSON **string** the UI must parse
       `ui/src/features/triggers/TriggersPage.tsx` (schedule cell ~421-435
       desktop, ~491-504 mobile), optional new helper in
       `ui/src/features/triggers/` + unit test.
+      Note: desktop/mobile now share `describeTrigger`, including event
+      type/source summaries and concise fallback descriptions.
 
 ### Stream B — Jobs list, Live Activity feed & data-fetching
 
