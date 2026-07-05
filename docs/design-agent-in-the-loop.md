@@ -1,8 +1,18 @@
 # Design: Agent-in-the-Loop ETL Remediation
 
-> Status: Brainstorm/Design — proposal for autonomous failure triage and
-> remediation. No implementation yet. Companion roadmap items: §2.3 SLA
-> Management (escalation), §3.2 Approval Gates & Human-in-the-Loop.
+> Status: Shipped (runtime) — all runtime streams merged. The
+> `metadata.remediation` jobdef block (profile/classes/maxAttempts/autonomy/
+> escalation) plus the incident manager, deterministic classifier, tiered
+> executor, agent runtime (scoped token, session supervisor, triage bundle,
+> the `/v1/agent/*` and MCP tool surfaces), approval gates, incident reads, the
+> `ai_agent` dispatch channel, and the Console incident/agent-activity/analytics
+> panels all ship, feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with
+> an active auth mode. Exec plan:
+> [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md);
+> the `metadata.remediation` surface is documented in
+> [`job-schema-reference.md`](job-schema-reference.md#remediation). Companion
+> roadmap items: §2.3 SLA Management (escalation), §3.2 Approval Gates &
+> Human-in-the-Loop.
 
 ## Problem
 

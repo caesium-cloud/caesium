@@ -540,7 +540,7 @@ from day one so the later extension does not require a migration rewrite.
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip the roadmap Phase 4 "Freshness-driven scheduling" row to
+- [x] N-1. Flip the roadmap Phase 4 "Freshness-driven scheduling" row to
       reference the shipped work (link this plan; mark P0/P1/P2 status as they
       land); update the
       [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md)
@@ -560,6 +560,16 @@ from day one so the later extension does not require a migration rewrite.
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–G (runs last, after the runtime ships).
+      Note: N-1 (docs stream) flipped the roadmap Phase 4 row + §3.5 and the
+      `design-freshness-scheduling.md` / `design-agent-in-the-loop.md` `> Status:`
+      banners to Shipped, documented the `datasets` surface (incl. `trigger:
+      {type: freshness}`) by editing `internal/jobdef/report/report.go` and
+      regenerating `docs/job-schema-reference.md` plus the hand-written
+      `job-definitions.md` / `caesium-job-llm-reference.md`, added the
+      `freshness-arrival` + `freshness-fanin-cascade` (and agent
+      `agent-remediation`) pinned examples, and updated the README bullets in
+      backtick form. Guardrails green: schema-ref, README-index, example-manifest,
+      image-pin.
 
 ## Sequencing & Dependencies
 

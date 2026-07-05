@@ -1,0 +1,58 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: freshness-vendor-orders
+  labels:
+    team: data-platform
+  annotations:
+    owner: oncall
+    purpose: extract a vendor SFTP drop keyed on data arrival, not a cron guess
+  # Freshness-driven scheduling: declare the datasets this job consumes and
+  # produces plus the freshness SLO consumers care about. The whole surface is
+  # scheduling metadata and never enters the cache identity hash. Requires
+  # CAESIUM_FRESHNESS_ENABLED=true on the server for the evaluator to act on it.
+  datasets:
+    # External upstream nobody in Caesium produces. A late drop surfaces as
+    # stale-upstream (an observable state with a reason), not a failed run.
+    sources:
+      - name: raw.vendor_orders
+        expectedEvery: 24h
+        external: true
+        arrival:
+          # Advance the source watermark when a matching arrival event lands,
+          # so the extract can run the moment the file is really here.
+          event:
+            type: "webhook.s3"
+            filter:
+              bucket: vendor-drops
+          watermark: "$.object.last_modified"
+    # Cron stays a heartbeat; skip the scheduled run (record skipped_fresh)
+    # when outputs are already fresh and the consumed watermark has not moved.
+    skipWhenFresh: true
+trigger:
+  type: cron
+  configuration:
+    cron: "*/30 * * * *"
+    timezone: UTC
+steps:
+  - name: extract-orders
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "extracting vendor orders"
+        echo '##caesium::output {"processed_through": "2026-07-04T00:00:00Z"}'
+    datasets:
+      consumes:
+        - raw.vendor_orders
+      produces:
+        - name: analytics.orders_daily
+          # Target staleness SLO: consumers tolerate at most 6h out of date.
+          freshness: 6h
+          # Hard bound; a breach emits freshness_violated for escalation.
+          maxStaleness: 12h
+          # The ##caesium::output key this step emits to advance the watermark.
+          watermark:
+            key: processed_through

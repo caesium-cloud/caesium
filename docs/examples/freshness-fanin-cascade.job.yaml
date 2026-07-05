@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: freshness-orders-cascade
+  labels:
+    team: analytics
+  annotations:
+    owner: analytics-oncall
+    purpose: fan two upstream datasets into a joined mart then derive a rollup — freshness cascades down the lineage
+  datasets:
+    # Two external upstreams fan in. Each carries a cadence expectation; a
+    # missed arrival surfaces as stale-upstream on the downstream dataset.
+    sources:
+      - name: raw.orders
+        expectedEvery: 1h
+        external: true
+      - name: raw.customers
+        expectedEvery: 24h
+        external: true
+    skipWhenFresh: true
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+    timezone: UTC
+steps:
+  # Fan-in: consume both upstreams, produce the enriched mart.
+  - name: join-orders-customers
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "joining orders with customers"
+        echo '##caesium::output {"mart_watermark": "2026-07-04T01:00:00Z"}'
+    datasets:
+      consumes:
+        - raw.orders
+        - raw.customers
+      produces:
+        - name: analytics.orders_enriched
+          freshness: 2h
+          maxStaleness: 4h
+          watermark:
+            key: mart_watermark
+    next: [rollup-daily]
+
+  # Cascade: consume the dataset the previous step produced, derive a rollup
+  # with its own, looser freshness SLO.
+  - name: rollup-daily
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "rolling up enriched orders"
+        echo '##caesium::output {"rollup_watermark": "2026-07-04T01:00:00Z"}'
+    dependsOn: [join-orders-customers]
+    datasets:
+      consumes:
+        - analytics.orders_enriched
+      produces:
+        - name: analytics.orders_daily_rollup
+          freshness: 6h
+          maxStaleness: 12h
+          watermark:
+            key: rollup_watermark

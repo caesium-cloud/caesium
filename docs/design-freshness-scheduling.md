@@ -1,9 +1,16 @@
 # Design: Freshness-Driven Scheduling — Schedule on Data, Not Time
 
-> Status: Brainstorm/Design — proposal for dataset freshness SLOs and
-> lineage-derived scheduling. No implementation yet. The strategic flagship
-> of this design wave: cron becomes the fallback, not the model. Companion
-> designs: [`design-window-scheduling.md`](design-window-scheduling.md),
+> Status: Shipped — streams A–G merged. The `datasets` jobdef surface
+> (`produces`/`consumes`/`freshness`/`maxStaleness`/`watermark`,
+> `metadata.datasets.sources`, `skipWhenFresh`), the freshness evaluator,
+> arrival signals, the `GET /v1/datasets*` REST surface, the Console freshness
+> UI, skip-when-fresh, and `trigger: {type: freshness}` all ship, feature-gated
+> behind `CAESIUM_FRESHNESS_ENABLED`. The strategic flagship of this design
+> wave: cron becomes the fallback, not the model. Exec plan:
+> [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md); the
+> `datasets` surface is documented in
+> [`job-schema-reference.md`](job-schema-reference.md#datasets--freshness).
+> Companion designs: [`design-window-scheduling.md`](design-window-scheduling.md),
 > [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md),
 > [`design-contract-enforcement.md`](design-contract-enforcement.md),
 > [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md),
