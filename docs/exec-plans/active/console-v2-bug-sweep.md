@@ -281,7 +281,7 @@ Fixes on the run detail page and its timeline
 
 ### Stream E — JobDefs lint accuracy
 
-- [ ] E1. Make the JobDefs live-lint status bar report an accurate step
+- [x] E1. Make the JobDefs live-lint status bar report an accurate step
       summary. It currently reads "Schema valid · No steps" even for a
       two-step manifest, because the frontend renders
       `lintResult.summary?.steps || "No steps"` and the backend's
@@ -303,6 +303,9 @@ Fixes on the run detail page and its timeline
       `ui/src/lib/api.ts` (`LintSummary`),
       `ui/src/features/jobdefs/JobDefsPage.tsx` (~304, ~325-329), new
       `test/*_test.go` scenario.
+      Note: W1-epsilon now returns numeric `summary.steps` plus optional
+      `summary.contracts`, formats the JobDefs bar from the count, and adds
+      live-server lint assertions for multi-step and stepless manifests.
 
 ### Stream F — Shell & display consistency
 

@@ -82,11 +82,20 @@ const customTheme = EditorView.theme({
   },
 }, { dark: true });
 
+function formatStepCount(count: number) {
+  return `${count} ${count === 1 ? "step" : "steps"}`;
+}
+
+function contractStatusLabel(summary: string) {
+  const detailStart = summary.indexOf(" (");
+  return detailStart === -1 ? summary : summary.slice(0, detailStart);
+}
+
 export function JobDefsPage() {
   const queryClient = useQueryClient();
   const [yaml, setYaml] = useState(EXAMPLE_YAML);
   const [tab, setTab] = useState("editor");
-  const [lintResult, setLintResult] = useState<LintResponse>({ errors: [], warnings: [], summary: { steps: "" } });
+  const [lintResult, setLintResult] = useState<LintResponse>({ errors: [], warnings: [], summary: { steps: 0 } });
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
   const [isLinting, setIsLinting] = useState(false);
   
@@ -119,7 +128,7 @@ export function JobDefsPage() {
         setLintResult({
           errors: [{ message: err instanceof Error ? err.message : "Request failed", line: 1 }],
           warnings: [],
-          summary: { steps: "" },
+          summary: { steps: 0 },
         });
         setDiffResult(null);
       } finally {
@@ -171,6 +180,9 @@ export function JobDefsPage() {
   const lineCount = yaml.split("\n").length;
   const diffCount = diffResult ? (diffResult.added?.length || 0) + (diffResult.removed?.length || 0) + (diffResult.modified?.length || 0) : 0;
   const hasErrors = lintResult.errors && lintResult.errors.length > 0;
+  const stepLabel = formatStepCount(lintResult.summary?.steps ?? 0);
+  const contractSummary = lintResult.summary?.contracts?.trim() ?? "";
+  const summaryLabel = contractSummary ? `${stepLabel} · ${contractStatusLabel(contractSummary)}` : stepLabel;
   const deferredYaml = useDeferredValue(yaml);
   const runtimeHints = useMemo(() => getJobDefRuntimeHints(deferredYaml), [deferredYaml]);
 
@@ -301,7 +313,7 @@ export function JobDefsPage() {
                         <CheckCircle2 className="h-3.5 w-3.5 text-success" />
                         <span className="text-success">Schema valid</span>
                         <span className="text-text-4 mx-1">·</span>
-                        <span className="text-text-3">{lintResult.summary?.steps || "No steps"}</span>
+                        <span className="text-text-3">{summaryLabel}</span>
                       </>
                     )}
                   </div>
@@ -322,11 +334,11 @@ export function JobDefsPage() {
                   </div>
                 )}
                 
-                {!hasErrors && lintResult.summary?.steps && (
+                {!hasErrors && contractSummary && (
                   <div className="p-3">
                     <div className="flex items-start gap-2.5 text-xs">
                       <Info className="h-3.5 w-3.5 text-success mt-0.5 flex-shrink-0" />
-                      <span className="text-text-2">{lintResult.summary.steps}</span>
+                      <span className="text-text-2">{contractSummary}</span>
                     </div>
                   </div>
                 )}
