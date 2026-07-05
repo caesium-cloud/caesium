@@ -16,6 +16,12 @@ export interface Job {
   updated_at: string;
   trigger?: Trigger;
   latest_run?: JobRun;
+  last_runs?: JobLastRun[];
+}
+
+export interface JobLastRun {
+  status: string;
+  duration?: number | null;
 }
 
 export interface JobRun {

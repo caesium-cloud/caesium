@@ -1,5 +1,16 @@
 import { expect, test } from "@playwright/test";
-import { applyDefinitions, loadFixtureDefinition } from "./helpers/fixtures";
+import {
+  applyDefinitions,
+  awaitRun,
+  findJobByAlias,
+  loadFixtureDefinition,
+  loadFixtureDefinitions,
+  triggerJob,
+} from "./helpers/fixtures";
+
+function shortId(value: string) {
+  return value.slice(0, 8);
+}
 
 test("operator can pause and unpause a job from the detail page", async ({ page, request }) => {
   // The minimal fixture uses a daily cron in the future, so the job will sit
@@ -64,4 +75,37 @@ test("jobs list filters rows by search and shows empty state for no matches", as
   await searchInput.fill("definitely-not-an-alias-xyz");
   await expect(page.locator('[data-testid="job-row"]')).toHaveCount(0);
   await expect(page.getByText("No pipelines match")).toBeVisible();
+});
+
+test("jobs live activity de-duplicates terminal events and resolves aliases", async ({ page, request }) => {
+  const definitions = await loadFixtureDefinitions("run-history.job.yaml");
+  const successAlias = String(definitions[0]?.metadata?.alias);
+  const failureAlias = String(definitions[1]?.metadata?.alias);
+  await applyDefinitions(request, ...definitions);
+  const successJob = await findJobByAlias(request, successAlias);
+  const failureJob = await findJobByAlias(request, failureAlias);
+
+  await page.goto("/jobs");
+  await expect(page.locator('[data-testid="job-row"]', { hasText: successAlias }).first()).toBeVisible();
+  await expect(page.locator('[data-testid="job-row"]', { hasText: failureAlias }).first()).toBeVisible();
+
+  await triggerJob(request, successJob.id);
+  const successRun = await awaitRun(request, successJob.id, { status: "succeeded" });
+  await triggerJob(request, failureJob.id);
+  const failureRun = await awaitRun(request, failureJob.id, { status: "failed" });
+
+  const feed = page.getByTestId("activity-feed");
+  await expect(feed).toBeVisible();
+  await expect(feed).toContainText(successAlias);
+  await expect(feed).toContainText(failureAlias);
+  await expect(feed).not.toContainText(successJob.id);
+  await expect(feed).not.toContainText(failureJob.id);
+
+  const successEntries = page.getByTestId("activity-entry").filter({ hasText: shortId(successRun.id) });
+  await expect(successEntries.filter({ hasText: "Run completed" })).toHaveCount(1);
+  await expect(successEntries.filter({ hasText: "Run failed" })).toHaveCount(0);
+
+  const failureEntries = page.getByTestId("activity-entry").filter({ hasText: shortId(failureRun.id) });
+  await expect(failureEntries.filter({ hasText: "Run failed" })).toHaveCount(1);
+  await expect(failureEntries.filter({ hasText: "Run completed" })).toHaveCount(0);
 });

@@ -25,6 +25,38 @@ import { api } from "@/lib/api"
 import { shortId } from "@/lib/utils"
 import { RelativeTime } from "./relative-time"
 
+function normalizeSearchText(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function searchWords(value: string) {
+  return normalizeSearchText(value).split(/[^a-z0-9]+/).filter(Boolean)
+}
+
+function fieldScore(field: string, term: string) {
+  const normalized = normalizeSearchText(field)
+  if (!normalized) return 0
+  if (normalized === term) return 1
+  if (normalized.startsWith(term)) return 0.9
+  if (normalized.includes(term)) return 0.75
+  if (searchWords(normalized).some((word) => word.startsWith(term))) return 0.8
+  return 0
+}
+
+export function commandPaletteFilter(value: string, search: string, keywords?: string[]) {
+  const terms = searchWords(search)
+  if (terms.length === 0) return 1
+
+  const fields = [value, ...(keywords ?? [])]
+  let score = 0
+  for (const term of terms) {
+    const termScore = Math.max(...fields.map((field) => fieldScore(field, term)))
+    if (termScore === 0) return 0
+    score += termScore
+  }
+  return score / terms.length
+}
+
 export function CommandMenu() {
   const [open, setOpen] = React.useState(false)
   const navigate = useNavigate()
@@ -32,6 +64,19 @@ export function CommandMenu() {
   const { data: jobs } = useQuery({
     queryKey: ["jobs"],
     queryFn: api.getJobs,
+    enabled: open,
+  })
+
+  const { data: triggers } = useQuery({
+    queryKey: ["triggers"],
+    queryFn: api.getTriggers,
+    enabled: open,
+  })
+
+  const { data: atoms } = useQuery({
+    queryKey: ["atoms"],
+    queryFn: api.getAtoms,
+    enabled: open,
   })
 
   React.useEffect(() => {
@@ -65,32 +110,32 @@ export function CommandMenu() {
           <span className="text-xs">⌘</span>K
         </kbd>
       </button>
-      <CommandDialog open={open} onOpenChange={setOpen}>
+      <CommandDialog open={open} onOpenChange={setOpen} commandProps={{ filter: commandPaletteFilter }}>
         <CommandInput placeholder="Type a command or search..." />
         <CommandList>
           <CommandEmpty>No results found.</CommandEmpty>
           <CommandGroup heading="Suggestions">
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
+            <CommandItem value="jobs pipelines" onSelect={() => runCommand(() => navigate({ to: "/jobs" }))}>
               <LayoutDashboard className="mr-2 h-4 w-4" />
               <span>Jobs</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
+            <CommandItem value="stats analytics" onSelect={() => runCommand(() => navigate({ to: "/stats" }))}>
               <BarChart className="mr-2 h-4 w-4" />
               <span>Stats</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
+            <CommandItem value="triggers schedules events" onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}>
               <Radio className="mr-2 h-4 w-4" />
               <span>Triggers</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
+            <CommandItem value="atoms containers" onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}>
               <Database className="mr-2 h-4 w-4" />
               <span>Atoms</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
+            <CommandItem value="system health nodes" onSelect={() => runCommand(() => navigate({ to: "/system" }))}>
               <Server className="mr-2 h-4 w-4" />
               <span>System</span>
             </CommandItem>
-            <CommandItem onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
+            <CommandItem value="job definitions manifests yaml" onSelect={() => runCommand(() => navigate({ to: "/jobdefs" }))}>
               <FileCode2 className="mr-2 h-4 w-4" />
               <span>Job Definitions</span>
             </CommandItem>
@@ -100,6 +145,8 @@ export function CommandMenu() {
             {jobs?.map((job) => (
               <CommandItem
                 key={job.id}
+                value={`job ${job.alias} ${shortId(job.id)}`}
+                keywords={[job.alias, shortId(job.id)]}
                 onSelect={() => runCommand(() => navigate({ to: "/jobs/$jobId", params: { jobId: job.id } }))}
                 className="flex items-center justify-between"
               >
@@ -111,6 +158,44 @@ export function CommandMenu() {
                 <div className="text-[10px] text-muted-foreground">
                   <RelativeTime date={job.created_at} />
                 </div>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Triggers">
+            {triggers?.map((trigger) => (
+              <CommandItem
+                key={trigger.id}
+                value={`trigger ${trigger.alias} ${shortId(trigger.id)}`}
+                keywords={[trigger.alias, shortId(trigger.id), trigger.type]}
+                onSelect={() => runCommand(() => navigate({ to: "/triggers" }))}
+                className="flex items-center justify-between"
+              >
+                <div className="flex items-center">
+                  <Radio className="mr-2 h-4 w-4 text-cyan-glow" />
+                  <span>{trigger.alias}</span>
+                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(trigger.id)}</span>
+                </div>
+                <div className="text-[10px] uppercase text-muted-foreground">{trigger.type}</div>
+              </CommandItem>
+            ))}
+          </CommandGroup>
+          <CommandSeparator />
+          <CommandGroup heading="Atoms">
+            {atoms?.map((atom) => (
+              <CommandItem
+                key={atom.id}
+                value={`atom ${atom.image} ${atom.engine} ${shortId(atom.id)}`}
+                keywords={[atom.image, atom.engine, shortId(atom.id)]}
+                onSelect={() => runCommand(() => navigate({ to: "/atoms" }))}
+                className="flex items-center justify-between"
+              >
+                <div className="flex min-w-0 items-center">
+                  <Database className="mr-2 h-4 w-4 shrink-0 text-success" />
+                  <span className="truncate">{atom.image}</span>
+                  <span className="ml-2 text-xs text-muted-foreground font-mono">{shortId(atom.id)}</span>
+                </div>
+                <div className="text-[10px] uppercase text-muted-foreground">{atom.engine}</div>
               </CommandItem>
             ))}
           </CommandGroup>

@@ -64,15 +64,6 @@ class EventManager {
       });
     });
 
-    this.eventSource.onmessage = (message) => {
-      try {
-        const event = JSON.parse(message.data) as CaesiumEvent;
-        this.emit(event);
-      } catch (err) {
-        console.error("Failed to parse SSE message", err);
-      }
-    };
-
     this.eventSource.onerror = () => {
       this.connected = false;
       this.lastErrorAt = Date.now();

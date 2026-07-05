@@ -1,17 +1,25 @@
 package job
 
 import (
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/api/middleware"
 	"github.com/caesium-cloud/caesium/api/rest/service/job"
-	runsvc "github.com/caesium-cloud/caesium/api/rest/service/run"
+	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
-	"gorm.io/gorm"
 )
+
+const jobListRunHistoryLimit = 10
+
+type ListJobResponse struct {
+	*models.Job
+	LatestRun *runstorage.JobRun   `json:"latest_run,omitempty"`
+	LastRuns  []job.RunListSummary `json:"last_runs"`
+}
 
 func List(c *echo.Context) error {
 	req, err := parseListRequest(c)
@@ -22,19 +30,36 @@ func List(c *echo.Context) error {
 		req.Aliases = aliases
 	}
 
-	jobs, err := job.Service(c.Request().Context()).List(req)
+	svc := job.Service(c.Request().Context())
+	jobs, err := svc.List(req)
 	if err != nil {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	resp := make([]*JobResponse, 0, len(jobs))
+	jobIDs := make([]uuid.UUID, 0, len(jobs))
 	for _, entry := range jobs {
-		item := &JobResponse{Job: entry}
-		latest, latestErr := runsvc.New(c.Request().Context()).Latest(entry.ID)
-		if latestErr != nil && !errors.Is(latestErr, gorm.ErrRecordNotFound) {
-			return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(latestErr)
+		jobIDs = append(jobIDs, entry.ID)
+	}
+
+	runsByJob, err := svc.ListRecentRuns(jobIDs, jobListRunHistoryLimit)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
+	resp := make([]*ListJobResponse, 0, len(jobs))
+	for _, entry := range jobs {
+		history := runsByJob[entry.ID]
+		if history == nil {
+			history = []job.RunListSummary{}
 		}
-		item.LatestRun = latest
+
+		item := &ListJobResponse{
+			Job:      entry,
+			LastRuns: history,
+		}
+		if len(history) > 0 {
+			item.LatestRun = history[len(history)-1].JobRun()
+		}
 		resp = append(resp, item)
 	}
 

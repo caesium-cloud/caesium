@@ -28,6 +28,13 @@ export interface ActivityEntry {
   timestamp: string;
 }
 
+interface PendingActivityEntry {
+  type: string;
+  jobId: string;
+  runId?: string;
+  timestamp: string;
+}
+
 const STATUS_FILTERS: StatusFilter[] = ["all", "running", "succeeded", "failed", "paused"];
 const SORT_KEYS: SortKey[] = ["alias", "status", "last_run"];
 
@@ -52,8 +59,11 @@ function writeUrlParams(status: StatusFilter, q: string, sort: SortKey) {
   window.history.replaceState(null, "", url);
 }
 
-type BackendJobRun = { status: string; duration?: number };
-type JobWithLastRuns = Job & { last_runs?: BackendJobRun[] };
+function activityKey(e: CaesiumEvent, jobId: string, runId?: string) {
+  if (runId) return `${e.type}:${runId}`;
+  if (e.sequence !== undefined) return `${e.type}:sequence:${e.sequence}`;
+  return `${e.type}:${jobId}:${e.timestamp}`;
+}
 
 export function useJobsView() {
   const queryClient = useQueryClient();
@@ -65,6 +75,9 @@ export function useJobsView() {
   const [sort, setSortState] = useState<SortKey>(initial.sort);
   const [activity, setActivity] = useState<ActivityEntry[]>([]);
   const activityIdRef = useRef(0);
+  const activityKeysRef = useRef(new Set<string>());
+  const jobAliasesRef = useRef(new Map<string, string>());
+  const pendingActivityRef = useRef<PendingActivityEntry[]>([]);
 
   const setStatusFilter = useCallback((f: StatusFilter) => setStatusFilterState(f), []);
   const setSearch = useCallback((s: string) => setSearchState(s), []);
@@ -79,6 +92,57 @@ export function useJobsView() {
     queryFn: api.getJobs,
     refetchInterval: streamHealthy ? false : 15000,
   });
+
+  const appendActivity = useCallback((draft: PendingActivityEntry, alias: string) => {
+    setActivity((prev) => {
+      const entry: ActivityEntry = {
+        id: String(++activityIdRef.current),
+        type: draft.type,
+        jobId: draft.jobId,
+        jobAlias: alias,
+        runId: draft.runId,
+        timestamp: draft.timestamp,
+      };
+      return [entry, ...prev].slice(0, 20);
+    });
+  }, []);
+
+  useEffect(() => {
+    const aliases = new Map<string, string>();
+    jobs?.forEach((job) => aliases.set(job.id, job.alias));
+    jobAliasesRef.current = aliases;
+
+    if (pendingActivityRef.current.length === 0) return;
+
+    const ready: Array<{ draft: PendingActivityEntry; alias: string }> = [];
+    const pending: PendingActivityEntry[] = [];
+    pendingActivityRef.current.forEach((draft) => {
+      const alias = aliases.get(draft.jobId);
+      if (alias) {
+        ready.push({ draft, alias });
+      } else {
+        pending.push(draft);
+      }
+    });
+    pendingActivityRef.current = pending;
+
+    if (ready.length === 0) return;
+
+    setActivity((prev) => {
+      const entries = ready
+        .slice()
+        .reverse()
+        .map(({ draft, alias }) => ({
+          id: String(++activityIdRef.current),
+          type: draft.type,
+          jobId: draft.jobId,
+          jobAlias: alias,
+          runId: draft.runId,
+          timestamp: draft.timestamp,
+        }));
+      return [...entries, ...prev].slice(0, 20);
+    });
+  }, [jobs]);
 
   useEffect(() => {
     const onConnection = (healthy: boolean) => setStreamHealthy(healthy);
@@ -106,22 +170,31 @@ export function useJobsView() {
         );
       }
 
-      const alias =
-        run?.job_alias ??
-        queryClient.getQueryData<Job[]>(["jobs"])?.find((j) => j.id === jobID)?.alias ??
-        jobID;
+      const payloadAlias = run?.job_alias?.trim();
+      const cachedAlias =
+        jobAliasesRef.current.get(jobID) ??
+        queryClient.getQueryData<Job[]>(["jobs"])?.find((j) => j.id === jobID)?.alias;
+      const alias = payloadAlias || cachedAlias;
+      const runId = e.run_id ?? run?.id;
+      const key = activityKey(e, jobID, runId);
 
-      setActivity((prev) => {
-        const entry: ActivityEntry = {
-          id: String(++activityIdRef.current),
-          type: e.type,
-          jobId: jobID,
-          jobAlias: alias,
-          runId: e.run_id ?? run?.id,
-          timestamp: e.timestamp ?? new Date().toISOString(),
-        };
-        return [entry, ...prev].slice(0, 20);
-      });
+      if (activityKeysRef.current.has(key)) return;
+      activityKeysRef.current.add(key);
+
+      const draft: PendingActivityEntry = {
+        type: e.type,
+        jobId: jobID,
+        runId,
+        timestamp: e.timestamp ?? new Date().toISOString(),
+      };
+
+      if (alias) {
+        appendActivity(draft, alias);
+        return;
+      }
+
+      pendingActivityRef.current.push(draft);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     };
 
     const onPauseEvent = (e: CaesiumEvent) => {
@@ -153,7 +226,7 @@ export function useJobsView() {
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((t) =>
+    ["run_started", "run_completed", "run_failed"].forEach((t) =>
       events.subscribe(t, onRunEvent),
     );
     ["job_paused", "job_unpaused"].forEach((t) => events.subscribe(t, onPauseEvent));
@@ -161,13 +234,13 @@ export function useJobsView() {
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_completed", "run_failed", "run_terminal"].forEach((t) =>
+      ["run_started", "run_completed", "run_failed"].forEach((t) =>
         events.unsubscribe(t, onRunEvent),
       );
       ["job_paused", "job_unpaused"].forEach((t) => events.unsubscribe(t, onPauseEvent));
       events.unsubscribe("task_cached", onTaskCached);
     };
-  }, [queryClient]);
+  }, [appendActivity, queryClient]);
 
   const counts = useMemo<JobCounts>(() => {
     if (!jobs) return { all: 0, running: 0, succeeded: 0, failed: 0, paused: 0 };
@@ -218,7 +291,7 @@ export function useJobsView() {
 
     return sorted.map((job) => ({
       ...job,
-      lastRuns: ((job as JobWithLastRuns).last_runs ?? [])
+      lastRuns: (job.last_runs ?? [])
         .slice(-14)
         .map((r) => ({ status: r.status, duration: r.duration ?? null })),
     }));

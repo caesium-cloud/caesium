@@ -8,7 +8,13 @@ import { Toaster } from '@/components/ui/sonner'
 import { ThemeProvider } from './components/theme-provider'
 import { AuthGate } from './features/auth/AuthGate'
 
-const queryClient = new QueryClient()
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      staleTime: 15_000,
+    },
+  },
+})
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

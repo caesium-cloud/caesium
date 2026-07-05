@@ -332,20 +332,19 @@ function FilterBar({ counts, statusFilter, onStatusFilter, search, onSearch, sor
 const ACTIVITY_LABELS: Record<string, string> = {
   run_started: "Run started",
   run_completed: "Run completed",
-  run_terminal: "Run completed",
   run_failed: "Run failed",
 };
 
 function activityDotClass(type: string) {
   if (type === "run_started") return "bg-cyan-glow/80";
   if (type === "run_failed") return "bg-danger/80";
-  if (type === "run_completed" || type === "run_terminal") return "bg-success/80";
+  if (type === "run_completed") return "bg-success/80";
   return "bg-text-4";
 }
 
 function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
   return (
-    <div className="rounded-md border border-border/50 bg-card">
+    <div className="rounded-md border border-border/50 bg-card" data-testid="activity-feed">
       <div className="flex items-center gap-2 px-4 py-2.5 border-b border-border/50">
         <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
           Live activity
@@ -354,7 +353,7 @@ function ActivityFeed({ entries }: { entries: ActivityEntry[] }) {
       </div>
       <div className="divide-y divide-border/30 max-h-64 overflow-y-auto">
         {entries.map((entry) => (
-          <div key={entry.id} className="flex items-center gap-3 px-4 py-2.5">
+          <div key={entry.id} data-testid="activity-entry" className="flex items-center gap-3 px-4 py-2.5">
             <span
               className={cn("h-1.5 w-1.5 rounded-full shrink-0", activityDotClass(entry.type))}
             />
