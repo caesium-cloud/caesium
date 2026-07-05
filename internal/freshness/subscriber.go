@@ -181,11 +181,38 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 			log.Error("freshness: advance failed", "dataset", p.Name, "run_id", evt.RunID, "error", err)
 			continue
 		}
-		if res.Outcome == OutcomeRegressionDropped || res.Outcome == OutcomeOutOfOrderDropped {
+		switch res.Outcome {
+		case OutcomeRegressionDropped, OutcomeOutOfOrderDropped:
 			log.Warn("freshness: watermark write dropped",
 				"dataset", p.Name, "outcome", string(res.Outcome), "run_id", evt.RunID, "watermark", watermark)
+		case OutcomeAdvanced, OutcomeVerified:
+			// Publish AFTER the Advance commits so the evaluator reacting to this
+			// event reads post-advance state. RunID feeds the evaluator's
+			// _trigger_depth propagation. Regression/out-of-order/backfill drops
+			// leave state unchanged, so they must not wake a reactive derivation.
+			c.publishDatasetAdvanced(p.Namespace, p.Name, evt.JobID, evt.RunID)
 		}
 	}
+}
+
+// publishDatasetAdvanced notifies the freshness evaluator that a dataset's
+// watermark moved, so it can reactively re-derive downstream consumers off
+// post-advance state. Payload carries the {namespace, name} dataset identity.
+func (c *Capturer) publishDatasetAdvanced(namespace *string, name string, jobID, runID uuid.UUID) {
+	if c.bus == nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"namespace": nsValue(namespace),
+		"name":      name,
+	})
+	c.bus.Publish(event.Event{
+		Type:      event.TypeDatasetAdvanced,
+		JobID:     jobID,
+		RunID:     runID,
+		Timestamp: time.Now().UTC(),
+		Payload:   payload,
+	})
 }
 
 // runTiming reports whether the run is a backfill and its effective completion

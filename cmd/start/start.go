@@ -191,6 +191,10 @@ func start(cmd *cobra.Command, args []string) error {
 	}
 	if vars.FreshnessEnabled {
 		conn := db.Connection()
+		// Wire the process-wide arrival observer (used by the ingest/webhook
+		// controllers) to the bus so an accepted arrival advance publishes
+		// dataset_advanced, waking the evaluator without a timer tick.
+		freshness.DefaultArrivalObserver().SetBus(bus)
 		capturer := freshness.NewCapturer(bus, conn)
 		evaluator := freshness.NewEvaluator(freshness.Config{
 			DB:                    conn,

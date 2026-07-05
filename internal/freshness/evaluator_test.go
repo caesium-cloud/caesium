@@ -284,6 +284,176 @@ func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
 	}
 }
 
+// TestEvaluatorReactsToDatasetAdvancedPostState proves the reactive path keys
+// off POST-advance state: a downstream consumer only derives once its upstream's
+// watermark has actually advanced past the consumed snapshot. This is the race
+// fix — dataset_advanced is published AFTER the capturer's Advance commits, so
+// the evaluator never reads pre-advance state and derives a redundant run.
+func TestEvaluatorReactsToDatasetAdvancedPostState(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+
+	p1 := seedFreshnessJob(t, db, "stage-producer")
+	p2 := seedFreshnessJob(t, db, "mart-producer")
+	seedDeclarations(t, db,
+		produceDecl(p1, "staging", "1h", ""),
+		produceDecl(p2, "mart", "1h", ""),
+		consumeDecl(p2, "staging"),
+	)
+	// mart is stale and last consumed staging="1". staging is currently fresh but
+	// still at watermark "1" (pre-advance) — equal to mart's consumed snapshot.
+	seedState(t, db, "mart", "500", now.Add(-2*time.Hour), map[string]string{"staging": "1"})
+	seedState(t, db, "staging", "1", now.Add(-30*time.Minute), nil)
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+
+	advanced := datasetAdvancedEvent(t, "", "staging", uuid.Nil)
+
+	// Pre-advance: staging watermark "1" == mart's consumed "1", so mart is
+	// stale-upstream (waiting) and must NOT derive a redundant producer run.
+	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
+		t.Fatalf("evaluate pre-advance: %v", err)
+	}
+	if admitter.calls != 0 {
+		t.Fatalf("pre-advance derived %d runs, want 0", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedUpstream, 1)
+
+	// The capturer's Advance commits before it publishes dataset_advanced. Move
+	// staging past mart's consumed snapshot.
+	if _, err := NewStore(db).Advance(ctx, AdvanceInput{
+		Name: "staging", Watermark: "2", RunID: uuid.New(), CompletedAt: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatalf("advance staging: %v", err)
+	}
+
+	// Post-advance: mart now sees staging advanced past its consumed snapshot and
+	// derives exactly one run.
+	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
+		t.Fatalf("evaluate post-advance: %v", err)
+	}
+	if admitter.calls != 1 {
+		t.Fatalf("post-advance derived %d runs, want 1", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
+// TestArrivalAdvanceTriggersReactiveEvaluation proves the flagship external
+// event -> derive downstream flow: an arrival advance publishes dataset_advanced,
+// and feeding that event to the evaluator derives the downstream consumer
+// without waiting for a timer tick.
+func TestArrivalAdvanceTriggersReactiveEvaluation(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+
+	seedArrivalSource(t, db, "raw.vendor_x", "s3:ObjectCreated", "$.key")
+	p2 := seedFreshnessJob(t, db, "arrival-mart")
+	seedDeclarations(t, db,
+		produceDecl(p2, "mart", "1h", ""),
+		consumeDecl(p2, "raw.vendor_x"),
+	)
+	// mart is stale and last consumed raw.vendor_x="v1".
+	seedState(t, db, "mart", "500", now.Add(-2*time.Hour), map[string]string{"raw.vendor_x": "v1"})
+
+	bus := event.New()
+	events, err := bus.Subscribe(ctx, event.Filter{Types: []event.Type{event.TypeDatasetAdvanced}})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	obs := NewArrivalObserver(db)
+	obs.SetBus(bus)
+
+	ingested := &models.IngestedEvent{
+		ID:        uuid.New(),
+		Type:      "s3:ObjectCreated",
+		Data:      datatypes.JSON([]byte(`{"key":"v2"}`)),
+		CreatedAt: now.Add(-time.Minute),
+	}
+	res, err := obs.Observe(ctx, ingested)
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if len(res.Advances) != 1 || res.Advances[0].Outcome != OutcomeAdvanced {
+		t.Fatalf("arrival advances = %+v, want one OutcomeAdvanced", res.Advances)
+	}
+
+	// The arrival advance must have published dataset_advanced for the source.
+	var advanced event.Event
+	select {
+	case advanced = <-events:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for dataset_advanced from arrival")
+	}
+	if advanced.Type != event.TypeDatasetAdvanced {
+		t.Fatalf("event type = %q, want %q", advanced.Type, event.TypeDatasetAdvanced)
+	}
+	id, ok := datasetIdentityFromPayload(advanced.Payload)
+	if !ok || id.name != "raw.vendor_x" {
+		t.Fatalf("dataset_advanced payload = %s (parsed=%+v ok=%v)", advanced.Payload, id, ok)
+	}
+
+	// Feeding the reactive event to the evaluator derives the downstream mart.
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateEvent(ctx, advanced); err != nil {
+		t.Fatalf("evaluate reactive: %v", err)
+	}
+	if admitter.calls != 1 {
+		t.Fatalf("reactive derived %d runs, want 1", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 1)
+}
+
+func datasetAdvancedEvent(t *testing.T, namespace, name string, runID uuid.UUID) event.Event {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"namespace": namespace, "name": name})
+	if err != nil {
+		t.Fatalf("marshal dataset_advanced payload: %v", err)
+	}
+	return event.Event{Type: event.TypeDatasetAdvanced, RunID: runID, Payload: payload}
+}
+
+func seedArrivalSource(t *testing.T, db *gorm.DB, name, eventType, watermarkPath string) {
+	t.Helper()
+	binding, err := json.Marshal(map[string]any{
+		"event":     map[string]any{"type": eventType},
+		"watermark": watermarkPath,
+	})
+	if err != nil {
+		t.Fatalf("marshal arrival binding: %v", err)
+	}
+	decl := models.DatasetDeclaration{
+		ID:             uuid.New(),
+		JobID:          uuid.New(),
+		JobAlias:       "arrival-source",
+		StepName:       "",
+		Name:           name,
+		Direction:      models.DatasetDirectionSource,
+		External:       true,
+		ExpectedEvery:  "24h",
+		ArrivalBinding: datatypes.JSON(binding),
+		CreatedAt:      t0,
+		UpdatedAt:      t0,
+	}
+	if err := db.Create(&decl).Error; err != nil {
+		t.Fatalf("create arrival source: %v", err)
+	}
+}
+
 func seedFreshnessJob(t *testing.T, db *gorm.DB, alias string) uuid.UUID {
 	t.Helper()
 	now := time.Now().UTC()
