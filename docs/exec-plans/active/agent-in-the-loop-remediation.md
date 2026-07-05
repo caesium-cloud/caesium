@@ -658,7 +658,7 @@ primary evidence — nothing is prose-only.
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip `docs/roadmap.md` §3.5 to reflect shipped phases; update the
+- [x] N-1. Flip `docs/roadmap.md` §3.5 to reflect shipped phases; update the
       [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md)
       `> Status:` banner from "Brainstorm/Design — no implementation yet" to the
       shipped phase(s), and reconcile any design amendments this plan surfaced back
@@ -673,6 +673,15 @@ primary evidence — nothing is prose-only.
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–U + F + G (runs last, after the runtime ships).
+      Note: shipped in the combined freshness+agent N-1 docs PR. Flipped §3.5 to
+      Shipped (runtime) and the `design-agent-in-the-loop.md` `> Status:` banner
+      to the shipped runtime; documented the `metadata.remediation` block
+      (profile/classes/maxAttempts/autonomy/escalation, action + class
+      vocabularies) via `internal/jobdef/report/report.go` → regenerated
+      `docs/job-schema-reference.md`, plus `job-definitions.md` and
+      `caesium-job-llm-reference.md`; added the pinned `agent-remediation.job.yaml`
+      example; and refreshed the README bullet in backtick form. No design-body
+      amendments were surfaced by the runtime streams beyond the banner.
 
 ## Sequencing & Dependencies
 

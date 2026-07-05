@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: remediation-vendor-extract
+  labels:
+    team: data-platform
+  annotations:
+    owner: oncall
+    purpose: autonomous incident remediation for a flaky vendor extract — retry late files, gate risky patches, escalate with the diagnosis already done
+  # Opt this job into agent-in-the-loop incident remediation. This is policy
+  # metadata enforced server-side by the incident manager and executor; it
+  # never enters the cache identity hash. Requires
+  # CAESIUM_AGENT_REMEDIATION_ENABLED=true and an active auth mode on the server.
+  remediation:
+    # References a server-side AgentProfile (managed via /v1/agentprofiles).
+    # Offline `caesium job lint` cannot verify this reference and emits a scope
+    # note; server-side lint (POST /v1/jobdefs/lint) and apply verify it.
+    profile: vendor-extract-agent
+    # Failure classes this policy applies to.
+    classes:
+      - transient_infra
+      - data_unavailable
+      - schema_violation
+      - auth_failure
+    # Bound remediation attempts before the incident force-escalates.
+    maxAttempts: 3
+    autonomy:
+      # Tier 1/2 actions permitted to run without a human. A tier-3 action
+      # always creates an ApprovalRequest regardless of this list.
+      allow:
+        - auto_retry_backoff
+        - snooze_until_cron
+        - notify
+        - suppress_downstream_alerts
+      # Whitelist rerun_with_params values per trigger.defaultParams key.
+      paramOverrides:
+        mode:
+          - full
+          - incremental
+      # Narrow the allow-list for a specific failure class.
+      perClass:
+        auth_failure:
+          allow:
+            - notify
+            - escalate
+      # Always require human approval for these, even if their tier would
+      # otherwise permit autonomous execution.
+      requireApproval:
+        - apply_jobdef_patch
+        - override_schema_gate
+    # Force a hand-off to a NotificationChannel if unresolved within the cap.
+    escalation:
+      channel: data-oncall
+      after: 2h
+trigger:
+  type: cron
+  configuration:
+    cron: "15 3 * * *"
+    timezone: UTC
+  # Top-level defaultParams populate the run params the remediation policy's
+  # paramOverrides whitelist is validated against.
+  defaultParams:
+    mode: incremental
+steps:
+  - name: extract
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - echo "extract in ${CAESIUM_PARAM_MODE:-incremental} mode"

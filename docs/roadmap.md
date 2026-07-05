@@ -208,28 +208,28 @@ steps:
 
 ### 3.5 Agent-in-the-Loop ETL Remediation
 
-**Current state**: When a pipeline fails, Caesium retries per declared policy, then notifies a human. Triage (reading logs, classifying the failure, deciding to wait/retry/patch/escalate) is entirely manual.
+**Status**: Shipped (runtime). A failing run now opens a persisted incident that a deterministic classifier triages. The `metadata.remediation` jobdef block (`profile`/`classes`/`maxAttempts`/`autonomy`/`escalation`) declares a tiered, server-enforced action policy, and a container-native agent runtime — scoped session token, session supervisor, triage bundle, the `/v1/agent/*` tool surface plus an MCP surface — executes bounded tier-1/2 actions autonomously while tier-3 actions are gated behind a human approval. AgentProfiles are managed via `/v1/agentprofiles`; incident reads, the `ai_agent` dispatch channel, and Console incident/agent-activity/analytics panels ship alongside. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call. Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with an active auth mode.
 
-**Target state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done. BYO agent image and model key; deterministic rules handle the cheap failure classes without any LLM call.
+**Delivered state**: Failures open an incident that a container-native LLM agent triages using Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay as a what-if sandbox) and remediates within a declarative, tiered, server-enforced action policy — retrying late-file extracts on a schedule, proposing human-approved schema patches for vendor drift, pausing lineage-adjacent jobs on credential failures — escalating to humans with the diagnosis already done.
 
 **Design doc**: [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
 
-**Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM).
+**Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM); all runtime streams merged. The `metadata.remediation` surface is documented in [`job-schema-reference.md`](job-schema-reference.md#remediation).
 
 ---
 
 ## Phase 4: Data-Plane Differentiators (Design Wave)
 
-A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc; none is committed work. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
+A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc. **Freshness-driven scheduling — the strategic flagship — has since shipped** (streams A–G merged); the rest are not yet committed to implementation. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
 
-Each design now has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams; the plans are eligible for the `exec-plan-wave` skill but no implementation wave has shipped.
+Each design has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams. Freshness-driven scheduling has shipped its full wave (see the row below and the [Completed Features](#completed-features) table); the remaining plans are eligible for the `exec-plan-wave` skill but have not yet shipped an implementation wave.
 
 | Design | One-liner | Doc | Plan |
 |--------|-----------|-----|------|
 | Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
 | Dynamic fan-out | A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/active/dynamic-fanout.md) |
 | Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
-| Freshness-driven scheduling | Declare freshness SLOs on datasets; derive execution from lineage + data arrival instead of cron guesses — the strategic flagship | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md) |
+| Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md) |
 | Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
 | Contract enforcement | Cross-job schema-compatibility checks at lint/diff/apply with named consumers and an intentional-break path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | [`contract-enforcement.md`](exec-plans/active/contract-enforcement.md) |
 | Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
@@ -253,8 +253,8 @@ Each design now has a drafted execution plan under `docs/exec-plans/active/` dec
 | **P3** | 3.2 Approval gates | Niche but important for compliance-heavy teams. |
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
-| **P3** | 3.5 Agent-in-the-loop remediation | Converts the data-plane-memory substrate into autonomous ops. Phase 0 (diagnosed pages) is cheap and de-risks the rest. |
-| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling, contract enforcement, and right-sizing are the near-term standouts. |
+| **P3** | 3.5 Agent-in-the-loop remediation | Runtime shipped. Converts the data-plane-memory substrate into autonomous ops; the `metadata.remediation` policy + agent runtime land, Phase 0 (diagnosed pages) first. |
+| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling has **shipped** its full wave, contract enforcement and right-sizing remain the near-term standouts. |
 
 ---
 
@@ -276,6 +276,8 @@ Features that were previously on the roadmap and are now shipped:
 | Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
 | Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
+| Freshness-driven scheduling | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | Shipped ([plan](exec-plans/active/freshness-scheduling.md); streams A–G) |
+| Agent-in-the-loop ETL remediation | [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) | Shipped ([plan](exec-plans/active/agent-in-the-loop-remediation.md); runtime streams) |
 
 ---
 

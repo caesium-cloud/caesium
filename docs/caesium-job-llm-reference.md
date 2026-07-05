@@ -156,6 +156,7 @@ steps:
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
+| `datasets` | object | no | Freshness surface: `consumes` (dataset names) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
@@ -236,6 +237,69 @@ callbacks:
       channel: "#pipelines"
       user_agent: "caesium"
 ```
+
+### Datasets & Freshness (opt-in)
+
+Declare the datasets steps produce and consume plus a freshness SLO, and Caesium can schedule on data arrival and staleness instead of a cron guess. All of this is scheduling metadata — excluded from the cache identity hash. Feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`.
+
+```yaml
+metadata:
+  alias: freshness-vendor-orders
+  datasets:
+    sources:                        # external upstreams nobody in Caesium produces
+      - name: raw.vendor_orders
+        expectedEvery: 24h          # cadence expectation; a late drop is stale-upstream, not an error
+        external: true
+        arrival:                    # advance the source watermark on a matching event
+          event: {type: "webhook.s3", filter: {bucket: vendor-drops}}
+          watermark: "$.object.last_modified"    # JSONPath into the event payload
+    skipWhenFresh: true             # default when datasets are declared: skip the cron run when already fresh
+trigger:
+  type: cron
+  configuration: {cron: "*/30 * * * *"}
+steps:
+  - name: extract-orders
+    image: alpine:3.23
+    command: ["sh", "-c", "... && echo '##caesium::output {\"processed_through\": \"2026-07-04T00:00:00Z\"}'"]
+    datasets:
+      consumes: [raw.vendor_orders]
+      produces:
+        - name: analytics.orders_daily
+          freshness: 6h             # target staleness SLO
+          maxStaleness: 12h         # hard bound; a breach emits freshness_violated
+          watermark: {key: processed_through}    # the ##caesium::output key that advances the dataset (an output key, not a JSONPath)
+```
+
+- `steps[].datasets.consumes` / `produces[]` — a consumed name may resolve to a dataset produced by another job; `produces[].name` is required, `freshness`/`maxStaleness` are Go durations, `watermark.key` names the emitted output key.
+- `metadata.datasets.sources[]` — external upstreams; `arrival.watermark` is a JSONPath into the event payload; `external: true` tells cross-job lint not to demand a producing job.
+- A purely data-derived job can drop cron with `trigger: {type: freshness}` (needs at least one consumed dataset and one produced dataset with `freshness`; declare it on the job, not via the trigger API). See the [generated reference](job-schema-reference.md#datasets--freshness).
+
+### Remediation (opt-in)
+
+`metadata.remediation` opts a job into agent-in-the-loop incident remediation: a failing run opens an incident that a bounded, tiered, server-enforced policy (and a container-native agent) can retry, snooze, patch, or escalate — tier-3 actions always gated behind a human approval. Policy metadata; excluded from the cache identity hash. Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED=true` with an active auth mode.
+
+```yaml
+metadata:
+  alias: remediation-vendor-extract
+  remediation:
+    profile: vendor-extract-agent           # server-side AgentProfile (/v1/agentprofiles)
+    classes: [transient_infra, data_unavailable, schema_violation, auth_failure]
+    maxAttempts: 3
+    autonomy:
+      allow: [auto_retry_backoff, snooze_until_cron, notify, suppress_downstream_alerts]
+      paramOverrides: {mode: [full, incremental]}    # keys must exist in trigger.defaultParams
+      perClass: {auth_failure: {allow: [notify, escalate]}}
+      requireApproval: [apply_jobdef_patch, override_schema_gate]
+    escalation: {channel: data-oncall, after: 2h}
+trigger:
+  type: cron
+  configuration: {cron: "15 3 * * *"}
+  defaultParams: {mode: incremental}          # top-level; paramOverrides is validated against these
+```
+
+- `profile` (required) names a server-side `AgentProfile`; offline lint emits a scope note, server-side lint/apply verify it.
+- `classes` (≥1): `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`.
+- Action names for `allow` / `perClass[].allow` / `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`. See the [generated reference](job-schema-reference.md#remediation).
 
 ---
 

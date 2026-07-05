@@ -36,10 +36,12 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |
 | `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |
 | `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |
+| `datasets` | object | optional | Freshness-driven scheduling surface: external `sources` the job's steps consume plus the `skipWhenFresh` control. See [Datasets & Freshness](#datasets--freshness). Feature-gated behind `CAESIUM_FRESHNESS_ENABLED`; scheduling metadata excluded from the cache identity hash. |
+| `remediation` | object | optional | Opt-in to agent-in-the-loop incident remediation: `profile`, `classes`, `maxAttempts`, `autonomy`, `escalation`. See [Remediation](#remediation). Feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED`; policy metadata excluded from the cache identity hash. |
 
 ## Trigger
 
-Supported trigger types: `cron`, `http`, `event`. Each type accepts a `configuration` map that is persisted verbatim, with type-specific validation.
+Supported trigger types: `cron`, `http`, `event`, `freshness`. Each type accepts a `configuration` map that is persisted verbatim, with type-specific validation. The `freshness` type is feature-gated behind `CAESIUM_FRESHNESS_ENABLED` and derives its cadence from the job's declared datasets; see [Freshness Trigger](#freshness-trigger).
 
 ### Common Trigger Fields
 | Field | Type | Required | Notes |
@@ -72,6 +74,9 @@ Supported trigger types: `cron`, `http`, `event`. Each type accepts a `configura
 | `defaultParams` | map[string]string | optional | Seeds run parameters for event-triggered executions before extracted event params are merged. Values must be strings. |
 
 For trigger chaining, Caesium routes lifecycle events with `source: caesium` through the same event router. The scheduler-owned `_trigger_depth` run parameter tracks chain depth and is rejected when it reaches `CAESIUM_MAX_TRIGGER_DEPTH`; authors should not set or depend on `_trigger_depth` for business logic.
+
+### Freshness Trigger
+A `freshness` trigger (feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`) carries no cadence of its own — the freshness evaluator derives runs from the job's declared dataset graph. A freshness-triggered job must declare at least one consumed dataset (a step-level `datasets.consumes` entry or a `metadata.datasets.sources` entry) and at least one produced dataset with a `freshness` SLO. Because the requirement lives on the job's datasets rather than the trigger, a `freshness` trigger cannot be created through the trigger-create/update API; declare it on a job definition. See [Datasets & Freshness](#datasets--freshness).
 
 ## Callbacks
 
@@ -121,6 +126,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
+| `datasets` | object | optional | Per-step freshness surface: `consumes` (dataset names) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs). See [Datasets & Freshness](#datasets--freshness). Scheduling metadata excluded from the cache identity hash. |
 | `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
 
 ### Cache
@@ -145,6 +151,63 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `queueName` | string | required | The Kueue LocalQueue (in the pod's namespace) to admit through. Becomes the value of the `kueue.x-k8s.io/queue-name` label. |
 
 The queue is **scheduling metadata, not an execution input**, so it is excluded from the cache identity hash exactly like secrets and workload identity: two otherwise-identical tasks that differ only in queue share one cache identity, and re-queuing a task never busts its cache. Your cluster must have Kueue installed with the LocalQueue (and a backing ClusterQueue) provisioned; see [`kubernetes-deployment.md`](kubernetes-deployment.md#delegating-scheduling-to-kueue).
+
+## Datasets & Freshness
+
+Freshness-driven scheduling lets a job declare the datasets its steps produce and consume, plus a freshness SLO on each output, so Caesium can derive execution from data arrival and staleness instead of a cron guess: run when upstream data has arrived and my output is stale against its SLO, don't run when nothing changed, and surface `stale-upstream` (an observable state with a reason) rather than a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. It is feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed through the `GET /v1/datasets` REST surface and the Console freshness view.
+
+### Step Datasets (`steps[].datasets`)
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `consumes` | array[string] | optional | Dataset names this step reads. A consumed name may resolve to a dataset produced by another job; cross-job resolution is a lint/registry concern, not a single-definition error. |
+| `produces` | array[object] | optional | Datasets this step produces, each carrying its freshness SLO. |
+| `produces[].name` | string | required | Dataset identity (keyed on name in v1; namespace is reserved). |
+| `produces[].freshness` | duration | optional | Target staleness SLO as a Go duration (e.g. `6h`) — how stale consumers tolerate this dataset being. |
+| `produces[].maxStaleness` | duration | optional | Hard bound; a breach emits `freshness_violated`. |
+| `produces[].watermark` | object | optional | `{key: <output-key>}` names the `##caesium::output` key this step emits to advance the dataset's watermark. It is an output key on the existing zero-SDK output contract, not a JSONPath. |
+
+### Source Datasets (`metadata.datasets.sources`)
+External datasets nobody in Caesium produces — the upstreams a consuming step depends on. A late arrival surfaces as stale-upstream rather than a failed run.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `name` | string | required | Source dataset identity, referenced by a step's `datasets.consumes`. |
+| `expectedEvery` | duration | optional | Cadence expectation as a Go duration; a missed arrival surfaces as stale-upstream. |
+| `external` | boolean | optional | Marks the dataset as intentionally produced outside Caesium so the cross-job lint does not demand a producing job. |
+| `arrival` | object | optional | Binds an ingested event to a source-dataset watermark advance. |
+| `arrival.event.type` | string | required with `arrival.event` | Event type to match (mirrors the shipped event-trigger matcher). |
+| `arrival.event.filter` | map[string]string | optional | Content filter over event data. |
+| `arrival.watermark` | string (JSONPath) | optional | JSONPath into the event payload extracted as the new watermark value. |
+
+`metadata.datasets.skipWhenFresh` (boolean) controls P1 cron skipping: when a cron-triggered job's outputs are already fresh and its consumed watermarks are unchanged, the scheduled run is recorded as `skipped_fresh` instead of executing. It defaults to `true` whenever a job declares datasets. For a purely data-derived job, drop cron and declare `trigger: {type: freshness}` (see [Freshness Trigger](#freshness-trigger)); the evaluator owns the cadence.
+
+## Remediation
+
+`metadata.remediation` opts a job into agent-in-the-loop incident remediation: when a run fails, Caesium opens an incident, classifies the failure, and lets a bounded, server-enforced policy retry, snooze, patch, or escalate — with tier-3 actions always gated behind a human approval. The block is policy metadata enforced server-side by the incident manager and executor; it never participates in step-execution cache identity. It requires `CAESIUM_AGENT_REMEDIATION_ENABLED=true` and an active auth mode on the server.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `profile` | string | required | Names a server-side `AgentProfile` (managed via `/v1/agentprofiles`). Offline `caesium job lint` cannot verify the reference and emits a scope note; server-side lint (`POST /v1/jobdefs/lint`) and the apply transaction verify it. |
+| `classes` | array[string] | required | Failure classes this policy applies to (at least one). One or more of `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`. |
+| `maxAttempts` | integer | optional | Bounds remediation attempts before an incident force-escalates. Must be `>= 0`. |
+| `autonomy` | object | optional | Tiered-autonomy policy (below). |
+| `escalation` | object | optional | Forced hand-off when remediation does not resolve the incident in time. |
+
+### Autonomy (`metadata.remediation.autonomy`)
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `allow` | array[string] | optional | Actions permitted to run without a human, subject to each action's own tier — a tier-3 action always creates an ApprovalRequest regardless of `allow`. |
+| `paramOverrides` | map[string]array[string] | optional | Whitelists `rerun_with_params` values per key; every key must name an existing `trigger.defaultParams` entry. |
+| `perClass` | map[string]object | optional | Narrows `allow` for a specific failure class: `perClass.<class>.allow`. |
+| `requireApproval` | array[string] | optional | Actions that must create an ApprovalRequest for this job even when their default tier would otherwise permit autonomous execution. |
+
+Remediation action names accepted in `allow`, `perClass[].allow`, and `requireApproval`: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`.
+
+### Escalation (`metadata.remediation.escalation`)
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `channel` | string | optional | Names a server-side NotificationChannel to force-escalate to. |
+| `after` | duration | optional | Wall-clock cap as a Go duration before the incident is force-escalated. At least one of `channel`/`after` is required when `escalation` is set. |
 
 ## Secret References
 

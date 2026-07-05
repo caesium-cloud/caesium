@@ -171,6 +171,75 @@ steps:
 
 Valid priorities are `high`, `normal`, and `low`. Valid concurrency strategies are `queue`, `replace`, `skip`, and `fail`. A step-level `rateLimit.resource` must match one of the job-level `metadata.rateLimits[].resource` entries.
 
+## Freshness-Driven Scheduling
+
+A cron expression is a guess about when data will have arrived. Freshness-driven scheduling inverts that: steps declare the datasets they produce and consume plus a freshness SLO on each output, and Caesium derives execution from data arrival and staleness — run when upstream data has arrived and my output is stale against its SLO, skip when nothing changed, and surface `stale-upstream` (an observable state with a reason) instead of a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. Enable it with `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed via the `GET /v1/datasets*` REST surface and the Console freshness view.
+
+```yaml
+metadata:
+  alias: freshness-vendor-orders
+  datasets:
+    sources:                       # external upstreams nobody in Caesium produces
+      - name: raw.vendor_orders
+        expectedEvery: 24h         # cadence expectation; a late drop is stale-upstream, not an error
+        external: true
+        arrival:                   # advance the source watermark on a matching event
+          event:
+            type: "webhook.s3"
+            filter: {bucket: vendor-drops}
+          watermark: "$.object.last_modified"   # JSONPath into the event payload
+    skipWhenFresh: true            # cron becomes a heartbeat; skip when already fresh (default when datasets are declared)
+trigger:
+  type: cron
+  configuration: {cron: "*/30 * * * *"}
+steps:
+  - name: extract-orders
+    image: alpine:3.23
+    command: ["sh", "-c", "... && echo '##caesium::output {\"processed_through\": \"2026-07-04T00:00:00Z\"}'"]
+    datasets:
+      consumes: [raw.vendor_orders]
+      produces:
+        - name: analytics.orders_daily
+          freshness: 6h            # target staleness SLO consumers tolerate
+          maxStaleness: 12h        # hard bound; a breach emits freshness_violated
+          watermark: {key: processed_through}   # names the ##caesium::output key that advances the dataset
+```
+
+- `steps[].datasets.consumes` names datasets a step reads; a consumed name may resolve to a dataset produced by another job (cross-job resolution is a registry/lint concern, not a single-definition error).
+- `steps[].datasets.produces[]` declares produced datasets. `name` is required; `freshness` and `maxStaleness` are Go durations; `watermark.key` names the `##caesium::output` key the step emits to advance the dataset (an output key, not a JSONPath).
+- `metadata.datasets.sources[]` declares external upstreams with an optional `expectedEvery` cadence, an `external` flag (so cross-job lint does not demand a producing job), and an `arrival` binding whose `watermark` is a JSONPath into the ingested event payload.
+- A purely data-derived job can drop cron entirely with `trigger: {type: freshness}` — the evaluator owns the cadence. Such a job must declare at least one consumed dataset and one produced dataset with a `freshness` SLO, and cannot be created through the trigger API (declare it on the job definition). The `freshness` trigger type is feature-gated behind `CAESIUM_FRESHNESS_ENABLED`.
+
+## Agent-in-the-Loop Remediation
+
+`metadata.remediation` opts a job into autonomous incident remediation: when a run fails, Caesium opens an incident, classifies the failure, and lets a bounded, server-enforced policy retry, snooze, patch, or escalate — with tier-3 actions always gated behind a human approval, and a container-native agent driving the diagnosis over Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay). The block is policy metadata enforced server-side; it never enters the cache identity hash. Enable it with `CAESIUM_AGENT_REMEDIATION_ENABLED=true` and an active auth mode.
+
+```yaml
+metadata:
+  alias: remediation-vendor-extract
+  remediation:
+    profile: vendor-extract-agent          # references a server-side AgentProfile (/v1/agentprofiles)
+    classes: [transient_infra, data_unavailable, schema_violation, auth_failure]
+    maxAttempts: 3                          # bound attempts before force-escalation
+    autonomy:
+      allow: [auto_retry_backoff, snooze_until_cron, notify, suppress_downstream_alerts]
+      paramOverrides:                       # whitelist rerun_with_params values per trigger.defaultParams key
+        mode: [full, incremental]
+      perClass:                             # narrow the allow-list for a specific class
+        auth_failure: {allow: [notify, escalate]}
+      requireApproval: [apply_jobdef_patch, override_schema_gate]
+    escalation: {channel: data-oncall, after: 2h}
+trigger:
+  type: cron
+  configuration: {cron: "15 3 * * *"}
+  defaultParams: {mode: incremental}        # top-level; paramOverrides keys are validated against these
+```
+
+- `profile` (required) names a server-side `AgentProfile`. Offline `caesium job lint` cannot verify it and emits a scope note; server-side lint (`POST /v1/jobdefs/lint`) and apply verify it.
+- `classes` (at least one) selects the failure classes the policy applies to: `transient_infra`, `schema_violation`, `sla_risk`, `data_unavailable`, `auth_failure`, `oom`, `quota`, `unknown`.
+- `autonomy.allow`, `autonomy.perClass[].allow`, and `autonomy.requireApproval` accept remediation action names: `auto_retry_backoff`, `snooze_until_cron`, `snooze_retry`, `retry_from_failure`, `retry_callbacks`, `notify`, `quarantine_replay`, `rerun_with_params`, `pause_job`, `unpause_job`, `clear_cache_entry`, `suppress_downstream_alerts`, `extend_sla_once`, `skip_task`, `override_schema_gate`, `apply_jobdef_patch`, `escalate`. A tier-3 action always creates an ApprovalRequest regardless of `allow`.
+- `escalation` forces a hand-off to a NotificationChannel when the incident is unresolved within `after`; at least one of `channel`/`after` is required when `escalation` is set.
+
 ## Volumes And Workload Identity
 
 Volumes are bring-your-own storage. Use `sources` for portable manifests that run locally with Docker/Podman and in production on Kubernetes; use `source` only for single-engine jobs.
@@ -371,6 +440,9 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Run-level concurrency queue policy — durable overflow run-queue drained priority-first (`concurrency-queue.job.yaml`).
   - Run-level concurrency replace-oldest policy — cancel the in-flight run and start fresh (`concurrency-replace.job.yaml`).
   - Priority and shared resource rate-limit scheduling (`priority-ratelimit.job.yaml`).
+  - Freshness-driven scheduling with an arrival-bound external source and a produced dataset SLO (`freshness-arrival.job.yaml`).
+  - Freshness fan-in cascade — two upstreams joined into a mart, then a rollup derived down the lineage (`freshness-fanin-cascade.job.yaml`).
+  - Agent-in-the-loop remediation policy with tiered autonomy and escalation (`agent-remediation.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
 
