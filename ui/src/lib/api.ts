@@ -392,6 +392,7 @@ export interface SystemFeatures {
   database_console_enabled: boolean;
   log_console_enabled: boolean;
   agent_remediation_enabled: boolean;
+  freshness_enabled: boolean;
   external_url?: string;
 }
 
@@ -699,6 +700,119 @@ export interface VerifyResult {
   rederived: Receipt | null;
 }
 
+export type DatasetStatus =
+  | "unknown"
+  | "fresh"
+  | "stale"
+  | "stale-upstream"
+  | "violated"
+  | "quarantined"
+  | string;
+
+export type DatasetDeclarationDirection =
+  | "produces"
+  | "consumes"
+  | "source"
+  | string;
+
+export type DatasetDecision =
+  | "derived"
+  | "skipped_fresh"
+  | "skipped_upstream"
+  | "skipped_admission"
+  | "skipped_active_run"
+  | string;
+
+export interface DatasetState {
+  id: string;
+  namespace?: string;
+  name: string;
+  watermark: string;
+  watermark_run_at?: string;
+  advanced_at?: string;
+  verified_at?: string;
+  status: DatasetStatus;
+  reason?: string;
+  last_run_id?: string;
+  consumed_watermarks?: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DatasetDeclaration {
+  id: string;
+  job_id: string;
+  job_alias: string;
+  step_name: string;
+  namespace?: string;
+  name: string;
+  direction: DatasetDeclarationDirection;
+  freshness?: string;
+  max_staleness?: string;
+  expected_every?: string;
+  watermark_key?: string;
+  external: boolean;
+  arrival_binding?: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DatasetSLO {
+  freshness?: string;
+  max_staleness?: string;
+  expected_every?: string;
+}
+
+export interface DatasetProducingJob {
+  id: string;
+  alias: string;
+  step_name?: string;
+}
+
+export interface DatasetDerivation {
+  id: string;
+  namespace?: string;
+  name: string;
+  decision: DatasetDecision;
+  reason?: string;
+  consumed_watermarks?: Record<string, string>;
+  run_id?: string;
+  created_at: string;
+}
+
+export interface DatasetListParams {
+  status?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface DatasetListResponse {
+  datasets: DatasetState[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface DatasetDetail {
+  state: DatasetState;
+  declaration?: DatasetDeclaration;
+  slo?: DatasetSLO;
+  producing_job?: DatasetProducingJob;
+  last_decision?: DatasetDerivation;
+}
+
+export interface DatasetDerivationsParams {
+  limit?: number;
+  offset?: number;
+}
+
+export interface DatasetDerivationsResponse {
+  derivations: DatasetDerivation[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 export interface LineageImpactQuery {
   namespace: string;
   name: string;
@@ -864,6 +978,10 @@ function queryString(params: Record<string, string | number | boolean | undefine
   return query.toString();
 }
 
+function datasetPath(namespace: string | undefined, name: string): string {
+  return `/datasets/${encodeURIComponent(namespace?.trim() || "_")}/${encodeURIComponent(name)}`;
+}
+
 function parseJobDefinitions(yaml: string) {
   const docs = parseAllDocuments(yaml);
   return docs
@@ -976,6 +1094,26 @@ export const api = {
   deleteTaskCache: (jobId: string, taskName: string) =>
     request<void>(`/jobs/${jobId}/cache/${encodeURIComponent(taskName)}`, { method: "DELETE" }),
   pruneCache: () => request<CachePruneResponse>("/cache/prune", { method: "POST" }),
+  getDatasets: (params: DatasetListParams = {}) => {
+    const query = queryString({
+      status: params.status,
+      limit: params.limit,
+      offset: params.offset,
+    });
+    return request<DatasetListResponse>(`/datasets${query ? `?${query}` : ""}`);
+  },
+  getDataset: (namespace: string | undefined, name: string) =>
+    request<DatasetDetail>(datasetPath(namespace, name)),
+  getDatasetDerivations: (
+    namespace: string | undefined,
+    name: string,
+    params: DatasetDerivationsParams = {},
+  ) => {
+    const query = queryString({ limit: params.limit, offset: params.offset });
+    return request<DatasetDerivationsResponse>(
+      `${datasetPath(namespace, name)}/derivations${query ? `?${query}` : ""}`,
+    );
+  },
   getSystemNodes: () => request<Node[]>("/system/nodes"),
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
   getIncidents: (params: IncidentListParams = {}) => {

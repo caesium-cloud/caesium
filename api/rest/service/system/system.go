@@ -38,6 +38,7 @@ type Features struct {
 	LogConsoleEnabled       bool   `json:"log_console_enabled"`
 	ExternalURL             string `json:"external_url,omitempty"`
 	AgentRemediationEnabled bool   `json:"agent_remediation_enabled"`
+	FreshnessEnabled        bool   `json:"freshness_enabled"`
 }
 
 type Service struct {
@@ -127,5 +128,6 @@ func (s *Service) Features() (*Features, error) {
 		LogConsoleEnabled:       v.LogConsoleEnabled,
 		ExternalURL:             v.APIExternalURL,
 		AgentRemediationEnabled: v.AgentRemediationEnabled,
+		FreshnessEnabled:        v.FreshnessEnabled,
 	}, nil
 }

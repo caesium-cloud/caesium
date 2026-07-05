@@ -453,18 +453,20 @@ data-plane-memory-ui precedent (the backend REST/CLI ships first; UI consumes
 it). New feature dir `ui/src/features/datasets/`. UI-gated by a `Features`
 field so the nav hides when the backend has freshness off.
 
-- [ ] F1. Add the dataset freshness board at `/datasets` (nav-level): status
+- [x] F1. Add the dataset freshness board at `/datasets` (nav-level): status
       chip, staleness-vs-SLO bar, producing job, and the `stale-upstream` reason,
       readable without DAGs. Route in `ui/src/router.tsx`, an `api.ts` method per
       `GET /v1/datasets` / `:ns/:name`, a nav entry, and a
       `FreshnessEnabled` field on the `Features` struct
       (`api/rest/service/system/system.go:36`) so the page hides when
       `CAESIUM_FRESHNESS_ENABLED=false`.
+      Note: W4-alpha landed the gated `/datasets` board, detail rail, producer/SLO
+      enrichment, and `freshness_enabled` system feature wiring.
       Files: new `ui/src/features/datasets/` (board), `ui/src/router.tsx`,
       `ui/src/lib/api.ts`, `ui/src/components/layout/Sidebar.tsx`,
       `api/rest/service/system/system.go`.
       Depends on: E1.
-- [ ] F2. Add the lineage freshness overlay + "why did/didn't this run"
+- [x] F2. Add the lineage freshness overlay + "why did/didn't this run"
       derivations panel: the existing `LineageGraph` component
       (`ui/src/features/jobs/LineageGraph.tsx`) gains a freshness coloring overlay
       ("everything downstream of vendor-x is amber"; declared edges render before
@@ -472,6 +474,8 @@ field so the nav hides when the backend has freshness off.
       `DatasetDerivation` rows ("18:00 tick skipped — fresh (2h/6h)", "04:31
       derived by raw.vendor_x advance") with the run's consumed-watermark set
       linking back to the arrival event (`GET /v1/datasets/:ns/:name/derivations`).
+      Note: W4-alpha landed the opt-in lineage freshness coloring/dashed declared
+      edge overlay and dataset derivation audit panel with consumed-watermark links.
       Files: `ui/src/features/jobs/LineageGraph.tsx`, `ui/src/features/datasets/`
       (derivations panel), `ui/src/lib/api.ts`.
       Depends on: F1 + E1.
