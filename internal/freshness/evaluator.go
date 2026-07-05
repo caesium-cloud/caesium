@@ -96,7 +96,11 @@ func NewEvaluator(cfg Config) *Evaluator {
 	}
 	reactiveTypes := cfg.ReactiveSubscriberTypes
 	if len(reactiveTypes) == 0 {
-		reactiveTypes = []event.Type{event.TypeRunCompleted}
+		// React to dataset_advanced (published post-Advance by the capturer and
+		// arrival observer), NOT run_completed: the latter races the capturer's own
+		// Advance, so the evaluator could read pre-advance state and derive a
+		// redundant producer run. The timer loop remains the correctness backstop.
+		reactiveTypes = []event.Type{event.TypeDatasetAdvanced}
 	}
 	return &Evaluator{
 		db:                    cfg.DB,
@@ -179,7 +183,15 @@ func (e *Evaluator) EvaluateDatasetNames(ctx context.Context, names []string) er
 }
 
 func (e *Evaluator) EvaluateEvent(ctx context.Context, evt event.Event) error {
-	if !e.isReactiveType(evt.Type) || evt.JobID == uuid.Nil {
+	if !e.isReactiveType(evt.Type) {
+		return nil
+	}
+	// Target the dataset that just advanced (from the event payload) plus its
+	// downstream consumers, rather than everything the event's job produces. This
+	// keys off the advanced dataset's identity, so arrival advances (which have no
+	// producing job) drive derivation too.
+	id, ok := datasetIdentityFromPayload(evt.Payload)
+	if !ok {
 		return nil
 	}
 	if e.leaderCheck != nil {
@@ -197,20 +209,11 @@ func (e *Evaluator) EvaluateEvent(ctx context.Context, evt event.Event) error {
 		return err
 	}
 	graph := newRegistrySnapshot(decls)
-	produced := graph.producesByJob[evt.JobID]
-	if len(produced) == 0 {
-		return nil
-	}
 
-	start := make([]datasetIdentity, 0, len(produced))
-	targets := make(map[datasetIdentity]struct{}, len(produced))
-	for _, decl := range produced {
-		id := declarationIdentity(decl)
-		start = append(start, id)
-		targets[id] = struct{}{}
-	}
-	for _, id := range graph.downstreamOf(start) {
-		targets[id] = struct{}{}
+	start := []datasetIdentity{id}
+	targets := map[datasetIdentity]struct{}{id: {}}
+	for _, downstream := range graph.downstreamOf(start) {
+		targets[downstream] = struct{}{}
 	}
 
 	depth, err := e.runTriggerDepth(ctx, evt.RunID)
@@ -218,6 +221,26 @@ func (e *Evaluator) EvaluateEvent(ctx context.Context, evt event.Event) error {
 		return err
 	}
 	return e.evaluateWithSnapshot(ctx, graph, targets, depth)
+}
+
+// datasetIdentityFromPayload extracts the {namespace, name} dataset identity a
+// dataset_advanced event carries. Namespace is already in nsValue (nil→"") form.
+func datasetIdentityFromPayload(payload json.RawMessage) (datasetIdentity, bool) {
+	if len(payload) == 0 {
+		return datasetIdentity{}, false
+	}
+	var p struct {
+		Namespace string `json:"namespace"`
+		Name      string `json:"name"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return datasetIdentity{}, false
+	}
+	name := strings.TrimSpace(p.Name)
+	if name == "" {
+		return datasetIdentity{}, false
+	}
+	return datasetIdentity{namespace: p.Namespace, name: name}, true
 }
 
 func (e *Evaluator) evaluate(ctx context.Context, targets map[datasetIdentity]struct{}, triggerDepth int) error {
@@ -377,20 +400,20 @@ func (e *Evaluator) updateStatus(ctx context.Context, namespace *string, name, s
 		ID:        uuid.New(),
 		Namespace: nsValue(namespace),
 		Name:      name,
-		Status:    models.DatasetStatusUnknown,
+		Status:    status,
+		Reason:    reason,
 	}
-	if err := e.db.WithContext(ctx).Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "namespace"}, {Name: "name"}},
-		DoNothing: true,
-	}).Create(&row).Error; err != nil {
-		return err
-	}
-	return e.db.WithContext(ctx).Model(&models.DatasetState{}).
-		Where("namespace = ? AND name = ?", nsValue(namespace), name).
-		Updates(map[string]any{
-			"status": status,
-			"reason": reason,
-		}).Error
+	// One upsert carrying the real status/reason: insert the row on first
+	// observation, otherwise update the evaluator-owned columns in place. dqlite
+	// accepts ON CONFLICT DO UPDATE for plain column assignments.
+	return e.db.WithContext(ctx).Clauses(clause.OnConflict{
+		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
+		DoUpdates: clause.Assignments(map[string]any{
+			"status":     status,
+			"reason":     reason,
+			"updated_at": e.now().UTC(),
+		}),
+	}).Create(&row).Error
 }
 
 func (e *Evaluator) upstreamReady(ctx context.Context, outputState models.DatasetState, consumes []models.DatasetDeclaration) (bool, map[string]string, string, error) {
@@ -699,6 +722,12 @@ func newRegistrySnapshot(decls []models.DatasetDeclaration) registrySnapshot {
 
 func (g registrySnapshot) downstreamOf(start []datasetIdentity) []datasetIdentity {
 	seen := make(map[datasetIdentity]struct{}, len(start))
+	// Pre-seed the start nodes so a (lint-forbidden but defensively handled)
+	// cyclic declared graph can never re-emit a start dataset as its own
+	// downstream.
+	for _, id := range start {
+		seen[id] = struct{}{}
+	}
 	queue := append([]datasetIdentity(nil), start...)
 	out := make([]datasetIdentity, 0)
 	for len(queue) > 0 {
@@ -786,16 +815,9 @@ func canonicalConsumedJSON(consumed map[string]string) datatypes.JSON {
 	if len(consumed) == 0 {
 		return datatypes.JSON([]byte(`{}`))
 	}
-	keys := make([]string, 0, len(consumed))
-	for key := range consumed {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	ordered := make(map[string]string, len(consumed))
-	for _, key := range keys {
-		ordered[key] = consumed[key]
-	}
-	blob, err := json.Marshal(ordered)
+	// encoding/json already marshals map keys in sorted order, so the output is
+	// canonical without an explicit sort-then-rebuild.
+	blob, err := json.Marshal(consumed)
 	if err != nil {
 		return datatypes.JSON([]byte(`{}`))
 	}

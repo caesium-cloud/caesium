@@ -45,6 +45,14 @@ const (
 	TypeSLAMissed              Type = "sla_missed"
 	TypeFreshnessViolated      Type = "freshness_violated"
 	TypeDatasetFreshnessAtRisk Type = "dataset_freshness_at_risk"
+	// TypeDatasetAdvanced fires after a dataset's watermark is advanced or
+	// verify-refreshed — by the run-completion capturer or the arrival observer —
+	// carrying {namespace, name} in its payload. The freshness evaluator
+	// subscribes to it to reactively re-derive downstream consumers off
+	// POST-advance state. Reacting to run_completed instead would race the
+	// capturer's own Advance (the bus fans out to subscribers unordered), so the
+	// evaluator could read pre-advance state and derive a redundant producer run.
+	TypeDatasetAdvanced Type = "dataset_advanced"
 	// TypeSchemaViolationRecorded is emitted when a task's output violates its
 	// declared schema in "warn" mode — the task does NOT fail, so the incident
 	// manager would otherwise never see the violation. In "fail" mode the task

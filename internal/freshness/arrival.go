@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/caesium-cloud/caesium/internal/event"
 	eventmatch "github.com/caesium-cloud/caesium/internal/eventmatch"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
@@ -23,6 +25,10 @@ import (
 type ArrivalObserver struct {
 	registry *Registry
 	store    *Store
+	// bus is optional; when wired (SetBus), an accepted arrival advance publishes
+	// dataset_advanced so the freshness evaluator reacts immediately instead of
+	// waiting for its next timer tick.
+	bus event.Bus
 }
 
 // ArrivalAdvance records one source declaration matched and advanced/verified
@@ -59,6 +65,16 @@ func DefaultArrivalObserver() *ArrivalObserver {
 		defaultArrivalObserver = NewArrivalObserver(db.Connection())
 	})
 	return defaultArrivalObserver
+}
+
+// SetBus wires the observer to the event bus so an accepted arrival advance
+// publishes dataset_advanced. Call once at startup before serving; the field is
+// read on every Observe.
+func (o *ArrivalObserver) SetBus(bus event.Bus) {
+	if o == nil {
+		return
+	}
+	o.bus = bus
 }
 
 func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent) (ArrivalResult, error) {
@@ -126,13 +142,38 @@ func (o *ArrivalObserver) Observe(ctx context.Context, evt *models.IngestedEvent
 		})
 		log.Info("freshness: arrival matched dataset",
 			"dataset", binding.name, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
-		if res.Outcome == OutcomeRegressionDropped || res.Outcome == OutcomeOutOfOrderDropped {
+		switch res.Outcome {
+		case OutcomeRegressionDropped, OutcomeOutOfOrderDropped:
 			log.Warn("freshness: arrival watermark write dropped",
 				"dataset", binding.name, "event_id", evt.ID, "outcome", string(res.Outcome), "watermark", watermark)
+		case OutcomeAdvanced, OutcomeVerified:
+			// An external event just advanced a source dataset. Publish
+			// dataset_advanced (RunID nil — no producing run) so the evaluator
+			// derives downstream immediately, removing the up-to-a-full-tick
+			// latency the timer-only path would otherwise impose.
+			o.publishDatasetAdvanced(binding.namespace, binding.name)
 		}
 	}
 
 	return result, nil
+}
+
+// publishDatasetAdvanced notifies the freshness evaluator that an arrival
+// advanced a source dataset. RunID is nil (no producing run) so the evaluator
+// starts downstream derivation at trigger depth 0.
+func (o *ArrivalObserver) publishDatasetAdvanced(namespace *string, name string) {
+	if o.bus == nil {
+		return
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"namespace": nsValue(namespace),
+		"name":      name,
+	})
+	o.bus.Publish(event.Event{
+		Type:      event.TypeDatasetAdvanced,
+		Timestamp: time.Now().UTC(),
+		Payload:   payload,
+	})
 }
 
 type arrivalBinding struct {
