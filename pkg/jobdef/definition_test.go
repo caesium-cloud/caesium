@@ -928,6 +928,44 @@ func TestValidateEventTriggerConfiguration(t *testing.T) {
 	require.Error(t, ValidateTriggerSpec(badDefaultParams))
 }
 
+func TestValidateFreshnessTriggerRequiresGateAndDatasets(t *testing.T) {
+	t.Setenv("CAESIUM_FRESHNESS_ENABLED", "false")
+	err := ValidateTriggerSpec(&Trigger{Type: TriggerFreshness, Configuration: map[string]any{}})
+	require.ErrorContains(t, err, "CAESIUM_FRESHNESS_ENABLED=true")
+
+	t.Setenv("CAESIUM_FRESHNESS_ENABLED", "true")
+	require.NoError(t, ValidateTriggerSpec(&Trigger{Type: TriggerFreshness, Configuration: map[string]any{}}))
+
+	valid := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: freshness-job
+  datasets:
+    skipWhenFresh: false
+trigger:
+  type: freshness
+  configuration: {}
+steps:
+  - name: build
+    image: alpine:3.23
+    datasets:
+      consumes: [raw.vendor_x]
+      produces:
+        - name: mart.vendor_x
+          freshness: 1h
+`
+	def, err := Parse([]byte(valid))
+	require.NoError(t, err)
+	require.NotNil(t, def.Metadata.Datasets)
+	require.NotNil(t, def.Metadata.Datasets.SkipWhenFresh)
+	require.False(t, *def.Metadata.Datasets.SkipWhenFresh)
+
+	missingDatasets := strings.Replace(valid, "      consumes: [raw.vendor_x]\n", "", 1)
+	_, err = Parse([]byte(missingDatasets))
+	require.ErrorContains(t, err, "requires at least one consumed dataset")
+}
+
 func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 	var step Step
 	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.23","command":["echo","ok"]}`), &step)

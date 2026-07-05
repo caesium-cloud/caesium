@@ -45,6 +45,8 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 	}
 
 	decls := make([]models.DatasetDeclaration, 0)
+	skipWhenFresh := schema.SkipWhenFreshEnabled(def.Metadata.Datasets)
+	skipWhenFreshPtr := boolPtr(skipWhenFresh)
 
 	if def.Metadata.Datasets != nil {
 		for i := range def.Metadata.Datasets.Sources {
@@ -66,6 +68,7 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				ExpectedEvery:  strings.TrimSpace(src.ExpectedEvery),
 				External:       src.External,
 				ArrivalBinding: binding,
+				SkipWhenFresh:  skipWhenFreshPtr,
 			})
 		}
 	}
@@ -86,15 +89,16 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				watermarkKey = strings.TrimSpace(p.Watermark.Key)
 			}
 			decls = append(decls, models.DatasetDeclaration{
-				ID:           uuid.New(),
-				JobID:        jobID,
-				JobAlias:     alias,
-				StepName:     step.Name,
-				Name:         name,
-				Direction:    models.DatasetDirectionProduces,
-				Freshness:    strings.TrimSpace(p.Freshness),
-				MaxStaleness: strings.TrimSpace(p.MaxStaleness),
-				WatermarkKey: watermarkKey,
+				ID:            uuid.New(),
+				JobID:         jobID,
+				JobAlias:      alias,
+				StepName:      step.Name,
+				Name:          name,
+				Direction:     models.DatasetDirectionProduces,
+				Freshness:     strings.TrimSpace(p.Freshness),
+				MaxStaleness:  strings.TrimSpace(p.MaxStaleness),
+				WatermarkKey:  watermarkKey,
+				SkipWhenFresh: skipWhenFreshPtr,
 			})
 		}
 		for _, raw := range step.Datasets.Consumes {
@@ -103,17 +107,23 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				continue
 			}
 			decls = append(decls, models.DatasetDeclaration{
-				ID:        uuid.New(),
-				JobID:     jobID,
-				JobAlias:  alias,
-				StepName:  step.Name,
-				Name:      name,
-				Direction: models.DatasetDirectionConsumes,
+				ID:            uuid.New(),
+				JobID:         jobID,
+				JobAlias:      alias,
+				StepName:      step.Name,
+				Name:          name,
+				Direction:     models.DatasetDirectionConsumes,
+				SkipWhenFresh: skipWhenFreshPtr,
 			})
 		}
 	}
 
 	return decls, nil
+}
+
+func boolPtr(value bool) *bool {
+	v := value
+	return &v
 }
 
 func marshalArrivalBinding(arrival *schema.Arrival) (datatypes.JSON, error) {

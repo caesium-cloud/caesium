@@ -258,6 +258,31 @@ func TestEvaluatorFanInDerivesOneRunAndDedupesActiveWatermarks(t *testing.T) {
 	assertDerivationCount(t, db, models.DatasetDecisionSkippedActiveRun, 1)
 }
 
+func TestEvaluatorDoesNotDeriveCronTriggeredJob(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJobWithTriggerType(t, db, "cron-owned", models.TriggerTypeCron)
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if admitter.calls != 0 {
+		t.Fatalf("cron-triggered job admitted %d runs, want 0", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+}
+
 func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
@@ -455,13 +480,17 @@ func seedArrivalSource(t *testing.T, db *gorm.DB, name, eventType, watermarkPath
 }
 
 func seedFreshnessJob(t *testing.T, db *gorm.DB, alias string) uuid.UUID {
+	return seedFreshnessJobWithTriggerType(t, db, alias, models.TriggerTypeFreshness)
+}
+
+func seedFreshnessJobWithTriggerType(t *testing.T, db *gorm.DB, alias string, triggerType models.TriggerType) uuid.UUID {
 	t.Helper()
 	now := time.Now().UTC()
 	triggerID := uuid.New()
 	trigger := models.Trigger{
 		ID:            triggerID,
 		Alias:         alias + "-trigger",
-		Type:          models.TriggerTypeCron,
+		Type:          triggerType,
 		Configuration: `{"expression":"0 0 31 2 *"}`,
 		CreatedAt:     now,
 		UpdatedAt:     now,

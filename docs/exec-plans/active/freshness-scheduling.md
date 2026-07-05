@@ -483,7 +483,7 @@ observe. Sequenced last and gated behind `CAESIUM_FRESHNESS_ENABLED` so a green
 substrate is proven before any tick is skipped or any job drops cron. Touches
 the trigger/executor loop, distinct files from the evaluator.
 
-- [ ] G1. **P1 — skip-when-fresh:** a cron tick consults dataset state and
+- [x] G1. **P1 — skip-when-fresh:** a cron tick consults dataset state and
       **skips** when every produced dataset is fresh and no consumed watermark
       advanced since the last run, recording `skipped_fresh` on
       `DatasetDerivation` (visible, opt-out per job via
@@ -495,7 +495,10 @@ the trigger/executor loop, distinct files from the evaluator.
       `internal/freshness/` (skip decision), `pkg/jobdef/definition.go`
       (`skipWhenFresh` metadata flag).
       Depends on: C1 (state machine) + A1 (metadata surface).
-- [ ] G2. **P2 — `trigger: {type: freshness}`:** a purely data-derived job may
+      Note: W4-beta added the env-gated cron/catchup skip helper, persists the
+      `skipWhenFresh` default on declarations, and records `skipped_fresh` only
+      after fresh outputs plus unchanged consumed watermarks are proven.
+- [x] G2. **P2 — `trigger: {type: freshness}`:** a purely data-derived job may
       drop cron entirely and declare a freshness trigger; the evaluator owns its
       cadence (cron demoted to optional heartbeat). Add `TriggerTypeFreshness` +
       type-specific validation in `pkg/jobdef/definition.go` `ValidateTriggerSpec`
@@ -505,6 +508,9 @@ the trigger/executor loop, distinct files from the evaluator.
       (`ValidateTriggerSpec`), `internal/freshness/evaluator.go`.
       Depends on: C3 (derivation must exist for a freshness-only job to ever run)
       + G1.
+      Note: W4-beta added the `freshness` trigger type, feature-flag/schema
+      validation, and evaluator admission only for persisted freshness-triggered
+      jobs.
 
 #### Deferred — partition-level freshness
 

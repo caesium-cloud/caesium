@@ -63,6 +63,12 @@ type DatasetDeclaration struct {
 	// advance the dataset. Empty in degraded mode (no declared watermark).
 	WatermarkKey string `gorm:"type:text;not null;default:''" json:"watermark_key,omitempty"`
 
+	// SkipWhenFresh carries metadata.datasets.skipWhenFresh after defaulting.
+	// It is evaluated at the cron scheduling seam only and never affects a task's
+	// cache identity. Pointer form preserves an explicit false across GORM's
+	// default:true create path.
+	SkipWhenFresh *bool `gorm:"not null;default:true" json:"skip_when_fresh,omitempty"`
+
 	// External marks a source dataset nobody in Caesium produces.
 	External bool `gorm:"not null;default:false" json:"external"`
 
