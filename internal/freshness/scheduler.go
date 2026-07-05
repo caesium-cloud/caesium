@@ -111,13 +111,22 @@ func (e *Evaluator) shouldSkipCronRun(ctx context.Context, jobID uuid.UUID) (Cro
 		datasets = append(datasets, datasetParamName(decl.Namespace, decl.Name))
 	}
 
-	for _, record := range records {
-		if err := e.updateStatus(ctx, record.decl.Namespace, record.decl.Name, models.DatasetStatusFresh, strings.TrimPrefix(record.reason, "cron tick skipped: ")); err != nil {
-			return CronSkipDecision{}, err
+	// Commit the whole skip decision atomically: a mid-loop failure must not
+	// leave dataset state advanced for some produced datasets but not others.
+	// tx is threaded explicitly through the *Tx helpers rather than reassigning
+	// e.db, which would race a shared evaluator across concurrent cron ticks.
+	if err := e.db.Transaction(func(tx *gorm.DB) error {
+		for _, record := range records {
+			if err := e.updateStatusTx(ctx, tx, record.decl.Namespace, record.decl.Name, models.DatasetStatusFresh, strings.TrimPrefix(record.reason, "cron tick skipped: ")); err != nil {
+				return err
+			}
+			if err := e.recordDerivationTx(ctx, tx, record.decl, models.DatasetDecisionSkippedFresh, record.reason, record.consumed, nil); err != nil {
+				return err
+			}
 		}
-		if err := e.recordDerivation(ctx, record.decl, models.DatasetDecisionSkippedFresh, record.reason, record.consumed, nil); err != nil {
-			return CronSkipDecision{}, err
-		}
+		return nil
+	}); err != nil {
+		return CronSkipDecision{}, err
 	}
 	sort.Strings(datasets)
 	return CronSkipDecision{Skip: true, Reason: "all produced datasets fresh and consumed watermarks unchanged", Datasets: datasets}, nil

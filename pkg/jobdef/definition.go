@@ -1023,17 +1023,31 @@ func validateTrigger(t *Trigger) error {
 	return nil
 }
 
+// ValidateTriggerSpec validates a trigger, optionally against the job
+// definition(s) it belongs to. A freshness trigger derives its runs from the
+// job's declared dataset graph (a consumed input plus a produced dataset with a
+// freshness SLO), which lives on the definition rather than the trigger. Callers
+// that own the definition (the apply path validates it via Definition.Validate)
+// pass it here so the dataset requirement is enforced; the trigger-create/update
+// API validates with the trigger alone and therefore has no dataset context. A
+// bare freshness trigger (no definition supplied) is rejected: it cannot satisfy
+// the dataset requirement, so it must be declared on a job definition instead.
 func ValidateTriggerSpec(t *Trigger, defs ...*Definition) error {
 	if err := validateTrigger(t); err != nil {
 		return err
 	}
+	sawDefinition := false
 	for _, def := range defs {
 		if def == nil {
 			continue
 		}
+		sawDefinition = true
 		if err := validateFreshnessTriggerDefinition(def); err != nil {
 			return err
 		}
+	}
+	if t != nil && t.Type == TriggerFreshness && !sawDefinition {
+		return fmt.Errorf("trigger.type %q cannot be created via the trigger API; declare it on a job definition with its consumed and produced datasets", TriggerFreshness)
 	}
 	return nil
 }
@@ -1048,6 +1062,19 @@ func validateFreshnessTriggerDefinition(d *Definition) error {
 		return nil
 	}
 	consumes, producesWithFreshness := false, false
+	// metadata.datasets.sources are the external-arrival binding path for a
+	// consumed input: BuildDeclarations persists each named source as a
+	// declaration, so a job that binds its input through sources (rather than a
+	// step-level consumes) still has a consumed input and satisfies the
+	// requirement. Mirror BuildDeclarations' non-empty-name check.
+	if d.Metadata.Datasets != nil {
+		for i := range d.Metadata.Datasets.Sources {
+			if strings.TrimSpace(d.Metadata.Datasets.Sources[i].Name) != "" {
+				consumes = true
+				break
+			}
+		}
+	}
 	for i := range d.Steps {
 		if d.Steps[i].Datasets == nil {
 			continue
@@ -1063,7 +1090,7 @@ func validateFreshnessTriggerDefinition(d *Definition) error {
 		}
 	}
 	if !consumes || !producesWithFreshness {
-		return fmt.Errorf("trigger.type %q requires at least one consumed dataset and one produced dataset with freshness", TriggerFreshness)
+		return fmt.Errorf("trigger.type %q requires at least one consumed dataset (a step-level consumes or a metadata.datasets.sources entry) and one produced dataset with freshness", TriggerFreshness)
 	}
 	return nil
 }

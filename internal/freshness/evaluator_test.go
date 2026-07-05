@@ -283,6 +283,42 @@ func TestEvaluatorDoesNotDeriveCronTriggeredJob(t *testing.T) {
 	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
 }
 
+func TestEvaluatorSkipsJobWithSoftDeletedFreshnessTrigger(t *testing.T) {
+	db := openRegistryDB(t)
+	ctx := context.Background()
+	now := t0.Add(3 * time.Hour)
+	jobID := seedFreshnessJobWithTriggerType(t, db, "soft-deleted", models.TriggerTypeFreshness)
+	seedDeclarations(t, db, produceDecl(jobID, "out", "1h", ""))
+	seedState(t, db, "out", "100", now.Add(-2*time.Hour), nil)
+
+	// Soft-delete the job's freshness trigger. A plain join would still match it;
+	// the deleted_at filter must exclude it so the job is no longer treated as
+	// freshness-triggered and derives nothing.
+	var job models.Job
+	if err := db.First(&job, "id = ?", jobID).Error; err != nil {
+		t.Fatalf("load job: %v", err)
+	}
+	if err := db.Delete(&models.Trigger{}, "id = ?", job.TriggerID).Error; err != nil {
+		t.Fatalf("soft-delete trigger: %v", err)
+	}
+
+	admitter := &fakeRunAdmitter{t: t, db: db, handled: true}
+	eval := NewEvaluator(Config{
+		DB:                    db,
+		RunStore:              admitter,
+		MaxDerivationsPerTick: 50,
+		Now:                   func() time.Time { return now },
+	})
+	if err := eval.EvaluateOnce(ctx); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if admitter.calls != 0 {
+		t.Fatalf("soft-deleted-trigger job admitted %d runs, want 0", admitter.calls)
+	}
+	assertDerivationCount(t, db, models.DatasetDecisionSkippedAdmission, 1)
+	assertDerivationCount(t, db, models.DatasetDecisionDerived, 0)
+}
+
 func TestEvaluatorAdmissionErrorsAreRecorded(t *testing.T) {
 	db := openRegistryDB(t)
 	ctx := context.Background()
