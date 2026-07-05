@@ -310,12 +310,14 @@ Lower-priority polish spanning the app shell. F1/F2/F4 are independent; F3 is a
 cross-cutting timestamp sweep that shares files with Streams C and D, so it is
 sequenced after them (see `## Sequencing & Dependencies`).
 
-- [ ] F1. Fix the System page NODES card, which is labelled "Active workers"
+- [x] F1. Fix the System page NODES card, which is labelled "Active workers"
       but displays a **node** count while the node row below shows WORKERS
       "0/4" (zero active). Either relabel the card sub-text to "Nodes" /
       "Tracked nodes", or add a real Workers KPI that sums `workers_busy` /
       `workers_total` across nodes. Files:
       `ui/src/features/system/SystemPage.tsx` (~138 `SysKpi`).
+      Notes: W1-zeta relabelled the existing Nodes KPI sub-text to
+      "Tracked nodes", keeping the displayed node count honest.
 - [ ] F2. Unify the app's not-found states (issue #17 is "two inconsistent
       404s"). (a) Add a catch-all `NotFoundComponent` (or `*` route) so unknown
       SPA paths render a coherent 404 instead of a bare/empty fallback. (b)
@@ -346,7 +348,7 @@ sequenced after them (see `## Sequencing & Dependencies`).
       `ui/src/features/jobs/components/TaskNode.tsx`,
       `ui/src/features/stats/components/TrendChart.tsx`.
       Depends on: C, D (shares `JobDetailPage.tsx` / `RunDetailPage.tsx`).
-- [ ] F4. Resolve short-id deep links. The list displays an 8-char id but
+- [x] F4. Resolve short-id deep links. The list displays an 8-char id but
       `GET /v1/jobs/:id` calls `uuid.Parse` (`api/rest/controller/job/get.go`
       ~24) and 400s on anything that isn't a full UUID, so a hand-typed/shared
       `/jobs/15bbde04` never resolves (row clicks already carry the full id).
@@ -357,6 +359,10 @@ sequenced after them (see `## Sequencing & Dependencies`).
       jobs list. Files: `api/rest/controller/job/get.go` +
       `api/rest/service/job/job.go` (`Get`), or `ui/src/router.tsx` +
       `ui/src/lib/api.ts`; `test/*_test.go` if backend.
+      Notes: W1-zeta added backend prefix resolution for `GET /v1/jobs/:id`;
+      invalid prefixes return 400, missing prefixes return 404, and ambiguous
+      prefixes return 409 with an integration scenario covering all three HTTP
+      surfaces.
 
 ## Harness Strengthening
 

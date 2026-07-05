@@ -19,6 +19,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/service/atom"
 	"github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -131,6 +132,51 @@ func (s *IntegrationTestSuite) TestJobListFilterByTrigger() {
 	assert.Equal(s.T(), created.ID, jobs[0].ID)
 }
 
+func (s *IntegrationTestSuite) TestJobGetResolvesShortIDPrefix() {
+	alias := fmt.Sprintf("test_job_short_id_%d", time.Now().UnixNano())
+	created := s.createJob(alias, nil)
+	prefix := created.ID.String()[:8]
+
+	resp, err := s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, prefix), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, string(body))
+
+	var detail jobSummary
+	s.Require().NoError(json.Unmarshal(body, &detail))
+	s.Equal(created.ID.String(), detail.ID)
+	s.Equal(alias, detail.Alias)
+
+	resp, err = s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, "not-a-uuid-prefix"), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	invalidBody, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Equal(http.StatusBadRequest, resp.StatusCode, string(invalidBody))
+	s.Contains(string(invalidBody), "invalid job id prefix")
+
+	missingPrefix := s.unusedJobIDPrefix(8)
+	resp, err = s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, missingPrefix), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	missingBody, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Equal(http.StatusNotFound, resp.StatusCode, string(missingBody))
+	s.NotEmpty(strings.TrimSpace(string(missingBody)))
+
+	ambiguousPrefix := s.createAmbiguousJobIDPrefix()
+	resp, err = s.doRequest(http.MethodGet, fmt.Sprintf("%v/v1/jobs/%s", s.caesiumURL, ambiguousPrefix), nil)
+	s.Require().NoError(err)
+	defer resp.Body.Close()
+	ambiguousBody, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Equal(http.StatusConflict, resp.StatusCode, string(ambiguousBody))
+	s.Contains(string(ambiguousBody), "ambiguous job id prefix")
+}
+
 func (s *IntegrationTestSuite) TestJobDeleteRemovesJob() {
 	created := s.createJob("test_job_delete", nil)
 
@@ -188,6 +234,45 @@ func (s *IntegrationTestSuite) TestJobApplyCommand() {
 
 func (s *IntegrationTestSuite) createJob(alias string, metadata *job.MetadataRequest) *models.Job {
 	return s.createJobWithTrigger(alias, metadata, models.TriggerTypeCron)
+}
+
+func (s *IntegrationTestSuite) unusedJobIDPrefix(length int) string {
+	var jobs []jobSummary
+	s.getJSON("/v1/jobs", &jobs)
+
+	used := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		if len(job.ID) >= length {
+			used[strings.ToLower(job.ID[:length])] = struct{}{}
+		}
+	}
+
+	for i := 0; i < 128; i++ {
+		candidate := uuid.NewString()[:length]
+		if _, ok := used[candidate]; !ok {
+			return candidate
+		}
+	}
+
+	s.T().Fatalf("could not find unused %d-character job id prefix", length)
+	return ""
+}
+
+func (s *IntegrationTestSuite) createAmbiguousJobIDPrefix() string {
+	baseAlias := fmt.Sprintf("test_job_short_id_ambiguous_%d", time.Now().UnixNano())
+	idsByPrefix := map[string][]string{}
+
+	for i := 0; i < 17; i++ {
+		created := s.createJob(fmt.Sprintf("%s_%02d", baseAlias, i), nil)
+		prefix := strings.ToLower(created.ID.String()[:1])
+		idsByPrefix[prefix] = append(idsByPrefix[prefix], created.ID.String())
+		if len(idsByPrefix[prefix]) > 1 {
+			return prefix
+		}
+	}
+
+	s.T().Fatalf("expected an ambiguous one-character job id prefix from generated jobs: %#v", idsByPrefix)
+	return ""
 }
 
 func (s *IntegrationTestSuite) createJobWithTrigger(alias string, metadata *job.MetadataRequest, trigType models.TriggerType) *models.Job {
