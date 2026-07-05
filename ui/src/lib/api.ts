@@ -406,7 +406,8 @@ export interface LintMessage {
 }
 
 export interface LintSummary {
-  steps: string;
+  steps: number;
+  contracts?: string;
 }
 
 export interface LintResponse {

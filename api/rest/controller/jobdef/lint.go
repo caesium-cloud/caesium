@@ -22,7 +22,8 @@ type LintMessage struct {
 }
 
 type LintSummary struct {
-	Steps string `json:"steps"`
+	Steps     int    `json:"steps"`
+	Contracts string `json:"contracts,omitempty"`
 }
 
 type LintResponse struct {
@@ -71,15 +72,14 @@ func Lint(c *echo.Context) error {
 		}
 	}
 
-	var stepsSummary string
 	if len(resp.Errors) == 0 {
 		var allSteps []schema.Step
 		for _, def := range req.Definitions {
 			allSteps = append(allSteps, def.Steps...)
 		}
-		stepsSummary = contractSummary(allSteps)
+		resp.Summary.Steps = len(allSteps)
+		resp.Summary.Contracts = contractSummary(allSteps)
 	}
-	resp.Summary.Steps = stepsSummary
 
 	return c.JSON(http.StatusOK, resp)
 }
