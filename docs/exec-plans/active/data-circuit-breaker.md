@@ -78,9 +78,9 @@ colliding on the base table, the canonical names are freshness's: the model is
 **`DatasetDeclaration`** in `internal/models/dataset_declaration.go` (table
 `dataset_declarations`), and the jobdef `produces`/`consumes` entries key the
 dataset identity on **`name`** (not `dataset`) — matching
-[`freshness-scheduling.md`](freshness-scheduling.md) Stream A and the
+[`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A and the
 [`contract-enforcement.md`](contract-enforcement.md) plan, both of which use `name`.
-The [`freshness-scheduling`](freshness-scheduling.md) plan's Stream A owns the
+The [`freshness-scheduling`](../completed/freshness-scheduling.md) plan's Stream A owns the
 `dataset_declarations` registry model + the `Metadata.Datasets` jobdef block; this
 plan's Stream A owns the assertion/`consumes` half of the same registry. **Neither
 ships a private copy of the base registry table, and neither introduces a second
@@ -286,7 +286,7 @@ evaluator (adds the `hold` disposition) and gates run admission in the store.
       path; `ReleasedBy` then always records an authenticated principal. Emit
       `dataset_released`.
       The `/v1/datasets/holds/:id/release` route extends the base dataset REST
-      package owned by [`freshness-scheduling.md`](freshness-scheduling.md) Stream E
+      package owned by [`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream E
       — see Stream D's cross-plan ownership note; this item adds a handler file and
       appends one route line, it does not create the package.
       Files: `internal/run/data_assertions.go` (clean-run release),
@@ -327,7 +327,7 @@ that drives all four endpoints.
 **Cross-plan ownership (base `cmd/dataset/` + `/v1/datasets` package):** the base
 `caesium dataset` Cobra group, the `api/rest/controller/dataset/` +
 `api/rest/service/dataset/` package, and the base `/v1/datasets` route family are
-owned by [`freshness-scheduling.md`](freshness-scheduling.md) **Stream E**. The
+owned by [`freshness-scheduling.md`](../completed/freshness-scheduling.md) **Stream E**. The
 items below (and C3's release route) **extend** that package — adding
 hold/metrics/release handlers and the `/v1/datasets/holds*` +
 `/v1/datasets/:ns/:name/metrics` routes and the `holds`/`release`/`metrics`
@@ -445,7 +445,7 @@ the `ui/**` conditional gate.
 
 **Cross-PLAN order (shared `DatasetDeclaration` registry):** the base declared-registry table
 + jobdef `produces` scaffold is shared with
-[`freshness-scheduling`](freshness-scheduling.md) Stream A. Whichever plan's Stream-A
+[`freshness-scheduling`](../completed/freshness-scheduling.md) Stream A. Whichever plan's Stream-A
 registry item merges first **creates** the registry model; the second **extends**
 it (adds columns / jobdef sub-fields) rather than redefining the table (see the
 Source-Of-Truth Note). Coordinate at wave-dispatch so the two Stream-A registry
@@ -453,7 +453,7 @@ items are not in flight in the same wave; the later one rebases onto the merged 
 
 **Cross-PLAN order (shared `cmd/dataset/` group + `/v1/datasets` package):** this
 plan's C3/D1/D2 add handlers/subcommands/routes to the same dataset REST package +
-Cobra group that [`freshness-scheduling`](freshness-scheduling.md) **Stream E**
+Cobra group that [`freshness-scheduling`](../completed/freshness-scheduling.md) **Stream E**
 owns (`api/rest/controller/dataset/`, `api/rest/service/dataset/`, `cmd/dataset/`,
 the `/v1/datasets` route family, the `cmds`-slice registration). Whichever plan's
 dataset-surface item merges first **creates** the package skeleton + registration
@@ -605,13 +605,13 @@ The plan is done when **all** of these hold:
   the design of record. Source of truth for intent and scope.
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 Data-Plane Differentiators — the
   "Data circuit breaker" entry this plan closes.
-- [`freshness-scheduling.md`](freshness-scheduling.md) — **shares the `DatasetDeclaration`
+- [`freshness-scheduling.md`](../completed/freshness-scheduling.md) — **shares the `DatasetDeclaration`
   registry table + jobdef `produces` substrate**; coordinate on who creates vs.
   extends (see Source-Of-Truth Note).
 - [`contract-enforcement.md`](contract-enforcement.md) — the static/PR-time half of
   the contract story; reads the same `consumes` edges. This plan is the runtime
   breaker for what static analysis cannot see (the *values*).
-- [`agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md) —
+- [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md) —
   `dataset_held` becomes a `data_quality_hold` incident class + `release_hold`
   action in the deferred Phase 3.
 - [`docs/job-schema-reference.md`](../../job-schema-reference.md),

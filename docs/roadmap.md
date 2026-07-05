@@ -214,7 +214,7 @@ steps:
 
 **Design doc**: [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
 
-**Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM); all runtime streams merged. The `metadata.remediation` surface is documented in [`job-schema-reference.md`](job-schema-reference.md#remediation).
+**Plan**: [`agent-in-the-loop-remediation.md`](exec-plans/completed/agent-in-the-loop-remediation.md) — decomposed into 8 streams, phased 0→3 (Phase 0 = diagnosed pages, no LLM); all runtime streams merged. The `metadata.remediation` surface is documented in [`job-schema-reference.md`](job-schema-reference.md#remediation).
 
 ---
 
@@ -229,7 +229,7 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 | Resource right-sizing | Learn per-step memory/CPU from run history; propose right-sized requests (GitOps PR) and retry OOM at escalated memory | [`design-resource-right-sizing.md`](design-resource-right-sizing.md) | [`resource-right-sizing.md`](exec-plans/active/resource-right-sizing.md) |
 | Dynamic fan-out | A step emits a partition list; Caesium materializes N parallel task instances with per-partition cache identity | [`design-dynamic-fanout.md`](design-dynamic-fanout.md) | [`dynamic-fanout.md`](exec-plans/active/dynamic-fanout.md) |
 | Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
-| Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md) |
+| Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md) |
 | Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
 | Contract enforcement | Cross-job schema-compatibility checks at lint/diff/apply with named consumers and an intentional-break path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | [`contract-enforcement.md`](exec-plans/active/contract-enforcement.md) |
 | Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
@@ -276,8 +276,8 @@ Features that were previously on the roadmap and are now shipped:
 | Trigger rules (all_success, all_done, etc.) | [`airflow-parity.md`](airflow-parity.md) | Shipped |
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
 | Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
-| Freshness-driven scheduling | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | Shipped ([plan](exec-plans/active/freshness-scheduling.md); streams A–G) |
-| Agent-in-the-loop ETL remediation | [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) | Shipped ([plan](exec-plans/active/agent-in-the-loop-remediation.md); runtime streams) |
+| Freshness-driven scheduling | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | Shipped ([plan](exec-plans/completed/freshness-scheduling.md); streams A–G) |
+| Agent-in-the-loop ETL remediation | [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) | Shipped ([plan](exec-plans/completed/agent-in-the-loop-remediation.md); runtime streams) |
 
 ---
 

@@ -448,7 +448,7 @@ The plan is done when **all** of these hold:
   [`backtesting.md`](backtesting.md) — the N-run sibling that consumes the shared
   `internal/outputdiff` compare primitive built in C1.
 - [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) /
-  [`agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md) — every
+  [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md) — every
   diagnosed page appends a `caesium reproduce … --diff` one-liner.
 - `internal/models/run.go` (`TaskExecutionDescriptor`), `internal/run/store.go`
   (`TaskExecutionDescriptor` loader), `pkg/task/output.go` (`ParseMarkers`,

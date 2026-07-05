@@ -895,7 +895,7 @@ The plan is done when **all** of these hold:
 - [`docs/job-schema-reference.md`](../../job-schema-reference.md),
   `docs/job-definitions.md`, `docs/caesium-job-llm-reference.md` — the schema docs
   N-1 extends with the `metadata.remediation` block.
-- [Data-Plane Memory UI](../completed/data-plane-memory-ui.md) — the precedent for
+- [Data-Plane Memory UI](data-plane-memory-ui.md) — the precedent for
   the Console incidents surface and the auth-enabled Playwright lane.
 - `internal/event/bus.go`, `internal/notification/subscriber.go`,
   `internal/replay/`, `internal/lineage/impact.go`, `internal/run/why.go`,

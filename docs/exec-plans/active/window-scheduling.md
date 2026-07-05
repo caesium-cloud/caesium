@@ -510,7 +510,7 @@ The plan is done when **all** of these hold:
 - [`docs/roadmap.md`](../../roadmap.md) Phase 4 Data-Plane Differentiators
   (Deadline-window scheduling row) — the strategic entry this plan promotes from
   design to in-progress.
-- [`docs/exec-plans/active/freshness-scheduling.md`](freshness-scheduling.md) —
+- [`docs/exec-plans/completed/freshness-scheduling.md`](../completed/freshness-scheduling.md) —
   the sibling temporal-scheduling initiative; freshness policies compile down to a
   rolling window + deadline, so they compose as layers (freshness decides *what
   deadline*, this plan decides *when inside the window to start*) over the same

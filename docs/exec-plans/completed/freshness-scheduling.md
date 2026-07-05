@@ -430,7 +430,7 @@ The read/act surface over the state store. This stream **owns the base
 `caesium dataset` Cobra group** (`cmd/dataset/`), the base `datasets` REST
 package (`api/rest/controller/dataset/`, `api/rest/service/dataset/`), and the
 base `/v1/datasets` route family in `api/rest/bind/bind.go`. **Cross-plan
-coordination:** [`data-circuit-breaker.md`](data-circuit-breaker.md) Stream C/D
+coordination:** [`data-circuit-breaker.md`](../active/data-circuit-breaker.md) Stream C/D
 **extends** this same package with hold/metrics/release subcommands and
 `/v1/datasets/holds*` + `/v1/datasets/:ns/:name/metrics` routes — it does **not**
 create a second `cmd/dataset/` group or dataset controller package. Whichever
@@ -665,7 +665,7 @@ C3 (strict). E1 → E2. F1 → F2. G1 → G2. D1 standalone.
 - `api/rest/bind/bind.go` — within this plan only **E1** adds `/v1/datasets*`
   routes (the import block is the conflict-prone part; single stream avoids it). D1
   routes arrivals through the *existing* event ingestion, adding no new REST route.
-  **Cross-plan:** [`data-circuit-breaker.md`](data-circuit-breaker.md) also appends
+  **Cross-plan:** [`data-circuit-breaker.md`](../active/data-circuit-breaker.md) also appends
   `/v1/datasets/holds*` + `/v1/datasets/:ns/:name/metrics` routes to this same file;
   E1 owns the base `/v1/datasets` family and the sibling plan extends it — never
   land both plans' `bind.go` dataset edits in the same wave (whichever merges first
@@ -802,11 +802,11 @@ The plan is done when **all** of these hold:
   the design-wave entry this plan promotes from proposed to shipped; freshness is
   the strategic flagship.
 - [`docs/design-event-triggers.md`](../../design-event-triggers.md) +
-  [`exec-plans/completed/event-trigger-routing.md`](../completed/event-trigger-routing.md)
+  [`exec-plans/completed/event-trigger-routing.md`](event-trigger-routing.md)
   — the shipped event ingestion, router, and `_trigger_depth` chain guard that
   arrival signals (Stream D) and derived-run cascades (Stream C) ride.
 - [`docs/design-data-plane-memory.md`](../../design-data-plane-memory.md) +
-  [Data-Plane Memory UI](../completed/data-plane-memory-ui.md) — the observed
+  [Data-Plane Memory UI](data-plane-memory-ui.md) — the observed
   `lineage_datasets` graph, `QueryImpact` traversal, and cache identity this plan
   builds on; the CLI/REST-first-then-UI precedent Stream F follows.
 - [`pkg/jobdef/definition.go`](../../../pkg/jobdef/definition.go) +

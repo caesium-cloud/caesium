@@ -8,7 +8,7 @@
 > `ai_agent` dispatch channel, and the Console incident/agent-activity/analytics
 > panels all ship, feature-gated behind `CAESIUM_AGENT_REMEDIATION_ENABLED` with
 > an active auth mode. Exec plan:
-> [`agent-in-the-loop-remediation.md`](exec-plans/active/agent-in-the-loop-remediation.md);
+> [`agent-in-the-loop-remediation.md`](exec-plans/completed/agent-in-the-loop-remediation.md);
 > the `metadata.remediation` surface is documented in
 > [`job-schema-reference.md`](job-schema-reference.md#remediation). Companion
 > roadmap items: §2.3 SLA Management (escalation), §3.2 Approval Gates &

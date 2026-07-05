@@ -7,7 +7,7 @@
 > UI, skip-when-fresh, and `trigger: {type: freshness}` all ship, feature-gated
 > behind `CAESIUM_FRESHNESS_ENABLED`. The strategic flagship of this design
 > wave: cron becomes the fallback, not the model. Exec plan:
-> [`freshness-scheduling.md`](exec-plans/active/freshness-scheduling.md); the
+> [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md); the
 > `datasets` surface is documented in
 > [`job-schema-reference.md`](job-schema-reference.md#datasets--freshness).
 > Companion designs: [`design-window-scheduling.md`](design-window-scheduling.md),

@@ -62,7 +62,7 @@ disagreements.
 Two cross-plan contracts bind this plan:
 
 - **The step-level `datasets` block is shared substrate owned by
-  [`freshness-scheduling.md`](freshness-scheduling.md) Stream A** (which introduces
+  [`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A** (which introduces
   `Step.Datasets` with `produces`/`consumes`/`freshness`/`watermark`). This design
   ADDS `schema`/`schemaFrom` to `produces` entries and a `schema` to `consumes`
   entries — it does **not** own the base block. Stream E coordinates: whichever plan
@@ -252,7 +252,7 @@ Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork th
 
 The YAML surface that upgrades inferred/evidence edges to declared, `fail`-grade
 contracts. This design ADDS schema fields to the step-level `datasets` block that
-[`freshness-scheduling.md`](freshness-scheduling.md) Stream A introduces — it does
+[`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A introduces — it does
 not own the base block. **Coordinate on `pkg/jobdef/definition.go`: whichever plan
 lands `Step.Datasets` first introduces the struct; this item extends it.**
 
@@ -507,7 +507,7 @@ The plan is done when **all** of these hold:
 - [`docs/roadmap.md`](../../roadmap.md) §2.1 PR Preview Runs & Visual DAG Diff — the
   PR surface this feature plugs its contract section into; and the Phase-4 design
   table (`docs/roadmap.md:226`).
-- [`freshness-scheduling.md`](freshness-scheduling.md) — sibling active plan that
+- [`freshness-scheduling.md`](../completed/freshness-scheduling.md) — sibling active plan that
   **owns the base step-level `datasets` block**; Stream E here extends it with schema
   fields. Coordinate on `pkg/jobdef/definition.go`.
 - [`docs/design-event-triggers.md`](../../design-event-triggers.md) and the shipped

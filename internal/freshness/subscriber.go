@@ -135,7 +135,7 @@ func (c *Capturer) handleRunCompleted(ctx context.Context, evt event.Event) {
 	// TypeRunStarted, keyed by run, and read them back here) belongs to the
 	// evaluator stream, where the read semantics and the run-start seam live;
 	// until then completion-time capture is the accepted v1 behavior. See
-	// docs/exec-plans/active/freshness-scheduling.md (Stream C, C2 at-risk).
+	// docs/exec-plans/completed/freshness-scheduling.md (Stream C, C2 at-risk).
 	consumed := c.consumedSnapshot(ctx, consumedNames)
 
 	for i := range produced {
