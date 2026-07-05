@@ -17,7 +17,7 @@ import { StatusBadge } from "@/components/ui/status-badge";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { INCIDENT_EVENT_TYPES } from "@/features/incidents/incident-utils";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
+import { api, type Atom, type CallbackRun, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { shortId } from "@/lib/utils";
@@ -282,6 +282,7 @@ export function RunDetailPage() {
     : compareRuns.length === 0
       ? "No other runs to compare"
       : undefined;
+  const callbackRuns = run.callbacks ?? [];
 
   return (
     <div className="space-y-5">
@@ -472,7 +473,7 @@ export function RunDetailPage() {
         {timelineOpen && (
           <div className="p-4">
             {run.tasks && run.tasks.length > 0 ? (
-              <RunTimeline tasks={run.tasks} runStartedAt={run.started_at} />
+              <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} />
             ) : (
               <div className="text-[12px] text-text-4 py-4 text-center">
                 No task execution data yet.
@@ -481,6 +482,8 @@ export function RunDetailPage() {
           </div>
         )}
       </div>
+
+      {callbackRuns.length > 0 ? <CallbackRunsSection callbacks={callbackRuns} /> : null}
 
       {/* Run parameters */}
       {run.params && Object.keys(run.params).length > 0 ? (
@@ -553,4 +556,46 @@ function parseTimestamp(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const timestamp = new Date(value).getTime();
   return Number.isFinite(timestamp) ? timestamp : undefined;
+}
+
+function CallbackRunsSection({ callbacks }: { callbacks: CallbackRun[] }) {
+  return (
+    <Card data-testid="run-callbacks-section">
+      <CardHeader className="pb-3">
+        <CardTitle className="text-sm">Callbacks</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {callbacks.map((callback) => {
+          const failed = callback.status.toLowerCase() === "failed";
+          return (
+            <div
+              key={callback.id}
+              data-testid="run-callback-row"
+              className={`rounded-md border px-3 py-2 ${
+                failed ? "border-danger/40 bg-danger/5" : "border-border/50 bg-obsidian/20"
+              }`}
+            >
+              <div className="flex flex-wrap items-center gap-2">
+                <StatusBadge status={callback.status} size="sm" />
+                <span className="font-mono text-xs text-text-2">
+                  callback {shortId(callback.callback_id)}
+                </span>
+                <span className="font-mono text-[10px] text-text-4">
+                  run {shortId(callback.id)}
+                </span>
+              </div>
+              {callback.error ? (
+                <div
+                  data-testid="run-callback-error"
+                  className={`mt-2 break-words font-mono text-xs ${failed ? "text-danger" : "text-text-3"}`}
+                >
+                  {callback.error}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </CardContent>
+    </Card>
+  );
 }

@@ -56,9 +56,9 @@ const META: Record<RunStatus, StatusMeta> = {
   },
   queued: {
     label: "queued",
-    fg: "hsl(var(--text-2))",
-    bg: "hsl(var(--text-3) / 0.12)",
-    border: "hsl(var(--text-3) / 0.25)",
+    fg: "hsl(var(--gold))",
+    bg: "hsl(var(--gold) / 0.12)",
+    border: "hsl(var(--gold) / 0.32)",
     dotClass: "",
   },
   paused: {

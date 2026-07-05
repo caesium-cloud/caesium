@@ -37,6 +37,16 @@ export interface JobRun {
   total_tasks?: number;
   quarantine?: boolean;
   tasks?: TaskRun[];
+  callbacks?: CallbackRun[];
+}
+
+export interface CallbackRun {
+  id: string;
+  callback_id: string;
+  status: string;
+  error?: string;
+  started_at: string;
+  completed_at?: string;
 }
 
 export interface Backfill {

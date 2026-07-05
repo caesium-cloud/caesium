@@ -1,10 +1,11 @@
 import { useState } from "react";
-import type { TaskRun } from "@/lib/api";
+import type { JobTask, TaskRun } from "@/lib/api";
 import { shortId } from "@/lib/utils";
 import { statusMeta } from "@/lib/status";
 
 interface Props {
   tasks: TaskRun[];
+  taskDefinitions: Record<string, JobTask>;
   runStartedAt: string;
 }
 
@@ -21,14 +22,17 @@ function formatMs(ms: number): string {
   return `${Math.floor(ms / 60000)}m ${Math.floor((ms % 60000) / 1000)}s`;
 }
 
-export function RunTimeline({ tasks, runStartedAt }: Props) {
+export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
   const runStart = new Date(runStartedAt).getTime();
   // Pass Date.now as an initializer reference (not called during render) so
   // React captures wall-clock time once at mount without violating purity rules.
   const [now] = useState<number>(Date.now);
 
   // Only show tasks that have started
-  const startedTasks = tasks.filter(t => t.started_at || t.status === "cached");
+  const startedTasks = orderTasksByDAG(
+    tasks.filter(t => t.started_at || t.status === "cached"),
+    taskDefinitions,
+  );
   if (startedTasks.length === 0) {
     return (
       <div className="flex items-center justify-center h-32 text-muted-foreground text-sm">
@@ -100,9 +104,7 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
           const barX = LABEL_W + (start / maxEnd) * BAR_AREA;
           const barW = Math.max(2, ((end - start) / maxEnd) * BAR_AREA);
           const color = colorFor(task.status);
-          const label = task.image
-            ? task.image.split("/").pop()?.split(":")[0] ?? shortId(task.atom_id)
-            : shortId(task.atom_id);
+          const label = taskLabel(task, taskDefinitions);
           const duration = end - start;
 
           return (
@@ -213,4 +215,85 @@ export function RunTimeline({ tasks, runStartedAt }: Props) {
       </div>
     </div>
   );
+}
+
+function orderTasksByDAG(tasks: TaskRun[], taskDefinitions: Record<string, JobTask>): TaskRun[] {
+  if (tasks.length <= 1) return tasks;
+
+  const taskByID = new Map<string, TaskRun>();
+  const adjacency = new Map<string, Set<string>>();
+  const indegree = new Map<string, number>();
+  const fallbackOrder = new Map<string, { timestamp: number; index: number }>();
+
+  tasks.forEach((task, index) => {
+    taskByID.set(task.task_id, task);
+    adjacency.set(task.task_id, new Set());
+    indegree.set(task.task_id, 0);
+    fallbackOrder.set(task.task_id, {
+      timestamp: fallbackTimestamp(task),
+      index,
+    });
+  });
+
+  tasks.forEach((task) => {
+    const nextID = taskDefinitions[task.task_id]?.next_id;
+    if (!nextID || nextID === task.task_id || !taskByID.has(nextID)) return;
+
+    const edges = adjacency.get(task.task_id);
+    if (!edges || edges.has(nextID)) return;
+
+    edges.add(nextID);
+    indegree.set(nextID, (indegree.get(nextID) ?? 0) + 1);
+  });
+
+  const compareByFallback = (a: TaskRun, b: TaskRun) => {
+    const aOrder = fallbackOrder.get(a.task_id) ?? { timestamp: Number.POSITIVE_INFINITY, index: 0 };
+    const bOrder = fallbackOrder.get(b.task_id) ?? { timestamp: Number.POSITIVE_INFINITY, index: 0 };
+    if (aOrder.timestamp !== bOrder.timestamp) return aOrder.timestamp - bOrder.timestamp;
+    return aOrder.index - bOrder.index;
+  };
+
+  const ready = tasks.filter((task) => (indegree.get(task.task_id) ?? 0) === 0).sort(compareByFallback);
+  const ordered: TaskRun[] = [];
+
+  while (ready.length > 0) {
+    const task = ready.shift();
+    if (!task) break;
+    ordered.push(task);
+
+    for (const nextID of adjacency.get(task.task_id) ?? []) {
+      const nextDegree = (indegree.get(nextID) ?? 0) - 1;
+      indegree.set(nextID, nextDegree);
+
+      const nextTask = taskByID.get(nextID);
+      if (nextTask && nextDegree === 0) {
+        ready.push(nextTask);
+        ready.sort(compareByFallback);
+      }
+    }
+  }
+
+  if (ordered.length === tasks.length) return ordered;
+
+  const orderedIDs = new Set(ordered.map((task) => task.task_id));
+  const unresolved = tasks
+    .filter((task) => !orderedIDs.has(task.task_id))
+    .sort(compareByFallback);
+  return [...ordered, ...unresolved];
+}
+
+function fallbackTimestamp(task: TaskRun): number {
+  const parsed = new Date(task.started_at ?? task.created_at).getTime();
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+function taskLabel(task: TaskRun, taskDefinitions: Record<string, JobTask>): string {
+  const name = taskDefinitions[task.task_id]?.name?.trim();
+  if (name) return name;
+
+  if (task.image) {
+    return task.image.split("/").pop()?.split(":")[0] ?? shortId(task.atom_id);
+  }
+
+  return shortId(task.atom_id);
 }

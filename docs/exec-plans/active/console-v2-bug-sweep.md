@@ -234,7 +234,7 @@ Fixes on the run detail page and its timeline
 (`ui/src/features/jobs/RunDetailPage.tsx`, `RunTimeline.tsx`,
 `ui/src/lib/status.ts`). All frontend-only.
 
-- [ ] D1. Order run-detail tasks by DAG/topological order (e.g. list → convert
+- [x] D1. Order run-detail tasks by DAG/topological order (e.g. list → convert
       → publish) rather than in the unspecified DB/payload order they arrive
       in, which currently lists "convert" before "list". Tasks are rendered
       unsorted via `<RunTimeline tasks={run.tasks} />`
@@ -248,7 +248,9 @@ Fixes on the run detail page and its timeline
       into `RunTimeline`**, then topo-sort by `next_id`, falling back to
       `started_at`. Files: `ui/src/features/jobs/RunDetailPage.tsx` (~431 the
       `RunTimeline` call + ~186-192 the task defs), `ui/src/features/jobs/RunTimeline.tsx`.
-- [ ] D2. Fix execution-timeline labels and legend: (a) rows are labelled by
+      Done: threaded `taskDefinitions` into `RunTimeline`; timeline rows are
+      topo-sorted from `JobTask.next_id` with `started_at`/input-order fallback.
+- [x] D2. Fix execution-timeline labels and legend: (a) rows are labelled by
       the container image name (the walkthrough saw steps show their base
       image name rather than the step name) — label by **task name** instead,
       falling
@@ -261,7 +263,9 @@ Fixes on the run detail page and its timeline
       ~210), `ui/src/lib/status.ts` (`skipped` / `queued` `META` entries
       ~57-82). Depends on: D1 (shares the `JobTask`-defs threading into
       `RunTimeline`).
-- [ ] D3. Surface a callbacks section on the run detail so failed callbacks
+      Done: timeline labels prefer `JobTask.name`; pending/queued now uses gold
+      status colors while skipped remains neutral gray, covered by vitest.
+- [x] D3. Surface a callbacks section on the run detail so failed callbacks
       ("webhook responded 404: no_team") are visible. The run payload
       **already** includes them — `internal/run/store.go:160` serializes
       `callbacks: []CallbackRun{id, callback_id, status, error, started_at,
@@ -271,6 +275,8 @@ Fixes on the run detail page and its timeline
       highlights failures with their `error`. Frontend-only. Files:
       `ui/src/lib/api.ts` (`JobRun.callbacks` + `CallbackRun` type),
       `ui/src/features/jobs/RunDetailPage.tsx` (new callbacks section).
+      Done: added `CallbackRun`/`JobRun.callbacks`, rendered a failure-highlighted
+      callbacks section, and added a Playwright spec for the failed-callback fixture.
 
 #### Rejected / deferred for Stream D
 

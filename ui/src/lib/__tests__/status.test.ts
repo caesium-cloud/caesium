@@ -31,6 +31,17 @@ describe("statusMeta", () => {
     expect(statusMeta("active").label).toBe("running");
   });
 
+  it("keeps pending and skipped visually distinct", () => {
+    const pending = statusMeta("pending");
+    const queued = statusMeta("queued");
+    const skipped = statusMeta("skipped");
+
+    expect(pending.fg).toBe(queued.fg);
+    expect(queued.fg).not.toBe(skipped.fg);
+    expect(queued.bg).not.toBe(skipped.bg);
+    expect(queued.border).not.toBe(skipped.border);
+  });
+
   it("falls back to a neutral 'unknown' meta", () => {
     const fallback = statusMeta("definitely-not-a-status");
     expect(fallback.label).toBe("unknown");
