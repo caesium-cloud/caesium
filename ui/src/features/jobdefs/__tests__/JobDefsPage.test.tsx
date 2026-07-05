@@ -61,7 +61,7 @@ describe("JobDefsPage", () => {
     vi.mocked(api.lintJobDef).mockResolvedValue({
       errors: [],
       warnings: [],
-      summary: { steps: "2 steps" },
+      summary: { steps: 2 },
     });
     vi.mocked(api.diffJobDef).mockResolvedValue({
       added: [],
