@@ -83,7 +83,7 @@ in its Phase 0 (`atom.ResourceFailure` is defined at
 regex/exit-code classifier works; the `oom` class stays best-effort until
 resource-right-sizing lands its detection, and that limit is recorded, not hidden.
 
-## Progress (as of 2026-07-04)
+## Progress (as of 2026-07-05)
 
 The plan was published from the `design-agent-in-the-loop.md` design of record.
 The design is explicitly phased (0→3); Wave 1 landed Stream A, the entire Phase-0
@@ -190,7 +190,12 @@ closed the integration-coverage gap noted above.
   job) so agent approval flows run under real `api-key` auth without 401ing the
   shared no-auth suite.
 
-Only **N-1** (docs — roadmap §3.5, design banner, schema reference, examples) remains.
+**N-1** (docs) shipped in [#299](https://github.com/caesium-cloud/caesium/pull/299)
+(merge `ebb54b6`) — a combined docs pass across both data-plane plans: roadmap §3.5
+flip, the `design-agent-in-the-loop.md` status banner, the `metadata.remediation`
+schema surface via the `internal/jobdef/report` generator, a pinned-image
+remediation example, and the README bullet. **Plan complete — all streams (A–G, U)
++ H-1 + N-1 shipped.** Ready to archive to `docs/exec-plans/completed/`.
 
 ### Stream Status
 
@@ -205,7 +210,7 @@ Only **N-1** (docs — roadmap §3.5, design banner, schema reference, examples)
 | G | CLI — `caesium incident …` + `caesium agentprofile …` | P2 | **Shipped** (Wave 3, #286) |
 | U | Console incidents surface — feed, triage timeline, approval cards, run/task ribbons, agent activity, fleet analytics | P1 | **Shipped** (Wave 3, #292) |
 | H-1 | Harness — deterministic fake agent image + integration server gate wiring | — | **Shipped** (W3-eta: fake image + auth lane) |
-| N-1 | Docs — roadmap §3.5 flip, design banner, schema reference (`remediation` block), examples, README | — | Not started |
+| N-1 | Docs — roadmap §3.5 flip, design banner, schema reference (`remediation` block), examples, README | — | **Shipped** (Wave 4, #299) |
 
 ## Streams
 

@@ -82,7 +82,7 @@ Non-goals (no built-in pollers, no data-quality judgment, one watermark per
 dataset, nullable `namespace` column but no cross-instance datasets in v1) are
 hard boundaries — an item that crosses one stops and reconciles first.
 
-## Progress (as of 2026-07-04)
+## Progress (as of 2026-07-05)
 
 The plan was published from the
 [`design-freshness-scheduling.md`](../../design-freshness-scheduling.md) design
@@ -161,8 +161,32 @@ sequenced last so scheduling behavior only changes after the substrate is proven
   (merge `00b5825`): `CAESIUM_FRESHNESS_ENABLED=true` on the integration lanes
   (Docker/distributed/ui-e2e/helm/CI), mirroring the OpenLineage precedent.
 
-Streams **F** (Console UI) and **G** (scheduling behavior — skip-when-fresh /
-`trigger: {type: freshness}`) plus **N-1** (docs) remain for Wave 4.
+### Wave 4 — Streams F, G + N-1 (shipped)
+
+- **Stream F** (F1–F2) shipped in [#298](https://github.com/caesium-cloud/caesium/pull/298)
+  (merge `5cb22e4`): the Console freshness surface — the `/datasets` board (status
+  chip, staleness-vs-SLO bar, producing job, `stale-upstream` reason), a freshness
+  coloring overlay on the lineage graph, and a "why did/didn't this run"
+  derivations panel with consumed-watermark links. Feature-gated on the
+  `FreshnessEnabled` `/system/features` flag. 6 review findings resolved (offset
+  pagination for the board + per-node `useQueries` for the overlay, per-dataset
+  namespaces in consumed links, `nowMs` threaded through the staleness math).
+- **Stream G** (G1–G2) shipped in [#297](https://github.com/caesium-cloud/caesium/pull/297)
+  (merge `9ea40c9`): skip-when-fresh (a cron tick skips when every produced dataset
+  is fresh and no consumed watermark advanced, recording `skipped_fresh`; opt-out
+  via `metadata.datasets.skipWhenFresh`) and `trigger: {type: freshness}`
+  (evaluator-owned cadence). Cache identity preserved; builds on BC-2's
+  `dataset_advanced` wiring (#296). 4 review findings resolved (`metadata.datasets.sources`
+  accepted as a consumed input, trigger-only validation tightened, soft-delete join
+  filter, atomic skip-writes via explicit `tx`).
+- **N-1** (docs) shipped in [#299](https://github.com/caesium-cloud/caesium/pull/299)
+  (merge `ebb54b6`): combined docs pass across both data-plane plans — roadmap
+  flips, design-banner flips, the `datasets`/`remediation` schema surfaces via the
+  `internal/jobdef/report` generator (regenerated `job-schema-reference.md`),
+  pinned-image examples, and backtick-form README bullets.
+
+**Plan complete — all streams (A–G) + H-1 + N-1 shipped.** Ready to archive to
+`docs/exec-plans/completed/`.
 
 ### Stream Status
 
@@ -173,10 +197,10 @@ Streams **F** (Console UI) and **G** (scheduling behavior — skip-when-fresh /
 | C | Freshness evaluator — leader-gated durable loop + reactive fast path, observe-only state machine, then P2 derivation to run starts | **P0** → P2 | **Shipped** (Wave 3, #289) |
 | D | Arrival signals — source `arrival` event-binding bridged through the event router to advance dataset state | **P0** | **Shipped** (Wave 3, #288) |
 | E | Dataset REST + CLI operator surface — `GET /v1/datasets*`, `POST …/advance`, `caesium dataset list/status/advance` | **P0** | **Shipped** (Wave 3, #290) |
-| F | Console UI — dataset freshness board, lineage freshness overlay, "why did/didn't this run" derivations panel | P1 | Not started |
-| G | Scheduling behavior — skip-when-fresh (P1) + `trigger: {type: freshness}` (P2) | P1 → P2 | Not started |
+| F | Console UI — dataset freshness board, lineage freshness overlay, "why did/didn't this run" derivations panel | P1 | **Shipped** (Wave 4, #298) |
+| G | Scheduling behavior — skip-when-fresh (P1) + `trigger: {type: freshness}` (P2) | P1 → P2 | **Shipped** (Wave 4, #297) |
 | H-1 | Integration harness — `CAESIUM_FRESHNESS_ENABLED=true` on the live integration server | — | **Shipped** (W3-eta: just/CI/helm env mirrors) |
-| N-1 | Docs — roadmap Phase 4 flip, design banner, schema references, examples, README | — | Not started |
+| N-1 | Docs — roadmap Phase 4 flip, design banner, schema references, examples, README | — | **Shipped** (Wave 4, #299) |
 
 ## Streams
 
