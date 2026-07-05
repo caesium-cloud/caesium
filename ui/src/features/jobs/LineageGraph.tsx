@@ -1,6 +1,6 @@
 import { type FormEvent, memo, useCallback, useMemo, useState } from "react";
 import { Link, getRouteApi, useNavigate } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useQueries, useQuery } from "@tanstack/react-query";
 import ReactFlow, {
   Background,
   BaseEdge,
@@ -23,7 +23,14 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
-import { api, type ImpactNode } from "@/lib/api";
+import { FreshnessStatusChip } from "@/features/datasets/FreshnessStatusChip";
+import {
+  datasetKey,
+  freshnessTone,
+  isDeclaredBeforeRun,
+  isStaleLike,
+} from "@/features/datasets/freshness-utils";
+import { api, type DatasetState, type ImpactNode } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { cn, shortId } from "@/lib/utils";
 
@@ -45,6 +52,10 @@ type LineageNodeData = {
   producingStep?: string;
   lastSeen?: string;
   depth?: number;
+  freshnessStatus?: DatasetState["status"];
+  freshnessReason?: string;
+  freshnessInherited?: boolean;
+  declaredBeforeRun?: boolean;
 };
 
 type LineageEdgeData = {
@@ -52,12 +63,18 @@ type LineageEdgeData = {
   testId: string;
   sourceName: string;
   targetName: string;
+  freshnessStatus?: DatasetState["status"];
+  freshnessInherited?: boolean;
+  declaredBeforeRun?: boolean;
 };
 
 type GraphNodeRef = {
   id: string;
   name: string;
   depth: number;
+  freshnessStatus?: DatasetState["status"];
+  freshnessInherited?: boolean;
+  declaredBeforeRun?: boolean;
 };
 
 export function LineageRoutePage() {
@@ -90,18 +107,75 @@ export function LineageGraph({
   const hasDataset = namespace !== "" && name !== "";
   const isScoped = principal.isScoped;
 
+  const featuresQuery = useQuery({
+    queryKey: ["system-features"],
+    queryFn: api.getSystemFeatures,
+    staleTime: 60_000,
+  });
+  const freshnessEnabled = featuresQuery.data?.freshness_enabled === true;
+
   const impactQuery = useQuery({
     queryKey: ["lineage", "impact", namespace, name],
     queryFn: () => api.getLineageImpact({ namespace, name }),
     enabled: hasDataset && !isScoped,
   });
 
+  // Overlay freshness on exactly the datasets present in this lineage graph (the
+  // root plus each downstream node) rather than a first-N page of /datasets — a
+  // page cap left nodes beyond the first 200 unstyled even when stale.
+  const overlayTargets = useMemo(() => {
+    if (!impactQuery.data) {
+      return [] as Array<{ namespace: string; name: string }>;
+    }
+    const seen = new Set<string>();
+    const targets: Array<{ namespace: string; name: string }> = [];
+    const push = (ns: string, datasetName: string) => {
+      const key = datasetKey(ns, datasetName);
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      targets.push({ namespace: ns, name: datasetName });
+    };
+    push(impactQuery.data.root_namespace, impactQuery.data.root_name);
+    (impactQuery.data.downstream ?? []).forEach((node) =>
+      push(node.dataset_namespace, node.dataset_name),
+    );
+    return targets;
+  }, [impactQuery.data]);
+
+  const freshnessQueries = useQueries({
+    queries: overlayTargets.map((target) => ({
+      queryKey: ["datasets", "detail", target.namespace, target.name],
+      queryFn: () => api.getDataset(target.namespace, target.name),
+      enabled: freshnessEnabled && !isScoped,
+      staleTime: 30_000,
+    })),
+  });
+
+  const freshnessByDataset = useMemo(() => {
+    const map = new Map<string, DatasetState>();
+    freshnessQueries.forEach((query, index) => {
+      const target = overlayTargets[index];
+      const state = query.data?.state;
+      if (target && state) {
+        map.set(datasetKey(target.namespace, target.name), state);
+      }
+    });
+    return map;
+  }, [freshnessQueries, overlayTargets]);
+
   const graph = useMemo(() => {
     if (!impactQuery.data) {
       return { nodes: [] as Node<LineageNodeData>[], edges: [] as Edge[] };
     }
-    return buildGraph(impactQuery.data.root_namespace, impactQuery.data.root_name, impactQuery.data.downstream ?? []);
-  }, [impactQuery.data]);
+    return buildGraph(
+      impactQuery.data.root_namespace,
+      impactQuery.data.root_name,
+      impactQuery.data.downstream ?? [],
+      freshnessByDataset,
+    );
+  }, [freshnessByDataset, impactQuery.data]);
 
   function applyDataset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -362,9 +436,22 @@ function MetadataCell({ label, value }: { label: string; value: string }) {
   );
 }
 
-function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactNode[]) {
+function buildGraph(
+  rootNamespace: string,
+  rootName: string,
+  downstream: ImpactNode[],
+  freshnessByDataset: Map<string, DatasetState>,
+) {
   const rootId = `root:${rootNamespace}:${rootName}`;
-  const rootRef: GraphNodeRef = { id: rootId, name: rootName, depth: -1 };
+  const rootState = freshnessByDataset.get(datasetKey(rootNamespace, rootName));
+  const rootIsStale = isStaleLike(rootState?.status);
+  const rootRef: GraphNodeRef = {
+    id: rootId,
+    name: rootName,
+    depth: -1,
+    freshnessStatus: rootState?.status,
+    declaredBeforeRun: isDeclaredBeforeRun(rootState?.status),
+  };
   const initialNodes: Node<LineageNodeData>[] = [
     {
       id: rootId,
@@ -373,6 +460,9 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
         kind: "root",
         namespace: rootNamespace,
         name: rootName,
+        freshnessStatus: rootState?.status,
+        freshnessReason: rootState?.reason,
+        declaredBeforeRun: isDeclaredBeforeRun(rootState?.status),
       },
       position: { x: 0, y: 0 },
     },
@@ -384,10 +474,16 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
 
   downstream.forEach((node, index) => {
     const nodeId = `impact:${node.dataset_namespace}:${node.dataset_name}:${node.job_id}:${index}`;
+    const state = freshnessByDataset.get(datasetKey(node.dataset_namespace, node.dataset_name));
+    const inheritedStale = rootIsStale && !isStaleLike(state?.status);
+    const declaredBeforeRun = isDeclaredBeforeRun(state?.status);
     const nodeRef = {
       id: nodeId,
       name: node.dataset_name,
       depth: node.depth,
+      freshnessStatus: state?.status,
+      freshnessInherited: inheritedStale,
+      declaredBeforeRun,
     };
     initialNodes.push({
       id: nodeId,
@@ -401,6 +497,10 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
         producingStep: node.producing_step,
         lastSeen: node.last_seen,
         depth: node.depth,
+        freshnessStatus: state?.status,
+        freshnessReason: state?.reason,
+        freshnessInherited: inheritedStale,
+        declaredBeforeRun,
       },
       position: { x: 0, y: 0 },
     });
@@ -421,6 +521,8 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
     sourceRefs.forEach((sourceRef) => {
       const index = edgeIndex;
       edgeIndex += 1;
+      const tone = freshnessTone(nodeRef.freshnessStatus, nodeRef.freshnessInherited);
+      const edgeColor = nodeRef.declaredBeforeRun ? "hsl(var(--text-4))" : tone.edgeColor;
       initialEdges.push({
         id: `lineage-edge-${index}`,
         source: sourceRef.id,
@@ -431,16 +533,20 @@ function buildGraph(rootNamespace: string, rootName: string, downstream: ImpactN
           sourceName: sourceRef.name,
           targetName: nodeRef.name,
           testId: lineageImpactEdgeTestId(sourceRef.name, nodeRef.name, index),
+          freshnessStatus: nodeRef.freshnessStatus,
+          freshnessInherited: nodeRef.freshnessInherited,
+          declaredBeforeRun: nodeRef.declaredBeforeRun,
         },
         markerEnd: {
           type: MarkerType.ArrowClosed,
           width: 20,
           height: 20,
-          color: "hsl(var(--running))",
+          color: edgeColor,
         },
         style: {
           strokeWidth: 2,
-          stroke: "hsl(var(--running))",
+          stroke: edgeColor,
+          strokeDasharray: nodeRef.declaredBeforeRun ? "6 5" : undefined,
         },
       });
     });
@@ -503,6 +609,8 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
   const hop = typeof data.depth === "number" ? data.depth + 1 : undefined;
   const displayJob = jobLabel(data.jobAlias, data.jobId);
   const jobTitle = data.jobId ? `Open job ${displayJob}` : displayJob;
+  const hasFreshnessOverlay = Boolean(data.freshnessStatus || data.freshnessInherited);
+  const tone = freshnessTone(data.freshnessStatus, data.freshnessInherited);
 
   return (
     <div
@@ -514,21 +622,39 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
       data-job-alias={data.jobAlias}
       className={cn(
         "relative h-[150px] w-[320px] overflow-hidden rounded-lg border-2 px-4 py-3 shadow-sm transition-colors",
-        isRoot
-          ? "border-gold/50 bg-[linear-gradient(155deg,hsl(var(--gold)/0.18),hsl(var(--node-surface)/0.95)_60%)]"
-          : "cursor-pointer border-caesium-cyan/45 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--node-surface)/0.95)_60%)] hover:border-caesium-cyan/80",
+        hasFreshnessOverlay
+          ? [
+              tone.borderClass,
+              data.declaredBeforeRun && "border-dashed",
+              data.freshnessInherited
+                ? "bg-[linear-gradient(155deg,hsl(var(--warning)/0.18),hsl(var(--node-surface)/0.95)_60%)]"
+                : tone.surfaceClass,
+            ]
+          : isRoot
+            ? "border-gold/50 bg-[linear-gradient(155deg,hsl(var(--gold)/0.18),hsl(var(--node-surface)/0.95)_60%)]"
+            : "cursor-pointer border-caesium-cyan/45 bg-[linear-gradient(155deg,hsl(var(--caesium-cyan)/0.18),hsl(var(--node-surface)/0.95)_60%)] hover:border-caesium-cyan/80",
+        !isRoot && "cursor-pointer",
+        hasFreshnessOverlay && !isRoot && "hover:border-text-2/60",
       )}
       title={isRoot ? `${data.namespace}/${data.name}` : jobTitle}
     >
       {!isRoot ? (
-        <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+        <Handle
+          type="target"
+          position={Position.Left}
+          className={cn("h-3 w-3 border-2 border-dag-bg", hasFreshnessOverlay ? tone.dotClass : "bg-caesium-cyan")}
+        />
       ) : null}
-      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+      <Handle
+        type="source"
+        position={Position.Right}
+        className={cn("h-3 w-3 border-2 border-dag-bg", hasFreshnessOverlay ? tone.dotClass : "bg-caesium-cyan")}
+      />
 
       <div className="flex h-full flex-col justify-between gap-3">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <Database className={cn("h-4 w-4 shrink-0", isRoot ? "text-gold" : "text-running")} />
+          <div className="flex flex-wrap items-center gap-2">
+            <Database className={cn("h-4 w-4 shrink-0", hasFreshnessOverlay ? tone.textClass : isRoot ? "text-gold" : "text-running")} />
             <Badge variant="outline" className="text-[10px]">
               {isRoot ? "Root dataset" : "Downstream output"}
             </Badge>
@@ -536,6 +662,13 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
               <span className="rounded border border-running/30 bg-running/10 px-1.5 py-0.5 text-[10px] font-semibold text-running">
                 Hop {hop}
               </span>
+            ) : null}
+            {hasFreshnessOverlay ? (
+              <FreshnessStatusChip
+                status={data.freshnessStatus}
+                inheritedStale={data.freshnessInherited}
+                className="max-w-[10rem]"
+              />
             ) : null}
           </div>
           <div className="mt-3 truncate font-mono text-sm font-semibold text-text-1" title={data.name}>
@@ -561,6 +694,11 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
             {data.lastSeen ? (
               <div className="truncate font-mono text-[10px]" title={data.lastSeen}>
                 {new Date(data.lastSeen).toLocaleString()}
+              </div>
+            ) : null}
+            {data.freshnessReason ? (
+              <div className={cn("truncate text-[10px]", tone.textClass)} title={data.freshnessReason}>
+                {data.freshnessReason}
               </div>
             ) : null}
           </div>
@@ -595,6 +733,15 @@ const LineageImpactEdge = memo(({
   });
   const depth = typeof data?.depth === "number" ? data.depth : 0;
   const testId = data?.testId ?? `lineage-edge:${id}`;
+  const hasFreshnessOverlay = Boolean(data?.freshnessStatus || data?.freshnessInherited || data?.declaredBeforeRun);
+  const tone = freshnessTone(data?.freshnessStatus, data?.freshnessInherited);
+  const label = data?.declaredBeforeRun
+    ? "declared"
+    : data?.freshnessInherited
+      ? "stale path"
+      : depth === 0
+        ? "downstream"
+        : `depth ${depth + 1}`;
 
   return (
     <>
@@ -605,13 +752,18 @@ const LineageImpactEdge = memo(({
           data-edge-id={id}
           data-edge-source={data?.sourceName}
           data-edge-target={data?.targetName}
-          className="nodrag nopan rounded-full border border-running/35 bg-card/95 px-2 py-1 text-[10px] font-semibold text-running shadow-sm"
+          className={cn(
+            "nodrag nopan rounded-full border bg-card/95 px-2 py-1 text-[10px] font-semibold shadow-sm",
+            hasFreshnessOverlay
+              ? [tone.borderClass, tone.surfaceClass, tone.textClass]
+              : "border-running/35 text-running",
+          )}
           style={{
             position: "absolute",
             transform: `translate(-50%, -50%) translate(${labelX}px,${labelY}px)`,
           }}
         >
-          {depth === 0 ? "downstream" : `depth ${depth + 1}`}
+          {label}
         </div>
       </EdgeLabelRenderer>
     </>

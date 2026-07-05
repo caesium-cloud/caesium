@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { AppShell } from "./components/layout/AppShell";
 import { AtomsPage } from "./features/atoms/AtomsPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
+import { DatasetsPage } from "./features/datasets/DatasetsPage";
 import { IncidentDetailPage } from "./features/incidents/IncidentDetailPage";
 import { IncidentsPage } from "./features/incidents/IncidentsPage";
 import { LogConsolePage } from "./features/logs/LogConsolePage";
@@ -16,6 +17,7 @@ import { StatsPage } from "./features/stats/StatsPage";
 import { SystemPage } from "./features/system/SystemPage";
 import { TriggersPage } from "./features/triggers/TriggersPage";
 import { api } from "./lib/api";
+import { normalizeStatusFilter } from "./features/datasets/freshness-utils";
 
 const rootRoute = createRootRoute({
   component: AppShell,
@@ -73,6 +75,28 @@ const lineageRoute = createRoute({
     name: typeof search.name === "string" ? search.name : undefined,
   }),
   component: LineageRoutePage,
+});
+
+async function requireFreshnessEnabled() {
+  const features = await api.getSystemFeatures();
+  if (!features.freshness_enabled) {
+    throw redirect({ to: "/jobs" });
+  }
+}
+
+const datasetsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "datasets",
+  validateSearch: (search: Record<string, unknown>) => {
+    const status = normalizeStatusFilter(search.status);
+    return {
+      status: status === "all" ? undefined : status,
+      namespace: typeof search.namespace === "string" ? search.namespace : undefined,
+      name: typeof search.name === "string" ? search.name : undefined,
+    };
+  },
+  loader: requireFreshnessEnabled,
+  component: DatasetsPage,
 });
 
 async function requireAgentRemediationEnabled() {
@@ -170,6 +194,7 @@ const routeTree = rootRoute.addChildren([
   runDiffRoute,
   runDetailRoute,
   lineageRoute,
+  datasetsRoute,
   incidentsRoute,
   incidentDetailRoute,
   statsRoute,
