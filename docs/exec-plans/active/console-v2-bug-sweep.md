@@ -360,7 +360,7 @@ sequenced after them (see `## Sequencing & Dependencies`).
 
 ## Harness Strengthening
 
-- [ ] H-1. Seed a richer e2e/integration fixture set so the assertions the
+- [x] H-1. Seed a richer e2e/integration fixture set so the assertions the
       above items need have real data to render against: a job with a
       **multi-step DAG** that produces a **failed run** carrying a **failed
       callback**, plus an **event trigger** and one or more **cron triggers**.
@@ -369,6 +369,9 @@ sequenced after them (see `## Sequencing & Dependencies`).
       validator (A1). Files: `ui/e2e/helpers/fixtures.ts`, new
       `ui/e2e/` fixture `*.job.yaml`, and any `test/` harness seed needed for
       the integration scenarios (B4, E1, F4).
+      Landed W1-H1: shared `fixtures.ts` helpers now index the existing
+      `docs/examples/` coverage and centralize fixture load/apply, job lookup,
+      trigger, and run-await flows; no new fixture was needed.
 
 ## Navigational / Organizational Improvements
 
