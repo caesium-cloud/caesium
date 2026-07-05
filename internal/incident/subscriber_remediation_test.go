@@ -38,17 +38,22 @@ func seedTransientInfraFailure(t *testing.T, db *gorm.DB) (jobID, runID, taskID 
 	return jobID, runID, taskID
 }
 
+// waitForAction blocks until the deterministic AgentAction row exists AND has
+// reached a terminal status. The row is first written as "proposed" and then
+// asynchronously updated to its terminal status by the executor; returning on
+// the intermediate "proposed" state races that update (and cancelling the test
+// ctx mid-update yields a "context canceled" warn), so poll until terminal.
 func waitForAction(t *testing.T, db *gorm.DB) models.AgentAction {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		var a models.AgentAction
-		if err := db.First(&a).Error; err == nil {
+		if err := db.First(&a).Error; err == nil && a.Status != models.AgentActionStatusProposed {
 			return a
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("expected a deterministic AgentAction row, got none")
+	t.Fatal("expected a deterministic AgentAction row in a terminal status, got none")
 	return models.AgentAction{}
 }
 

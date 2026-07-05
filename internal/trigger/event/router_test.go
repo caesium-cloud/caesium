@@ -202,9 +202,15 @@ func TestLifecycleBridgeRoutesRunCompletedWithJobAliasAndDepth(t *testing.T) {
 	require.NoError(t, router.Reload(ctx))
 
 	bus := eventstore.New()
+	// Subscribe SYNCHRONOUSLY so the publish below can't race the bridge's
+	// bus.Subscribe landing (an async StartLifecycleBridge occasionally loses
+	// the single publish under -race). Then run the bridge loop in the
+	// background and publish exactly once; Eventually only polls the DB.
+	events, err := router.SubscribeLifecycleBridge(ctx, bus)
+	require.NoError(t, err)
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- router.StartLifecycleBridge(ctx, bus)
+		errCh <- router.RunLifecycleBridge(ctx, events)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -212,14 +218,14 @@ func TestLifecycleBridgeRoutesRunCompletedWithJobAliasAndDepth(t *testing.T) {
 	})
 
 	runID := uuid.New()
-	require.Eventually(t, func() bool {
-		bus.Publish(eventstore.Event{
-			Type:    eventstore.TypeRunCompleted,
-			JobID:   upstreamJob.ID,
-			RunID:   runID,
-			Payload: []byte(`{"params":{"_trigger_depth":"1"}}`),
-		})
+	bus.Publish(eventstore.Event{
+		Type:    eventstore.TypeRunCompleted,
+		JobID:   upstreamJob.ID,
+		RunID:   runID,
+		Payload: []byte(`{"params":{"_trigger_depth":"1"}}`),
+	})
 
+	require.Eventually(t, func() bool {
 		var count int64
 		if err := db.Model(&models.JobRun{}).Where("job_id = ?", downstreamJob.ID).Count(&count).Error; err != nil {
 			return false
@@ -263,17 +269,22 @@ func TestEventTriggerFireRejectsDepthExceeded(t *testing.T) {
 
 func openEventRouterTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
-	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	// Private in-memory DB (no cache=shared): shared-cache uses a process-wide
+	// lock, so one test's concurrent bridge writes contend with — and can stall —
+	// sibling t.Parallel() tests. A private in-memory DB is isolated per test.
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.AutoMigrate(models.All...))
 	sqlDB, err := db.DB()
 	require.NoError(t, err)
-	// Serialize all access through a single connection: the lifecycle-bridge test
-	// writes (Route) concurrently with the test's reads on this cache=shared in-mem
-	// DB, and concurrent shared-cache access deadlocks (and via the process-wide
-	// shared-cache lock hangs sibling tests' gorm.Open). One connection serializes
-	// it without contention.
+	// Pin to a single connection so the private in-memory DB survives across
+	// calls (a mode=memory DB lives only as long as its connection) and to
+	// serialize the lifecycle-bridge test's concurrent Route writes with the
+	// test's reads without contention.
 	sqlDB.SetMaxOpenConns(1)
+	sqlDB.SetMaxIdleConns(1)
+	sqlDB.SetConnMaxLifetime(0)
+	sqlDB.SetConnMaxIdleTime(0)
+	require.NoError(t, db.AutoMigrate(models.All...))
 	t.Cleanup(func() { _ = sqlDB.Close() })
 	return db
 }
