@@ -9,11 +9,14 @@ import (
 	"time"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
+	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/job"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstore "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/internal/trigger"
+	"github.com/caesium-cloud/caesium/pkg/db"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"github.com/robfig/cron"
@@ -135,6 +138,15 @@ func (c *Cron) fireAt(ctx context.Context, logicalDate time.Time) error {
 			log.Info("skipping paused job", "id", j.ID)
 			continue
 		}
+		if env.Variables().FreshnessEnabled {
+			decision, err := freshness.ShouldSkipCronRun(ctx, db.Connection(), j.ID, logicalDate)
+			if err != nil {
+				log.Warn("freshness cron skip check failed; running job", "job_id", j.ID, "error", err)
+			} else if decision.Skip {
+				log.Info("skipping fresh job", "job_id", j.ID, "reason", decision.Reason, "datasets", strings.Join(decision.Datasets, ","))
+				continue
+			}
+		}
 		metrics.TriggerFiresTotal.WithLabelValues(j.ID.String(), string(models.TriggerTypeCron)).Inc()
 		params := c.scheduledRunParams(logicalDate)
 		go func() {
@@ -156,6 +168,15 @@ func (c *Cron) fireCatchup(ctx context.Context, jobs models.Jobs) {
 	for _, j := range jobs {
 		if j.Paused {
 			continue
+		}
+		if env.Variables().FreshnessEnabled {
+			decision, err := freshness.ShouldSkipCronRun(ctx, db.Connection(), j.ID, now)
+			if err != nil {
+				log.Warn("freshness catchup skip check failed; queueing catchup runs", "job_id", j.ID, "error", err)
+			} else if decision.Skip {
+				log.Info("skipping fresh catchup job", "job_id", j.ID, "reason", decision.Reason, "datasets", strings.Join(decision.Datasets, ","))
+				continue
+			}
 		}
 
 		// Use the last successful cron-triggered run as the watermark so that

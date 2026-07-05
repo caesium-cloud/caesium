@@ -225,6 +225,22 @@ func (s *TriggerSuite) TestCreateRejectsDuplicateAlias() {
 	s.True(errors.Is(err, ErrTriggerAliasConflict))
 }
 
+func (s *TriggerSuite) TestCreateRejectsBareFreshnessTrigger() {
+	// The trigger API has no job-definition context, so it cannot verify a
+	// freshness trigger's required consumed/produced datasets. A freshness trigger
+	// must be declared on a job definition (the apply path), so creating one
+	// through the trigger API is rejected even with the feature gate enabled.
+	s.T().Setenv("CAESIUM_FRESHNESS_ENABLED", "true")
+	_, err := s.svc().Create(&CreateRequest{
+		Alias:         "bare-freshness",
+		Type:          string(models.TriggerTypeFreshness),
+		Configuration: map[string]interface{}{},
+	})
+	s.Require().Error(err)
+	s.True(errors.Is(err, ErrInvalidTriggerRequest))
+	s.Contains(err.Error(), "cannot be created via the trigger API")
+}
+
 func (s *TriggerSuite) TestUpdateHTTPConfigurationRefreshesNormalizedPath() {
 	created := s.createHTTPTrigger("webhook", "/hooks/original")
 

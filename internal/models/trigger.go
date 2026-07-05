@@ -12,9 +12,10 @@ import (
 type TriggerType string
 
 const (
-	TriggerTypeCron  TriggerType = "cron"
-	TriggerTypeHTTP  TriggerType = "http"
-	TriggerTypeEvent TriggerType = "event"
+	TriggerTypeCron      TriggerType = "cron"
+	TriggerTypeHTTP      TriggerType = "http"
+	TriggerTypeEvent     TriggerType = "event"
+	TriggerTypeFreshness TriggerType = "freshness"
 )
 
 type Trigger struct {

@@ -3,6 +3,7 @@ package freshness
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -100,10 +101,30 @@ func TestBuildDeclarations(t *testing.T) {
 	if prod.Name != "staging.orders" || prod.Freshness != "8h" || prod.WatermarkKey != "max_order_ts" || prod.StepName != "extract" {
 		t.Fatalf("unexpected produce declaration: %+v", prod)
 	}
+	if prod.SkipWhenFresh == nil || !*prod.SkipWhenFresh {
+		t.Fatalf("skipWhenFresh default = %v, want true", prod.SkipWhenFresh)
+	}
 
 	con := byDir[models.DatasetDirectionConsumes]
 	if con.Name != "raw.vendor_x" || con.StepName != "extract" {
 		t.Fatalf("unexpected consume declaration: %+v", con)
+	}
+}
+
+func TestBuildDeclarationsCarriesSkipWhenFreshOptOut(t *testing.T) {
+	src := strings.Replace(registrySampleJob, "  datasets:\n    sources:", "  datasets:\n    skipWhenFresh: false\n    sources:", 1)
+	def, err := schema.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	decls, err := BuildDeclarations(def, uuid.New(), def.Metadata.Alias)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	for _, decl := range decls {
+		if decl.SkipWhenFresh == nil || *decl.SkipWhenFresh {
+			t.Fatalf("declaration %s skipWhenFresh = %v, want false", decl.Name, decl.SkipWhenFresh)
+		}
 	}
 }
 

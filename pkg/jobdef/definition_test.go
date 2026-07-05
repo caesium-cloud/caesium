@@ -928,6 +928,85 @@ func TestValidateEventTriggerConfiguration(t *testing.T) {
 	require.Error(t, ValidateTriggerSpec(badDefaultParams))
 }
 
+func TestValidateFreshnessTriggerRequiresGateAndDatasets(t *testing.T) {
+	t.Setenv("CAESIUM_FRESHNESS_ENABLED", "false")
+	err := ValidateTriggerSpec(&Trigger{Type: TriggerFreshness, Configuration: map[string]any{}})
+	require.ErrorContains(t, err, "CAESIUM_FRESHNESS_ENABLED=true")
+
+	// A bare freshness trigger (no accompanying definition, the trigger-create/
+	// update API path) has no dataset context to satisfy the requirement, so it
+	// is rejected even when the feature is enabled.
+	t.Setenv("CAESIUM_FRESHNESS_ENABLED", "true")
+	err = ValidateTriggerSpec(&Trigger{Type: TriggerFreshness, Configuration: map[string]any{}})
+	require.ErrorContains(t, err, "cannot be created via the trigger API")
+
+	valid := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: freshness-job
+  datasets:
+    skipWhenFresh: false
+trigger:
+  type: freshness
+  configuration: {}
+steps:
+  - name: build
+    image: alpine:3.23
+    datasets:
+      consumes: [raw.vendor_x]
+      produces:
+        - name: mart.vendor_x
+          freshness: 1h
+`
+	def, err := Parse([]byte(valid))
+	require.NoError(t, err)
+	require.NotNil(t, def.Metadata.Datasets)
+	require.NotNil(t, def.Metadata.Datasets.SkipWhenFresh)
+	require.False(t, *def.Metadata.Datasets.SkipWhenFresh)
+	// Validated with its definition, the same freshness trigger is accepted.
+	require.NoError(t, ValidateTriggerSpec(&def.Trigger, def))
+
+	missingDatasets := strings.Replace(valid, "      consumes: [raw.vendor_x]\n", "", 1)
+	_, err = Parse([]byte(missingDatasets))
+	require.ErrorContains(t, err, "requires at least one consumed dataset")
+}
+
+// A freshness job that binds its consumed input through metadata.datasets.sources
+// (the external-arrival path) rather than a step-level consumes still satisfies
+// the "has a consumed input" requirement, because BuildDeclarations persists each
+// source as a declaration.
+func TestValidateFreshnessTriggerAcceptsMetadataSourcesAsConsumedInput(t *testing.T) {
+	t.Setenv("CAESIUM_FRESHNESS_ENABLED", "true")
+	sourcesOnly := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: freshness-sources
+  datasets:
+    sources:
+      - name: raw.vendor_x
+        external: true
+        arrival:
+          event:
+            type: s3.object.created
+          watermark: $.detail.object.key
+trigger:
+  type: freshness
+  configuration: {}
+steps:
+  - name: build
+    image: alpine:3.23
+    datasets:
+      produces:
+        - name: mart.vendor_x
+          freshness: 1h
+`
+	def, err := Parse([]byte(sourcesOnly))
+	require.NoError(t, err)
+	require.NoError(t, ValidateTriggerSpec(&def.Trigger, def))
+}
+
 func TestStepUnmarshalJSONAppliesDefaults(t *testing.T) {
 	var step Step
 	err := json.Unmarshal([]byte(`{"name":"emit","image":"alpine:3.23","command":["echo","ok"]}`), &step)

@@ -332,9 +332,9 @@ func (e *Evaluator) evaluateProducedDataset(ctx context.Context, graph registryS
 		if !upstreamReady {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedUpstream, reason, consumed, nil)
 		}
-		return e.derive(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
 	case models.DatasetStatusStale:
-		return e.derive(ctx, decl, reason, consumed, triggerDepth, budget)
+		return e.deriveIfFreshnessTriggered(ctx, decl, reason, consumed, triggerDepth, budget)
 	case models.DatasetStatusQuarantined:
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "dataset quarantined", consumed, nil)
 	default:
@@ -392,6 +392,13 @@ func (e *Evaluator) statusFor(decl models.DatasetDeclaration, state models.Datas
 }
 
 func (e *Evaluator) updateStatus(ctx context.Context, namespace *string, name, status, reason string) error {
+	return e.updateStatusTx(ctx, e.db, namespace, name, status, reason)
+}
+
+// updateStatusTx is updateStatus bound to an explicit connection (a caller's
+// transaction or e.db). It threads the *gorm.DB rather than reassigning e.db so
+// a shared evaluator stays safe under concurrent ticks.
+func (e *Evaluator) updateStatusTx(ctx context.Context, db *gorm.DB, namespace *string, name, status, reason string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errEmptyDatasetName
@@ -406,7 +413,7 @@ func (e *Evaluator) updateStatus(ctx context.Context, namespace *string, name, s
 	// One upsert carrying the real status/reason: insert the row on first
 	// observation, otherwise update the evaluator-owned columns in place. dqlite
 	// accepts ON CONFLICT DO UPDATE for plain column assignments.
-	return e.db.WithContext(ctx).Clauses(clause.OnConflict{
+	return db.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns: []clause.Column{{Name: "namespace"}, {Name: "name"}},
 		DoUpdates: clause.Assignments(map[string]any{
 			"status":     status,
@@ -486,7 +493,44 @@ func watermarkAdvancedPast(previous, current string) bool {
 	return true
 }
 
-func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
+func (e *Evaluator) deriveIfFreshnessTriggered(ctx context.Context, decl models.DatasetDeclaration, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
+	triggerID, ok, err := e.freshnessTriggerIDForJob(ctx, decl.JobID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "job trigger is not freshness; waiting for scheduler", consumed, nil)
+	}
+	return e.derive(ctx, decl, triggerID, reason, consumed, triggerDepth, budget)
+}
+
+func (e *Evaluator) freshnessTriggerIDForJob(ctx context.Context, jobID uuid.UUID) (*uuid.UUID, bool, error) {
+	var row struct {
+		TriggerID   uuid.UUID
+		TriggerType models.TriggerType
+	}
+	// Filter GORM soft-deletes on both sides of the raw join: a plain Joins does
+	// not apply the deleted_at scope, so a soft-deleted trigger could otherwise
+	// still match an active job's trigger_id.
+	err := e.db.WithContext(ctx).Table("jobs").
+		Select("jobs.trigger_id AS trigger_id, triggers.type AS trigger_type").
+		Joins("JOIN triggers ON triggers.id = jobs.trigger_id AND triggers.deleted_at IS NULL").
+		Where("jobs.id = ? AND jobs.deleted_at IS NULL", jobID).
+		Take(&row).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if row.TriggerType != models.TriggerTypeFreshness || row.TriggerID == uuid.Nil {
+		return nil, false, nil
+	}
+	id := row.TriggerID
+	return &id, true, nil
+}
+
+func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, triggerID *uuid.UUID, reason string, consumed map[string]string, triggerDepth int, budget *int) error {
 	if budget != nil && *budget <= 0 {
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, "freshness derivation cap reached", consumed, nil)
 	}
@@ -514,7 +558,7 @@ func (e *Evaluator) derive(ctx context.Context, decl models.DatasetDeclaration, 
 		return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedActiveRun, "producer already has an active or queued run for the consumed watermarks", consumed, nil)
 	}
 
-	runRecord, handled, err := e.runStore.AdmitRun(decl.JobID, nil, runstorage.WithStartParams(params))
+	runRecord, handled, err := e.runStore.AdmitRun(decl.JobID, triggerID, runstorage.WithStartParams(params))
 	if err != nil {
 		if errors.Is(err, runstorage.ErrRunSkipped) || errors.Is(err, runstorage.ErrRunQueued) || errors.Is(err, runstorage.ErrMaxConcurrentRunsReached) {
 			return e.recordDerivation(ctx, decl, models.DatasetDecisionSkippedAdmission, err.Error(), consumed, nil)
@@ -571,11 +615,18 @@ func sameDerivationParams(a, b map[string]string) bool {
 }
 
 func (e *Evaluator) recordDerivation(ctx context.Context, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
+	return e.recordDerivationTx(ctx, e.db, decl, decision, reason, consumed, runID)
+}
+
+// recordDerivationTx is recordDerivation bound to an explicit connection so a
+// batch of skip decisions can commit atomically. It threads the *gorm.DB rather
+// than reassigning e.db so a shared evaluator stays safe under concurrent ticks.
+func (e *Evaluator) recordDerivationTx(ctx context.Context, db *gorm.DB, decl models.DatasetDeclaration, decision, reason string, consumed map[string]string, runID *uuid.UUID) error {
 	if strings.TrimSpace(decision) == "" {
 		return nil
 	}
 	metrics.DatasetDerivationsTotal.WithLabelValues(datasetParamName(decl.Namespace, decl.Name), decision).Inc()
-	return e.db.WithContext(ctx).Create(&models.DatasetDerivation{
+	return db.WithContext(ctx).Create(&models.DatasetDerivation{
 		ID:                 uuid.New(),
 		Namespace:          decl.Namespace,
 		Name:               decl.Name,

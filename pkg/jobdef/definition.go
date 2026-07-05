@@ -3,9 +3,11 @@ package jobdef
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,9 +19,10 @@ const (
 	APIVersionV1 = "v1"
 	KindJob      = "Job"
 
-	TriggerCron  = "cron"
-	TriggerHTTP  = "http"
-	TriggerEvent = "event"
+	TriggerCron      = "cron"
+	TriggerHTTP      = "http"
+	TriggerEvent     = "event"
+	TriggerFreshness = "freshness"
 
 	CallbackNotification = "notification"
 
@@ -290,9 +293,20 @@ type SourceDataset struct {
 }
 
 // MetadataDatasets is the job-level datasets surface: the external source
-// datasets the job's steps consume.
+// datasets the job's steps consume plus scheduling controls for freshness.
 type MetadataDatasets struct {
 	Sources []SourceDataset `yaml:"sources,omitempty" json:"sources,omitempty"`
+	// SkipWhenFresh controls P1 cron skipping. Nil means the default: true when a
+	// job declares datasets. This is scheduling metadata and does not affect cache
+	// identity.
+	SkipWhenFresh *bool `yaml:"skipWhenFresh,omitempty" json:"skipWhenFresh,omitempty"`
+}
+
+// SkipWhenFreshEnabled applies the metadata.datasets.skipWhenFresh default.
+// A nil metadata.datasets block also defaults to true so step-level datasets
+// declared without job-level sources still opt into skip-when-fresh.
+func SkipWhenFreshEnabled(datasets *MetadataDatasets) bool {
+	return datasets == nil || datasets.SkipWhenFresh == nil || *datasets.SkipWhenFresh
 }
 
 // Failure class names accepted by metadata.remediation.classes and the keys
@@ -684,6 +698,9 @@ func (d *Definition) Validate() error {
 	if err := validateDatasets(d); err != nil {
 		return err
 	}
+	if err := validateFreshnessTriggerDefinition(d); err != nil {
+		return err
+	}
 	if err := validateRemediation(d); err != nil {
 		return err
 	}
@@ -982,9 +999,9 @@ func validateSchedulingMetadata(metadata *Metadata) (map[string]struct{}, error)
 
 func validateTrigger(t *Trigger) error {
 	switch t.Type {
-	case TriggerCron, TriggerHTTP, TriggerEvent:
+	case TriggerCron, TriggerHTTP, TriggerEvent, TriggerFreshness:
 	default:
-		return fmt.Errorf("trigger.type must be one of [%s,%s,%s]", TriggerCron, TriggerHTTP, TriggerEvent)
+		return fmt.Errorf("trigger.type must be one of [%s,%s,%s,%s]", TriggerCron, TriggerHTTP, TriggerEvent, TriggerFreshness)
 	}
 	if t.Configuration == nil {
 		t.Configuration = map[string]any{}
@@ -998,12 +1015,84 @@ func validateTrigger(t *Trigger) error {
 		if err := validateEventTriggerConfiguration(t.Configuration); err != nil {
 			return err
 		}
+	case TriggerFreshness:
+		if !freshnessFeatureEnabled() {
+			return fmt.Errorf("trigger.type %q requires CAESIUM_FRESHNESS_ENABLED=true", TriggerFreshness)
+		}
 	}
 	return nil
 }
 
-func ValidateTriggerSpec(t *Trigger) error {
-	return validateTrigger(t)
+// ValidateTriggerSpec validates a trigger, optionally against the job
+// definition(s) it belongs to. A freshness trigger derives its runs from the
+// job's declared dataset graph (a consumed input plus a produced dataset with a
+// freshness SLO), which lives on the definition rather than the trigger. Callers
+// that own the definition (the apply path validates it via Definition.Validate)
+// pass it here so the dataset requirement is enforced; the trigger-create/update
+// API validates with the trigger alone and therefore has no dataset context. A
+// bare freshness trigger (no definition supplied) is rejected: it cannot satisfy
+// the dataset requirement, so it must be declared on a job definition instead.
+func ValidateTriggerSpec(t *Trigger, defs ...*Definition) error {
+	if err := validateTrigger(t); err != nil {
+		return err
+	}
+	sawDefinition := false
+	for _, def := range defs {
+		if def == nil {
+			continue
+		}
+		sawDefinition = true
+		if err := validateFreshnessTriggerDefinition(def); err != nil {
+			return err
+		}
+	}
+	if t != nil && t.Type == TriggerFreshness && !sawDefinition {
+		return fmt.Errorf("trigger.type %q cannot be created via the trigger API; declare it on a job definition with its consumed and produced datasets", TriggerFreshness)
+	}
+	return nil
+}
+
+func freshnessFeatureEnabled() bool {
+	enabled, err := strconv.ParseBool(strings.TrimSpace(os.Getenv("CAESIUM_FRESHNESS_ENABLED")))
+	return err == nil && enabled
+}
+
+func validateFreshnessTriggerDefinition(d *Definition) error {
+	if d == nil || d.Trigger.Type != TriggerFreshness {
+		return nil
+	}
+	consumes, producesWithFreshness := false, false
+	// metadata.datasets.sources are the external-arrival binding path for a
+	// consumed input: BuildDeclarations persists each named source as a
+	// declaration, so a job that binds its input through sources (rather than a
+	// step-level consumes) still has a consumed input and satisfies the
+	// requirement. Mirror BuildDeclarations' non-empty-name check.
+	if d.Metadata.Datasets != nil {
+		for i := range d.Metadata.Datasets.Sources {
+			if strings.TrimSpace(d.Metadata.Datasets.Sources[i].Name) != "" {
+				consumes = true
+				break
+			}
+		}
+	}
+	for i := range d.Steps {
+		if d.Steps[i].Datasets == nil {
+			continue
+		}
+		if len(d.Steps[i].Datasets.Consumes) > 0 {
+			consumes = true
+		}
+		for j := range d.Steps[i].Datasets.Produces {
+			if strings.TrimSpace(d.Steps[i].Datasets.Produces[j].Freshness) != "" {
+				producesWithFreshness = true
+				break
+			}
+		}
+	}
+	if !consumes || !producesWithFreshness {
+		return fmt.Errorf("trigger.type %q requires at least one consumed dataset (a step-level consumes or a metadata.datasets.sources entry) and one produced dataset with freshness", TriggerFreshness)
+	}
+	return nil
 }
 
 func validateHTTPTriggerConfiguration(cfg map[string]any) error {
