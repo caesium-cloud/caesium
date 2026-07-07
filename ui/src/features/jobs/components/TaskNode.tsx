@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { isRecord } from '@/lib/typeGuards';
-import { cn, formatUTCTimestamp, shortId } from '@/lib/utils';
+import { cn, formatUTCTimestamp } from '@/lib/utils';
 import {
   Activity,
   CheckCircle2,
@@ -26,6 +26,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter } = data;
   const taskLabel = typeof label === 'string' ? label : '';
   const runtimeHints = getRuntimeHints(atom?.spec);
+  const { showTargetHandle, showSourceHandle } = getHandleVisibility(data.edgeDegree);
 
   const getStatusIcon = () => {
     switch (status) {
@@ -110,20 +111,30 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
       )}
     >
-      <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+      {showTargetHandle ? (
+        <Handle
+          data-testid="task-node-target-handle"
+          type="target"
+          position={Position.Left}
+          className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan"
+        />
+      ) : null}
 
       <div className="flex h-full flex-col gap-2">
-        {/* Row 1: Image & Status */}
         <div className="flex min-h-[44px] items-start justify-between gap-3">
-          <div className="flex items-center gap-2 overflow-hidden">
+          <div className="flex min-w-0 items-center gap-2 overflow-hidden">
             <div className="rounded-lg border border-caesium-cyan/20 bg-muted p-1.5 shadow-inner shadow-caesium-cyan/10">
               {getEngineIcon()}
             </div>
-            <div className="flex flex-col min-w-0">
-              <span className="text-[11px] font-bold truncate text-foreground" title={atom?.image}>
-                {shortImage(atom?.image)}
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span
+                data-testid="task-node-label"
+                className="block truncate text-[13px] font-bold leading-5 text-foreground"
+                title={taskLabel}
+              >
+                {taskLabel}
               </span>
-              <div className="flex items-center gap-1">
+              <div className="mt-0.5 flex min-w-0 items-center gap-1">
                 {isShell && (
                   <span className="rounded border border-caesium-cyan/40 bg-caesium-cyan/15 px-1 text-[8px] font-black tracking-tighter text-caesium-cyan">
                     SHELL
@@ -149,8 +160,12 @@ export const TaskNode = memo(({ data }: NodeProps) => {
                     SA
                   </span>
                 )}
-                <span className="truncate text-[9px] font-mono text-muted-foreground">
-                  {shortId(taskLabel)}
+                <span
+                  data-testid="task-node-image"
+                  className="truncate text-[9px] font-mono text-muted-foreground"
+                  title={atom?.image}
+                >
+                  {shortImage(atom?.image)}
                 </span>
               </div>
             </div>
@@ -238,7 +253,14 @@ export const TaskNode = memo(({ data }: NodeProps) => {
         </div>
       </div>
 
-      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan" />
+      {showSourceHandle ? (
+        <Handle
+          data-testid="task-node-source-handle"
+          type="source"
+          position={Position.Right}
+          className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan"
+        />
+      ) : null}
     </div>
   );
 });
@@ -250,6 +272,24 @@ function formatRetryAfter(value: unknown) {
     return 'the current window resets';
   }
   return formatUTCTimestamp(value, value);
+}
+
+function getHandleVisibility(edgeDegree: unknown) {
+  if (!isRecord(edgeDegree)) {
+    return {
+      showTargetHandle: true,
+      showSourceHandle: true,
+    };
+  }
+
+  return {
+    showTargetHandle: readEdgeCount(edgeDegree.incoming) > 0,
+    showSourceHandle: readEdgeCount(edgeDegree.outgoing) > 0,
+  };
+}
+
+function readEdgeCount(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function getRuntimeHints(spec: unknown) {
