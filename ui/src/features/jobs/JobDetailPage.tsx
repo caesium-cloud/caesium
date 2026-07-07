@@ -63,6 +63,16 @@ export function JobDetailPage() {
     refetchInterval: streamHealthy ? false : 15000,
   });
 
+  // Short-id deep links: GET /v1/jobs/:id resolves an unambiguous UUID prefix,
+  // but the sub-resource routes (runs/queue/dag/tasks) still require a full
+  // UUID. Once the job resolves, canonicalize the URL to its full id so every
+  // sub-fetch, SSE filter, and mutation below operates on the full id.
+  useEffect(() => {
+    if (job && job.id !== jobId) {
+      navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true });
+    }
+  }, [job, jobId, navigate]);
+
   const { data: runs, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
     queryFn: () => api.getJobRuns(jobId),
@@ -534,9 +544,21 @@ export function JobDetailPage() {
               <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
             )}
             {secondaryView === "definition" && (
-              <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
-                {yamlStringify(jobManifest)}
-              </pre>
+              <div className="space-y-3">
+                <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
+                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                  <div>
+                    <div className="font-medium text-warning">Reconstructed from loaded job-detail data</div>
+                    <div className="mt-1 text-text-3">
+                      Root callbacks are not exposed by this page&apos;s loaded endpoints. Original multi-engine
+                      volume declarations are represented from resolved mounts when possible.
+                    </div>
+                  </div>
+                </div>
+                <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
+                  {yamlStringify(jobManifest)}
+                </pre>
+              </div>
             )}
             {secondaryView === "backfills" && (
               <BackfillsView jobId={jobId} />

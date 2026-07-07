@@ -3,6 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { Atom, Job, JobDAGResponse, JobTask, Trigger } from "@/lib/api";
 import { buildJobAuthoringManifest, formatCommandForDisplay } from "../job-detail-manifest";
 
+type LoadedJob = Job & {
+  priority: string;
+  concurrency: unknown;
+  rate_limits: unknown;
+  schema_validation: string;
+  replay_safe: boolean;
+  callbacks: Array<{ type: string; configuration: Record<string, unknown> }>;
+};
+
 describe("job detail command formatting", () => {
   it("decodes JSON-array command strings before joining for display", () => {
     expect(formatCommandForDisplay('["sh","-c","echo \\u003e /out/files.json \\u0026\\u0026 echo ok"]')).toBe(
@@ -32,19 +41,18 @@ describe("buildJobAuthoringManifest", () => {
       paused: false,
       created_at: "2026-07-05T00:00:00Z",
       updated_at: "2026-07-05T00:00:00Z",
-      latest_run: { id: "run-1", status: "failed" },
       priority: "high",
       concurrency: { maxRuns: 1, strategy: "queue" },
       rate_limits: [{ resource: "warehouse", limit: 3, window: "1m" }],
       schema_validation: "warn",
       replay_safe: true,
-    } as Job & {
-      priority: string;
-      concurrency: unknown;
-      rate_limits: unknown;
-      schema_validation: string;
-      replay_safe: boolean;
-    };
+      callbacks: [
+        {
+          type: "notification",
+          configuration: { channel: "ops", events: ["failed"] },
+        },
+      ],
+    } satisfies LoadedJob;
     const trigger: Trigger = {
       id: "trigger-1",
       alias: "nightly-report",
@@ -90,7 +98,20 @@ describe("buildJobAuthoringManifest", () => {
         engine: "docker",
         image: "alpine:3.23",
         command: '["sh","-c","echo \\u003e /out/files.json"]',
-        spec: { env: { FOO: "bar" }, workdir: "/work" },
+        spec: {
+          env: { FOO: "bar" },
+          workdir: "/work",
+          resolvedVolumeMounts: [
+            {
+              name: "work",
+              type: "bind",
+              source: "/mnt/shared/work",
+              target: "/work",
+              readOnly: true,
+              subPath: "reports",
+            },
+          ],
+        },
         created_at: "2026-07-05T00:00:00Z",
         updated_at: "2026-07-05T00:00:00Z",
       },
@@ -143,6 +164,18 @@ describe("buildJobAuthoringManifest", () => {
         configuration: { cron: "*/5 * * * *", timezone: "UTC" },
         defaultParams: { env: "prod" },
       },
+      callbacks: [
+        {
+          type: "notification",
+          configuration: { channel: "ops", events: ["failed"] },
+        },
+      ],
+      volumes: [
+        {
+          name: "work",
+          source: { bind: "/mnt/shared/work" },
+        },
+      ],
       steps: [
         {
           name: "extract",
@@ -157,6 +190,7 @@ describe("buildJobAuthoringManifest", () => {
           outputSchema: { type: "object", properties: { rows: { type: "integer" } } },
           env: { FOO: "bar" },
           workdir: "/work",
+          volumeMounts: [{ volume: "work", path: "/work", readOnly: true, subPath: "reports" }],
         },
         {
           name: "load",
