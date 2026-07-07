@@ -1,7 +1,14 @@
-import cronParser from "cron-parser";
+import * as cronParser from "cron-parser";
 import type { Trigger } from "@/lib/api";
 
 export type TriggerConfig = Record<string, unknown>;
+
+type CronParserOptions = { tz?: string };
+type CronDateLike = { toDate: () => Date };
+type CronExpressionLike = { next: () => CronDateLike };
+type CronExpressionParserLike = {
+  parse: (expression: string, options?: CronParserOptions) => CronExpressionLike;
+};
 
 export type TriggerDescription =
   | {
@@ -37,6 +44,7 @@ export type TriggerDescription =
     };
 
 const cronExpressionKeys = ["expression", "cron", "schedule"] as const;
+const cronExpressionParser = resolveCronExpressionParser(cronParser);
 
 export function normalizeWebhookPath(path: unknown) {
   if (typeof path !== "string") return "";
@@ -74,11 +82,11 @@ export function getCronExpression(config: TriggerConfig): string | null {
 
 export function getNextFireDate(expression: string | null | undefined, timezone?: string): Date | null {
   const cronExpression = typeof expression === "string" ? expression.trim() : "";
-  if (!cronExpression) return null;
+  if (!cronExpression || !cronExpressionParser) return null;
 
   try {
     const options = timezone ? { tz: timezone } : undefined;
-    return cronParser.parse(cronExpression, options).next().toDate();
+    return cronExpressionParser.parse(cronExpression, options).next().toDate();
   } catch {
     return null;
   }
@@ -204,6 +212,28 @@ function trimmedString(value: unknown) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function resolveCronExpressionParser(value: unknown, seen = new Set<unknown>()): CronExpressionParserLike | null {
+  if (!value || seen.has(value)) return null;
+  seen.add(value);
+
+  if (isCronExpressionParser(value)) return value;
+
+  if (isRecord(value)) {
+    const named = resolveCronExpressionParser(value.CronExpressionParser, seen);
+    if (named) return named;
+
+    const wrappedDefault = resolveCronExpressionParser(value.default, seen);
+    if (wrappedDefault) return wrappedDefault;
+  }
+
+  return null;
+}
+
+function isCronExpressionParser(value: unknown): value is CronExpressionParserLike {
+  if (!value || (typeof value !== "object" && typeof value !== "function")) return false;
+  return typeof (value as { parse?: unknown }).parse === "function";
 }
 
 function isRecord(value: unknown): value is TriggerConfig {

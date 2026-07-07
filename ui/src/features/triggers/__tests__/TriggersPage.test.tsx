@@ -32,6 +32,13 @@ describe("trigger cron parsing", () => {
     expect(Number.isNaN(next?.getTime())).toBe(false);
   });
 
+  it("parses the run-history fixture schedule with UTC", () => {
+    const next = getNextFireDate("*/2 * * * *", "UTC");
+
+    expect(next).toBeInstanceOf(Date);
+    expect(Number.isNaN(next?.getTime())).toBe(false);
+  });
+
   it("extracts backend-compatible schedule keys before parsing", () => {
     const description = describeTrigger(trigger("cron", {
       schedule: "0 * * * *",
