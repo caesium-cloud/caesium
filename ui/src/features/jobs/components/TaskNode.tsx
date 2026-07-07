@@ -2,6 +2,7 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { isRecord } from '@/lib/typeGuards';
 import { cn, formatUTCTimestamp } from '@/lib/utils';
+import { getHandleVisibility } from './node-edges';
 import {
   Activity,
   CheckCircle2,
@@ -272,24 +273,6 @@ function formatRetryAfter(value: unknown) {
     return 'the current window resets';
   }
   return formatUTCTimestamp(value, value);
-}
-
-function getHandleVisibility(edgeDegree: unknown) {
-  if (!isRecord(edgeDegree)) {
-    return {
-      showTargetHandle: true,
-      showSourceHandle: true,
-    };
-  }
-
-  return {
-    showTargetHandle: readEdgeCount(edgeDegree.incoming) > 0,
-    showSourceHandle: readEdgeCount(edgeDegree.outgoing) > 0,
-  };
-}
-
-function readEdgeCount(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function getRuntimeHints(spec: unknown) {

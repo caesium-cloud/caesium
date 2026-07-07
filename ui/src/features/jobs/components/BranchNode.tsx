@@ -1,6 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { cn, shortId } from '@/lib/utils';
+import { getHandleVisibility } from './node-edges';
 import {
   Activity,
   CheckCircle2,
@@ -209,24 +210,3 @@ export const BranchNode = memo(({ data }: NodeProps) => {
 
 BranchNode.displayName = 'BranchNode';
 
-function getHandleVisibility(edgeDegree: unknown) {
-  if (!isEdgeDegree(edgeDegree)) {
-    return {
-      showTargetHandle: true,
-      showSourceHandle: true,
-    };
-  }
-
-  return {
-    showTargetHandle: readEdgeCount(edgeDegree.incoming) > 0,
-    showSourceHandle: readEdgeCount(edgeDegree.outgoing) > 0,
-  };
-}
-
-function isEdgeDegree(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function readEdgeCount(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
-}

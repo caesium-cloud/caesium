@@ -234,12 +234,13 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
     );
 
     const isSingleNodeDAG = layoutedNodes.length === 1 && layoutedEdges.length === 0;
+    const dagMaxZoom = isSingleNodeDAG ? 2.2 : 1.5;
     const fitViewOptions = useMemo(
       () => ({
         padding: isSingleNodeDAG ? 0.06 : 0.2,
-        maxZoom: isSingleNodeDAG ? 2.2 : 1.5,
+        maxZoom: dagMaxZoom,
       }),
-      [isSingleNodeDAG]
+      [isSingleNodeDAG, dagMaxZoom]
     );
 
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
@@ -258,7 +259,7 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
           fitView
           fitViewOptions={fitViewOptions}
           minZoom={0.1}
-          maxZoom={isSingleNodeDAG ? 2.2 : 1.5}
+          maxZoom={dagMaxZoom}
         >
           <Background gap={20} />
           <Controls />
