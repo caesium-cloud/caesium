@@ -36,6 +36,28 @@ describe('TaskNode', () => {
     expect(screen.getByTestId('status-icon-succeeded')).toBeInTheDocument();
   });
 
+  it('renders the full task name as the primary truncated line', () => {
+    const taskName = 'bootstrap-operator-live-state-collector';
+
+    renderTaskNode({
+      label: taskName,
+      status: 'pending',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: [] },
+      engine: 'docker',
+      command: [],
+    });
+
+    const primaryLabel = screen.getByTestId('task-node-label');
+    expect(primaryLabel).toHaveTextContent(taskName);
+    expect(primaryLabel).toHaveAttribute('title', taskName);
+    expect(primaryLabel).toHaveClass('truncate');
+    expect(screen.queryByText('bootstra')).not.toBeInTheDocument();
+
+    const imageLabel = screen.getByTestId('task-node-image');
+    expect(imageLabel).toHaveTextContent('alpine:3.23');
+    expect(imageLabel).toHaveClass('truncate');
+  });
+
   it('renders task with failed status and shows error info', () => {
     renderTaskNode({
       label: 'task-def456',
@@ -121,6 +143,20 @@ describe('TaskNode', () => {
 
     expect(screen.queryByText('IN')).not.toBeInTheDocument();
     expect(screen.queryByText('OUT')).not.toBeInTheDocument();
+  });
+
+  it('hides dangling handles on nodes with no incident edges', () => {
+    renderTaskNode({
+      label: 'single-task',
+      status: 'pending',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: [] },
+      engine: 'docker',
+      command: [],
+      edgeDegree: { incoming: 0, outgoing: 0, total: 0 },
+    });
+
+    expect(screen.queryByTestId('task-node-target-handle')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('task-node-source-handle')).not.toBeInTheDocument();
   });
 
   it('renders runtime badges for resolved volumes and Kubernetes identity', () => {

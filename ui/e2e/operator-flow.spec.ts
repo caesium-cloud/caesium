@@ -66,7 +66,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await node.click();
 
   await expect(page.getByTestId("task-detail-panel")).toBeVisible();
-  await expect(page.getByTestId("task-detail-panel").getByText("Live", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("task-detail-panel").getByText("Live stream", { exact: true })).toBeVisible();
   await expect(page.getByTestId("task-log-plaintext")).toContainText("Starting log streaming showcase");
 
   await expect(page.locator('[data-status="succeeded"]').first()).toBeVisible({ timeout: 90_000 });
@@ -77,7 +77,7 @@ test("operator can trigger a run, watch it update live, and inspect retained log
   await node.click();
 
   await expect(page.getByTestId("task-detail-panel")).toBeVisible();
-  await expect(page.getByTestId("task-detail-panel").getByText("Retained", { exact: true })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("task-detail-panel").getByText("Retained snapshot", { exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("task-log-plaintext")).toContainText(
     "stream complete: retained logs should remain available after cleanup",
   );

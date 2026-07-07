@@ -21,6 +21,7 @@ import { Duration } from '@/components/duration';
 export const BranchNode = memo(({ data }: NodeProps) => {
   const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error } = data;
   const taskLabel = typeof label === 'string' ? label : '';
+  const { showTargetHandle, showSourceHandle } = getHandleVisibility(data.edgeDegree);
 
   const getStatusIcon = () => {
     switch (status) {
@@ -101,7 +102,14 @@ export const BranchNode = memo(({ data }: NodeProps) => {
         isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
       )}
     >
-      <Handle type="target" position={Position.Left} className="h-3 w-3 border-2 border-dag-bg bg-gold" />
+      {showTargetHandle ? (
+        <Handle
+          data-testid="branch-node-target-handle"
+          type="target"
+          position={Position.Left}
+          className="h-3 w-3 border-2 border-dag-bg bg-gold"
+        />
+      ) : null}
 
       <div className="flex h-full flex-col gap-2">
         {/* Row 1: Image & Status */}
@@ -187,9 +195,38 @@ export const BranchNode = memo(({ data }: NodeProps) => {
         </div>
       </div>
 
-      <Handle type="source" position={Position.Right} className="h-3 w-3 border-2 border-dag-bg bg-gold" />
+      {showSourceHandle ? (
+        <Handle
+          data-testid="branch-node-source-handle"
+          type="source"
+          position={Position.Right}
+          className="h-3 w-3 border-2 border-dag-bg bg-gold"
+        />
+      ) : null}
     </div>
   );
 });
 
 BranchNode.displayName = 'BranchNode';
+
+function getHandleVisibility(edgeDegree: unknown) {
+  if (!isEdgeDegree(edgeDegree)) {
+    return {
+      showTargetHandle: true,
+      showSourceHandle: true,
+    };
+  }
+
+  return {
+    showTargetHandle: readEdgeCount(edgeDegree.incoming) > 0,
+    showSourceHandle: readEdgeCount(edgeDegree.outgoing) > 0,
+  };
+}
+
+function isEdgeDegree(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function readEdgeCount(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}

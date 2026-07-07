@@ -27,6 +27,7 @@ type Job interface {
 	Get(uuid.UUID) (*models.Job, error)
 	GetByIDPrefix(string) (*models.Job, error)
 	Queue(uuid.UUID) ([]QueueItem, error)
+	CancelQueuedRun(uuid.UUID, uuid.UUID) error
 	Create(*CreateRequest) (*models.Job, error)
 	Delete(uuid.UUID) error
 	SetPaused(id uuid.UUID, paused bool) (*models.Job, error)
@@ -371,6 +372,10 @@ func (j *jobService) Queue(id uuid.UUID) ([]QueueItem, error) {
 		})
 	}
 	return items, nil
+}
+
+func (j *jobService) CancelQueuedRun(jobID, queueID uuid.UUID) error {
+	return runstorage.NewStore(j.db.WithContext(j.ctx)).CancelQueuedRun(j.ctx, jobID, queueID)
 }
 
 func decodeQueueParams(raw []byte) (map[string]string, error) {

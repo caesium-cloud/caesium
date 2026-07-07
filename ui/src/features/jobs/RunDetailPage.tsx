@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, RotateCcw, Square, History } from "lucide-react";
+import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, FileJson, RotateCcw, Square, History } from "lucide-react";
 import { toast } from "sonner";
 import { NotFoundState } from "@/components/not-found-state";
 import { RelativeTime } from "@/components/relative-time";
@@ -39,6 +39,7 @@ export function RunDetailPage() {
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [timelineOpen, setTimelineOpen] = useState(true);
+  const [reproducibilityOpen, setReproducibilityOpen] = useState(false);
   const [replayDialogOpen, setReplayDialogOpen] = useState(false);
   const principal = usePrincipal();
 
@@ -454,14 +455,14 @@ export function RunDetailPage() {
         testId="run-incident-ribbon"
       />
 
-      <ReceiptPanel jobId={jobId} runId={runId} />
-
       {/* Gantt timeline */}
-      <div className="rounded-md border border-border/50 bg-card overflow-hidden">
+      <div data-testid="run-execution-timeline-section" className="rounded-md border border-border/50 bg-card overflow-hidden">
         <button
           type="button"
           className="flex w-full items-center gap-2 px-4 py-2.5 text-left border-b border-border/50 hover:bg-obsidian/30 transition-colors"
           onClick={() => setTimelineOpen((o) => !o)}
+          aria-expanded={timelineOpen}
+          aria-controls="run-execution-timeline-body"
         >
           {timelineOpen ? (
             <ChevronDown className="h-3.5 w-3.5 text-text-3" />
@@ -479,7 +480,7 @@ export function RunDetailPage() {
           </span>
         </button>
         {timelineOpen && (
-          <div className="p-4">
+          <div id="run-execution-timeline-body" className="p-4">
             {run.tasks && run.tasks.length > 0 ? (
               <RunTimeline tasks={run.tasks} taskDefinitions={taskDefinitions} runStartedAt={run.started_at} />
             ) : (
@@ -489,6 +490,49 @@ export function RunDetailPage() {
             )}
           </div>
         )}
+      </div>
+
+      {/* Interactive DAG with task selection */}
+      <div data-testid="run-interactive-dag-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
+        <div className="flex items-center gap-2 border-b border-border/50 px-4 py-2.5">
+          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+            Interactive DAG + task logs
+          </span>
+          <span className="ml-auto text-[10px] text-text-4">
+            {dag?.nodes?.length ?? 0} nodes
+          </span>
+        </div>
+        <div
+          ref={dagContainerRef}
+          className="relative overflow-hidden bg-card"
+          style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
+        >
+          {dag && atoms ? (
+            <JobDAG
+              dag={dag}
+              atoms={atoms}
+              taskDefinitions={taskDefinitions}
+              taskMetadata={taskMetadata}
+              taskRunData={runTasks}
+              onNodeClick={(id) => setSelectedTaskId((prev) => (prev === id ? null : id))}
+              selectedTaskId={selectedTaskId}
+            />
+          ) : null}
+
+          {selectedTaskId ? (
+            <TaskDetailPanel
+              key={selectedTaskId}
+              taskId={selectedTaskId}
+              task={selectedTask}
+              runTask={selectedRunTask}
+              taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
+              jobId={jobId}
+              runId={runId}
+              incidents={selectedTaskIncidents}
+              onClose={() => setSelectedTaskId(null)}
+            />
+          ) : null}
+        </div>
       </div>
 
       {callbackRuns.length > 0 ? <CallbackRunsSection callbacks={callbackRuns} /> : null}
@@ -510,36 +554,30 @@ export function RunDetailPage() {
         </Card>
       ) : null}
 
-      {/* DAG with task selection */}
-      <div
-        ref={dagContainerRef}
-        className="relative overflow-hidden rounded-md border border-border/50 bg-card"
-        style={{ height: dagHeight ? `${dagHeight}px` : "600px" }}
-      >
-        {dag && atoms ? (
-          <JobDAG
-            dag={dag}
-            atoms={atoms}
-            taskDefinitions={taskDefinitions}
-            taskMetadata={taskMetadata}
-            taskRunData={runTasks}
-            onNodeClick={(id) => setSelectedTaskId((prev) => (prev === id ? null : id))}
-            selectedTaskId={selectedTaskId}
-          />
-        ) : null}
-
-        {selectedTaskId ? (
-          <TaskDetailPanel
-            key={selectedTaskId}
-            taskId={selectedTaskId}
-            task={selectedTask}
-            runTask={selectedRunTask}
-            taskType={dag?.nodes?.find((n) => n.id === selectedTaskId)?.type}
-            jobId={jobId}
-            runId={runId}
-            incidents={selectedTaskIncidents}
-            onClose={() => setSelectedTaskId(null)}
-          />
+      <div data-testid="run-reproducibility-section" className="overflow-hidden rounded-md border border-border/50 bg-card">
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-obsidian/30 transition-colors"
+          onClick={() => setReproducibilityOpen((open) => !open)}
+          aria-expanded={reproducibilityOpen}
+          aria-controls="run-reproducibility-body"
+          data-testid="run-reproducibility-toggle"
+        >
+          {reproducibilityOpen ? (
+            <ChevronDown className="h-3.5 w-3.5 text-text-3" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5 text-text-3" />
+          )}
+          <FileJson className="h-3.5 w-3.5 text-text-3" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.1em] text-text-3">
+            Reproducibility
+          </span>
+          <span className="ml-auto text-[10px] text-text-4">Receipt</span>
+        </button>
+        {reproducibilityOpen ? (
+          <div id="run-reproducibility-body" className="border-t border-border/50 p-4">
+            <ReceiptPanel jobId={jobId} runId={runId} />
+          </div>
         ) : null}
       </div>
     </div>

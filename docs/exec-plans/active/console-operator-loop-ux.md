@@ -95,19 +95,21 @@ is the universal "something's broken" signal, so every normal run looks
 alarming. This stream leads with what happened and reserves red for real
 failure.
 
-- [ ] A1. Reorder `RunDetailPage` so the run leads with status + execution
+- [x] A1. Reorder `RunDetailPage` so the run leads with status + execution
       timeline + DAG + per-task logs; move `ReceiptPanel` into a collapsed
       "Reproducibility" section (or dedicated tab) below the fold, so attestation
       is one interaction away rather than the first thing on the page.
       Files: `ui/src/features/jobs/RunDetailPage.tsx`.
-- [ ] A2. Reserve red for real failures in the receipt panel: render "not
+      Note: Run detail now renders timeline and interactive DAG/task logs before a collapsed Reproducibility receipt section.
+- [x] A2. Reserve red for real failures in the receipt panel: render "not
       attested", "caching disabled", "digest_pinned=false", and
       "degraded / unverifiable" as neutral, informational text (muted/secondary
       styling), not red/amber alarm badges. Keep red strictly for actual task
       failure or attestation *tampering* (a computed digest that does not match
       the recorded one).
       Files: `ui/src/features/jobs/ReceiptPanel.tsx`.
-- [ ] A3. Reconcile the run page's timeline-vs-DAG surfaces so they no longer
+      Note: Degraded/unverifiable and digest-pinned-off receipt states now use muted informational styling, with component/e2e coverage.
+- [x] A3. Reconcile the run page's timeline-vs-DAG surfaces so they no longer
       read as a duplicated DAG (the review flagged "the DAG is rendered twice —
       overlay up top, full DAG at bottom"). Label the execution-timeline gantt
       and the interactive DAG distinctly, and/or collapse the redundant surface;
@@ -115,11 +117,13 @@ failure.
       reconciliation in the PR and resolve as verified-not-a-bug.
       Files: `ui/src/features/jobs/RunDetailPage.tsx`.
       Depends on: A1.
-- [ ] A4. Order the run's task rows in execution order (by start time, breaking
+      Note: Verified one `JobDAG` on the run page; the separate SVG gantt is labeled Execution timeline and the graph is labeled Interactive DAG + task logs.
+- [x] A4. Order the run's task rows in execution order (by start time, breaking
       ties with DAG topological order) before rendering the timeline, so the
       task list reads top-to-bottom in the order things actually ran ("convert
       before list").
       Files: `ui/src/features/jobs/RunTimeline.tsx`.
+      Note: Timeline rows now sort by execution start time first and use the existing DAG topology as the tie-breaker.
 
 ### Stream B — Job-detail page: actionable header, intentional trigger, honest queue & counts
 
@@ -170,7 +174,7 @@ trigger deliberate, and its status honest.
       backend-provided reason fields, age, params, stable queue ID, inspect anchor,
       and source-level confirmation that the list endpoint reads unclaimed
       `run_queue` rows ordered by priority/age.
-- [ ] B5. Wire a queue-cancel affordance end-to-end (no dead buttons). This is
+- [x] B5. Wire a queue-cancel affordance end-to-end (no dead buttons). This is
       the plan's **one backend mutation** and there is currently no dequeue
       endpoint (only `cancelBackfill`), so it is specified tightly — an
       under-specified version risks a Cancel button that 403s under auth, is
@@ -221,6 +225,12 @@ trigger deliberate, and its status honest.
       `api/auth_rbac_policy_completeness_test.go`, the run-queue store
       (`internal/run/store.go` or the run-queue store package),
       `ui/src/lib/api.ts`, `ui/src/features/jobs/JobDetailPage.tsx`, `test/`.
+      W1-zeta backend note: `DELETE /v1/jobs/:id/queue/:queue_id` is bound
+      group-relative as `/jobs/:id/queue/:queue_id`, carries normalized
+      Operator RBAC policy key `DELETE /v1/jobs/:id/queue/:id`, and deletes only
+      unclaimed `run_queue` rows (`claimed_by = ''`); zero affected rows return
+      409. Integration coverage exercises clean unclaimed cancel and claimed-row
+      conflict.
       Depends on: B4.
 - [x] B6. Make the secondary views (Runs, Tasks, Config, YAML, Backfills, Cache)
       linkable sub-routes instead of modal state, so an operator can deep-link
@@ -242,12 +252,14 @@ render dangling input/output handles on nodes with no edges. And a "React Flow"
 attribution watermark shows bottom-right on every DAG, which reads as unbranded
 for a product surface.
 
-- [ ] C1. Promote the task name to the node's primary line — the full task name
+- [x] C1. Promote the task name to the node's primary line — the full task name
       with `text-overflow: ellipsis` + a `title` tooltip — and demote the image
       to a secondary line; stop `shortId`-truncating the label so operators scan
       the identifier they came for.
       Files: `ui/src/features/jobs/components/TaskNode.tsx`.
-- [ ] C2. Handle trivial and disconnected graphs: tighten zoom-to-fit (or render
+      Note (W1-γ): `TaskNode` now renders the task label as the primary
+      truncated/title line and moves the image to secondary metadata.
+- [x] C2. Handle trivial and disconnected graphs: tighten zoom-to-fit (or render
       a compact card) for single-node DAGs so one node no longer floats in an
       empty canvas, and hide the input/output `Handle`s on nodes with no incident
       edges (pass edge-degree into the node and render handles conditionally).
@@ -255,7 +267,10 @@ for a product surface.
       `ui/src/features/jobs/components/TaskNode.tsx`,
       `ui/src/features/jobs/components/BranchNode.tsx`.
       Depends on: C1.
-- [ ] C3. Hide the React Flow attribution watermark on every DAG
+      Note (W1-γ): `JobDAG` passes incoming/outgoing/total edge degree into DAG
+      nodes, isolated nodes hide handles, and single-node DAGs use tighter
+      `fitViewOptions`.
+- [ ] C3. (Deferred 2026-07-07 — the operator chose to keep the on-canvas watermark; no React Flow Pro subscription / OSS exception is confirmed. C1/C2 shipped without it.) Hide the React Flow attribution watermark on every DAG
       (`proOptions={{ hideAttribution: true }}` on the `ReactFlow` element) and
       drop the now-dead `.react-flow__attribution` styling.
       **Licensing gate**: xyflow's terms ask that you either keep the "React
@@ -266,6 +281,9 @@ for a product surface.
       lightweight "Powered by React Flow" credit in an About/footer surface
       rather than the on-canvas watermark, which still de-clutters the DAG.
       Files: `ui/src/features/jobs/JobDAG.tsx`, `ui/src/index.css`.
+      Note (W1-γ): implemented on-canvas attribution hiding; orchestrator still
+      needs to confirm the Pro/OSS exception stance or add the fallback footer
+      credit before publication.
 
 ### Stream D — Task log drawer
 
@@ -275,7 +293,7 @@ it is starved for space: it wraps structured lines mid-word
 overlaps the DAG node it describes. Its state toggles (`Ready` / `Retained`) are
 ambiguous. This stream gives the drawer room and makes its state legible.
 
-- [ ] D1. Give the log drawer room to breathe: default it wider / to full height,
+- [x] D1. Give the log drawer room to breathe: default it wider / to full height,
       stop it occluding the DAG node it describes (offset or dim the canvas
       rather than overlapping the selected node), and stop breaking structured
       log lines mid-word.
@@ -292,10 +310,15 @@ ambiguous. This stream gives the drawer room and makes its state legible.
       structured-log case; keep xterm for free-form/colorized streaming.
       Files: `ui/src/features/jobs/TaskDetailPanel.tsx`,
       `ui/src/features/jobs/LogViewer.tsx`.
-- [ ] D2. Disambiguate the log-state labels (`Ready` / `Retained` / `Live` /
+      Done in W1-delta: the drawer defaults wider, pads its DAG host by the
+      drawer width while mounted/resized, and renders structured logs through a
+      horizontally scrollable `<pre>` while retaining xterm for free-form logs.
+- [x] D2. Disambiguate the log-state labels (`Ready` / `Retained` / `Live` /
       `Truncated`) with clearer wording and tooltips explaining what each state
       means (e.g. "Retained → persisted logs from a finished task").
       Files: `ui/src/features/jobs/LogViewer.tsx`.
+      Done in W1-delta: state badges use clearer wording and native
+      title/aria tooltip text for loaded, live, retained, and truncated states.
       Depends on: D1.
 
 ## Sequencing & Dependencies

@@ -193,6 +193,41 @@ func TestEnqueueRunEvictsOldestWhenDepthExceeded(t *testing.T) {
 	require.NotEqual(t, oldestID, rows[1].ID)
 }
 
+func TestCancelQueuedRunDeletesOnlyUnclaimedRows(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+
+	store := NewStore(db)
+	job := createConcurrencyJob(t, db, "queue-cancel", jobdef.ConcurrencyStrategyQueue, 1)
+	unclaimedID := uuid.New()
+	claimedID := uuid.New()
+	now := time.Now().UTC()
+	require.NoError(t, db.Create(&models.RunQueue{
+		ID:        unclaimedID,
+		JobID:     job.ID,
+		Priority:  PriorityNormalValue,
+		CreatedAt: now,
+	}).Error)
+	require.NoError(t, db.Create(&models.RunQueue{
+		ID:        claimedID,
+		JobID:     job.ID,
+		Priority:  PriorityNormalValue,
+		ClaimedBy: "node-a/race",
+		ClaimedAt: &now,
+		CreatedAt: now,
+	}).Error)
+
+	require.NoError(t, store.CancelQueuedRun(context.Background(), job.ID, unclaimedID))
+	var count int64
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ?", unclaimedID).Count(&count).Error)
+	require.Zero(t, count)
+
+	err := store.CancelQueuedRun(context.Background(), job.ID, claimedID)
+	require.ErrorIs(t, err, ErrQueuedRunUnavailable)
+	require.NoError(t, db.Model(&models.RunQueue{}).Where("id = ? AND claimed_by = ?", claimedID, "node-a/race").Count(&count).Error)
+	require.EqualValues(t, 1, count)
+}
+
 func createConcurrencyJob(t *testing.T, db *gorm.DB, alias, strategy string, maxRuns int) *models.Job {
 	t.Helper()
 	now := time.Now().UTC()

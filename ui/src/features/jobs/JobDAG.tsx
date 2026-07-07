@@ -100,6 +100,12 @@ interface EdgeDetailsState {
   contractSchema?: Record<string, unknown>;
 }
 
+interface NodeEdgeDegree {
+  incoming: number;
+  outgoing: number;
+  total: number;
+}
+
 export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, taskRunData, onNodeClick, selectedTaskId }: JobDAGProps) {
     const [selectedEdge, setSelectedEdge] = useState<EdgeDetailsState | null>(null);
     const resolvedTaskStatus = useMemo(() => {
@@ -117,6 +123,21 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
 
         return statusByTask;
     }, [taskMetadata, taskStatus]);
+
+    const edgeDegreeByNode = useMemo(() => {
+        const degreeByNode = new Map<string, NodeEdgeDegree>();
+
+        (dag.nodes ?? []).forEach((node) => {
+            degreeByNode.set(node.id, { incoming: 0, outgoing: 0, total: 0 });
+        });
+
+        (dag.edges ?? []).forEach((edge) => {
+            incrementEdgeDegree(degreeByNode, edge.from, 'outgoing');
+            incrementEdgeDegree(degreeByNode, edge.to, 'incoming');
+        });
+
+        return degreeByNode;
+    }, [dag.edges, dag.nodes]);
 
     const initialNodes: Node[] = useMemo(() => {
         if (!dag.nodes) return [];
@@ -141,11 +162,12 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
                   error: meta?.error,
                   rateLimitRetryAfter: meta?.rate_limit_retry_after,
                   taskType: n.type,
+                  edgeDegree: edgeDegreeByNode.get(n.id) ?? { incoming: 0, outgoing: 0, total: 0 },
                 },
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, selectedTaskId]);
+    }, [dag, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, selectedTaskId, edgeDegreeByNode]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];
@@ -211,6 +233,15 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
         [initialNodes, initialEdges]
     );
 
+    const isSingleNodeDAG = layoutedNodes.length === 1 && layoutedEdges.length === 0;
+    const fitViewOptions = useMemo(
+      () => ({
+        padding: isSingleNodeDAG ? 0.06 : 0.2,
+        maxZoom: isSingleNodeDAG ? 2.2 : 1.5,
+      }),
+      [isSingleNodeDAG]
+    );
+
     const handleNodeClick = useCallback((_event: React.MouseEvent, node: Node) => {
       onNodeClick?.(node.id);
     }, [onNodeClick]);
@@ -225,9 +256,9 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
           edgeTypes={edgeTypes}
           onNodeClick={handleNodeClick}
           fitView
-          fitViewOptions={{ padding: 0.2 }}
+          fitViewOptions={fitViewOptions}
           minZoom={0.1}
-          maxZoom={1.5}
+          maxZoom={isSingleNodeDAG ? 2.2 : 1.5}
         >
           <Background gap={20} />
           <Controls />
@@ -249,6 +280,13 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
       </Dialog>
     </>
   );
+}
+
+function incrementEdgeDegree(degreeByNode: Map<string, NodeEdgeDegree>, nodeId: string, direction: 'incoming' | 'outgoing') {
+    const degree = degreeByNode.get(nodeId) ?? { incoming: 0, outgoing: 0, total: 0 };
+    degree[direction] += 1;
+    degree.total += 1;
+    degreeByNode.set(nodeId, degree);
 }
 
 function normalizeTaskStatus(status?: string) {

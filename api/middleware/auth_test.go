@@ -459,9 +459,17 @@ func TestAuthRejectsBadSessionCSRFRecordsFailureAndAudit(t *testing.T) {
 func requireAuditReason(t *testing.T, entry models.AuditLog, want string) {
 	t.Helper()
 
+	requireAuditMetadata(t, entry, map[string]any{"reason": want})
+}
+
+func requireAuditMetadata(t *testing.T, entry models.AuditLog, want map[string]any) {
+	t.Helper()
+
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal(entry.Metadata, &metadata))
-	require.Equal(t, want, metadata["reason"])
+	for key, value := range want {
+		require.Equal(t, value, metadata[key], "audit metadata %s", key)
+	}
 }
 
 func TestMiddlewareRejectsExpiredKey(t *testing.T) {
@@ -683,6 +691,117 @@ func TestMiddlewareScopedJobRouteRejectsOutOfScopeAlias(t *testing.T) {
 	he, ok := err.(*echo.HTTPError)
 	require.True(t, ok)
 	require.Equal(t, http.StatusForbidden, he.Code)
+}
+
+func TestMiddlewareScopedQueueCancelAllowsInScopeOperatorAndAudits(t *testing.T) {
+	db, svc, auditor, limiter, _ := setupAuth(t)
+	jobID, _, _ := seedJobFixtures(t, db, "alpha")
+	queueID := uuid.New()
+	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"alpha"}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	rec, err := callMiddleware(
+		t,
+		svc,
+		auditor,
+		limiter,
+		req,
+		&echo.RouteInfo{Path: "/v1/jobs/:id/queue/:queue_id", Method: http.MethodDelete},
+		echo.PathValues{
+			{Name: "id", Value: jobID.String()},
+			{Name: "queue_id", Value: queueID.String()},
+		},
+		func(c *echo.Context) error {
+			return c.NoContent(http.StatusNoContent)
+		},
+	)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionRunQueueCancel, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Equal(t, auth.OutcomeSuccess, entries[0].Outcome)
+	require.Equal(t, "job", entries[0].ResourceType)
+	require.Equal(t, "alpha", entries[0].ResourceID)
+	requireAuditMetadata(t, entries[0], map[string]any{
+		"method": "DELETE",
+		"path":   "/v1/jobs/:id/queue/:id",
+	})
+}
+
+func TestMiddlewareScopedQueueCancelRejectsOutOfScopeOperator(t *testing.T) {
+	db, svc, auditor, limiter, _ := setupAuth(t)
+	jobID, _, _ := seedJobFixtures(t, db, "alpha")
+	queueID := uuid.New()
+	key := createKey(t, svc, models.RoleOperator, &models.KeyScope{Jobs: []string{"beta"}})
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	_, err := callMiddleware(
+		t,
+		svc,
+		auditor,
+		limiter,
+		req,
+		&echo.RouteInfo{Path: "/v1/jobs/:id/queue/:queue_id", Method: http.MethodDelete},
+		echo.PathValues{
+			{Name: "id", Value: jobID.String()},
+			{Name: "queue_id", Value: queueID.String()},
+		},
+		nil,
+	)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditMetadata(t, entries[0], map[string]any{
+		"reason":     "insufficient_scope",
+		"policy_key": "DELETE /v1/jobs/:id/queue/:id",
+	})
+}
+
+func TestMiddlewareQueueCancelRequiresOperator(t *testing.T) {
+	db, svc, auditor, limiter, _ := setupAuth(t)
+	jobID, _, _ := seedJobFixtures(t, db, "alpha")
+	queueID := uuid.New()
+	key := createKey(t, svc, models.RoleViewer, nil)
+
+	req := httptest.NewRequest(http.MethodDelete, "/v1/jobs/"+jobID.String()+"/queue/"+queueID.String(), nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	_, err := callMiddleware(
+		t,
+		svc,
+		auditor,
+		limiter,
+		req,
+		&echo.RouteInfo{Path: "/v1/jobs/:id/queue/:queue_id", Method: http.MethodDelete},
+		echo.PathValues{
+			{Name: "id", Value: jobID.String()},
+			{Name: "queue_id", Value: queueID.String()},
+		},
+		nil,
+	)
+	require.Error(t, err)
+
+	he, ok := err.(*echo.HTTPError)
+	require.True(t, ok)
+	require.Equal(t, http.StatusForbidden, he.Code)
+
+	entries, err := auditor.Query(&auth.AuditQueryRequest{Action: auth.ActionAuthDenied, Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	requireAuditMetadata(t, entries[0], map[string]any{
+		"reason":        "insufficient_role",
+		"required_role": string(models.RoleOperator),
+		"policy_key":    "DELETE /v1/jobs/:id/queue/:id",
+	})
 }
 
 func TestMiddlewareScopedRunRouteAllowsInScopeAlias(t *testing.T) {

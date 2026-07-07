@@ -82,6 +82,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id/tasks", job.Tasks)
 		g.GET("/jobs/:id/dag", job.DAG)
 		g.GET("/jobs/:id/queue", jobqueue.List)
+		g.DELETE("/jobs/:id/queue/:queue_id", jobqueue.Delete)
 		g.GET("/jobs/:id/runs", run.List)
 		g.GET("/jobs/:id/runs/diff", rundiffctrl.Get)
 		g.GET("/jobs/:id/runs/:run_id", run.Get)
