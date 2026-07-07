@@ -259,7 +259,7 @@ it is starved for space: it wraps structured lines mid-word
 overlaps the DAG node it describes. Its state toggles (`Ready` / `Retained`) are
 ambiguous. This stream gives the drawer room and makes its state legible.
 
-- [ ] D1. Give the log drawer room to breathe: default it wider / to full height,
+- [x] D1. Give the log drawer room to breathe: default it wider / to full height,
       stop it occluding the DAG node it describes (offset or dim the canvas
       rather than overlapping the selected node), and stop breaking structured
       log lines mid-word.
@@ -276,10 +276,15 @@ ambiguous. This stream gives the drawer room and makes its state legible.
       structured-log case; keep xterm for free-form/colorized streaming.
       Files: `ui/src/features/jobs/TaskDetailPanel.tsx`,
       `ui/src/features/jobs/LogViewer.tsx`.
-- [ ] D2. Disambiguate the log-state labels (`Ready` / `Retained` / `Live` /
+      Done in W1-delta: the drawer defaults wider, pads its DAG host by the
+      drawer width while mounted/resized, and renders structured logs through a
+      horizontally scrollable `<pre>` while retaining xterm for free-form logs.
+- [x] D2. Disambiguate the log-state labels (`Ready` / `Retained` / `Live` /
       `Truncated`) with clearer wording and tooltips explaining what each state
       means (e.g. "Retained → persisted logs from a finished task").
       Files: `ui/src/features/jobs/LogViewer.tsx`.
+      Done in W1-delta: state badges use clearer wording and native
+      title/aria tooltip text for loaded, live, retained, and truncated states.
       Depends on: D1.
 
 ## Sequencing & Dependencies

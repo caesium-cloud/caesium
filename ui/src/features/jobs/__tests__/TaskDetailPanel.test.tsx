@@ -4,12 +4,31 @@ import type { ReactElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailPanel } from "../TaskDetailPanel";
 
-vi.mock("../LogViewer", () => ({
-  LogViewer: ({ sizeVersion }: { sizeVersion?: number }) => (
-    <div data-testid="log-viewer" data-size-version={sizeVersion ?? ""}>
-      Log viewer
-    </div>
-  ),
+const { mockFetch, terminalWrite, terminalReset, fitAddonFit } = vi.hoisted(() => ({
+  mockFetch: vi.fn(),
+  terminalWrite: vi.fn((_chunk: string, callback?: () => void) => callback?.()),
+  terminalReset: vi.fn(),
+  fitAddonFit: vi.fn(),
+}));
+
+vi.mock("@/lib/auth", () => ({
+  withAuthHeaders: () => ({}),
+}));
+
+vi.mock("xterm", () => ({
+  Terminal: vi.fn().mockImplementation(() => ({
+    loadAddon: vi.fn(),
+    open: vi.fn(),
+    reset: terminalReset,
+    write: terminalWrite,
+    dispose: vi.fn(),
+  })),
+}));
+
+vi.mock("xterm-addon-fit", () => ({
+  FitAddon: vi.fn().mockImplementation(() => ({
+    fit: fitAddonFit,
+  })),
 }));
 
 describe("TaskDetailPanel", () => {
@@ -17,12 +36,20 @@ describe("TaskDetailPanel", () => {
     const queryClient = new QueryClient();
     return render(
       <QueryClientProvider client={queryClient}>
-        {component}
+        <div data-testid="dag-canvas-host" className="relative">
+          {component}
+        </div>
       </QueryClientProvider>,
     );
   }
 
   beforeEach(() => {
+    mockFetch.mockReset();
+    terminalWrite.mockClear();
+    terminalReset.mockClear();
+    fitAddonFit.mockClear();
+    globalThis.fetch = mockFetch as unknown as typeof fetch;
+    mockFetch.mockImplementation(() => Promise.resolve(noContentLogResponse()));
     window.localStorage.clear();
     Object.defineProperty(window, "innerWidth", {
       configurable: true,
@@ -43,22 +70,70 @@ describe("TaskDetailPanel", () => {
 
     const panel = screen.getByTestId("task-detail-panel");
     const handle = screen.getByTestId("task-detail-panel-resize-handle");
+    const host = screen.getByTestId("dag-canvas-host");
 
-    expect(panel).toHaveStyle({ width: "520px" });
-    expect(screen.getByTestId("log-viewer")).toHaveAttribute("data-size-version", "520");
+    expect(panel).toHaveStyle({ width: "680px" });
+    expect(host).toHaveStyle({ paddingRight: "680px" });
+    expect(host).toHaveAttribute("data-task-detail-panel-open", "true");
 
     fireEvent.pointerDown(handle, { clientX: 680 });
     fireEvent.pointerMove(window, { clientX: 400 });
 
     expect(panel).toHaveStyle({ width: "800px" });
-    expect(screen.getByTestId("log-viewer")).toHaveAttribute("data-size-version", "800");
+    expect(host).toHaveStyle({ paddingRight: "800px" });
 
     fireEvent.pointerMove(window, { clientX: 20 });
-    expect(panel).toHaveStyle({ width: "960px" });
+    expect(panel).toHaveStyle({ width: "1080px" });
+    expect(host).toHaveStyle({ paddingRight: "1080px" });
 
     fireEvent.pointerUp(window);
     fireEvent.pointerMove(window, { clientX: 500 });
-    expect(panel).toHaveStyle({ width: "960px" });
+    expect(panel).toHaveStyle({ width: "1080px" });
+  });
+
+  it("renders structured logs without wrapping and explains log state badges", async () => {
+    mockFetch.mockImplementationOnce(() =>
+      Promise.resolve(
+        new Response("worker=demo-node throughput_rps=172 trace_id=abc123\n", {
+          status: 200,
+          headers: {
+            "X-Caesium-Log-Source": "persisted",
+            "X-Caesium-Log-Truncated": "true",
+          },
+        }),
+      ),
+    );
+
+    renderPanel(
+      <TaskDetailPanel
+        taskId="task-logs"
+        jobId="job-1"
+        runId="run-1"
+        onClose={() => {}}
+      />,
+    );
+
+    expect(await screen.findByText("Logs ready")).toBeInTheDocument();
+    expect(screen.getByTestId("log-state-primary")).toHaveAttribute(
+      "title",
+      "Log output has loaded and is ready to inspect.",
+    );
+    expect(screen.getByTestId("log-source-badge")).toHaveTextContent("Retained snapshot");
+    expect(screen.getByTestId("log-source-badge")).toHaveAttribute(
+      "title",
+      "Persisted logs from a finished task.",
+    );
+    expect(screen.getByTestId("log-truncated-badge")).toHaveTextContent("Truncated output");
+    expect(screen.getByTestId("log-truncated-badge")).toHaveAttribute(
+      "title",
+      "The retained log exceeded the storage limit, so only the available tail is shown.",
+    );
+
+    const scroller = await screen.findByTestId("task-log-structured-scroll");
+    const structuredText = screen.getByTestId("task-log-structured-text");
+    expect(scroller).toHaveClass("overflow-auto");
+    expect(structuredText).toHaveClass("whitespace-pre");
+    expect(structuredText).toHaveTextContent("worker=demo-node throughput_rps=172 trace_id=abc123");
   });
 
   it("shows cache provenance when the task was served from cache", () => {
@@ -91,3 +166,12 @@ describe("TaskDetailPanel", () => {
     expect(screen.getByRole("button", { name: "Invalidate" })).toBeInTheDocument();
   });
 });
+
+function noContentLogResponse() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "X-Caesium-Log-State": "empty",
+    },
+  });
+}
