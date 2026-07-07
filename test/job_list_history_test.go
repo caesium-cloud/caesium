@@ -66,7 +66,7 @@ func (s *IntegrationTestSuite) awaitListedJobRun(alias, runID, status string, ti
 
 	for {
 		var jobs []listJobResponse
-		if err := s.tryGetJSON("/v1/jobs?order_by=created_at desc", &jobs); err != nil {
+		if err := s.tryGetJSON("/v1/jobs", &jobs); err != nil {
 			lastErr = err
 		} else {
 			lastErr = nil
