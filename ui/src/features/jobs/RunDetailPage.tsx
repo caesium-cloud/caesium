@@ -574,7 +574,7 @@ function CallbackRunsSection({ callbacks }: { callbacks: CallbackRun[] }) {
       </CardHeader>
       <CardContent className="space-y-2">
         {callbacks.map((callback) => {
-          const failed = callback.status.toLowerCase() === "failed";
+          const failed = callback.status?.toLowerCase() === "failed";
           return (
             <div
               key={callback.id}
