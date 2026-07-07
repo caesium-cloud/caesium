@@ -214,7 +214,16 @@ func TestLifecycleBridgeRoutesRunCompletedWithJobAliasAndDepth(t *testing.T) {
 	}()
 	t.Cleanup(func() {
 		cancel()
-		require.NoError(t, <-errCh)
+		// Bounded wait: a regression that stops the bridge honoring
+		// cancellation should fail here in seconds with a clear message,
+		// not hold the package open to the 600s go-test timeout. 5s gives
+		// a loaded -race arm64 runner room to finish the in-flight route.
+		select {
+		case err := <-errCh:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Fatal("lifecycle bridge did not exit after context cancellation")
+		}
 	})
 
 	runID := uuid.New()

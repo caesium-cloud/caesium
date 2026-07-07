@@ -279,6 +279,7 @@ type admissionResult struct {
 }
 
 type startRunRequest struct {
+	ctx              context.Context
 	jobID            uuid.UUID
 	triggerID        *uuid.UUID
 	backfillID       *uuid.UUID
@@ -842,6 +843,15 @@ func metricJobAlias(jobID uuid.UUID, alias string) string {
 }
 
 func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
+	ctx := req.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	conn := s.db.WithContext(ctx)
+
 	model, err := newStartRunModel(req)
 	if err != nil {
 		return nil, err
@@ -851,10 +861,10 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		pendingEvents []event.Event
 		admission     admissionResult
 	)
-	if err := withStoreBusyRetry(func() error {
+	if err := withStoreBusyRetryContext(ctx, func() error {
 		attemptEvents := make([]event.Event, 0, 3)
 		attemptAdmission := admissionResult{decision: admissionNoPolicy}
-		err := s.db.Transaction(func(tx *gorm.DB) error {
+		err := conn.Transaction(func(tx *gorm.DB) error {
 			priority, err := startPriorityTx(tx, req.jobID, req.priorityOverride)
 			if err != nil {
 				return err
@@ -947,7 +957,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	if s.leaseStore != nil {
 		vars := env.Variables()
 		if _, leaseErr := s.leaseStore.AcquireLease(
-			context.Background(),
+			ctx,
 			model.ID,
 			vars.NodeAddress,
 			vars.RunLeaseTTL,
@@ -966,7 +976,7 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 		s.startedMu.Unlock()
 	}
 
-	return s.loadRun(model.ID)
+	return s.loadRunWithDB(conn, model.ID)
 }
 
 func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
@@ -1038,8 +1048,13 @@ func mergeDescriptorSecretRefs(existing, updates []models.TaskExecutionSecretRef
 }
 
 func (s *Store) Start(jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOption) (*JobRun, error) {
+	return s.StartWithContext(context.Background(), jobID, triggerID, opts...)
+}
+
+func (s *Store) StartWithContext(ctx context.Context, jobID uuid.UUID, triggerID *uuid.UUID, opts ...StartOption) (*JobRun, error) {
 	startOpts := startOptionsFrom(opts)
 	return s.startRun(startRunRequest{
+		ctx:              ctx,
 		jobID:            jobID,
 		triggerID:        triggerID,
 		params:           startOpts.Params,
@@ -1076,11 +1091,12 @@ func (s *Store) StartForBackfill(jobID, backfillID uuid.UUID, params map[string]
 // StartQueuedRun creates a fresh JobRun from an already-claimed run_queue row.
 // If a slot disappears between dequeue and insert, the caller should release the
 // queue row so a later drain can retry it.
-func (s *Store) StartQueuedRun(_ context.Context, queued *models.RunQueue) (*JobRun, error) {
+func (s *Store) StartQueuedRun(ctx context.Context, queued *models.RunQueue) (*JobRun, error) {
 	if queued == nil {
 		return nil, errors.New("run: queued run is nil")
 	}
 	return s.startRun(startRunRequest{
+		ctx:              ctx,
 		jobID:            queued.JobID,
 		params:           decodeRunParams(queued.Params),
 		priorityOverride: PriorityLabel(queued.Priority),
@@ -4326,8 +4342,18 @@ func (c *dbWriteCounts) commit() {
 }
 
 func withStoreBusyRetry(fn func() error) error {
+	return withStoreBusyRetryContext(context.Background(), fn)
+}
+
+func withStoreBusyRetryContext(ctx context.Context, fn func() error) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	var err error
 	for attempt := 0; ; attempt++ {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		err = fn()
 		if err == nil || !isStoreContentionErr(err) {
 			return err
@@ -4337,7 +4363,23 @@ func withStoreBusyRetry(fn func() error) error {
 		}
 
 		metrics.DBBusyRetriesTotal.Inc()
-		time.Sleep(jitterStoreBusyRetryBackoff(storeBusyRetryBackoffs[attempt]))
+		if sleepErr := sleepStoreBusyRetry(ctx, jitterStoreBusyRetryBackoff(storeBusyRetryBackoffs[attempt])); sleepErr != nil {
+			return sleepErr
+		}
+	}
+}
+
+func sleepStoreBusyRetry(ctx context.Context, backoff time.Duration) error {
+	if backoff <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
 }
 
