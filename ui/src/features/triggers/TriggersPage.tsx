@@ -16,7 +16,14 @@ import { toast } from "sonner";
 import { Clock, Globe, Plus, Pencil, Copy, Check, ChevronDown, ChevronRight, Zap } from "lucide-react";
 import { useMemo, useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
-import cronParser from "cron-parser";
+import {
+  describeTrigger,
+  getNextFireDate,
+  normalizeWebhookPath,
+  parseTriggerConfiguration,
+  webhookRoute,
+  type TriggerDescription,
+} from "./trigger-utils";
 
 const inputClass =
   "w-full rounded-md border border-graphite/50 bg-midnight/50 px-3 py-2 text-sm text-text-1 ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan-glow";
@@ -33,32 +40,6 @@ type HTTPTriggerFormState = {
   defaultParamsText: string;
   extraConfig: Record<string, unknown>;
 };
-
-function normalizeWebhookPath(path: unknown) {
-  if (typeof path !== "string") return "";
-  let normalized = path.trim();
-  normalized = normalized.replace(/^\/+/, "");
-  normalized = normalized.replace(/^v1\/+/, "");
-  normalized = normalized.replace(/^hooks\/+/, "");
-  return normalized.replace(/\/+$/, "");
-}
-
-function webhookRoute(path: unknown) {
-  const normalized = normalizeWebhookPath(path);
-  return normalized ? `/v1/hooks/${normalized}` : "";
-}
-
-function parseTriggerConfiguration(trigger: Trigger) {
-  try {
-    const parsed = JSON.parse(trigger.configuration);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
-    }
-  } catch {
-    // ignore malformed config
-  }
-  return {};
-}
 
 function stringifyStringMap(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "{}";
@@ -152,12 +133,7 @@ function NextFire({ expression, timezone }: { expression: string; timezone?: str
 
   useEffect(() => {
     const compute = () => {
-      try {
-        const interval = cronParser.parse(expression, timezone ? { tz: timezone } : undefined);
-        setNextDate(interval.next().toDate());
-      } catch {
-        setNextDate(null);
-      }
+      setNextDate(getNextFireDate(expression, timezone));
     };
     
     compute();
@@ -207,6 +183,55 @@ function CopyWebhookUrl({ path, externalUrl }: { path: string; externalUrl?: str
       >
         {copied ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
       </Button>
+    </div>
+  );
+}
+
+function TriggerAction({
+  description,
+  externalUrl,
+  mobile = false,
+}: {
+  description: TriggerDescription;
+  externalUrl?: string;
+  mobile?: boolean;
+}) {
+  if (description.kind === "http" && description.path) {
+    return (
+      <div className={cn(mobile && "mt-1 max-w-[300px]")}>
+        <CopyWebhookUrl path={description.path} externalUrl={externalUrl} />
+      </div>
+    );
+  }
+
+  if (description.kind === "cron") {
+    if (!description.expression) {
+      return <span className="text-xs text-text-4">{description.summary}</span>;
+    }
+
+    return (
+      <div className={cn("flex flex-col", mobile && "mt-1")}>
+        <code
+          className={cn(
+            "text-xs text-text-2 font-mono",
+            mobile && "bg-midnight/40 px-2 py-1 rounded inline-block w-max",
+          )}
+        >
+          {description.expression}
+        </code>
+        <div className={mobile ? "mt-2" : "mt-1"}>
+          <NextFire expression={description.expression} timezone={description.timezone} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cn("min-w-0", mobile && "mt-1")}>
+      <div className="truncate text-xs text-text-2">{description.summary}</div>
+      {description.detail && (
+        <div className="mt-0.5 truncate text-[10px] text-text-4">{description.detail}</div>
+      )}
     </div>
   );
 }
@@ -384,15 +409,15 @@ export function TriggersPage() {
 
         <div className="grid gap-3">
           {filtered.map((trigger) => {
-            const config = parseTriggerConfiguration(trigger);
-            const isHttp = trigger.type === "http";
-            const webhookPath = webhookRoute(config.path);
+            const description = describeTrigger(trigger);
+            const config = description.config;
+            const isHttp = description.kind === "http";
             const isExpanded = expanded === trigger.id;
-            const expr = (config.expression || config.cron || trigger.configuration) as string;
 
             return (
               <Card 
                 key={trigger.id} 
+                data-testid="trigger-card"
                 className={cn(
                   "overflow-hidden transition-colors border-graphite/30",
                   isExpanded ? "bg-midnight/60 border-graphite/50" : "bg-midnight/30 hover:bg-midnight/50 hover:border-graphite/50 cursor-pointer"
@@ -419,20 +444,7 @@ export function TriggersPage() {
                       </div>
                       
                       <div className="hidden md:flex items-center">
-                        {isHttp && webhookPath ? (
-                          <CopyWebhookUrl path={webhookPath} externalUrl={features?.external_url} />
-                        ) : trigger.type === "cron" ? (
-                          <div className="flex flex-col">
-                            <code className="text-xs text-text-2 font-mono">{expr}</code>
-                            <div className="mt-1">
-                              <NextFire expression={expr} timezone={config.timezone as string | undefined} />
-                            </div>
-                          </div>
-                        ) : (
-                          <span className="text-xs text-text-4 font-mono truncate max-w-[200px]">
-                            {String(trigger.configuration ?? "").slice(0, 40)}
-                          </span>
-                        )}
+                        <TriggerAction description={description} externalUrl={features?.external_url} />
                       </div>
 
                       <div className="hidden md:flex justify-end">
@@ -490,18 +502,7 @@ export function TriggersPage() {
                     
                     <div className="md:hidden">
                       <p className="text-[10px] uppercase tracking-widest font-bold text-text-4 mb-1">Action</p>
-                      {isHttp && webhookPath ? (
-                          <div className="mt-1 max-w-[300px]">
-                            <CopyWebhookUrl path={webhookPath} externalUrl={features?.external_url} />
-                          </div>
-                        ) : trigger.type === "cron" ? (
-                          <div className="flex flex-col mt-1">
-                            <code className="text-xs text-text-2 font-mono bg-midnight/40 px-2 py-1 rounded inline-block w-max">{expr}</code>
-                            <div className="mt-2">
-                              <NextFire expression={expr} timezone={config.timezone as string | undefined} />
-                            </div>
-                          </div>
-                        ) : null}
+                      <TriggerAction description={description} externalUrl={features?.external_url} mobile />
                     </div>
 
                     <div>
