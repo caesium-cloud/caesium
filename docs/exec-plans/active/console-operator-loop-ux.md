@@ -138,13 +138,16 @@ failure), and a stale "1 pending" queue row reads as an alarm with no
 explanation or action. This stream makes the page's controls reachable, its
 trigger deliberate, and its status honest.
 
-- [ ] B1. Rework the header layout: split the view-"tabs" from the action
+- [x] B1. Rework the header layout: split the view-"tabs" from the action
       buttons, move secondary actions (Backfill, Pause) into an
       always-reachable "⋯" overflow menu so `Pause` is never clipped at narrow
       widths, and add `aria-label`s to every icon-only control (Trigger, Backfill,
       Pause, and the theme/search icons).
       Files: `ui/src/features/jobs/JobDetailPage.tsx`.
-- [ ] B2. Trigger with intent: replace the one-click Trigger with a dialog that
+      Note: W1-β split route tabs from actions, moved Backfill/Pause behind the
+      overflow trigger, and added accessible names for job actions plus global
+      search/theme controls.
+- [x] B2. Trigger with intent: replace the one-click Trigger with a dialog that
       offers optional run params (e.g. `logical_date`) and an explicit confirm
       (or a brief undo window), and land the operator on the live DAG +
       streaming-logs view — which A1's run-page reorder now leads with — rather
@@ -152,17 +155,25 @@ trigger deliberate, and its status honest.
       Files: `ui/src/features/jobs/JobDetailPage.tsx`, new
       `ui/src/features/jobs/TriggerDialog.tsx`.
       Depends on: A1 (for the live-progress landing view).
-- [ ] B3. Fix the DAG overlay counters (`DagCounters`) to surface failures and
+      Note: W1-β added `TriggerDialog`, optional `logical_date`/key-value params,
+      and confirms before navigating to `/jobs/:job_id/runs/:run_id`.
+- [x] B3. Fix the DAG overlay counters (`DagCounters`) to surface failures and
       blocked tasks instead of dropping them: render "N done · N failed · N
       blocked" (with running/cached as today) so a failed run reads
       "0 done · 1 failed · 2 blocked", not "0/3 done · 2 queued".
       Files: `ui/src/features/jobs/JobDetailPage.tsx`.
-- [ ] B4. Queue triage (diagnostic, UI-only): on each run-queue row show *why*
+      Note: W1-β extracted `DagCounters` and added explicit failed/blocked buckets
+      with component coverage for failed + blocked statuses.
+- [x] B4. Queue triage (diagnostic, UI-only): on each run-queue row show *why*
       it is pending (priority/position, and blocked-vs-waiting reason where the
       API exposes it) alongside its age, and link the row to inspect the queued
       run. Confirm a stale "enqueued 3h ago" row reflects real queue state, not
       seed data or a genuine scheduler stall — capture the finding in the PR.
       Files: `ui/src/features/jobs/JobDetailPage.tsx`.
+      Note: W1-β shows wait reason from current queue fields plus optional
+      backend-provided reason fields, age, params, stable queue ID, inspect anchor,
+      and source-level confirmation that the list endpoint reads unclaimed
+      `run_queue` rows ordered by priority/age.
 - [x] B5. Wire a queue-cancel affordance end-to-end (no dead buttons). This is
       the plan's **one backend mutation** and there is currently no dequeue
       endpoint (only `cancelBackfill`), so it is specified tightly — an
@@ -204,6 +215,9 @@ trigger deliberate, and its status honest.
       - **UI**: an `api.ts` client method + a Cancel action on the queue row that
         surfaces the 409 ("already started — can't cancel") distinctly from
         success.
+        Frontend note: W1-β added the `api.ts` client method and queue-row Cancel
+        affordance with distinct 409 toast handling; backend/RBAC/integration
+        completion remains with Stream ζ.
       - If the team descopes the mutation, B4 ships inspect-only and this item is
         recorded as deferred — do not ship a Cancel button wired to nothing.
       Files: `api/rest/controller/job/queue/`, `api/rest/service/job/`,
@@ -218,12 +232,14 @@ trigger deliberate, and its status honest.
       409. Integration coverage exercises clean unclaimed cancel and claimed-row
       conflict.
       Depends on: B4.
-- [ ] B6. Make the secondary views (Runs, Tasks, Config, YAML, Backfills, Cache)
+- [x] B6. Make the secondary views (Runs, Tasks, Config, YAML, Backfills, Cache)
       linkable sub-routes instead of modal state, so an operator can deep-link
       to a job's Config/YAML and the browser back button closes the view instead
       of navigating away.
       Files: `ui/src/features/jobs/JobDetailPage.tsx`, `ui/src/router.tsx`.
       Depends on: B1.
+      Note: W1-β added `/jobs/:id/{runs,tasks,config,yaml,backfills,cache}` routes
+      that open the existing secondary dialogs from URL state.
 
 ### Stream C — DAG canvas & node legibility
 

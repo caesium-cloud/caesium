@@ -82,7 +82,7 @@ test("operator can launch cache-hit replay and sees typed refusals inline", asyn
 
   await page.getByRole("button", { name: "Close" }).click();
   await page.goto(`/jobs/${job.id}`);
-  await page.getByRole("button", { name: "Runs", exact: true }).click();
+  await page.getByRole("link", { name: "Runs", exact: true }).click();
   const runHistory = page.getByRole("dialog", { name: "Run History" });
   await expect(runHistory).toBeVisible();
   await expect(runHistory.locator(`a[href="/jobs/${job.id}/runs/${baseline.id}"]`)).toHaveCount(1);

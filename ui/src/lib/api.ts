@@ -118,6 +118,11 @@ export interface RunQueueItem {
   priority: number;
   params?: Record<string, string>;
   enqueued_at: string;
+  blocked?: boolean;
+  reason?: string;
+  pending_reason?: string;
+  wait_reason?: string;
+  blocked_reason?: string;
 }
 
 export interface Atom {
@@ -528,7 +533,8 @@ export type ApiErrorKind =
   | "replay_conflict"
   | "replay_request_too_large"
   | "replay_safe_refusal"
-  | "replay_refused";
+  | "replay_refused"
+  | "queue_cancel_conflict";
 
 export interface FieldChange {
   field: string;
@@ -985,6 +991,10 @@ function replayErrorKind(status: number, message: string): ApiErrorKind | undefi
   }
 }
 
+function queueCancelErrorKind(status: number): ApiErrorKind | undefined {
+  return status === 409 ? "queue_cancel_conflict" : undefined;
+}
+
 function queryString(params: Record<string, string | number | boolean | undefined>): string {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
@@ -1071,6 +1081,12 @@ export const api = {
     return request<JobRun[]>(`/jobs/${jobId}/runs${suffix}`);
   },
   getJobQueue: (jobId: string) => request<RunQueueItem[]>(`/jobs/${encodeURIComponent(jobId)}/queue`),
+  cancelQueuedRun: (jobId: string, queueId: string) =>
+    request<void>(
+      `/jobs/${encodeURIComponent(jobId)}/queue/${encodeURIComponent(queueId)}`,
+      { method: "DELETE" },
+      queueCancelErrorKind,
+    ),
   getJobRun: (jobId: string, runId: string) => request<JobRun>(`/jobs/${jobId}/runs/${runId}`),
   getRunDiff: (jobId: string, left: string, right: string) =>
     request<RunDiff>(
@@ -1173,7 +1189,7 @@ export const api = {
       body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
     }),
   triggerJob: (jobId: string, body?: TriggerRunRequest) =>
-    request<JobRun>(`/jobs/${jobId}/run`, {
+    request<JobRun | undefined>(`/jobs/${encodeURIComponent(jobId)}/run`, {
       method: "POST",
       body: body ? JSON.stringify(body) : undefined,
     }),
