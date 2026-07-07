@@ -194,13 +194,16 @@ Three independent fixes on the job detail page
 (`ui/src/features/jobs/JobDetailPage.tsx`). All frontend-only — the data is
 already present in the responses the page fetches.
 
-- [ ] C1. Include failed tasks in the DAG overlay counts. A failed run's header
+- [x] C1. Include failed tasks in the DAG overlay counts. A failed run's header
       reads "0/3 done · 2 queued" — the failed task appears in neither number.
       `done` counts `succeeded|completed` and `queued` counts
       `pending|queued`; add a `failed` count (and any `running`) so the tallies
       reconcile to the total, and surface the failure (e.g. "1 failed"). Files:
       `ui/src/features/jobs/JobDetailPage.tsx` (~521-532).
-- [ ] C2. Decode task commands so JSON unicode escapes stop rendering
+      Note: `DagCounters` now renders a failed count; `ui/e2e/job-detail.spec.ts`
+      drives `run-history.job.yaml`'s `cron-failure-fast` run and asserts the
+      visible `1 failed` counter.
+- [x] C2. Decode task commands so JSON unicode escapes stop rendering
       literally (`echo … > /out/files.json`). The atom's `command` field is
       a JSON-encoded **string** (`internal/models/atom.go` — `Command string`,
       unmarshalled by `Atom.Cmd()`; `ui/src/lib/api.ts:111` types it `string`),
@@ -212,7 +215,10 @@ already present in the responses the page fetches.
       blame API already as a decoded `string[]` — no escape bug there, leave it
       alone.) Files: `ui/src/features/jobs/JobDetailPage.tsx` (`formatCommand`
       ~799, use ~647).
-- [ ] C3. Render the "YAML" tab as a clean authoring manifest instead of
+      Note: `formatCommandForDisplay` parses JSON-array command strings before
+      joining, with Vitest coverage for `\u003e` / `\u0026` decoding and
+      already-decoded inputs.
+- [x] C3. Render the "YAML" tab as a clean authoring manifest instead of
       `yamlStringify(job)`, which dumps `latest_run` runtime state, internal
       UUIDs, empty provenance, and the double-encoded `configuration` string.
       Reconstruct an `apiVersion: v1` / `kind: Job` / `metadata` / `trigger` /
@@ -223,6 +229,10 @@ already present in the responses the page fetches.
       helper under `ui/src/features/jobs/` + unit test.
       (Alternative, deferred: a backend `GET /v1/jobs/:id/manifest` export
       endpoint — recorded in Rejected below.)
+      Note: the YAML tab now stringifies `buildJobAuthoringManifest(...)`, which
+      rebuilds the jobdef root fields from loaded job/task/trigger/atom/DAG data
+      and unflattens persisted trigger `defaultParams`; Vitest covers the
+      reconstructed field names and omits runtime IDs/state.
 
 #### Rejected / deferred for Stream C
 

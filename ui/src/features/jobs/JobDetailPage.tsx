@@ -23,6 +23,7 @@ import { BackfillsView } from "./BackfillsView";
 import { CacheView } from "./CacheView";
 import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
+import { buildJobAuthoringManifest, formatCommandForDisplay } from "./job-detail-manifest";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
@@ -61,6 +62,16 @@ export function JobDetailPage() {
     queryFn: () => api.getJob(jobId),
     refetchInterval: streamHealthy ? false : 15000,
   });
+
+  // Short-id deep links: GET /v1/jobs/:id resolves an unambiguous UUID prefix,
+  // but the sub-resource routes (runs/queue/dag/tasks) still require a full
+  // UUID. Once the job resolves, canonicalize the URL to its full id so every
+  // sub-fetch, SSE filter, and mutation below operates on the full id.
+  useEffect(() => {
+    if (job && job.id !== jobId) {
+      navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true });
+    }
+  }, [job, jobId, navigate]);
 
   const { data: runs, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
@@ -324,6 +335,10 @@ export function JobDetailPage() {
     [tasks],
   );
   const triggerConfig = useMemo(() => parseJSONConfig(trigger?.configuration), [trigger?.configuration]);
+  const jobManifest = useMemo(
+    () => job ? buildJobAuthoringManifest({ job, tasks, trigger, atoms, dag }) : null,
+    [job, tasks, trigger, atoms, dag],
+  );
 
   if (isLoading || (featuredRunId && isLoadingFeaturedRun)) {
     return <div className="p-8">Loading...</div>;
@@ -529,7 +544,21 @@ export function JobDetailPage() {
               <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
             )}
             {secondaryView === "definition" && (
-              <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">{yamlStringify(job)}</pre>
+              <div className="space-y-3">
+                <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
+                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                  <div>
+                    <div className="font-medium text-warning">Reconstructed from loaded job-detail data</div>
+                    <div className="mt-1 text-text-3">
+                      Root callbacks are not exposed by this page&apos;s loaded endpoints. Original multi-engine
+                      volume declarations are represented from resolved mounts when possible.
+                    </div>
+                  </div>
+                </div>
+                <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
+                  {yamlStringify(jobManifest)}
+                </pre>
+              </div>
             )}
             {secondaryView === "backfills" && (
               <BackfillsView jobId={jobId} />
@@ -558,14 +587,16 @@ function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
   const done = tasks.filter((t) => t.status === "succeeded" || t.status === "completed").length;
   const running = tasks.filter((t) => t.status === "running").length;
   const cached = tasks.filter((t) => t.status === "cached").length;
+  const failed = tasks.filter((t) => t.status === "failed").length;
   const queued = tasks.filter((t) => t.status === "pending" || t.status === "queued").length;
   const total = tasks.length;
 
   return (
-    <div className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
+    <div data-testid="dag-counters" className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
       <span className="text-success/80">{done}/{total} done</span>
       {running > 0 && <span className="text-cyan-glow/80">{running} active</span>}
       {cached > 0 && <span className="text-cached/80">{cached} cached</span>}
+      {failed > 0 && <span className="text-danger/80">{failed} failed</span>}
       {queued > 0 && <span className="text-text-4">{queued} queued</span>}
     </div>
   );
@@ -761,7 +792,7 @@ function TasksView({
               </div>
               <div>
                 <div className="mb-1 text-xs uppercase tracking-wide text-muted-foreground">Command</div>
-                <div className="font-mono text-xs break-all">{formatCommand(atoms?.[task.atom_id]?.command)}</div>
+                <div className="font-mono text-xs break-all">{formatCommandForDisplay(atoms?.[task.atom_id]?.command)}</div>
               </div>
             </div>
           </CardContent>
@@ -938,16 +969,6 @@ function renderTriggerSummary(trigger: Trigger | null | undefined) {
       </div>
     </>
   );
-}
-
-function formatCommand(command?: string | string[]) {
-  if (!command) {
-    return "N/A";
-  }
-  if (Array.isArray(command)) {
-    return command.join(" ");
-  }
-  return command;
 }
 
 function formatPriority(priority: number) {
