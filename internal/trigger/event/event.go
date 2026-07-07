@@ -131,6 +131,9 @@ func (t *EventTrigger) Fire(ctx context.Context) error {
 }
 
 func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]string) ([]FireOutcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	log.Info("trigger firing", "id", t.id, "type", models.TriggerTypeEvent)
 
 	mergedParams := t.config.mergedParams(params)
@@ -160,7 +163,7 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 		}
 
 		runtimeParams := cloneParams(mergedParams)
-		runRecord, err := t.runStoreFactory().Start(jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
+		runRecord, err := t.runStoreFactory().StartWithContext(ctx, jobModel.ID, &t.id, runstorage.WithStartParams(runtimeParams))
 		if err != nil {
 			if errors.Is(err, runstorage.ErrRunSkipped) {
 				outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Skipped: true, SkipReason: "max concurrency reached"})
