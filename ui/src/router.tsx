@@ -1,5 +1,6 @@
 import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/react-router";
 import { AppShell } from "./components/layout/AppShell";
+import { ConsoleNotFound } from "./components/not-found-state";
 import { AtomsPage } from "./features/atoms/AtomsPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
 import { DatasetsPage } from "./features/datasets/DatasetsPage";
@@ -21,6 +22,7 @@ import { normalizeStatusFilter } from "./features/datasets/freshness-utils";
 
 const rootRoute = createRootRoute({
   component: AppShell,
+  notFoundComponent: ConsoleNotFound,
 });
 
 const indexRoute = createRoute({

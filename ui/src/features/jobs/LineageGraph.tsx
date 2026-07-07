@@ -32,7 +32,7 @@ import {
 } from "@/features/datasets/freshness-utils";
 import { api, type DatasetState, type ImpactNode } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
-import { cn, shortId } from "@/lib/utils";
+import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
 
 const lineageRouteApi = getRouteApi("/lineage");
 const nodeWidth = 320;
@@ -693,7 +693,7 @@ const LineageDatasetNode = memo(({ data }: NodeProps<LineageNodeData>) => {
             ) : null}
             {data.lastSeen ? (
               <div className="truncate font-mono text-[10px]" title={data.lastSeen}>
-                {new Date(data.lastSeen).toLocaleString()}
+                {formatUTCTimestamp(data.lastSeen, data.lastSeen)}
               </div>
             ) : null}
             {data.freshnessReason ? (

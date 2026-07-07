@@ -60,3 +60,23 @@ export function shortId(value?: string | null, length = 8): string {
 
   return value.slice(0, length)
 }
+
+function padUTC(value: number): string {
+  return String(value).padStart(2, "0")
+}
+
+export function formatUTCTimestamp(
+  value: string | number | Date,
+  fallback = "Unknown time",
+): string {
+  const date = value instanceof Date ? value : new Date(value)
+  if (!Number.isFinite(date.getTime())) {
+    return fallback
+  }
+
+  return [
+    `${date.getUTCFullYear()}-${padUTC(date.getUTCMonth() + 1)}-${padUTC(date.getUTCDate())}`,
+    `${padUTC(date.getUTCHours())}:${padUTC(date.getUTCMinutes())}:${padUTC(date.getUTCSeconds())}`,
+    "UTC",
+  ].join(" ")
+}

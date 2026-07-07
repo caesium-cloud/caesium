@@ -341,7 +341,7 @@ sequenced after them (see `## Sequencing & Dependencies`).
       `ui/src/features/system/SystemPage.tsx` (~138 `SysKpi`).
       Notes: W1-zeta relabelled the existing Nodes KPI sub-text to
       "Tracked nodes", keeping the displayed node count honest.
-- [ ] F2. Unify the app's not-found states (issue #17 is "two inconsistent
+- [x] F2. Unify the app's not-found states (issue #17 is "two inconsistent
       404s"). (a) Add a catch-all `NotFoundComponent` (or `*` route) so unknown
       SPA paths render a coherent 404 instead of a bare/empty fallback. (b)
       Normalize the two existing per-resource not-found renders, which are
@@ -355,7 +355,10 @@ sequenced after them (see `## Sequencing & Dependencies`).
       component under `ui/src/components/`. (Note: `/api/*` paths hitting the
       SPA is expected — the real API prefix is `/v1`, which `api/ui.go` already
       excludes from the SPA fallback; no backend change needed.)
-- [ ] F3. Make wall-clock timestamps consistently labelled. Bare
+      Notes: W2-alpha added a shared `NotFoundState`, wired the root route
+      not-found component, and reused it for missing jobs/runs plus navigation
+      e2e coverage.
+- [x] F3. Make wall-clock timestamps consistently labelled. Bare
       `toLocaleString()` renders unlabelled **local** time (e.g. "Jul 2, 2026,
       10:00 AM") right next to the UTC header clock, mixing zones without
       labels. Add one shared timestamp helper/component that emits a
@@ -371,6 +374,9 @@ sequenced after them (see `## Sequencing & Dependencies`).
       `ui/src/features/jobs/components/TaskNode.tsx`,
       `ui/src/features/stats/components/TrendChart.tsx`.
       Depends on: C, D (shares `JobDetailPage.tsx` / `RunDetailPage.tsx`).
+      Notes: W2-alpha added `formatUTCTimestamp`, replaced wall-clock local
+      timestamp formatting with labelled UTC output, and added deterministic
+      vitest coverage.
 - [x] F4. Resolve short-id deep links. The list displays an 8-char id but
       `GET /v1/jobs/:id` calls `uuid.Parse` (`api/rest/controller/job/get.go`
       ~24) and 400s on anything that isn't a full UUID, so a hand-typed/shared

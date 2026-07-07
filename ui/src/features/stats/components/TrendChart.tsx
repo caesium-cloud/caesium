@@ -11,23 +11,26 @@ import {
 } from 'recharts';
 import type { DailyStats } from '@/lib/api';
 
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
 interface TrendChartProps {
   data: DailyStats[];
 }
 
 function formatDateLabel(value: string) {
   if (value.includes('T')) {
-    const date = new Date(value);
-    return new Intl.DateTimeFormat(undefined, {
-      hour: 'numeric',
-    }).format(date);
+    // Intraday tick: keep a compact UTC hour (e.g. "10 AM") so 24 hourly ticks
+    // don't overlap on the axis; the full UTC timestamp is far too wide here.
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    const hour = parsed.getUTCHours();
+    const suffix = hour < 12 ? 'AM' : 'PM';
+    const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+    return `${hour12} ${suffix}`;
   }
   const [year, month, day] = value.split('-').map(Number);
   if (!year || !month || !day) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(new Date(year, month - 1, day));
+  return `${MONTH_LABELS[month - 1] ?? String(month)} ${day}`;
 }
 
 export function TrendChart({ data }: TrendChartProps) {

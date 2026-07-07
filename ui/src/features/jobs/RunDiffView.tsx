@@ -7,7 +7,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { api, type FieldChange, type RunDiffTask, type RunDiffVerdict, type WhyTrigger } from "@/lib/api";
-import { cn, shortId } from "@/lib/utils";
+import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
 
 export interface RunDiffViewProps {
   jobId: string;
@@ -102,7 +102,7 @@ export function RunDiffView({ jobId, leftRunId, rightRunId }: RunDiffViewProps) 
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-text-3">
             <span className="font-mono text-text-4 text-[10px]">{diff.jobId}</span>
             <span className="text-text-4">·</span>
-            <span>{new Date(diff.generatedAt).toLocaleString()}</span>
+            <span>{formatUTCTimestamp(diff.generatedAt, diff.generatedAt)}</span>
           </div>
         </div>
         <div className="flex w-fit max-w-full items-start gap-1.5 rounded-md border border-primary/30 bg-primary/5 px-2.5 py-1.5 text-xs font-medium text-primary">
