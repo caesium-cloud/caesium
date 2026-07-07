@@ -135,7 +135,7 @@ export function SystemPage() {
         <SysKpi icon={Database} label="Database" value={<span className="capitalize text-success">{db?.status || "unknown"}</span>} sub={db?.latency_ms != null ? `${db.latency_ms}ms latency` : "--"} dot={db?.status === "healthy"} />
         <SysKpi icon={Activity} label="Active runs" value={<span className="font-mono text-cyan-glow">{activeRuns?.count ?? 0}</span>} sub="Currently executing" />
         <SysKpi icon={Zap} label="Triggers" value={<span className="font-mono">{triggers?.count ?? 0}</span>} sub="Registered" />
-        <SysKpi icon={Server} label="Nodes" value={<span className="font-mono">{nodesCheck?.count ?? nodes.length}</span>} sub="Active workers" dot={nodes.length > 0} />
+        <SysKpi icon={Server} label="Nodes" value={<span className="font-mono">{nodesCheck?.count ?? nodes.length}</span>} sub="Tracked nodes" dot={nodes.length > 0} />
       </div>
 
       <div className="grid lg:grid-cols-[2fr_1fr] gap-4 items-start">

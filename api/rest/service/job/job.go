@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type Job interface {
 	SetBus(event.Bus)
 	List(*ListRequest) (models.Jobs, error)
 	Get(uuid.UUID) (*models.Job, error)
+	GetByIDPrefix(string) (*models.Job, error)
 	Queue(uuid.UUID) ([]QueueItem, error)
 	Create(*CreateRequest) (*models.Job, error)
 	Delete(uuid.UUID) error
@@ -39,6 +41,11 @@ type jobService struct {
 var (
 	defaultService   *jobService
 	defaultServiceMu sync.Mutex
+
+	// ErrAmbiguousJobIDPrefix means a prefix matched more than one job ID.
+	ErrAmbiguousJobIDPrefix = errors.New("ambiguous job id prefix")
+	// ErrInvalidJobIDPrefix means a job ID prefix cannot match a canonical UUID.
+	ErrInvalidJobIDPrefix = errors.New("invalid job id prefix")
 )
 
 func Service(ctx context.Context) Job {
@@ -154,6 +161,70 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 		return nil, err
 	}
 
+	j.attachLatestRun(job)
+
+	return job, nil
+}
+
+func (j *jobService) GetByIDPrefix(rawID string) (*models.Job, error) {
+	rawID = strings.TrimSpace(rawID)
+	if rawID == "" {
+		return nil, ErrInvalidJobIDPrefix
+	}
+
+	if id, err := uuid.Parse(rawID); err == nil {
+		return j.Get(id)
+	}
+
+	prefix := strings.ToLower(rawID)
+	if !isCanonicalUUIDPrefix(prefix) {
+		return nil, ErrInvalidJobIDPrefix
+	}
+
+	var matches []models.Job
+	if err := j.db.WithContext(j.ctx).
+		Where("id LIKE ?", prefix+"%").
+		Limit(2).
+		Find(&matches).Error; err != nil {
+		return nil, err
+	}
+
+	switch len(matches) {
+	case 0:
+		return nil, gorm.ErrRecordNotFound
+	case 1:
+		job := &matches[0]
+		j.attachLatestRun(job)
+		return job, nil
+	default:
+		return nil, ErrAmbiguousJobIDPrefix
+	}
+}
+
+func isCanonicalUUIDPrefix(prefix string) bool {
+	if len(prefix) > 36 {
+		return false
+	}
+	for i, r := range prefix {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if !isHexRune(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func isHexRune(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')
+}
+
+func (j *jobService) attachLatestRun(job *models.Job) {
 	runStore := runstorage.NewStore(j.db)
 	if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
 		job.LatestRun = &models.JobRun{
@@ -168,8 +239,6 @@ func (j *jobService) Get(id uuid.UUID) (*models.Job, error) {
 			TotalTasks:    latest.TotalTasks,
 		}
 	}
-
-	return job, nil
 }
 
 type QueueItem struct {

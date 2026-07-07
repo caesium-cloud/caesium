@@ -9,7 +9,6 @@ import (
 	tsvc "github.com/caesium-cloud/caesium/api/rest/service/trigger"
 	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
-	"github.com/google/uuid"
 	"github.com/labstack/echo/v5"
 	"gorm.io/gorm"
 )
@@ -21,17 +20,17 @@ type JobResponse struct {
 }
 
 func Get(c *echo.Context) error {
-	id, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return echo.NewHTTPError(http.StatusBadRequest, "bad request").Wrap(err)
-	}
-
 	ctx := c.Request().Context()
 
-	j, err := jsvc.Service(ctx).Get(id)
+	j, err := jsvc.Service(ctx).GetByIDPrefix(c.Param("id"))
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
 			return echo.ErrNotFound
+		case errors.Is(err, jsvc.ErrInvalidJobIDPrefix):
+			return echo.NewHTTPError(http.StatusBadRequest, err.Error()).Wrap(err)
+		case errors.Is(err, jsvc.ErrAmbiguousJobIDPrefix):
+			return echo.NewHTTPError(http.StatusConflict, err.Error()).Wrap(err)
 		}
 
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
