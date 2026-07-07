@@ -38,8 +38,8 @@ function fieldScore(field: string, term: string) {
   if (!normalized) return 0
   if (normalized === term) return 1
   if (normalized.startsWith(term)) return 0.9
-  if (normalized.includes(term)) return 0.75
   if (searchWords(normalized).some((word) => word.startsWith(term))) return 0.8
+  if (normalized.includes(term)) return 0.75
   return 0
 }
 

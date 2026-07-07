@@ -37,6 +37,9 @@ interface PendingActivityEntry {
 
 const STATUS_FILTERS: StatusFilter[] = ["all", "running", "succeeded", "failed", "paused"];
 const SORT_KEYS: SortKey[] = ["alias", "status", "last_run"];
+const ACTIVITY_LIMIT = 20;
+const ACTIVITY_KEY_LIMIT = 100;
+const RUN_ACTIVITY_EVENTS = ["run_started", "run_completed", "run_failed", "run_cancelled"] as const;
 
 function readUrlParams(): { status: StatusFilter; q: string; sort: SortKey } {
   const params = new URLSearchParams(window.location.search);
@@ -63,6 +66,17 @@ function activityKey(e: CaesiumEvent, jobId: string, runId?: string) {
   if (runId) return `${e.type}:${runId}`;
   if (e.sequence !== undefined) return `${e.type}:sequence:${e.sequence}`;
   return `${e.type}:${jobId}:${e.timestamp}`;
+}
+
+function rememberActivityKey(keys: Set<string>, key: string) {
+  if (keys.has(key)) return false;
+  keys.add(key);
+  while (keys.size > ACTIVITY_KEY_LIMIT) {
+    const oldest = keys.values().next().value;
+    if (oldest === undefined) break;
+    keys.delete(oldest);
+  }
+  return true;
 }
 
 export function useJobsView() {
@@ -103,7 +117,7 @@ export function useJobsView() {
         runId: draft.runId,
         timestamp: draft.timestamp,
       };
-      return [entry, ...prev].slice(0, 20);
+      return [entry, ...prev].slice(0, ACTIVITY_LIMIT);
     });
   }, []);
 
@@ -140,7 +154,7 @@ export function useJobsView() {
           runId: draft.runId,
           timestamp: draft.timestamp,
         }));
-      return [...entries, ...prev].slice(0, 20);
+      return [...entries, ...prev].slice(0, ACTIVITY_LIMIT);
     });
   }, [jobs]);
 
@@ -178,8 +192,7 @@ export function useJobsView() {
       const runId = e.run_id ?? run?.id;
       const key = activityKey(e, jobID, runId);
 
-      if (activityKeysRef.current.has(key)) return;
-      activityKeysRef.current.add(key);
+      if (!rememberActivityKey(activityKeysRef.current, key)) return;
 
       const draft: PendingActivityEntry = {
         type: e.type,
@@ -226,17 +239,13 @@ export function useJobsView() {
     };
 
     events.subscribeConnection(onConnection);
-    ["run_started", "run_completed", "run_failed"].forEach((t) =>
-      events.subscribe(t, onRunEvent),
-    );
+    RUN_ACTIVITY_EVENTS.forEach((t) => events.subscribe(t, onRunEvent));
     ["job_paused", "job_unpaused"].forEach((t) => events.subscribe(t, onPauseEvent));
     events.subscribe("task_cached", onTaskCached);
 
     return () => {
       events.unsubscribeConnection(onConnection);
-      ["run_started", "run_completed", "run_failed"].forEach((t) =>
-        events.unsubscribe(t, onRunEvent),
-      );
+      RUN_ACTIVITY_EVENTS.forEach((t) => events.unsubscribe(t, onRunEvent));
       ["job_paused", "job_unpaused"].forEach((t) => events.unsubscribe(t, onPauseEvent));
       events.unsubscribe("task_cached", onTaskCached);
     };
