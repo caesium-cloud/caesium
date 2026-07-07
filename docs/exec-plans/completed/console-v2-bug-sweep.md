@@ -1,6 +1,11 @@
 # Caesium Console v2 — Bug Sweep & Hardening
 
-Last updated: 2026-07-02
+Last updated: 2026-07-07
+
+> **Status: Complete — shipped in Waves 1–2 (2026-07-05 → 07) and archived to
+> `docs/exec-plans/completed/`.** All six streams (A–F), the H-1 fixture harness,
+> and the F2/F3 shell/display items merged; the roadmap §2.4 hardening note is
+> flipped to shipped. Post-review hardening landed as a consolidated follow-up.
 
 This plan fixes a batch of real defects found during a hands-on interactive
 walkthrough of the shipped **Caesium Console v2** web UI (roadmap §2.4). None
@@ -54,26 +59,40 @@ authoring manifest (C3), the job-definition schema wins: when the
 reconstructed YAML and `pkg/jobdef/definition.go` / `pkg/jobdef/schema.go`
 disagree about field names or structure, the schema is authoritative. There is
 no sibling exec-plan that owns any of this scope — the Console v2 build shipped
-via [`docs/exec-plans/completed/data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md)
+via [`docs/exec-plans/completed/data-plane-memory-ui.md`](data-plane-memory-ui.md)
 and the archived `ui_implementation_plan.md`, both closed.
 
-## Progress (as of 2026-07-02)
+## Progress (as of 2026-07-07)
 
-No implementation waves have shipped yet. The plan was published from the
-interactive UI walkthrough that enumerated the defects; every root cause below
-was verified against the current source on `master`. The first wave is the
-next eligible run of the `exec-plan-wave` skill against this doc.
+**Complete.** Shipped across two waves via the `exec-plan-wave` skill (codex
+implementation, orchestrator verify/publish/merge):
+
+**Wave 1** — H-1 fixtures landed first, then Streams A–F in parallel:
+- **H-1** — shared e2e trigger/await fixture harness in `ui/e2e/helpers/fixtures.ts`. PR #300.
+- **A** — Triggers cron validation (the `schedule`-key fallthrough + robust cron-parser default-export resolution) and event-trigger rendering via a shared `describeTrigger`. PR #303.
+- **B** — Live Activity dedup (drop `run_terminal`, subscribe `run_started/completed/failed/cancelled`) + alias resolution, single-fetch React Query defaults, stricter ⌘K matcher, and the `/v1/jobs` `last_runs` history sparkline (one batched window query). PR #306.
+- **C** — job-detail failed-DAG counts, command decode, clean reconstructed authoring-manifest YAML, plus short-id deep-link canonicalization. PR #305.
+- **D** — run-detail DAG-ordered tasks, task-name timeline labels + distinct skipped/pending colors, and a callbacks section. PR #304.
+- **E** — accurate JobDefs lint step count (`summary.steps`). PR #301.
+- **F (F1/F4)** — honest System workers/nodes KPI and short-id job-GET prefix resolution (parameterized, ambiguity → 409). PR #302.
+
+**Wave 2** — after C/D landed (shared JobDetail/RunDetail files):
+- **F2/F3** — unified 404/not-found component (root `notFoundComponent` + shared render) and consistently UTC-labelled wall-clock timestamps (`formatUTCTimestamp`). PR #307.
+- **N-1** — this doc close-out + roadmap §2.4 flip to shipped + archive to `completed/`.
+
+Post-review hardening (empty-prefix guard, request-ctx propagation, null-timestamp/callback guards, fixtures guard reorder) shipped as a consolidated follow-up PR (#308).
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Triggers page — cron validation + event-trigger rendering | **P0** | Not started |
-| B | Jobs list, Live Activity feed & data-fetching | **P0** | Not started |
-| C | Job detail view — DAG counts, command decode, clean-manifest YAML | P1 | Not started |
-| D | Run detail & execution timeline — ordering, labels, callbacks | P1 | Not started |
-| E | JobDefs lint accuracy — step summary | P1 | Not started |
-| F | Shell & display consistency — nodes card, 404, timestamps, short-id | P2 | Not started |
+| A | Triggers page — cron validation + event-trigger rendering | **P0** | ✅ Shipped (#303) |
+| B | Jobs list, Live Activity feed & data-fetching | **P0** | ✅ Shipped (#306) |
+| C | Job detail view — DAG counts, command decode, clean-manifest YAML | P1 | ✅ Shipped (#305) |
+| D | Run detail & execution timeline — ordering, labels, callbacks | P1 | ✅ Shipped (#304) |
+| E | JobDefs lint accuracy — step summary | P1 | ✅ Shipped (#301) |
+| F | Shell & display consistency — nodes card, 404, timestamps, short-id | P2 | ✅ Shipped (#302, #307) |
+| H-1 | Shared e2e/integration fixture harness | — | ✅ Shipped (#300) |
 
 ## Streams
 
@@ -410,7 +429,10 @@ sequenced after them (see `## Sequencing & Dependencies`).
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Close out the docs. The **publish-time** cross-links already landed
+- [x] N-1. Close out the docs (done in this PR): flipped the roadmap §2.4 note
+      to shipped, removed the plan from the README "Active Exec Plans" list, moved
+      the plan to `docs/exec-plans/completed/`, and synced the `## Progress`
+      dashboard + Status table to the merged PRs. The **publish-time** cross-links already landed
       with this plan's publication PR — the "Hardening (active)" note under
       `docs/roadmap.md` §2.4 and the "Active Exec Plans" bullet in
       `docs/README.md` — so N-1 is **not** those additions. N-1 is the **final
@@ -566,7 +588,7 @@ The plan is done when **all** of these hold:
 
 - [`docs/roadmap.md`](../../roadmap.md) §2.4 UI Refresh (Caesium Console v2) —
   the shipped feature this plan hardens.
-- [`docs/exec-plans/completed/data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md) —
+- [`docs/exec-plans/completed/data-plane-memory-ui.md`](data-plane-memory-ui.md) —
   the completed plan that surfaced the data-plane verbs in the Console; several
   of the pages touched here (run detail, blame, lineage) shipped there.
 - [`docs/README.md`](../../README.md) — active-records index (updated by N-1).
