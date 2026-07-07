@@ -714,14 +714,16 @@ function RunQueuePanel({
                 {formatQueueParams(row.params)}
               </span>
               <div className="flex items-center justify-end gap-1">
-                <a
-                  href={`/jobs/${encodeURIComponent(jobId)}#queue-${row.id}`}
+                <Link
+                  to="/jobs/$jobId"
+                  params={{ jobId }}
+                  hash={`queue-${row.id}`}
                   className="rounded-md px-2 py-1 text-xs text-cyan-glow hover:bg-cyan-glow/10"
                   aria-label={`Inspect queued run ${shortId(row.id)}`}
                   data-testid="run-queue-inspect-link"
                 >
                   Inspect
-                </a>
+                </Link>
                 <Button
                   type="button"
                   variant="ghost"

@@ -152,9 +152,25 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     setTransportError(null);
 
     const abortController = new AbortController();
+    // The structured-vs-freeform decision reads only the first
+    // structuredScanMaxChars of the log, so once that head is complete the
+    // NEGATIVE decision is final too — stop rescanning it on every chunk.
+    let structuredDecisionFinal = false;
     const appendLogChunk = (chunk: string) => {
       rawLogTextRef.current += chunk;
-      const shouldUseStructuredRenderer = shouldUseStructuredLogViewer(rawLogTextRef.current);
+      // Once the structured renderer is locked in there is no way back, so skip
+      // re-scanning the (growing) buffer on every subsequent chunk.
+      let shouldUseStructuredRenderer: boolean;
+      if (structuredLogRendererRef.current) {
+        shouldUseStructuredRenderer = true;
+      } else if (structuredDecisionFinal) {
+        shouldUseStructuredRenderer = false;
+      } else {
+        shouldUseStructuredRenderer = shouldUseStructuredLogViewer(rawLogTextRef.current);
+        if (!shouldUseStructuredRenderer && rawLogTextRef.current.length >= structuredScanMaxChars) {
+          structuredDecisionFinal = true;
+        }
+      }
       setRawLogText(rawLogTextRef.current);
 
       if (shouldUseStructuredRenderer && !structuredLogRendererRef.current) {
@@ -587,17 +603,26 @@ const jsonLikeLogPattern = /^\s*(?:\{.*\}|\[.*\])\s*$/;
 const namedStructuredFieldPattern =
   /\b(?:level|time|timestamp|ts|msg|message|trace_id|span_id|request_id)[=:]/i;
 
+// Bound the structured-log heuristic to the head of the buffer: the decision is
+// made from the first lines a task emits, so appends never rescan an unbounded
+// (and growing) log. 64 KB / 200 non-empty lines is far more than the heuristic
+// needs while keeping every call O(1) in the total log size.
+const structuredScanMaxChars = 64_000;
+const structuredScanMaxLines = 200;
+
 function shouldUseStructuredLogViewer(rawLog: string): boolean {
   if (!rawLog) {
     return false;
   }
 
   const lines = rawLog
+    .slice(0, structuredScanMaxChars)
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .split("\n")
     .map((line) => stripAnsi(line).trim())
-    .filter((line) => line.length > 0);
+    .filter((line) => line.length > 0)
+    .slice(0, structuredScanMaxLines);
   if (lines.length === 0) {
     return false;
   }
