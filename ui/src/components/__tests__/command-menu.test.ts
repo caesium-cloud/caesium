@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { commandPaletteFilter } from "../command-menu";
+import { commandPaletteFilter } from "../command-filter";
 
 describe("commandPaletteFilter", () => {
   it("does not match scattered subsequence letters", () => {
