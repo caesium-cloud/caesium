@@ -1,6 +1,6 @@
 import { type ChangeEvent, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { AlertTriangle, FileJson, Loader2, ShieldAlert, ShieldCheck, Upload } from "lucide-react";
+import { AlertTriangle, FileJson, Loader2, ShieldCheck, Upload } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,6 +13,11 @@ interface ReceiptPanelProps {
   jobId: string;
   runId: string;
 }
+
+const RECEIPT_INFO_BADGE_CLASS =
+  "border-border/60 bg-muted/40 text-text-3 shadow-none hover:bg-muted/50";
+const RECEIPT_INFO_PANEL_CLASS =
+  "rounded-md border border-border/60 bg-muted/25 p-3 text-xs text-text-3";
 
 export function ReceiptPanel({ jobId, runId }: ReceiptPanelProps) {
   const [committedReceiptText, setCommittedReceiptText] = useState("");
@@ -137,8 +142,12 @@ function ReceiptSkeleton() {
 
 function ReceiptStatus({ receipt }: { receipt: Receipt }) {
   return receipt.degraded === true ? (
-    <Badge data-testid="receipt-degraded-status" variant="destructive" className="h-fit gap-1.5">
-      <ShieldAlert className="h-3.5 w-3.5" />
+    <Badge
+      data-testid="receipt-degraded-status"
+      variant="secondary"
+      className={cn("h-fit gap-1.5", RECEIPT_INFO_BADGE_CLASS)}
+    >
+      <FileJson className="h-3.5 w-3.5" />
       degraded-unverifiable
     </Badge>
   ) : (
@@ -191,10 +200,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
               key={`${task.task_name}:${task.identity_hash}`}
               data-testid="receipt-task-row"
               data-task-name={task.task_name}
-              className={cn(
-                "rounded-md border bg-background/40 p-3",
-                task.degraded === true ? "border-warning/35" : "border-border/50",
-              )}
+              className="rounded-md border border-border/50 bg-background/40 p-3"
             >
               <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                 <div className="min-w-0">
@@ -209,11 +215,19 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Badge variant={task.digest_pinned ? "success" : "destructive"} className="text-[10px]">
+                  <Badge
+                    data-testid="receipt-task-digest-pinned-marker"
+                    variant={task.digest_pinned ? "success" : "secondary"}
+                    className={cn("text-[10px]", task.digest_pinned ? undefined : RECEIPT_INFO_BADGE_CLASS)}
+                  >
                     digest_pinned={String(task.digest_pinned)}
                   </Badge>
                   {task.degraded === true ? (
-                    <Badge data-testid="receipt-task-unverifiable-marker" variant="destructive" className="text-[10px]">
+                    <Badge
+                      data-testid="receipt-task-unverifiable-marker"
+                      variant="secondary"
+                      className={cn("text-[10px]", RECEIPT_INFO_BADGE_CLASS)}
+                    >
                       unverifiable
                     </Badge>
                   ) : null}
@@ -250,7 +264,7 @@ function ReceiptContent({ receipt }: { receipt: Receipt }) {
               {task.degraded_reason ? (
                 <div
                   data-testid="receipt-task-degraded-reason"
-                  className="mt-3 rounded-md border border-warning/25 bg-warning/10 p-2 text-xs text-warning"
+                  className="mt-3 rounded-md border border-border/60 bg-muted/25 p-2 text-xs text-text-3"
                 >
                   {task.degraded_reason}
                 </div>
@@ -271,13 +285,13 @@ function UnverifiableSummary({ tasks }: { tasks: string[] }) {
   return (
     <div
       data-testid="receipt-unverifiable-summary"
-      className="rounded-md border border-warning/25 bg-warning/10 p-3 text-xs text-warning"
+      className={RECEIPT_INFO_PANEL_CLASS}
     >
       <div className="flex items-start gap-2">
-        <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+        <FileJson className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-3" />
         <div>
           <div className="font-semibold">This receipt is degraded-unverifiable.</div>
-          <div className="mt-1 text-warning/85">
+          <div className="mt-1 text-text-3">
             Unverifiable tasks:{" "}
             {tasks.map((task, index) => (
               <span key={`${task}:${index}`}>
@@ -375,6 +389,8 @@ function VerifyForm({
 
 function VerifyResultView({ result }: { result: VerifyResult }) {
   const verdict = verifyVerdict(result);
+  const isDegraded = verdict === "degraded-unverifiable";
+  const isDrift = !result.match && !isDegraded;
   const degradedTasks = result.degraded_tasks ?? [];
   const drifts = result.drifts ?? [];
 
@@ -383,17 +399,18 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
       data-testid="receipt-verify-result"
       className={cn(
         "space-y-3 rounded-md border p-3",
-        verdict === "reproducible"
+        result.match
           ? "border-success/30 bg-success/10"
-          : verdict === "degraded-unverifiable"
-            ? "border-warning/30 bg-warning/10"
-            : "border-danger/30 bg-danger/10",
+          : isDrift
+            ? "border-danger/30 bg-danger/10"
+            : "border-border/60 bg-muted/25",
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
         <Badge
           data-testid="receipt-verify-verdict"
-          variant={verdict === "reproducible" ? "success" : verdict === "degraded-unverifiable" ? "destructive" : "outline"}
+          variant={result.match ? "success" : isDrift ? "destructive" : "secondary"}
+          className={isDegraded ? RECEIPT_INFO_BADGE_CLASS : undefined}
         >
           {verdict}
         </Badge>
@@ -418,7 +435,7 @@ function VerifyResultView({ result }: { result: VerifyResult }) {
       </div>
 
       {degradedTasks.length > 0 ? (
-        <div className="rounded-md border border-warning/25 bg-warning/10 p-2 text-xs text-warning">
+        <div className="rounded-md border border-border/60 bg-muted/25 p-2 text-xs text-text-3">
           <span className="font-semibold">degraded_tasks </span>
           {degradedTasks.map((task, index) => (
             <span key={`${task}:${index}`}>
