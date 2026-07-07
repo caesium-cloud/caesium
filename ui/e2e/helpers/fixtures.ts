@@ -167,11 +167,11 @@ export async function triggerJob(
 ): Promise<void> {
   const options = normalizeTriggerJobOptions(params);
   const job = await getJob(request, jobId);
-  if (!job.trigger_id) {
-    throw new Error(`job ${jobId} did not include trigger_id`);
-  }
 
   if (job.trigger?.type === "http") {
+    if (!job.trigger_id) {
+      throw new Error(`job ${jobId} did not include trigger_id`);
+    }
     await fireHTTPTrigger(request, jobId, job.trigger_id, options);
     return;
   }

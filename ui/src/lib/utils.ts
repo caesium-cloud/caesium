@@ -66,9 +66,12 @@ function padUTC(value: number): string {
 }
 
 export function formatUTCTimestamp(
-  value: string | number | Date,
+  value: string | number | Date | null | undefined,
   fallback = "Unknown time",
 ): string {
+  if (value === null || value === undefined || value === "") {
+    return fallback
+  }
   const date = value instanceof Date ? value : new Date(value)
   if (!Number.isFinite(date.getTime())) {
     return fallback

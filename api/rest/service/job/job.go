@@ -299,7 +299,7 @@ func (j *jobService) GetByIDPrefix(rawID string) (*models.Job, error) {
 }
 
 func isCanonicalUUIDPrefix(prefix string) bool {
-	if len(prefix) > 36 {
+	if len(prefix) == 0 || len(prefix) > 36 {
 		return false
 	}
 	for i, r := range prefix {
@@ -322,7 +322,7 @@ func isHexRune(r rune) bool {
 }
 
 func (j *jobService) attachLatestRun(job *models.Job) {
-	runStore := runstorage.NewStore(j.db)
+	runStore := runstorage.NewStore(j.db.WithContext(j.ctx))
 	if latest, err := runStore.Latest(job.ID); err == nil && latest != nil {
 		job.LatestRun = &models.JobRun{
 			ID:            latest.ID,

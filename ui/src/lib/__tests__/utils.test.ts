@@ -11,4 +11,10 @@ describe("formatUTCTimestamp", () => {
   it("returns the fallback for invalid timestamps", () => {
     expect(formatUTCTimestamp("not-a-date", "unavailable")).toBe("unavailable");
   });
+
+  it("returns the fallback for null, undefined, or empty input", () => {
+    expect(formatUTCTimestamp(null, "unavailable")).toBe("unavailable");
+    expect(formatUTCTimestamp(undefined, "unavailable")).toBe("unavailable");
+    expect(formatUTCTimestamp("", "unavailable")).toBe("unavailable");
+  });
 });
