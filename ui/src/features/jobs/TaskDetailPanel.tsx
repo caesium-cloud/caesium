@@ -34,9 +34,9 @@ interface TaskDetailPanelProps {
 
 type TabId = "details" | "logs";
 
-const taskPanelDefaultWidth = 520;
-const taskPanelMinWidth = 420;
-const taskPanelMaxWidth = 960;
+const taskPanelDefaultWidth = 680;
+const taskPanelMinWidth = 520;
+const taskPanelMaxWidth = 1120;
 const taskPanelWidthStorageKey = "caesium.task-detail-panel.width";
 
 export function TaskDetailPanel({
@@ -54,6 +54,13 @@ export function TaskDetailPanel({
   const [isVisible, setIsVisible] = useState(false);
   const [panelWidth, setPanelWidth] = useState(() => getInitialPanelWidth());
   const [isResizing, setIsResizing] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const hostLayoutRef = useRef<{
+    host: HTMLElement;
+    paddingRight: string;
+    transition: string;
+    boxSizing: string;
+  } | null>(null);
   // Tracks the pending close animation timer so stale timers can be cancelled.
   // Without this, quickly switching from task A → B could have A's timer fire
   // and call onClose after B's panel has already opened.
@@ -63,6 +70,46 @@ export function TaskDetailPanel({
   useLayoutEffect(() => {
     requestAnimationFrame(() => setIsVisible(true));
   }, []);
+
+  useLayoutEffect(() => {
+    const host = panelRef.current?.parentElement;
+    if (!host) {
+      return;
+    }
+
+    hostLayoutRef.current = {
+      host,
+      paddingRight: host.style.paddingRight,
+      transition: host.style.transition,
+      boxSizing: host.style.boxSizing,
+    };
+    host.style.boxSizing = "border-box";
+    host.style.transition = appendTransition(host.style.transition, "padding-right 200ms ease-out");
+    host.dataset.taskDetailPanelOpen = "true";
+
+    return () => {
+      const previous = hostLayoutRef.current;
+      if (!previous) {
+        return;
+      }
+
+      previous.host.style.paddingRight = previous.paddingRight;
+      previous.host.style.transition = previous.transition;
+      previous.host.style.boxSizing = previous.boxSizing;
+      delete previous.host.dataset.taskDetailPanelOpen;
+      hostLayoutRef.current = null;
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    const host = hostLayoutRef.current?.host ?? panelRef.current?.parentElement;
+    if (!host) {
+      return;
+    }
+
+    // eslint-disable-next-line react-hooks/immutability -- imperative DOM offset of the host in a layout effect
+    host.style.paddingRight = `${panelWidth}px`;
+  }, [panelWidth]);
 
   // Clear any pending close timer on unmount.
   useEffect(() => {
@@ -148,6 +195,7 @@ export function TaskDetailPanel({
 
   return (
     <div
+      ref={panelRef}
       data-testid="task-detail-panel"
       className={cn(
         "absolute inset-y-0 right-0 z-20 flex flex-col",
@@ -484,4 +532,8 @@ function persistPanelWidth(width: number) {
   }
 
   window.localStorage.setItem(taskPanelWidthStorageKey, String(width));
+}
+
+function appendTransition(existing: string, addition: string) {
+  return existing ? `${existing}, ${addition}` : addition;
 }

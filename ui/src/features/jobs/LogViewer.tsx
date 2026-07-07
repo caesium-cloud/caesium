@@ -17,7 +17,7 @@ import {
   LogToolbar,
 } from "@/components/logs";
 import { withAuthHeaders } from "@/lib/auth";
-import { buildLogFilterResult } from "./logFiltering";
+import { buildLogFilterResult, stripAnsi } from "./logFiltering";
 
 const logHeaderState = "X-Caesium-Log-State";
 const logHeaderSource = "X-Caesium-Log-Source";
@@ -40,7 +40,10 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const searchTermRef = useRef("");
+  const rawLogTextRef = useRef("");
+  const structuredLogRendererRef = useRef(false);
   const [rawLogText, setRawLogText] = useState("");
+  const [usesStructuredRenderer, setUsesStructuredRenderer] = useState(false);
   const [logState, setLogState] = useState<LogState>("loading");
   const [logSource, setLogSource] = useState<LogSource>(null);
   const [logTruncated, setLogTruncated] = useState(false);
@@ -142,8 +145,26 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     const term = terminal;
 
     term.reset();
+    rawLogTextRef.current = "";
+    structuredLogRendererRef.current = false;
+    setRawLogText("");
+    setUsesStructuredRenderer(false);
+    setTransportError(null);
 
     const abortController = new AbortController();
+    const appendLogChunk = (chunk: string) => {
+      rawLogTextRef.current += chunk;
+      const shouldUseStructuredRenderer = shouldUseStructuredLogViewer(rawLogTextRef.current);
+      setRawLogText(rawLogTextRef.current);
+
+      if (shouldUseStructuredRenderer && !structuredLogRendererRef.current) {
+        structuredLogRendererRef.current = true;
+        setUsesStructuredRenderer(true);
+        term.reset();
+      }
+
+      return shouldUseStructuredRenderer;
+    };
 
     async function streamLogs() {
       try {
@@ -189,24 +210,24 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
             continue;
           }
 
-          setRawLogText((current) => current + chunk);
+          const shouldUseStructuredRenderer = appendLogChunk(chunk);
           if (!sawOutput) {
             sawOutput = true;
           }
 
-          if (!searchTermRef.current) {
+          if (!searchTermRef.current && !shouldUseStructuredRenderer) {
             term.write(chunk);
           }
         }
 
         const tail = decoder.decode();
         if (tail) {
-          setRawLogText((current) => current + tail);
+          const shouldUseStructuredRenderer = appendLogChunk(tail);
           if (!sawOutput) {
             sawOutput = true;
           }
 
-          if (!searchTermRef.current) {
+          if (!searchTermRef.current && !shouldUseStructuredRenderer) {
             term.write(tail);
           }
         }
@@ -241,6 +262,10 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       : null;
 
   useEffect(() => {
+    if (usesStructuredRenderer) {
+      return;
+    }
+
     const terminal = xtermRef.current;
     if (!terminal) {
       return;
@@ -258,7 +283,7 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to search task logs");
     }
-  }, [filterResult.renderedLog]);
+  }, [filterResult.renderedLog, usesStructuredRenderer]);
 
   const handleCopy = async () => {
     const text = filterResult.renderedText.trimEnd();
@@ -311,15 +336,33 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     <LogToolbar
       status={
         <>
-          <LogBadge>{renderStateLabel(logState)}</LogBadge>
+          <LogStatusBadge
+            testId="log-state-primary"
+            {...getPrimaryStateBadge(logState)}
+          />
           {logSource === "live" && (
-            <LogBadge className="border-success/30 bg-success/10 text-success">Live</LogBadge>
+            <LogStatusBadge
+              testId="log-source-badge"
+              label="Live stream"
+              tooltip="Logs are currently streaming from the running task."
+              className="border-success/30 bg-success/10 text-success"
+            />
           )}
           {logSource === "persisted" && (
-            <LogBadge className="border-running/30 bg-running/10 text-running">Retained</LogBadge>
+            <LogStatusBadge
+              testId="log-source-badge"
+              label="Retained snapshot"
+              tooltip="Persisted logs from a finished task."
+              className="border-running/30 bg-running/10 text-running"
+            />
           )}
           {logTruncated && (
-            <LogBadge className="border-warning/30 bg-warning/10 text-warning">Truncated</LogBadge>
+            <LogStatusBadge
+              testId="log-truncated-badge"
+              label="Truncated output"
+              tooltip="The retained log exceeded the storage limit, so only the available tail is shown."
+              className="border-warning/30 bg-warning/10 text-warning"
+            />
           )}
         </>
       }
@@ -370,7 +413,33 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
       emptyState={filteredEmptyState || emptyState}
       hasVisibleOutput={hasVisibleOutput}
     >
-      <div ref={terminalRef} className="h-full w-full overflow-hidden bg-obsidian px-3 py-2" />
+      <div
+        ref={terminalRef}
+        data-testid="task-log-terminal"
+        aria-hidden={usesStructuredRenderer}
+        className={cn(
+          "h-full w-full overflow-hidden bg-obsidian px-3 py-2",
+          usesStructuredRenderer && "hidden",
+        )}
+      />
+      {usesStructuredRenderer && (
+        <div
+          data-testid="task-log-structured-scroll"
+          className="h-full overflow-auto bg-obsidian"
+        >
+          {/*
+            Structured logs render as text instead of xterm: xterm fits to
+            columns and hard-wraps, while this preserves each record as one
+            horizontally scrollable line.
+          */}
+          <pre
+            data-testid="task-log-structured-text"
+            className="m-0 min-w-max whitespace-pre break-normal px-3 py-2 font-mono text-[11px] leading-5 text-slate-200"
+          >
+            {filterResult.renderedText}
+          </pre>
+        </div>
+      )}
       <pre data-testid="task-log-plaintext" className="sr-only">
         {filterResult.renderedText}
       </pre>
@@ -412,22 +481,66 @@ async function readErrorMessage(response: Response): Promise<string> {
   }
 }
 
-function renderStateLabel(state: LogState): string {
+function LogStatusBadge({
+  label,
+  tooltip,
+  testId,
+  className,
+}: {
+  label: string;
+  tooltip: string;
+  testId: string;
+  className?: string;
+}) {
+  return (
+    <span
+      data-testid={testId}
+      title={tooltip}
+      aria-label={`${label}: ${tooltip}`}
+      className="inline-flex"
+    >
+      <LogBadge className={className}>{label}</LogBadge>
+    </span>
+  );
+}
+
+function getPrimaryStateBadge(state: LogState): { label: string; tooltip: string } {
   switch (state) {
     case "loading":
-      return "Loading";
+      return {
+        label: "Loading logs",
+        tooltip: "Caesium is opening the task log stream or checking retained output.",
+      };
     case "streaming":
-      return "Streaming";
+      return {
+        label: "Streaming now",
+        tooltip: "New task output is arriving from a running task.",
+      };
     case "pending":
-      return "Pending";
+      return {
+        label: "Waiting for task",
+        tooltip: "The task has not started emitting stdout or stderr yet.",
+      };
     case "empty":
-      return "Empty";
+      return {
+        label: "No output",
+        tooltip: "The task is reachable, but no stdout or stderr was captured.",
+      };
     case "unavailable":
-      return "Missing";
+      return {
+        label: "Logs unavailable",
+        tooltip: "No live stream or retained log snapshot is available for this task.",
+      };
     case "error":
-      return "Error";
+      return {
+        label: "Load failed",
+        tooltip: "Caesium could not load logs for this task.",
+      };
     default:
-      return "Ready";
+      return {
+        label: "Logs ready",
+        tooltip: "Log output has loaded and is ready to inspect.",
+      };
   }
 }
 
@@ -467,4 +580,45 @@ function getEmptyState(state: LogState, status?: string, source?: LogSource) {
     default:
       return null;
   }
+}
+
+const keyValueLogPattern = /(?:^|[\s,{])[\w.-]+=(?:"[^"]*"|'[^']*'|[^\s,}]+)/;
+const jsonLikeLogPattern = /^\s*(?:\{.*\}|\[.*\])\s*$/;
+const namedStructuredFieldPattern =
+  /\b(?:level|time|timestamp|ts|msg|message|trace_id|span_id|request_id)[=:]/i;
+
+function shouldUseStructuredLogViewer(rawLog: string): boolean {
+  if (!rawLog) {
+    return false;
+  }
+
+  const lines = rawLog
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => stripAnsi(line).trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return false;
+  }
+
+  // Route to the no-wrap structured viewer only when structured lines dominate,
+  // so a single structured-looking line doesn't pull free-form/colorized logs
+  // away from the xterm renderer.
+  const structuredCount = lines.filter(isStructuredLogLine).length;
+  return structuredCount / lines.length >= 0.5;
+}
+
+function isStructuredLogLine(line: string): boolean {
+  const trimmedLine = line.trim();
+  if (!trimmedLine) {
+    return false;
+  }
+
+  return (
+    jsonLikeLogPattern.test(trimmedLine) ||
+    keyValueLogPattern.test(trimmedLine) ||
+    namedStructuredFieldPattern.test(trimmedLine) ||
+    (trimmedLine.length >= 100 && /[=:{}[\],]/.test(trimmedLine))
+  );
 }
