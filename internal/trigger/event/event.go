@@ -178,6 +178,11 @@ func (t *EventTrigger) FireWithParams(ctx context.Context, params map[string]str
 				continue
 			}
 			outcomes = append(outcomes, FireOutcome{JobID: jobModel.ID, Error: err.Error()})
+			// A cancelled fire context fails every remaining start the same
+			// way — abort the loop instead of appending redundant errors.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return outcomes, ctxErr
+			}
 			continue
 		}
 		if runRecord == nil {
