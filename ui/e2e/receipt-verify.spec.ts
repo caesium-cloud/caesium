@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { applyDefinitions, type FixtureDefinition } from "./helpers/fixtures";
 
 type E2EJob = {
@@ -74,7 +74,8 @@ test("operator can inspect receipts and verify a committed receipt against drift
   expect(committedReceipt.degraded).toBe(false);
 
   await page.goto(`/jobs/${pinnedJob.id}/runs/${pinnedRun.id}`);
-  await expect(page.getByTestId("receipt-panel")).toBeVisible({ timeout: 30_000 });
+  await expectRunRealityBeforeReceipt(page);
+  await openReproducibility(page);
   await expect(page.getByTestId("receipt-digest")).toContainText(committedReceipt.receipt_digest);
   await expect(page.getByTestId("receipt-task-row").filter({ hasText: "prepare" })).toContainText("digest_pinned=true");
   await expect(page.getByTestId("receipt-task-row").filter({ hasText: "render" })).toContainText("identity_hash");
@@ -105,12 +106,55 @@ test("operator can inspect receipts and verify a committed receipt against drift
   await waitForSucceededRun(request, unpinnedJob.id, unpinnedRun.id);
 
   await page.goto(`/jobs/${unpinnedJob.id}/runs/${unpinnedRun.id}`);
-  await expect(page.getByTestId("receipt-panel")).toBeVisible({ timeout: 30_000 });
+  await expectRunRealityBeforeReceipt(page);
+  await expect(page.getByTestId("run-timeline-task-row").first()).toHaveAttribute("data-task-name", "prepare");
+  await openReproducibility(page);
   await expect(page.getByTestId("receipt-degraded-status")).toContainText("degraded-unverifiable");
+  await expect(page.getByTestId("receipt-degraded-status")).not.toHaveClass(alarmClassPattern);
+  await expect(
+    page.getByTestId("receipt-task-digest-pinned-marker").filter({ hasText: "digest_pinned=false" }).first(),
+  ).not.toHaveClass(alarmClassPattern);
   await expect(page.getByTestId("receipt-task-unverifiable-marker").first()).toContainText("unverifiable");
+  await expect(page.getByTestId("receipt-task-unverifiable-marker").first()).not.toHaveClass(alarmClassPattern);
   await expect(page.getByTestId("receipt-task-degraded-reason").first()).toContainText("image not digest-pinned");
+  await expect(page.getByTestId("receipt-task-degraded-reason").first()).not.toHaveClass(alarmClassPattern);
   await expect(page.getByTestId("receipt-unverifiable-summary")).toContainText("Unverifiable tasks");
+  await expect(page.getByTestId("receipt-unverifiable-summary")).not.toHaveClass(alarmClassPattern);
 });
+
+const alarmClassPattern = /(?:bg|text|border)-(?:destructive|warning|danger)/;
+
+async function expectRunRealityBeforeReceipt(page: Page): Promise<void> {
+  await expect(page.getByTestId("run-execution-timeline-section")).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByTestId("run-interactive-dag-section")).toBeVisible();
+  await expect(page.getByTestId("run-reproducibility-section")).toBeVisible();
+  await expect(page.getByTestId("receipt-panel")).toHaveCount(0);
+
+  const order = await page.evaluate(() => {
+    const timeline = document.querySelector('[data-testid="run-execution-timeline-section"]');
+    const dag = document.querySelector('[data-testid="run-interactive-dag-section"]');
+    const receipt = document.querySelector('[data-testid="run-reproducibility-section"]');
+    const isBefore = (first: Element | null, second: Element | null) =>
+      Boolean(first && second && (first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING));
+
+    return {
+      timelineBeforeDag: isBefore(timeline, dag),
+      dagBeforeReceipt: isBefore(dag, receipt),
+      timelineBeforeReceipt: isBefore(timeline, receipt),
+    };
+  });
+
+  expect(order).toEqual({
+    timelineBeforeDag: true,
+    dagBeforeReceipt: true,
+    timelineBeforeReceipt: true,
+  });
+}
+
+async function openReproducibility(page: Page): Promise<void> {
+  await page.getByTestId("run-reproducibility-toggle").click();
+  await expect(page.getByTestId("receipt-panel")).toBeVisible({ timeout: 30_000 });
+}
 
 function buildReceiptDefinition(alias: string, variant: string, pinDigests: boolean): ReceiptFixture {
   return {

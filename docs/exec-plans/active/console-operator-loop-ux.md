@@ -95,19 +95,21 @@ is the universal "something's broken" signal, so every normal run looks
 alarming. This stream leads with what happened and reserves red for real
 failure.
 
-- [ ] A1. Reorder `RunDetailPage` so the run leads with status + execution
+- [x] A1. Reorder `RunDetailPage` so the run leads with status + execution
       timeline + DAG + per-task logs; move `ReceiptPanel` into a collapsed
       "Reproducibility" section (or dedicated tab) below the fold, so attestation
       is one interaction away rather than the first thing on the page.
       Files: `ui/src/features/jobs/RunDetailPage.tsx`.
-- [ ] A2. Reserve red for real failures in the receipt panel: render "not
+      Note: Run detail now renders timeline and interactive DAG/task logs before a collapsed Reproducibility receipt section.
+- [x] A2. Reserve red for real failures in the receipt panel: render "not
       attested", "caching disabled", "digest_pinned=false", and
       "degraded / unverifiable" as neutral, informational text (muted/secondary
       styling), not red/amber alarm badges. Keep red strictly for actual task
       failure or attestation *tampering* (a computed digest that does not match
       the recorded one).
       Files: `ui/src/features/jobs/ReceiptPanel.tsx`.
-- [ ] A3. Reconcile the run page's timeline-vs-DAG surfaces so they no longer
+      Note: Degraded/unverifiable and digest-pinned-off receipt states now use muted informational styling, with component/e2e coverage.
+- [x] A3. Reconcile the run page's timeline-vs-DAG surfaces so they no longer
       read as a duplicated DAG (the review flagged "the DAG is rendered twice —
       overlay up top, full DAG at bottom"). Label the execution-timeline gantt
       and the interactive DAG distinctly, and/or collapse the redundant surface;
@@ -115,11 +117,13 @@ failure.
       reconciliation in the PR and resolve as verified-not-a-bug.
       Files: `ui/src/features/jobs/RunDetailPage.tsx`.
       Depends on: A1.
-- [ ] A4. Order the run's task rows in execution order (by start time, breaking
+      Note: Verified one `JobDAG` on the run page; the separate SVG gantt is labeled Execution timeline and the graph is labeled Interactive DAG + task logs.
+- [x] A4. Order the run's task rows in execution order (by start time, breaking
       ties with DAG topological order) before rendering the timeline, so the
       task list reads top-to-bottom in the order things actually ran ("convert
       before list").
       Files: `ui/src/features/jobs/RunTimeline.tsx`.
+      Note: Timeline rows now sort by execution start time first and use the existing DAG topology as the tie-breaker.
 
 ### Stream B — Job-detail page: actionable header, intentional trigger, honest queue & counts
 

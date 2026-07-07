@@ -29,7 +29,7 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
   const [now] = useState<number>(Date.now);
 
   // Only show tasks that have started
-  const startedTasks = orderTasksByDAG(
+  const startedTasks = orderTasksByExecution(
     tasks.filter(t => t.started_at || t.status === "cached"),
     taskDefinitions,
   );
@@ -108,7 +108,13 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
           const duration = end - start;
 
           return (
-            <g key={task.id}>
+            <g
+              key={task.id}
+              data-testid="run-timeline-task-row"
+              data-task-id={task.task_id}
+              data-task-name={label}
+              data-started-at={task.started_at ?? ""}
+            >
               {/* Task label */}
               <text
                 x={LABEL_W - 8}
@@ -217,22 +223,36 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
   );
 }
 
-function orderTasksByDAG(tasks: TaskRun[], taskDefinitions: Record<string, JobTask>): TaskRun[] {
+function orderTasksByExecution(tasks: TaskRun[], taskDefinitions: Record<string, JobTask>): TaskRun[] {
   if (tasks.length <= 1) return tasks;
 
+  const topoRank = taskTopologicalRanks(tasks, taskDefinitions);
+  const inputOrder = new Map(tasks.map((task, index) => [task.task_id, index]));
+
+  return [...tasks].sort((a, b) => {
+    const aStartedAt = executionTimestamp(a);
+    const bStartedAt = executionTimestamp(b);
+    if (aStartedAt !== bStartedAt) return aStartedAt - bStartedAt;
+
+    const aTopoRank = topoRank.get(a.task_id) ?? Number.POSITIVE_INFINITY;
+    const bTopoRank = topoRank.get(b.task_id) ?? Number.POSITIVE_INFINITY;
+    if (aTopoRank !== bTopoRank) return aTopoRank - bTopoRank;
+
+    return (inputOrder.get(a.task_id) ?? 0) - (inputOrder.get(b.task_id) ?? 0);
+  });
+}
+
+function taskTopologicalRanks(tasks: TaskRun[], taskDefinitions: Record<string, JobTask>): Map<string, number> {
   const taskByID = new Map<string, TaskRun>();
   const adjacency = new Map<string, Set<string>>();
   const indegree = new Map<string, number>();
-  const fallbackOrder = new Map<string, { timestamp: number; index: number }>();
+  const inputOrder = new Map<string, number>();
 
   tasks.forEach((task, index) => {
     taskByID.set(task.task_id, task);
     adjacency.set(task.task_id, new Set());
     indegree.set(task.task_id, 0);
-    fallbackOrder.set(task.task_id, {
-      timestamp: fallbackTimestamp(task),
-      index,
-    });
+    inputOrder.set(task.task_id, index);
   });
 
   tasks.forEach((task) => {
@@ -246,14 +266,11 @@ function orderTasksByDAG(tasks: TaskRun[], taskDefinitions: Record<string, JobTa
     indegree.set(nextID, (indegree.get(nextID) ?? 0) + 1);
   });
 
-  const compareByFallback = (a: TaskRun, b: TaskRun) => {
-    const aOrder = fallbackOrder.get(a.task_id) ?? { timestamp: Number.POSITIVE_INFINITY, index: 0 };
-    const bOrder = fallbackOrder.get(b.task_id) ?? { timestamp: Number.POSITIVE_INFINITY, index: 0 };
-    if (aOrder.timestamp !== bOrder.timestamp) return aOrder.timestamp - bOrder.timestamp;
-    return aOrder.index - bOrder.index;
+  const compareByInputOrder = (a: TaskRun, b: TaskRun) => {
+    return (inputOrder.get(a.task_id) ?? 0) - (inputOrder.get(b.task_id) ?? 0);
   };
 
-  const ready = tasks.filter((task) => (indegree.get(task.task_id) ?? 0) === 0).sort(compareByFallback);
+  const ready = tasks.filter((task) => (indegree.get(task.task_id) ?? 0) === 0).sort(compareByInputOrder);
   const ordered: TaskRun[] = [];
 
   while (ready.length > 0) {
@@ -268,21 +285,20 @@ function orderTasksByDAG(tasks: TaskRun[], taskDefinitions: Record<string, JobTa
       const nextTask = taskByID.get(nextID);
       if (nextTask && nextDegree === 0) {
         ready.push(nextTask);
-        ready.sort(compareByFallback);
+        ready.sort(compareByInputOrder);
       }
     }
   }
 
-  if (ordered.length === tasks.length) return ordered;
-
   const orderedIDs = new Set(ordered.map((task) => task.task_id));
   const unresolved = tasks
     .filter((task) => !orderedIDs.has(task.task_id))
-    .sort(compareByFallback);
-  return [...ordered, ...unresolved];
+    .sort(compareByInputOrder);
+
+  return new Map([...ordered, ...unresolved].map((task, index) => [task.task_id, index]));
 }
 
-function fallbackTimestamp(task: TaskRun): number {
+function executionTimestamp(task: TaskRun): number {
   const parsed = new Date(task.started_at ?? task.created_at).getTime();
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
