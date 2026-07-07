@@ -114,6 +114,7 @@ var endpointPolicy = map[string]models.Role{
 	"PUT /v1/jobs/:id/unpause":              models.RoleOperator,
 	"POST /v1/jobdefs/apply":                models.RoleOperator,
 	"POST /v1/cache/prune":                  models.RoleOperator,
+	"DELETE /v1/jobs/:id/queue/:id":         models.RoleOperator,
 	"DELETE /v1/jobs/:id/cache":             models.RoleOperator,
 	"DELETE /v1/jobs/:id/cache/:id":         models.RoleOperator,
 	"PUT /v1/jobs/:id/backfills/:id/cancel": models.RoleOperator,
