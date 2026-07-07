@@ -8,15 +8,27 @@ vi.mock("reactflow", () => {
     nodes = [],
     edges = [],
     onNodeClick,
+    fitViewOptions,
+    maxZoom,
+    proOptions,
   }: {
     nodes?: Array<Record<string, unknown>>;
     edges?: Array<Record<string, unknown>>;
     onNodeClick?: (event: React.MouseEvent, node: Record<string, unknown>) => void;
+    fitViewOptions?: Record<string, unknown>;
+    maxZoom?: number;
+    proOptions?: { hideAttribution?: boolean };
   }) => (
-    <div data-testid="reactflow-mock">
+    <div
+      data-testid="reactflow-mock"
+      data-fit-view-padding={String(fitViewOptions?.padding ?? "")}
+      data-fit-view-max-zoom={String(fitViewOptions?.maxZoom ?? "")}
+      data-max-zoom={String(maxZoom ?? "")}
+    >
       {nodes.map((node) => {
         const id = String(node.id);
         const data = (node.data ?? {}) as Record<string, unknown>;
+        const edgeDegree = (data.edgeDegree ?? {}) as Record<string, unknown>;
         return (
           <button
             key={id}
@@ -25,6 +37,9 @@ vi.mock("reactflow", () => {
             data-node-type={String(node.type)}
             data-status={String(data.status ?? "")}
             data-selected={String(Boolean(data.isSelected))}
+            data-edge-incoming={String(edgeDegree.incoming ?? "")}
+            data-edge-outgoing={String(edgeDegree.outgoing ?? "")}
+            data-edge-total={String(edgeDegree.total ?? "")}
             onClick={(event) => onNodeClick?.(event, node)}
           >
             {String(data.label ?? id)}
@@ -50,6 +65,9 @@ vi.mock("reactflow", () => {
           />
         );
       })}
+      {proOptions?.hideAttribution ? null : (
+        <div className="react-flow__attribution">React Flow</div>
+      )}
     </div>
   );
 
@@ -181,6 +199,23 @@ describe("JobDAG", () => {
     expect(screen.getByTestId("node-task-1")).toHaveTextContent("extract");
   });
 
+  it("tightens single-node DAGs and passes zero edge degree", () => {
+    const dag: JobDAGResponse = {
+      job_id: "job-1",
+      nodes: [{ id: "task-1", atom_id: "atom-1" }],
+      edges: [],
+    };
+
+    render(<JobDAG dag={dag} atoms={atoms} />);
+
+    expect(screen.getByTestId("reactflow-mock")).toHaveAttribute("data-fit-view-padding", "0.06");
+    expect(screen.getByTestId("reactflow-mock")).toHaveAttribute("data-fit-view-max-zoom", "2.2");
+    expect(screen.getByTestId("reactflow-mock")).toHaveAttribute("data-max-zoom", "2.2");
+    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-edge-incoming", "0");
+    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-edge-outgoing", "0");
+    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-edge-total", "0");
+  });
+
   it("marks output-bearing contract edges and skipped branch paths", () => {
     const dag: JobDAGResponse = {
       job_id: "job-1",
@@ -220,6 +255,10 @@ describe("JobDAG", () => {
     );
 
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-output-count", "2");
+    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-edge-incoming", "0");
+    expect(screen.getByTestId("node-task-1")).toHaveAttribute("data-edge-outgoing", "1");
+    expect(screen.getByTestId("node-task-2")).toHaveAttribute("data-edge-incoming", "1");
+    expect(screen.getByTestId("node-task-2")).toHaveAttribute("data-edge-outgoing", "0");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-contract-defined", "true");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-stroke", "hsl(var(--text-3))");
     expect(screen.getByTestId("edge-task-1-task-2")).toHaveAttribute("data-dasharray", "6 3");

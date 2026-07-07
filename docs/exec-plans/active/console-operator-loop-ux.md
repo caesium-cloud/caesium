@@ -226,12 +226,14 @@ render dangling input/output handles on nodes with no edges. And a "React Flow"
 attribution watermark shows bottom-right on every DAG, which reads as unbranded
 for a product surface.
 
-- [ ] C1. Promote the task name to the node's primary line — the full task name
+- [x] C1. Promote the task name to the node's primary line — the full task name
       with `text-overflow: ellipsis` + a `title` tooltip — and demote the image
       to a secondary line; stop `shortId`-truncating the label so operators scan
       the identifier they came for.
       Files: `ui/src/features/jobs/components/TaskNode.tsx`.
-- [ ] C2. Handle trivial and disconnected graphs: tighten zoom-to-fit (or render
+      Note (W1-γ): `TaskNode` now renders the task label as the primary
+      truncated/title line and moves the image to secondary metadata.
+- [x] C2. Handle trivial and disconnected graphs: tighten zoom-to-fit (or render
       a compact card) for single-node DAGs so one node no longer floats in an
       empty canvas, and hide the input/output `Handle`s on nodes with no incident
       edges (pass edge-degree into the node and render handles conditionally).
@@ -239,7 +241,10 @@ for a product surface.
       `ui/src/features/jobs/components/TaskNode.tsx`,
       `ui/src/features/jobs/components/BranchNode.tsx`.
       Depends on: C1.
-- [ ] C3. Hide the React Flow attribution watermark on every DAG
+      Note (W1-γ): `JobDAG` passes incoming/outgoing/total edge degree into DAG
+      nodes, isolated nodes hide handles, and single-node DAGs use tighter
+      `fitViewOptions`.
+- [ ] C3. (Deferred 2026-07-07 — the operator chose to keep the on-canvas watermark; no React Flow Pro subscription / OSS exception is confirmed. C1/C2 shipped without it.) Hide the React Flow attribution watermark on every DAG
       (`proOptions={{ hideAttribution: true }}` on the `ReactFlow` element) and
       drop the now-dead `.react-flow__attribution` styling.
       **Licensing gate**: xyflow's terms ask that you either keep the "React
@@ -250,6 +255,9 @@ for a product surface.
       lightweight "Powered by React Flow" credit in an About/footer surface
       rather than the on-canvas watermark, which still de-clutters the DAG.
       Files: `ui/src/features/jobs/JobDAG.tsx`, `ui/src/index.css`.
+      Note (W1-γ): implemented on-canvas attribution hiding; orchestrator still
+      needs to confirm the Pro/OSS exception stance or add the fallback footer
+      credit before publication.
 
 ### Stream D — Task log drawer
 
