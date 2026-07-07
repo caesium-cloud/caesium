@@ -22,8 +22,11 @@ describe("DagCounters", () => {
   it("surfaces failed and blocked buckets explicitly", () => {
     render(<DagCounters tasks={[task("failed"), task("skipped"), task("blocked")]} />);
 
-    expect(screen.getByTestId("dag-counters")).toHaveTextContent("0 done · 1 failed · 2 blocked");
-    expect(screen.getByTestId("dag-counters")).not.toHaveTextContent("queued");
+    const counters = screen.getByTestId("dag-counters");
+    expect(counters).toHaveTextContent("0 done");
+    expect(counters).toHaveTextContent("1 failed");
+    expect(counters).toHaveTextContent("2 blocked");
+    expect(counters).not.toHaveTextContent("queued");
   });
 
   it("keeps running and cached counts visible", () => {
