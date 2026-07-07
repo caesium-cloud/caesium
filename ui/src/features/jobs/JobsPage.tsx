@@ -333,12 +333,14 @@ const ACTIVITY_LABELS: Record<string, string> = {
   run_started: "Run started",
   run_completed: "Run completed",
   run_failed: "Run failed",
+  run_cancelled: "Run cancelled",
 };
 
 function activityDotClass(type: string) {
   if (type === "run_started") return "bg-cyan-glow/80";
   if (type === "run_failed") return "bg-danger/80";
   if (type === "run_completed") return "bg-success/80";
+  if (type === "run_cancelled") return "bg-warning/80";
   return "bg-text-4";
 }
 
