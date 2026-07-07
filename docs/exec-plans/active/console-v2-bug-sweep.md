@@ -135,7 +135,7 @@ The Live Activity feed duplicates and contradicts itself; the page re-fetches
 `/v1/jobs` four times per load; the command palette over-matches; and the
 HISTORY column never renders. All four items are independent.
 
-- [ ] B1. Fix the Live Activity feed. Two symptoms, one root cause plus an
+- [x] B1. Fix the Live Activity feed. Two symptoms, one root cause plus an
       alias miss: (a) **duplicates + contradiction** — every terminal run
       emits both a specific `run_completed`/`run_failed` event **and** a
       separate `run_terminal` event (`internal/run/store.go` ~3395-3417), and
@@ -158,7 +158,7 @@ HISTORY column never renders. All four items are independent.
       (~109-124, subscription ~156), `ui/src/features/jobs/JobsPage.tsx`
       (activity feed label/color map ~335-342), `ui/src/lib/events.ts` (~66-73),
       `ui/src/lib/__tests__/events.test.ts`.
-- [ ] B2. Eliminate redundant duplicate fetches (one page load fires
+- [x] B2. Eliminate redundant duplicate fetches (one page load fires
       `/v1/jobs` ×4 and `/v1/triggers`, `/v1/atoms`, `/health` ×2). Set a
       sensible global react-query default (`staleTime` > 0 and/or
       `refetchOnMount: false`) on the `QueryClient`, and make the nav-count
@@ -168,14 +168,14 @@ HISTORY column never renders. All four items are independent.
       counts) share one in-flight request. Files: `ui/src/main.tsx`
       (`new QueryClient()`), `ui/src/features/jobs/useNavCounts.ts`,
       `ui/src/features/jobs/useJobsView.ts`, `ui/src/components/command-menu.tsx`.
-- [ ] B3. Fix the command palette (`⌘K`) matcher: it uses cmdk's default
+- [x] B3. Fix the command palette (`⌘K`) matcher: it uses cmdk's default
       subsequence scoring, so "cron" matches "pro**c**ess-p**r**oducti**o**n"
       via scattered letters. Supply a stricter custom `filter` (word / substring
       match against alias + short-id) and index `triggers` and `atoms` as their
       own search groups, not just jobs. Files:
       `ui/src/components/command-menu.tsx`, `ui/src/components/ui/command.tsx`
       (if the custom filter mounts there).
-- [ ] B4. Populate the HISTORY sparkline column, which is `—` for every job.
+- [x] B4. Populate the HISTORY sparkline column, which is `—` for every job.
       The sparkline reads `job.lastRuns` (from a `last_runs` field) but
       `/v1/jobs` only returns a single `latest_run`, so the array is always
       empty. Extend the list controller/service to return a bounded

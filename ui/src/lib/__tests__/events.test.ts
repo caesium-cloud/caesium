@@ -3,7 +3,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // Mock EventSource before importing events module
 class MockEventSource {
   url: string;
-  onmessage: ((event: MessageEvent) => void) | null = null;
+  onopen: (() => void) | null = null;
   onerror: (() => void) | null = null;
   close = vi.fn();
   private eventListeners: Record<string, ((event: MessageEvent) => void)[]> = {};
@@ -18,6 +18,11 @@ class MockEventSource {
       this.eventListeners[type] = [];
     }
     this.eventListeners[type].push(listener);
+  }
+
+  emit(type: string, payload: unknown) {
+    const event = { data: JSON.stringify(payload) } as MessageEvent;
+    this.eventListeners[type]?.forEach((listener) => listener(event));
   }
 
   static instances: MockEventSource[] = [];
@@ -57,13 +62,9 @@ describe('EventManager', () => {
     const handler = vi.fn();
     events.subscribe('run_started', handler);
 
-    // Simulate an SSE event by triggering addEventListener callback
+    // Simulate the named SSE events emitted by the server.
     const es = MockEventSource.instances[0];
-    // The EventManager subscribes via addEventListener and onmessage
-    // Use the onmessage handler to simulate a generic event
-    es.onmessage?.({
-      data: JSON.stringify({ type: 'run_started', timestamp: '2024-01-01T00:00:00Z' }),
-    } as MessageEvent);
+    es.emit('run_started', { type: 'run_started', timestamp: '2024-01-01T00:00:00Z' });
 
     expect(handler).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'run_started' })
@@ -77,9 +78,7 @@ describe('EventManager', () => {
     events.unsubscribe('run_started', handler);
 
     const es = MockEventSource.instances[0];
-    es.onmessage?.({
-      data: JSON.stringify({ type: 'run_started', timestamp: '2024-01-01T00:00:00Z' }),
-    } as MessageEvent);
+    es.emit('run_started', { type: 'run_started', timestamp: '2024-01-01T00:00:00Z' });
 
     expect(handler).not.toHaveBeenCalled();
   });

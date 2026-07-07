@@ -25,19 +25,19 @@ export function useNavCounts(): NavCounts {
   const results = useQueries({
     queries: [
       {
-        queryKey: ["nav-counts", "jobs"],
+        queryKey: ["jobs"],
         queryFn: api.getJobs,
         refetchInterval: REFETCH_MS,
         staleTime: REFETCH_MS / 2,
       },
       {
-        queryKey: ["nav-counts", "triggers"],
+        queryKey: ["triggers"],
         queryFn: api.getTriggers,
         refetchInterval: REFETCH_MS,
         staleTime: REFETCH_MS / 2,
       },
       {
-        queryKey: ["nav-counts", "atoms"],
+        queryKey: ["atoms"],
         queryFn: api.getAtoms,
         refetchInterval: REFETCH_MS,
         staleTime: REFETCH_MS / 2,
