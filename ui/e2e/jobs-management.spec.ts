@@ -27,24 +27,24 @@ test("operator can pause and unpause a job from the detail page", async ({ page,
   await page.waitForURL(/\/jobs\/[^/]+$/);
   await expect(page.getByRole("heading", { name: alias })).toBeVisible();
 
-  const triggerButton = page.getByRole("button", { name: "Trigger" });
-  const pauseButton = page.getByRole("button", { name: "Pause" });
+  const triggerButton = page.getByRole("button", { name: "Trigger job" });
+  const moreActions = page.getByRole("button", { name: "More job actions" });
   await expect(triggerButton).toBeEnabled();
-  await expect(pauseButton).toBeVisible();
 
-  await pauseButton.click();
+  // Pause now lives in the "⋯" overflow menu so it is never clipped.
+  await moreActions.click();
+  await page.getByRole("menuitem", { name: "Pause job" }).click();
 
-  // Once paused, the action button label flips to "Unpause" and the trigger
-  // button is disabled so operators can't kick off new runs by accident.
-  const unpauseButton = page.getByRole("button", { name: "Unpause" });
-  await expect(unpauseButton).toBeVisible();
+  // Once paused, the trigger button is disabled so operators can't kick off new
+  // runs by accident, and the overflow item flips to "Unpause job".
   await expect(triggerButton).toBeDisabled();
-
   // The header status badge should switch to "paused" alongside the alias.
   await expect(page.getByText("paused", { exact: true }).first()).toBeVisible();
 
-  await unpauseButton.click();
-  await expect(pauseButton).toBeVisible();
+  await moreActions.click();
+  const unpauseItem = page.getByRole("menuitem", { name: "Unpause job" });
+  await expect(unpauseItem).toBeVisible();
+  await unpauseItem.click();
   await expect(triggerButton).toBeEnabled();
 });
 
