@@ -1,7 +1,7 @@
 import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { isRecord } from '@/lib/typeGuards';
-import { cn, shortId } from '@/lib/utils';
+import { cn, formatUTCTimestamp, shortId } from '@/lib/utils';
 import {
   Activity,
   CheckCircle2,
@@ -249,11 +249,7 @@ function formatRetryAfter(value: unknown) {
   if (typeof value !== 'string' || value.trim() === '') {
     return 'the current window resets';
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+  return formatUTCTimestamp(value, value);
 }
 
 function getRuntimeHints(spec: unknown) {

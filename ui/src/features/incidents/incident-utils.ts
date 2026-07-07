@@ -1,5 +1,5 @@
 import type { AgentAction, AgentSession, Incident, Job } from "@/lib/api";
-import { shortId } from "@/lib/utils";
+import { formatUTCTimestamp, shortId } from "@/lib/utils";
 
 export const INCIDENT_EVENT_TYPES = [
   "incident_opened",
@@ -57,9 +57,7 @@ export function incidentSummary(incident: Incident): string {
 
 export function formatDateTime(value?: string): string {
   if (!value) return "unknown";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return formatUTCTimestamp(value, value);
 }
 
 export function formatDurationMs(ms: number): string {

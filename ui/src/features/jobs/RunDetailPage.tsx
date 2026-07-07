@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, ArrowLeftRight, ChevronDown, ChevronRight, RotateCcw, Square, History } from "lucide-react";
 import { toast } from "sonner";
+import { NotFoundState } from "@/components/not-found-state";
 import { RelativeTime } from "@/components/relative-time";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,7 +21,7 @@ import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type CallbackRun, type Incident, type JobRun, type JobTask, type TaskRun } from "@/lib/api";
 import { usePrincipal } from "@/lib/auth";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { shortId } from "@/lib/utils";
+import { formatUTCTimestamp, shortId } from "@/lib/utils";
 import { getRunCacheStats } from "./cache-utils";
 import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
@@ -267,7 +268,14 @@ export function RunDetailPage() {
     );
   }
 
-  if (!run) return <div className="p-8 text-text-3">Run not found</div>;
+  if (!run) {
+    return (
+      <NotFoundState
+        title="Run not found"
+        subtitle="The requested run could not be found or is no longer available."
+      />
+    );
+  }
 
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
   const selectedRunTask = selectedTaskId ? runTasks[selectedTaskId] : undefined;
@@ -549,7 +557,7 @@ function runSortTimestamp(run: JobRun): number {
 
 function formatRunTimestamp(run: JobRun): string {
   const parsed = parseTimestamp(run.started_at) ?? parseTimestamp(run.created_at);
-  return parsed !== undefined ? new Date(parsed).toLocaleString() : "Unknown start time";
+  return parsed !== undefined ? formatUTCTimestamp(parsed, "Unknown start time") : "Unknown start time";
 }
 
 function parseTimestamp(value: string | undefined): number | undefined {

@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { RelativeTime } from "@/components/relative-time";
 import { api, type Backfill } from "@/lib/api";
-import { shortId } from "@/lib/utils";
+import { formatUTCTimestamp, shortId } from "@/lib/utils";
 
 interface BackfillsViewProps {
   jobId: string;
@@ -34,11 +34,7 @@ function renderBackfillStatus(backfill: Backfill) {
 }
 
 function formatDateRange(start: string, end: string): string {
-  const fmt = (s: string) =>
-    new Date(s).toLocaleString(undefined, {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
+  const fmt = (s: string) => formatUTCTimestamp(s, s);
   return `${fmt(start)} → ${fmt(end)}`;
 }
 

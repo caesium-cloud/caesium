@@ -5,6 +5,7 @@ import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, Pause
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
+import { NotFoundState } from "@/components/not-found-state";
 import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -30,7 +31,7 @@ import { TaskMetadataPanel } from "./TaskMetadataPanel";
 import { useDagHeight } from "@/hooks/useDagHeight";
 import { api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
-import { formatDurationNs, formatKeyValueMap, parseJSONConfig, shortId } from "@/lib/utils";
+import { formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
 type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache" | null;
 
@@ -345,7 +346,12 @@ export function JobDetailPage() {
   }
 
   if (!job) {
-    return <div className="p-8">Job not found</div>;
+    return (
+      <NotFoundState
+        title="Job not found"
+        subtitle="The requested job could not be found or is no longer available."
+      />
+    );
   }
 
   const selectedTask = selectedTaskId ? taskDefinitions[selectedTaskId] : undefined;
@@ -746,7 +752,7 @@ function RunsView({ runs, job }: { runs: JobRun[]; job: Job }) {
         >
           <div className="space-y-1">
             <div className="flex items-center gap-2">
-              <span className="font-medium">{new Date(run.started_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}</span>
+              <span className="font-medium">{formatUTCTimestamp(run.started_at, run.started_at)}</span>
               {run.params && Object.keys(run.params).length > 0 ? (
                 <Badge variant="outline">{Object.keys(run.params).length} params</Badge>
               ) : null}

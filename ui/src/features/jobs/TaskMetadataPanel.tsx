@@ -1,5 +1,5 @@
 import type { JobTask, TaskRun } from "@/lib/api";
-import { formatDurationNs, formatKeyValueMap } from "@/lib/utils";
+import { formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { isTaskCached } from "./cache-utils";
@@ -35,8 +35,8 @@ export function TaskMetadataPanel({ task, runTask, taskType, framed = true }: Ta
         <MetadataRow label="Node Selector" value={formatKeyValueMap((task?.node_selector || runTask?.node_selector) as Record<string, unknown>)} />
         <MetadataRow label="Outstanding Predecessors" value={String(runTask?.outstanding_predecessors ?? 0)} mono />
         {runTask?.cache_origin_run_id ? <MetadataRow label="Source Run" value={runTask.cache_origin_run_id} mono /> : null}
-        {runTask?.cache_created_at ? <MetadataRow label="Cached At" value={new Date(runTask.cache_created_at).toLocaleString()} /> : null}
-        {runTask?.cache_expires_at ? <MetadataRow label="Cache Expires" value={new Date(runTask.cache_expires_at).toLocaleString()} /> : null}
+        {runTask?.cache_created_at ? <MetadataRow label="Cached At" value={formatUTCTimestamp(runTask.cache_created_at, runTask.cache_created_at)} /> : null}
+        {runTask?.cache_expires_at ? <MetadataRow label="Cache Expires" value={formatUTCTimestamp(runTask.cache_expires_at, runTask.cache_expires_at)} /> : null}
         {runTask?.error ? <MetadataRow label="Error" value={runTask.error} className="md:col-span-2" /> : null}
         {runTask?.output && Object.keys(runTask.output).length > 0 ? (
           <div className="md:col-span-2">
@@ -83,11 +83,7 @@ function formatAttempts(runTask?: TaskRun): string {
 }
 
 function formatRetryAfter(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return formatUTCTimestamp(value, value);
 }
 
 interface MetadataRowProps {

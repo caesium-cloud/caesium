@@ -11,7 +11,7 @@ import {
   TimerReset,
 } from "lucide-react";
 import { toast } from "sonner";
-import { cn, formatDurationNs, formatKeyValueMap } from "@/lib/utils";
+import { cn, formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
@@ -290,10 +290,10 @@ export function TaskDetailPanel({
                         </Link>
                       ) : null}
                       {runTask?.cache_created_at ? (
-                        <span>cached {new Date(runTask.cache_created_at).toLocaleString()}</span>
+                        <span>cached {formatUTCTimestamp(runTask.cache_created_at, runTask.cache_created_at)}</span>
                       ) : null}
                       {runTask?.cache_expires_at ? (
-                        <span>expires {new Date(runTask.cache_expires_at).toLocaleString()}</span>
+                        <span>expires {formatUTCTimestamp(runTask.cache_expires_at, runTask.cache_expires_at)}</span>
                       ) : null}
                     </div>
                   </div>
@@ -459,11 +459,7 @@ function formatAttempts(runTask?: TaskRun): string {
 }
 
 function formatRetryAfter(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) {
-    return value;
-  }
-  return parsed.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return formatUTCTimestamp(value, value);
 }
 
 function getInitialPanelWidth() {

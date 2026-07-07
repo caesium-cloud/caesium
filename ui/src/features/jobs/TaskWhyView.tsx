@@ -15,7 +15,7 @@ import {
   type WhyTrigger,
   type WhyVerdict,
 } from "@/lib/api";
-import { cn, shortId } from "@/lib/utils";
+import { cn, formatUTCTimestamp, shortId } from "@/lib/utils";
 
 interface TaskWhyViewProps {
   jobId: string;
@@ -461,5 +461,5 @@ function formatVerdict(verdict: WhyVerdict) {
 }
 
 function formatDateTime(value: string) {
-  return new Date(value).toLocaleString();
+  return formatUTCTimestamp(value, value);
 }

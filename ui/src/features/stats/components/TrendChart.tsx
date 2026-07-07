@@ -10,6 +10,9 @@ import {
   Legend,
 } from 'recharts';
 import type { DailyStats } from '@/lib/api';
+import { formatUTCTimestamp } from '@/lib/utils';
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 interface TrendChartProps {
   data: DailyStats[];
@@ -17,17 +20,11 @@ interface TrendChartProps {
 
 function formatDateLabel(value: string) {
   if (value.includes('T')) {
-    const date = new Date(value);
-    return new Intl.DateTimeFormat(undefined, {
-      hour: 'numeric',
-    }).format(date);
+    return formatUTCTimestamp(value, value);
   }
   const [year, month, day] = value.split('-').map(Number);
   if (!year || !month || !day) return value;
-  return new Intl.DateTimeFormat(undefined, {
-    month: 'short',
-    day: 'numeric',
-  }).format(new Date(year, month - 1, day));
+  return `${MONTH_LABELS[month - 1] ?? String(month)} ${day}`;
 }
 
 export function TrendChart({ data }: TrendChartProps) {

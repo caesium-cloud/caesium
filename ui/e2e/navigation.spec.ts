@@ -26,3 +26,12 @@ test("sidebar navigates between every primary control-plane page", async ({ page
     await expect(page.getByRole("heading", { name: item.heading })).toBeVisible();
   }
 });
+
+test("unknown console routes render the shared not-found state", async ({ page }) => {
+  await page.goto("/definitely-missing-console-route");
+
+  await expect(page.getByTestId("not-found-state")).toBeVisible();
+  await expect(page.getByText("404")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Page not found" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Back to jobs" })).toBeVisible();
+});
