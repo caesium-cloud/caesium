@@ -107,7 +107,7 @@ export function TriggerDialog({
           ) : null}
 
           <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={() => onOpenChange(false)} disabled={isPending}>
+            <Button type="button" variant="outline" size="sm" onClick={() => handleOpenChange(false)} disabled={isPending}>
               Cancel
             </Button>
             <Button type="submit" size="sm" disabled={isPending || disabled}>
