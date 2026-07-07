@@ -10,7 +10,6 @@ import {
   Legend,
 } from 'recharts';
 import type { DailyStats } from '@/lib/api';
-import { formatUTCTimestamp } from '@/lib/utils';
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -20,7 +19,14 @@ interface TrendChartProps {
 
 function formatDateLabel(value: string) {
   if (value.includes('T')) {
-    return formatUTCTimestamp(value, value);
+    // Intraday tick: keep a compact UTC hour (e.g. "10 AM") so 24 hourly ticks
+    // don't overlap on the axis; the full UTC timestamp is far too wide here.
+    const parsed = new Date(value);
+    if (Number.isNaN(parsed.getTime())) return value;
+    const hour = parsed.getUTCHours();
+    const suffix = hour < 12 ? 'AM' : 'PM';
+    const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+    return `${hour12} ${suffix}`;
   }
   const [year, month, day] = value.split('-').map(Number);
   if (!year || !month || !day) return value;
