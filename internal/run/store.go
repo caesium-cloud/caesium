@@ -242,6 +242,7 @@ var (
 	ErrRunSkipped               = errors.New("run: skipped by concurrency policy")
 	ErrRunQueued                = errors.New("run: queued by concurrency policy")
 	ErrQueuedRunUnavailable     = errors.New("run: queued run already claimed or unavailable")
+	ErrQueuedRunNotFound        = errors.New("run: queued run not found")
 	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
 	// ErrJobPaused is returned by RetryFromFailureAdmitted when an agent-initiated
 	// retry is refused because the job is paused. A human pause outranks an agent
@@ -3803,6 +3804,16 @@ func (s *Store) CancelQueuedRun(ctx context.Context, jobID, queueID uuid.UUID) e
 		return result.Error
 	}
 	if result.RowsAffected == 0 {
+		// The conditional delete matched no unclaimed row: distinguish a missing
+		// queued run (404) from one the dequeuer has already claimed (409).
+		var count int64
+		if err := s.db.WithContext(ctx).Model(&models.RunQueue{}).
+			Where("id = ? AND job_id = ?", queueID, jobID).Count(&count).Error; err != nil {
+			return err
+		}
+		if count == 0 {
+			return ErrQueuedRunNotFound
+		}
 		return ErrQueuedRunUnavailable
 	}
 	if err := s.observeRunQueueDepth(jobID); err != nil {

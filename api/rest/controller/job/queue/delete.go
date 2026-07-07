@@ -32,6 +32,9 @@ func Delete(c *echo.Context) error {
 	}
 
 	if err := svc.CancelQueuedRun(jobID, queueID); err != nil {
+		if errors.Is(err, runstorage.ErrQueuedRunNotFound) {
+			return echo.NewHTTPError(http.StatusNotFound, "queued run not found")
+		}
 		if errors.Is(err, runstorage.ErrQueuedRunUnavailable) {
 			return echo.NewHTTPError(http.StatusConflict, "queued run already started")
 		}
