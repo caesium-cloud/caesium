@@ -1,6 +1,11 @@
 # Console Operator Loop UX — Job Detail, Run, and DAG Surfaces
 
-Last updated: 2026-07-02
+Last updated: 2026-07-07
+
+> **Status: Complete — shipped 2026-07-07 (Streams A/B/C/D plus the B5 queue-cancel
+> backend) and archived to `docs/exec-plans/completed/`.** The one deferred item is
+> C3 (React Flow watermark removal), kept on the canvas by operator decision pending
+> a Pro subscription / OSS exception.
 
 This plan closes the gap between what the Caesium console *shows* and what an
 operator actually needs from the job-detail, run-detail, and DAG surfaces:
@@ -14,7 +19,7 @@ header overflows so that `Pause` is clipped off-screen with no overflow menu.
 
 The receipt/`why`/`blame`/`diff`/`replay` affordances these pages carry were
 shipped by the completed
-[`data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md) plan and the
+[`data-plane-memory-ui.md`](data-plane-memory-ui.md) plan and the
 `2.4 UI Refresh` initiative. This plan does **not** change those features'
 semantics — it changes their *placement and visual weight* so the diagnostic
 substance survives contact with a real operator. The work is UI-first and
@@ -48,7 +53,7 @@ wins (the operator-loop refinement is a follow-up to `§2.4 UI Refresh` and
 overlaps the remaining UI surface of `§3.4 Live DAG Debugging`). The
 receipt / `why` / `blame` / run-diff / replay affordances this plan
 *reorganizes* are owned by the completed
-[`data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md); when the two
+[`data-plane-memory-ui.md`](data-plane-memory-ui.md); when the two
 disagree on how those affordances behave, that plan's contract wins — this plan
 only relocates and re-weights them, it does not redefine their meaning. Every
 stream is UI-gated by the `just ui-lint && just ui-test && just ui-e2e` chain;
@@ -56,13 +61,18 @@ a stream is not done until its behavior is asserted through the real surface
 (component test or Playwright e2e against a live backend), never a snapshot of
 internal state.
 
-## Progress (as of 2026-07-02)
+## Progress (as of 2026-07-07)
 
-No implementation waves have shipped yet. The plan was published from the
-job-detail + DAG UX review; the first wave is the next eligible run of the
-`exec-plan-wave` skill against this doc. All four streams are leaf-eligible on
-wave 1 (see `## Sequencing & Dependencies` for the two soft cross-stream
-edges).
+**Complete** (except C3, deferred by operator decision). Shipped in one wave via
+the `exec-plan-wave` skill (codex implementation, orchestrator verify/publish/merge):
+
+- **A** — run page leads with status + a labeled execution timeline + interactive DAG + per-task logs; the receipt is collapsed below the fold and de-alarmed (neutral styling for not-attested/degraded/digest-pinned-off — red is reserved for real failure or attestation tampering); task rows render in execution order. PR #312.
+- **B** — job-detail header splits view-tabs from actions with Pause/Backfill in an always-reachable "⋯" overflow menu (+ aria-labels); a params+confirm `TriggerDialog` landing on the live run view; DAG counters surface failed + blocked; queue rows show why-pending + age + inspect; secondary views are deep-linkable sub-routes; and a queue Cancel affordance wired to the new endpoint (409 surfaced distinctly). PR #314 (frontend).
+- **B5** — the queue-cancel backend: `DELETE /v1/jobs/:id/queue/:queue_id`, a race-safe conditional delete on the unclaimed row (409 when already claimed, 404 when absent), an explicit Operator RBAC policy entry + `run_queue.cancel` scope, and a live-server integration test. PR #311 (backend).
+- **C** — DAG nodes lead with the full task name (ellipsis + tooltip) and demote the image; single-node graphs fit tightly with handles hidden on edgeless nodes. **C3 (watermark removal) deferred** — the operator kept the on-canvas React Flow attribution (no Pro/OSS exception). PR #310.
+- **D** — the task log drawer widens, offsets the host so it no longer occludes the selected node, renders structured logs through a no-wrap scrollable viewer, and disambiguates the log-state labels (Live stream / Retained snapshot / Truncated output). PR #313.
+
+Post-review hardening (404-vs-409 queue semantics, the Cancel-button reset, a structured-log detection threshold, and the e2e reconciliation for the overflow menu + renamed labels) landed in the same PRs.
 
 A round of Codex adversarial review (2026-07-02) hardened **B5** (the queue-cancel
 endpoint — the plan's only backend mutation): it now pins the exact route/method,
@@ -76,10 +86,10 @@ completeness test), a race-safe conditional delete on the unclaimed row with a
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Run page: lead with status/timeline/DAG/logs, demote & de-alarm the receipt, order tasks | **P0** | Not started |
-| B | Job-detail page: overflow-safe header, intentional trigger, honest queue & counts, deep-links | **P0** | Not started |
-| C | DAG canvas & node legibility: task-name-first nodes, trivial-graph fit, no watermark | P1 | Not started |
-| D | Task log drawer: room to breathe, no mid-word wrap, disambiguated state labels | P1 | Not started |
+| A | Run page: lead with status/timeline/DAG/logs, demote & de-alarm the receipt, order tasks | **P0** | ✅ Shipped (#312) |
+| B | Job-detail page: overflow-safe header, intentional trigger, honest queue & counts, deep-links | **P0** | ✅ Shipped (#314 frontend, #311 B5 backend) |
+| C | DAG canvas & node legibility: task-name-first nodes, trivial-graph fit, no watermark | P1 | ✅ Shipped (#310); C3 deferred (watermark kept) |
+| D | Task log drawer: room to breathe, no mid-word wrap, disambiguated state labels | P1 | ✅ Shipped (#313) |
 
 ## Streams
 
@@ -464,7 +474,7 @@ The plan is done when **all** of these hold:
 - [`docs/roadmap.md`](../../roadmap.md) — `§2.4 UI Refresh (Caesium Console v2)`
   and `§3.4 Live DAG Debugging & Run Diff`; this plan is the operator-loop
   refinement follow-up.
-- [`docs/exec-plans/completed/data-plane-memory-ui.md`](../completed/data-plane-memory-ui.md)
+- [`docs/exec-plans/completed/data-plane-memory-ui.md`](data-plane-memory-ui.md)
   — owns the receipt / `why` / `blame` / run-diff / replay affordances this plan
   relocates and re-weights.
 - [`docs/README.md`](../../README.md) — active records index.

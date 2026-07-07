@@ -48,9 +48,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 
 ## Active Exec Plans
 
-Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill.
-
-- `exec-plans/active/console-operator-loop-ux.md`: Operator-loop UX refinement of the job-detail, run-detail, and DAG surfaces (follow-up to the shipped Console v2 refresh; 4 UI-first streams).
+Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. None are open right now — both Console v2 exec plans (bug sweep and operator-loop UX) have shipped and moved to `exec-plans/completed/`; feature exec plans are linked from their design records above.
 
 ## Load Testing
 
