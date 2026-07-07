@@ -385,6 +385,8 @@ func auditActionForRoute(method, routePath string) string {
 		return auth.ActionRunTrigger
 	case "GET /v1/jobs/:id/queue":
 		return auth.ActionRunQueueRead
+	case "DELETE /v1/jobs/:id/queue/:id":
+		return auth.ActionRunQueueCancel
 	case "POST /v1/jobs/:id/runs/:id/retry":
 		return auth.ActionRunRetry
 	case "POST /v1/jobs/:id/backfill":

@@ -159,7 +159,7 @@ trigger deliberate, and its status honest.
       run. Confirm a stale "enqueued 3h ago" row reflects real queue state, not
       seed data or a genuine scheduler stall — capture the finding in the PR.
       Files: `ui/src/features/jobs/JobDetailPage.tsx`.
-- [ ] B5. Wire a queue-cancel affordance end-to-end (no dead buttons). This is
+- [x] B5. Wire a queue-cancel affordance end-to-end (no dead buttons). This is
       the plan's **one backend mutation** and there is currently no dequeue
       endpoint (only `cancelBackfill`), so it is specified tightly — an
       under-specified version risks a Cancel button that 403s under auth, is
@@ -207,6 +207,12 @@ trigger deliberate, and its status honest.
       `api/auth_rbac_policy_completeness_test.go`, the run-queue store
       (`internal/run/store.go` or the run-queue store package),
       `ui/src/lib/api.ts`, `ui/src/features/jobs/JobDetailPage.tsx`, `test/`.
+      W1-zeta backend note: `DELETE /v1/jobs/:id/queue/:queue_id` is bound
+      group-relative as `/jobs/:id/queue/:queue_id`, carries normalized
+      Operator RBAC policy key `DELETE /v1/jobs/:id/queue/:id`, and deletes only
+      unclaimed `run_queue` rows (`claimed_by = ''`); zero affected rows return
+      409. Integration coverage exercises clean unclaimed cancel and claimed-row
+      conflict.
       Depends on: B4.
 - [ ] B6. Make the secondary views (Runs, Tasks, Config, YAML, Backfills, Cache)
       linkable sub-routes instead of modal state, so an operator can deep-link

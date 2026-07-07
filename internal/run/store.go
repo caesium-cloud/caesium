@@ -241,6 +241,7 @@ var (
 	ErrTaskClaimMismatch        = errors.New("run: task claim mismatch")
 	ErrRunSkipped               = errors.New("run: skipped by concurrency policy")
 	ErrRunQueued                = errors.New("run: queued by concurrency policy")
+	ErrQueuedRunUnavailable     = errors.New("run: queued run already claimed or unavailable")
 	ErrMaxConcurrentRunsReached = errors.New("run: max concurrent runs reached")
 	// ErrJobPaused is returned by RetryFromFailureAdmitted when an agent-initiated
 	// retry is refused because the job is paused. A human pause outranks an agent
@@ -3790,6 +3791,22 @@ func (s *Store) ReleaseQueuedRun(ctx context.Context, queueID uuid.UUID, claimed
 		if observeErr := s.observeRunQueueDepth(queued.JobID); observeErr != nil {
 			log.Warn("run queue: failed to observe depth after release", "job_id", queued.JobID, "error", observeErr)
 		}
+	}
+	return nil
+}
+
+func (s *Store) CancelQueuedRun(ctx context.Context, jobID, queueID uuid.UUID) error {
+	result := s.db.WithContext(ctx).
+		Where("id = ? AND job_id = ? AND claimed_by = ''", queueID, jobID).
+		Delete(&models.RunQueue{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return ErrQueuedRunUnavailable
+	}
+	if err := s.observeRunQueueDepth(jobID); err != nil {
+		log.Warn("run queue: failed to observe depth after cancel", "job_id", jobID, "queue_id", queueID, "error", err)
 	}
 	return nil
 }
