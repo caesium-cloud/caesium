@@ -11,6 +11,7 @@ type E2ERun = {
 };
 
 type QueueRow = {
+  id: string;
   position: number;
   priority: number;
   params?: Record<string, string>;
@@ -34,6 +35,20 @@ test("job detail shows pending queued runs", async ({ page, request }) => {
       return rows[0]?.params?.lane ?? "";
     }, { timeout: 10_000 })
     .toBe("queued");
+  const queuedRows = await getQueue(request, job.id);
+  const queuedRow = queuedRows[0];
+  if (!queuedRow) {
+    throw new Error("queued row was not returned after polling");
+  }
+  expect(queuedRow.id).toBeTruthy();
+
+  await page.route(`**/v1/jobs/${job.id}/queue/${queuedRow.id}`, async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ message: "already started" }),
+    });
+  });
 
   await page.goto(`/jobs/${job.id}`);
   const panel = page.getByTestId("run-queue-panel");
@@ -42,6 +57,12 @@ test("job detail shows pending queued runs", async ({ page, request }) => {
   await expect(row).toBeVisible();
   await expect(row).toContainText("#1");
   await expect(row).toContainText("high");
+  await expect(row).toContainText("Waiting for a run slot");
+  await expect(row).toContainText("enqueued");
+  await expect(row.getByTestId("run-queue-inspect-link")).toHaveAttribute("href", new RegExp(`#queue-${queuedRow.id}$`));
+
+  await row.getByRole("button", { name: /Cancel queued run/ }).click();
+  await expect(page.getByText("Queued run already started")).toBeVisible();
 });
 
 function buildQueueDefinition(alias: string): FixtureDefinition {

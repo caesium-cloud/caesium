@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "@tanstack/react-router";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { Link, useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, Pause, Play, Settings2, ShieldCheck, Zap } from "lucide-react";
+import { CalendarRange, FileText, FileWarning, History, List, ListOrdered, MoreHorizontal, Pause, Play, Settings2, ShieldCheck, XCircle, Zap } from "lucide-react";
 import { stringify as yamlStringify } from "yaml";
 import { toast } from "sonner";
 import { Duration } from "@/components/duration";
@@ -10,6 +10,12 @@ import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { StatusBadge } from "@/components/ui/status-badge";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { INCIDENT_EVENT_TYPES, formatIncidentClass, incidentAge, incidentSummary, isResolvedIncident } from "@/features/incidents/incident-utils";
@@ -23,29 +29,45 @@ import { BackfillDialog } from "./BackfillDialog";
 import { BackfillsView } from "./BackfillsView";
 import { CacheView } from "./CacheView";
 import { describeCachePolicy, getRunCacheStats } from "./cache-utils";
+import { DagCounters } from "./DagCounters";
 import { JobDAG } from "./JobDAG";
 import { buildJobAuthoringManifest, formatCommandForDisplay } from "./job-detail-manifest";
 import { RunCacheSummary } from "./RunCacheSummary";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 import { TaskMetadataPanel } from "./TaskMetadataPanel";
+import { TriggerDialog } from "./TriggerDialog";
 import { useDagHeight } from "@/hooks/useDagHeight";
-import { api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
+import { ApiError, api, type Atom, type Incident, type Job, type JobRun, type JobTask, type RunQueueItem, type TaskRun, type Trigger } from "@/lib/api";
 import { events, type CaesiumEvent } from "@/lib/events";
 import { formatDurationNs, formatKeyValueMap, formatUTCTimestamp, parseJSONConfig, shortId } from "@/lib/utils";
 
-type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache" | null;
+type SecondaryView = "runs" | "tasks" | "configuration" | "definition" | "backfills" | "cache";
+
+const secondaryViewSegments: Record<SecondaryView, string> = {
+  runs: "runs",
+  tasks: "tasks",
+  configuration: "config",
+  definition: "yaml",
+  backfills: "backfills",
+  cache: "cache",
+};
 
 export function JobDetailPage() {
   const { jobId } = useParams({ strict: false }) as { jobId: string };
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const secondaryView = secondaryViewFromPath(pathname);
   const [streamHealthy, setStreamHealthy] = useState(events.isHealthy());
   const [backfillDialogOpen, setBackfillDialogOpen] = useState(false);
-  const [secondaryView, setSecondaryView] = useState<SecondaryView>(null);
+  const [triggerDialogOpen, setTriggerDialogOpen] = useState(false);
 
   // URL-hash driven node selection
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(() => {
     const hash = window.location.hash.slice(1);
+    if (hash.startsWith("queue-")) {
+      return null;
+    }
     return hash || null;
   });
 
@@ -70,9 +92,9 @@ export function JobDetailPage() {
   // sub-fetch, SSE filter, and mutation below operates on the full id.
   useEffect(() => {
     if (job && job.id !== jobId) {
-      navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true });
+      navigate({ to: jobViewPath(job.id, secondaryView), replace: true });
     }
-  }, [job, jobId, navigate]);
+  }, [job, jobId, navigate, secondaryView]);
 
   const { data: runs, isLoading: isLoadingRuns } = useQuery({
     queryKey: ["job", jobId, "runs"],
@@ -156,10 +178,12 @@ export function JobDetailPage() {
   }, [jobId, queryClient]);
 
   const triggerMutation = useMutation({
-    mutationFn: ({ jobId: currentJobId }: { jobId: string }) => api.triggerJob(currentJobId),
+    mutationFn: ({ jobId: currentJobId, params }: { jobId: string; params: Record<string, string> }) =>
+      api.triggerJob(currentJobId, Object.keys(params).length > 0 ? { params } : undefined),
     onSuccess: (run) => {
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
       queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      setTriggerDialogOpen(false);
       if (!run?.id) {
         toast.success("Job queued");
         return;
@@ -192,6 +216,25 @@ export function JobDetailPage() {
     },
     onError: (err: Error) => {
       toast.error(`Failed to update job state: ${err.message}`);
+    },
+  });
+
+  const cancelQueueMutation = useMutation({
+    mutationFn: ({ jobId: currentJobId, queueId }: { jobId: string; queueId: string }) =>
+      api.cancelQueuedRun(currentJobId, queueId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
+      queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+      toast.success("Queued run cancelled");
+    },
+    onError: (err: Error) => {
+      if (err instanceof ApiError && err.status === 409) {
+        toast.error("Queued run already started — can't cancel");
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "queue"] });
+        queryClient.invalidateQueries({ queryKey: ["job", jobId, "runs"] });
+        return;
+      }
+      toast.error(`Failed to cancel queued run: ${err.message}`);
     },
   });
 
@@ -364,9 +407,9 @@ export function JobDetailPage() {
 
   return (
     <div className="space-y-4">
-      {/* Header row */}
-      <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-        <div>
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
             <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-text-3 mb-1">Pipeline</div>
             <div className="flex items-center gap-2.5">
               <h1 className="text-xl font-semibold text-text-1 tracking-tight">{job.alias}</h1>
@@ -389,62 +432,81 @@ export function JobDetailPage() {
               ) : null}
             </div>
             {featuredRun ? <div className="mt-2"><RunCacheSummary run={featuredRun} /></div> : null}
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Secondary view buttons */}
-          <div className="flex items-center gap-1 mr-2">
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("runs")}>
-              <History className="mr-1.5 h-3.5 w-3.5" />
-              Runs
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("tasks")}>
-              <List className="mr-1.5 h-3.5 w-3.5" />
-              Tasks
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("configuration")}>
-              <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-              Config
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("definition")}>
-              <FileText className="mr-1.5 h-3.5 w-3.5" />
-              YAML
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("backfills")}>
-              <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
-              Backfills
-            </Button>
-            <Button variant="ghost" size="sm" className="h-8 px-2.5 text-xs" onClick={() => setSecondaryView("cache")}>
-              Cache
-            </Button>
           </div>
-          <div className="h-6 w-px bg-border" />
-          <Button size="sm" onClick={() => triggerMutation.mutate({ jobId: job.id })} disabled={triggerMutation.isPending || job.paused}>
-            <Play className="mr-1.5 h-3.5 w-3.5" />
-            Trigger
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setBackfillDialogOpen(true)}
-            disabled={job.paused || trigger?.type !== "cron"}
-            title={trigger?.type !== "cron" ? "Backfill requires a cron trigger" : undefined}
-          >
-            <CalendarRange className="mr-1.5 h-3.5 w-3.5" />
-            Backfill
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
-            disabled={pauseMutation.isPending}
-          >
-            <Pause className="mr-1.5 h-3.5 w-3.5" />
-            {job.paused ? "Unpause" : "Pause"}
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button
+              size="sm"
+              aria-label="Trigger job"
+              onClick={() => setTriggerDialogOpen(true)}
+              disabled={triggerMutation.isPending || job.paused}
+            >
+              <Play className="mr-1.5 h-3.5 w-3.5" />
+              Trigger
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  aria-label="More job actions"
+                  data-testid="job-actions-overflow"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuItem
+                  aria-label="Backfill job"
+                  disabled={job.paused || trigger?.type !== "cron"}
+                  onSelect={() => setBackfillDialogOpen(true)}
+                >
+                  <CalendarRange className="h-4 w-4" />
+                  Backfill
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  aria-label={job.paused ? "Unpause job" : "Pause job"}
+                  disabled={pauseMutation.isPending}
+                  onSelect={() => pauseMutation.mutate({ jobId: job.id, paused: !job.paused, hasActiveRun: !!activeRun })}
+                >
+                  <Pause className="h-4 w-4" />
+                  {job.paused ? "Unpause" : "Pause"}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </div>
+        <div
+          className="flex max-w-full items-center gap-1 overflow-x-auto rounded-md border bg-card/80 p-1"
+          data-testid="job-detail-view-tabs"
+        >
+          <ViewTab jobId={job.id} view="runs" activeView={secondaryView} icon={<History className="h-3.5 w-3.5" />}>
+            Runs
+          </ViewTab>
+          <ViewTab jobId={job.id} view="tasks" activeView={secondaryView} icon={<List className="h-3.5 w-3.5" />}>
+            Tasks
+          </ViewTab>
+          <ViewTab jobId={job.id} view="configuration" activeView={secondaryView} icon={<Settings2 className="h-3.5 w-3.5" />}>
+            Config
+          </ViewTab>
+          <ViewTab jobId={job.id} view="definition" activeView={secondaryView} icon={<FileText className="h-3.5 w-3.5" />}>
+            YAML
+          </ViewTab>
+          <ViewTab jobId={job.id} view="backfills" activeView={secondaryView} icon={<CalendarRange className="h-3.5 w-3.5" />}>
+            Backfills
+          </ViewTab>
+          <ViewTab jobId={job.id} view="cache" activeView={secondaryView}>
+            Cache
+          </ViewTab>
         </div>
       </div>
 
-      <RunQueuePanel rows={queueRows} isLoading={isLoadingQueue} />
+      <RunQueuePanel
+        rows={queueRows}
+        isLoading={isLoadingQueue}
+        jobId={job.id}
+        cancelingQueueId={cancelQueueMutation.isPending ? cancelQueueMutation.variables?.queueId : undefined}
+        onCancel={(queueId) => cancelQueueMutation.mutate({ jobId: job.id, queueId })}
+      />
 
       {features?.agent_remediation_enabled === true ? (
         <RemediationOverview job={job} incidents={jobIncidents} activeIncidents={activeIncidents} />
@@ -485,9 +547,7 @@ export function JobDetailPage() {
 
           <div className="flex items-center gap-3 shrink-0">
             {/* Live task counters */}
-            {featuredRun && (
-              <DagCounters tasks={featuredRun.tasks} />
-            )}
+            {featuredRun && <DagCounters tasks={featuredRun.tasks} />}
             {job.paused && (
               <StatusBadge status="paused" variant="soft" size="sm" />
             )}
@@ -526,58 +586,67 @@ export function JobDetailPage() {
         ) : null}
       </div>
 
-      {/* Secondary views dialog */}
-      <Dialog open={secondaryView !== null} onOpenChange={(open) => !open && setSecondaryView(null)}>
-        <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
-          <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
-            <DialogTitle>
-              {secondaryView === "runs" && "Run History"}
-              {secondaryView === "tasks" && "Task Definitions"}
-              {secondaryView === "configuration" && "Configuration"}
-              {secondaryView === "definition" && "Job Definition (YAML)"}
-              {secondaryView === "backfills" && "Backfills"}
-              {secondaryView === "cache" && "Cache"}
-            </DialogTitle>
-          </DialogHeader>
-          <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
-            {secondaryView === "runs" && (
-              <RunsView runs={sortedRuns} job={job} />
-            )}
-            {secondaryView === "tasks" && (
-              <TasksView tasks={tasks} atoms={atoms} dag={dag} featuredRunTasks={featuredRunTasks} />
-            )}
-            {secondaryView === "configuration" && (
-              <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
-            )}
-            {secondaryView === "definition" && (
-              <div className="space-y-3">
-                <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
-                  <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
-                  <div>
-                    <div className="font-medium text-warning">Reconstructed from loaded job-detail data</div>
-                    <div className="mt-1 text-text-3">
-                      Root callbacks are not exposed by this page&apos;s loaded endpoints. Original multi-engine
-                      volume declarations are represented from resolved mounts when possible.
+      <Dialog
+        open={secondaryView !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            navigate({ to: "/jobs/$jobId", params: { jobId: job.id }, replace: true });
+          }
+        }}
+      >
+        {secondaryView ? (
+          <DialogContent className={`${secondaryView === "cache" ? "max-w-5xl" : "max-w-3xl"} max-h-[80vh] flex flex-col gap-0 overflow-hidden p-0`}>
+            <DialogHeader className="shrink-0 px-6 pt-6 pb-4">
+              <DialogTitle>{secondaryViewTitle(secondaryView)}</DialogTitle>
+            </DialogHeader>
+            <div className="flex-1 min-h-0 overflow-auto px-6 pb-6">
+              {secondaryView === "runs" && (
+                <RunsView runs={sortedRuns} job={job} />
+              )}
+              {secondaryView === "tasks" && (
+                <TasksView tasks={tasks} atoms={atoms} dag={dag} featuredRunTasks={featuredRunTasks} />
+              )}
+              {secondaryView === "configuration" && (
+                <ConfigurationView job={job} trigger={trigger} triggerConfig={triggerConfig} />
+              )}
+              {secondaryView === "definition" && (
+                <div className="space-y-3">
+                  <div className="flex gap-2 rounded-md border border-warning/30 bg-warning/10 p-3 text-xs text-text-2">
+                    <FileWarning className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
+                    <div>
+                      <div className="font-medium text-warning">Reconstructed from loaded job-detail data</div>
+                      <div className="mt-1 text-text-3">
+                        Root callbacks are not exposed by this page&apos;s loaded endpoints. Original multi-engine
+                        volume declarations are represented from resolved mounts when possible.
+                      </div>
                     </div>
                   </div>
+                  <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
+                    {yamlStringify(jobManifest)}
+                  </pre>
                 </div>
-                <pre className="overflow-auto rounded-md border bg-muted p-4 text-xs">
-                  {yamlStringify(jobManifest)}
-                </pre>
-              </div>
-            )}
-            {secondaryView === "backfills" && (
-              <BackfillsView jobId={jobId} />
-            )}
-            {secondaryView === "cache" && (
-              <CacheView jobId={jobId} job={job} featuredRun={featuredRun} tasks={tasks} />
-            )}
-          </div>
-        </DialogContent>
+              )}
+              {secondaryView === "backfills" && (
+                <BackfillsView jobId={job.id} />
+              )}
+              {secondaryView === "cache" && (
+                <CacheView jobId={job.id} job={job} featuredRun={featuredRun} tasks={tasks} />
+              )}
+            </div>
+          </DialogContent>
+        ) : null}
       </Dialog>
 
+      <TriggerDialog
+        open={triggerDialogOpen}
+        onOpenChange={setTriggerDialogOpen}
+        disabled={job.paused}
+        isPending={triggerMutation.isPending}
+        onConfirm={(params) => triggerMutation.mutate({ jobId: job.id, params })}
+      />
+
       <BackfillDialog
-        jobId={jobId}
+        jobId={job.id}
         open={backfillDialogOpen}
         onOpenChange={setBackfillDialogOpen}
         disabled={job.paused}
@@ -586,29 +655,19 @@ export function JobDetailPage() {
   );
 }
 
-/* ── DAG live counters ── */
-
-function DagCounters({ tasks }: { tasks?: TaskRun[] }) {
-  if (!tasks || tasks.length === 0) return null;
-  const done = tasks.filter((t) => t.status === "succeeded" || t.status === "completed").length;
-  const running = tasks.filter((t) => t.status === "running").length;
-  const cached = tasks.filter((t) => t.status === "cached").length;
-  const failed = tasks.filter((t) => t.status === "failed").length;
-  const queued = tasks.filter((t) => t.status === "pending" || t.status === "queued").length;
-  const total = tasks.length;
-
-  return (
-    <div data-testid="dag-counters" className="flex items-center gap-3 text-[10px] font-mono tabular-nums">
-      <span className="text-success/80">{done}/{total} done</span>
-      {running > 0 && <span className="text-cyan-glow/80">{running} active</span>}
-      {cached > 0 && <span className="text-cached/80">{cached} cached</span>}
-      {failed > 0 && <span className="text-danger/80">{failed} failed</span>}
-      {queued > 0 && <span className="text-text-4">{queued} queued</span>}
-    </div>
-  );
-}
-
-function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: boolean }) {
+function RunQueuePanel({
+  rows,
+  isLoading,
+  jobId,
+  cancelingQueueId,
+  onCancel,
+}: {
+  rows?: RunQueueItem[];
+  isLoading: boolean;
+  jobId: string;
+  cancelingQueueId?: string;
+  onCancel: (queueId: string) => void;
+}) {
   const hasRows = (rows?.length ?? 0) > 0;
   if (!hasRows && !isLoading) {
     return null;
@@ -630,19 +689,52 @@ function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: 
           {rows?.map((row) => (
             <div
               key={row.id}
+              id={`queue-${row.id}`}
               data-testid="run-queue-row"
-              className="grid gap-2 px-3 py-2 text-xs md:grid-cols-[72px_96px_minmax(160px,1fr)_minmax(160px,1.4fr)] md:items-center"
+              className="grid gap-3 px-3 py-2 text-xs md:grid-cols-[minmax(120px,0.8fr)_minmax(220px,1.4fr)_minmax(160px,1fr)_auto] md:items-center"
             >
-              <span className="font-mono text-text-3">#{row.position}</span>
-              <Badge variant="outline" className="w-fit font-mono text-[10px]">
-                {formatPriority(row.priority)}
-              </Badge>
-              <span className="text-text-3">
-                enqueued <RelativeTime date={row.enqueued_at} />
-              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-text-3">#{row.position}</span>
+                  <Badge variant="outline" className="w-fit font-mono text-[10px]">
+                    {formatPriority(row.priority)}
+                  </Badge>
+                </div>
+                <div className="mt-1 font-mono text-[10px] text-text-4">{shortId(row.id)}</div>
+              </div>
+              <div className="min-w-0">
+                <div className="truncate text-text-2" title={queuePendingReason(row)}>
+                  {queuePendingReason(row)}
+                </div>
+                <div className="mt-1 text-text-3">
+                  enqueued <RelativeTime date={row.enqueued_at} />
+                </div>
+              </div>
               <span className="min-w-0 truncate font-mono text-text-2" title={formatQueueParams(row.params)}>
                 {formatQueueParams(row.params)}
               </span>
+              <div className="flex items-center justify-end gap-1">
+                <a
+                  href={`/jobs/${encodeURIComponent(jobId)}#queue-${row.id}`}
+                  className="rounded-md px-2 py-1 text-xs text-cyan-glow hover:bg-cyan-glow/10"
+                  aria-label={`Inspect queued run ${shortId(row.id)}`}
+                  data-testid="run-queue-inspect-link"
+                >
+                  Inspect
+                </a>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-2 text-xs text-danger hover:text-danger"
+                  aria-label={`Cancel queued run ${shortId(row.id)}`}
+                  disabled={cancelingQueueId === row.id}
+                  onClick={() => onCancel(row.id)}
+                >
+                  <XCircle className="mr-1 h-3.5 w-3.5" />
+                  {cancelingQueueId === row.id ? "Canceling" : "Cancel"}
+                </Button>
+              </div>
             </div>
           ))}
         </div>
@@ -652,6 +744,38 @@ function RunQueuePanel({ rows, isLoading }: { rows?: RunQueueItem[]; isLoading: 
         </div>
       )}
     </div>
+  );
+}
+
+function ViewTab({
+  jobId,
+  view,
+  activeView,
+  icon,
+  children,
+}: {
+  jobId: string;
+  view: SecondaryView;
+  activeView: SecondaryView | null;
+  icon?: ReactNode;
+  children: ReactNode;
+}) {
+  const isActive = activeView === view;
+  return (
+    <Button
+      asChild
+      variant={isActive ? "secondary" : "ghost"}
+      size="sm"
+      className="h-8 shrink-0 px-2.5 text-xs"
+    >
+      <Link
+        to={jobViewPath(jobId, view)}
+        aria-current={isActive ? "page" : undefined}
+      >
+        {icon}
+        {children}
+      </Link>
+    </Button>
   );
 }
 
@@ -941,6 +1065,48 @@ function incidentMatchesTask(incident: Incident, taskId: string, taskName?: stri
   return incident.task_id === taskId || incident.task_name === taskId || Boolean(taskName && incident.task_name === taskName);
 }
 
+function secondaryViewFromPath(pathname: string): SecondaryView | null {
+  const lastSegment = pathname.split("/").filter(Boolean).at(-1);
+  switch (lastSegment) {
+    case "runs":
+      return "runs";
+    case "tasks":
+      return "tasks";
+    case "config":
+      return "configuration";
+    case "yaml":
+      return "definition";
+    case "backfills":
+      return "backfills";
+    case "cache":
+      return "cache";
+    default:
+      return null;
+  }
+}
+
+function jobViewPath(jobId: string, view: SecondaryView | null): string {
+  const base = `/jobs/${encodeURIComponent(jobId)}`;
+  return view ? `${base}/${secondaryViewSegments[view]}` : base;
+}
+
+function secondaryViewTitle(view: SecondaryView): string {
+  switch (view) {
+    case "runs":
+      return "Run History";
+    case "tasks":
+      return "Task Definitions";
+    case "configuration":
+      return "Configuration";
+    case "definition":
+      return "Job Definition (YAML)";
+    case "backfills":
+      return "Backfills";
+    case "cache":
+      return "Cache";
+  }
+}
+
 function renderRunStatus(status: string) {
   const variant =
     status === "succeeded" || status === "completed"
@@ -996,4 +1162,15 @@ function formatQueueParams(params?: Record<string, string>) {
     .sort()
     .map((key) => `${key}=${params[key]}`)
     .join(", ");
+}
+
+function queuePendingReason(row: RunQueueItem) {
+  const explicitReason = row.pending_reason ?? row.wait_reason ?? row.blocked_reason ?? row.reason;
+  if (row.blocked === true) {
+    return explicitReason ? `Blocked: ${explicitReason}` : "Blocked by scheduler policy";
+  }
+  if (explicitReason) {
+    return explicitReason;
+  }
+  return `Waiting for a run slot; ${formatPriority(row.priority)} priority at position #${row.position}`;
 }

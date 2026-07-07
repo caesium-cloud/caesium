@@ -24,6 +24,11 @@ const ROUTE_LABELS: Record<string, string> = {
   database: "Database",
   logs: "Logs",
   runs: "Runs",
+  tasks: "Tasks",
+  config: "Config",
+  yaml: "YAML",
+  backfills: "Backfills",
+  cache: "Cache",
 };
 
 function buildCrumbs(pathname: string): Crumb[] {

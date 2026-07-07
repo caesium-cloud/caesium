@@ -43,6 +43,42 @@ const jobDetailRoute = createRoute({
   component: JobDetailPage,
 });
 
+const jobRunsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/runs",
+  component: JobDetailPage,
+});
+
+const jobTasksRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/tasks",
+  component: JobDetailPage,
+});
+
+const jobConfigRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/config",
+  component: JobDetailPage,
+});
+
+const jobYamlRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/yaml",
+  component: JobDetailPage,
+});
+
+const jobBackfillsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/backfills",
+  component: JobDetailPage,
+});
+
+const jobCacheRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "jobs/$jobId/cache",
+  component: JobDetailPage,
+});
+
 const blameRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "jobs/$jobId/blame",
@@ -192,6 +228,12 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   jobsRoute,
   jobDetailRoute,
+  jobRunsRoute,
+  jobTasksRoute,
+  jobConfigRoute,
+  jobYamlRoute,
+  jobBackfillsRoute,
+  jobCacheRoute,
   blameRoute,
   runDiffRoute,
   runDetailRoute,
