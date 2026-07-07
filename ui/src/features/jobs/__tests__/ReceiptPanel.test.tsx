@@ -79,7 +79,7 @@ const degradedReceipt: Receipt = {
     {
       task_name: "extract",
       identity_hash: "identity",
-      image: "busybox:latest",
+      image: "busybox:1.36.1",
       digest_pinned: false,
       degraded: true,
       degraded_reason: "image not digest-pinned",
