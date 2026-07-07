@@ -16,19 +16,23 @@ vi.mock("@/lib/auth", () => ({
 }));
 
 vi.mock("xterm", () => ({
-  Terminal: vi.fn().mockImplementation(() => ({
-    loadAddon: vi.fn(),
-    open: vi.fn(),
-    reset: terminalReset,
-    write: terminalWrite,
-    dispose: vi.fn(),
-  })),
+  Terminal: vi.fn().mockImplementation(function () {
+    return {
+      loadAddon: vi.fn(),
+      open: vi.fn(),
+      reset: terminalReset,
+      write: terminalWrite,
+      dispose: vi.fn(),
+    };
+  }),
 }));
 
 vi.mock("xterm-addon-fit", () => ({
-  FitAddon: vi.fn().mockImplementation(() => ({
-    fit: fitAddonFit,
-  })),
+  FitAddon: vi.fn().mockImplementation(function () {
+    return {
+      fit: fitAddonFit,
+    };
+  }),
 }));
 
 describe("TaskDetailPanel", () => {
