@@ -592,11 +592,21 @@ function shouldUseStructuredLogViewer(rawLog: string): boolean {
     return false;
   }
 
-  return rawLog
+  const lines = rawLog
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
     .split("\n")
-    .some((line) => isStructuredLogLine(stripAnsi(line)));
+    .map((line) => stripAnsi(line).trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return false;
+  }
+
+  // Route to the no-wrap structured viewer only when structured lines dominate,
+  // so a single structured-looking line doesn't pull free-form/colorized logs
+  // away from the xterm renderer.
+  const structuredCount = lines.filter(isStructuredLogLine).length;
+  return structuredCount / lines.length >= 0.5;
 }
 
 function isStructuredLogLine(line: string): boolean {
