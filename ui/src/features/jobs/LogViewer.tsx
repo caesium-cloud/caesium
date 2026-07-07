@@ -152,12 +152,25 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     setTransportError(null);
 
     const abortController = new AbortController();
+    // The structured-vs-freeform decision reads only the first
+    // structuredScanMaxChars of the log, so once that head is complete the
+    // NEGATIVE decision is final too — stop rescanning it on every chunk.
+    let structuredDecisionFinal = false;
     const appendLogChunk = (chunk: string) => {
       rawLogTextRef.current += chunk;
       // Once the structured renderer is locked in there is no way back, so skip
       // re-scanning the (growing) buffer on every subsequent chunk.
-      const shouldUseStructuredRenderer =
-        structuredLogRendererRef.current || shouldUseStructuredLogViewer(rawLogTextRef.current);
+      let shouldUseStructuredRenderer: boolean;
+      if (structuredLogRendererRef.current) {
+        shouldUseStructuredRenderer = true;
+      } else if (structuredDecisionFinal) {
+        shouldUseStructuredRenderer = false;
+      } else {
+        shouldUseStructuredRenderer = shouldUseStructuredLogViewer(rawLogTextRef.current);
+        if (!shouldUseStructuredRenderer && rawLogTextRef.current.length >= structuredScanMaxChars) {
+          structuredDecisionFinal = true;
+        }
+      }
       setRawLogText(rawLogTextRef.current);
 
       if (shouldUseStructuredRenderer && !structuredLogRendererRef.current) {

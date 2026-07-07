@@ -3,8 +3,10 @@
 // node data; nodes hide their input/output handles when they have no incident
 // edges on that side.
 
+import { isRecord } from '@/lib/typeGuards';
+
 export function getHandleVisibility(edgeDegree: unknown) {
-  if (!isEdgeDegree(edgeDegree)) {
+  if (!isRecord(edgeDegree)) {
     return {
       showTargetHandle: true,
       showSourceHandle: true,
@@ -15,10 +17,6 @@ export function getHandleVisibility(edgeDegree: unknown) {
     showTargetHandle: readEdgeCount(edgeDegree.incoming) > 0,
     showSourceHandle: readEdgeCount(edgeDegree.outgoing) > 0,
   };
-}
-
-function isEdgeDegree(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function readEdgeCount(value: unknown) {
