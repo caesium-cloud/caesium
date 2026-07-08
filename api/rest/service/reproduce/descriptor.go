@@ -22,9 +22,8 @@ var ErrDescriptorUnavailable = errors.New("reproduce: descriptor unavailable")
 
 // Service loads task execution descriptors for the REST controller.
 type Service struct {
-	ctx   context.Context
-	db    *gorm.DB
-	store *runstorage.Store
+	ctx context.Context
+	db  *gorm.DB
 }
 
 // DescriptorResponse is the small response wrapper around the stored raw
@@ -66,7 +65,7 @@ func New(ctx context.Context) *Service {
 
 // NewWithDatabase creates a Service backed by the supplied database connection.
 func NewWithDatabase(ctx context.Context, conn *gorm.DB) *Service {
-	return &Service{ctx: ctx, db: conn, store: runstorage.NewStore(conn)}
+	return &Service{ctx: ctx, db: conn}
 }
 
 // WithDatabase returns a copy of the Service using the supplied connection.
@@ -94,16 +93,9 @@ func (s *Service) Descriptor(runID uuid.UUID, taskRef string) (*DescriptorRespon
 		return nil, ErrDescriptorUnavailable
 	}
 
-	if _, err := s.store.TaskExecutionDescriptor(s.ctx, runID, row.TaskID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, runstorage.ErrTaskRunNotFound
-		}
-		if strings.Contains(err.Error(), "task execution descriptor missing") {
-			return nil, ErrDescriptorUnavailable
-		}
-		return nil, err
-	}
-
+	// The raw stored bytes are returned verbatim — deliberately NO typed decode
+	// or schema-version gate here: a future schemaVersion bump must not hide a
+	// perfectly readable descriptor from the CLI (which owns version handling).
 	return &DescriptorResponse{
 		JobID:      row.JobID,
 		TaskRunID:  row.ID,
