@@ -82,6 +82,8 @@ These features widen the gap between Caesium and alternatives in areas where Cae
 
 **Current state**: `caesium job diff` shows textual differences between local YAML and the server. `caesium dev --once` runs a job locally. These are separate manual steps.
 
+**Shipped contract surface**: The contract section of this PR flow is live. Server-mode lint and JobDefs diff responses include contract findings, `caesium contract check`/`graph` and `GET /v1/contracts/graph` expose the derived graph, the Console `/contracts` route renders the graph, and the JobDefs diff tab badges compatible/unknown/breaking edges with named consumers and teams. Breaking applies in fail mode return 409 unless the operator supplies an acknowledgement with `caesium job apply --allow-breaking dataset=<name> --reason ...`; the Console apply flow requires that ack reason before sending the intentional-break request.
+
 **Target state**: A GitHub Action (and GitLab CI template) that automatically runs on PRs touching `*.job.yaml` files: validates the definition, renders a visual DAG diff (added/removed tasks, changed parameters, new edges), executes the job in a sandboxed namespace, and posts results as a PR comment. This makes pipeline changes as reviewable as application code changes.
 
 **Implementation plan**:
@@ -220,9 +222,9 @@ steps:
 
 ## Phase 4: Data-Plane Differentiators (Design Wave)
 
-A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc. **Freshness-driven scheduling — the strategic flagship — has since shipped** (streams A–G merged); the rest are not yet committed to implementation. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
+A brainstormed wave of proposed designs that compound the shipped data-plane-memory substrate (descriptors, receipts, lineage, cache identity, quarantined replay) and the agent-in-the-loop direction. Each is a standalone design doc. **Freshness-driven scheduling — the strategic flagship — has since shipped** (streams A–G merged), and contract enforcement has also shipped its full implementation wave. The first three decompose the "Dataflow-style compute sized to the ETL" instinct into tractable, container-native slices (vertical, horizontal, temporal) without Caesium ever owning the computation model.
 
-Each design has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams. Freshness-driven scheduling has shipped its full wave (see the row below and the [Completed Features](#completed-features) table); the remaining plans are eligible for the `exec-plan-wave` skill but have not yet shipped an implementation wave.
+Each design has a drafted execution plan under `docs/exec-plans/active/` decomposing it into parallelizable streams. Freshness-driven scheduling and contract enforcement have shipped their full waves (see the rows below and the [Completed Features](#completed-features) table); the remaining active plans are eligible for the `exec-plan-wave` skill but have not yet shipped an implementation wave.
 
 | Design | One-liner | Doc | Plan |
 |--------|-----------|-----|------|
@@ -231,7 +233,7 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 | Deadline-window scheduling | Declare a window + deadline instead of a cron minute; scheduler picks the start from load/cost/carbon signals with a deadline-safe latest start | [`design-window-scheduling.md`](design-window-scheduling.md) | [`window-scheduling.md`](exec-plans/active/window-scheduling.md) |
 | Freshness-driven scheduling | **Shipped.** Declare freshness SLOs on datasets; execution derives from lineage + data arrival instead of cron guesses — the `datasets` jobdef surface, freshness evaluator, arrival signals, `GET /v1/datasets*`, Console freshness UI, P1 skip-when-fresh, and P2 `trigger: {type: freshness}` all land | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | [`freshness-scheduling.md`](exec-plans/completed/freshness-scheduling.md) |
 | Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
-| Contract enforcement | Cross-job schema-compatibility checks at lint/diff/apply with named consumers and an intentional-break path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | [`contract-enforcement.md`](exec-plans/active/contract-enforcement.md) |
+| Contract enforcement | **Shipped.** Cross-job schema-compatibility checks at lint/diff/apply with named consumers, REST/CLI/Console graph surfaces, JobDefs diff badges, and an intentional-break acknowledgement path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | `exec-plans/completed/contract-enforcement.md` |
 | Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
 | `caesium reproduce` | Re-execute any historical task locally from its execution descriptor — production debugging on a laptop | [`design-reproduce.md`](design-reproduce.md) | [`reproduce.md`](exec-plans/active/reproduce.md) |
 
@@ -254,7 +256,7 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 | **P3** | 3.3 Self-serve triggers | Expands the user base beyond engineers. |
 | **P3** | 3.4 Live DAG debugging | High wow-factor. Mostly UI work. |
 | **P3** | 3.5 Agent-in-the-loop remediation | Runtime shipped. Converts the data-plane-memory substrate into autonomous ops; the `metadata.remediation` policy + agent runtime land, Phase 0 (diagnosed pages) first. |
-| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling has **shipped** its full wave, contract enforcement and right-sizing remain the near-term standouts. |
+| **P3** | Phase 4 design wave | Eight proposed designs compounding the data-plane substrate; freshness-driven scheduling and contract enforcement have **shipped** their full waves, with right-sizing the remaining near-term standout. |
 
 ---
 
@@ -277,6 +279,7 @@ Features that were previously on the roadmap and are now shipped:
 | Embedded web UI with DAG visualization | [`ui_implementation_plan.md`](archive/ui_implementation_plan.md) | Shipped |
 | Native SSO authentication | [`sso-authentication.md`](sso-authentication.md) | Shipped (OIDC, SAML, LDAP) |
 | Freshness-driven scheduling | [`design-freshness-scheduling.md`](design-freshness-scheduling.md) | Shipped ([plan](exec-plans/completed/freshness-scheduling.md); streams A–G) |
+| Cross-job contract enforcement | [`design-contract-enforcement.md`](design-contract-enforcement.md) | Shipped (`exec-plans/completed/contract-enforcement.md`; contract graph/check, apply enforcement, Console graph and diff badges) |
 | Agent-in-the-loop ETL remediation | [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) | Shipped ([plan](exec-plans/completed/agent-in-the-loop-remediation.md); runtime streams) |
 
 ---

@@ -156,7 +156,7 @@ steps:
 | `retries` / `retryDelay` / `retryBackoff` | int / duration / bool | no | Retry policy |
 | `triggerRule` | string | no | `all_success` (default), `all_done`, `all_failed`, `one_success`, `always` |
 | `outputSchema` / `inputSchema` | object / map | no | Data contracts (see [Data Contracts](#data-contracts-outputinput-schemas)) |
-| `datasets` | object | no | Freshness surface: `consumes` (dataset names) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
+| `datasets` | object | no | Freshness and contract surface: `consumes` (dataset names or `{name, schema}` objects) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs plus optional `schema`/`schemaFrom`/`version`). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
@@ -240,7 +240,7 @@ callbacks:
 
 ### Datasets & Freshness (opt-in)
 
-Declare the datasets steps produce and consume plus a freshness SLO, and Caesium can schedule on data arrival and staleness instead of a cron guess. All of this is scheduling metadata — excluded from the cache identity hash. Feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`.
+Declare the datasets steps produce and consume plus a freshness SLO, and Caesium can schedule on data arrival and staleness instead of a cron guess. The same dataset block can carry producer and consumer JSON Schemas for cross-job contract enforcement. All of this is scheduling or apply-time metadata, excluded from the cache identity hash. Freshness is feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`; contract enforcement is server-gated by `CAESIUM_CONTRACT_ENFORCEMENT`.
 
 ```yaml
 metadata:
@@ -271,8 +271,20 @@ steps:
 ```
 
 - `steps[].datasets.consumes` / `produces[]` — a consumed name may resolve to a dataset produced by another job; `produces[].name` is required, `freshness`/`maxStaleness` are Go durations, `watermark.key` names the emitted output key.
+- Contract schemas: producers use `produces[].schema` for an inline JSON Schema or `produces[].schemaFrom: output` to reuse the step `outputSchema`; `produces[].version` is bumped for intentional breaking changes. Consumers may use the object form `consumes: [{name, schema}]` for the subset they require. Scalar consumes remain valid and create name-level edges only.
 - `metadata.datasets.sources[]` — external upstreams; `arrival.watermark` is a JSONPath into the event payload; `external: true` tells cross-job lint not to demand a producing job.
 - A purely data-derived job can drop cron with `trigger: {type: freshness}` (needs at least one consumed dataset and one produced dataset with `freshness`; declare it on the job, not via the trigger API). See the [generated reference](job-schema-reference.md#datasets--freshness).
+
+### Cross-Job Contract Enforcement (server-gated)
+
+Set `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `fail` on the server; the empty default disables contract graph derivation and leaves `GET /v1/contracts/graph` unregistered. `CAESIUM_CONTRACT_DEPRECATION_WINDOW` defaults to `336h`. In fail mode, `POST /v1/jobdefs/apply` returns HTTP 409 for breaking findings scoped to the incoming apply. An unrelated pre-existing break does not block the apply, and a producer plus consumer migration in one batch passes without an acknowledgement.
+
+Operator loop:
+
+- `caesium job lint --server` and `caesium contract check --path jobs/ [--json]` check local manifests against persisted jobs.
+- `caesium contract graph [--dataset ns/name] [--json]`, `GET /v1/contracts/graph`, and the Console `/contracts` route show the derived graph.
+- `POST /v1/jobdefs/diff` returns per-job `contractFindings`; the Console JobDefs diff tab shows compatible/unknown/breaking badges with named consumers and teams.
+- Intentional breaks use `caesium job apply --allow-breaking dataset=<name> --reason ...`. The acknowledgement is digest-scoped; producer and consumer applies warn during the deprecation window, then re-block after expiry because the window is evaluated at check time. The Console apply flow requires an ack reason before sending that request.
 
 ### Remediation (opt-in)
 
@@ -635,6 +647,7 @@ When generating a Caesium job definition, verify:
 - [ ] No cycles in the DAG
 - [ ] `outputSchema`/`inputSchema` use valid JSON Schema types
 - [ ] `inputSchema` keys reference actual predecessor step names
+- [ ] Cross-job contract schemas use `produces[].schema` or `schemaFrom: output`; consumer requirements use `consumes[].schema` object entries when enforcement should compare fields
 - [ ] Secrets use `secret://` URIs, never hardcoded values
 - [ ] Durations use Go format: `30s`, `5m`, `1h`
 - [ ] File is saved with `.job.yaml` extension for Git sync glob matching

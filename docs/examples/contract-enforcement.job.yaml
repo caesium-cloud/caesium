@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Job
+metadata:
+  alias: contract-producer-demo
+  labels:
+    team: data-platform
+  annotations:
+    purpose: produces a dataset contract from the step output schema
+trigger:
+  type: cron
+  configuration:
+    cron: "0 1 * * *"
+    timezone: UTC
+steps:
+  - name: export-customers
+    engine: docker
+    image: alpine:3.23
+    outputSchema:
+      type: object
+      required: [customer_id, row_count]
+      properties:
+        customer_id:
+          type: string
+        row_count:
+          type: integer
+    command:
+      - sh
+      - -c
+      - |
+        echo "exporting customer snapshot"
+        echo '##caesium::output {"customer_id": "cust-001", "row_count": 1}'
+    datasets:
+      produces:
+        - name: lake.vendor_customers
+          schemaFrom: output
+          version: 1
+---
+apiVersion: v1
+kind: Job
+metadata:
+  alias: contract-consumer-demo
+  labels:
+    team: analytics
+  annotations:
+    purpose: consumes the producer dataset with an explicit required schema
+trigger:
+  type: cron
+  configuration:
+    cron: "15 1 * * *"
+    timezone: UTC
+steps:
+  - name: load-customers
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - echo "loading customer snapshot"
+    datasets:
+      consumes:
+        - name: lake.vendor_customers
+          schema:
+            type: object
+            required: [customer_id]
+            properties:
+              customer_id:
+                type: string

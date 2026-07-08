@@ -452,7 +452,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip the [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md)
+- [x] N-1. Flip the [`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md)
       `> Status:` banner from "Brainstorm/Design" to shipped (naming this plan);
       update `docs/roadmap.md` §2.1 (PR Preview Runs) to note the contract section of
       the PR flow ships, and the Phase-4 design table row (`docs/roadmap.md:226`);
@@ -467,6 +467,12 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       `docs/job-schema-reference.md`, `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/examples/`, `docs/README.md`.
       Depends on: A–F (runs last).
+      Note: W4-nu flipped the design banner to shipped, updated roadmap §2.1 and
+      the Phase-4 contract row, documented dataset contract schemas plus
+      `CAESIUM_CONTRACT_*` env/operator behavior in the generated schema
+      reference and authoring docs, added
+      `docs/examples/contract-enforcement.job.yaml`, indexed the completed plan
+      path in `docs/README.md`, and verified `go test ./internal/guardrails/`.
 
 ## Sequencing & Dependencies
 

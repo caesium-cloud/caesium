@@ -210,6 +210,57 @@ steps:
 - `metadata.datasets.sources[]` declares external upstreams with an optional `expectedEvery` cadence, an `external` flag (so cross-job lint does not demand a producing job), and an `arrival` binding whose `watermark` is a JSONPath into the ingested event payload.
 - A purely data-derived job can drop cron entirely with `trigger: {type: freshness}` — the evaluator owns the cadence. Such a job must declare at least one consumed dataset and one produced dataset with a `freshness` SLO, and cannot be created through the trigger API (declare it on the job definition). The `freshness` trigger type is feature-gated behind `CAESIUM_FRESHNESS_ENABLED`.
 
+## Cross-Job Contract Enforcement
+
+Contract enforcement uses the same `steps[].datasets` block to compare producer dataset schemas against what downstream consumers require before a manifest is applied. It is separate from runtime `metadata.schemaValidation`: runtime validation checks one run's actual step outputs, while contract enforcement checks the proposed job definitions against the persisted cross-job graph.
+
+Declare the producer side with either an inline JSON Schema or by reusing the step output contract:
+
+```yaml
+steps:
+  - name: export-customers
+    image: alpine:3.23
+    outputSchema:
+      type: object
+      required: [customer_id, row_count]
+      properties:
+        customer_id: {type: string}
+        row_count: {type: integer}
+    datasets:
+      produces:
+        - name: lake.vendor_customers
+          schemaFrom: output
+          version: 1
+```
+
+Declare the consumer side with the object form of `consumes` when the consumer has a required schema subset. Scalar consumes such as `consumes: [lake.vendor_customers]` remain valid and create name-level edges only.
+
+```yaml
+steps:
+  - name: load-customers
+    image: alpine:3.23
+    datasets:
+      consumes:
+        - name: lake.vendor_customers
+          schema:
+            type: object
+            required: [customer_id]
+            properties:
+              customer_id: {type: string}
+```
+
+Enable server-side checks with `CAESIUM_CONTRACT_ENFORCEMENT=warn` or `CAESIUM_CONTRACT_ENFORCEMENT=fail`; the empty default disables graph derivation and does not register `GET /v1/contracts/graph`. `CAESIUM_CONTRACT_DEPRECATION_WINDOW` defaults to `336h` and controls how long an acknowledged breaking edge-set digest stays in warning mode. The window is evaluated at check time: during the window producer and consumer applies warn, and after expiry the same unresolved break blocks again.
+
+Operator surfaces:
+
+- `caesium job lint --server` posts local definitions to `POST /v1/jobdefs/lint` and reports contract findings against persisted jobs.
+- `caesium contract check --path jobs/ [--json]` runs the contract-only server check.
+- `caesium contract graph [--dataset ns/name] [--json]` and `GET /v1/contracts/graph` expose the derived graph; the Console `/contracts` view renders the same graph.
+- `POST /v1/jobdefs/diff` includes per-job `contractFindings`; the Console JobDefs diff tab renders compatible/unknown/breaking badges with named consumers and teams.
+- In fail mode, `POST /v1/jobdefs/apply` returns HTTP 409 for breaking findings. The CLI escape hatch is explicit: `caesium job apply --allow-breaking dataset=<name> --reason ...`. The Console apply flow requires the ack reason before sending that intentional-break request.
+
+Enforcement is scoped to the incoming apply. A pre-existing broken contract between other jobs does not block an unrelated manifest apply, and a coordinated producer plus consumer migration applied in the same batch passes without an acknowledgement because the new consumer schema is the comparison target.
+
 ## Agent-in-the-Loop Remediation
 
 `metadata.remediation` opts a job into autonomous incident remediation: when a run fails, Caesium opens an incident, classifies the failure, and lets a bounded, server-enforced policy retry, snooze, patch, or escalate — with tier-3 actions always gated behind a human approval, and a container-native agent driving the diagnosis over Caesium's causal primitives (`why`, run diff, receipts, lineage impact, quarantined replay). The block is policy metadata enforced server-side; it never enters the cache identity hash. Enable it with `CAESIUM_AGENT_REMEDIATION_ENABLED=true` and an active auth mode.
@@ -442,6 +493,7 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Priority and shared resource rate-limit scheduling (`priority-ratelimit.job.yaml`).
   - Freshness-driven scheduling with an arrival-bound external source and a produced dataset SLO (`freshness-arrival.job.yaml`).
   - Freshness fan-in cascade — two upstreams joined into a mart, then a rollup derived down the lineage (`freshness-fanin-cascade.job.yaml`).
+  - Cross-job contract enforcement with a producer `schemaFrom: output` dataset and a consumer `consumes[].schema` requirement (`contract-enforcement.job.yaml`).
   - Agent-in-the-loop remediation policy with tiered autonomy and escalation (`agent-remediation.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
