@@ -41,6 +41,11 @@ config:
     # deterministic here too (mirrors the justfile/ci.yml server blocks).
     - name: CAESIUM_CONTRACT_DEPRECATION_WINDOW
       value: 5s
+    # Pin image digests so descriptors record ResolvedImageDigest and the
+    # reproduce scenarios can pull-by-digest faithfully (falls back to tag on
+    # registry failure, so this cannot fail runs).
+    - name: CAESIUM_CACHE_PIN_DIGESTS
+      value: "true"
 
 kubernetes:
   engine:
