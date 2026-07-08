@@ -163,7 +163,8 @@ async function waitForContractEdge(
     (candidate) =>
       candidate.from === `job:${producerAlias}` &&
       candidate.to === `job:${consumerAlias}` &&
-      candidate.class === "inferred",
+      candidate.class === "inferred" &&
+      candidate.verdict === "compatible",
   );
   if (!edge) {
     throw new Error(`contract graph did not return edge ${expected}`);

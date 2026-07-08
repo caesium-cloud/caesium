@@ -862,9 +862,9 @@ export interface ImpactResult {
   downstream: ImpactNode[];
 }
 
-export type ContractNodeKind = "job" | "dataset" | string;
-export type ContractEdgeClass = "declared" | "inferred" | "evidence" | string;
-export type ContractVerdict = "breaking" | "compatible" | "unknown" | string;
+export type ContractNodeKind = "job" | "dataset";
+export type ContractEdgeClass = "declared" | "inferred" | "evidence";
+export type ContractVerdict = "breaking" | "compatible" | "unknown";
 
 export interface ContractDatasetRef {
   namespace: string;
