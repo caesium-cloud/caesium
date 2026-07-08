@@ -43,9 +43,10 @@ type CallbackSpec struct {
 }
 
 type StepSpec struct {
-	Engine  string   `json:"engine"`
-	Image   string   `json:"image"`
-	Command []string `json:"command"`
+	Engine       string         `json:"engine"`
+	Image        string         `json:"image"`
+	Command      []string       `json:"command"`
+	OutputSchema map[string]any `json:"outputSchema"`
 }
 
 // FromDefinition normalises a job definition into a JobSpec.
@@ -184,10 +185,15 @@ func loadSteps(ctx context.Context, db *gorm.DB, jobID uuid.UUID) ([]StepSpec, e
 		if atom == nil {
 			return nil, fmt.Errorf("atom %s not found", task.AtomID)
 		}
+		outputSchema, err := parseJSONConfigBytes(task.OutputSchema)
+		if err != nil {
+			return nil, fmt.Errorf("task %s output_schema: %w", task.ID, err)
+		}
 		steps = append(steps, StepSpec{
-			Engine:  string(atom.Engine),
-			Image:   atom.Image,
-			Command: slices.Clone(atom.Cmd()),
+			Engine:       string(atom.Engine),
+			Image:        atom.Image,
+			Command:      slices.Clone(atom.Cmd()),
+			OutputSchema: outputSchema,
 		})
 	}
 	return steps, nil
@@ -285,20 +291,26 @@ func copySteps(steps []schema.Step) []StepSpec {
 	result := make([]StepSpec, 0, len(steps))
 	for _, step := range steps {
 		result = append(result, StepSpec{
-			Engine:  step.Engine,
-			Image:   step.Image,
-			Command: slices.Clone(step.Command),
+			Engine:       step.Engine,
+			Image:        step.Image,
+			Command:      slices.Clone(step.Command),
+			OutputSchema: cloneAnyMap(step.OutputSchema),
 		})
 	}
 	return result
 }
 
 func parseJSONConfig(raw string) (map[string]any, error) {
-	if strings.TrimSpace(raw) == "" {
+	return parseJSONConfigBytes([]byte(raw))
+}
+
+func parseJSONConfigBytes(raw []byte) (map[string]any, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return map[string]any{}, nil
 	}
 	var result map[string]any
-	if err := json.Unmarshal([]byte(raw), &result); err != nil {
+	if err := json.Unmarshal(raw, &result); err != nil {
 		return nil, err
 	}
 	return result, nil

@@ -620,6 +620,76 @@ func TestGORMStoreDeriveGraphUsesPersistedConsumerSchemaRequirement(t *testing.T
 	require.Contains(t, edge.Findings[0].Detail, "customer_id")
 }
 
+func TestGORMStoreDeriveGraphReportsIncomingProducerRemovedMappedOutput(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractJobTables(t, db)
+
+	producerAlias := "contract-diff-producer"
+	consumerAlias := "contract-diff-consumer"
+
+	producerID := uuid.New()
+	producerTriggerID := uuid.New()
+	insertContractTriggerWithConfig(t, db, producerTriggerID, schema.TriggerCron, map[string]any{
+		"cron":     "0 2 * * *",
+		"timezone": "UTC",
+	})
+	insertContractJob(t, db, producerID, producerTriggerID, producerAlias)
+	insertContractTask(t, db, producerID, "export", integerOutputSchemaWithRequired("row_count"))
+
+	consumerID := uuid.New()
+	consumerTriggerID := uuid.New()
+	insertContractTriggerWithConfig(t, db, consumerTriggerID, schema.TriggerEvent, map[string]any{
+		"events": []any{
+			map[string]any{
+				"type":   "run_completed",
+				"source": "caesium",
+				"filter": map[string]any{
+					"job_alias": producerAlias,
+				},
+			},
+		},
+		"paramMapping": map[string]any{
+			"upstream_rows": "$.tasks[0].output.row_count",
+		},
+	})
+	insertContractJob(t, db, consumerID, consumerTriggerID, consumerAlias)
+	insertContractTask(t, db, consumerID, "load", nil)
+
+	incomingProducer := schema.Definition{
+		APIVersion: schema.APIVersionV1,
+		Kind:       "Job",
+		Metadata:   schema.Metadata{Alias: producerAlias},
+		Trigger: schema.Trigger{
+			Type: schema.TriggerCron,
+			Configuration: map[string]any{
+				"cron":     "0 2 * * *",
+				"timezone": "UTC",
+			},
+		},
+		Steps: []schema.Step{{
+			Name:         "export",
+			Engine:       "docker",
+			Image:        "alpine:3.23",
+			Command:      []string{"sh", "-c", "echo export"},
+			OutputSchema: integerOutputSchemaWithRequired(),
+		}},
+	}
+
+	graph, err := (Deriver{Jobs: GORMStore{DB: db}}).DeriveGraph(context.Background(), []schema.Definition{incomingProducer})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, JobNodeID(producerAlias), JobNodeID(consumerAlias), "")
+	require.Equal(t, JobNodeID(producerAlias), edge.From)
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnsatisfied, edge.Findings[0].Kind)
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Findings[0].Verdict)
+	require.Equal(t, "row_count", edge.Findings[0].Key)
+	require.Equal(t, "trigger.configuration.paramMapping.upstream_rows", edge.Findings[0].Path)
+	require.Contains(t, edge.Findings[0].Detail, "row_count")
+}
+
 func outputSchemaWithProperties(keys ...string) map[string]any {
 	properties := make(map[string]any, len(keys))
 	for _, key := range keys {
@@ -635,6 +705,18 @@ func objectSchemaWithRequired(keys ...string) map[string]any {
 	schema := outputSchemaWithProperties(keys...)
 	schema["required"] = append([]string(nil), keys...)
 	return schema
+}
+
+func integerOutputSchemaWithRequired(keys ...string) map[string]any {
+	properties := make(map[string]any, len(keys))
+	for _, key := range keys {
+		properties[key] = map[string]any{"type": "integer"}
+	}
+	return map[string]any{
+		"type":       "object",
+		"required":   append([]string(nil), keys...),
+		"properties": properties,
+	}
 }
 
 func eventTrigger(sourceAlias string, mapping map[string]string) Trigger {
@@ -740,7 +822,12 @@ func createContractJobTables(t *testing.T, db *gorm.DB) {
 
 func insertContractTrigger(t *testing.T, db *gorm.DB, triggerID uuid.UUID) {
 	t.Helper()
-	require.NoError(t, db.Exec("INSERT INTO triggers (id, type, configuration, deleted_at) VALUES (?, ?, ?, NULL)", triggerID, schema.TriggerCron, `{}`).Error)
+	insertContractTriggerWithConfig(t, db, triggerID, schema.TriggerCron, map[string]any{})
+}
+
+func insertContractTriggerWithConfig(t *testing.T, db *gorm.DB, triggerID uuid.UUID, triggerType string, configuration map[string]any) {
+	t.Helper()
+	require.NoError(t, db.Exec("INSERT INTO triggers (id, type, configuration, deleted_at) VALUES (?, ?, ?, NULL)", triggerID, triggerType, mustJSON(t, configuration)).Error)
 }
 
 func insertContractJob(t *testing.T, db *gorm.DB, jobID, triggerID uuid.UUID, alias string) {

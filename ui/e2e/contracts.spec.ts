@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
 import { stringify } from "yaml";
 import { applyDefinitions, findJobByAlias, type FixtureDefinition } from "./helpers/fixtures";
 
@@ -66,7 +66,7 @@ test("operator can inspect the feature-gated contract graph", async ({ page, req
   await expect(edgeLabel).toHaveAttribute("data-edge-verdict", "compatible");
 });
 
-test("operator can acknowledge a breaking contract finding from the JobDefs diff", async ({ page, request }) => {
+test("operator can acknowledge a breaking contract finding from the JobDefs diff", async ({ page, request }, testInfo) => {
   const suffix = Date.now().toString(36);
   const producerAlias = `contract-diff-producer-${suffix}`;
   const consumerAlias = `contract-diff-consumer-${suffix}`;
@@ -82,10 +82,30 @@ test("operator can acknowledge a breaking contract finding from the JobDefs diff
   const editedProducerYaml = stringify(buildProducerDefinition(producerAlias, []));
   await page.locator(".cm-content[contenteditable='true']").fill(editedProducerYaml);
   await expect(page.getByText("1 step")).toBeVisible();
+  const diffResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/v1/jobdefs/diff") && response.request().method() === "POST",
+  );
   await page.getByRole("tab", { name: /Diff vs server/i }).click();
+  const diffResponse = await diffResponsePromise;
+  const diffResponseBody = await diffResponseBodyForDiagnostics(diffResponse);
+  await testInfo.attach("jobdefs-diff-response.json", {
+    body: diffResponseBody,
+    contentType: "application/json",
+  });
 
   const breakingBadge = page.getByTestId("contract-finding-badge").filter({ hasText: "breaking" }).first();
-  await expect(breakingBadge).toBeVisible();
+  try {
+    await expect(breakingBadge).toBeVisible();
+  } catch (error) {
+    throw new Error(
+      [
+        "expected JobDefs diff to render a breaking contract finding badge",
+        `POST /v1/jobdefs/diff returned ${diffResponse.status()} ${diffResponse.statusText()}`,
+        truncateForDiagnostics(diffResponseBody),
+        error instanceof Error ? error.message : String(error),
+      ].join("\n\n"),
+    );
+  }
   await expect(breakingBadge).toContainText(`${producerAlias}.output.row_count`);
   await expect(breakingBadge).toContainText(`consumer: ${consumerAlias}`);
 
@@ -209,4 +229,21 @@ async function waitForContractEdge(
 
 function contractEdgeTestId(edge: ContractGraphEdge): string {
   return `contract-edge:${edge.class}:${edge.id}`;
+}
+
+async function diffResponseBodyForDiagnostics(response: APIResponse): Promise<string> {
+  const body = await response.text();
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+function truncateForDiagnostics(value: string, limit = 12_000): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  const omitted = value.length - limit;
+  return `${value.slice(0, limit)}\n... truncated ${omitted} characters`;
 }
