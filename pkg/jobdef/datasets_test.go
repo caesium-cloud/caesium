@@ -1,6 +1,7 @@
 package jobdef
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -66,8 +67,15 @@ func TestParseDatasetsSurface(t *testing.T) {
 	}
 
 	extract := def.Steps[0]
-	if extract.Datasets == nil || len(extract.Datasets.Consumes) != 1 || extract.Datasets.Consumes[0] != "raw.vendor_x" {
+	if extract.Datasets == nil || len(extract.Datasets.Consumes) != 1 || extract.Datasets.Consumes[0].Name != "raw.vendor_x" {
 		t.Fatalf("unexpected extract consumes: %+v", extract.Datasets)
+	}
+	consumeJSON, err := json.Marshal(extract.Datasets.Consumes)
+	if err != nil {
+		t.Fatalf("marshal consumes: %v", err)
+	}
+	if strings.Contains(string(consumeJSON), `"raw.vendor_x"`) && !strings.Contains(string(consumeJSON), `"name":"raw.vendor_x"`) {
+		t.Fatalf("consumes JSON should use object shape, got %s", consumeJSON)
 	}
 	if len(extract.Datasets.Produces) != 1 {
 		t.Fatalf("expected 1 produced dataset")
@@ -75,6 +83,55 @@ func TestParseDatasetsSurface(t *testing.T) {
 	p := extract.Datasets.Produces[0]
 	if p.Name != "staging.orders" || p.Freshness != "8h" || p.Watermark == nil || p.Watermark.Key != "max_order_ts" {
 		t.Fatalf("unexpected produced dataset: %+v", p)
+	}
+}
+
+func TestParseDatasetContractSchemas(t *testing.T) {
+	y := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: contracts
+trigger:
+  type: cron
+  configuration: {expression: "0 * * * *"}
+steps:
+  - name: export
+    image: etl:1
+    outputSchema:
+      type: object
+      required: [customer_id, row_count]
+      properties:
+        customer_id: {type: string}
+        row_count: {type: integer}
+    datasets:
+      produces:
+        - name: lake.vendor_x_customers
+          schemaFrom: output
+          version: 2
+  - name: load
+    image: etl:1
+    datasets:
+      consumes:
+        - name: lake.vendor_x_customers
+          schema:
+            type: object
+            required: [customer_id]
+            properties:
+              customer_id: {type: string}
+`
+	def, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	produced := def.Steps[0].Datasets.Produces[0]
+	if produced.SchemaFrom != DatasetSchemaFromOutput || produced.Version != 2 || produced.Schema != nil {
+		t.Fatalf("unexpected produced contract schema fields: %+v", produced)
+	}
+	consumed := def.Steps[1].Datasets.Consumes[0]
+	if consumed.Name != "lake.vendor_x_customers" || consumed.Schema == nil {
+		t.Fatalf("unexpected consumed contract schema fields: %+v", consumed)
 	}
 }
 
@@ -141,6 +198,36 @@ func TestValidateDatasetsRejectsBadInputs(t *testing.T) {
 			name: "duplicate consumes entry",
 			yaml: datasetStep(`consumes: [a, a]`),
 			want: "duplicate entry",
+		},
+		{
+			name: "produced schema and schemaFrom are mutually exclusive",
+			yaml: datasetStep(`produces: [{name: a, schemaFrom: output, schema: {type: object}}]`),
+			want: "cannot set both schema and schemaFrom",
+		},
+		{
+			name: "produced schemaFrom must be output",
+			yaml: datasetStep(`produces: [{name: a, schemaFrom: input}]`),
+			want: `schemaFrom "input" must be "output"`,
+		},
+		{
+			name: "schemaFrom output requires outputSchema",
+			yaml: datasetStep(`produces: [{name: a, schemaFrom: output}]`),
+			want: "requires step \"s\" to declare outputSchema",
+		},
+		{
+			name: "bad produced schema",
+			yaml: datasetStep(`produces: [{name: a, schema: {type: nope}}]`),
+			want: "produces[0].schema: invalid schema",
+		},
+		{
+			name: "object consume requires schema",
+			yaml: datasetStep(`consumes: [{name: a}]`),
+			want: "consumes[0].schema is required",
+		},
+		{
+			name: "bad consumed schema",
+			yaml: datasetStep(`consumes: [{name: a, schema: {type: nope}}]`),
+			want: "consumes[0].schema: invalid schema",
 		},
 	}
 	for _, tc := range cases {

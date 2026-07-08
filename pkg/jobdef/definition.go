@@ -235,6 +235,10 @@ const (
 	// DatasetDirectionSource marks an external dataset declared under
 	// metadata.datasets.sources that nobody in this instance produces.
 	DatasetDirectionSource = "source"
+
+	// DatasetSchemaFromOutput reuses the producing step's outputSchema as the
+	// produced dataset schema.
+	DatasetSchemaFromOutput = "output"
 )
 
 // Watermark identifies the ##caesium::output key a producing step emits to
@@ -250,6 +254,14 @@ type Watermark struct {
 type ProducedDataset struct {
 	// Name is the dataset identity (keyed on name in v1; namespace is reserved).
 	Name string `yaml:"name" json:"name"`
+	// Schema is an inline JSON Schema describing the dataset this step produces.
+	Schema map[string]any `yaml:"schema,omitempty" json:"schema,omitempty"`
+	// SchemaFrom names a step-local schema source. The only supported value is
+	// "output", which reuses this step's outputSchema.
+	SchemaFrom string `yaml:"schemaFrom,omitempty" json:"schemaFrom,omitempty"`
+	// Version is bumped by authors when an intentional dataset contract break is
+	// introduced.
+	Version int `yaml:"version,omitempty" json:"version,omitempty"`
 	// Freshness is the target staleness SLO as a Go duration string (e.g. "6h").
 	Freshness string `yaml:"freshness,omitempty" json:"freshness,omitempty"`
 	// MaxStaleness is the hard bound whose breach emits freshness_violated.
@@ -258,10 +270,79 @@ type ProducedDataset struct {
 	Watermark *Watermark `yaml:"watermark,omitempty" json:"watermark,omitempty"`
 }
 
+// ConsumedDataset declares a dataset a step reads. Legacy YAML may use a plain
+// scalar name; the object form carries the consumer's required JSON Schema.
+type ConsumedDataset struct {
+	// Name is the dataset identity this step reads.
+	Name string `yaml:"name" json:"name"`
+	// Schema is the JSON Schema subset this consumer requires from the dataset.
+	Schema map[string]any `yaml:"schema,omitempty" json:"schema,omitempty"`
+
+	legacyScalar bool
+}
+
+// UnmarshalYAML accepts the shipped freshness shape (`consumes: [orders]`) and
+// the contract-enforcement object shape (`{name: orders, schema: {...}}`).
+func (c *ConsumedDataset) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.ScalarNode:
+		var name string
+		if err := value.Decode(&name); err != nil {
+			return err
+		}
+		c.Name = name
+		c.Schema = nil
+		c.legacyScalar = true
+		return nil
+	case yaml.MappingNode:
+		var raw struct {
+			Name   string         `yaml:"name"`
+			Schema map[string]any `yaml:"schema"`
+		}
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		c.Name = raw.Name
+		c.Schema = raw.Schema
+		c.legacyScalar = false
+		return nil
+	default:
+		return fmt.Errorf("datasets.consumes entries must be strings or mappings")
+	}
+}
+
+// UnmarshalJSON mirrors YAML compatibility for API callers while MarshalJSON
+// uses the struct shape by default.
+func (c *ConsumedDataset) UnmarshalJSON(data []byte) error {
+	trimmed := strings.TrimSpace(string(data))
+	if strings.HasPrefix(trimmed, `"`) {
+		var name string
+		if err := json.Unmarshal(data, &name); err != nil {
+			return err
+		}
+		c.Name = name
+		c.Schema = nil
+		c.legacyScalar = true
+		return nil
+	}
+
+	var raw struct {
+		Name   string         `json:"name"`
+		Schema map[string]any `json:"schema"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	c.Name = raw.Name
+	c.Schema = raw.Schema
+	c.legacyScalar = false
+	return nil
+}
+
 // StepDatasets is the per-step datasets surface: the datasets a step consumes
 // and the datasets it produces (with their freshness SLOs).
 type StepDatasets struct {
-	Consumes []string          `yaml:"consumes,omitempty" json:"consumes,omitempty"`
+	Consumes []ConsumedDataset `yaml:"consumes,omitempty" json:"consumes,omitempty"`
 	Produces []ProducedDataset `yaml:"produces,omitempty" json:"produces,omitempty"`
 }
 
@@ -836,14 +917,14 @@ func validateRemediationActionList(field string, actions []string) error {
 
 // validateDatasets performs single-definition validation of the datasets
 // surface: SLO fields parse as Go durations, arrival watermarks are well-formed
-// JSONPaths, produced/source names are unique within the job, and consumes
-// entries are non-empty and de-duplicated. It deliberately does NOT reject a
-// consumes name that resolves to no dataset in THIS definition: a step may
-// consume a dataset produced by another job, and that cross-job resolution
-// (produced-in-applied-set / declared-source / external:true) is the batch
-// validator's job (internal/jobdef, item A3), which sees the whole applied set
-// plus persisted declarations. Datasets are scheduling metadata and never enter
-// the cache identity hash.
+// JSONPaths, dataset schemas compile, produced/source names are unique within
+// the job, and consumes entries are non-empty and de-duplicated. It deliberately
+// does NOT reject a consumes name that resolves to no dataset in THIS
+// definition: a step may consume a dataset produced by another job, and that
+// cross-job resolution (produced-in-applied-set / declared-source /
+// external:true) is the batch validator's job (internal/jobdef, item A3), which
+// sees the whole applied set plus persisted declarations. Datasets are
+// scheduling metadata and never enter the cache identity hash.
 func validateDatasets(d *Definition) error {
 	produced := make(map[string]struct{})
 	sources := make(map[string]struct{})
@@ -921,6 +1002,25 @@ func validateDatasets(d *Definition) error {
 			if p.Watermark != nil && strings.TrimSpace(p.Watermark.Key) == "" {
 				return fmt.Errorf("steps[%d].datasets.produces[%d].watermark.key is required when watermark is set", i, j)
 			}
+			schemaFrom := strings.TrimSpace(p.SchemaFrom)
+			if p.Schema != nil && schemaFrom != "" {
+				return fmt.Errorf("steps[%d].datasets.produces[%d] cannot set both schema and schemaFrom", i, j)
+			}
+			switch schemaFrom {
+			case "":
+			case DatasetSchemaFromOutput:
+				if len(step.OutputSchema) == 0 {
+					return fmt.Errorf("steps[%d].datasets.produces[%d].schemaFrom %q requires step %q to declare outputSchema", i, j, schemaFrom, step.Name)
+				}
+			default:
+				return fmt.Errorf("steps[%d].datasets.produces[%d].schemaFrom %q must be %q", i, j, p.SchemaFrom, DatasetSchemaFromOutput)
+			}
+			if p.Schema != nil {
+				if err := validateDatasetSchema(fmt.Sprintf("steps[%d].datasets.produces[%d].schema", i, j), p.Schema); err != nil {
+					return err
+				}
+			}
+			p.SchemaFrom = schemaFrom
 			p.Name = name
 		}
 	}
@@ -931,16 +1031,25 @@ func validateDatasets(d *Definition) error {
 			continue
 		}
 		seen := make(map[string]struct{}, len(step.Datasets.Consumes))
-		for j, raw := range step.Datasets.Consumes {
-			name := strings.TrimSpace(raw)
+		for j := range step.Datasets.Consumes {
+			consumed := &step.Datasets.Consumes[j]
+			name := strings.TrimSpace(consumed.Name)
 			if name == "" {
 				return fmt.Errorf("steps[%d].datasets.consumes[%d] must not be empty", i, j)
 			}
 			if _, dup := seen[name]; dup {
 				return fmt.Errorf("steps[%d].datasets.consumes contains duplicate entry %q", i, name)
 			}
+			if consumed.Schema == nil && !consumed.legacyScalar {
+				return fmt.Errorf("steps[%d].datasets.consumes[%d].schema is required", i, j)
+			}
+			if consumed.Schema != nil {
+				if err := validateDatasetSchema(fmt.Sprintf("steps[%d].datasets.consumes[%d].schema", i, j), consumed.Schema); err != nil {
+					return err
+				}
+			}
 			seen[name] = struct{}{}
-			step.Datasets.Consumes[j] = name
+			consumed.Name = name
 		}
 	}
 

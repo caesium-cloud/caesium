@@ -126,7 +126,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `triggerRule` | string | optional | Upstream completion policy such as `all_success`, `all_done`, or `one_success`. |
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
-| `datasets` | object | optional | Per-step freshness surface: `consumes` (dataset names) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs). See [Datasets & Freshness](#datasets--freshness). Scheduling metadata excluded from the cache identity hash. |
+| `datasets` | object | optional | Per-step dataset surface: `consumes` (legacy dataset names or objects with `name`/`schema`) and `produces` (datasets with freshness SLOs and optional contract schemas). See [Datasets & Freshness](#datasets--freshness). Scheduling and apply-time contract metadata are excluded from the cache identity hash. |
 | `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
 
 ### Cache
@@ -154,14 +154,19 @@ The queue is **scheduling metadata, not an execution input**, so it is excluded 
 
 ## Datasets & Freshness
 
-Freshness-driven scheduling lets a job declare the datasets its steps produce and consume, plus a freshness SLO on each output, so Caesium can derive execution from data arrival and staleness instead of a cron guess: run when upstream data has arrived and my output is stale against its SLO, don't run when nothing changed, and surface `stale-upstream` (an observable state with a reason) rather than a failed run when upstream is late. The whole surface is scheduling metadata and never enters the cache identity hash. It is feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed through the `GET /v1/datasets` REST surface and the Console freshness view.
+Freshness-driven scheduling lets a job declare the datasets its steps produce and consume, plus a freshness SLO on each output, so Caesium can derive execution from data arrival and staleness instead of a cron guess: run when upstream data has arrived and my output is stale against its SLO, don't run when nothing changed, and surface `stale-upstream` (an observable state with a reason) rather than a failed run when upstream is late. Dataset entries may also carry apply-time contract schemas for cross-job checks. The whole surface is scheduling or apply-time metadata and never enters the cache identity hash. Freshness evaluation is feature-gated behind `CAESIUM_FRESHNESS_ENABLED=true`; dataset state is exposed through the `GET /v1/datasets` REST surface and the Console freshness view.
 
 ### Step Datasets (`steps[].datasets`)
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `consumes` | array[string] | optional | Dataset names this step reads. A consumed name may resolve to a dataset produced by another job; cross-job resolution is a lint/registry concern, not a single-definition error. |
-| `produces` | array[object] | optional | Datasets this step produces, each carrying its freshness SLO. |
+| `consumes` | array[string or object] | optional | Dataset names this step reads. The legacy scalar form (`consumes: [orders]`) remains valid; the object form carries the consumer's required schema. A consumed name may resolve to a dataset produced by another job; cross-job resolution is a lint/registry concern, not a single-definition error. |
+| `consumes[].name` | string | required with object form | Dataset identity this step reads. |
+| `consumes[].schema` | object | required with object form | JSON Schema describing what this consumer requires from the dataset, as a subset rather than a copy of the producer schema. Schemas compile under `santhosh-tekuri/jsonschema/v6`. Legacy scalar consumes omit this field for backward compatibility. |
+| `produces` | array[object] | optional | Datasets this step produces, each carrying freshness SLOs and optional contract schema metadata. |
 | `produces[].name` | string | required | Dataset identity (keyed on name in v1; namespace is reserved). |
+| `produces[].schema` | object | optional | Inline JSON Schema for the produced dataset. Mutually exclusive with `schemaFrom`; schemas compile under `santhosh-tekuri/jsonschema/v6`. |
+| `produces[].schemaFrom` | string | optional | `output` reuses this step's `outputSchema` as the dataset schema. Requires a non-empty `outputSchema` and is mutually exclusive with `schema`. |
+| `produces[].version` | integer | optional | Bump when an intentional dataset contract break is introduced. |
 | `produces[].freshness` | duration | optional | Target staleness SLO as a Go duration (e.g. `6h`) — how stale consumers tolerate this dataset being. |
 | `produces[].maxStaleness` | duration | optional | Hard bound; a breach emits `freshness_violated`. |
 | `produces[].watermark` | object | optional | `{key: <output-key>}` names the `##caesium::output` key this step emits to advance the dataset's watermark. It is an output key on the existing zero-SDK output contract, not a JSONPath. |

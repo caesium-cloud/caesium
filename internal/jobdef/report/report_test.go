@@ -61,6 +61,8 @@ func (s *ReportSuite) TestMarkdownGeneration() {
 	s.Contains(md, "| `dependsOn` | array[string]")
 	s.Contains(md, "| `retries` | integer")
 	s.Contains(md, "| `triggerRule` | string")
+	s.Contains(md, "| `produces[].schemaFrom` | string")
+	s.Contains(md, "| `consumes[].schema` | object")
 }
 
 func (s *ReportSuite) TestRenderSummaryMarkdown() {

@@ -35,17 +35,33 @@ func validateSchemas(steps []Step, names map[string]int, predecessors map[string
 // validateOutputSchema compiles the schema using the jsonschema library to ensure
 // it is a syntactically valid JSON Schema.
 func validateOutputSchema(stepName string, schema map[string]any) error {
+	if err := compileJSONSchema(schema); err != nil {
+		return fmt.Errorf("step %q: invalid outputSchema: %w", stepName, err)
+	}
+	return nil
+}
+
+// validateDatasetSchema compiles an inline dataset schema using the jsonschema
+// library to ensure it is a syntactically valid JSON Schema.
+func validateDatasetSchema(field string, schema map[string]any) error {
+	if err := compileJSONSchema(schema); err != nil {
+		return fmt.Errorf("%s: invalid schema: %w", field, err)
+	}
+	return nil
+}
+
+func compileJSONSchema(schema map[string]any) error {
 	doc, err := marshalForCompiler(schema)
 	if err != nil {
-		return fmt.Errorf("step %q: invalid outputSchema: %w", stepName, err)
+		return err
 	}
 
 	c := jsonschema.NewCompiler()
 	if err := c.AddResource(schemaResourceURL, doc); err != nil {
-		return fmt.Errorf("step %q: invalid outputSchema: %w", stepName, err)
+		return err
 	}
 	if _, err := c.Compile(schemaResourceURL); err != nil {
-		return fmt.Errorf("step %q: invalid outputSchema: %w", stepName, err)
+		return err
 	}
 	return nil
 }

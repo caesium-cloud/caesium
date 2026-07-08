@@ -618,6 +618,67 @@ steps:
 		"priority, concurrency, and rate-limit settings are scheduling metadata and must not change the cache hash")
 }
 
+func TestCompute_DatasetSchemasExcludedFromDefinitionHash(t *testing.T) {
+	withoutSchemas := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: dataset-schema-cache
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+    outputSchema:
+      type: object
+      required: [customer_id]
+      properties:
+        customer_id: {type: string}
+    datasets:
+      consumes: [raw.vendor_x]
+      produces:
+        - name: lake.vendor_x_customers
+`
+	withSchemas := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: dataset-schema-cache
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: extract
+    image: alpine:3.23
+    command: ["sh", "-c", "echo extract"]
+    outputSchema:
+      type: object
+      required: [customer_id]
+      properties:
+        customer_id: {type: string}
+    datasets:
+      consumes:
+        - name: raw.vendor_x
+          schema:
+            type: object
+            required: [customer_id]
+            properties:
+              customer_id: {type: string}
+      produces:
+        - name: lake.vendor_x_customers
+          schema:
+            type: object
+            required: [customer_id]
+            properties:
+              customer_id: {type: string}
+`
+
+	assert.Equal(t, taskHashFromDefinition(t, withoutSchemas), taskHashFromDefinition(t, withSchemas),
+		"dataset schema declarations are apply-time metadata and must not change the cache hash")
+}
+
 func taskHashFromDefinition(t *testing.T, src string) string {
 	t.Helper()
 
