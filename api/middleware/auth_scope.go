@@ -22,6 +22,10 @@ const ContextKeyAllowedJobAliases = "auth.allowed_job_aliases"
 // integration tests assert against the single source of truth.
 const LineageImpactScopedDenyMessage = "lineage impact is a global cross-job query and requires an unscoped principal"
 
+// ContractsGraphScopedDenyMessage is the 403 reason returned to a scoped
+// principal on the global, cross-job /v1/contracts/graph route.
+const ContractsGraphScopedDenyMessage = "contracts graph is a global cross-job query and requires an unscoped principal"
+
 // EventsScopedDenyMessage is returned when a scoped principal attempts to open
 // the global event stream without a run_id filter. Scoped event subscriptions
 // must resolve to one run owner before any events are streamed.
@@ -142,6 +146,10 @@ func authorizeScope(c *echo.Context, svc *auth.Service, scopeJSON []byte, routeP
 	case "/v1/lineage/impact":
 		if c.Request().Method == http.MethodGet {
 			return nil, echo.NewHTTPError(http.StatusForbidden, LineageImpactScopedDenyMessage)
+		}
+	case "/v1/contracts/graph":
+		if c.Request().Method == http.MethodGet {
+			return nil, echo.NewHTTPError(http.StatusForbidden, ContractsGraphScopedDenyMessage)
 		}
 	case "/v1/events":
 		if c.Request().Method == http.MethodGet {

@@ -269,6 +269,14 @@ var (
 		[]string{"dataset", "status"},
 	)
 
+	ContractFindingsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_contract_findings_total",
+			Help: "Total contract findings surfaced by read paths, by bounded verdict.",
+		},
+		[]string{"verdict"},
+	)
+
 	// Auth metrics
 
 	AuthRequestsTotal = prometheus.NewCounterVec(
@@ -586,6 +594,7 @@ func Register() {
 			DatasetStalenessSeconds,
 			DatasetDerivationsTotal,
 			FreshnessViolationsTotal,
+			ContractFindingsTotal,
 			AuthRequestsTotal,
 			AuthFailuresTotal,
 			AuthKeyAgeSeconds,

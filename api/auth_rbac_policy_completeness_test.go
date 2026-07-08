@@ -25,6 +25,7 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 	t.Setenv("CAESIUM_AUTH_LDAP_ENABLED", "true")
 	t.Setenv("CAESIUM_LOG_CONSOLE_ENABLED", "true")
 	t.Setenv("CAESIUM_DATABASE_CONSOLE_ENABLED", "true")
+	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "fail")
 	require.NoError(t, env.Process())
 
 	vars := env.Variables()
@@ -64,6 +65,7 @@ func TestAuthMiddlewareMountedRoutesHaveRBACPolicy(t *testing.T) {
 	require.Contains(t, mounted, "GET /v1/auth/keys")
 	require.Contains(t, mounted, "GET /v1/logs/level")
 	require.Contains(t, mounted, "GET /v1/database/schema")
+	require.Contains(t, mounted, "GET /v1/contracts/graph")
 
 	sort.Strings(missing)
 	require.Empty(t, missing, "auth-middleware mounted routes missing endpointPolicy entries")

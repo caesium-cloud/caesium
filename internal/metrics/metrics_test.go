@@ -42,6 +42,7 @@ func (s *MetricsSuite) SetupTest() {
 		EventTriggerMatchesTotal,
 		EventsIngestedTotal,
 		EventBridgeFailuresTotal,
+		ContractFindingsTotal,
 		SSOLoginsTotal,
 		SSOLoginDurationSeconds,
 		SSOLogoutsTotal,
@@ -248,6 +249,18 @@ func (s *MetricsSuite) TestEventBridgeFailuresTotalIncrements() {
 
 	val := metrictestutil.CounterValue(s.T(), EventBridgeFailuresTotal, "webhook")
 	s.GreaterOrEqual(val, float64(1))
+}
+
+func (s *MetricsSuite) TestContractFindingsTotalIncrements() {
+	ContractFindingsTotal.WithLabelValues("breaking").Inc()
+	ContractFindingsTotal.WithLabelValues("unknown").Inc()
+	ContractFindingsTotal.WithLabelValues("unknown").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), ContractFindingsTotal, "breaking")
+	s.GreaterOrEqual(val, float64(1))
+
+	val = metrictestutil.CounterValue(s.T(), ContractFindingsTotal, "unknown")
+	s.GreaterOrEqual(val, float64(2))
 }
 
 func (s *MetricsSuite) TestSSOLoginsTotalIncrements() {

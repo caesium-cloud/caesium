@@ -59,6 +59,7 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/stats/summary":                     models.RoleViewer,
 	"GET /v1/system/features":                   models.RoleViewer,
 	"GET /v1/system/nodes":                      models.RoleViewer,
+	"GET /v1/contracts/graph":                   models.RoleViewer,
 	"GET /v1/triggers":                          models.RoleViewer,
 	"GET /v1/triggers/:id":                      models.RoleViewer,
 	"GET /v1/triggers/:id/events":               models.RoleViewer,
