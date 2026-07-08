@@ -36,6 +36,7 @@ type Finding struct {
 	Dataset   *internalcontract.DatasetRef `json:"dataset,omitempty"`
 	Kind      schemacompat.FindingKind     `json:"kind,omitempty"`
 	Path      string                       `json:"path,omitempty"`
+	Key       string                       `json:"key,omitempty"`
 	Detail    string                       `json:"detail,omitempty"`
 	Verdict   schemacompat.Verdict         `json:"verdict"`
 }
@@ -142,6 +143,7 @@ func FindingsFromGraph(graph internalcontract.Graph) []Finding {
 				Dataset:   cloneDataset(edge.Dataset),
 				Kind:      edgeFinding.Kind,
 				Path:      edgeFinding.Path,
+				Key:       edgeFinding.Key,
 				Detail:    edgeFinding.Detail,
 				Verdict:   edgeFinding.Verdict,
 			})

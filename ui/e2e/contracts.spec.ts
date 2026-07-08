@@ -1,4 +1,5 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type APIResponse } from "@playwright/test";
+import { stringify } from "yaml";
 import { applyDefinitions, findJobByAlias, type FixtureDefinition } from "./helpers/fixtures";
 
 type ContractFixtureDefinition = Omit<FixtureDefinition, "trigger"> & {
@@ -65,7 +66,59 @@ test("operator can inspect the feature-gated contract graph", async ({ page, req
   await expect(edgeLabel).toHaveAttribute("data-edge-verdict", "compatible");
 });
 
-function buildProducerDefinition(alias: string): ContractFixtureDefinition {
+test("operator can acknowledge a breaking contract finding from the JobDefs diff", async ({ page, request }, testInfo) => {
+  const suffix = Date.now().toString(36);
+  const producerAlias = `contract-diff-producer-${suffix}`;
+  const consumerAlias = `contract-diff-consumer-${suffix}`;
+
+  await applyDefinitions(
+    request,
+    buildProducerDefinition(producerAlias),
+    buildConsumerDefinition(consumerAlias, producerAlias),
+  );
+  await waitForContractEdge(request, producerAlias, consumerAlias);
+
+  await page.goto("/jobdefs");
+  const editedProducerYaml = stringify(buildProducerDefinition(producerAlias, []));
+  await page.locator(".cm-content[contenteditable='true']").fill(editedProducerYaml);
+  await expect(page.getByText("1 step")).toBeVisible();
+  const diffResponsePromise = page.waitForResponse(
+    (response) => response.url().includes("/v1/jobdefs/diff") && response.request().method() === "POST",
+  );
+  await page.getByRole("tab", { name: /Diff vs server/i }).click();
+  const diffResponse = await diffResponsePromise;
+  const diffResponseBody = await diffResponseBodyForDiagnostics(diffResponse);
+  await testInfo.attach("jobdefs-diff-response.json", {
+    body: diffResponseBody,
+    contentType: "application/json",
+  });
+
+  const breakingBadge = page.getByTestId("contract-finding-badge").filter({ hasText: "breaking" }).first();
+  try {
+    await expect(breakingBadge).toBeVisible();
+  } catch (error) {
+    throw new Error(
+      [
+        "expected JobDefs diff to render a breaking contract finding badge",
+        `POST /v1/jobdefs/diff returned ${diffResponse.status()} ${diffResponse.statusText()}`,
+        truncateForDiagnostics(diffResponseBody),
+        error instanceof Error ? error.message : String(error),
+      ].join("\n\n"),
+    );
+  }
+  await expect(breakingBadge).toContainText(`${producerAlias}.output.row_count`);
+  await expect(breakingBadge).toContainText(`consumer: ${consumerAlias}`);
+
+  const applyButton = page.getByRole("button", { name: /Apply definition/i });
+  await expect(applyButton).toBeDisabled();
+
+  await page.getByLabel("Breaking change acknowledgement reason").fill("accepted during contract migration");
+  await expect(applyButton).toBeEnabled();
+  await applyButton.click();
+  await expect(page.getByText(/Applied successfully/)).toBeVisible();
+});
+
+function buildProducerDefinition(alias: string, outputKeys = ["row_count"]): ContractFixtureDefinition {
   return {
     apiVersion: "v1",
     kind: "Job",
@@ -84,16 +137,18 @@ function buildProducerDefinition(alias: string): ContractFixtureDefinition {
         name: "export",
         engine: "docker",
         image: shellImage,
-        outputSchema: {
-          type: "object",
-          required: ["row_count"],
-          properties: {
-            row_count: { type: "integer" },
-          },
-        },
+        outputSchema: outputSchemaForKeys(outputKeys),
         command: ["sh", "-c", "echo export"],
       },
     ],
+  };
+}
+
+function outputSchemaForKeys(keys: string[]) {
+  return {
+    type: "object",
+    required: keys,
+    properties: Object.fromEntries(keys.map((key) => [key, { type: "integer" }])),
   };
 }
 
@@ -174,4 +229,21 @@ async function waitForContractEdge(
 
 function contractEdgeTestId(edge: ContractGraphEdge): string {
   return `contract-edge:${edge.class}:${edge.id}`;
+}
+
+async function diffResponseBodyForDiagnostics(response: APIResponse): Promise<string> {
+  const body = await response.text();
+  try {
+    return JSON.stringify(JSON.parse(body), null, 2);
+  } catch {
+    return body;
+  }
+}
+
+function truncateForDiagnostics(value: string, limit = 12_000): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  const omitted = value.length - limit;
+  return `${value.slice(0, limit)}\n... truncated ${omitted} characters`;
 }

@@ -412,13 +412,20 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       resolved through `/jobs`, vitest coverage, and `ui/e2e/contracts.spec.ts`.
       Local proof: `npm run lint`, `npm run build`, and focused `npx vitest run`
       for the contracts component plus API tests pass.
-- [ ] F2. Add contract badges to the JobDefs diff tab: extend
+- [x] F2. Add contract badges to the JobDefs diff tab: extend
       `ui/src/features/jobdefs/JobDefsPage.tsx` (which already lints then diffs pasted
       YAML) so its diff tab renders breaking/compatible/unknown badges per edge from
       the `contractFindings` in the diff response, with named consumers and teams
       inline, and disables Apply on breaking findings unless an ack reason is entered.
       Files: `ui/src/features/jobdefs/JobDefsPage.tsx`, `ui/src/lib/api.ts`.
       Depends on: D1 + C2 (the ack-reason path).
+      Note: W4-ζ added diff-tab contract finding badges, subject/consumer/team
+      labeling, ack-reason gated Apply, `allow_breaking` request threading, apply
+      `contract_warnings` toasts, vitest coverage for badge rendering and ack
+      threading, and a Playwright JobDefs diff scenario extending
+      `ui/e2e/contracts.spec.ts`. Local proof: `npm run lint`, `npm run build`, and
+      focused vitest for `src/features/jobdefs/__tests__/JobDefsPage.test.tsx` plus
+      `src/lib/__tests__/api.test.ts` pass.
 
 ## Harness Strengthening
 

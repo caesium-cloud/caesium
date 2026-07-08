@@ -191,6 +191,33 @@ steps:
     });
   });
 
+  it('applyJobDef threads contract break acknowledgements', async () => {
+    mockFetch.mockResolvedValue(okResponse({ applied: 1 }));
+
+    await api.applyJobDef(`apiVersion: v1
+kind: Job
+metadata:
+  alias: contract-ack
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+steps:
+  - name: run
+    image: alpine:3.23
+`, {
+      dataset: 'producer.output.customer_id',
+      reason: 'accepted by reporting',
+    });
+
+    const [, init] = mockFetch.mock.calls[0];
+    const payload = JSON.parse(String(init?.body));
+    expect(payload.allow_breaking).toEqual({
+      dataset: 'producer.output.customer_id',
+      reason: 'accepted by reporting',
+    });
+  });
+
   it('deleteTaskCache encodes the task name in the URL', async () => {
     mockFetch.mockResolvedValue({
       ok: true,
