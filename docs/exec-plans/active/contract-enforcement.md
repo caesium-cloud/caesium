@@ -105,7 +105,7 @@ case (a narrowing change that still satisfies a declared consumer requirement).
 Lives in `pkg/` (not `internal/`) because the CLI needs it offline. New package, no
 shared files — merges cleanly, so it is the foundation the other streams import.
 
-- [ ] A1. Add the `pkg/jobdef/schemacompat` package: a `Compare(oldSchema,
+- [x] A1. Add the `pkg/jobdef/schemacompat` package: a `Compare(oldSchema,
       newSchema map[string]any) []Finding` walker returning typed findings
       `{Kind, Path, Detail, Verdict}` over exactly the design's subset —
       **breaking**: a `required` field removed (from `required` or `properties`
@@ -124,7 +124,13 @@ shared files — merges cleanly, so it is the foundation the other streams impor
       Files: new `pkg/jobdef/schemacompat/compat.go`, new
       `pkg/jobdef/schemacompat/compat_test.go`, new
       `pkg/jobdef/schemacompat/fuzz_test.go`.
-- [ ] A2. Add the table-driven verdict matrix + fuzz corpus: every subset row
+      Note: Landed the exported `schemacompat` API (`Verdict`, verdict constants,
+      `FindingKind`, `Finding`, `Compare`, and `Satisfies`) with deterministic
+      path-based findings over the design subset. Unknown/out-of-subset constructs
+      fail closed with `VerdictUnknown`, while required removals, type narrowing,
+      enum shrinkage, and unsatisfiable `additionalProperties: false` requirements
+      report breaking findings.
+- [x] A2. Add the table-driven verdict matrix + fuzz corpus: every subset row
       (removed required, type narrow/widen, enum shrink/grow, additive optional,
       `additionalProperties` tighten, each unknown construct → `unknown`) as a
       deterministic case, plus a `FuzzCompare` that asserts the walker never panics
@@ -132,6 +138,11 @@ shared files — merges cleanly, so it is the foundation the other streams impor
       Files: `pkg/jobdef/schemacompat/compat_test.go`,
       `pkg/jobdef/schemacompat/fuzz_test.go`.
       Depends on: A1.
+      Note: Added table-driven coverage for the breaking/compatible/unknown matrix,
+      nested required-field paths, relaxed constraints, doc-only edits, and
+      `Satisfies` producer-vs-consumer required/type behavior. Added `FuzzCompare`
+      with meaningful JSON object seeds so normal unit-test execution covers the
+      seed corpus and fuzzing checks arbitrary nested schema maps for panics.
 
 ### Stream B — Contract graph derivation (`internal/contract`)
 
