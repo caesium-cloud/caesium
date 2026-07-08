@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   Radio,
   Server,
+  ShieldCheck,
   Siren,
   type LucideIcon,
 } from "lucide-react";
@@ -82,6 +83,7 @@ export function Sidebar() {
   });
   const incidentsEnabled = features?.agent_remediation_enabled === true;
   const freshnessEnabled = features?.freshness_enabled === true;
+  const contractEnforcementEnabled = features?.contract_enforcement_enabled === true;
 
   const { data: incidentNav } = useQuery({
     queryKey: ["incidents", "nav"],
@@ -117,6 +119,9 @@ export function Sidebar() {
     { to: "/atoms", label: "Atoms", icon: Database, count: counts.atoms },
     ...(freshnessEnabled
       ? [{ to: "/datasets", label: "Datasets", icon: GitBranch, count: null }]
+      : []),
+    ...(contractEnforcementEnabled
+      ? [{ to: "/contracts", label: "Contracts", icon: ShieldCheck, count: null }]
       : []),
     ...(incidentsEnabled
       ? [{ to: "/incidents", label: "Incidents", icon: Siren, count: activeIncidentCount }]

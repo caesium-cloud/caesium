@@ -353,7 +353,7 @@ The Console surface, shipped after the REST reads (mirrors the data-plane-memory
 precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
 `ContractEnforcementEnabled` feature flag.
 
-- [ ] F1. Add the contract graph view rendering `GET /v1/contracts/graph`, reusing
+- [x] F1. Add the contract graph view rendering `GET /v1/contracts/graph`, reusing
       the existing `ui/src/features/jobs/LineageGraph.tsx` renderer (nodes:
       jobs/datasets; edge styling by class: declared / inferred / evidence); add the
       route in `ui/src/router.tsx`, the API method in `ui/src/lib/api.ts`, a nav
@@ -362,6 +362,12 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       Files: new `ui/src/features/contracts/`, `ui/src/router.tsx`,
       `ui/src/lib/api.ts`, `ui/src/components/layout/Sidebar.tsx`.
       Depends on: D1.
+      Note: W3-ζ added the `/contracts` Console route, `Contracts` sidebar nav,
+      typed `getContractGraph({dataset})` API, feature-off not-found handling,
+      empty-state copy, class/verdict legend and edge styling, job-node SPA links
+      resolved through `/jobs`, vitest coverage, and `ui/e2e/contracts.spec.ts`.
+      Local proof: `npm run lint`, `npm run build`, and focused `npx vitest run`
+      for the contracts component plus API tests pass.
 - [ ] F2. Add contract badges to the JobDefs diff tab: extend
       `ui/src/features/jobdefs/JobDefsPage.tsx` (which already lints then diffs pasted
       YAML) so its diff tab renders breaking/compatible/unknown badges per edge from

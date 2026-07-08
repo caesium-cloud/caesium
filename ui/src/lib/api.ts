@@ -414,6 +414,7 @@ export interface SystemFeatures {
   log_console_enabled: boolean;
   agent_remediation_enabled: boolean;
   freshness_enabled: boolean;
+  contract_enforcement_enabled: boolean;
   external_url?: string;
 }
 
@@ -861,6 +862,53 @@ export interface ImpactResult {
   downstream: ImpactNode[];
 }
 
+export type ContractNodeKind = "job" | "dataset" | string;
+export type ContractEdgeClass = "declared" | "inferred" | "evidence" | string;
+export type ContractVerdict = "breaking" | "compatible" | "unknown" | string;
+
+export interface ContractDatasetRef {
+  namespace: string;
+  name: string;
+}
+
+export interface ContractGraphNode {
+  id: string;
+  kind: ContractNodeKind;
+  alias?: string;
+  labels?: Record<string, string>;
+  dataset?: ContractDatasetRef;
+}
+
+export interface ContractFinding {
+  kind?: string;
+  path?: string;
+  detail?: string;
+  verdict: ContractVerdict;
+}
+
+export interface ContractGraphEdge {
+  id: string;
+  from: string;
+  to: string;
+  class: ContractEdgeClass;
+  verdict?: ContractVerdict;
+  findings?: ContractFinding[];
+  dataset?: ContractDatasetRef;
+  producerSchema?: Record<string, unknown>;
+  previousProducerSchema?: Record<string, unknown>;
+  consumerSchema?: Record<string, unknown>;
+  lastSeen?: string;
+}
+
+export interface ContractGraphResponse {
+  nodes: ContractGraphNode[];
+  edges: ContractGraphEdge[];
+}
+
+export interface ContractGraphQuery {
+  dataset?: string;
+}
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "/v1";
 
 export class ApiError extends Error {
@@ -1149,6 +1197,10 @@ export const api = {
   },
   getSystemNodes: () => request<Node[]>("/system/nodes"),
   getSystemFeatures: () => request<SystemFeatures>("/system/features"),
+  getContractGraph: (query: ContractGraphQuery = {}) => {
+    const params = queryString({ dataset: query.dataset });
+    return request<ContractGraphResponse>(`/contracts/graph${params ? `?${params}` : ""}`);
+  },
   getIncidents: (params: IncidentListParams = {}) => {
     const query = queryString({
       status: params.status,
