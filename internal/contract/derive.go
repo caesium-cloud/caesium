@@ -213,10 +213,13 @@ func (s GORMStore) ListContractProducerSchemas(ctx context.Context, incoming []s
 				StepName: stepName,
 				Dataset:  datasetRefFromName(name),
 			}
-			if step, ok := stepsByName[stepName]; ok && len(step.OutputSchema) > 0 {
-				record.Schema = cloneAnyMap(step.OutputSchema)
-				record.SchemaKnown = true
+			step, _ := stepsByName[stepName]
+			producerSchema, schemaKnown, err := persistedProducerSchema(decl, step)
+			if err != nil {
+				return nil, fmt.Errorf("existing job %s step %s dataset %s schema: %w", alias, stepName, name, err)
 			}
+			record.Schema = producerSchema
+			record.SchemaKnown = schemaKnown
 			records = append(records, record)
 		}
 	}
@@ -475,7 +478,10 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 		if err != nil {
 			return nil, fmt.Errorf("existing trigger %s configuration: %w", row.Alias, err)
 		}
-		steps := attachPersistedDatasetDeclarations(stepsByJobID[row.ID], declsByJobID[row.ID])
+		steps, err := attachPersistedDatasetDeclarations(stepsByJobID[row.ID], declsByJobID[row.ID])
+		if err != nil {
+			return nil, fmt.Errorf("existing job %s dataset declarations: %w", row.Alias, err)
+		}
 		jobs = append(jobs, Job{
 			ID:     row.ID,
 			Alias:  row.Alias,
@@ -613,9 +619,9 @@ func consumedDatasetsFromDefinition(datasets *schema.StepDatasets) []ConsumedDat
 	return out
 }
 
-func attachPersistedDatasetDeclarations(steps []Step, decls []models.DatasetDeclaration) []Step {
+func attachPersistedDatasetDeclarations(steps []Step, decls []models.DatasetDeclaration) ([]Step, error) {
 	if len(steps) == 0 || len(decls) == 0 {
-		return steps
+		return steps, nil
 	}
 
 	stepIndexByName := make(map[string]int, len(steps))
@@ -635,13 +641,26 @@ func attachPersistedDatasetDeclarations(steps []Step, decls []models.DatasetDecl
 		}
 		switch decl.Direction {
 		case models.DatasetDirectionProduces:
-			produced := ProducedDataset{Name: name}
-			if len(steps[idx].OutputSchema) > 0 {
-				produced.SchemaFrom = schema.DatasetSchemaFromOutput
+			inlineSchema, err := persistedInlineSchema(decl)
+			if err != nil {
+				return nil, fmt.Errorf("%s produces %s: %w", stepName, name, err)
+			}
+			produced := ProducedDataset{
+				Name:       name,
+				Schema:     inlineSchema,
+				SchemaFrom: strings.TrimSpace(decl.SchemaFrom),
+				Version:    decl.SchemaVersion,
 			}
 			steps[idx].Produces = append(steps[idx].Produces, produced)
 		case models.DatasetDirectionConsumes:
-			steps[idx].Consumes = append(steps[idx].Consumes, ConsumedDataset{Name: name})
+			inlineSchema, err := persistedInlineSchema(decl)
+			if err != nil {
+				return nil, fmt.Errorf("%s consumes %s: %w", stepName, name, err)
+			}
+			steps[idx].Consumes = append(steps[idx].Consumes, ConsumedDataset{
+				Name:   name,
+				Schema: inlineSchema,
+			})
 		}
 	}
 
@@ -653,7 +672,33 @@ func attachPersistedDatasetDeclarations(steps []Step, decls []models.DatasetDecl
 			return steps[idx].Consumes[i].Name < steps[idx].Consumes[j].Name
 		})
 	}
-	return steps
+	return steps, nil
+}
+
+func persistedProducerSchema(decl models.DatasetDeclaration, step Step) (map[string]any, bool, error) {
+	inlineSchema, err := persistedInlineSchema(decl)
+	if err != nil {
+		return nil, false, err
+	}
+	if strings.TrimSpace(decl.SchemaJSON) != "" {
+		return inlineSchema, true, nil
+	}
+	if strings.TrimSpace(decl.SchemaFrom) == schema.DatasetSchemaFromOutput && len(step.OutputSchema) > 0 {
+		return cloneAnyMap(step.OutputSchema), true, nil
+	}
+	return nil, false, nil
+}
+
+func persistedInlineSchema(decl models.DatasetDeclaration) (map[string]any, error) {
+	raw := strings.TrimSpace(decl.SchemaJSON)
+	if raw == "" {
+		return nil, nil
+	}
+	out, err := parseJSONMap(raw)
+	if err != nil {
+		return nil, fmt.Errorf("schema_json: %w", err)
+	}
+	return out, nil
 }
 
 type declaredProducer struct {

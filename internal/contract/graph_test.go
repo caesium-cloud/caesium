@@ -537,7 +537,7 @@ func TestGORMStoreListContractProducerSchemasUsesTaskOutputSchema(t *testing.T) 
 	insertContractTrigger(t, db, triggerID)
 	insertContractJob(t, db, jobID, triggerID, "producer")
 	insertContractTask(t, db, jobID, "export", objectSchemaWithRequired("customer_id"))
-	insertDatasetDeclaration(t, db, jobID, "producer", "export", "lake.customers", "produces")
+	insertDatasetDeclarationWithSchema(t, db, jobID, "producer", "export", "lake.customers", "produces", "", schema.DatasetSchemaFromOutput, 2)
 
 	records, err := (GORMStore{DB: db}).ListContractProducerSchemas(context.Background(), []schema.Definition{{
 		Metadata: schema.Metadata{Alias: "producer"},
@@ -549,6 +549,75 @@ func TestGORMStoreListContractProducerSchemasUsesTaskOutputSchema(t *testing.T) 
 	require.Equal(t, DatasetRef{Name: "lake.customers"}, records[0].Dataset)
 	require.True(t, records[0].SchemaKnown)
 	require.Contains(t, records[0].Schema["properties"], "customer_id")
+}
+
+func TestGORMStoreListContractProducerSchemasUsesDeclarationInlineSchema(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractJobTables(t, db)
+
+	jobID := uuid.New()
+	triggerID := uuid.New()
+	insertContractTrigger(t, db, triggerID)
+	insertContractJob(t, db, jobID, triggerID, "producer")
+	insertDatasetDeclarationWithSchema(t, db, jobID, "producer", "export", "lake.customers", "produces", mustJSON(t, objectSchemaWithRequired("customer_id")), "", 3)
+
+	records, err := (GORMStore{DB: db}).ListContractProducerSchemas(context.Background(), []schema.Definition{{
+		Metadata: schema.Metadata{Alias: "producer"},
+	}})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "producer", records[0].JobAlias)
+	require.Equal(t, "export", records[0].StepName)
+	require.Equal(t, DatasetRef{Name: "lake.customers"}, records[0].Dataset)
+	require.True(t, records[0].SchemaKnown)
+	require.Contains(t, records[0].Schema["properties"], "customer_id")
+}
+
+func TestGORMStoreDeriveGraphUsesPersistedConsumerSchemaRequirement(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractJobTables(t, db)
+
+	consumerID := uuid.New()
+	triggerID := uuid.New()
+	insertContractTrigger(t, db, triggerID)
+	insertContractJob(t, db, consumerID, triggerID, "consumer")
+	insertContractTask(t, db, consumerID, "load", nil)
+	insertDatasetDeclarationWithSchema(t, db, consumerID, "consumer", "load", "lake.customers", "consumes", mustJSON(t, objectSchemaWithRequired("customer_id")), "", 0)
+
+	incomingProducer := schema.Definition{
+		APIVersion: schema.APIVersionV1,
+		Kind:       "Job",
+		Metadata:   schema.Metadata{Alias: "producer"},
+		Trigger: schema.Trigger{
+			Type:          schema.TriggerCron,
+			Configuration: map[string]any{"cron": "0 0 * * *"},
+		},
+		Steps: []schema.Step{{
+			Name:         "export",
+			Image:        "alpine:3.23",
+			OutputSchema: objectSchemaWithRequired("row_count"),
+			Datasets: &schema.StepDatasets{Produces: []schema.ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+				Version:    2,
+			}}},
+		}},
+	}
+
+	store := GORMStore{DB: db}
+	graph, err := (Deriver{Jobs: store, ProducerSchemas: store}).DeriveGraph(context.Background(), []schema.Definition{incomingProducer})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Verdict)
+	require.Contains(t, edge.ProducerSchema["properties"], "row_count")
+	require.Contains(t, edge.ConsumerSchema["properties"], "customer_id")
+	require.Len(t, edge.Findings, 2)
+	require.Equal(t, schemacompat.FindingKindRequirementUnsatisfied, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Path, "datasets.consumes.lake.customers.schema")
+	require.Contains(t, edge.Findings[0].Detail, "customer_id")
 }
 
 func outputSchemaWithProperties(keys ...string) map[string]any {
@@ -666,7 +735,7 @@ func createContractJobTables(t *testing.T, db *gorm.DB) {
 	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, trigger_id text NOT NULL, labels json, deleted_at datetime)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE triggers (id text PRIMARY KEY, type text NOT NULL, configuration text NOT NULL, deleted_at datetime)").Error)
 	require.NoError(t, db.Exec("CREATE TABLE tasks (id text PRIMARY KEY, job_id text NOT NULL, name text NOT NULL, position integer NOT NULL, output_schema json, deleted_at datetime, created_at datetime)").Error)
-	require.NoError(t, db.Exec("CREATE TABLE dataset_declarations (id text PRIMARY KEY, job_id text NOT NULL, job_alias text NOT NULL, step_name text NOT NULL, name text NOT NULL, direction text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE dataset_declarations (id text PRIMARY KEY, job_id text NOT NULL, job_alias text NOT NULL, step_name text NOT NULL, name text NOT NULL, direction text NOT NULL, schema_json text, schema_from text, schema_version integer)").Error)
 }
 
 func insertContractTrigger(t *testing.T, db *gorm.DB, triggerID uuid.UUID) {
@@ -694,14 +763,22 @@ func insertContractTask(t *testing.T, db *gorm.DB, jobID uuid.UUID, name string,
 
 func insertDatasetDeclaration(t *testing.T, db *gorm.DB, jobID uuid.UUID, jobAlias, stepName, name, direction string) {
 	t.Helper()
+	insertDatasetDeclarationWithSchema(t, db, jobID, jobAlias, stepName, name, direction, "", "", 0)
+}
+
+func insertDatasetDeclarationWithSchema(t *testing.T, db *gorm.DB, jobID uuid.UUID, jobAlias, stepName, name, direction, schemaJSON, schemaFrom string, schemaVersion int) {
+	t.Helper()
 	require.NoError(t, db.Exec(
-		"INSERT INTO dataset_declarations (id, job_id, job_alias, step_name, name, direction) VALUES (?, ?, ?, ?, ?, ?)",
+		"INSERT INTO dataset_declarations (id, job_id, job_alias, step_name, name, direction, schema_json, schema_from, schema_version) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		uuid.New(),
 		jobID,
 		jobAlias,
 		stepName,
 		name,
 		direction,
+		schemaJSON,
+		schemaFrom,
+		schemaVersion,
 	).Error)
 }
 

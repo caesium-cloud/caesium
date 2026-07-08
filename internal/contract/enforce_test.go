@@ -63,7 +63,7 @@ func TestEvaluateGraphAcknowledgementAllowsMatchingDigest(t *testing.T) {
 	require.NoError(t, EvaluateGraph(context.Background(), db, graph, EnforcementModeFail, now))
 }
 
-func TestAllowBreakingMatchesDeclaredDatasetName(t *testing.T) {
+func TestAllowBreakingAckLifecycleWarningsAndExpiry(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	graph := breakingDeclaredDatasetGraph()
 
@@ -77,14 +77,36 @@ func TestAllowBreakingMatchesDeclaredDatasetName(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Len(t, result.Warnings, 1)
+	require.Equal(t, "contract_break_declared", result.Warnings[0].Type)
 	require.Equal(t, "lake.customers", result.Warnings[0].Dataset)
+	require.Equal(t, "customer_id", result.Warnings[0].OutputKey)
+	require.NotEmpty(t, result.Warnings[0].AcknowledgementID)
+	require.Equal(t, now.Add(time.Hour), result.Warnings[0].DeprecationUntil)
+	require.Contains(t, result.Warnings[0].Message, "contract break declared")
 	require.Contains(t, result.Warnings[0].Message, "lake.customers")
+	require.Contains(t, result.Warnings[0].Message, "customer_id")
 
 	var ack models.ContractAck
 	require.NoError(t, db.First(&ack).Error)
 	require.Equal(t, "lake.customers", ack.Dataset)
 	require.Equal(t, "operator@example.com", ack.Actor)
 	require.Equal(t, now.Add(time.Hour), ack.ExpiresAt)
+
+	result, err = EvaluateGraphWithOptions(context.Background(), db, graph, EnforcementModeFail, now.Add(time.Minute), ApplyOptions{})
+	require.NoError(t, err)
+	require.Len(t, result.Warnings, 1)
+	require.Equal(t, "contract_break_acknowledged", result.Warnings[0].Type)
+	require.Equal(t, "lake.customers", result.Warnings[0].Dataset)
+	require.Equal(t, "customer_id", result.Warnings[0].OutputKey)
+	require.Contains(t, result.Warnings[0].Message, "deprecation window")
+	require.Contains(t, result.Warnings[0].Message, "lake.customers")
+
+	_, err = EvaluateGraphWithOptions(context.Background(), db, graph, EnforcementModeFail, now.Add(2*time.Hour), ApplyOptions{})
+	var enforcementErr *EnforcementError
+	require.ErrorAs(t, err, &enforcementErr)
+	require.True(t, errors.Is(err, ErrContractBreakBlocked))
+	require.Contains(t, enforcementErr.Response.Message, "lake.customers")
+	require.Contains(t, enforcementErr.Response.Message, "customer_id")
 }
 
 func TestEdgeSetDigestV2IgnoresConsumerTeam(t *testing.T) {

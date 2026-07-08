@@ -111,6 +111,84 @@ func TestBuildDeclarations(t *testing.T) {
 	}
 }
 
+const registrySchemaJob = `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: contract-datasets
+trigger:
+  type: cron
+  configuration: {expression: "0 */6 * * *"}
+steps:
+  - name: transform
+    image: etl:1.4
+    outputSchema:
+      type: object
+      required: [customer_id]
+      properties:
+        customer_id:
+          type: string
+    datasets:
+      consumes:
+        - name: raw.customers
+          schema:
+            type: object
+            required: [legacy_id]
+            properties:
+              legacy_id:
+                type: string
+      produces:
+        - name: lake.customers
+          schemaFrom: output
+          version: 2
+        - name: lake.orders
+          schema:
+            type: object
+            required: [order_id]
+            properties:
+              order_id:
+                type: string
+          version: 5
+`
+
+func TestBuildDeclarationsPersistsSchemaMetadata(t *testing.T) {
+	def, err := schema.Parse([]byte(registrySchemaJob))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	jobID := uuid.New()
+	decls, err := BuildDeclarations(def, jobID, def.Metadata.Alias)
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	db := openRegistryDB(t)
+	if err := ReplaceForJobTx(db, jobID, decls); err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+	got, err := NewRegistry(db).ListByJob(context.Background(), jobID)
+	if err != nil {
+		t.Fatalf("list by job: %v", err)
+	}
+
+	consume := findDeclaration(t, got, models.DatasetDirectionConsumes, "raw.customers")
+	if consume.SchemaFrom != "" || consume.SchemaVersion != 0 {
+		t.Fatalf("unexpected consume schema source metadata: %+v", consume)
+	}
+	requireSchemaJSONRequired(t, consume.SchemaJSON, "legacy_id")
+
+	output := findDeclaration(t, got, models.DatasetDirectionProduces, "lake.customers")
+	if output.SchemaJSON != "" || output.SchemaFrom != schema.DatasetSchemaFromOutput || output.SchemaVersion != 2 {
+		t.Fatalf("unexpected schemaFrom declaration metadata: %+v", output)
+	}
+
+	inline := findDeclaration(t, got, models.DatasetDirectionProduces, "lake.orders")
+	if inline.SchemaFrom != "" || inline.SchemaVersion != 5 {
+		t.Fatalf("unexpected inline declaration metadata: %+v", inline)
+	}
+	requireSchemaJSONRequired(t, inline.SchemaJSON, "order_id")
+}
+
 func TestBuildDeclarationsCarriesSkipWhenFreshOptOut(t *testing.T) {
 	src := strings.Replace(registrySampleJob, "  datasets:\n    sources:", "  datasets:\n    skipWhenFresh: false\n    sources:", 1)
 	def, err := schema.Parse([]byte(src))
@@ -126,6 +204,38 @@ func TestBuildDeclarationsCarriesSkipWhenFreshOptOut(t *testing.T) {
 			t.Fatalf("declaration %s skipWhenFresh = %v, want false", decl.Name, decl.SkipWhenFresh)
 		}
 	}
+}
+
+func findDeclaration(t *testing.T, decls []models.DatasetDeclaration, direction, name string) models.DatasetDeclaration {
+	t.Helper()
+	for _, decl := range decls {
+		if decl.Direction == direction && decl.Name == name {
+			return decl
+		}
+	}
+	t.Fatalf("declaration %s %s not found in %+v", direction, name, decls)
+	return models.DatasetDeclaration{}
+}
+
+func requireSchemaJSONRequired(t *testing.T, raw, required string) {
+	t.Helper()
+	if raw == "" {
+		t.Fatalf("schema_json is empty, want required key %q", required)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		t.Fatalf("schema_json is not valid JSON: %v", err)
+	}
+	values, ok := parsed["required"].([]any)
+	if !ok {
+		t.Fatalf("schema_json required = %#v, want list containing %q", parsed["required"], required)
+	}
+	for _, value := range values {
+		if value == required {
+			return
+		}
+	}
+	t.Fatalf("schema_json required = %#v, want %q", values, required)
 }
 
 func TestReplaceForJobTxRebuildsAndPrunes(t *testing.T) {

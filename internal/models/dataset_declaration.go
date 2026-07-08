@@ -63,6 +63,20 @@ type DatasetDeclaration struct {
 	// advance the dataset. Empty in degraded mode (no declared watermark).
 	WatermarkKey string `gorm:"type:text;not null;default:''" json:"watermark_key,omitempty"`
 
+	// SchemaJSON is the marshaled inline JSON Schema declared on
+	// produces[].schema or consumes[].schema. Empty when no inline schema was
+	// declared.
+	SchemaJSON string `gorm:"type:text" json:"schema_json,omitempty"`
+
+	// SchemaFrom is the producing step-local schema source (currently "output").
+	// Empty for consumed declarations and produced declarations without
+	// schemaFrom.
+	SchemaFrom string `gorm:"type:text" json:"schema_from,omitempty"`
+
+	// SchemaVersion carries produces[].version for intentional dataset contract
+	// breaks. It is zero when unset and unused for consumed/source declarations.
+	SchemaVersion int `json:"schema_version,omitempty"`
+
 	// SkipWhenFresh carries metadata.datasets.skipWhenFresh after defaulting.
 	// It is evaluated at the cron scheduling seam only and never affects a task's
 	// cache identity. Pointer form preserves an explicit false across GORM's

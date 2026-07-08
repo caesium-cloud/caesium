@@ -197,14 +197,6 @@ func ContractBreakResponse(err error) (any, bool) {
 	return enforcementErr.Response, true
 }
 
-func (i *Importer) enforceContractsTx(ctx context.Context, tx *gorm.DB, def *schema.Definition) error {
-	mode := env.Variables().ContractEnforcement
-	if strings.TrimSpace(mode) == "" {
-		return nil
-	}
-	return i.enforceContractsWithOptionsTx(ctx, tx, def, nil)
-}
-
 func (i *Importer) enforceContractsWithOptionsTx(ctx context.Context, tx *gorm.DB, def *schema.Definition, opts *ApplyOptions) error {
 	vars := env.Variables()
 	mode := vars.ContractEnforcement
