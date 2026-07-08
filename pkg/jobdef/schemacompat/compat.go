@@ -427,7 +427,10 @@ func compareAdditionalProperties(findings *[]Finding, path schemaPath, oldSchema
 	}
 
 	newProps := schemaProperties(newSchema)
-	required := unionSets(requiredSet(oldSchema), requiredSet(newSchema))
+	// Only the NEW schema's required set matters here: a key required by the
+	// old schema but dropped by the new one is compareRequired's finding
+	// (required-removed), not an additionalProperties tightening.
+	required := requiredSet(newSchema)
 	for _, key := range sortedSetKeys(required) {
 		if _, ok := newProps[key]; ok {
 			continue
@@ -503,13 +506,19 @@ func compareRelaxableConstraints(findings *[]Finding, path schemaPath, oldSchema
 	}
 }
 
-func sortedConstraintKeys() []string {
+// sortedConstraintKeysList is computed once — relaxableConstraintKeywords is
+// static, and this list is consulted on every schema-node comparison.
+var sortedConstraintKeysList = func() []string {
 	keys := make([]string, 0, len(relaxableConstraintKeywords))
 	for key := range relaxableConstraintKeywords {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	return keys
+}()
+
+func sortedConstraintKeys() []string {
+	return sortedConstraintKeysList
 }
 
 func constraintValuesEqual(a, b any) bool {
@@ -579,6 +588,9 @@ func compareAddedOptionalProperties(findings *[]Finding, path schemaPath, oldSch
 			continue
 		}
 		if _, required := newRequired[key]; required {
+			// A property added simultaneously to properties AND required
+			// strengthens the producer's guarantee — deliberately no finding:
+			// consumers can only gain from the stronger contract.
 			continue
 		}
 		*findings = append(*findings, finding(
@@ -632,7 +644,12 @@ func satisfySchema(findings *[]Finding, path schemaPath, schema, requirement map
 		propPath := path.append("properties", key)
 		schemaProp, schemaOK := schemaProps[key].(map[string]any)
 		if !schemaOK {
-			if _, requiresType := schemaTypes(requirementProp["type"]); requiresType {
+			// With additionalProperties: false the producer can never emit this
+			// field at all: if the consumer REQUIRES it, the required-key loop
+			// above already emitted a breaking RequirementUnsatisfied; if it is
+			// optional, a field that never arrives satisfies vacuously. Either
+			// way an unknown here would be noise.
+			if _, requiresType := schemaTypes(requirementProp["type"]); requiresType && !additionalFalse {
 				*findings = append(*findings, finding(
 					FindingKindRequirementUnknown,
 					propPath.append("type"),
@@ -653,7 +670,7 @@ func satisfyType(findings *[]Finding, path schemaPath, schema, requirement map[s
 		return
 	}
 
-	schemaTypes, schemaHasTypes := schemaTypes(schema["type"])
+	producerTypes, schemaHasTypes := schemaTypes(schema["type"])
 	typePath := path.append("type")
 	if !schemaHasTypes {
 		*findings = append(*findings, finding(
@@ -666,13 +683,13 @@ func satisfyType(findings *[]Finding, path schemaPath, schema, requirement map[s
 		return
 	}
 
-	if !typeSetAllowsAll(requirementTypes, schemaTypes) {
+	if !typeSetAllowsAll(requirementTypes, producerTypes) {
 		*findings = append(*findings, finding(
 			FindingKindRequirementTypeMismatch,
 			typePath,
 			VerdictBreaking,
 			"producer type %s does not satisfy consumer type %s",
-			formatTypes(schemaTypes),
+			formatTypes(producerTypes),
 			formatTypes(requirementTypes),
 		))
 	}
@@ -843,17 +860,6 @@ func canonicalJSON(value any) string {
 func additionalPropertiesFalse(schema map[string]any) bool {
 	value, ok := schema["additionalProperties"].(bool)
 	return ok && !value
-}
-
-func unionSets(a, b map[string]struct{}) map[string]struct{} {
-	union := make(map[string]struct{}, len(a)+len(b))
-	for item := range a {
-		union[item] = struct{}{}
-	}
-	for item := range b {
-		union[item] = struct{}{}
-	}
-	return union
 }
 
 func sortedKeys(values map[string]any) []string {

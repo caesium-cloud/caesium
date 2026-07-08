@@ -226,6 +226,58 @@ func TestCompareDocOnlyEditHasNoFindings(t *testing.T) {
 	require.Empty(t, findings)
 }
 
+// A key that was required by the OLD schema but dropped by the new one is
+// compareRequired's required-removed finding — it must NOT also surface as an
+// additionalProperties tightening (the tightening guard reads only the NEW
+// schema's required set). Regression for the review-flagged union false
+// positive.
+func TestCompareDroppedRequiredDoesNotDoubleAsTightening(t *testing.T) {
+	findings := Compare(
+		map[string]any{
+			"type":     "object",
+			"required": []any{"customer_id"},
+			"properties": map[string]any{
+				"customer_id": map[string]any{"type": "string"},
+			},
+		},
+		map[string]any{
+			"type":                 "object",
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"row_count": map[string]any{"type": "integer"},
+			},
+		},
+	)
+
+	requireContainsFinding(t, findings, FindingKindRequiredRemoved, "properties.customer_id", VerdictBreaking)
+	for _, f := range findings {
+		require.NotEqual(t, FindingKindAdditionalPropertiesTightened, f.Kind,
+			"dropped-required key must not double as a tightening finding: %#v", f)
+	}
+}
+
+// A property added simultaneously to properties AND required strengthens the
+// producer's guarantee — deliberately no finding of any verdict.
+func TestCompareAddedRequiredPropertyIsSilentlyCompatible(t *testing.T) {
+	findings := Compare(
+		map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"customer_id": map[string]any{"type": "string"},
+			},
+		},
+		map[string]any{
+			"type":     "object",
+			"required": []any{"row_count"},
+			"properties": map[string]any{
+				"customer_id": map[string]any{"type": "string"},
+				"row_count":   map[string]any{"type": "integer"},
+			},
+		},
+	)
+	require.Empty(t, findings)
+}
+
 func TestSatisfies(t *testing.T) {
 	cases := []struct {
 		name        string
