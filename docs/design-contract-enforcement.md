@@ -1,7 +1,11 @@
 # Design: Cross-Job Contract Enforcement at Apply Time
 
-> Status: Brainstorm/Design — proposal for static, apply-time enforcement of
-> cross-job data contracts. No implementation yet. The static complement to
+> Status: Shipped via the contract-enforcement execution plan
+> (`docs/exec-plans/completed/contract-enforcement.md`). Static apply-time
+> cross-job data contracts are live across lint/diff/apply, REST and CLI
+> graph/check surfaces, the Console graph, JobDefs diff badges, intentional-break
+> acknowledgements, deprecation notifications, and dataset schema declarations.
+> The static complement to
 > [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md) scenario 2
 > (schema drift) and the apply-time counterpart of
 > [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md).
