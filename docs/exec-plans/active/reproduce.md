@@ -252,7 +252,7 @@ on the shared command file — see conflicts).
 
 ## Harness Strengthening
 
-- [ ] H-1. Ensure the integration server produces reproducible descriptors and the
+- [x] H-1. Ensure the integration server produces reproducible descriptors and the
       reproduce scenarios drive the **real CLI** against the harness Docker daemon:
       confirm the integration job runs with digest pinning on (so
       `ResolvedImageDigest` is recorded and pull-by-digest is faithful), that the
@@ -263,6 +263,17 @@ on the shared command file — see conflicts).
       is real. Reproduce needs no new `CAESIUM_*` server env (it reuses
       `CAESIUM_API_KEY`); if any harness gate is missing, add it here.
       Files: `justfile`, `.github/workflows/ci.yml`, `test/` harness helpers.
+      Note: W1-η found digest pinning was the one missing gate —
+      `CAESIUM_CACHE_PIN_DIGESTS` (default false) was set on NO server-boot site, so
+      descriptors recorded no `ResolvedImageDigest`. Now set `=true` on every site in
+      one sweep (all justfile lanes incl. podman/distributed/agent, the local
+      k8s-distributed helm `--set` list as `extraEnv[3]`, the CI helm values file,
+      and the three ci.yml server blocks) — degradation-safe because the imagecheck
+      resolver falls back to the tag on registry failure. Verified already-present:
+      the harness Docker daemon is reachable from the test-runner container (both
+      mount `docker.sock`), and `runCLIStdout`/`runCLISeparate` split-stream helpers
+      exist in `test/` (used by blame/agent-remediation scenarios). No new helper
+      code needed; A2/B scenarios consume the existing surface.
 
 ## Navigational / Organizational Improvements
 
