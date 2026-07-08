@@ -256,7 +256,7 @@ contracts. This design ADDS schema fields to the step-level `datasets` block tha
 not own the base block. **Coordinate on `pkg/jobdef/definition.go`: whichever plan
 lands `Step.Datasets` first introduces the struct; this item extends it.**
 
-- [ ] E1. Add `schema`/`schemaFrom` to `datasets.produces` entries (`schemaFrom:
+- [x] E1. Add `schema`/`schemaFrom` to `datasets.produces` entries (`schemaFrom:
       output` reuses the step's `outputSchema`; `schema: {...}` declares an inline
       dataset schema; `version` bumped on intentional breaks) and a required `schema`
       to `datasets.consumes` entries (what THIS consumer requires — a subset, not a
@@ -272,6 +272,7 @@ lands `Step.Datasets` first introduces the struct; this item extends it.**
       `internal/cache/hash_test.go` assertion (hash stability).
       Note: coordinates with freshness Stream A on the base `datasets` block — see the
       Source-Of-Truth Note. Not an in-plan dependency; documented cross-plan.
+      W1-epsilon note: final YAML shape is `datasets.produces[].{name,schema|schemaFrom,version,freshness,maxStaleness,watermark}` with `schemaFrom: output` resolving to the producing step's `outputSchema`, and `datasets.consumes[]` accepts either legacy scalar names or object entries `{name, schema}`. Scalar consumes remain valid without schema for shipped freshness manifests; object consumes require `schema`. Validation now trims/dedupes dataset names, rejects `schema` plus `schemaFrom`, restricts `schemaFrom` to `output` with a non-empty step `outputSchema`, and compiles inline produce/consume schemas with `santhosh-tekuri/jsonschema/v6`.
 
 ### Stream F — Console UI (contract graph + diff badges)
 

@@ -101,8 +101,8 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				SkipWhenFresh: skipWhenFreshPtr,
 			})
 		}
-		for _, raw := range step.Datasets.Consumes {
-			name := strings.TrimSpace(raw)
+		for _, consumed := range step.Datasets.Consumes {
+			name := strings.TrimSpace(consumed.Name)
 			if name == "" {
 				continue
 			}
