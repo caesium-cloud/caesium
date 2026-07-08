@@ -284,6 +284,9 @@ type ConsumedDataset struct {
 // UnmarshalYAML accepts the shipped freshness shape (`consumes: [orders]`) and
 // the contract-enforcement object shape (`{name: orders, schema: {...}}`).
 func (c *ConsumedDataset) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.AliasNode {
+		value = value.Alias
+	}
 	switch value.Kind {
 	case yaml.ScalarNode:
 		var name string

@@ -170,6 +170,36 @@ func TestConsumesSurviveJSONRoundTrip(t *testing.T) {
 	}
 }
 
+// TestConsumesResolveYAMLAliases pins anchor/alias support: an aliased scalar
+// consumes entry must dereference to its target rather than erroring on
+// yaml.AliasNode.
+func TestConsumesResolveYAMLAliases(t *testing.T) {
+	y := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: aliased
+  datasets:
+    sources:
+      - name: &upstream orders
+        external: true
+trigger:
+  type: cron
+  configuration: {expression: "0 * * * *"}
+steps:
+  - name: s
+    image: etl:1
+    datasets: {consumes: [*upstream]}
+`
+	def, err := Parse([]byte(y))
+	if err != nil {
+		t.Fatalf("parse aliased consumes: %v", err)
+	}
+	if got := def.Steps[0].Datasets.Consumes[0].Name; got != "orders" {
+		t.Fatalf("aliased consume resolved to %q, want %q", got, "orders")
+	}
+}
+
 // datasetStep builds a minimal single-step job whose step carries the provided
 // inline `datasets:` body, for table-driven validation tests.
 func datasetStep(datasetsBody string) string {
