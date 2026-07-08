@@ -298,7 +298,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
 
 ## Harness Strengthening
 
-- [ ] H-1. Enable the contract path on the live integration server so the Stream C/D
+- [x] H-1. Enable the contract path on the live integration server so the Stream C/D
       scenarios drive the real surface, not an internal call: set
       `CAESIUM_CONTRACT_ENFORCEMENT=fail` (and a short
       `CAESIUM_CONTRACT_DEPRECATION_WINDOW` if the ack-expiry test needs a tight
@@ -309,6 +309,14 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       need (apply producer+consumer fixtures, `runCLIStdout` split-stream capture for
       `--json`).
       Files: `justfile`, `.github/workflows/ci.yml`, `test/` harness helpers.
+      Note: W1-η set `CAESIUM_CONTRACT_ENFORCEMENT=fail` on every server-boot site,
+      mirroring the `CAESIUM_FRESHNESS_ENABLED` precedent — all justfile lanes
+      (docker, distributed, agent, podman), the helm chart `config.extraEnv[2]`, and
+      the three ci.yml server blocks — so no lane drifts red when enforcement lands.
+      The env var is inert until C1 adds it to `pkg/env/env.go`. Deliberately
+      deferred to W2: the `CAESIUM_CONTRACT_DEPRECATION_WINDOW` bound and the `test/`
+      fixture helpers land alongside the C/D scenarios that use them (helpers now
+      would be unused code; the window depends on C2's actual expiry-test shape).
 
 ## Navigational / Organizational Improvements
 
