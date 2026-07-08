@@ -157,6 +157,11 @@ func (s GORMStore) ListContractProducerSchemas(ctx context.Context, incoming []s
 		if alias == "" {
 			return nil, fmt.Errorf("definition %d: metadata.alias is required", idx)
 		}
+		// Mirror ListContractJobs' duplicate guard so a direct call cannot
+		// silently pick an arbitrary definition for a repeated alias.
+		if _, exists := incomingAliases[alias]; exists {
+			return nil, fmt.Errorf("duplicate job alias %q", alias)
+		}
 		incomingAliases[alias] = struct{}{}
 	}
 
