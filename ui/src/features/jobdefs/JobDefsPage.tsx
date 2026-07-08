@@ -301,7 +301,12 @@ export function JobDefsPage() {
   const contractFindings = useMemo(() => collectContractFindings(diffResult), [diffResult]);
   const breakingContractFindings = contractFindings.filter((finding) => finding.verdict === "breaking");
   const hasBreakingContractFindings = breakingContractFindings.length > 0;
-  const ackSubject = breakingContractFindings[0] ? contractSubjectForFinding(breakingContractFindings[0]) : "";
+  // The allow_breaking request (like the CLI flag) acknowledges ONE subject per
+  // apply, so the in-page ack can only unlock single-subject breaking diffs;
+  // multi-subject breaks must be split into separate applies.
+  const breakingSubjects = [...new Set(breakingContractFindings.map(contractSubjectForFinding))];
+  const hasMultipleBreakingSubjects = breakingSubjects.length > 1;
+  const ackSubject = breakingSubjects[0] ?? "";
   const trimmedAckReason = ackReason.trim();
   const allowBreaking: AllowBreakingRequest | undefined = hasBreakingContractFindings
     ? { dataset: ackSubject, reason: trimmedAckReason }
@@ -372,7 +377,7 @@ export function JobDefsPage() {
             <GitBranch className="h-3.5 w-3.5 mr-1.5" />
             Git sync
           </Button>
-          {hasBreakingContractFindings && (
+          {hasBreakingContractFindings && !hasMultipleBreakingSubjects && (
             <input
               aria-label="Breaking change acknowledgement reason"
               data-testid="contract-ack-reason"
@@ -382,11 +387,21 @@ export function JobDefsPage() {
               className="h-8 w-full sm:w-64 rounded-md border border-danger/35 bg-danger/10 px-3 text-xs text-text-1 placeholder:text-danger/70 outline-none transition-colors focus:border-danger"
             />
           )}
-          <Button 
-            size="sm" 
+          {hasMultipleBreakingSubjects && (
+            <span
+              data-testid="contract-ack-multi-subject"
+              className="text-[11px] text-danger/90 max-w-xs"
+            >
+              {breakingSubjects.length} contracts break ({breakingSubjects.join(", ")}) — an
+              acknowledgement covers one subject per apply, so split this change into separate
+              applies (or use `caesium job apply --allow-breaking` per dataset).
+            </span>
+          )}
+          <Button
+            size="sm"
             className="bg-cyan-glow text-midnight hover:bg-cyan-dim disabled:opacity-50"
             onClick={() => applyMutation.mutate()}
-            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting || (hasBreakingContractFindings && !trimmedAckReason)}
+            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting || (hasBreakingContractFindings && !trimmedAckReason) || hasMultipleBreakingSubjects}
           >
             <Play className="h-3.5 w-3.5 mr-1.5" />
             {applyMutation.isPending ? "Applying..." : "Apply definition"}
@@ -762,7 +777,7 @@ function ContractFindingsList({
     <div className="pl-7 pr-2 pb-2 flex flex-col gap-1.5" data-testid="contract-findings">
       {visibleFindings.map((finding) => (
         <ContractFindingBadge
-          key={contractFindingTitle(finding, contractTeams)}
+          key={`${finding.edgeId ?? ""}:${finding.path ?? ""}:${finding.detail ?? ""}`}
           finding={finding}
           contractTeams={contractTeams}
         />

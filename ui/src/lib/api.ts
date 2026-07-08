@@ -918,8 +918,6 @@ export interface ContractDiffFinding extends ContractFinding {
   dataset?: ContractDatasetRef;
   consumerTeam?: string;
   consumer_team?: string;
-  teamAttribution?: string;
-  team_attribution?: string;
 }
 
 export interface ContractGraphEdge {
