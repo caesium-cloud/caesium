@@ -263,6 +263,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
@@ -326,6 +327,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
@@ -506,6 +508,7 @@ jobs:
             -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
+            -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
             --user 0:0 \
             caesiumcloud/caesium:${{ env.IMAGE_TAG }}-amd64 start
       - name: Extract caesium CLI
