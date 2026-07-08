@@ -54,23 +54,27 @@ type Node struct {
 
 // Edge is a derived relationship between two graph nodes.
 type Edge struct {
-	ID       string                 `json:"id"`
-	From     string                 `json:"from"`
-	To       string                 `json:"to"`
-	Class    EdgeClass              `json:"class"`
-	Verdict  schemacompat.Verdict   `json:"verdict,omitempty"`
-	Findings []schemacompat.Finding `json:"findings,omitempty"`
-	Dataset  *DatasetRef            `json:"dataset,omitempty"`
-	LastSeen *time.Time             `json:"lastSeen,omitempty"`
+	ID                     string                 `json:"id"`
+	From                   string                 `json:"from"`
+	To                     string                 `json:"to"`
+	Class                  EdgeClass              `json:"class"`
+	Verdict                schemacompat.Verdict   `json:"verdict,omitempty"`
+	Findings               []schemacompat.Finding `json:"findings,omitempty"`
+	Dataset                *DatasetRef            `json:"dataset,omitempty"`
+	ProducerSchema         map[string]any         `json:"producerSchema,omitempty"`
+	PreviousProducerSchema map[string]any         `json:"previousProducerSchema,omitempty"`
+	ConsumerSchema         map[string]any         `json:"consumerSchema,omitempty"`
+	LastSeen               *time.Time             `json:"lastSeen,omitempty"`
 }
 
-// Job is the compact job definition surface needed to derive B1 graph edges.
+// Job is the compact job definition surface needed to derive contract graph edges.
 type Job struct {
-	ID      uuid.UUID
-	Alias   string
-	Labels  map[string]string
-	Trigger Trigger
-	Steps   []Step
+	ID       uuid.UUID
+	Alias    string
+	Labels   map[string]string
+	Trigger  Trigger
+	Steps    []Step
+	Incoming bool
 }
 
 // Trigger is the compact trigger surface needed for trigger-chain inference.
@@ -79,10 +83,26 @@ type Trigger struct {
 	Configuration map[string]any
 }
 
-// Step is the compact step surface needed for output-schema path checks.
+// Step is the compact step surface needed for output-schema and dataset checks.
 type Step struct {
 	Name         string
 	OutputSchema map[string]any
+	Produces     []ProducedDataset
+	Consumes     []ConsumedDataset
+}
+
+// ProducedDataset is the compact produces declaration used by the contract graph.
+type ProducedDataset struct {
+	Name       string
+	Schema     map[string]any
+	SchemaFrom string
+	Version    int
+}
+
+// ConsumedDataset is the compact consumes declaration used by the contract graph.
+type ConsumedDataset struct {
+	Name   string
+	Schema map[string]any
 }
 
 // EvidenceRecord is one distinct lineage-observed producer/dataset/consumer edge.
@@ -95,9 +115,20 @@ type EvidenceRecord struct {
 	LastSeen         time.Time
 }
 
+// ProducerSchemaRecord captures a persisted producer's resolved dataset schema
+// before an incoming definition replaces it.
+type ProducerSchemaRecord struct {
+	JobAlias    string
+	StepName    string
+	Dataset     DatasetRef
+	Schema      map[string]any
+	SchemaKnown bool
+}
+
 // DeriveInput is the pure input surface for graph derivation. Callers that
 // already have the merged job world can use DeriveGraph directly.
 type DeriveInput struct {
-	Jobs     []Job
-	Evidence []EvidenceRecord
+	Jobs                    []Job
+	Evidence                []EvidenceRecord
+	PreviousProducerSchemas []ProducerSchemaRecord
 }
