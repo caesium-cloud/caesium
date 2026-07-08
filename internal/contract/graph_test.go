@@ -761,11 +761,6 @@ func insertContractTask(t *testing.T, db *gorm.DB, jobID uuid.UUID, name string,
 	).Error)
 }
 
-func insertDatasetDeclaration(t *testing.T, db *gorm.DB, jobID uuid.UUID, jobAlias, stepName, name, direction string) {
-	t.Helper()
-	insertDatasetDeclarationWithSchema(t, db, jobID, jobAlias, stepName, name, direction, "", "", 0)
-}
-
 func insertDatasetDeclarationWithSchema(t *testing.T, db *gorm.DB, jobID uuid.UUID, jobAlias, stepName, name, direction, schemaJSON, schemaFrom string, schemaVersion int) {
 	t.Helper()
 	require.NoError(t, db.Exec(

@@ -213,7 +213,7 @@ func (s GORMStore) ListContractProducerSchemas(ctx context.Context, incoming []s
 				StepName: stepName,
 				Dataset:  datasetRefFromName(name),
 			}
-			step, _ := stepsByName[stepName]
+			step := stepsByName[stepName]
 			producerSchema, schemaKnown, err := persistedProducerSchema(decl, step)
 			if err != nil {
 				return nil, fmt.Errorf("existing job %s step %s dataset %s schema: %w", alias, stepName, name, err)

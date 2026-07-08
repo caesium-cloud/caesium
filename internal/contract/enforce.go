@@ -208,7 +208,7 @@ func EvaluateGraphWithOptions(ctx context.Context, db *gorm.DB, graph Graph, mod
 		return EnforcementResult{}, fmt.Errorf("contract deprecation window must be greater than 0")
 	}
 
-	groups, err := breakingGroupsFromGraph(graph)
+	groups, err := breakingGroupsFromGraph(graph, opts.IncomingAliases)
 	if err != nil {
 		return EnforcementResult{}, err
 	}
@@ -290,7 +290,7 @@ func EvaluateGraphWithOptions(ctx context.Context, db *gorm.DB, graph Graph, mod
 	}
 }
 
-func breakingGroupsFromGraph(graph Graph) ([]breakingGroup, error) {
+func breakingGroupsFromGraph(graph Graph, incomingAliases map[string]struct{}) ([]breakingGroup, error) {
 	nodesByID := make(map[string]Node, len(graph.Nodes))
 	for _, node := range graph.Nodes {
 		nodesByID[node.ID] = node
@@ -306,6 +306,9 @@ func breakingGroupsFromGraph(graph Graph) ([]breakingGroup, error) {
 				continue
 			}
 			cf := contractFindingFromEdge(edge, finding, nodesByID)
+			if !contractFindingInIncomingScope(cf, incomingAliases) {
+				continue
+			}
 			key := cf.Producer + "\x00" + cf.Subject
 			group := grouped[key]
 			if group == nil {
@@ -336,6 +339,19 @@ func breakingGroupsFromGraph(graph Graph) ([]breakingGroup, error) {
 		return groups[i].subject < groups[j].subject
 	})
 	return groups, nil
+}
+
+func contractFindingInIncomingScope(finding ContractFinding, incomingAliases map[string]struct{}) bool {
+	if incomingAliases == nil {
+		return true
+	}
+	if _, ok := incomingAliases[strings.TrimSpace(finding.Producer)]; ok {
+		return true
+	}
+	if _, ok := incomingAliases[strings.TrimSpace(finding.Consumer)]; ok {
+		return true
+	}
+	return false
 }
 
 func contractFindingFromEdge(edge Edge, finding schemacompat.Finding, nodesByID map[string]Node) ContractFinding {

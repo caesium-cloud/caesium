@@ -149,6 +149,26 @@ func TestEvaluateGraphWarnModeDoesNotBlock(t *testing.T) {
 	require.NoError(t, EvaluateGraph(context.Background(), nil, breakingInferenceGraph(), EnforcementModeWarn, time.Now().UTC()))
 }
 
+func TestEvaluateGraphWithOptionsScopesFindingsToIncomingAliases(t *testing.T) {
+	graph := breakingDeclaredDatasetGraph()
+	graph.Nodes = append(graph.Nodes, Node{ID: "job:unrelated", Kind: NodeKindJob, Alias: "unrelated"})
+	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
+
+	result, err := EvaluateGraphWithOptions(context.Background(), nil, graph, EnforcementModeFail, now, ApplyOptions{
+		IncomingAliases: map[string]struct{}{"unrelated": {}},
+	})
+	require.NoError(t, err)
+	require.Empty(t, result.Warnings)
+
+	_, err = EvaluateGraphWithOptions(context.Background(), nil, graph, EnforcementModeFail, now, ApplyOptions{
+		IncomingAliases: map[string]struct{}{"producer": {}},
+	})
+	var enforcementErr *EnforcementError
+	require.ErrorAs(t, err, &enforcementErr)
+	require.Contains(t, enforcementErr.Response.Message, "lake.customers")
+	require.Contains(t, enforcementErr.Response.Message, "customer_id")
+}
+
 func breakingInferenceGraph() Graph {
 	return Graph{
 		Nodes: []Node{
