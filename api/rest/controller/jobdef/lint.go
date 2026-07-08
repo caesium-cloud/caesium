@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
@@ -27,9 +28,10 @@ type LintSummary struct {
 }
 
 type LintResponse struct {
-	Errors   []LintMessage `json:"errors"`
-	Warnings []LintMessage `json:"warnings"`
-	Summary  LintSummary   `json:"summary"`
+	Errors    []LintMessage                `json:"errors"`
+	Warnings  []LintMessage                `json:"warnings"`
+	Summary   LintSummary                  `json:"summary"`
+	Contracts *contractsvc.FindingsSummary `json:"contracts,omitempty"`
 }
 
 func Lint(c *echo.Context) error {
@@ -73,6 +75,16 @@ func Lint(c *echo.Context) error {
 	}
 
 	if len(resp.Errors) == 0 {
+		if contractsvc.Enabled() {
+			graph, err := contractsvc.New(c.Request().Context()).Graph("", req.Definitions)
+			if err != nil {
+				return echo.NewHTTPError(http.StatusInternalServerError, "failed to derive contract graph").Wrap(err)
+			}
+			contractsvc.RecordFindings(*graph)
+			summary := contractsvc.SummaryFromGraph(*graph)
+			resp.Contracts = &summary
+		}
+
 		var allSteps []schema.Step
 		for _, def := range req.Definitions {
 			allSteps = append(allSteps, def.Steps...)

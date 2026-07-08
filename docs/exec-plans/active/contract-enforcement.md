@@ -283,7 +283,7 @@ The read/inspect surfaces over the graph and checker: the graph endpoint, the
 contract CLI, and contract findings folded into the existing lint/diff responses.
 Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork them.
 
-- [ ] D1. Add `GET /v1/contracts/graph` (`[--dataset ns/name]` filter) computing the
+- [x] D1. Add `GET /v1/contracts/graph` (`[--dataset ns/name]` filter) computing the
       Stream B graph on demand, bound in `Protected()` of `api/rest/bind/bind.go`
       (alongside the existing `/jobdefs/*` routes at `bind.go:126-128`); fold contract
       findings into the existing lint/diff responses — `POST /v1/jobdefs/lint`
@@ -298,6 +298,17 @@ Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork th
       `api/rest/controller/jobdef/lint.go`, `api/rest/controller/jobdef/diff.go`,
       `api/rest/service/system/system.go`, `internal/metrics/metrics.go`.
       Depends on: A1 + B1.
+      Note: W2-delta added the env-gated `GET /v1/contracts/graph` REST read through
+      a new `api/rest/service/contract` wrapper over `internal/contract.NewGORMDeriver`
+      with optional `dataset=ns/name` filtering, no route registration when
+      `CAESIUM_CONTRACT_ENFORCEMENT` is unset, and `GET /v1/system/features`
+      reporting `contract_enforcement_enabled` from the same raw env gate. Server
+      lint now adds optional `contracts: {breaking, warnings, edges}` and diff wraps
+      added/removed/modified entries with optional `contractFindings`, both omitted
+      when the gate is off. Added the read-only RBAC policy and scoped-key global-read
+      denial for `/v1/contracts/graph`, `caesium_contract_findings_total{verdict}`,
+      and an integration scenario that applies a producer/consumer pair, reads the
+      real graph endpoint, and verifies the feature flag.
 - [ ] D2. Add the `caesium contract` Cobra group — `caesium contract graph
       [--dataset ns/name] [--json]` (GET `/v1/contracts/graph`) and `caesium contract
       check --path jobs/ [--json]` (server-mode contract lint) — appended to the

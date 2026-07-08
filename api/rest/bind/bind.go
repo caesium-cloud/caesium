@@ -8,6 +8,7 @@ import (
 	authctrl "github.com/caesium-cloud/caesium/api/rest/controller/auth"
 	"github.com/caesium-cloud/caesium/api/rest/controller/backfill"
 	blamectrl "github.com/caesium-cloud/caesium/api/rest/controller/blame"
+	contractctrl "github.com/caesium-cloud/caesium/api/rest/controller/contract"
 	"github.com/caesium-cloud/caesium/api/rest/controller/database"
 	datasetctrl "github.com/caesium-cloud/caesium/api/rest/controller/dataset"
 	"github.com/caesium-cloud/caesium/api/rest/controller/event"
@@ -30,6 +31,7 @@ import (
 	"github.com/caesium-cloud/caesium/api/rest/controller/trigger"
 	"github.com/caesium-cloud/caesium/api/rest/controller/webhook"
 	whyctrl "github.com/caesium-cloud/caesium/api/rest/controller/why"
+	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	"github.com/caesium-cloud/caesium/internal/auth"
 	internal_event "github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/pkg/env"
@@ -131,6 +133,11 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/jobdefs/apply", jobdef.Apply)
 		g.POST("/jobdefs/lint", jobdef.Lint)
 		g.POST("/jobdefs/diff", jobdef.Diff)
+	}
+
+	// contracts
+	if contractsvc.Enabled() {
+		g.GET("/contracts/graph", contractctrl.Graph)
 	}
 
 	// datasets

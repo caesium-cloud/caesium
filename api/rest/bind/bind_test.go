@@ -53,3 +53,24 @@ func TestAllProtectsRESTButLeavesWebhooksPublic(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, webhookRec.Code)
 	require.Equal(t, 1, webhookCalls)
 }
+
+func TestProtectedGatesContractGraphRoute(t *testing.T) {
+	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "")
+	off := echo.New()
+	Protected(off.Group("/v1"), nil)
+	require.False(t, hasRoute(off, http.MethodGet, "/v1/contracts/graph"))
+
+	t.Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "fail")
+	on := echo.New()
+	Protected(on.Group("/v1"), nil)
+	require.True(t, hasRoute(on, http.MethodGet, "/v1/contracts/graph"))
+}
+
+func hasRoute(e *echo.Echo, method, path string) bool {
+	for _, route := range e.Router().Routes() {
+		if route.Method == method && route.Path == path {
+			return true
+		}
+	}
+	return false
+}

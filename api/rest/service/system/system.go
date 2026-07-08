@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
@@ -34,11 +35,12 @@ type Node struct {
 }
 
 type Features struct {
-	DatabaseConsoleEnabled  bool   `json:"database_console_enabled"`
-	LogConsoleEnabled       bool   `json:"log_console_enabled"`
-	ExternalURL             string `json:"external_url,omitempty"`
-	AgentRemediationEnabled bool   `json:"agent_remediation_enabled"`
-	FreshnessEnabled        bool   `json:"freshness_enabled"`
+	DatabaseConsoleEnabled     bool   `json:"database_console_enabled"`
+	LogConsoleEnabled          bool   `json:"log_console_enabled"`
+	ExternalURL                string `json:"external_url,omitempty"`
+	AgentRemediationEnabled    bool   `json:"agent_remediation_enabled"`
+	FreshnessEnabled           bool   `json:"freshness_enabled"`
+	ContractEnforcementEnabled bool   `json:"contract_enforcement_enabled"`
 }
 
 type Service struct {
@@ -124,10 +126,11 @@ func (s *Service) Nodes() ([]Node, error) {
 func (s *Service) Features() (*Features, error) {
 	v := env.Variables()
 	return &Features{
-		DatabaseConsoleEnabled:  v.DatabaseConsoleEnabled,
-		LogConsoleEnabled:       v.LogConsoleEnabled,
-		ExternalURL:             v.APIExternalURL,
-		AgentRemediationEnabled: v.AgentRemediationEnabled,
-		FreshnessEnabled:        v.FreshnessEnabled,
+		DatabaseConsoleEnabled:     v.DatabaseConsoleEnabled,
+		LogConsoleEnabled:          v.LogConsoleEnabled,
+		ExternalURL:                v.APIExternalURL,
+		AgentRemediationEnabled:    v.AgentRemediationEnabled,
+		FreshnessEnabled:           v.FreshnessEnabled,
+		ContractEnforcementEnabled: contractsvc.Enabled(),
 	}, nil
 }

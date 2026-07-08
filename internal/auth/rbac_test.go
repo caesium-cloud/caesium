@@ -97,6 +97,7 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 		{"GET", "/v1/stats/summary", models.RoleViewer},
 		{"GET", "/v1/system/features", models.RoleViewer},
 		{"GET", "/v1/system/nodes", models.RoleViewer},
+		{"GET", "/v1/contracts/graph", models.RoleViewer},
 		{"GET", "/v1/notifications/channels", models.RoleViewer},
 		{"GET", "/v1/notifications/channels/:id", models.RoleViewer},
 		{"GET", "/v1/notifications/policies", models.RoleViewer},

@@ -1426,8 +1426,15 @@ func mergeEdges(existing, incoming Edge) Edge {
 	return existing
 }
 
-func jobNodeID(alias string) string {
+// JobNodeID is the canonical graph node identifier for a job alias. Exported
+// so API layers filtering findings by job stay in sync with the graph's ID
+// convention instead of duplicating the format.
+func JobNodeID(alias string) string {
 	return "job:" + strings.TrimSpace(alias)
+}
+
+func jobNodeID(alias string) string {
+	return JobNodeID(alias)
 }
 
 func datasetNodeID(dataset DatasetRef) string {
