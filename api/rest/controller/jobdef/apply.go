@@ -49,6 +49,12 @@ func Apply(c *echo.Context) error {
 
 		aliases = append(aliases, def.Metadata.Alias)
 		if _, err := importer.ApplyWithOptions(ctx, def, opts); err != nil {
+			if errors.Is(err, internaljobdef.ErrContractBreak) {
+				if payload, ok := internaljobdef.ContractBreakResponse(err); ok {
+					return c.JSON(http.StatusConflict, payload)
+				}
+				return echo.NewHTTPError(http.StatusConflict, err.Error())
+			}
 			if errors.Is(err, internaljobdef.ErrDuplicateJob) || errors.Is(err, internaljobdef.ErrProvenanceConflict) || errors.Is(err, internaljobdef.ErrJobRunning) {
 				return echo.NewHTTPError(http.StatusConflict, err.Error())
 			}

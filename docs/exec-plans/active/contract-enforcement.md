@@ -229,7 +229,7 @@ transaction that persists the producer — so racing applies serialize on the st
 and there is no TOCTOU window. Breaking findings without a valid ack → HTTP 409.
 Plus the two-sided intentional-break escape hatch.
 
-- [ ] C1. Add the `ContractAck` GORM model (dataset/edge-set digest, actor, reason,
+- [x] C1. Add the `ContractAck` GORM model (dataset/edge-set digest, actor, reason,
       created/expires) + register it in the `All` slice (`internal/models/models.go`,
       appended after `LineageDataset`); add `CAESIUM_CONTRACT_ENFORCEMENT` (`""` off /
       `warn` / `fail`, mirroring `metadata.schemaValidation`'s tri-state) and
@@ -246,6 +246,7 @@ Plus the two-sided intentional-break escape hatch.
       `api/rest/controller/jobdef/apply.go`, `internal/contract/enforce.go`,
       `internal/metrics/metrics.go`.
       Depends on: A1 + B1.
+      Note: W2-γ landed the catalog-only `ContractAck` model, `CAESIUM_CONTRACT_ENFORCEMENT`/`CAESIUM_CONTRACT_DEPRECATION_WINDOW`, fail/warn apply-time enforcement inside the importer transaction, the HTTP 409 payload, `caesium_contract_breaks_blocked_total{dataset}`, and the paramMapping + happy-path integration scenarios. The C1 edge-set digest is `sha256` hex over JSON `{version:1, subject, edges[]}`, with `edges[]` sorted by producer, consumer, edge ID, path, and detail and carrying edge class, dataset/output key, consumer team, path/detail, and verdict.
 - [ ] C2. Add the intentional-break escape hatch: `caesium job apply
       --allow-breaking dataset=<name> [--reason ...]` records a `ContractAck` row
       (actor, edge-set digest, `deprecationUntil`); during the window the enforcement
@@ -366,6 +367,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       deferred to W2: the `CAESIUM_CONTRACT_DEPRECATION_WINDOW` bound and the `test/`
       fixture helpers land alongside the C/D scenarios that use them (helpers now
       would be unused code; the window depends on C2's actual expiry-test shape).
+      W2-γ added the deferred `test/` fixture helpers alongside the apply-time enforcement scenarios that use them; expiry-specific helpers remain deferred to C2's ack lifecycle.
 
 ## Navigational / Organizational Improvements
 

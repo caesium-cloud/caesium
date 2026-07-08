@@ -54,6 +54,14 @@ func validate() error {
 	default:
 		return fmt.Errorf("CAESIUM_WAKEUP_FANOUT_MODE must be one of: full, gossip")
 	}
+	switch strings.ToLower(strings.TrimSpace(variables.ContractEnforcement)) {
+	case "", "warn", "fail":
+	default:
+		return fmt.Errorf("CAESIUM_CONTRACT_ENFORCEMENT must be one of: \"\", warn, fail")
+	}
+	if variables.ContractDeprecationWindow <= 0 {
+		return fmt.Errorf("CAESIUM_CONTRACT_DEPRECATION_WINDOW must be greater than 0")
+	}
 
 	// Agent-in-the-loop master gate (D1 security precondition). Caesium defaults
 	// to CAESIUM_AUTH_MODE=none, which attaches NO auth middleware at all — every
@@ -180,6 +188,8 @@ type Environment struct {
 	FreshnessEnabled               bool          `envconfig:"FRESHNESS_ENABLED" default:"false"`
 	FreshnessEvalInterval          time.Duration `envconfig:"FRESHNESS_EVAL_INTERVAL" default:"1m"`
 	FreshnessMaxDerivationsPerTick int           `envconfig:"FRESHNESS_MAX_DERIVATIONS_PER_TICK" default:"50"`
+	ContractEnforcement            string        `envconfig:"CONTRACT_ENFORCEMENT" default:""`
+	ContractDeprecationWindow      time.Duration `envconfig:"CONTRACT_DEPRECATION_WINDOW" default:"336h"`
 
 	// Notification Watcher
 	NotificationWatcherInterval time.Duration `envconfig:"NOTIFICATION_WATCHER_INTERVAL" default:"15s"`
