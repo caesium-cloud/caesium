@@ -422,11 +422,13 @@ func compareAdditionalProperties(findings *[]Finding, path schemaPath, oldSchema
 		))
 		return
 	}
-	if oldFalse || !newFalse {
+	if !newFalse {
 		return
 	}
 
 	newProps := schemaProperties(newSchema)
+	oldProps := schemaProperties(oldSchema)
+	oldRequired := requiredSet(oldSchema)
 	// Only the NEW schema's required set matters here: a key required by the
 	// old schema but dropped by the new one is compareRequired's finding
 	// (required-removed), not an additionalProperties tightening.
@@ -434,6 +436,17 @@ func compareAdditionalProperties(findings *[]Finding, path schemaPath, oldSchema
 	for _, key := range sortedSetKeys(required) {
 		if _, ok := newProps[key]; ok {
 			continue
+		}
+		if oldFalse {
+			// The old schema was already additionalProperties: false. Flag only
+			// NEWLY unsatisfiable keys — a key that was already
+			// required-outside-properties is a pre-existing invariant, not a
+			// change introduced by this revision.
+			_, wasRequired := oldRequired[key]
+			_, hadProp := oldProps[key]
+			if wasRequired && !hadProp {
+				continue
+			}
 		}
 		*findings = append(*findings, finding(
 			FindingKindAdditionalPropertiesTightened,
