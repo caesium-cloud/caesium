@@ -35,10 +35,16 @@ type EvidenceReader interface {
 	ListContractEvidence(ctx context.Context) ([]EvidenceRecord, error)
 }
 
+// ProducerSchemaReader reads persisted producer schemas replaced by an incoming batch.
+type ProducerSchemaReader interface {
+	ListContractProducerSchemas(ctx context.Context, incoming []schema.Definition) ([]ProducerSchemaRecord, error)
+}
+
 // Deriver loads authoritative sources and derives a contract graph on demand.
 type Deriver struct {
-	Jobs     JobReader
-	Evidence EvidenceReader
+	Jobs            JobReader
+	Evidence        EvidenceReader
+	ProducerSchemas ProducerSchemaReader
 }
 
 // GORMStore reads contract graph inputs from the existing GORM catalog.
@@ -49,7 +55,7 @@ type GORMStore struct {
 // NewGORMDeriver returns a Deriver backed by the existing GORM catalog tables.
 func NewGORMDeriver(db *gorm.DB) Deriver {
 	store := GORMStore{DB: db}
-	return Deriver{Jobs: store, Evidence: store}
+	return Deriver{Jobs: store, Evidence: store, ProducerSchemas: store}
 }
 
 // DeriveGraph loads the merged job world, lineage evidence, and returns the
@@ -72,7 +78,15 @@ func (d Deriver) DeriveGraph(ctx context.Context, incoming []schema.Definition) 
 		}
 	}
 
-	return DeriveGraph(DeriveInput{Jobs: jobs, Evidence: evidence})
+	var previousProducerSchemas []ProducerSchemaRecord
+	if d.ProducerSchemas != nil {
+		previousProducerSchemas, err = d.ProducerSchemas.ListContractProducerSchemas(ctx, incoming)
+		if err != nil {
+			return Graph{}, err
+		}
+	}
+
+	return DeriveGraph(DeriveInput{Jobs: jobs, Evidence: evidence, PreviousProducerSchemas: previousProducerSchemas})
 }
 
 // ListContractJobs returns incoming definitions plus persisted jobs not
@@ -125,6 +139,89 @@ func (s GORMStore) ListContractJobs(ctx context.Context, incoming []schema.Defin
 	jobs = append(jobs, existing...)
 	sortJobs(jobs)
 	return jobs, nil
+}
+
+// ListContractProducerSchemas returns resolved persisted producer schemas for
+// jobs that the incoming batch is replacing.
+func (s GORMStore) ListContractProducerSchemas(ctx context.Context, incoming []schema.Definition) ([]ProducerSchemaRecord, error) {
+	if s.DB == nil || len(incoming) == 0 {
+		return nil, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	incomingAliases := make(map[string]struct{}, len(incoming))
+	for idx := range incoming {
+		alias := strings.TrimSpace(incoming[idx].Metadata.Alias)
+		if alias == "" {
+			return nil, fmt.Errorf("definition %d: metadata.alias is required", idx)
+		}
+		// Mirror ListContractJobs' duplicate guard so a direct call cannot
+		// silently pick an arbitrary definition for a repeated alias.
+		if _, exists := incomingAliases[alias]; exists {
+			return nil, fmt.Errorf("duplicate job alias %q", alias)
+		}
+		incomingAliases[alias] = struct{}{}
+	}
+
+	incomingJobIDs, err := s.existingJobIDsByAlias(ctx, incomingAliases)
+	if err != nil {
+		return nil, err
+	}
+	if len(incomingJobIDs) == 0 {
+		return nil, nil
+	}
+
+	jobIDs := make([]uuid.UUID, 0, len(incomingJobIDs))
+	aliasByJobID := make(map[uuid.UUID]string, len(incomingJobIDs))
+	for alias, id := range incomingJobIDs {
+		jobIDs = append(jobIDs, id)
+		aliasByJobID[id] = alias
+	}
+	sort.Slice(jobIDs, func(i, j int) bool {
+		return aliasByJobID[jobIDs[i]] < aliasByJobID[jobIDs[j]]
+	})
+
+	stepsByJobID, err := s.persistedContractSteps(ctx, jobIDs)
+	if err != nil {
+		return nil, err
+	}
+	declsByJobID, err := s.persistedDatasetDeclarations(ctx, jobIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	records := make([]ProducerSchemaRecord, 0)
+	for _, jobID := range jobIDs {
+		alias := aliasByJobID[jobID]
+		stepsByName := make(map[string]Step, len(stepsByJobID[jobID]))
+		for _, step := range stepsByJobID[jobID] {
+			stepsByName[strings.TrimSpace(step.Name)] = step
+		}
+		for _, decl := range declsByJobID[jobID] {
+			if decl.Direction != models.DatasetDirectionProduces {
+				continue
+			}
+			name := strings.TrimSpace(decl.Name)
+			if name == "" {
+				continue
+			}
+			stepName := strings.TrimSpace(decl.StepName)
+			record := ProducerSchemaRecord{
+				JobAlias: alias,
+				StepName: stepName,
+				Dataset:  datasetRefFromName(name),
+			}
+			if step, ok := stepsByName[stepName]; ok && len(step.OutputSchema) > 0 {
+				record.Schema = cloneAnyMap(step.OutputSchema)
+				record.SchemaKnown = true
+			}
+			records = append(records, record)
+		}
+	}
+	sortProducerSchemaRecords(records)
+	return records, nil
 }
 
 // ListContractEvidence returns distinct job-level lineage evidence edges.
@@ -281,6 +378,7 @@ func DeriveGraph(input DeriveInput) (Graph, error) {
 		builder.addJob(jobs[idx])
 	}
 
+	deriveDeclaredEdges(builder, jobs, input.PreviousProducerSchemas)
 	if err := deriveInferredEdges(builder, jobs); err != nil {
 		return Graph{}, err
 	}
@@ -366,6 +464,10 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 	if err != nil {
 		return nil, err
 	}
+	declsByJobID, err := s.persistedDatasetDeclarations(ctx, jobIDs)
+	if err != nil {
+		return nil, err
+	}
 
 	jobs := make([]Job, 0, len(eligibleRows))
 	for _, row := range eligibleRows {
@@ -373,6 +475,7 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 		if err != nil {
 			return nil, fmt.Errorf("existing trigger %s configuration: %w", row.Alias, err)
 		}
+		steps := attachPersistedDatasetDeclarations(stepsByJobID[row.ID], declsByJobID[row.ID])
 		jobs = append(jobs, Job{
 			ID:     row.ID,
 			Alias:  row.Alias,
@@ -381,7 +484,7 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 				Type:          strings.TrimSpace(row.TriggerType),
 				Configuration: cfg,
 			},
-			Steps: stepsByJobID[row.ID],
+			Steps: steps,
 		})
 	}
 	return jobs, nil
@@ -416,6 +519,28 @@ func (s GORMStore) persistedContractSteps(ctx context.Context, jobIDs []uuid.UUI
 	return stepsByJobID, nil
 }
 
+func (s GORMStore) persistedDatasetDeclarations(ctx context.Context, jobIDs []uuid.UUID) (map[uuid.UUID][]models.DatasetDeclaration, error) {
+	declsByJobID := make(map[uuid.UUID][]models.DatasetDeclaration, len(jobIDs))
+	if len(jobIDs) == 0 {
+		return declsByJobID, nil
+	}
+
+	var decls []models.DatasetDeclaration
+	if err := s.DB.WithContext(ctx).
+		Where("job_id IN ?", jobIDs).
+		Order("job_id ASC").
+		Order("step_name ASC").
+		Order("name ASC").
+		Find(&decls).Error; err != nil {
+		return nil, err
+	}
+
+	for _, decl := range decls {
+		declsByJobID[decl.JobID] = append(declsByJobID[decl.JobID], decl)
+	}
+	return declsByJobID, nil
+}
+
 func jobFromDefinition(def schema.Definition) (Job, error) {
 	alias := strings.TrimSpace(def.Metadata.Alias)
 	if alias == "" {
@@ -427,18 +552,365 @@ func jobFromDefinition(def schema.Definition) (Job, error) {
 		steps = append(steps, Step{
 			Name:         strings.TrimSpace(step.Name),
 			OutputSchema: cloneAnyMap(step.OutputSchema),
+			Produces:     producedDatasetsFromDefinition(step.Datasets),
+			Consumes:     consumedDatasetsFromDefinition(step.Datasets),
 		})
 	}
 
 	return Job{
-		Alias:  alias,
-		Labels: cloneStringMap(def.Metadata.Labels),
+		Alias:    alias,
+		Labels:   cloneStringMap(def.Metadata.Labels),
+		Incoming: true,
 		Trigger: Trigger{
 			Type:          strings.TrimSpace(def.Trigger.Type),
 			Configuration: cloneAnyMap(def.Trigger.Configuration),
 		},
 		Steps: steps,
 	}, nil
+}
+
+func producedDatasetsFromDefinition(datasets *schema.StepDatasets) []ProducedDataset {
+	if datasets == nil || len(datasets.Produces) == 0 {
+		return nil
+	}
+	out := make([]ProducedDataset, 0, len(datasets.Produces))
+	for _, produced := range datasets.Produces {
+		name := strings.TrimSpace(produced.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, ProducedDataset{
+			Name:       name,
+			Schema:     cloneAnyMap(produced.Schema),
+			SchemaFrom: strings.TrimSpace(produced.SchemaFrom),
+			Version:    produced.Version,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func consumedDatasetsFromDefinition(datasets *schema.StepDatasets) []ConsumedDataset {
+	if datasets == nil || len(datasets.Consumes) == 0 {
+		return nil
+	}
+	out := make([]ConsumedDataset, 0, len(datasets.Consumes))
+	for _, consumed := range datasets.Consumes {
+		name := strings.TrimSpace(consumed.Name)
+		if name == "" {
+			continue
+		}
+		out = append(out, ConsumedDataset{
+			Name:   name,
+			Schema: cloneAnyMap(consumed.Schema),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
+	return out
+}
+
+func attachPersistedDatasetDeclarations(steps []Step, decls []models.DatasetDeclaration) []Step {
+	if len(steps) == 0 || len(decls) == 0 {
+		return steps
+	}
+
+	stepIndexByName := make(map[string]int, len(steps))
+	for idx := range steps {
+		stepIndexByName[strings.TrimSpace(steps[idx].Name)] = idx
+	}
+
+	for _, decl := range decls {
+		name := strings.TrimSpace(decl.Name)
+		if name == "" {
+			continue
+		}
+		stepName := strings.TrimSpace(decl.StepName)
+		idx, ok := stepIndexByName[stepName]
+		if !ok {
+			continue
+		}
+		switch decl.Direction {
+		case models.DatasetDirectionProduces:
+			produced := ProducedDataset{Name: name}
+			if len(steps[idx].OutputSchema) > 0 {
+				produced.SchemaFrom = schema.DatasetSchemaFromOutput
+			}
+			steps[idx].Produces = append(steps[idx].Produces, produced)
+		case models.DatasetDirectionConsumes:
+			steps[idx].Consumes = append(steps[idx].Consumes, ConsumedDataset{Name: name})
+		}
+	}
+
+	for idx := range steps {
+		sort.Slice(steps[idx].Produces, func(i, j int) bool {
+			return steps[idx].Produces[i].Name < steps[idx].Produces[j].Name
+		})
+		sort.Slice(steps[idx].Consumes, func(i, j int) bool {
+			return steps[idx].Consumes[i].Name < steps[idx].Consumes[j].Name
+		})
+	}
+	return steps
+}
+
+type declaredProducer struct {
+	job         Job
+	step        Step
+	dataset     DatasetRef
+	schema      map[string]any
+	schemaKnown bool
+}
+
+type declaredConsumer struct {
+	job         Job
+	step        Step
+	dataset     DatasetRef
+	schema      map[string]any
+	schemaKnown bool
+}
+
+func deriveDeclaredEdges(builder *graphBuilder, jobs []Job, previousSchemas []ProducerSchemaRecord) {
+	previousByKey := make(map[producerSchemaKey]ProducerSchemaRecord, len(previousSchemas))
+	for _, record := range previousSchemas {
+		key := producerSchemaKeyFor(record.JobAlias, record.StepName, record.Dataset)
+		if key.jobAlias == "" || key.datasetName == "" {
+			continue
+		}
+		previousByKey[key] = record
+	}
+
+	producersByDataset := map[string][]declaredProducer{}
+	consumersByDataset := map[string][]declaredConsumer{}
+
+	for _, job := range jobs {
+		for _, step := range job.Steps {
+			for _, produced := range step.Produces {
+				dataset := datasetRefFromName(produced.Name)
+				if dataset.Name == "" {
+					continue
+				}
+				producerSchema, schemaKnown := resolveProducedDatasetSchema(step, produced)
+				producersByDataset[dataset.Name] = append(producersByDataset[dataset.Name], declaredProducer{
+					job:         job,
+					step:        step,
+					dataset:     dataset,
+					schema:      producerSchema,
+					schemaKnown: schemaKnown,
+				})
+			}
+			for _, consumed := range step.Consumes {
+				dataset := datasetRefFromName(consumed.Name)
+				if dataset.Name == "" {
+					continue
+				}
+				consumerSchema := cloneAnyMap(consumed.Schema)
+				consumersByDataset[dataset.Name] = append(consumersByDataset[dataset.Name], declaredConsumer{
+					job:         job,
+					step:        step,
+					dataset:     dataset,
+					schema:      consumerSchema,
+					schemaKnown: len(consumerSchema) > 0,
+				})
+			}
+		}
+	}
+
+	datasetNames := make([]string, 0, len(producersByDataset))
+	for name := range producersByDataset {
+		if len(consumersByDataset[name]) > 0 {
+			datasetNames = append(datasetNames, name)
+		}
+	}
+	sort.Strings(datasetNames)
+
+	for _, datasetName := range datasetNames {
+		producers := producersByDataset[datasetName]
+		consumers := consumersByDataset[datasetName]
+		sortDeclaredProducers(producers)
+		sortDeclaredConsumers(consumers)
+
+		for _, producer := range producers {
+			builder.addDataset(producer.dataset)
+			previous, previousExists := previousByKey[producerSchemaKeyFor(producer.job.Alias, producer.step.Name, producer.dataset)]
+			compareFindings, previousSchema := declaredCompareFindings(producer, previous, previousExists)
+			for _, consumer := range consumers {
+				if producer.job.Alias == consumer.job.Alias {
+					continue
+				}
+				dataset := producer.dataset
+				findings := declaredEdgeFindings(compareFindings, producer, consumer)
+				builder.addEdge(Edge{
+					From:                   jobNodeID(producer.job.Alias),
+					To:                     jobNodeID(consumer.job.Alias),
+					Class:                  EdgeClassDeclared,
+					Verdict:                verdictForFindings(findings, schemacompat.VerdictCompatible),
+					Findings:               findings,
+					Dataset:                &dataset,
+					ProducerSchema:         cloneAnyMap(producer.schema),
+					PreviousProducerSchema: cloneAnyMap(previousSchema),
+					ConsumerSchema:         cloneAnyMap(consumer.schema),
+				})
+			}
+		}
+	}
+}
+
+func resolveProducedDatasetSchema(step Step, produced ProducedDataset) (map[string]any, bool) {
+	if len(produced.Schema) > 0 {
+		return cloneAnyMap(produced.Schema), true
+	}
+	if strings.TrimSpace(produced.SchemaFrom) == schema.DatasetSchemaFromOutput && len(step.OutputSchema) > 0 {
+		return cloneAnyMap(step.OutputSchema), true
+	}
+	return nil, false
+}
+
+func declaredCompareFindings(producer declaredProducer, previous ProducerSchemaRecord, previousExists bool) ([]schemacompat.Finding, map[string]any) {
+	var findings []schemacompat.Finding
+	var previousSchema map[string]any
+	if producer.job.Incoming && previousExists {
+		if !previous.SchemaKnown {
+			findings = append(findings, schemacompat.Finding{
+				Kind:    schemacompat.FindingKindRequirementUnknown,
+				Detail:  fmt.Sprintf("persisted producer schema for dataset %q on %s/%s is unavailable; cannot compare old producer schema to the incoming schema", producer.dataset.Name, producer.job.Alias, producer.step.Name),
+				Verdict: schemacompat.VerdictUnknown,
+			})
+			return prefixFindings(findings, declaredProduceFindingPath(producer.dataset)), nil
+		}
+		previousSchema = cloneAnyMap(previous.Schema)
+	} else if producer.schemaKnown {
+		previousSchema = cloneAnyMap(producer.schema)
+	}
+
+	if producer.job.Incoming && previousExists && previous.SchemaKnown {
+		findings = append(findings, schemacompat.Compare(previousSchema, schemaForCompare(producer.schema, producer.schemaKnown))...)
+	}
+	return prefixFindings(findings, declaredProduceFindingPath(producer.dataset)), previousSchema
+}
+
+func declaredEdgeFindings(compareFindings []schemacompat.Finding, producer declaredProducer, consumer declaredConsumer) []schemacompat.Finding {
+	findings := make([]schemacompat.Finding, 0, len(compareFindings))
+	if !consumer.schemaKnown {
+		findings = append(findings, compareFindings...)
+		return sortedFindings(findings)
+	}
+
+	requirementFindings := schemacompat.Satisfies(schemaForCompare(producer.schema, producer.schemaKnown), consumer.schema)
+	findings = append(findings, prefixFindings(requirementFindings, declaredConsumeFindingPath(consumer.dataset))...)
+	for _, finding := range compareFindings {
+		if finding.Verdict != schemacompat.VerdictBreaking {
+			findings = append(findings, finding)
+		}
+	}
+	return sortedFindings(findings)
+}
+
+func schemaForCompare(schema map[string]any, known bool) map[string]any {
+	if !known {
+		return nil
+	}
+	return schema
+}
+
+func datasetRefFromName(name string) DatasetRef {
+	return DatasetRef{Name: strings.TrimSpace(name)}
+}
+
+func declaredProduceFindingPath(dataset DatasetRef) string {
+	return "datasets.produces." + strings.TrimSpace(dataset.Name) + ".schema"
+}
+
+func declaredConsumeFindingPath(dataset DatasetRef) string {
+	return "datasets.consumes." + strings.TrimSpace(dataset.Name) + ".schema"
+}
+
+func prefixFindings(findings []schemacompat.Finding, prefix string) []schemacompat.Finding {
+	if len(findings) == 0 {
+		return nil
+	}
+	out := make([]schemacompat.Finding, 0, len(findings))
+	prefix = strings.TrimSuffix(strings.TrimSpace(prefix), ".")
+	for _, finding := range findings {
+		if prefix != "" {
+			finding.Path = prefixFindingPath(prefix, finding.Path)
+		}
+		out = append(out, finding)
+	}
+	return sortedFindings(out)
+}
+
+func prefixFindingPath(prefix, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return prefix
+	}
+	return prefix + "." + path
+}
+
+func sortedFindings(findings []schemacompat.Finding) []schemacompat.Finding {
+	sort.Slice(findings, func(i, j int) bool {
+		if findings[i].Path == findings[j].Path {
+			if findings[i].Kind == findings[j].Kind {
+				return findings[i].Detail < findings[j].Detail
+			}
+			return findings[i].Kind < findings[j].Kind
+		}
+		return findings[i].Path < findings[j].Path
+	})
+	return findings
+}
+
+type producerSchemaKey struct {
+	jobAlias    string
+	stepName    string
+	datasetName string
+}
+
+func producerSchemaKeyFor(jobAlias, stepName string, dataset DatasetRef) producerSchemaKey {
+	return producerSchemaKey{
+		jobAlias:    strings.TrimSpace(jobAlias),
+		stepName:    strings.TrimSpace(stepName),
+		datasetName: strings.TrimSpace(dataset.Name),
+	}
+}
+
+func sortDeclaredProducers(producers []declaredProducer) {
+	sort.Slice(producers, func(i, j int) bool {
+		if producers[i].job.Alias == producers[j].job.Alias {
+			if producers[i].step.Name == producers[j].step.Name {
+				return producers[i].dataset.Name < producers[j].dataset.Name
+			}
+			return producers[i].step.Name < producers[j].step.Name
+		}
+		return producers[i].job.Alias < producers[j].job.Alias
+	})
+}
+
+func sortDeclaredConsumers(consumers []declaredConsumer) {
+	sort.Slice(consumers, func(i, j int) bool {
+		if consumers[i].job.Alias == consumers[j].job.Alias {
+			if consumers[i].step.Name == consumers[j].step.Name {
+				return consumers[i].dataset.Name < consumers[j].dataset.Name
+			}
+			return consumers[i].step.Name < consumers[j].step.Name
+		}
+		return consumers[i].job.Alias < consumers[j].job.Alias
+	})
+}
+
+func sortProducerSchemaRecords(records []ProducerSchemaRecord) {
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].JobAlias == records[j].JobAlias {
+			if records[i].StepName == records[j].StepName {
+				return records[i].Dataset.Name < records[j].Dataset.Name
+			}
+			return records[i].StepName < records[j].StepName
+		}
+		return records[i].JobAlias < records[j].JobAlias
+	})
 }
 
 func deriveInferredEdges(builder *graphBuilder, jobs []Job) error {
@@ -937,6 +1409,16 @@ func mergeEdges(existing, incoming Edge) Edge {
 	}
 
 	existing.Findings = append(existing.Findings, incoming.Findings...)
+	existing.Findings = sortedFindings(existing.Findings)
+	if len(existing.ProducerSchema) == 0 && len(incoming.ProducerSchema) > 0 {
+		existing.ProducerSchema = cloneAnyMap(incoming.ProducerSchema)
+	}
+	if len(existing.PreviousProducerSchema) == 0 && len(incoming.PreviousProducerSchema) > 0 {
+		existing.PreviousProducerSchema = cloneAnyMap(incoming.PreviousProducerSchema)
+	}
+	if len(existing.ConsumerSchema) == 0 && len(incoming.ConsumerSchema) > 0 {
+		existing.ConsumerSchema = cloneAnyMap(incoming.ConsumerSchema)
+	}
 	if incoming.LastSeen != nil && (existing.LastSeen == nil || incoming.LastSeen.After(*existing.LastSeen)) {
 		lastSeen := *incoming.LastSeen
 		existing.LastSeen = &lastSeen

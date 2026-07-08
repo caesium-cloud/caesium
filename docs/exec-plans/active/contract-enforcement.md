@@ -208,7 +208,7 @@ read-only against existing tables.
       warn-only `VerdictUnknown` plus `lastSeen`; tests cover missing keys,
       unresolved task indexes, unknown scoped producers, ignored non-output paths,
       job-id source filters, and evidence last-seen aggregation.
-- [ ] B2. Fold the **declared** edge class into the graph: match
+- [x] B2. Fold the **declared** edge class into the graph: match
       `datasets.produces`/`datasets.consumes` on dataset `name` across all merged
       jobs, attaching the producer's `schemaFrom: output` (resolved to that step's
       `outputSchema`) or inline `schema`, and each consumer's required `schema`.
@@ -219,6 +219,19 @@ read-only against existing tables.
       the comparison target), so a coordinated migration passes without an ack.
       Files: `internal/contract/derive.go`, `internal/contract/graph_test.go`.
       Depends on: B1 + E1 (the `datasets` schema fields the declared edges read).
+      Note: Added declared job-to-job dataset edges over merged `produces`/`consumes`
+      names, resolving inline producer schemas or `schemaFrom: output` to the step
+      `outputSchema` and carrying producer/previous-producer/consumer schemas on the
+      edge. Added additive `Job.Incoming`, compact produced/consumed dataset fields,
+      `ProducerSchemaRecord`, `DeriveInput.PreviousProducerSchemas`, and an optional
+      `ProducerSchemaReader` so incoming producer schemas compare against persisted
+      old schemas without breaking existing callers. Consumer schema requirements run
+      through `schemacompat.Satisfies`; schema-less consumers use producer old-vs-new
+      `Compare`; coordinated producer+consumer batch migrations use the incoming
+      consumer requirement as the target. Tests cover `schemaFrom: output`, inline
+      schemas, name-level edges, breaking requirements, schema-less consumer compare
+      behavior, coordinated migration, unknown previous schemas, and the GORM
+      previous-producer schema reader.
 
 ### Stream C — Apply-time enforcement, acks & break notifications
 

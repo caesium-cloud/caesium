@@ -2,6 +2,7 @@ package contract
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -280,6 +281,276 @@ func TestDeriveGraphInferredEdgeResolvesJobIDFilter(t *testing.T) {
 	require.Empty(t, edge.Findings)
 }
 
+func TestDeriveGraphDeclaredEdgeResolvesSchemaFromOutput(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name:         "export",
+			OutputSchema: objectSchemaWithRequired("customer_id", "row_count"),
+			Produces: []ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name: "load",
+			Consumes: []ConsumedDataset{{
+				Name:   "lake.customers",
+				Schema: objectSchemaWithRequired("customer_id"),
+			}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictCompatible, edge.Verdict)
+	require.Empty(t, edge.Findings)
+	require.Contains(t, edge.ProducerSchema["properties"], "customer_id")
+	require.Contains(t, edge.ConsumerSchema["properties"], "customer_id")
+	requireDatasetNode(t, graph, "/lake.customers")
+}
+
+func TestDeriveGraphDeclaredEdgeUsesInlineProducerSchema(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name: "export",
+			Produces: []ProducedDataset{{
+				Name:   "lake.customers",
+				Schema: objectSchemaWithRequired("customer_id"),
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name: "load",
+			Consumes: []ConsumedDataset{{
+				Name:   "lake.customers",
+				Schema: objectSchemaWithRequired("customer_id"),
+			}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictCompatible, edge.Verdict)
+	require.Empty(t, edge.Findings)
+	require.Contains(t, edge.ProducerSchema["properties"], "customer_id")
+}
+
+func TestDeriveGraphDeclaredNameLevelEdgeWithoutSchemas(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name:     "export",
+			Produces: []ProducedDataset{{Name: "lake.customers"}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name:     "load",
+			Consumes: []ConsumedDataset{{Name: "lake.customers"}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictCompatible, edge.Verdict)
+	require.Empty(t, edge.Findings)
+	require.Empty(t, edge.ProducerSchema)
+	require.Empty(t, edge.ConsumerSchema)
+}
+
+func TestDeriveGraphDeclaredConsumerRequirementReportsBreaking(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name:         "export",
+			OutputSchema: objectSchemaWithRequired("row_count"),
+			Produces: []ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name: "load",
+			Consumes: []ConsumedDataset{{
+				Name:   "lake.customers",
+				Schema: objectSchemaWithRequired("customer_id"),
+			}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Verdict)
+	require.Len(t, edge.Findings, 2)
+	require.Equal(t, schemacompat.FindingKindRequirementUnsatisfied, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Path, "datasets.consumes.lake.customers.schema")
+	require.Contains(t, edge.Findings[0].Detail, "customer_id")
+}
+
+func TestDeriveGraphDeclaredSchemaLessConsumerUsesProducerComparison(t *testing.T) {
+	producer := Job{
+		Alias:    "producer",
+		Incoming: true,
+		Steps: []Step{{
+			Name:         "export",
+			OutputSchema: objectSchemaWithRequired("row_count"),
+			Produces: []ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name:     "load",
+			Consumes: []ConsumedDataset{{Name: "lake.customers"}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{
+		Jobs: []Job{producer, consumer},
+		PreviousProducerSchemas: []ProducerSchemaRecord{{
+			JobAlias:    "producer",
+			StepName:    "export",
+			Dataset:     DatasetRef{Name: "lake.customers"},
+			Schema:      objectSchemaWithRequired("customer_id", "row_count"),
+			SchemaKnown: true,
+		}},
+	})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Verdict)
+	require.NotEmpty(t, edge.PreviousProducerSchema)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequiredRemoved, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Detail, "customer_id")
+}
+
+func TestDeriveGraphDeclaredBatchConsumerRequirementCanMigrate(t *testing.T) {
+	producer := Job{
+		Alias:    "producer",
+		Incoming: true,
+		Steps: []Step{{
+			Name:         "export",
+			OutputSchema: objectSchemaWithRequired("row_count"),
+			Produces: []ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias:    "consumer",
+		Incoming: true,
+		Steps: []Step{{
+			Name: "load",
+			Consumes: []ConsumedDataset{{
+				Name:   "lake.customers",
+				Schema: objectSchemaWithRequired("row_count"),
+			}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{
+		Jobs: []Job{producer, consumer},
+		PreviousProducerSchemas: []ProducerSchemaRecord{{
+			JobAlias:    "producer",
+			StepName:    "export",
+			Dataset:     DatasetRef{Name: "lake.customers"},
+			Schema:      objectSchemaWithRequired("customer_id", "row_count"),
+			SchemaKnown: true,
+		}},
+	})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictCompatible, edge.Verdict)
+	require.Empty(t, edge.Findings)
+}
+
+func TestDeriveGraphDeclaredUnknownPreviousProducerSchemaWarns(t *testing.T) {
+	producer := Job{
+		Alias:    "producer",
+		Incoming: true,
+		Steps: []Step{{
+			Name:         "export",
+			OutputSchema: objectSchemaWithRequired("customer_id"),
+			Produces: []ProducedDataset{{
+				Name:       "lake.customers",
+				SchemaFrom: schema.DatasetSchemaFromOutput,
+			}},
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Steps: []Step{{
+			Name:     "load",
+			Consumes: []ConsumedDataset{{Name: "lake.customers"}},
+		}},
+	}
+
+	graph, err := DeriveGraph(DeriveInput{
+		Jobs: []Job{producer, consumer},
+		PreviousProducerSchemas: []ProducerSchemaRecord{{
+			JobAlias: "producer",
+			StepName: "export",
+			Dataset:  DatasetRef{Name: "lake.customers"},
+		}},
+	})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassDeclared, "job:producer", "job:consumer", "/lake.customers")
+	require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnknown, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Detail, "persisted producer schema")
+}
+
+func TestGORMStoreListContractProducerSchemasUsesTaskOutputSchema(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractJobTables(t, db)
+
+	jobID := uuid.New()
+	triggerID := uuid.New()
+	insertContractTrigger(t, db, triggerID)
+	insertContractJob(t, db, jobID, triggerID, "producer")
+	insertContractTask(t, db, jobID, "export", objectSchemaWithRequired("customer_id"))
+	insertDatasetDeclaration(t, db, jobID, "producer", "export", "lake.customers", "produces")
+
+	records, err := (GORMStore{DB: db}).ListContractProducerSchemas(context.Background(), []schema.Definition{{
+		Metadata: schema.Metadata{Alias: "producer"},
+	}})
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, "producer", records[0].JobAlias)
+	require.Equal(t, "export", records[0].StepName)
+	require.Equal(t, DatasetRef{Name: "lake.customers"}, records[0].Dataset)
+	require.True(t, records[0].SchemaKnown)
+	require.Contains(t, records[0].Schema["properties"], "customer_id")
+}
+
 func outputSchemaWithProperties(keys ...string) map[string]any {
 	properties := make(map[string]any, len(keys))
 	for _, key := range keys {
@@ -289,6 +560,12 @@ func outputSchemaWithProperties(keys ...string) map[string]any {
 		"type":       "object",
 		"properties": properties,
 	}
+}
+
+func objectSchemaWithRequired(keys ...string) map[string]any {
+	schema := outputSchemaWithProperties(keys...)
+	schema["required"] = append([]string(nil), keys...)
+	return schema
 }
 
 func eventTrigger(sourceAlias string, mapping map[string]string) Trigger {
@@ -382,4 +659,55 @@ func insertEvidenceDataset(t *testing.T, db *gorm.DB, jobID uuid.UUID, namespace
 		direction,
 		createdAt,
 	).Error)
+}
+
+func createContractJobTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, trigger_id text NOT NULL, labels json, deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE triggers (id text PRIMARY KEY, type text NOT NULL, configuration text NOT NULL, deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE tasks (id text PRIMARY KEY, job_id text NOT NULL, name text NOT NULL, position integer NOT NULL, output_schema json, deleted_at datetime, created_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE dataset_declarations (id text PRIMARY KEY, job_id text NOT NULL, job_alias text NOT NULL, step_name text NOT NULL, name text NOT NULL, direction text NOT NULL)").Error)
+}
+
+func insertContractTrigger(t *testing.T, db *gorm.DB, triggerID uuid.UUID) {
+	t.Helper()
+	require.NoError(t, db.Exec("INSERT INTO triggers (id, type, configuration, deleted_at) VALUES (?, ?, ?, NULL)", triggerID, schema.TriggerCron, `{}`).Error)
+}
+
+func insertContractJob(t *testing.T, db *gorm.DB, jobID, triggerID uuid.UUID, alias string) {
+	t.Helper()
+	require.NoError(t, db.Exec("INSERT INTO jobs (id, alias, trigger_id, labels, deleted_at) VALUES (?, ?, ?, '{}', NULL)", jobID, alias, triggerID).Error)
+}
+
+func insertContractTask(t *testing.T, db *gorm.DB, jobID uuid.UUID, name string, outputSchema map[string]any) {
+	t.Helper()
+	require.NoError(t, db.Exec(
+		"INSERT INTO tasks (id, job_id, name, position, output_schema, deleted_at, created_at) VALUES (?, ?, ?, ?, ?, NULL, ?)",
+		uuid.New(),
+		jobID,
+		name,
+		0,
+		mustJSON(t, outputSchema),
+		time.Now().UTC(),
+	).Error)
+}
+
+func insertDatasetDeclaration(t *testing.T, db *gorm.DB, jobID uuid.UUID, jobAlias, stepName, name, direction string) {
+	t.Helper()
+	require.NoError(t, db.Exec(
+		"INSERT INTO dataset_declarations (id, job_id, job_alias, step_name, name, direction) VALUES (?, ?, ?, ?, ?, ?)",
+		uuid.New(),
+		jobID,
+		jobAlias,
+		stepName,
+		name,
+		direction,
+	).Error)
+}
+
+func mustJSON(t *testing.T, value any) string {
+	t.Helper()
+	data, err := json.Marshal(value)
+	require.NoError(t, err)
+	return string(data)
 }
