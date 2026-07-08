@@ -74,6 +74,25 @@ describe('api', () => {
     expect(mockFetch).toHaveBeenCalledWith('/v1/jobs/job-42/cache', expect.anything());
   });
 
+  it('getContractGraph encodes the optional dataset filter', async () => {
+    mockFetch.mockResolvedValue(okResponse({ nodes: [], edges: [] }));
+    await api.getContractGraph({ dataset: 'lake/customers' });
+    expect(mockFetch).toHaveBeenCalledWith(
+      '/v1/contracts/graph?dataset=lake%2Fcustomers',
+      expect.anything(),
+    );
+  });
+
+  it('getContractGraph surfaces disabled-route 404 as ApiError', async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 404,
+      text: () => Promise.resolve('Not found'),
+    });
+
+    await expect(api.getContractGraph()).rejects.toMatchObject({ status: 404 });
+  });
+
   it('getJobTasks normalizes task IDs from Go model casing', async () => {
     mockFetch.mockResolvedValue(okResponse([
       {

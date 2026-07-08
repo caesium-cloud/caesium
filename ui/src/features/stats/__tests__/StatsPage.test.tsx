@@ -63,6 +63,7 @@ describe('StatsPage', () => {
       log_console_enabled: false,
       agent_remediation_enabled: false,
       freshness_enabled: false,
+      contract_enforcement_enabled: false,
     });
   });
 

@@ -2,6 +2,7 @@ import { createRootRoute, createRoute, createRouter, redirect } from "@tanstack/
 import { AppShell } from "./components/layout/AppShell";
 import { ConsoleNotFound } from "./components/not-found-state";
 import { AtomsPage } from "./features/atoms/AtomsPage";
+import { ContractGraphPage } from "./features/contracts/ContractGraphPage";
 import { DatabaseConsolePage } from "./features/database/DatabaseConsolePage";
 import { DatasetsPage } from "./features/datasets/DatasetsPage";
 import { IncidentDetailPage } from "./features/incidents/IncidentDetailPage";
@@ -113,6 +114,15 @@ const lineageRoute = createRoute({
     name: typeof search.name === "string" ? search.name : undefined,
   }),
   component: LineageRoutePage,
+});
+
+const contractsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "contracts",
+  validateSearch: (search: Record<string, unknown>) => ({
+    dataset: typeof search.dataset === "string" ? search.dataset : undefined,
+  }),
+  component: ContractGraphPage,
 });
 
 async function requireFreshnessEnabled() {
@@ -238,6 +248,7 @@ const routeTree = rootRoute.addChildren([
   runDiffRoute,
   runDetailRoute,
   lineageRoute,
+  contractsRoute,
   datasetsRoute,
   incidentsRoute,
   incidentDetailRoute,
