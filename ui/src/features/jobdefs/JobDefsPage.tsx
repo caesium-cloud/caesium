@@ -2,8 +2,8 @@ import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api, type DiffResponse, type LintResponse } from "@/lib/api";
-import { FileCode2, Play, CheckCircle2, XCircle, Upload, GitBranch, FileWarning, Info, HardDrive, ShieldCheck } from "lucide-react";
+import { api, type AllowBreakingRequest, type ContractDiffFinding, type DiffResponse, type LintResponse } from "@/lib/api";
+import { FileCode2, Play, CheckCircle2, XCircle, Upload, GitBranch, FileWarning, Info, HardDrive, ShieldCheck, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
@@ -91,6 +91,104 @@ function contractStatusLabel(summary: string) {
   return detailStart === -1 ? summary : summary.slice(0, detailStart);
 }
 
+function collectContractFindings(diff: DiffResponse | null) {
+  if (!diff) return [];
+  return dedupeContractFindings([
+    ...(diff.added ?? []).flatMap((job) => job.contractFindings ?? []),
+    ...(diff.removed ?? []).flatMap((job) => job.contractFindings ?? []),
+    ...(diff.modified ?? []).flatMap((job) => job.contractFindings ?? []),
+  ]);
+}
+
+function dedupeContractFindings(findings: ContractDiffFinding[] | undefined) {
+  if (!findings?.length) return [];
+  const seen = new Set<string>();
+  const out: ContractDiffFinding[] = [];
+  for (const finding of findings) {
+    const key = [
+      finding.edgeId,
+      finding.edgeClass,
+      finding.from,
+      finding.to,
+      finding.verdict,
+      finding.path,
+      finding.key,
+      finding.detail,
+      contractDatasetLabel(finding.dataset),
+    ].join("|");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(finding);
+  }
+  return out;
+}
+
+function buildContractTeamLookup(diff: DiffResponse | null) {
+  const teams: Record<string, string> = {};
+  for (const job of [...(diff?.added ?? []), ...(diff?.removed ?? [])]) {
+    const alias = job.alias?.trim();
+    const team = job.labels?.team?.trim();
+    if (alias && team) {
+      teams[alias] = team;
+    }
+  }
+  return teams;
+}
+
+function contractDatasetLabel(dataset: ContractDiffFinding["dataset"] | undefined) {
+  const namespace = dataset?.namespace?.trim();
+  const name = dataset?.name?.trim();
+  if (namespace && name) return `${namespace}/${name}`;
+  return name || namespace || "";
+}
+
+function jobAliasFromNodeID(nodeID: string | undefined) {
+  const value = nodeID?.trim() ?? "";
+  return value.startsWith("job:") ? value.slice(4) : value;
+}
+
+function contractSubjectForFinding(finding: ContractDiffFinding) {
+  const dataset = contractDatasetLabel(finding.dataset);
+  if (dataset) return dataset;
+  const producer = jobAliasFromNodeID(finding.from) || "producer";
+  const key = finding.key?.trim();
+  if (key) return `${producer}.output.${key}`;
+  return `${producer}.contract`;
+}
+
+function contractConsumerLabel(finding: ContractDiffFinding) {
+  return jobAliasFromNodeID(finding.to) || "unknown consumer";
+}
+
+function contractTeamLabel(finding: ContractDiffFinding, contractTeams: Record<string, string>) {
+  const consumer = contractConsumerLabel(finding);
+  const team = finding.consumerTeam?.trim() || finding.consumer_team?.trim() || contractTeams[consumer];
+  if (team) return `team: ${team}`;
+  return "team not set";
+}
+
+function contractFindingTitle(finding: ContractDiffFinding, contractTeams: Record<string, string>) {
+  return [
+    `${finding.verdict}: ${contractSubjectForFinding(finding)}`,
+    `consumer: ${contractConsumerLabel(finding)}`,
+    contractTeamLabel(finding, contractTeams),
+    finding.detail,
+  ].filter(Boolean).join(" · ");
+}
+
+function contractBadgeClass(verdict: ContractDiffFinding["verdict"]) {
+  switch (verdict) {
+    case "breaking":
+      return "border-danger/35 bg-danger/10 text-danger";
+    case "unknown":
+      return "border-warning/35 bg-warning/10 text-warning";
+    case "compatible":
+      return "border-success/35 bg-success/10 text-success";
+    default:
+      return "border-text-3/30 text-text-3";
+  }
+}
+
 export function JobDefsPage() {
   const queryClient = useQueryClient();
   const [yaml, setYaml] = useState(EXAMPLE_YAML);
@@ -98,10 +196,12 @@ export function JobDefsPage() {
   const [lintResult, setLintResult] = useState<LintResponse>({ errors: [], warnings: [], summary: { steps: 0 } });
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
   const [isLinting, setIsLinting] = useState(false);
+  const [ackReason, setAckReason] = useState("");
   
   const handleYamlChange = (val: string) => {
     setYaml(val);
     setIsLinting(true);
+    setAckReason("");
   };
 
   // Debounced API calls
@@ -144,10 +244,24 @@ export function JobDefsPage() {
     };
   }, [yaml]);
 
+  const contractTeams = useMemo(() => buildContractTeamLookup(diffResult), [diffResult]);
+  const contractFindings = useMemo(() => collectContractFindings(diffResult), [diffResult]);
+  const breakingContractFindings = contractFindings.filter((finding) => finding.verdict === "breaking");
+  const hasBreakingContractFindings = breakingContractFindings.length > 0;
+  const ackSubject = breakingContractFindings[0] ? contractSubjectForFinding(breakingContractFindings[0]) : "";
+  const trimmedAckReason = ackReason.trim();
+  const allowBreaking: AllowBreakingRequest | undefined = hasBreakingContractFindings
+    ? { dataset: ackSubject, reason: trimmedAckReason }
+    : undefined;
+
   const applyMutation = useMutation({
-    mutationFn: () => api.applyJobDef(yaml),
+    mutationFn: () => api.applyJobDef(yaml, allowBreaking),
     onSuccess: (data) => {
       toast.success(`Applied successfully (${data.applied} jobs)`);
+      for (const warning of data.contract_warnings ?? []) {
+        toast.warning(warning.message || `Contract warning for ${warning.subject}`);
+      }
+      setAckReason("");
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
       queryClient.invalidateQueries({ queryKey: ["atoms"] });
       queryClient.invalidateQueries({ queryKey: ["triggers"] });
@@ -196,7 +310,7 @@ export function JobDefsPage() {
             Lint, diff, and apply YAML manifests <span className="text-text-4">·</span> <code className="font-mono text-cyan-glow text-xs bg-cyan-glow/10 px-1 py-0.5 rounded">caesium job apply</code>
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
           <Button variant="outline" size="sm" className="bg-transparent border-graphite/50 text-text-2">
             <Upload className="h-3.5 w-3.5 mr-1.5" />
             Upload
@@ -205,11 +319,21 @@ export function JobDefsPage() {
             <GitBranch className="h-3.5 w-3.5 mr-1.5" />
             Git sync
           </Button>
+          {hasBreakingContractFindings && (
+            <input
+              aria-label="Breaking change acknowledgement reason"
+              data-testid="contract-ack-reason"
+              value={ackReason}
+              onChange={(event) => setAckReason(event.currentTarget.value)}
+              placeholder={`Reason for ${ackSubject}`}
+              className="h-8 w-full sm:w-64 rounded-md border border-danger/35 bg-danger/10 px-3 text-xs text-text-1 placeholder:text-danger/70 outline-none transition-colors focus:border-danger"
+            />
+          )}
           <Button 
             size="sm" 
             className="bg-cyan-glow text-midnight hover:bg-cyan-dim disabled:opacity-50"
             onClick={() => applyMutation.mutate()}
-            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting}
+            disabled={hasErrors || applyMutation.isPending || !yaml.trim() || isLinting || (hasBreakingContractFindings && !trimmedAckReason)}
           >
             <Play className="h-3.5 w-3.5 mr-1.5" />
             {applyMutation.isPending ? "Applying..." : "Apply definition"}
@@ -345,7 +469,7 @@ export function JobDefsPage() {
               </Card>
             </>
           ) : (
-            <DiffView diff={diffResult} />
+            <DiffView diff={diffResult} contractTeams={contractTeams} />
           )}
         </div>
 
@@ -488,7 +612,7 @@ function formatIdentityDetail(hints: JobDefRuntimeHints) {
   return `Includes ${extras.join(" and ")}.`;
 }
 
-function DiffView({ diff }: { diff: DiffResponse | null }) {
+function DiffView({ diff, contractTeams }: { diff: DiffResponse | null; contractTeams: Record<string, string> }) {
   if (!diff) {
     return (
       <Card className="bg-midnight/30 border-graphite/50 p-8 text-center text-text-3 text-sm">
@@ -524,18 +648,24 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
         ) : (
           <div className="font-mono text-xs leading-relaxed overflow-x-auto bg-void p-4">
             {added.map((a, i) => (
-              <div key={`a-${i}`} className="flex gap-3 py-1.5">
-                <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
-                <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
-                <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
+              <div key={`a-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
+                <div className="flex gap-3">
+                  <span className="text-success font-bold w-4 flex-shrink-0 text-center">+</span>
+                  <span className="text-cyan-glow flex-shrink-0">{a.alias}</span>
+                  <span className="text-success/80 text-[11px] truncate whitespace-nowrap">Job will be created</span>
+                </div>
+                <ContractFindingsList findings={a.contractFindings} contractTeams={contractTeams} />
               </div>
             ))}
             
             {removed.map((r, i) => (
-              <div key={`r-${i}`} className="flex gap-3 py-1.5">
-                <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
-                <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
-                <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
+              <div key={`r-${i}`} className="py-1.5 border-b border-graphite/20 last:border-0">
+                <div className="flex gap-3">
+                  <span className="text-danger font-bold w-4 flex-shrink-0 text-center">-</span>
+                  <span className="text-cyan-glow flex-shrink-0">{r.alias}</span>
+                  <span className="text-danger/80 text-[11px] truncate whitespace-nowrap">Job will be deleted (if prune enabled)</span>
+                </div>
+                <ContractFindingsList findings={r.contractFindings} contractTeams={contractTeams} />
               </div>
             ))}
             
@@ -545,6 +675,7 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
                   <span className="text-gold font-bold w-4 flex-shrink-0 text-center">~</span>
                   <span className="text-cyan-glow">{m.alias}</span>
                 </div>
+                <ContractFindingsList findings={m.contractFindings} contractTeams={contractTeams} />
                 <div className="pl-7 pr-2">
                   <pre className="text-[11px] font-mono text-text-3 overflow-x-auto bg-obsidian/30 p-2 rounded border border-graphite/20">
                     {m.diff}
@@ -556,6 +687,73 @@ function DiffView({ diff }: { diff: DiffResponse | null }) {
         )}
       </div>
     </Card>
+  );
+}
+
+function ContractFindingsList({
+  findings,
+  contractTeams,
+}: {
+  findings?: ContractDiffFinding[];
+  contractTeams: Record<string, string>;
+}) {
+  const visibleFindings = dedupeContractFindings(findings);
+  if (visibleFindings.length === 0) return null;
+
+  return (
+    <div className="pl-7 pr-2 pb-2 flex flex-col gap-1.5" data-testid="contract-findings">
+      {visibleFindings.map((finding) => (
+        <ContractFindingBadge
+          key={contractFindingTitle(finding, contractTeams)}
+          finding={finding}
+          contractTeams={contractTeams}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ContractFindingBadge({
+  finding,
+  contractTeams,
+}: {
+  finding: ContractDiffFinding;
+  contractTeams: Record<string, string>;
+}) {
+  const subject = contractSubjectForFinding(finding);
+  const consumer = contractConsumerLabel(finding);
+  const team = contractTeamLabel(finding, contractTeams);
+  const edgeClass = finding.edgeClass ?? "edge";
+
+  return (
+    <details className="group max-w-full">
+      <summary
+        title={contractFindingTitle(finding, contractTeams)}
+        data-testid="contract-finding-badge"
+        data-verdict={finding.verdict}
+        className={[
+          "flex w-fit max-w-full cursor-pointer list-none flex-wrap items-center gap-1.5 rounded-full border px-2 py-1 text-[10px] font-semibold leading-tight shadow-sm transition-colors [&::-webkit-details-marker]:hidden",
+          contractBadgeClass(finding.verdict),
+        ].join(" ")}
+      >
+        {finding.verdict === "breaking" && <AlertTriangle className="h-3 w-3 flex-shrink-0" />}
+        <span className="uppercase">{finding.verdict}</span>
+        <span className="text-text-4">·</span>
+        <span className="break-all">{subject}</span>
+        <span className="text-text-4">·</span>
+        <span>consumer: {consumer}</span>
+        <span className="text-text-4">·</span>
+        <span>{team}</span>
+      </summary>
+      <div className="mt-1 max-w-2xl rounded border border-graphite/30 bg-obsidian/40 p-2 text-[11px] leading-relaxed text-text-2">
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          <span>{edgeClass}</span>
+          {finding.path && <span>path: {finding.path}</span>}
+          {finding.key && <span>key: {finding.key}</span>}
+        </div>
+        {finding.detail && <div className="mt-1 text-text-3">{finding.detail}</div>}
+      </div>
+    </details>
   );
 }
 

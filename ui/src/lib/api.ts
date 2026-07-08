@@ -447,11 +447,13 @@ export interface DiffJobSpec {
     configuration: Record<string, unknown>;
   };
   steps?: unknown[];
+  contractFindings?: ContractDiffFinding[];
 }
 
 export interface DiffUpdate {
   alias: string;
   diff: string;
+  contractFindings?: ContractDiffFinding[];
 }
 
 export interface DiffResponse {
@@ -460,8 +462,29 @@ export interface DiffResponse {
   modified: DiffUpdate[];
 }
 
+export interface AllowBreakingRequest {
+  dataset: string;
+  reason?: string;
+}
+
+export interface ContractWarning {
+  type: string;
+  message: string;
+  subject: string;
+  dataset?: string;
+  output_key?: string;
+  producer: string;
+  consumer?: string;
+  consumer_team?: string;
+  edge_set_digest: string;
+  acknowledgement_id: string;
+  deprecation_until: string;
+}
+
 export interface ApplyJobDefResponse {
   applied: number;
+  pruned?: number;
+  contract_warnings?: ContractWarning[];
 }
 
 export interface TriggerRunRequest {
@@ -883,7 +906,20 @@ export interface ContractFinding {
   kind?: string;
   path?: string;
   detail?: string;
+  key?: string;
   verdict: ContractVerdict;
+}
+
+export interface ContractDiffFinding extends ContractFinding {
+  edgeId?: string;
+  edgeClass?: ContractEdgeClass;
+  from?: string;
+  to?: string;
+  dataset?: ContractDatasetRef;
+  consumerTeam?: string;
+  consumer_team?: string;
+  teamAttribution?: string;
+  team_attribution?: string;
 }
 
 export interface ContractGraphEdge {
@@ -1309,10 +1345,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
-  applyJobDef: (yaml: string) =>
+  applyJobDef: (yaml: string, allowBreaking?: AllowBreakingRequest) =>
     request<ApplyJobDefResponse>("/jobdefs/apply", {
       method: "POST",
-      body: JSON.stringify({ definitions: parseJobDefinitions(yaml) }),
+      body: JSON.stringify({
+        definitions: parseJobDefinitions(yaml),
+        ...(allowBreaking ? { allow_breaking: allowBreaking } : {}),
+      }),
     }),
   getBackfills: (jobId: string) =>
     request<Backfill[]>(`/jobs/${jobId}/backfills`),

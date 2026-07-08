@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,14 @@ vi.mock("@/lib/api", () => ({
     lintJobDef: vi.fn(),
     diffJobDef: vi.fn(),
     applyJobDef: vi.fn(),
+  },
+}));
+
+vi.mock("sonner", () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    warning: vi.fn(),
   },
 }));
 
@@ -54,6 +62,31 @@ function createWrapper() {
   );
 }
 
+async function settleLintAndDiff() {
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(350);
+  });
+}
+
+function openDiffTab() {
+  const tab = screen.getByRole("tab", { name: /Diff vs server/i });
+  fireEvent.pointerDown(tab, { button: 0, ctrlKey: false });
+  fireEvent.click(tab);
+  fireEvent.keyDown(tab, { key: "Enter", code: "Enter" });
+}
+
+const breakingFinding = {
+  edgeId: "inferred:producer:consumer",
+  edgeClass: "inferred" as const,
+  from: "job:producer",
+  to: "job:consumer",
+  verdict: "breaking" as const,
+  key: "customer_id",
+  path: "trigger.configuration.paramMapping.customer",
+  detail: "paramMapping customer references output key customer_id, but that key is missing",
+  consumer_team: "reporting",
+};
+
 describe("JobDefsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -67,6 +100,10 @@ describe("JobDefsPage", () => {
       added: [],
       removed: [],
       modified: [],
+    });
+    vi.mocked(api.applyJobDef).mockResolvedValue({
+      applied: 1,
+      contract_warnings: [],
     });
   });
 
@@ -120,5 +157,83 @@ steps:
 
     expect(screen.getByText("No volumes declared")).toBeInTheDocument();
     expect(screen.getByText("No service account")).toBeInTheDocument();
+  });
+
+  it("renders contract finding badges from the diff response", async () => {
+    vi.mocked(api.diffJobDef).mockResolvedValue({
+      added: [],
+      removed: [],
+      modified: [
+        {
+          alias: "producer",
+          diff: "- old\n+ new",
+          contractFindings: [
+            breakingFinding,
+            {
+              ...breakingFinding,
+              edgeId: "declared:producer:consumer:lake/customers",
+              edgeClass: "declared",
+              verdict: "compatible",
+              dataset: { namespace: "lake", name: "customers" },
+              detail: "optional field added",
+            },
+            {
+              ...breakingFinding,
+              edgeId: "inferred:producer:consumer:unknown",
+              verdict: "unknown",
+              key: "order_id",
+              detail: "consumer requirement cannot be proven",
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    await settleLintAndDiff();
+    openDiffTab();
+
+    const badges = screen.getAllByTestId("contract-finding-badge");
+    expect(badges).toHaveLength(3);
+    expect(badges[0]).toHaveAttribute("data-verdict", "breaking");
+    expect(screen.getByText("producer.output.customer_id")).toBeInTheDocument();
+    expect(screen.getByText("lake/customers")).toBeInTheDocument();
+    expect(screen.getAllByText("consumer: consumer").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("team: reporting").length).toBeGreaterThan(0);
+    expect(badges[0].getAttribute("title")).toContain("missing");
+  });
+
+  it("requires an acknowledgement reason for breaking findings and passes it to apply", async () => {
+    vi.mocked(api.diffJobDef).mockResolvedValue({
+      added: [],
+      removed: [],
+      modified: [
+        {
+          alias: "producer",
+          diff: "- old\n+ new",
+          contractFindings: [breakingFinding],
+        },
+      ],
+    });
+
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    await settleLintAndDiff();
+
+    const applyButton = screen.getByRole("button", { name: /Apply definition/i });
+    expect(applyButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Breaking change acknowledgement reason"), {
+      target: { value: "customer migration accepted" },
+    });
+    expect(applyButton).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(applyButton);
+      await Promise.resolve();
+    });
+    expect(api.applyJobDef).toHaveBeenCalledWith(expect.any(String), {
+      dataset: "producer.output.customer_id",
+      reason: "customer migration accepted",
+    });
   });
 });
