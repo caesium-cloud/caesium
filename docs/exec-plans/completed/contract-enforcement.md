@@ -2,6 +2,11 @@
 
 Last updated: 2026-07-08
 
+> **Status: Complete — all 13 items shipped 2026-07-08 across four waves
+> (PRs #318–#332) and archived to `docs/exec-plans/completed/`.** All nine
+> acceptance criteria hold; enforcement remains off by default
+> (`CAESIUM_CONTRACT_ENFORCEMENT=""`).
+
 Caesium validates per-step data contracts (`OutputSchema` / `InputSchema` in
 `pkg/jobdef/definition.go`) **at runtime, within one run** via
 `pkg/task/schema.go`. But data also flows *between* jobs — through event-trigger
@@ -62,7 +67,7 @@ disagreements.
 Two cross-plan contracts bind this plan:
 
 - **The step-level `datasets` block is shared substrate owned by
-  [`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A** (which introduces
+  [`freshness-scheduling.md`](freshness-scheduling.md) Stream A** (which introduces
   `Step.Datasets` with `produces`/`consumes`/`freshness`/`watermark`). This design
   ADDS `schema`/`schemaFrom` to `produces` entries and a `schema` to `consumes`
   entries — it does **not** own the base block. Stream E coordinates: whichever plan
@@ -142,18 +147,65 @@ offending-key field on `schemacompat.Finding` replacing the Detail-text parse, t
 blocked-breaks metric label rename, and enforcement-scoped window validation).
 Remaining after W3: F2, N-1.
 
+### Wave 3 — shipped 2026-07-08 (3 items; 11 of 13 total)
+
+Merge order δ → ζ → γ:
+
+- **W3-γ (C2 + deferred hardening)** — the intentional-break escape hatch:
+  `--allow-breaking dataset=<name> --reason ...` records a digest-scoped
+  `ContractAck` in the apply transaction, downgrades the acknowledged digest to
+  warn during the deprecation window, warns consumers applying against a
+  deprecated contract, and re-blocks at check-time expiry (no reaper);
+  `contract_break_declared` routes through the notification pipeline. Landed the
+  four W2-review deferrals: digest v2 (no `ConsumerTeam`), structured
+  `schemacompat.Finding.Key` replacing the Detail-text parse, the `subject`
+  metric label, enforcement-scoped window validation. Three CI-driven fixes en
+  route: (1) persisted `DatasetDeclaration` rows now carry
+  `schema_json`/`schema_from`/`schema_version` — the ack-lifecycle scenario
+  exposed that declared contracts were hollow server-side (schemas parsed but
+  never persisted, B2's flagged gap); (2) enforcement became INCOMING-SCOPED
+  after cross-test contamination proved a pre-existing broken contract between
+  persisted jobs could block unrelated applies; (3) integration/e2e/helm servers
+  boot with a 5s deprecation window for a deterministic lifecycle scenario.
+  PR #330.
+- **W3-δ (D2)** — `caesium contract graph/check [--json]` (stdout-clean via
+  `runCLIStdout`-asserted scenarios; `check` exits non-zero on breaking findings
+  for CI gating) and `caesium job lint --server` with the offline nil-DB path
+  preserved as the default. PR #328.
+- **W3-ζ (F1)** — the Console `/contracts` graph view: React Flow canvas with
+  class-styled edges (declared/inferred/evidence) + verdict coloring + legend,
+  feature-gated everywhere on `contract_enforcement_enabled`, with vitest +
+  Playwright coverage. PR #329.
+
+### Wave 4 — shipped 2026-07-08 (2 items; 13 of 13 — plan complete)
+
+- **W4-ζ (F2)** — JobDefs diff contract badges (verdict-colored, consumer+team
+  inline) with ack-gated Apply: single-subject breaking diffs unlock via a
+  reason input that threads `allow_breaking` through the apply; multi-subject
+  breaking diffs disable Apply with an explanatory message (an ack covers one
+  subject per apply, matching the CLI). Two real platform bugs fixed en route:
+  the jobdefs diff ignored `tasks.output_schema` (schema-only edits produced no
+  modified row — the deriver was proven correct by a GORM-backed reproduction
+  test), and the diff e2e now attaches the live diff response to any future
+  failure. PR #332.
+- **W4-ν (N-1)** — the closing docs pass: design-doc status flipped, roadmap
+  §2.1 + Phase-4 table updated, the full operator loop documented across the
+  job docs, schema reference regenerated via the generator, a lint-clean
+  producer+consumer example manifest, and the plan indexed in `docs/README.md`.
+  PR #331.
+
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Schema-compatibility checker — new `pkg/jobdef/schemacompat` walker, verdict types, table-driven matrix + fuzz | **P0** | ✅ Shipped W1 (#320, #321) |
 | B | Contract graph derivation — new `internal/contract` (inferred trigger-chain + evidence lineage edges, then declared) | **P0** | ✅ Shipped W1+W2 (#322, #326) |
-| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | C1 ✅ W2 (#324); C2 in flight (W3) |
-| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | D1 ✅ W2 (#325); D2 in flight (W3) |
+| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | ✅ Shipped W2+W3 (#324, #330) |
+| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | ✅ Shipped W2+W3 (#325, #328) |
 | E | Datasets `schema`/`schemaFrom` declarations (coordinated with freshness Stream A) | P1 | ✅ Shipped W1 (#319) |
-| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | F1 in flight (W3); F2 queued (W4) |
+| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | ✅ Shipped W3+W4 (#329, #332) |
 | H-1 | Integration harness — enable `CAESIUM_CONTRACT_ENFORCEMENT` on the live integration server | — | ✅ Shipped W1 (#318) + helm values in W2 (#324); helpers landed with C1 |
-| N-1 | Docs — roadmap §2.1, design-doc banner, schema references, examples, README | — | Queued (last) |
+| N-1 | Docs — roadmap §2.1, design-doc banner, schema references, examples, README | — | ✅ Shipped W4 (#331) |
 
 ## Streams
 
@@ -369,7 +421,7 @@ Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork th
 
 The YAML surface that upgrades inferred/evidence edges to declared, `fail`-grade
 contracts. This design ADDS schema fields to the step-level `datasets` block that
-[`freshness-scheduling.md`](../completed/freshness-scheduling.md) Stream A introduces — it does
+[`freshness-scheduling.md`](freshness-scheduling.md) Stream A introduces — it does
 not own the base block. **Coordinate on `pkg/jobdef/definition.go`: whichever plan
 lands `Step.Datasets` first introduces the struct; this item extends it.**
 
@@ -653,11 +705,11 @@ The plan is done when **all** of these hold:
 - [`docs/roadmap.md`](../../roadmap.md) §2.1 PR Preview Runs & Visual DAG Diff — the
   PR surface this feature plugs its contract section into; and the Phase-4 design
   table (`docs/roadmap.md:226`).
-- [`freshness-scheduling.md`](../completed/freshness-scheduling.md) — sibling active plan that
+- [`freshness-scheduling.md`](freshness-scheduling.md) — sibling active plan that
   **owns the base step-level `datasets` block**; Stream E here extends it with schema
   fields. Coordinate on `pkg/jobdef/definition.go`.
 - [`docs/design-event-triggers.md`](../../design-event-triggers.md) and the shipped
-  [`event-trigger-routing.md`](../completed/event-trigger-routing.md) — the WS3
+  [`event-trigger-routing.md`](event-trigger-routing.md) — the WS3
   trigger-chaining substrate (`internal/jobdef/trigger_cycle.go`,
   `paramMapping`) the inferred edge class analyzes.
 - [`docs/design-data-circuit-breaker.md`](../../design-data-circuit-breaker.md) and
