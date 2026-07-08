@@ -230,7 +230,7 @@ func (t *sqlTime) Scan(value any) error {
 }
 
 func (t sqlTime) Value() (driver.Value, error) {
-	if t.Time.IsZero() {
+	if t.IsZero() {
 		return nil, nil
 	}
 	return t.Time, nil
