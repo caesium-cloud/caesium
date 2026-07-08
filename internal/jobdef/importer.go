@@ -15,10 +15,12 @@ import (
 	"sync"
 	"time"
 
+	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/jsonmap"
 	"github.com/caesium-cloud/caesium/pkg/jsonutil"
@@ -32,6 +34,7 @@ var (
 	ErrDuplicateJob       = errors.New("job alias already exists")
 	ErrProvenanceConflict = errors.New("job definition provenance conflict")
 	ErrJobRunning         = errors.New("job has a running run")
+	ErrContractBreak      = contractenforce.ErrContractBreakBlocked
 
 	importerBusyRetryBackoffs = []time.Duration{
 		10 * time.Millisecond,
@@ -156,6 +159,9 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
 				return err
 			}
+			if err := i.enforceContractsTx(ctx, tx, def); err != nil {
+				return err
+			}
 			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
 				return err
 			}
@@ -175,6 +181,24 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 	notifyTriggerMutationBestEffort(ctx, "apply")
 
 	return result, nil
+}
+
+// ContractBreakResponse returns the stable 409 payload for an apply-time
+// contract enforcement error.
+func ContractBreakResponse(err error) (any, bool) {
+	var enforcementErr *contractenforce.EnforcementError
+	if !errors.As(err, &enforcementErr) {
+		return nil, false
+	}
+	return enforcementErr.Response, true
+}
+
+func (i *Importer) enforceContractsTx(ctx context.Context, tx *gorm.DB, def *schema.Definition) error {
+	mode := env.Variables().ContractEnforcement
+	if strings.TrimSpace(mode) == "" {
+		return nil
+	}
+	return contractenforce.EnforceApply(ctx, tx, []schema.Definition{*def}, mode, time.Now().UTC())
 }
 
 // PruneMissing retires active jobs that are absent from the desired alias set.

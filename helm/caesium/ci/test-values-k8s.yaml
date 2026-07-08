@@ -33,6 +33,10 @@ config:
     # Enable freshness so dataset-state integration scenarios exercise the live evaluator.
     - name: CAESIUM_FRESHNESS_ENABLED
       value: "true"
+    # Enable contract enforcement so the apply-time 409 scenarios run here too
+    # (mirrors the justfile lanes and the ci.yml docker-run server blocks).
+    - name: CAESIUM_CONTRACT_ENFORCEMENT
+      value: fail
 
 kubernetes:
   engine:

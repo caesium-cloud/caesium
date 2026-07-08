@@ -17,6 +17,7 @@ var All = []interface{}{
 	&JobRun{},
 	&TaskRun{},
 	&LineageDataset{},
+	&ContractAck{},
 	&TaskCache{},
 	&CallbackRun{},
 	&ExecutionEvent{},

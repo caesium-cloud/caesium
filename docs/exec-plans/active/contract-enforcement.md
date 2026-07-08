@@ -1,6 +1,6 @@
 # Data-Contract Enforcement — Cross-Job Schema Compatibility at Apply Time
 
-Last updated: 2026-07-03
+Last updated: 2026-07-08
 
 Caesium validates per-step data contracts (`OutputSchema` / `InputSchema` in
 `pkg/jobdef/definition.go`) **at runtime, within one run** via
@@ -75,24 +75,53 @@ Two cross-plan contracts bind this plan:
   the design's explicit subset — if an item finds it needs a construct outside that
   subset, it returns the `unknown` verdict, it does not extend the library.
 
-## Progress (as of 2026-07-03)
+## Progress (as of 2026-07-08)
 
-No implementation waves have shipped yet. The plan was published from
-[`docs/design-contract-enforcement.md`](../../design-contract-enforcement.md); the
-first wave is the next eligible run of the `exec-plan-wave` skill against this doc.
+### Wave 1 — shipped 2026-07-08 (5 of 13 items)
+
+Run via the `exec-plan-wave` skill (codex implementation, orchestrator
+verify/publish/merge; GHA CI as the verify gate). Merge order η → ε → α → β:
+
+- **W1-α (A1+A2)** — the `pkg/jobdef/schemacompat` checker: `Compare`/`Satisfies`
+  over the design subset with tri-state verdicts (unknown never silently passes),
+  42-case verdict matrix + `FuzzCompare`. PR #320; post-merge review fix-forward
+  PR #321 (a both-`additionalProperties: false` schema that newly requires a key
+  outside `properties` is now flagged as breaking instead of producing zero
+  findings).
+- **W1-β (B1)** — the `internal/contract` graph deriver: inferred trigger-chain
+  edges (lifecycle patterns + static `$.tasks[<i>].output.<key>` paramMapping
+  analysis, degrading to warn on unresolvable indexes) and warn-only lineage
+  evidence edges with `lastSeen`; `DeriveGraph(DeriveInput)` for merged-world
+  callers + `NewGORMDeriver(db)` for server reads. Review hardening: unknown
+  `filter.job_id` consumers surface as unknown-producer edges instead of
+  silently dropping, and the evidence query pre-aggregates per
+  job/dataset/direction before the self-join. PR #322.
+- **W1-ε (E1)** — `datasets.produces[].schema`/`schemaFrom`/`version` and
+  scalar-or-object `consumes` entries with optional consumer schemas; schemas
+  compile at lint time; hash-stability test proves the cache key is untouched;
+  schema-reference generator updated. The integration lanes caught (and the fix
+  removed) a schema-required rule that could not survive the CLI→server JSON
+  round trip. PR #319.
+- **W1-η (H-1)** — `CAESIUM_CONTRACT_ENFORCEMENT=fail` pre-plumbed on every
+  server-boot site (all justfile lanes, helm `extraEnv`, three ci.yml server
+  blocks), mirroring the freshness precedent so no lane drifts red. Deferred to
+  W2: the deprecation-window bound + `test/` fixture helpers (land with the
+  scenarios that use them). PR #318.
+
+Wave 2 (B2 + C1 + D1) is in flight. Remaining after W2: C2, D2, F1, F2, N-1.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Schema-compatibility checker — new `pkg/jobdef/schemacompat` walker, verdict types, table-driven matrix + fuzz | **P0** | Not started |
-| B | Contract graph derivation — new `internal/contract` (inferred trigger-chain + evidence lineage edges, then declared) | **P0** | Not started |
-| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | Not started |
-| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | Not started |
-| E | Datasets `schema`/`schemaFrom` declarations (coordinated with freshness Stream A) | P1 | Not started |
-| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | Not started |
-| H-1 | Integration harness — enable `CAESIUM_CONTRACT_ENFORCEMENT` on the live integration server | — | Not started |
-| N-1 | Docs — roadmap §2.1, design-doc banner, schema references, examples, README | — | Not started |
+| A | Schema-compatibility checker — new `pkg/jobdef/schemacompat` walker, verdict types, table-driven matrix + fuzz | **P0** | ✅ Shipped W1 (#320, #321) |
+| B | Contract graph derivation — new `internal/contract` (inferred trigger-chain + evidence lineage edges, then declared) | **P0** | B1 ✅ W1 (#322); B2 in flight (W2) |
+| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | C1 in flight (W2); C2 queued (W3) |
+| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | D1 in flight (W2); D2 queued (W3) |
+| E | Datasets `schema`/`schemaFrom` declarations (coordinated with freshness Stream A) | P1 | ✅ Shipped W1 (#319) |
+| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | Queued (W3/W4, after D1) |
+| H-1 | Integration harness — enable `CAESIUM_CONTRACT_ENFORCEMENT` on the live integration server | — | ✅ Shipped W1 (#318); helpers land with W2-γ |
+| N-1 | Docs — roadmap §2.1, design-doc banner, schema references, examples, README | — | Queued (last) |
 
 ## Streams
 
@@ -200,7 +229,7 @@ transaction that persists the producer — so racing applies serialize on the st
 and there is no TOCTOU window. Breaking findings without a valid ack → HTTP 409.
 Plus the two-sided intentional-break escape hatch.
 
-- [ ] C1. Add the `ContractAck` GORM model (dataset/edge-set digest, actor, reason,
+- [x] C1. Add the `ContractAck` GORM model (dataset/edge-set digest, actor, reason,
       created/expires) + register it in the `All` slice (`internal/models/models.go`,
       appended after `LineageDataset`); add `CAESIUM_CONTRACT_ENFORCEMENT` (`""` off /
       `warn` / `fail`, mirroring `metadata.schemaValidation`'s tri-state) and
@@ -217,6 +246,7 @@ Plus the two-sided intentional-break escape hatch.
       `api/rest/controller/jobdef/apply.go`, `internal/contract/enforce.go`,
       `internal/metrics/metrics.go`.
       Depends on: A1 + B1.
+      Note: W2-γ landed the catalog-only `ContractAck` model, `CAESIUM_CONTRACT_ENFORCEMENT`/`CAESIUM_CONTRACT_DEPRECATION_WINDOW`, fail/warn apply-time enforcement inside the importer transaction, the HTTP 409 payload, `caesium_contract_breaks_blocked_total{dataset}`, and the paramMapping + happy-path integration scenarios. The C1 edge-set digest is `sha256` hex over JSON `{version:1, subject, edges[]}`, with `edges[]` sorted by producer, consumer, edge ID, path, and detail and carrying edge class, dataset/output key, consumer team, path/detail, and verdict.
 - [ ] C2. Add the intentional-break escape hatch: `caesium job apply
       --allow-breaking dataset=<name> [--reason ...]` records a `ContractAck` row
       (actor, edge-set digest, `deprecationUntil`); during the window the enforcement
@@ -348,6 +378,7 @@ precedent: backend REST/CLI first, UI consumes it). New feature dir gated by the
       deferred to W2: the `CAESIUM_CONTRACT_DEPRECATION_WINDOW` bound and the `test/`
       fixture helpers land alongside the C/D scenarios that use them (helpers now
       would be unused code; the window depends on C2's actual expiry-test shape).
+      W2-γ added the deferred `test/` fixture helpers alongside the apply-time enforcement scenarios that use them; expiry-specific helpers remain deferred to C2's ack lifecycle.
 
 ## Navigational / Organizational Improvements
 

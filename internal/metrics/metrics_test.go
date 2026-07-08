@@ -46,6 +46,7 @@ func (s *MetricsSuite) SetupTest() {
 		SSOLoginsTotal,
 		SSOLoginDurationSeconds,
 		SSOLogoutsTotal,
+		ContractBreaksBlockedTotal,
 	)
 }
 
@@ -305,6 +306,13 @@ func (s *MetricsSuite) TestSSOLogoutsTotalIncrements() {
 
 	val = metrictestutil.CounterValue(s.T(), SSOLogoutsTotal, "error")
 	s.GreaterOrEqual(val, float64(2))
+}
+
+func (s *MetricsSuite) TestContractBreaksBlockedTotalIncrements() {
+	ContractBreaksBlockedTotal.WithLabelValues("producer.output.customer_id").Inc()
+
+	val := metrictestutil.CounterValue(s.T(), ContractBreaksBlockedTotal, "producer.output.customer_id")
+	s.GreaterOrEqual(val, float64(1))
 }
 
 func (s *MetricsSuite) gaugeValue(vec *prometheus.GaugeVec, labels ...string) float64 {
