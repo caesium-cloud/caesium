@@ -24,6 +24,7 @@ import (
 	notifctrl "github.com/caesium-cloud/caesium/api/rest/controller/notification"
 	receiptctrl "github.com/caesium-cloud/caesium/api/rest/controller/receipt"
 	replayctrl "github.com/caesium-cloud/caesium/api/rest/controller/replay"
+	reproducectrl "github.com/caesium-cloud/caesium/api/rest/controller/reproduce"
 	rundiffctrl "github.com/caesium-cloud/caesium/api/rest/controller/rundiff"
 	"github.com/caesium-cloud/caesium/api/rest/controller/stats"
 	"github.com/caesium-cloud/caesium/api/rest/controller/system"
@@ -91,6 +92,7 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.GET("/jobs/:id/runs/:run_id/logs", run.Logs)
 		// causal explainer (data-plane-memory A3): why a task ran/hit cache/re-ran
 		g.GET("/jobs/:id/runs/:run_id/why", whyctrl.Get)
+		g.GET("/jobs/:id/runs/:run_id/tasks/:task/descriptor", reproducectrl.Get)
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/runs/:run_id/replay", replayctrl.Post)
 		g.POST("/jobs/:id/runs/:run_id/retry", run.Retry)

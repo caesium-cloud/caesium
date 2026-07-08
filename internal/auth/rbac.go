@@ -75,6 +75,8 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/jobdefs/lint":                     models.RoleViewer,
 	"POST /v1/jobdefs/diff":                     models.RoleViewer,
 	"GET /v1/lineage/impact":                    models.RoleViewer,
+
+	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor": models.RoleViewer,
 	// Incident operator read API (agent-in-the-loop D2).
 	"GET /v1/incidents":     models.RoleViewer,
 	"GET /v1/incidents/:id": models.RoleViewer,
