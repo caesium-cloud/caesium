@@ -276,9 +276,9 @@ type ConsumedDataset struct {
 	// Name is the dataset identity this step reads.
 	Name string `yaml:"name" json:"name"`
 	// Schema is the JSON Schema subset this consumer requires from the dataset.
+	// Optional: a consumer without a declared schema participates in name-level
+	// contract edges only.
 	Schema map[string]any `yaml:"schema,omitempty" json:"schema,omitempty"`
-
-	legacyScalar bool
 }
 
 // UnmarshalYAML accepts the shipped freshness shape (`consumes: [orders]`) and
@@ -292,7 +292,6 @@ func (c *ConsumedDataset) UnmarshalYAML(value *yaml.Node) error {
 		}
 		c.Name = name
 		c.Schema = nil
-		c.legacyScalar = true
 		return nil
 	case yaml.MappingNode:
 		var raw struct {
@@ -304,7 +303,6 @@ func (c *ConsumedDataset) UnmarshalYAML(value *yaml.Node) error {
 		}
 		c.Name = raw.Name
 		c.Schema = raw.Schema
-		c.legacyScalar = false
 		return nil
 	default:
 		return fmt.Errorf("datasets.consumes entries must be strings or mappings")
@@ -322,7 +320,6 @@ func (c *ConsumedDataset) UnmarshalJSON(data []byte) error {
 		}
 		c.Name = name
 		c.Schema = nil
-		c.legacyScalar = true
 		return nil
 	}
 
@@ -335,7 +332,6 @@ func (c *ConsumedDataset) UnmarshalJSON(data []byte) error {
 	}
 	c.Name = raw.Name
 	c.Schema = raw.Schema
-	c.legacyScalar = false
 	return nil
 }
 
@@ -1040,9 +1036,11 @@ func validateDatasets(d *Definition) error {
 			if _, dup := seen[name]; dup {
 				return fmt.Errorf("steps[%d].datasets.consumes contains duplicate entry %q", i, name)
 			}
-			if consumed.Schema == nil && !consumed.legacyScalar {
-				return fmt.Errorf("steps[%d].datasets.consumes[%d].schema is required", i, j)
-			}
+			// Schema is optional on every consumes shape: a consumer without a
+			// declared schema participates in name-level contract edges only.
+			// It cannot be required on the object form — the YAML-vs-object
+			// distinction does not survive the CLI→server JSON round trip, so a
+			// hard requirement would reject every re-validated legacy manifest.
 			if consumed.Schema != nil {
 				if err := validateDatasetSchema(fmt.Sprintf("steps[%d].datasets.consumes[%d].schema", i, j), consumed.Schema); err != nil {
 					return err

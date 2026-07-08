@@ -135,6 +135,41 @@ steps:
 	}
 }
 
+// TestConsumesSurviveJSONRoundTrip pins the CLI→server apply path: a legacy
+// scalar `consumes: [name]` manifest is parsed from YAML by the CLI, marshaled
+// to JSON for the apply API (which emits the object shape), unmarshaled
+// server-side, and re-validated. The scalar-vs-object distinction does not
+// survive that round trip, so validation must not depend on it — a consumer
+// without a schema stays valid in every shape. Regression for the freshness
+// integration failures ("consumes[0].schema is required") on W1-ε.
+func TestConsumesSurviveJSONRoundTrip(t *testing.T) {
+	def, err := Parse([]byte(datasetStep(`consumes: [orders]`)))
+	if err != nil {
+		t.Fatalf("parse legacy scalar consumes: %v", err)
+	}
+
+	encoded, err := json.Marshal(def)
+	if err != nil {
+		t.Fatalf("marshal definition: %v", err)
+	}
+	var roundTripped Definition
+	if err := json.Unmarshal(encoded, &roundTripped); err != nil {
+		t.Fatalf("unmarshal definition: %v", err)
+	}
+	if err := roundTripped.Validate(); err != nil {
+		t.Fatalf("re-validate round-tripped definition: %v", err)
+	}
+	got := roundTripped.Steps[0].Datasets.Consumes[0]
+	if got.Name != "orders" || got.Schema != nil {
+		t.Fatalf("unexpected round-tripped consume: %+v", got)
+	}
+
+	// The object form without a schema is equally valid straight from YAML.
+	if _, err := Parse([]byte(datasetStep(`consumes: [{name: orders}]`))); err != nil {
+		t.Fatalf("parse object-form consumes without schema: %v", err)
+	}
+}
+
 // datasetStep builds a minimal single-step job whose step carries the provided
 // inline `datasets:` body, for table-driven validation tests.
 func datasetStep(datasetsBody string) string {
@@ -218,11 +253,6 @@ func TestValidateDatasetsRejectsBadInputs(t *testing.T) {
 			name: "bad produced schema",
 			yaml: datasetStep(`produces: [{name: a, schema: {type: nope}}]`),
 			want: "produces[0].schema: invalid schema",
-		},
-		{
-			name: "object consume requires schema",
-			yaml: datasetStep(`consumes: [{name: a}]`),
-			want: "consumes[0].schema is required",
 		},
 		{
 			name: "bad consumed schema",

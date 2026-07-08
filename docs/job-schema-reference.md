@@ -159,9 +159,9 @@ Freshness-driven scheduling lets a job declare the datasets its steps produce an
 ### Step Datasets (`steps[].datasets`)
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `consumes` | array[string or object] | optional | Dataset names this step reads. The legacy scalar form (`consumes: [orders]`) remains valid; the object form carries the consumer's required schema. A consumed name may resolve to a dataset produced by another job; cross-job resolution is a lint/registry concern, not a single-definition error. |
+| `consumes` | array[string or object] | optional | Dataset names this step reads. The legacy scalar form (`consumes: [orders]`) remains valid; the object form can carry the consumer's required schema. A consumed name may resolve to a dataset produced by another job; cross-job resolution is a lint/registry concern, not a single-definition error. |
 | `consumes[].name` | string | required with object form | Dataset identity this step reads. |
-| `consumes[].schema` | object | required with object form | JSON Schema describing what this consumer requires from the dataset, as a subset rather than a copy of the producer schema. Schemas compile under `santhosh-tekuri/jsonschema/v6`. Legacy scalar consumes omit this field for backward compatibility. |
+| `consumes[].schema` | object | optional | JSON Schema describing what this consumer requires from the dataset, as a subset rather than a copy of the producer schema. Schemas compile under `santhosh-tekuri/jsonschema/v6`. A consumer without a declared schema participates in name-level contract edges only. |
 | `produces` | array[object] | optional | Datasets this step produces, each carrying freshness SLOs and optional contract schema metadata. |
 | `produces[].name` | string | required | Dataset identity (keyed on name in v1; namespace is reserved). |
 | `produces[].schema` | object | optional | Inline JSON Schema for the produced dataset. Mutually exclusive with `schemaFrom`; schemas compile under `santhosh-tekuri/jsonschema/v6`. |
