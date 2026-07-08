@@ -154,7 +154,7 @@ versions) — derive the three edge classes. Edges are recomputed per request fr
 authoritative sources so they never go stale against jobdef edits. New package,
 read-only against existing tables.
 
-- [ ] B1. Add the `internal/contract` graph deriver for the two evidence-driven edge
+- [x] B1. Add the `internal/contract` graph deriver for the two evidence-driven edge
       classes: **inferred** — reuse `patternCanMatchCaesiumLifecycle` +
       `triggerChainPatternSourceAlias` (`internal/jobdef/trigger_cycle.go:293,236`)
       to find A→B trigger-chain edges, then statically parse B's `paramMapping`
@@ -171,6 +171,14 @@ read-only against existing tables.
       new `internal/contract/graph_test.go`.
       Depends on: A1 (edges reference the checker's `Finding` type for path-vs-schema
       verdicts).
+      Note: Added JSON-ready `Graph{Nodes, Edges}` types, `declared`/`inferred`/
+      `evidence` edge-class constants, a pure `DeriveGraph(DeriveInput)` API, and
+      a `Deriver` with GORM-backed readers that substitute incoming definitions
+      for persisted jobs. B1 covers inferred lifecycle `paramMapping` output-key
+      checks with `schemacompat.Finding` verdicts and lineage evidence edges with
+      warn-only `VerdictUnknown` plus `lastSeen`; tests cover missing keys,
+      unresolved task indexes, unknown scoped producers, ignored non-output paths,
+      job-id source filters, and evidence last-seen aggregation.
 - [ ] B2. Fold the **declared** edge class into the graph: match
       `datasets.produces`/`datasets.consumes` on dataset `name` across all merged
       jobs, attaching the producer's `schemaFrom: output` (resolved to that step's

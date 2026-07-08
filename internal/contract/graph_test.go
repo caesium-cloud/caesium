@@ -1,0 +1,385 @@
+package contract
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	"github.com/caesium-cloud/caesium/pkg/jobdef/schemacompat"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
+)
+
+func TestDeriveGraphInferredEdgeReportsMissingMappedOutput(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTrigger("producer", map[string]string{
+			"rows":     "$.tasks[0].output.row_count",
+			"customer": "$.tasks[0].output.customer_id",
+			"run_id":   "$.run_id",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, "job:producer", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnsatisfied, edge.Findings[0].Kind)
+	require.Equal(t, schemacompat.VerdictBreaking, edge.Findings[0].Verdict)
+	require.Equal(t, "trigger.configuration.paramMapping.customer", edge.Findings[0].Path)
+	require.Contains(t, edge.Findings[0].Detail, "customer_id")
+}
+
+func TestDeriveGraphInferredUnresolvedIndexDegradesToUnknown(t *testing.T) {
+	tests := []struct {
+		name         string
+		outputKey    string
+		producerKeys []string
+		wantKind     schemacompat.FindingKind
+	}{
+		{
+			name:         "key found in producer union",
+			outputKey:    "customer_id",
+			producerKeys: []string{"customer_id"},
+			wantKind:     schemacompat.FindingKindRequirementUnknown,
+		},
+		{
+			name:         "key missing from producer union",
+			outputKey:    "customer_id",
+			producerKeys: []string{"row_count"},
+			wantKind:     schemacompat.FindingKindRequirementUnsatisfied,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			producer := Job{
+				Alias: "producer",
+				Steps: []Step{{
+					Name:         "extract",
+					OutputSchema: outputSchemaWithProperties(tt.producerKeys...),
+				}},
+			}
+			consumer := Job{
+				Alias: "consumer",
+				Trigger: eventTrigger("producer", map[string]string{
+					"customer": "$.tasks[3].output." + tt.outputKey,
+				}),
+			}
+
+			graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+			require.NoError(t, err)
+
+			edge := requireEdge(t, graph, EdgeClassInferred, "job:producer", "job:consumer", "")
+			require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+			require.Len(t, edge.Findings, 1)
+			require.Equal(t, tt.wantKind, edge.Findings[0].Kind)
+			require.Equal(t, schemacompat.VerdictUnknown, edge.Findings[0].Verdict)
+			require.Contains(t, edge.Findings[0].Detail, "cannot be resolved")
+		})
+	}
+}
+
+func TestDeriveGraphIgnoresParamMappingsOutsideTaskOutputPaths(t *testing.T) {
+	producer := Job{
+		Alias: "producer",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTrigger("producer", map[string]string{
+			"run_id": "$.run_id",
+			"root":   "$",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+	require.Empty(t, graph.Edges)
+}
+
+func TestDeriveGraphInferredUnknownProducerAliasWarns(t *testing.T) {
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTrigger("missing-producer", map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, "job:missing-producer", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnknown, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Detail, "not present in the merged job set")
+}
+
+func TestDeriveGraphUnscopedLifecyclePatternFansOutToKnownJobs(t *testing.T) {
+	producerA := Job{
+		Alias: "producer-a",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	producerB := Job{
+		Alias: "producer-b",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTriggerWithFilter(map[string]any{}, map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producerA, producerB, consumer}})
+	require.NoError(t, err)
+
+	edgeA := requireEdge(t, graph, EdgeClassInferred, "job:producer-a", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictCompatible, edgeA.Verdict)
+	require.Empty(t, edgeA.Findings)
+
+	edgeB := requireEdge(t, graph, EdgeClassInferred, "job:producer-b", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictCompatible, edgeB.Verdict)
+	require.Empty(t, edgeB.Findings)
+	require.Len(t, graph.Edges, 2)
+}
+
+func TestDeriveGraphUnknownJobIDFilterWarns(t *testing.T) {
+	missingJobID := uuid.New()
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTriggerWithFilter(map[string]any{"job_id": missingJobID.String()}, map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, "job:"+missingJobID.String(), "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnknown, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Detail, missingJobID.String())
+	require.Contains(t, edge.Findings[0].Detail, "not present in the merged job set")
+	requireJobNode(t, graph, missingJobID.String())
+}
+
+func TestDeriveGraphEvidenceEdgesAggregateLastSeen(t *testing.T) {
+	producerID := uuid.New()
+	consumerID := uuid.New()
+	older := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	newer := older.Add(2 * time.Hour)
+
+	graph, err := DeriveGraph(DeriveInput{
+		Jobs: []Job{
+			{ID: producerID, Alias: "producer"},
+			{ID: consumerID, Alias: "consumer"},
+		},
+		Evidence: []EvidenceRecord{
+			{
+				ProducerJobID:    producerID,
+				ProducerJobAlias: "producer",
+				ConsumerJobID:    consumerID,
+				ConsumerJobAlias: "consumer",
+				Dataset:          DatasetRef{Namespace: "lake", Name: "customers"},
+				LastSeen:         older,
+			},
+			{
+				ProducerJobID:    producerID,
+				ProducerJobAlias: "producer",
+				ConsumerJobID:    consumerID,
+				ConsumerJobAlias: "consumer",
+				Dataset:          DatasetRef{Namespace: "lake", Name: "customers"},
+				LastSeen:         newer,
+			},
+		},
+	})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassEvidence, "job:producer", "job:consumer", "lake/customers")
+	require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+	require.Empty(t, edge.Findings)
+	require.NotNil(t, edge.LastSeen)
+	require.Equal(t, newer, *edge.LastSeen)
+	requireDatasetNode(t, graph, "lake/customers")
+}
+
+func TestGORMStoreListContractEvidenceAggregatesBeforeJoining(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractEvidenceTables(t, db)
+
+	producerJobID := uuid.New()
+	consumerJobID := uuid.New()
+	insertEvidenceJob(t, db, producerJobID, "producer")
+	insertEvidenceJob(t, db, consumerJobID, "consumer")
+
+	olderConsumerSeen := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	newerConsumerSeen := olderConsumerSeen.Add(2 * time.Hour)
+	insertEvidenceDataset(t, db, producerJobID, "lake", "customers", "output", olderConsumerSeen.Add(-2*time.Hour))
+	insertEvidenceDataset(t, db, producerJobID, "lake", "customers", "output", olderConsumerSeen.Add(-time.Hour))
+	insertEvidenceDataset(t, db, consumerJobID, "lake", "customers", "input", olderConsumerSeen)
+	insertEvidenceDataset(t, db, consumerJobID, "lake", "customers", "input", newerConsumerSeen)
+
+	records, err := (GORMStore{DB: db}).ListContractEvidence(context.Background())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, producerJobID, records[0].ProducerJobID)
+	require.Equal(t, "producer", records[0].ProducerJobAlias)
+	require.Equal(t, consumerJobID, records[0].ConsumerJobID)
+	require.Equal(t, "consumer", records[0].ConsumerJobAlias)
+	require.Equal(t, DatasetRef{Namespace: "lake", Name: "customers"}, records[0].Dataset)
+	require.WithinDuration(t, newerConsumerSeen, records[0].LastSeen, time.Second)
+}
+
+func TestDeriveGraphInferredEdgeResolvesJobIDFilter(t *testing.T) {
+	producerID := uuid.New()
+	producer := Job{
+		ID:    producerID,
+		Alias: "producer",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTriggerWithFilter(map[string]any{"job_id": producerID.String()}, map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producer, consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, "job:producer", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictCompatible, edge.Verdict)
+	require.Empty(t, edge.Findings)
+}
+
+func outputSchemaWithProperties(keys ...string) map[string]any {
+	properties := make(map[string]any, len(keys))
+	for _, key := range keys {
+		properties[key] = map[string]any{"type": "string"}
+	}
+	return map[string]any{
+		"type":       "object",
+		"properties": properties,
+	}
+}
+
+func eventTrigger(sourceAlias string, mapping map[string]string) Trigger {
+	filter := map[string]any{}
+	if sourceAlias != "" {
+		filter["job_alias"] = sourceAlias
+	}
+	return eventTriggerWithFilter(filter, mapping)
+}
+
+func eventTriggerWithFilter(filter map[string]any, mapping map[string]string) Trigger {
+	cfg := map[string]any{
+		"events": []any{
+			map[string]any{
+				"type":   "run_completed",
+				"source": "caesium",
+				"filter": filter,
+			},
+		},
+		"paramMapping": map[string]any{},
+	}
+	for key, value := range mapping {
+		cfg["paramMapping"].(map[string]any)[key] = value
+	}
+	return Trigger{
+		Type:          schema.TriggerEvent,
+		Configuration: cfg,
+	}
+}
+
+func requireEdge(t *testing.T, graph Graph, class EdgeClass, from, to, dataset string) Edge {
+	t.Helper()
+	for _, edge := range graph.Edges {
+		if edge.Class != class || edge.From != from || edge.To != to {
+			continue
+		}
+		if datasetKey(edge.Dataset) != dataset {
+			continue
+		}
+		return edge
+	}
+	t.Fatalf("edge %s %s -> %s dataset %q not found in %#v", class, from, to, dataset, graph.Edges)
+	return Edge{}
+}
+
+func requireDatasetNode(t *testing.T, graph Graph, dataset string) {
+	t.Helper()
+	for _, node := range graph.Nodes {
+		if node.Kind == NodeKindDataset && datasetKey(node.Dataset) == dataset {
+			return
+		}
+	}
+	t.Fatalf("dataset node %q not found in %#v", dataset, graph.Nodes)
+}
+
+func requireJobNode(t *testing.T, graph Graph, alias string) {
+	t.Helper()
+	for _, node := range graph.Nodes {
+		if node.Kind == NodeKindJob && node.Alias == alias {
+			return
+		}
+	}
+	t.Fatalf("job node %q not found in %#v", alias, graph.Nodes)
+}
+
+func createContractEvidenceTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE job_runs (id text PRIMARY KEY, job_id text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE task_runs (id text PRIMARY KEY, job_run_id text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE lineage_datasets (id text PRIMARY KEY, task_run_id text NOT NULL, namespace text NOT NULL, name text NOT NULL, direction text NOT NULL, created_at datetime NOT NULL)").Error)
+}
+
+func insertEvidenceJob(t *testing.T, db *gorm.DB, jobID uuid.UUID, alias string) {
+	t.Helper()
+	require.NoError(t, db.Exec("INSERT INTO jobs (id, alias, deleted_at) VALUES (?, ?, NULL)", jobID, alias).Error)
+}
+
+func insertEvidenceDataset(t *testing.T, db *gorm.DB, jobID uuid.UUID, namespace, name, direction string, createdAt time.Time) {
+	t.Helper()
+	jobRunID := uuid.New()
+	taskRunID := uuid.New()
+	require.NoError(t, db.Exec("INSERT INTO job_runs (id, job_id) VALUES (?, ?)", jobRunID, jobID).Error)
+	require.NoError(t, db.Exec("INSERT INTO task_runs (id, job_run_id) VALUES (?, ?)", taskRunID, jobRunID).Error)
+	require.NoError(t, db.Exec(
+		"INSERT INTO lineage_datasets (id, task_run_id, namespace, name, direction, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		uuid.New(),
+		taskRunID,
+		namespace,
+		name,
+		direction,
+		createdAt,
+	).Error)
+}
