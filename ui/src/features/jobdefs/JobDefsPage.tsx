@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml as yamlLang } from "@codemirror/lang-yaml";
 import { linter, type Diagnostic } from "@codemirror/lint";
-import { EditorView } from "@codemirror/view";
+import { EditorView, type ViewUpdate } from "@codemirror/view";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
 import { getJobDefRuntimeHints, type JobDefRuntimeHints } from "./runtimeHints";
@@ -197,52 +197,105 @@ export function JobDefsPage() {
   const [diffResult, setDiffResult] = useState<DiffResponse | null>(null);
   const [isLinting, setIsLinting] = useState(false);
   const [ackReason, setAckReason] = useState("");
-  
-  const handleYamlChange = (val: string) => {
+  const latestYamlRef = useRef(EXAMPLE_YAML);
+  const yamlVersionRef = useRef(0);
+  const validationSeqRef = useRef(0);
+  const editorViewRef = useRef<EditorView | null>(null);
+
+  const syncLatestYaml = useCallback((value: string) => {
+    if (latestYamlRef.current !== value) {
+      latestYamlRef.current = value;
+      yamlVersionRef.current += 1;
+    }
+    return yamlVersionRef.current;
+  }, []);
+
+  const currentEditorYaml = useCallback(() => (
+    editorViewRef.current?.state.doc.toString() ?? latestYamlRef.current
+  ), []);
+
+  const runValidation = useCallback(async (sourceYaml: string, sourceVersion = yamlVersionRef.current) => {
+    const validationID = validationSeqRef.current + 1;
+    validationSeqRef.current = validationID;
+    const isCurrentValidation = () => (
+      validationID === validationSeqRef.current && sourceVersion === yamlVersionRef.current
+    );
+
+    setIsLinting(true);
+    try {
+      const lr = await api.lintJobDef(sourceYaml);
+      if (!isCurrentValidation()) return;
+      setLintResult(lr);
+
+      // Only get diff if lint passes
+      if (lr.errors && lr.errors.length === 0) {
+        const dr = await api.diffJobDef(sourceYaml);
+        if (!isCurrentValidation()) return;
+        setDiffResult(dr);
+      } else {
+        setDiffResult(null);
+      }
+    } catch (err) {
+      if (!isCurrentValidation()) return;
+      // Surface YAML parse errors or network failures
+      setLintResult({
+        errors: [{ message: err instanceof Error ? err.message : "Request failed", line: 1 }],
+        warnings: [],
+        summary: { steps: 0 },
+      });
+      setDiffResult(null);
+    } finally {
+      if (isCurrentValidation()) {
+        setIsLinting(false);
+      }
+    }
+  }, []);
+
+  const handleYamlChange = useCallback((val: string) => {
+    syncLatestYaml(val);
     setYaml(val);
     setIsLinting(true);
     setAckReason("");
-  };
+  }, [syncLatestYaml]);
+
+  const handleEditorUpdate = useCallback((update: ViewUpdate) => {
+    if (update.docChanged) {
+      syncLatestYaml(update.state.doc.toString());
+    }
+  }, [syncLatestYaml]);
+
+  const handleResetExample = useCallback(() => {
+    syncLatestYaml(EXAMPLE_YAML);
+    setYaml(EXAMPLE_YAML);
+    setIsLinting(true);
+    setAckReason("");
+  }, [syncLatestYaml]);
+
+  const handleTabChange = useCallback((value: string) => {
+    setTab(value);
+    if (value !== "diff") return;
+
+    const sourceYaml = currentEditorYaml();
+    const sourceVersion = syncLatestYaml(sourceYaml);
+    if (sourceYaml !== yaml) {
+      setYaml(sourceYaml);
+      setIsLinting(true);
+      setAckReason("");
+    }
+    void runValidation(sourceYaml, sourceVersion);
+  }, [currentEditorYaml, runValidation, syncLatestYaml, yaml]);
 
   // Debounced API calls
   useEffect(() => {
-    const ac = new AbortController();
-
+    const sourceVersion = yamlVersionRef.current;
     const timer = setTimeout(async () => {
-      try {
-        const lr = await api.lintJobDef(yaml);
-        if (ac.signal.aborted) return;
-        setLintResult(lr);
-        
-        // Only get diff if lint passes
-        if (lr.errors && lr.errors.length === 0) {
-          const dr = await api.diffJobDef(yaml);
-          if (ac.signal.aborted) return;
-          setDiffResult(dr);
-        } else {
-          setDiffResult(null);
-        }
-      } catch (err) {
-        if (ac.signal.aborted) return;
-        // Surface YAML parse errors or network failures
-        setLintResult({
-          errors: [{ message: err instanceof Error ? err.message : "Request failed", line: 1 }],
-          warnings: [],
-          summary: { steps: 0 },
-        });
-        setDiffResult(null);
-      } finally {
-        if (!ac.signal.aborted) {
-          setIsLinting(false);
-        }
-      }
+      await runValidation(yaml, sourceVersion);
     }, 300);
 
     return () => {
       clearTimeout(timer);
-      ac.abort();
     };
-  }, [yaml]);
+  }, [runValidation, yaml]);
 
   const contractTeams = useMemo(() => buildContractTeamLookup(diffResult), [diffResult]);
   const contractFindings = useMemo(() => collectContractFindings(diffResult), [diffResult]);
@@ -342,7 +395,7 @@ export function JobDefsPage() {
       </div>
 
       <div className="bg-obsidian border border-graphite/50 rounded-lg p-[3px] w-fit">
-        <Tabs value={tab} onValueChange={setTab}>
+        <Tabs value={tab} onValueChange={handleTabChange}>
           <TabsList className="bg-transparent h-auto p-0 space-x-1">
             <TabsTrigger 
               value="editor" 
@@ -392,8 +445,8 @@ export function JobDefsPage() {
                     <span className="font-mono text-[10px] text-text-4">
                       {lineCount} lines <span className="mx-1">·</span> {(yaml.length / 1024).toFixed(1)} KB
                     </span>
-                    <button 
-                      onClick={() => setYaml(EXAMPLE_YAML)} 
+                    <button
+                      onClick={handleResetExample}
                       className="text-[11px] text-text-3 hover:text-text-1 transition-colors"
                     >
                       Reset example
@@ -407,6 +460,11 @@ export function JobDefsPage() {
                     height="420px"
                     extensions={[yamlLang(), customTheme, customLinter]}
                     onChange={handleYamlChange}
+                    onCreateEditor={(view) => {
+                      editorViewRef.current = view;
+                      syncLatestYaml(view.state.doc.toString());
+                    }}
+                    onUpdate={handleEditorUpdate}
                     basicSetup={{
                       lineNumbers: true,
                       foldGutter: true,

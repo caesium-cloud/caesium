@@ -4,6 +4,26 @@ import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { JobDefsPage } from "../JobDefsPage";
 
+const codeMirrorHarness = vi.hoisted(() => {
+  const state: {
+    editorText: string;
+    delayOnChange: boolean;
+    pendingOnChange?: () => void;
+  } = {
+    editorText: "",
+    delayOnChange: false,
+    pendingOnChange: undefined,
+  };
+  const view = {
+    state: {
+      doc: {
+        toString: () => state.editorText,
+      },
+    },
+  };
+  return { state, view };
+});
+
 vi.mock("@/lib/api", () => ({
   api: {
     lintJobDef: vi.fn(),
@@ -24,16 +44,36 @@ vi.mock("@uiw/react-codemirror", () => ({
   default: ({
     value,
     onChange,
+    onCreateEditor,
+    onUpdate,
   }: {
     value: string;
     onChange?: (value: string) => void;
-  }) => (
-    <textarea
-      aria-label="job.yaml editor"
-      value={value}
-      onChange={(event) => onChange?.(event.currentTarget.value)}
-    />
-  ),
+    onCreateEditor?: (view: typeof codeMirrorHarness.view, state: typeof codeMirrorHarness.view.state) => void;
+    onUpdate?: (update: { docChanged: boolean; state: typeof codeMirrorHarness.view.state }) => void;
+  }) => {
+    codeMirrorHarness.state.editorText = value;
+    onCreateEditor?.(codeMirrorHarness.view, codeMirrorHarness.view.state);
+
+    return (
+      <textarea
+        aria-label="job.yaml editor"
+        value={value}
+        onChange={(event) => {
+          const nextValue = event.currentTarget.value;
+          codeMirrorHarness.state.editorText = nextValue;
+          onUpdate?.({ docChanged: true, state: codeMirrorHarness.view.state });
+
+          const emitChange = () => onChange?.(nextValue);
+          if (codeMirrorHarness.state.delayOnChange) {
+            codeMirrorHarness.state.pendingOnChange = emitChange;
+            return;
+          }
+          emitChange();
+        }}
+      />
+    );
+  },
 }));
 
 vi.mock("@codemirror/lang-yaml", () => ({
@@ -91,6 +131,9 @@ describe("JobDefsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    codeMirrorHarness.state.editorText = "";
+    codeMirrorHarness.state.delayOnChange = false;
+    codeMirrorHarness.state.pendingOnChange = undefined;
     vi.mocked(api.lintJobDef).mockResolvedValue({
       errors: [],
       warnings: [],
@@ -201,6 +244,41 @@ steps:
     expect(screen.getAllByText("consumer: consumer").length).toBeGreaterThan(0);
     expect(screen.getAllByText("team: reporting").length).toBeGreaterThan(0);
     expect(badges[0].getAttribute("title")).toContain("missing");
+  });
+
+  it("diffs the current editor document when the tab opens before onChange settles", async () => {
+    codeMirrorHarness.state.delayOnChange = true;
+    const nextYaml = `apiVersion: v1
+kind: Job
+metadata:
+  alias: race-producer
+trigger:
+  type: cron
+  configuration:
+    cron: "0 * * * *"
+steps:
+  - name: export
+    image: alpine:3.23
+`;
+
+    render(<JobDefsPage />, { wrapper: createWrapper() });
+    await settleLintAndDiff();
+    vi.mocked(api.lintJobDef).mockClear();
+    vi.mocked(api.diffJobDef).mockClear();
+
+    fireEvent.change(screen.getByLabelText("job.yaml editor"), {
+      target: { value: nextYaml },
+    });
+    openDiffTab();
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(codeMirrorHarness.state.pendingOnChange).toBeTypeOf("function");
+    expect(api.lintJobDef).toHaveBeenCalledWith(nextYaml);
+    expect(api.diffJobDef).toHaveBeenCalledWith(nextYaml);
   });
 
   it("requires an acknowledgement reason for breaking findings and passes it to apply", async () => {

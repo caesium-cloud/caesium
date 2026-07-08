@@ -79,7 +79,9 @@ test("operator can acknowledge a breaking contract finding from the JobDefs diff
   await waitForContractEdge(request, producerAlias, consumerAlias);
 
   await page.goto("/jobdefs");
-  await page.locator(".cm-content[contenteditable='true']").fill(stringify(buildProducerDefinition(producerAlias, [])));
+  const editedProducerYaml = stringify(buildProducerDefinition(producerAlias, []));
+  await page.locator(".cm-content[contenteditable='true']").fill(editedProducerYaml);
+  await expect(page.getByText("1 step")).toBeVisible();
   await page.getByRole("tab", { name: /Diff vs server/i }).click();
 
   const breakingBadge = page.getByTestId("contract-finding-badge").filter({ hasText: "breaking" }).first();
