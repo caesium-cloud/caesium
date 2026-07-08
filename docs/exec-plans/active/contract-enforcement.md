@@ -341,7 +341,7 @@ Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork th
       denial for `/v1/contracts/graph`, `caesium_contract_findings_total{verdict}`,
       and an integration scenario that applies a producer/consumer pair, reads the
       real graph endpoint, and verifies the feature flag.
-- [ ] D2. Add the `caesium contract` Cobra group — `caesium contract graph
+- [x] D2. Add the `caesium contract` Cobra group — `caesium contract graph
       [--dataset ns/name] [--json]` (GET `/v1/contracts/graph`) and `caesium contract
       check --path jobs/ [--json]` (server-mode contract lint) — appended to the
       `cmds` slice in `cmd/execute.go` (after `cache.Cmd`); add a `--server` flag to
@@ -352,6 +352,17 @@ Reuses the existing `api/rest/controller/jobdef/` controllers — do NOT fork th
       parseable output to **stdout** via `cmd.OutOrStdout()`.
       Files: new `cmd/contract/`, `cmd/execute.go`, `cmd/job/lint.go`.
       Depends on: D1.
+      Note: W3-delta added the `caesium contract` group with `graph` and `check`
+      verbs, feature-probing `GET /v1/system/features` and failing with
+      `CAESIUM_CONTRACT_ENFORCEMENT` guidance when the gate is off. `graph --json`
+      emits the raw graph response; human graph output renders nodes and edges with
+      classes/verdicts. `check --path ... [--json]` reuses the job lint manifest
+      loader, POSTs to `/v1/jobdefs/lint`, renders only the contract findings block,
+      and exits non-zero on breaking findings. `job lint --server[=<url>] [--json]`
+      now posts to server-side lint while offline lint remains the default nil-DB
+      path; JSON uses `cmd.OutOrStdout()`. Added split-stream integration scenarios in
+      `test/contract_cli_test.go` for graph JSON, server lint JSON, and breaking
+      contract-check exit behavior.
 
 ### Stream E — Datasets `schema`/`schemaFrom` declarations
 
