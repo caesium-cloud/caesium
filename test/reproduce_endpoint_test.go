@@ -112,8 +112,16 @@ steps:
 	s.Equal("transform", desc.Baseline.TaskName)
 	s.Require().NoError(uuid.Validate(desc.Baseline.TaskID))
 	s.Equal("alpine:3.23", desc.Runtime.Image)
-	s.NotEmpty(desc.Runtime.ResolvedImageDigest, "pinDigests fixture should record a resolved image digest")
-	s.Contains(desc.Runtime.ResolvedImageDigest, "sha256:")
+	// Digest resolution is a docker-engine behavior: the podman and kubernetes
+	// lanes resolve through engine paths that legitimately fall back to the
+	// mutable tag (reproduce marks such pulls DEGRADED). Assert the recorded
+	// digest only where the resolver actually runs.
+	if s.engineType == "" || s.engineType == "docker" {
+		s.NotEmpty(desc.Runtime.ResolvedImageDigest, "pinDigests fixture should record a resolved image digest")
+		s.Contains(desc.Runtime.ResolvedImageDigest, "sha256:")
+	} else {
+		s.T().Logf("skipping resolved-digest assertion under CAESIUM_TEST_ENGINE=%s; digest recording is covered on the docker lane", s.engineType)
+	}
 	s.True(desc.Cache.PinDigests)
 	s.Equal("fixture-literal", desc.ContainerSpec.Env["LITERAL_ENV"])
 	s.Equal("vanilla", desc.Run.Params["flavor"])
