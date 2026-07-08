@@ -61,8 +61,9 @@ func Diff(c *echo.Context) error {
 		}
 		contractsvc.RecordFindings(*graph)
 		findingsByAlias = make(map[string][]contractsvc.Finding, len(desired))
+		allFindings := contractsvc.FindingsFromGraph(*graph)
 		for alias := range desired {
-			if findings := contractsvc.FindingsForAlias(*graph, alias); len(findings) > 0 {
+			if findings := contractsvc.FilterFindingsForAlias(allFindings, alias); len(findings) > 0 {
 				findingsByAlias[alias] = findings
 			}
 		}

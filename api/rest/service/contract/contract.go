@@ -74,11 +74,14 @@ func (s *Service) Graph(dataset string, incoming []schema.Definition) (*internal
 	if err != nil {
 		return nil, err
 	}
-	if s.ctx == nil {
-		s.ctx = context.Background()
+	// Local fallback only — mutating s.ctx from a pointer receiver would be a
+	// latent race across concurrent requests sharing the service value.
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	graph, err := internalcontract.NewGORMDeriver(s.db).DeriveGraph(s.ctx, incoming)
+	graph, err := internalcontract.NewGORMDeriver(s.db).DeriveGraph(ctx, incoming)
 	if err != nil {
 		return nil, err
 	}
@@ -105,13 +108,21 @@ func SummaryFromGraph(graph internalcontract.Graph) FindingsSummary {
 }
 
 func FindingsForAlias(graph internalcontract.Graph, alias string) []Finding {
+	return FilterFindingsForAlias(FindingsFromGraph(graph), alias)
+}
+
+// FilterFindingsForAlias filters an already-materialized findings list, so
+// callers iterating many aliases compute FindingsFromGraph once. The node ID
+// comes from the graph package's canonical helper rather than a duplicated
+// format string.
+func FilterFindingsForAlias(all []Finding, alias string) []Finding {
 	alias = strings.TrimSpace(alias)
 	if alias == "" {
 		return nil
 	}
-	nodeID := "job:" + alias
+	nodeID := internalcontract.JobNodeID(alias)
 	findings := make([]Finding, 0)
-	for _, finding := range FindingsFromGraph(graph) {
+	for _, finding := range all {
 		if finding.From == nodeID || finding.To == nodeID {
 			findings = append(findings, finding)
 		}
