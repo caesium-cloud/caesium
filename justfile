@@ -33,6 +33,7 @@ sock := env("CAESIUM_SOCK", default_sock)
 port := env("CAESIUM_PORT", "8080")
 auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
+contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
 agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
 agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
 
@@ -295,6 +296,7 @@ integration-test-podman: build
         -e CAESIUM_LOG_LEVEL=debug \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         --user 0:0 \
         {{ repo }}/{{ image }}:{{ tag }} start
     if docker run --rm --platform {{ platform }} \
@@ -337,6 +339,7 @@ integration-up: build-test
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
         -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
@@ -362,6 +365,7 @@ integration-up-distributed: build-test
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         -e CAESIUM_EXECUTION_MODE=distributed \
         -e CAESIUM_NODE_ADDRESS=127.0.0.1:9001 \
@@ -409,6 +413,7 @@ integration-up-agent: build-test build-triage-agent
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
         {{ local_image_ref }}:{{ tag }}-test start
 
@@ -449,6 +454,7 @@ ui-e2e: build-release
             -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
             -e CAESIUM_FRESHNESS_ENABLED=true \
             -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+            -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
             -e CAESIUM_RUN_QUEUE_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
             -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
@@ -487,6 +493,7 @@ ui-e2e-auth: build-release
         -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
         -e CAESIUM_FRESHNESS_ENABLED=true \
         -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
         -e CAESIUM_AGENT_REMEDIATION_ENABLED=true \
         --user 0:0 {{ local_image_ref }}:{{ tag }} start >/dev/null
     tries=0

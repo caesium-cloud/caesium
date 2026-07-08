@@ -150,6 +150,16 @@ func (s *EnvTestSuite) TestAgentRemediationSatisfiedBySSO() {
 	assert.NoError(s.T(), Process())
 }
 
+func (s *EnvTestSuite) TestContractDeprecationWindowValidatedOnlyWhenEnforcementEnabled() {
+	s.T().Setenv("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "0s")
+	assert.NoError(s.T(), Process())
+
+	s.T().Setenv("CAESIUM_CONTRACT_ENFORCEMENT", "fail")
+	err := Process()
+	s.Require().Error(err)
+	assert.Contains(s.T(), err.Error(), "CAESIUM_CONTRACT_DEPRECATION_WINDOW")
+}
+
 func (s *EnvTestSuite) TestProcessInvalidTypeFailure() {
 	s.T().Setenv("CAESIUM_PORT", "not_a_port")
 	assert.NotNil(s.T(), Process())

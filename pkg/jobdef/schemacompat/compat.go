@@ -64,6 +64,9 @@ type Finding struct {
 	Kind FindingKind `json:"kind"`
 	// Path is the dotted JSON path to the relevant schema node.
 	Path string `json:"path"`
+	// Key is the concrete offending object property/output key when the walker
+	// can identify one.
+	Key string `json:"key,omitempty"`
 	// Detail is a human-readable explanation of the finding.
 	Detail string `json:"detail"`
 	// Verdict is the tri-state compatibility decision for this finding.
@@ -906,10 +909,20 @@ func (p schemaPath) string() string {
 	return strings.Join(p, ".")
 }
 
+func (p schemaPath) key() string {
+	for i := len(p) - 2; i >= 0; i-- {
+		if p[i] == "properties" {
+			return p[i+1]
+		}
+	}
+	return ""
+}
+
 func finding(kind FindingKind, path schemaPath, verdict Verdict, format string, args ...any) Finding {
 	return Finding{
 		Kind:    kind,
 		Path:    path.string(),
+		Key:     path.key(),
 		Detail:  fmt.Sprintf(format, args...),
 		Verdict: verdict,
 	}

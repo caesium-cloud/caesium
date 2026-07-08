@@ -1220,6 +1220,7 @@ func inferredFindings(producer Job, refs []outputRef) []schemacompat.Finding {
 			findings = append(findings, schemacompat.Finding{
 				Kind:    schemacompat.FindingKindRequirementUnsatisfied,
 				Path:    paramMappingFindingPath(ref.paramName),
+				Key:     ref.key,
 				Detail:  fmt.Sprintf("paramMapping %q references %s output key %q from producer %s step %q, but that key is missing from the step outputSchema", ref.paramName, ref.jsonPath, ref.key, producer.Alias, step.Name),
 				Verdict: schemacompat.VerdictBreaking,
 			})
@@ -1236,6 +1237,7 @@ func inferredFindings(producer Job, refs []outputRef) []schemacompat.Finding {
 		findings = append(findings, schemacompat.Finding{
 			Kind:    kind,
 			Path:    paramMappingFindingPath(ref.paramName),
+			Key:     ref.key,
 			Detail:  detail,
 			Verdict: schemacompat.VerdictUnknown,
 		})
@@ -1256,6 +1258,7 @@ func unknownProducerFindings(producerAlias string, consumer Job, refs []outputRe
 		findings = append(findings, schemacompat.Finding{
 			Kind:    schemacompat.FindingKindRequirementUnknown,
 			Path:    paramMappingFindingPath(ref.paramName),
+			Key:     ref.key,
 			Detail:  fmt.Sprintf("paramMapping %q on %s references %s from producer %s, but that producer is not present in the merged job set; cannot prove the output key %q exists", ref.paramName, consumer.Alias, ref.jsonPath, producerAlias, ref.key),
 			Verdict: schemacompat.VerdictUnknown,
 		})

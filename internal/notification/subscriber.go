@@ -20,6 +20,7 @@ var notifiableTypes = []event.Type{
 	event.TypeSLAMissed,
 	event.TypeRunCompleted,
 	event.TypeTaskSucceeded,
+	event.TypeContractBreakDeclared,
 }
 
 // Subscriber listens to the event bus and dispatches notifications

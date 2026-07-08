@@ -37,6 +37,10 @@ config:
     # (mirrors the justfile lanes and the ci.yml docker-run server blocks).
     - name: CAESIUM_CONTRACT_ENFORCEMENT
       value: fail
+    # Short deprecation window so the ack-expiry lifecycle scenario is
+    # deterministic here too (mirrors the justfile/ci.yml server blocks).
+    - name: CAESIUM_CONTRACT_DEPRECATION_WINDOW
+      value: 5s
 
 kubernetes:
   engine:

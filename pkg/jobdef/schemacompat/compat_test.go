@@ -315,6 +315,26 @@ func TestCompareBothAdditionalPropertiesFalse(t *testing.T) {
 	require.Empty(t, findings)
 }
 
+func TestFindingKeyIsPopulatedForConcreteProperties(t *testing.T) {
+	findings := Compare(
+		objectSchema(
+			[]any{"customer_id"},
+			map[string]any{"customer_id": map[string]any{"type": "string"}},
+		),
+		objectSchema(
+			nil,
+			map[string]any{"customer_id": map[string]any{"type": "string"}},
+		),
+	)
+	requireContainsFindingKey(t, findings, FindingKindRequiredRemoved, "properties.customer_id", "customer_id")
+
+	findings = Compare(
+		objectSchema(nil, map[string]any{"tier": map[string]any{"type": "string", "enum": []any{"free", "pro"}}}),
+		objectSchema(nil, map[string]any{"tier": map[string]any{"type": "string", "enum": []any{"pro"}}}),
+	)
+	requireContainsFindingKey(t, findings, FindingKindEnumValuesRemoved, "properties.tier.enum", "tier")
+}
+
 func TestSatisfies(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -441,4 +461,16 @@ func requireContainsFinding(t *testing.T, findings []Finding, kind FindingKind, 
 		}
 	}
 	require.Failf(t, "missing finding", "kind=%s path=%s verdict=%s findings=%#v", kind, path, verdict, findings)
+}
+
+func requireContainsFindingKey(t *testing.T, findings []Finding, kind FindingKind, path, key string) {
+	t.Helper()
+
+	for _, finding := range findings {
+		if finding.Kind == kind && finding.Path == path {
+			require.Equal(t, key, finding.Key)
+			return
+		}
+	}
+	require.Failf(t, "missing finding", "kind=%s path=%s key=%s findings=%#v", kind, path, key, findings)
 }
