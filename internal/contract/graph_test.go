@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -8,6 +9,8 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/jobdef/schemacompat"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 func TestDeriveGraphInferredEdgeReportsMissingMappedOutput(t *testing.T) {
@@ -128,6 +131,62 @@ func TestDeriveGraphInferredUnknownProducerAliasWarns(t *testing.T) {
 	require.Contains(t, edge.Findings[0].Detail, "not present in the merged job set")
 }
 
+func TestDeriveGraphUnscopedLifecyclePatternFansOutToKnownJobs(t *testing.T) {
+	producerA := Job{
+		Alias: "producer-a",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	producerB := Job{
+		Alias: "producer-b",
+		Steps: []Step{{
+			Name:         "extract",
+			OutputSchema: outputSchemaWithProperties("row_count"),
+		}},
+	}
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTriggerWithFilter(map[string]any{}, map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{producerA, producerB, consumer}})
+	require.NoError(t, err)
+
+	edgeA := requireEdge(t, graph, EdgeClassInferred, "job:producer-a", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictCompatible, edgeA.Verdict)
+	require.Empty(t, edgeA.Findings)
+
+	edgeB := requireEdge(t, graph, EdgeClassInferred, "job:producer-b", "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictCompatible, edgeB.Verdict)
+	require.Empty(t, edgeB.Findings)
+	require.Len(t, graph.Edges, 2)
+}
+
+func TestDeriveGraphUnknownJobIDFilterWarns(t *testing.T) {
+	missingJobID := uuid.New()
+	consumer := Job{
+		Alias: "consumer",
+		Trigger: eventTriggerWithFilter(map[string]any{"job_id": missingJobID.String()}, map[string]string{
+			"rows": "$.tasks[0].output.row_count",
+		}),
+	}
+
+	graph, err := DeriveGraph(DeriveInput{Jobs: []Job{consumer}})
+	require.NoError(t, err)
+
+	edge := requireEdge(t, graph, EdgeClassInferred, "job:"+missingJobID.String(), "job:consumer", "")
+	require.Equal(t, schemacompat.VerdictUnknown, edge.Verdict)
+	require.Len(t, edge.Findings, 1)
+	require.Equal(t, schemacompat.FindingKindRequirementUnknown, edge.Findings[0].Kind)
+	require.Contains(t, edge.Findings[0].Detail, missingJobID.String())
+	require.Contains(t, edge.Findings[0].Detail, "not present in the merged job set")
+	requireJobNode(t, graph, missingJobID.String())
+}
+
 func TestDeriveGraphEvidenceEdgesAggregateLastSeen(t *testing.T) {
 	producerID := uuid.New()
 	consumerID := uuid.New()
@@ -166,6 +225,34 @@ func TestDeriveGraphEvidenceEdgesAggregateLastSeen(t *testing.T) {
 	require.NotNil(t, edge.LastSeen)
 	require.Equal(t, newer, *edge.LastSeen)
 	requireDatasetNode(t, graph, "lake/customers")
+}
+
+func TestGORMStoreListContractEvidenceAggregatesBeforeJoining(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+uuid.NewString()+"?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	createContractEvidenceTables(t, db)
+
+	producerJobID := uuid.New()
+	consumerJobID := uuid.New()
+	insertEvidenceJob(t, db, producerJobID, "producer")
+	insertEvidenceJob(t, db, consumerJobID, "consumer")
+
+	olderConsumerSeen := time.Date(2026, 7, 7, 10, 0, 0, 0, time.UTC)
+	newerConsumerSeen := olderConsumerSeen.Add(2 * time.Hour)
+	insertEvidenceDataset(t, db, producerJobID, "lake", "customers", "output", olderConsumerSeen.Add(-2*time.Hour))
+	insertEvidenceDataset(t, db, producerJobID, "lake", "customers", "output", olderConsumerSeen.Add(-time.Hour))
+	insertEvidenceDataset(t, db, consumerJobID, "lake", "customers", "input", olderConsumerSeen)
+	insertEvidenceDataset(t, db, consumerJobID, "lake", "customers", "input", newerConsumerSeen)
+
+	records, err := (GORMStore{DB: db}).ListContractEvidence(context.Background())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	require.Equal(t, producerJobID, records[0].ProducerJobID)
+	require.Equal(t, "producer", records[0].ProducerJobAlias)
+	require.Equal(t, consumerJobID, records[0].ConsumerJobID)
+	require.Equal(t, "consumer", records[0].ConsumerJobAlias)
+	require.Equal(t, DatasetRef{Namespace: "lake", Name: "customers"}, records[0].Dataset)
+	require.WithinDuration(t, newerConsumerSeen, records[0].LastSeen, time.Second)
 }
 
 func TestDeriveGraphInferredEdgeResolvesJobIDFilter(t *testing.T) {
@@ -255,4 +342,44 @@ func requireDatasetNode(t *testing.T, graph Graph, dataset string) {
 		}
 	}
 	t.Fatalf("dataset node %q not found in %#v", dataset, graph.Nodes)
+}
+
+func requireJobNode(t *testing.T, graph Graph, alias string) {
+	t.Helper()
+	for _, node := range graph.Nodes {
+		if node.Kind == NodeKindJob && node.Alias == alias {
+			return
+		}
+	}
+	t.Fatalf("job node %q not found in %#v", alias, graph.Nodes)
+}
+
+func createContractEvidenceTables(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	require.NoError(t, db.Exec("CREATE TABLE jobs (id text PRIMARY KEY, alias text NOT NULL, deleted_at datetime)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE job_runs (id text PRIMARY KEY, job_id text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE task_runs (id text PRIMARY KEY, job_run_id text NOT NULL)").Error)
+	require.NoError(t, db.Exec("CREATE TABLE lineage_datasets (id text PRIMARY KEY, task_run_id text NOT NULL, namespace text NOT NULL, name text NOT NULL, direction text NOT NULL, created_at datetime NOT NULL)").Error)
+}
+
+func insertEvidenceJob(t *testing.T, db *gorm.DB, jobID uuid.UUID, alias string) {
+	t.Helper()
+	require.NoError(t, db.Exec("INSERT INTO jobs (id, alias, deleted_at) VALUES (?, ?, NULL)", jobID, alias).Error)
+}
+
+func insertEvidenceDataset(t *testing.T, db *gorm.DB, jobID uuid.UUID, namespace, name, direction string, createdAt time.Time) {
+	t.Helper()
+	jobRunID := uuid.New()
+	taskRunID := uuid.New()
+	require.NoError(t, db.Exec("INSERT INTO job_runs (id, job_id) VALUES (?, ?)", jobRunID, jobID).Error)
+	require.NoError(t, db.Exec("INSERT INTO task_runs (id, job_run_id) VALUES (?, ?)", taskRunID, jobRunID).Error)
+	require.NoError(t, db.Exec(
+		"INSERT INTO lineage_datasets (id, task_run_id, namespace, name, direction, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+		uuid.New(),
+		taskRunID,
+		namespace,
+		name,
+		direction,
+		createdAt,
+	).Error)
 }

@@ -3,6 +3,7 @@ package contract
 import (
 	"bytes"
 	"context"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -142,31 +143,48 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 		ConsumerJobAlias string    `gorm:"column:consumer_job_alias"`
 		Namespace        string    `gorm:"column:namespace"`
 		Name             string    `gorm:"column:name"`
-		LastSeen         time.Time `gorm:"column:last_seen"`
+		LastSeen         sqlTime   `gorm:"column:last_seen"`
 	}
 	var rows []evidenceRow
 
+	lineageJobDatasetAggregate := func() *gorm.DB {
+		return s.DB.WithContext(ctx).
+			Table("lineage_datasets AS ld").
+			Select(
+				"job_runs.job_id AS job_id," +
+					" jobs.alias AS job_alias," +
+					" ld.namespace AS namespace," +
+					" ld.name AS name," +
+					" ld.direction AS direction," +
+					" MAX(ld.created_at) AS last_seen",
+			).
+			Joins("JOIN task_runs ON task_runs.id = ld.task_run_id").
+			Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
+			Joins("JOIN jobs ON jobs.id = job_runs.job_id AND jobs.deleted_at IS NULL").
+			Group("job_runs.job_id, jobs.alias, ld.namespace, ld.name, ld.direction")
+	}
+
 	err := s.DB.WithContext(ctx).
-		Table("lineage_datasets AS producer_ld").
+		Table("(?) AS producer", lineageJobDatasetAggregate()).
 		Select(
-			"producer_job.id AS producer_job_id,"+
-				" producer_job.alias AS producer_job_alias,"+
-				" consumer_job.id AS consumer_job_id,"+
-				" consumer_job.alias AS consumer_job_alias,"+
-				" producer_ld.namespace AS namespace,"+
-				" producer_ld.name AS name,"+
-				" MAX(consumer_ld.created_at) AS last_seen",
+			"producer.job_id AS producer_job_id,"+
+				" producer.job_alias AS producer_job_alias,"+
+				" consumer.job_id AS consumer_job_id,"+
+				" consumer.job_alias AS consumer_job_alias,"+
+				" producer.namespace AS namespace,"+
+				" producer.name AS name,"+
+				" consumer.last_seen AS last_seen",
 		).
-		Joins("JOIN task_runs producer_task_run ON producer_task_run.id = producer_ld.task_run_id").
-		Joins("JOIN job_runs producer_job_run ON producer_job_run.id = producer_task_run.job_run_id").
-		Joins("JOIN jobs producer_job ON producer_job.id = producer_job_run.job_id AND producer_job.deleted_at IS NULL").
-		Joins("JOIN lineage_datasets consumer_ld ON consumer_ld.namespace = producer_ld.namespace AND consumer_ld.name = producer_ld.name AND consumer_ld.direction = 'input'").
-		Joins("JOIN task_runs consumer_task_run ON consumer_task_run.id = consumer_ld.task_run_id").
-		Joins("JOIN job_runs consumer_job_run ON consumer_job_run.id = consumer_task_run.job_run_id").
-		Joins("JOIN jobs consumer_job ON consumer_job.id = consumer_job_run.job_id AND consumer_job.deleted_at IS NULL").
-		Where("producer_ld.direction = ?", "output").
-		Where("producer_job.id <> consumer_job.id").
-		Group("producer_job.id, producer_job.alias, consumer_job.id, consumer_job.alias, producer_ld.namespace, producer_ld.name").
+		Joins(
+			"JOIN (?) AS consumer ON consumer.namespace = producer.namespace"+
+				" AND consumer.name = producer.name"+
+				" AND producer.direction = ?"+
+				" AND consumer.direction = ?"+
+				" AND producer.job_id <> consumer.job_id",
+			lineageJobDatasetAggregate(),
+			"output",
+			"input",
+		).
 		Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -183,11 +201,62 @@ func (s GORMStore) ListContractEvidence(ctx context.Context) ([]EvidenceRecord, 
 				Namespace: strings.TrimSpace(row.Namespace),
 				Name:      strings.TrimSpace(row.Name),
 			},
-			LastSeen: row.LastSeen,
+			LastSeen: row.LastSeen.Time,
 		})
 	}
 	sortEvidence(records)
 	return records, nil
+}
+
+type sqlTime struct {
+	time.Time
+}
+
+func (t *sqlTime) Scan(value any) error {
+	switch v := value.(type) {
+	case time.Time:
+		t.Time = v
+		return nil
+	case string:
+		return t.scanString(v)
+	case []byte:
+		return t.scanString(string(v))
+	case nil:
+		t.Time = time.Time{}
+		return nil
+	default:
+		return fmt.Errorf("unsupported timestamp value %T", value)
+	}
+}
+
+func (t sqlTime) Value() (driver.Value, error) {
+	if t.Time.IsZero() {
+		return nil, nil
+	}
+	return t.Time, nil
+}
+
+func (t *sqlTime) scanString(value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		t.Time = time.Time{}
+		return nil
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05.999999999Z07:00",
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05-07:00",
+		"2006-01-02 15:04:05",
+	} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			t.Time = parsed
+			return nil
+		}
+	}
+	return fmt.Errorf("parse timestamp %q", value)
 }
 
 // DeriveGraph derives a contract graph from already-loaded jobs and lineage
@@ -275,6 +344,7 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 		return nil, err
 	}
 
+	eligibleRows := make([]jobRow, 0, len(rows))
 	jobIDs := make([]uuid.UUID, 0, len(rows))
 	for _, row := range rows {
 		alias := strings.TrimSpace(row.Alias)
@@ -287,6 +357,8 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 		if _, replaced := incomingJobIDs[row.ID]; replaced {
 			continue
 		}
+		row.Alias = alias
+		eligibleRows = append(eligibleRows, row)
 		jobIDs = append(jobIDs, row.ID)
 	}
 
@@ -295,26 +367,15 @@ func (s GORMStore) persistedContractJobs(ctx context.Context, incomingAliases ma
 		return nil, err
 	}
 
-	jobs := make([]Job, 0, len(rows))
-	for _, row := range rows {
-		alias := strings.TrimSpace(row.Alias)
-		if alias == "" {
-			continue
-		}
-		if _, replaced := incomingAliases[alias]; replaced {
-			continue
-		}
-		if _, replaced := incomingJobIDs[row.ID]; replaced {
-			continue
-		}
-
+	jobs := make([]Job, 0, len(eligibleRows))
+	for _, row := range eligibleRows {
 		cfg, err := parseJSONMap(row.Configuration)
 		if err != nil {
-			return nil, fmt.Errorf("existing trigger %s configuration: %w", alias, err)
+			return nil, fmt.Errorf("existing trigger %s configuration: %w", row.Alias, err)
 		}
 		jobs = append(jobs, Job{
 			ID:     row.ID,
-			Alias:  alias,
+			Alias:  row.Alias,
 			Labels: stringLabels(row.Labels),
 			Trigger: Trigger{
 				Type:          strings.TrimSpace(row.TriggerType),
@@ -581,7 +642,10 @@ func triggerChainPatternSourceAlias(pattern triggerChainPattern, aliasByJobID ma
 
 	resolvedAlias := aliasByJobID[sourceJobID]
 	if sourceAlias == "" {
-		return resolvedAlias, true
+		if resolvedAlias != "" {
+			return resolvedAlias, true
+		}
+		return sourceJobID, true
 	}
 	if resolvedAlias != "" && resolvedAlias != sourceAlias {
 		return "", true
@@ -761,10 +825,6 @@ func verdictForFindings(findings []schemacompat.Finding, defaultVerdict schemaco
 			return schemacompat.VerdictBreaking
 		case schemacompat.VerdictUnknown:
 			verdict = schemacompat.VerdictUnknown
-		case schemacompat.VerdictCompatible:
-			if verdict == "" {
-				verdict = schemacompat.VerdictCompatible
-			}
 		}
 	}
 	return verdict
