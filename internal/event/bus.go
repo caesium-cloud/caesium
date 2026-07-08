@@ -58,6 +58,10 @@ const (
 	// manager would otherwise never see the violation. In "fail" mode the task
 	// failure already carries the violations, so no separate event is emitted.
 	TypeSchemaViolationRecorded Type = "schema_violation_recorded"
+	// TypeContractBreakDeclared is emitted when an operator intentionally
+	// acknowledges a breaking cross-job data contract for a bounded
+	// deprecation window.
+	TypeContractBreakDeclared Type = "contract_break_declared"
 
 	// Incident lifecycle events (agent-in-the-loop D2). Emitted on the existing
 	// /events stream so the Console incidents surface (Stream U) can live-update

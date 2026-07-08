@@ -201,6 +201,7 @@ func TestValidEventTypes(t *testing.T) {
 		event.TypeSLAMissed,
 		event.TypeRunCompleted,
 		event.TypeTaskSucceeded,
+		event.TypeContractBreakDeclared,
 	}
 
 	for _, et := range expected {
@@ -277,11 +278,11 @@ func TestIsTimeoutError(t *testing.T) {
 
 func TestParseSLA(t *testing.T) {
 	tests := []struct {
-		name        string
-		input       json.RawMessage
-		wantNil     bool
-		wantDur     time.Duration
-		wantCompBy  string
+		name       string
+		input      json.RawMessage
+		wantNil    bool
+		wantDur    time.Duration
+		wantCompBy string
 	}{
 		{
 			name:    "nil input",
@@ -429,9 +430,9 @@ func TestRunMetSLA_BoundaryConditions(t *testing.T) {
 	windowStart := deadline.Add(-24 * time.Hour)
 
 	tests := []struct {
-		name     string
-		complAt  time.Time
-		want     bool
+		name    string
+		complAt time.Time
+		want    bool
 	}{
 		{"exactly at deadline", deadline, true},
 		{"exactly at window start", windowStart, true},

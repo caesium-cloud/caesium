@@ -292,7 +292,7 @@ Plus the two-sided intentional-break escape hatch.
       `internal/metrics/metrics.go`.
       Depends on: A1 + B1.
       Note: W2-γ landed the catalog-only `ContractAck` model, `CAESIUM_CONTRACT_ENFORCEMENT`/`CAESIUM_CONTRACT_DEPRECATION_WINDOW`, fail/warn apply-time enforcement inside the importer transaction, the HTTP 409 payload, `caesium_contract_breaks_blocked_total{dataset}`, and the paramMapping + happy-path integration scenarios. The C1 edge-set digest is `sha256` hex over JSON `{version:1, subject, edges[]}`, with `edges[]` sorted by producer, consumer, edge ID, path, and detail and carrying edge class, dataset/output key, consumer team, path/detail, and verdict.
-- [ ] C2. Add the intentional-break escape hatch: `caesium job apply
+- [x] C2. Add the intentional-break escape hatch: `caesium job apply
       --allow-breaking dataset=<name> [--reason ...]` records a `ContractAck` row
       (actor, edge-set digest, `deprecationUntil`); during the window the enforcement
       check downgrades to `warn` for the acknowledged digest only, and consumers'
@@ -308,6 +308,7 @@ Plus the two-sided intentional-break escape hatch.
       `internal/contract/enforce.go`, `internal/notification/subscriber.go`,
       `api/rest/controller/jobdef/apply.go`.
       Depends on: C1.
+      Note: W3-gamma landed `--allow-breaking dataset=<name> [--reason ...]` through the CLI/apply API/importer transaction, digest-scoped `ContractAck` creation, active-window warnings for producer and consumer applies, expiry-by-check-time re-blocking, and `contract_break_declared` notification events for impacted consumers. The required hardening items also landed: digest v2 drops `ConsumerTeam`, `schemacompat.Finding.Key` replaces free-text output-key parsing with fallback compatibility, `caesium_contract_breaks_blocked_total` now labels `subject`, and `CAESIUM_CONTRACT_DEPRECATION_WINDOW` validation is scoped to enforcement-enabled configs.
 
 ### Stream D — REST + CLI operator surface
 

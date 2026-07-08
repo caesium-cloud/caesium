@@ -54,12 +54,13 @@ func validate() error {
 	default:
 		return fmt.Errorf("CAESIUM_WAKEUP_FANOUT_MODE must be one of: full, gossip")
 	}
-	switch strings.ToLower(strings.TrimSpace(variables.ContractEnforcement)) {
+	contractMode := strings.ToLower(strings.TrimSpace(variables.ContractEnforcement))
+	switch contractMode {
 	case "", "warn", "fail":
 	default:
 		return fmt.Errorf("CAESIUM_CONTRACT_ENFORCEMENT must be one of: \"\", warn, fail")
 	}
-	if variables.ContractDeprecationWindow <= 0 {
+	if contractMode != "" && variables.ContractDeprecationWindow <= 0 {
 		return fmt.Errorf("CAESIUM_CONTRACT_DEPRECATION_WINDOW must be greater than 0")
 	}
 

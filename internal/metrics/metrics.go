@@ -282,7 +282,7 @@ var (
 			Name: "caesium_contract_breaks_blocked_total",
 			Help: "Total apply-time contract breaks blocked by dataset or output-key subject.",
 		},
-		[]string{"dataset"},
+		[]string{"subject"},
 	)
 
 	// Auth metrics

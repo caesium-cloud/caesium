@@ -28,6 +28,8 @@ var (
 	applyProvenanceRef      string
 	applyProvenanceCommit   string
 	applyProvenancePath     string
+	applyAllowBreaking      string
+	applyReason             string
 )
 
 var applyCmd = &cobra.Command{
@@ -45,8 +47,19 @@ var applyCmd = &cobra.Command{
 			return nil
 		}
 
-		if err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune, applyProvenanceFromFlags()); err != nil {
+		allowBreaking, err := allowBreakingFromFlags()
+		if err != nil {
 			return err
+		}
+
+		resp, err := sendApplyRequest(cmd.Context(), strings.TrimSuffix(applyServer, "/"), defs, applyForce, applyPrune, applyProvenanceFromFlags(), allowBreaking)
+		if err != nil {
+			return err
+		}
+		for _, warning := range resp.ContractWarnings {
+			if _, err := fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message); err != nil {
+				return err
+			}
 		}
 
 		if _, err := fmt.Fprintf(cmd.OutOrStdout(), "Applied %d job definition(s)\n", len(defs)); err != nil {
@@ -66,6 +79,8 @@ func init() {
 	applyCmd.Flags().StringVar(&applyProvenanceRef, "provenance-ref", "", "Record the repository ref that produced the applied definitions")
 	applyCmd.Flags().StringVar(&applyProvenanceCommit, "provenance-commit", "", "Record the commit that produced the applied definitions")
 	applyCmd.Flags().StringVar(&applyProvenancePath, "provenance-path", "", "Record the manifest path that produced the applied definitions")
+	applyCmd.Flags().StringVar(&applyAllowBreaking, "allow-breaking", "", "Acknowledge an intentional breaking contract change (grammar: dataset=<name>)")
+	applyCmd.Flags().StringVar(&applyReason, "reason", "", "Reason recorded with --allow-breaking")
 	Cmd.AddCommand(applyCmd)
 }
 
@@ -148,38 +163,68 @@ func applyProvenanceFromFlags() *jobdefsvc.ApplyProvenance {
 	return prov
 }
 
-func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool, provenance *jobdefsvc.ApplyProvenance) error {
+func allowBreakingFromFlags() (*jobdefsvc.AllowBreakingRequest, error) {
+	raw := strings.TrimSpace(applyAllowBreaking)
+	reason := strings.TrimSpace(applyReason)
+	if raw == "" {
+		if reason != "" {
+			return nil, errors.New("--reason requires --allow-breaking dataset=<name>")
+		}
+		return nil, nil
+	}
+	key, value, ok := strings.Cut(raw, "=")
+	if !ok || strings.TrimSpace(key) != "dataset" || strings.TrimSpace(value) == "" {
+		return nil, errors.New(`--allow-breaking must use grammar dataset=<name>`)
+	}
+	return &jobdefsvc.AllowBreakingRequest{
+		Dataset: strings.TrimSpace(value),
+		Reason:  reason,
+	}, nil
+}
+
+func sendApplyRequest(ctx context.Context, server string, defs []schema.Definition, force, prune bool, provenance *jobdefsvc.ApplyProvenance, allowBreaking *jobdefsvc.AllowBreakingRequest) (*jobdefsvc.ApplyResponse, error) {
 	reqBody := jobdefsvc.ApplyRequest{
-		Definitions: defs,
-		Force:       force,
-		Prune:       prune,
-		Provenance:  provenance,
+		Definitions:   defs,
+		Force:         force,
+		Prune:         prune,
+		Provenance:    provenance,
+		AllowBreaking: allowBreaking,
 	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, server+"/v1/jobdefs/apply", bytes.NewReader(payload))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() {
 		_ = resp.Body.Close()
 	}()
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode >= http.StatusBadRequest {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("apply failed: %s", strings.TrimSpace(string(body)))
+		return nil, fmt.Errorf("apply failed: %s", strings.TrimSpace(string(body)))
 	}
 
-	return nil
+	var applyResp jobdefsvc.ApplyResponse
+	if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &applyResp); err != nil {
+			return nil, err
+		}
+	}
+
+	return &applyResp, nil
 }
 
 func isYAML(path string) bool {

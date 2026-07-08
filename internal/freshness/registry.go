@@ -8,6 +8,7 @@ package freshness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -84,6 +85,10 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 			if name == "" {
 				continue
 			}
+			schemaJSON, err := marshalInlineSchema(p.Schema)
+			if err != nil {
+				return nil, fmt.Errorf("steps[%d].datasets.produces[%d].schema: %w", i, j, err)
+			}
 			watermarkKey := ""
 			if p.Watermark != nil {
 				watermarkKey = strings.TrimSpace(p.Watermark.Key)
@@ -95,16 +100,24 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				StepName:      step.Name,
 				Name:          name,
 				Direction:     models.DatasetDirectionProduces,
+				SchemaJSON:    schemaJSON,
+				SchemaFrom:    strings.TrimSpace(p.SchemaFrom),
+				SchemaVersion: p.Version,
 				Freshness:     strings.TrimSpace(p.Freshness),
 				MaxStaleness:  strings.TrimSpace(p.MaxStaleness),
 				WatermarkKey:  watermarkKey,
 				SkipWhenFresh: skipWhenFreshPtr,
 			})
 		}
-		for _, consumed := range step.Datasets.Consumes {
+		for j := range step.Datasets.Consumes {
+			consumed := &step.Datasets.Consumes[j]
 			name := strings.TrimSpace(consumed.Name)
 			if name == "" {
 				continue
+			}
+			schemaJSON, err := marshalInlineSchema(consumed.Schema)
+			if err != nil {
+				return nil, fmt.Errorf("steps[%d].datasets.consumes[%d].schema: %w", i, j, err)
 			}
 			decls = append(decls, models.DatasetDeclaration{
 				ID:            uuid.New(),
@@ -113,12 +126,24 @@ func BuildDeclarations(def *schema.Definition, jobID uuid.UUID, jobAlias string)
 				StepName:      step.Name,
 				Name:          name,
 				Direction:     models.DatasetDirectionConsumes,
+				SchemaJSON:    schemaJSON,
 				SkipWhenFresh: skipWhenFreshPtr,
 			})
 		}
 	}
 
 	return decls, nil
+}
+
+func marshalInlineSchema(value map[string]any) (string, error) {
+	if len(value) == 0 {
+		return "", nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 func boolPtr(value bool) *bool {

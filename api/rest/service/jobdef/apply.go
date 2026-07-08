@@ -1,12 +1,16 @@
 package jobdef
 
-import schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+import (
+	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
+	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
+)
 
 type ApplyRequest struct {
-	Definitions []schema.Definition `json:"definitions"`
-	Force       bool                `json:"force,omitempty"`
-	Prune       bool                `json:"prune,omitempty"`
-	Provenance  *ApplyProvenance    `json:"provenance,omitempty"`
+	Definitions   []schema.Definition   `json:"definitions"`
+	Force         bool                  `json:"force,omitempty"`
+	Prune         bool                  `json:"prune,omitempty"`
+	Provenance    *ApplyProvenance      `json:"provenance,omitempty"`
+	AllowBreaking *AllowBreakingRequest `json:"allow_breaking,omitempty"`
 }
 
 // ApplyProvenance lets a non-git-sync apply (e.g. a CI/CD pipeline) record the
@@ -28,6 +32,14 @@ type ApplyProvenance struct {
 }
 
 type ApplyResponse struct {
-	Applied int `json:"applied"`
-	Pruned  int `json:"pruned,omitempty"`
+	Applied          int                               `json:"applied"`
+	Pruned           int                               `json:"pruned,omitempty"`
+	ContractWarnings []contractenforce.ContractWarning `json:"contract_warnings,omitempty"`
+}
+
+// AllowBreakingRequest requests a bounded contract-break acknowledgement for
+// one declared dataset or inferred producer.output.<key> subject.
+type AllowBreakingRequest struct {
+	Dataset string `json:"dataset"`
+	Reason  string `json:"reason,omitempty"`
 }

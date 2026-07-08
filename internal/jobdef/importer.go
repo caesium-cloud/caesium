@@ -16,6 +16,7 @@ import (
 	"time"
 
 	contractenforce "github.com/caesium-cloud/caesium/internal/contract"
+	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/freshness"
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -35,6 +36,7 @@ var (
 	ErrProvenanceConflict = errors.New("job definition provenance conflict")
 	ErrJobRunning         = errors.New("job has a running run")
 	ErrContractBreak      = contractenforce.ErrContractBreakBlocked
+	ErrContractAck        = contractenforce.ErrInvalidContractAck
 
 	importerBusyRetryBackoffs = []time.Duration{
 		10 * time.Millisecond,
@@ -92,8 +94,10 @@ func (i *Importer) Apply(ctx context.Context, def *schema.Definition) (*models.J
 
 // ApplyOptions control optional behaviors for ApplyWithOptions.
 type ApplyOptions struct {
-	Provenance *Provenance
-	Force      bool
+	Provenance       *Provenance
+	Force            bool
+	ContractAck      *contractenforce.AllowBreaking
+	ContractWarnings *[]contractenforce.ContractWarning
 }
 
 // PruneOptions scope the set of jobs that should be retired when pruning.
@@ -159,7 +163,7 @@ func (i *Importer) ApplyWithOptions(ctx context.Context, def *schema.Definition,
 			if err := i.reconcileDatasetDeclarationsTx(tx, jobModel, def); err != nil {
 				return err
 			}
-			if err := i.enforceContractsTx(ctx, tx, def); err != nil {
+			if err := i.enforceContractsWithOptionsTx(ctx, tx, def, opts); err != nil {
 				return err
 			}
 			if err := i.softDeleteAtomsTx(tx, retiredAtomIDs); err != nil {
@@ -193,12 +197,27 @@ func ContractBreakResponse(err error) (any, bool) {
 	return enforcementErr.Response, true
 }
 
-func (i *Importer) enforceContractsTx(ctx context.Context, tx *gorm.DB, def *schema.Definition) error {
-	mode := env.Variables().ContractEnforcement
+func (i *Importer) enforceContractsWithOptionsTx(ctx context.Context, tx *gorm.DB, def *schema.Definition, opts *ApplyOptions) error {
+	vars := env.Variables()
+	mode := vars.ContractEnforcement
 	if strings.TrimSpace(mode) == "" {
 		return nil
 	}
-	return contractenforce.EnforceApply(ctx, tx, []schema.Definition{*def}, mode, time.Now().UTC())
+	enforceOpts := contractenforce.ApplyOptions{
+		DeprecationWindow: vars.ContractDeprecationWindow,
+		EventStore:        event.NewStore(i.db),
+	}
+	if opts != nil {
+		enforceOpts.AllowBreaking = opts.ContractAck
+	}
+	result, err := contractenforce.EnforceApplyWithOptions(ctx, tx, []schema.Definition{*def}, mode, time.Now().UTC(), enforceOpts)
+	if err != nil {
+		return err
+	}
+	if opts != nil && opts.ContractWarnings != nil && len(result.Warnings) > 0 {
+		*opts.ContractWarnings = append(*opts.ContractWarnings, result.Warnings...)
+	}
+	return nil
 }
 
 // PruneMissing retires active jobs that are absent from the desired alias set.
