@@ -278,6 +278,43 @@ func TestCompareAddedRequiredPropertyIsSilentlyCompatible(t *testing.T) {
 	require.Empty(t, findings)
 }
 
+// When BOTH schemas carry additionalProperties: false, a key newly added to
+// required but absent from properties makes the new schema unsatisfiable —
+// that must be a breaking finding, while a key that was ALREADY
+// required-outside-properties in the old schema is a pre-existing invariant
+// and stays silent. Regression for the post-merge review finding on W1-α.
+func TestCompareBothAdditionalPropertiesFalse(t *testing.T) {
+	oldSchema := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+		},
+	}
+	newSchema := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"name"},
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+		},
+	}
+	findings := Compare(oldSchema, newSchema)
+	requireContainsFinding(t, findings, FindingKindAdditionalPropertiesTightened, "properties.name", VerdictBreaking)
+
+	// Same shape, but the unsatisfiable key predates this revision: silent.
+	preExisting := map[string]any{
+		"type":                 "object",
+		"additionalProperties": false,
+		"required":             []any{"name"},
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+		},
+	}
+	findings = Compare(preExisting, preExisting)
+	require.Empty(t, findings)
+}
+
 func TestSatisfies(t *testing.T) {
 	cases := []struct {
 		name        string
