@@ -108,19 +108,51 @@ verify/publish/merge; GHA CI as the verify gate). Merge order η → ε → α �
   W2: the deprecation-window bound + `test/` fixture helpers (land with the
   scenarios that use them). PR #318.
 
-Wave 2 (B2 + C1 + D1) is in flight. Remaining after W2: C2, D2, F1, F2, N-1.
+### Wave 2 — shipped 2026-07-08 (3 items; 8 of 13 total)
+
+Same wave mechanics as W1. Merge order γ → β → δ:
+
+- **W2-γ (C1)** — apply-time enforcement inside `ApplyWithOptions`'s transaction:
+  the `ContractAck` catalog model, the `CAESIUM_CONTRACT_ENFORCEMENT` tri-state +
+  `CAESIUM_CONTRACT_DEPRECATION_WINDOW` env gates, a structured HTTP 409 naming
+  consumers/teams, `caesium_contract_breaks_blocked_total`, and the live
+  integration scenarios (paramMapping removed-output-key rejection + non-breaking
+  inertness). Wave discovery: the helm CI lane deploys its server from
+  `helm/caesium/ci/test-values-k8s.yaml` — a fourth env site the W1-η sweep
+  missed; fixed here so the 409 scenario passes on both docker and k8s lanes.
+  PR #324.
+- **W2-β (B2)** — declared edges fold into the graph: produces/consumes matched on
+  dataset name, inline `schema` / `schemaFrom: output` resolution, per-edge checker
+  verdicts (producer old-vs-new + per-consumer `Satisfies`), coordinated-batch
+  semantics. Known gap flagged for W3+: persisted declarations don't carry inline
+  schema metadata, so previous-producer schemas degrade honestly to `unknown`
+  when only inline schemas existed. PR #326.
+- **W2-δ (D1)** — the REST operator surface: env-gated `GET /v1/contracts/graph`
+  (route absent when enforcement unset), contract findings folded into the
+  jobdefs lint/diff responses, `contract_enforcement_enabled` in
+  `/system/features`, RBAC + scoped-principal coverage,
+  `caesium_contract_findings_total{verdict}`, and a live graph-endpoint
+  integration scenario. Review hardening: a latent ctx-mutation race removed, the
+  per-alias findings filter hoisted, and the job-node-ID convention exported as
+  `internal/contract.JobNodeID`. PR #325.
+
+Wave 3 (C2 + D2 + F1) is in flight — C2 additionally carries four review-deferred
+hardening items from W2-γ (digest v2 without `ConsumerTeam`, a structured
+offending-key field on `schemacompat.Finding` replacing the Detail-text parse, the
+blocked-breaks metric label rename, and enforcement-scoped window validation).
+Remaining after W3: F2, N-1.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Schema-compatibility checker — new `pkg/jobdef/schemacompat` walker, verdict types, table-driven matrix + fuzz | **P0** | ✅ Shipped W1 (#320, #321) |
-| B | Contract graph derivation — new `internal/contract` (inferred trigger-chain + evidence lineage edges, then declared) | **P0** | B1 ✅ W1 (#322); B2 in flight (W2) |
-| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | C1 in flight (W2); C2 queued (W3) |
-| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | D1 in flight (W2); D2 queued (W3) |
+| B | Contract graph derivation — new `internal/contract` (inferred trigger-chain + evidence lineage edges, then declared) | **P0** | ✅ Shipped W1+W2 (#322, #326) |
+| C | Apply-time enforcement, `ContractAck`, `--allow-breaking`, deprecation-window notifications | **P0** | C1 ✅ W2 (#324); C2 in flight (W3) |
+| D | REST + CLI operator surface — `GET /v1/contracts/graph`, `caesium contract`, `job lint --server`, findings in lint/diff | P1 | D1 ✅ W2 (#325); D2 in flight (W3) |
 | E | Datasets `schema`/`schemaFrom` declarations (coordinated with freshness Stream A) | P1 | ✅ Shipped W1 (#319) |
-| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | Queued (W3/W4, after D1) |
-| H-1 | Integration harness — enable `CAESIUM_CONTRACT_ENFORCEMENT` on the live integration server | — | ✅ Shipped W1 (#318); helpers land with W2-γ |
+| F | Console UI — contract graph view, JobDefs diff badges, dataset detail | P2 | F1 in flight (W3); F2 queued (W4) |
+| H-1 | Integration harness — enable `CAESIUM_CONTRACT_ENFORCEMENT` on the live integration server | — | ✅ Shipped W1 (#318) + helm values in W2 (#324); helpers landed with C1 |
 | N-1 | Docs — roadmap §2.1, design-doc banner, schema references, examples, README | — | Queued (last) |
 
 ## Streams
