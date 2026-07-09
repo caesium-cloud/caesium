@@ -46,6 +46,27 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		s.True(reproduceHasWarning(envelope.Warnings, "secret_omitted"), "warnings = %+v", envelope.Warnings)
 	}
 
+	// The missing-descriptor exit-2 leg is daemon-free — run it on every lane
+	// before the docker-gated run-mode leg below.
+	missingOut, missingErrOut, missingErr := s.runCLISeparate(
+		"reproduce", uuid.NewString(),
+		"--job-id", jobID,
+		"--task", "transform",
+		"--server", s.caesiumURL,
+	)
+	s.Require().Error(missingErr)
+	s.Equal("", missingOut)
+	s.Equal(2, reproduceExitCode(missingErr), "stderr: %s", missingErrOut)
+	s.Contains(missingErrOut, "fetch descriptor failed")
+
+	// Run mode executes on the operator's LOCAL Docker daemon by design; the
+	// podman and kubernetes lanes' test-runners have no docker.sock, so only
+	// the daemon-free legs above run there.
+	if s.engineType != "" && s.engineType != "docker" {
+		s.T().Logf("skipping reproduce run-mode leg under CAESIUM_TEST_ENGINE=%s; local execution needs the harness Docker daemon (covered on the docker lanes)", s.engineType)
+		return
+	}
+
 	runOut, runErrOut, runErr := s.runCLISeparate(
 		"reproduce", runID,
 		"--job-id", jobID,
@@ -62,17 +83,6 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Equal("yes", result.Output["clean"])
 	s.Equal("7", result.Output["rows"])
 	s.Equal("raw", result.Output["source"])
-
-	missingOut, missingErrOut, missingErr := s.runCLISeparate(
-		"reproduce", uuid.NewString(),
-		"--job-id", jobID,
-		"--task", "transform",
-		"--server", s.caesiumURL,
-	)
-	s.Require().Error(missingErr)
-	s.Equal("", missingOut)
-	s.Equal(2, reproduceExitCode(missingErr), "stderr: %s", missingErrOut)
-	s.Contains(missingErrOut, "fetch descriptor failed")
 }
 
 func (s *IntegrationTestSuite) createReproduceCLIFixture() (jobID, runID, taskRunID string) {
