@@ -13,6 +13,7 @@ import (
 	"github.com/caesium-cloud/caesium/cmd/incident"
 	"github.com/caesium-cloud/caesium/cmd/job"
 	"github.com/caesium-cloud/caesium/cmd/receipt"
+	"github.com/caesium-cloud/caesium/cmd/reproduce"
 	"github.com/caesium-cloud/caesium/cmd/run"
 	"github.com/caesium-cloud/caesium/cmd/start"
 	"github.com/caesium-cloud/caesium/cmd/test"
@@ -29,6 +30,7 @@ var cmds = []*cobra.Command{
 	blame.Cmd,
 	cache.Cmd,
 	contract.Cmd,
+	reproduce.Cmd,
 	dataset.Cmd,
 	dev.Cmd,
 	event.Cmd,
