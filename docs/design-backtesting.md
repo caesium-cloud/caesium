@@ -433,6 +433,9 @@ integration test driving its real surface.
   that recorded everything backtest replays.
 - [`design-reproduce.md`](design-reproduce.md) — same descriptor substrate,
   single-task local reproduction; backtest is the N-run server-side counterpart.
+  The recorded-vs-reproduced output compare primitive has already shipped as
+  `internal/outputdiff` in reproduce C1 (#339), so backtesting should reuse that
+  package instead of adding a second comparator.
 - [`design-contract-enforcement.md`](design-contract-enforcement.md) — the
   *static* half of pre-merge safety; backtest is the *dynamic* half.
 - [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) — runtime
