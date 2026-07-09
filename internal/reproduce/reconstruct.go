@@ -313,7 +313,10 @@ func BuildDefinition(desc *Descriptor, env *Envelope, timeout time.Duration) *pk
 			},
 		},
 		Steps: []pkgjobdef.Step{{
-			Name:         firstNonEmpty(desc.Baseline.TaskName, "task"),
+			Name: firstNonEmpty(desc.Baseline.TaskName, "task"),
+			// Type must be set explicitly: the YAML unmarshaller defaults it,
+			// but this definition is constructed in Go and localrun validates.
+			Type:         pkgjobdef.StepTypeTask,
 			Engine:       pkgjobdef.EngineDocker,
 			Image:        env.Image,
 			Command:      slices.Clone(env.Command),

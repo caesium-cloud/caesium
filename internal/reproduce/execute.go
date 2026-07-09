@@ -167,12 +167,11 @@ func RegistryHost(imageRef string) string {
 	if before, _, ok := strings.Cut(ref, "@"); ok {
 		ref = before
 	}
-	first := ref
-	if slash := strings.IndexByte(ref, '/'); slash >= 0 {
-		first = ref[:slash]
-	} else {
+	slash := strings.IndexByte(ref, '/')
+	if slash < 0 {
 		return "docker.io"
 	}
+	first := ref[:slash]
 	if strings.Contains(first, ".") || strings.Contains(first, ":") || first == "localhost" {
 		return first
 	}
