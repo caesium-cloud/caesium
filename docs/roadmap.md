@@ -235,7 +235,7 @@ Each design has a drafted execution plan under `docs/exec-plans/active/` decompo
 | Pipeline backtesting | Replay a code change over recorded production runs in quarantine; report output deltas in the PR before merge | [`design-backtesting.md`](design-backtesting.md) | [`backtesting.md`](exec-plans/active/backtesting.md) |
 | Contract enforcement | **Shipped.** Cross-job schema-compatibility checks at lint/diff/apply with named consumers, REST/CLI/Console graph surfaces, JobDefs diff badges, and an intentional-break acknowledgement path | [`design-contract-enforcement.md`](design-contract-enforcement.md) | `exec-plans/completed/contract-enforcement.md` |
 | Data circuit breaker | Statistical assertions on step outputs; violations hold the dataset so downstream jobs skip poison instead of consuming it | [`design-data-circuit-breaker.md`](design-data-circuit-breaker.md) | [`data-circuit-breaker.md`](exec-plans/active/data-circuit-breaker.md) |
-| `caesium reproduce` | **Shipped.** Descriptor endpoint plus `caesium reproduce` local single-task execution with `--dry-run`, run mode, `--diff` exit 3, `--shell`, `--image` fix-testing, `--resolve-secrets`, and explicit fidelity summary | [`design-reproduce.md`](design-reproduce.md) | [`reproduce.md`](exec-plans/active/reproduce.md) |
+| `caesium reproduce` | **Shipped.** Descriptor endpoint plus `caesium reproduce` local single-task execution with `--dry-run`, run mode, `--diff` exit 3, `--shell`, `--image` fix-testing, `--resolve-secrets`, and explicit fidelity summary | [`design-reproduce.md`](design-reproduce.md) | [`reproduce.md`](exec-plans/completed/reproduce.md) |
 
 ---
 

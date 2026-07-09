@@ -1,8 +1,8 @@
 # Design: `caesium reproduce` — Re-Execute a Historical Production Task Locally
 
 > Status: Shipped/active — implemented via
-> [`exec-plans/active/reproduce.md`](exec-plans/active/reproduce.md) (PRs
-> #334-#340). Siblings: [`design-quarantined-replay.md`](design-quarantined-replay.md)
+> [`exec-plans/completed/reproduce.md`](exec-plans/completed/reproduce.md) (PRs
+> #334-#341). Siblings: [`design-quarantined-replay.md`](design-quarantined-replay.md)
 > (server-side what-if), [`design-backtesting.md`](design-backtesting.md)
 > (N-run server-side sibling), [`design-agent-in-the-loop.md`](design-agent-in-the-loop.md)
 > (consumes the repro one-liner in escalations).
