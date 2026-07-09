@@ -53,6 +53,8 @@ quarantined replay (a side-effect-free sandbox to *test* a hypothesis fix
 before touching production). Most orchestrators would have to build that first.
 We just have to hand it to an agent.
 
+Human escalations can now include the shipped [`caesium reproduce`](reproduce.md) one-liner, for example `caesium reproduce <run> --job-id <id> --task <task> --diff`, so the on-call can replay the failed task locally from the recorded descriptor; design record: [`design-reproduce.md`](design-reproduce.md).
+
 ## Fit with Design Principles
 
 1. **Container-native execution.** The agent itself is a container. Caesium

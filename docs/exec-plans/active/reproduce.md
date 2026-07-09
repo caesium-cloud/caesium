@@ -379,7 +379,7 @@ on the shared command file — see conflicts).
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. Flip the [`docs/design-reproduce.md`](../../design-reproduce.md)
+- [x] N-1. Flip the [`docs/design-reproduce.md`](../../design-reproduce.md)
       `> Status:` banner from "Brainstorm/Design" to shipped/active and point it at
       this plan; update the `docs/roadmap.md` Phase 4 "Data-Plane Differentiators"
       table `caesium reproduce` row (line ~228) to add the plan link
@@ -397,6 +397,12 @@ on the shared command file — see conflicts).
       Files: `docs/design-reproduce.md`, `docs/roadmap.md`, `docs/README.md`,
       CLI/operator reference docs.
       Depends on: A–D (runs last).
+      Note: W5-nu flipped the design/roadmap/README shipped status, added
+      `docs/reproduce.md` as the operator reference for flags, exit codes,
+      fidelity, secrets, and `--image` OVERRIDDEN semantics, and cross-linked
+      agent escalation plus backtesting `internal/outputdiff` reuse. Verified
+      `grep -n "](exec-plans" docs/README.md` returns no matches and
+      `grep -c "reproduce.md" docs/README.md` returns `2`.
 
 ## Sequencing & Dependencies
 
