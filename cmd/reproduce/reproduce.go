@@ -258,6 +258,20 @@ func (dockerPuller) Pull(ctx context.Context, imageRef, platform string) error {
 	return err
 }
 
+// ExistsLocally reports whether the image is already present in the local
+// daemon, letting Execute skip the registry pull (and survive private-registry
+// auth failures when the operator pulled or built the image themselves).
+func (dockerPuller) ExistsLocally(ctx context.Context, imageRef string) bool {
+	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
+	if err != nil {
+		return false
+	}
+	defer func() { _ = cli.Close() }()
+
+	_, err = cli.ImageInspect(ctx, imageRef)
+	return err == nil
+}
+
 type localRunner struct{}
 
 func (localRunner) Run(ctx context.Context, def *pkgjobdef.Definition, taskTimeout time.Duration) (*ireproduce.RunResult, error) {

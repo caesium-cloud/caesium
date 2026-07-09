@@ -17,6 +17,13 @@ type Puller interface {
 	Pull(ctx context.Context, imageRef, platform string) error
 }
 
+// LocalImageChecker is optionally implemented by a Puller that can report
+// whether the image already exists in the local daemon, letting Execute skip
+// the registry pull (and survive registry-auth failures) when it does.
+type LocalImageChecker interface {
+	ExistsLocally(ctx context.Context, imageRef string) bool
+}
+
 // Runner executes a synthesized one-step definition through the local runtime.
 type Runner interface {
 	Run(ctx context.Context, def *pkgjobdef.Definition, taskTimeout time.Duration) (*RunResult, error)
@@ -70,7 +77,7 @@ type PullError struct {
 
 func (e *PullError) Error() string {
 	return fmt.Sprintf(
-		"pull image %s from registry %s failed: %v; authenticate with docker login %s or use --image <local-ref> when the image is available locally",
+		"pull image %s from registry %s failed: %v; authenticate with docker login %s and re-run, or make the image available in the local Docker daemon (docker pull/docker build) — reproduce uses a locally present image without pulling",
 		e.ImageRef,
 		e.Registry,
 		e.Err,
@@ -99,7 +106,13 @@ func Execute(ctx context.Context, desc *Descriptor, env *Envelope, opts ExecuteO
 	}
 
 	platform := firstNonEmpty(strings.TrimSpace(opts.Platform), env.Platform)
-	if err := opts.Puller.Pull(ctx, env.Image, platform); err != nil {
+	checker, canCheckLocal := opts.Puller.(LocalImageChecker)
+	if canCheckLocal && checker.ExistsLocally(ctx, env.Image) {
+		env.Warnings = append(env.Warnings, Warning{
+			Code:    "local_image_used",
+			Message: fmt.Sprintf("image %s already present in the local daemon; skipped registry pull", env.Image),
+		})
+	} else if err := opts.Puller.Pull(ctx, env.Image, platform); err != nil {
 		return nil, &PullError{
 			ImageRef: env.Image,
 			Registry: RegistryHost(env.Image),

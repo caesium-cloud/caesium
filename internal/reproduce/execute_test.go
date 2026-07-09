@@ -3,6 +3,7 @@ package reproduce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,7 @@ import (
 	pkgjobdef "github.com/caesium-cloud/caesium/pkg/jobdef"
 )
 
-func TestExecutePullFailureGuidanceNamesRegistryAndImageHint(t *testing.T) {
+func TestExecutePullFailureGuidanceNamesRegistryAndLocalFallback(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:1")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	env, err := Reconstruct(desc, ReconstructOptions{})
@@ -30,8 +31,53 @@ func TestExecutePullFailureGuidanceNamesRegistryAndImageHint(t *testing.T) {
 	if !strings.Contains(msg, "registry.example.com") {
 		t.Fatalf("pull error %q does not name registry", msg)
 	}
-	if !strings.Contains(msg, "--image <local-ref>") {
-		t.Fatalf("pull error %q does not include --image hint", msg)
+	if !strings.Contains(msg, "docker login registry.example.com") {
+		t.Fatalf("pull error %q does not include the docker login hint", msg)
+	}
+	if !strings.Contains(msg, "locally present image") {
+		t.Fatalf("pull error %q does not include the local-image guidance", msg)
+	}
+}
+
+type localPresentPuller struct{ pullCalled bool }
+
+func (p *localPresentPuller) Pull(context.Context, string, string) error {
+	p.pullCalled = true
+	return fmt.Errorf("must not pull when the image is local")
+}
+
+func (p *localPresentPuller) ExistsLocally(context.Context, string) bool { return true }
+
+// A locally present image short-circuits the registry pull entirely, so a
+// private-registry auth failure cannot block reproducing with a local image.
+func TestExecuteSkipsPullWhenImagePresentLocally(t *testing.T) {
+	desc := basicDescriptor("registry.example.com/team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	env, err := Reconstruct(desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	puller := &localPresentPuller{}
+	result, err := Execute(context.Background(), desc, env, ExecuteOptions{
+		Puller: puller,
+		Runner: fakeRunner{result: &RunResult{Tasks: []TaskResult{{
+			Name:   "transform",
+			Status: "succeeded",
+		}}}},
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want success via local image", err)
+	}
+	if puller.pullCalled {
+		t.Fatal("Pull was called despite the image existing locally")
+	}
+	found := false
+	for _, w := range result.Envelope.Warnings {
+		if w.Code == "local_image_used" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected local_image_used warning, got %+v", result.Envelope.Warnings)
 	}
 }
 
