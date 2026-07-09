@@ -310,14 +310,20 @@ The last two modes from the design's phasing. Both extend `cmd/reproduce/` and
 `internal/reproduce/`, so D sequences **after** Stream B (and coordinates with C
 on the shared command file — see conflicts).
 
-- [ ] D1. Add `--image ref` fix-testing mode: override the image (e.g. a locally
+- [x] D1. Add `--image ref` fix-testing mode: override the image (e.g. a locally
       built candidate fix) while keeping the recorded env, params, and predecessor
       outputs — "does my patch produce the right output *given the exact inputs that
       broke prod*?". Prominently mark the run **OVERRIDDEN** in the output line and
       the `--json` document so it is never mistaken for a faithful reproduction.
       Files: `cmd/reproduce/reproduce.go`, `internal/reproduce/execute.go`.
       Depends on: B2.
-- [ ] D2. Add `--resolve-secrets`: resolve `secret://` refs via the operator's
+      Note: W4-delta added `--image` override wiring through the reconstructed
+      envelope, pull target, synthesized localrun step image, top-level run JSON
+      (`image_pull_mode: "OVERRIDDEN"`, `image_overridden: true`), human stderr
+      result labels, and the `image_content: overridden` fidelity dimension, with
+      unit coverage plus a docker-gated `--json --diff --image alpine:3.23`
+      integration assertion.
+- [x] D2. Add `--resolve-secrets`: resolve `secret://` refs via the operator's
       **local** `secret.Resolver` config (never fetched from the server), and emit a
       best-effort drift warning by comparing the recorded ref string + provider
       identity fields (Vault version / k8s resourceVersion) when the local provider
@@ -326,6 +332,13 @@ on the shared command file — see conflicts).
       opt-in described in the design's Security section.
       Files: `cmd/reproduce/reproduce.go`, `internal/reproduce/reconstruct.go`.
       Depends on: B2.
+      Note: W4-delta added local resolver construction from the existing
+      `internal/jobdef/secret` provider config, a small reproduce-layer resolver
+      interface for pure-Go tests, opt-in env injection before `--set-env`
+      overrides, per-ref omission warnings on local failure/provider mismatch,
+      Vault-version and k8s-resourceVersion drift warnings, and integration
+      coverage for `secret://env/...` default omission plus
+      `--resolve-secrets --dry-run --json` injection.
 
 #### Deferred — recorded, not in scope
 

@@ -3,8 +3,10 @@
 package reproduce
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"runtime"
 	"slices"
 	"sort"
@@ -18,7 +20,11 @@ import (
 
 const (
 	WarningSecretOmitted       = "secret_omitted"
+	WarningSecretResolveFailed = "secret_resolution_failed"
+	WarningSecretProvider      = "secret_provider_mismatch"
+	WarningSecretDrift         = "secret_drift"
 	WarningDegradedImagePull   = "degraded_image_pull"
+	WarningImageOverridden     = "image_overridden"
 	WarningOutputRefUnresolved = "output_ref_unresolved"
 	WarningOutputMissingName   = "predecessor_output_missing_name"
 	WarningMountNotRemapped    = "mount_not_remapped"
@@ -35,6 +41,7 @@ const (
 const (
 	FidelityFaithful         = "faithful"
 	FidelityDegraded         = "degraded"
+	FidelityOverridden       = "overridden"
 	FidelityNotReproduced    = "not_reproduced"
 	FidelityListedNotApplied = "listed_not_applied"
 )
@@ -79,6 +86,37 @@ type SecretOmission struct {
 	Ref    string `json:"ref,omitempty"`
 }
 
+// SecretResolution records a locally resolved secret without exposing its
+// value outside Envelope.Env.
+type SecretResolution struct {
+	EnvKey   string `json:"env_key"`
+	Ref      string `json:"ref,omitempty"`
+	Provider string `json:"provider,omitempty"`
+}
+
+// SecretIdentity is the provider identity subset reproduce can compare without
+// importing provider implementations.
+type SecretIdentity struct {
+	Provider           string            `json:"provider,omitempty"`
+	Ref                string            `json:"ref,omitempty"`
+	Version            string            `json:"version,omitempty"`
+	ResourceVersion    string            `json:"resourceVersion,omitempty"`
+	Namespace          string            `json:"namespace,omitempty"`
+	Name               string            `json:"name,omitempty"`
+	Key                string            `json:"key,omitempty"`
+	KeyID              string            `json:"keyId,omitempty"`
+	HMACSHA256         string            `json:"hmacSha256,omitempty"`
+	Verifiable         bool              `json:"verifiable"`
+	UnverifiableReason string            `json:"unverifiableReason,omitempty"`
+	Metadata           map[string]string `json:"metadata,omitempty"`
+}
+
+// SecretResolver resolves local secret refs. The command layer adapts this to
+// internal/jobdef/secret so this package stays independent of provider deps.
+type SecretResolver interface {
+	ResolveWithIdentity(ctx context.Context, ref string) (string, SecretIdentity, error)
+}
+
 // RetryPolicy records the historical retry knobs. Reproduce surfaces them but
 // runs a single local attempt.
 type RetryPolicy struct {
@@ -89,36 +127,42 @@ type RetryPolicy struct {
 
 // Envelope is the reconstructed local execution envelope.
 type Envelope struct {
-	TaskName            string            `json:"task"`
-	JobID               string            `json:"job_id,omitempty"`
-	JobAlias            string            `json:"job_alias,omitempty"`
-	BaselineRunID       string            `json:"baseline_run_id,omitempty"`
-	ReplaySafe          bool              `json:"replay_safe"`
-	CapturedAt          time.Time         `json:"captured_at,omitempty"`
-	Image               string            `json:"image"`
-	RecordedImage       string            `json:"recorded_image,omitempty"`
-	ResolvedImageDigest string            `json:"resolved_image_digest,omitempty"`
-	ImagePullMode       string            `json:"image_pull_mode"`
-	Command             []string          `json:"command,omitempty"`
-	WorkDir             string            `json:"workdir,omitempty"`
-	Env                 map[string]string `json:"env"`
-	Mounts              []container.Mount `json:"mounts,omitempty"`
-	Timeout             string            `json:"timeout,omitempty"`
-	Platform            string            `json:"platform,omitempty"`
-	RecordedRetryPolicy *RetryPolicy      `json:"recorded_retry_policy,omitempty"`
-	OmittedSecrets      []SecretOmission  `json:"omitted_secrets,omitempty"`
-	Fidelity            *FidelitySummary  `json:"fidelity,omitempty"`
-	Warnings            []Warning         `json:"warnings,omitempty"`
+	TaskName            string             `json:"task"`
+	JobID               string             `json:"job_id,omitempty"`
+	JobAlias            string             `json:"job_alias,omitempty"`
+	BaselineRunID       string             `json:"baseline_run_id,omitempty"`
+	ReplaySafe          bool               `json:"replay_safe"`
+	CapturedAt          time.Time          `json:"captured_at,omitempty"`
+	Image               string             `json:"image"`
+	RecordedImage       string             `json:"recorded_image,omitempty"`
+	ResolvedImageDigest string             `json:"resolved_image_digest,omitempty"`
+	ImagePullMode       string             `json:"image_pull_mode"`
+	ImageOverride       string             `json:"image_override,omitempty"`
+	ImageOverridden     bool               `json:"image_overridden,omitempty"`
+	Command             []string           `json:"command,omitempty"`
+	WorkDir             string             `json:"workdir,omitempty"`
+	Env                 map[string]string  `json:"env"`
+	Mounts              []container.Mount  `json:"mounts,omitempty"`
+	Timeout             string             `json:"timeout,omitempty"`
+	Platform            string             `json:"platform,omitempty"`
+	RecordedRetryPolicy *RetryPolicy       `json:"recorded_retry_policy,omitempty"`
+	OmittedSecrets      []SecretOmission   `json:"omitted_secrets,omitempty"`
+	ResolvedSecrets     []SecretResolution `json:"resolved_secrets,omitempty"`
+	Fidelity            *FidelitySummary   `json:"fidelity,omitempty"`
+	Warnings            []Warning          `json:"warnings,omitempty"`
 }
 
 // ReconstructOptions controls local envelope reconstruction.
 type ReconstructOptions struct {
-	SetParams  []Assignment
-	SetEnv     []Assignment
-	Mounts     []MountRemap
-	Timeout    time.Duration
-	Platform   string
-	ReplaySafe bool
+	SetParams      []Assignment
+	SetEnv         []Assignment
+	Mounts         []MountRemap
+	Timeout        time.Duration
+	Platform       string
+	ReplaySafe     bool
+	ImageOverride  string
+	ResolveSecrets bool
+	SecretResolver SecretResolver
 }
 
 // Descriptor mirrors descriptor schema v1 without importing internal/models.
@@ -180,8 +224,12 @@ type EdgeRef struct {
 // SecretRef mirrors the descriptor's secret metadata relevant to local
 // omission warnings.
 type SecretRef struct {
-	Ref    string `json:"ref"`
-	EnvKey string `json:"envKey,omitempty"`
+	Ref                string         `json:"ref"`
+	EnvKey             string         `json:"envKey,omitempty"`
+	Provider           string         `json:"provider,omitempty"`
+	Identity           map[string]any `json:"identity,omitempty"`
+	Verifiable         bool           `json:"verifiable"`
+	UnverifiableReason string         `json:"unverifiableReason,omitempty"`
 }
 
 // DecodeDescriptor decodes raw descriptor JSON into the local mirror type.
@@ -206,7 +254,10 @@ func DecodeDescriptor(raw []byte) (*Descriptor, error) {
 }
 
 // Reconstruct builds the local envelope from a descriptor and CLI overrides.
-func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
+func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if desc == nil {
 		return nil, fmt.Errorf("descriptor is required")
 	}
@@ -214,30 +265,58 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 	warnings := make([]Warning, 0)
 	env := make(map[string]string)
 	omitted := make([]SecretOmission, 0)
+	resolvedSecrets := make([]SecretResolution, 0)
 	secretRefs := secretRefsByEnv(desc.SecretRefs)
+	processedSecretEnv := make(map[string]struct{})
 
 	for _, key := range sortedKeys(desc.ContainerSpec.Env) {
 		value := desc.ContainerSpec.Env[key]
 		if isSecretRef(value) {
-			omitted = appendSecretOmission(omitted, SecretOmission{EnvKey: key, Ref: firstNonEmpty(secretRefs[key], value)})
+			ref := secretRefs[key]
+			ref.EnvKey = key
+			ref.Ref = firstNonEmpty(ref.Ref, value)
+			processedSecretEnv[key] = struct{}{}
+			if resolved, resolutionWarnings, ok := resolveRecordedSecret(ctx, ref, opts); ok {
+				env[key] = resolved.Value
+				resolvedSecrets = appendSecretResolution(resolvedSecrets, resolved.Resolution)
+				warnings = append(warnings, resolutionWarnings...)
+				continue
+			} else {
+				warnings = append(warnings, resolutionWarnings...)
+			}
+			omitted = appendSecretOmission(omitted, SecretOmission{EnvKey: key, Ref: ref.Ref})
 			continue
 		}
 		env[key] = value
 	}
-	for _, ref := range desc.SecretRefs {
+	for _, ref := range sortedSecretRefs(desc.SecretRefs) {
 		if ref.EnvKey == "" {
 			continue
 		}
+		if _, ok := processedSecretEnv[ref.EnvKey]; ok {
+			continue
+		}
 		if _, ok := desc.ContainerSpec.Env[ref.EnvKey]; !ok {
+			processedSecretEnv[ref.EnvKey] = struct{}{}
+			if resolved, resolutionWarnings, ok := resolveRecordedSecret(ctx, ref, opts); ok {
+				env[ref.EnvKey] = resolved.Value
+				resolvedSecrets = appendSecretResolution(resolvedSecrets, resolved.Resolution)
+				warnings = append(warnings, resolutionWarnings...)
+				continue
+			} else {
+				warnings = append(warnings, resolutionWarnings...)
+			}
 			omitted = appendSecretOmission(omitted, SecretOmission{EnvKey: ref.EnvKey, Ref: ref.Ref})
 		}
 	}
-	if len(omitted) > 0 {
+	if len(omitted) > 0 && !opts.ResolveSecrets {
 		sort.Slice(omitted, func(i, j int) bool { return omitted[i].EnvKey < omitted[j].EnvKey })
 		warnings = append(warnings, Warning{
 			Code:    WarningSecretOmitted,
 			Message: fmt.Sprintf("secret refs omitted by default: %s", strings.Join(secretEnvKeys(omitted), ", ")),
 		})
+	} else if len(omitted) > 0 {
+		sort.Slice(omitted, func(i, j int) bool { return omitted[i].EnvKey < omitted[j].EnvKey })
 	}
 
 	for _, key := range sortedKeys(desc.Run.Params) {
@@ -263,7 +342,7 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 		env[assignment.Key] = assignment.Value
 	}
 
-	image, pullMode, imageWarnings := imageReference(desc.Runtime.Image, desc.Runtime.ResolvedImageDigest)
+	image, pullMode, imageWarnings := imageReference(desc.Runtime.Image, desc.Runtime.ResolvedImageDigest, opts.ImageOverride)
 	warnings = append(warnings, imageWarnings...)
 
 	mounts, mountWarnings := reconstructMounts(desc.ContainerSpec, opts.Mounts)
@@ -308,6 +387,8 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 		RecordedImage:       desc.Runtime.Image,
 		ResolvedImageDigest: desc.Runtime.ResolvedImageDigest,
 		ImagePullMode:       pullMode,
+		ImageOverride:       strings.TrimSpace(opts.ImageOverride),
+		ImageOverridden:     pullMode == "OVERRIDDEN",
 		Command:             command,
 		WorkDir:             workdir,
 		Env:                 env,
@@ -316,8 +397,9 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 		Platform:            strings.TrimSpace(opts.Platform),
 		RecordedRetryPolicy: retryPolicy,
 		OmittedSecrets:      omitted,
+		ResolvedSecrets:     resolvedSecrets,
 	}
-	fidelity, fidelityWarnings := buildFidelitySummary(desc, envelope, opts, omitted)
+	fidelity, fidelityWarnings := buildFidelitySummary(desc, envelope, opts, omitted, resolvedSecrets)
 	warnings = append(warnings, fidelityWarnings...)
 	sortWarnings(warnings)
 	envelope.Fidelity = fidelity
@@ -462,9 +544,16 @@ func applyMountRemap(mount container.Mount, remapBySource map[string]string, war
 	return mount
 }
 
-func imageReference(recorded, digest string) (string, string, []Warning) {
+func imageReference(recorded, digest, override string) (string, string, []Warning) {
 	recorded = strings.TrimSpace(recorded)
 	digest = strings.TrimSpace(digest)
+	override = strings.TrimSpace(override)
+	if override != "" {
+		return override, "OVERRIDDEN", []Warning{{
+			Code:    WarningImageOverridden,
+			Message: fmt.Sprintf("OVERRIDDEN: using image override %s instead of recorded image %s", override, recorded),
+		}}
+	}
 	if digest == "" {
 		return recorded, "DEGRADED", []Warning{{
 			Code:    WarningDegradedImagePull,
@@ -478,7 +567,7 @@ func imageReference(recorded, digest string) (string, string, []Warning) {
 	return base + "@" + digest, "DIGEST", nil
 }
 
-func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptions, omitted []SecretOmission) (*FidelitySummary, []Warning) {
+func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptions, omitted []SecretOmission, resolved []SecretResolution) (*FidelitySummary, []Warning) {
 	var dimensions []FidelityDimension
 	var warnings []Warning
 	add := func(dimension, status string, details ...string) {
@@ -489,9 +578,16 @@ func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptio
 		})
 	}
 
-	if strings.TrimSpace(desc.Runtime.ResolvedImageDigest) == "" {
+	switch {
+	case env.ImagePullMode == "OVERRIDDEN":
+		details := []string{fmt.Sprintf("OVERRIDDEN: local run uses image override %s instead of recorded image %s", env.Image, desc.Runtime.Image)}
+		if strings.TrimSpace(desc.Runtime.ResolvedImageDigest) != "" {
+			details = append(details, fmt.Sprintf("recorded digest %s is not used for the override image", desc.Runtime.ResolvedImageDigest))
+		}
+		add("image_content", FidelityOverridden, details...)
+	case strings.TrimSpace(desc.Runtime.ResolvedImageDigest) == "":
 		add("image_content", FidelityDegraded, fmt.Sprintf("no resolved digest recorded for %s; local pull uses the mutable tag", desc.Runtime.Image))
-	} else {
+	default:
 		add("image_content", FidelityFaithful, fmt.Sprintf("image pulled by recorded digest %s", desc.Runtime.ResolvedImageDigest))
 	}
 	add("command_argv_workdir", FidelityFaithful, "recorded command, argv, and workdir are used verbatim")
@@ -505,9 +601,14 @@ func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptio
 	}
 	add("schema_config", FidelityFaithful, "recorded output schema and validation mode are applied to the local run")
 
-	if len(omitted) > 0 {
+	switch {
+	case len(omitted) > 0 && opts.ResolveSecrets:
+		add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs unresolved locally and omitted: %s", strings.Join(secretEnvKeys(omitted), ", ")))
+	case len(omitted) > 0:
 		add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs omitted by default: %s", strings.Join(secretEnvKeys(omitted), ", ")))
-	} else {
+	case len(resolved) > 0:
+		add("secret_values", FidelityDegraded, fmt.Sprintf("secret refs resolved from local providers for %s; local values may differ from the recorded baseline", strings.Join(resolvedSecretEnvKeys(resolved), ", ")))
+	default:
 		add("secret_values", FidelityFaithful, "no recorded secret refs were present")
 	}
 
@@ -724,6 +825,121 @@ func formatStringMap(values map[string]string) string {
 	return strings.Join(parts, ", ")
 }
 
+type resolvedSecret struct {
+	Value      string
+	Resolution SecretResolution
+}
+
+func resolveRecordedSecret(ctx context.Context, ref SecretRef, opts ReconstructOptions) (resolvedSecret, []Warning, bool) {
+	if !opts.ResolveSecrets {
+		return resolvedSecret{}, nil, false
+	}
+	if opts.SecretResolver == nil {
+		return resolvedSecret{}, []Warning{secretResolutionWarning(ref, "local secret resolver is not configured")}, false
+	}
+	value, identity, err := opts.SecretResolver.ResolveWithIdentity(ctx, ref.Ref)
+	if err != nil {
+		return resolvedSecret{}, []Warning{secretResolutionWarning(ref, err.Error())}, false
+	}
+
+	recordedProvider := recordedSecretProvider(ref)
+	localProvider := normalizeSecretProvider(identity.Provider)
+	if localProvider == "" || (recordedProvider != "" && recordedProvider != localProvider) {
+		return resolvedSecret{}, []Warning{{
+			Code: WarningSecretProvider,
+			Message: fmt.Sprintf(
+				"secret ref %s for %s resolved from local provider %q but recorded provider was %q; omitting env var",
+				ref.Ref,
+				ref.EnvKey,
+				firstNonEmpty(localProvider, "unknown"),
+				firstNonEmpty(recordedProvider, "unknown"),
+			),
+		}}, false
+	}
+
+	warnings := secretDriftWarnings(ref, identity)
+	return resolvedSecret{
+		Value: value,
+		Resolution: SecretResolution{
+			EnvKey:   ref.EnvKey,
+			Ref:      ref.Ref,
+			Provider: localProvider,
+		},
+	}, warnings, true
+}
+
+func secretResolutionWarning(ref SecretRef, reason string) Warning {
+	return Warning{
+		Code:    WarningSecretResolveFailed,
+		Message: fmt.Sprintf("secret ref %s for %s could not be resolved locally; omitting env var: %s", ref.Ref, ref.EnvKey, reason),
+	}
+}
+
+func secretDriftWarnings(ref SecretRef, identity SecretIdentity) []Warning {
+	localProvider := normalizeSecretProvider(identity.Provider)
+	if recorded := recordedSecretProvider(ref); recorded != "" && recorded != localProvider {
+		return nil
+	}
+
+	var details []string
+	if recordedRef := strings.TrimSpace(ref.Ref); recordedRef != "" && strings.TrimSpace(identity.Ref) != "" && recordedRef != strings.TrimSpace(identity.Ref) {
+		details = append(details, fmt.Sprintf("recorded ref %s, local ref %s", recordedRef, strings.TrimSpace(identity.Ref)))
+	}
+	switch localProvider {
+	case "vault":
+		recordedVersion := secretIdentityValue(ref.Identity, "version")
+		if recordedVersion != "" && strings.TrimSpace(identity.Version) != "" && recordedVersion != strings.TrimSpace(identity.Version) {
+			details = append(details, fmt.Sprintf("recorded Vault version %s, local version %s", recordedVersion, strings.TrimSpace(identity.Version)))
+		}
+	case "k8s":
+		recordedResourceVersion := secretIdentityValue(ref.Identity, "resourceVersion")
+		if recordedResourceVersion != "" && strings.TrimSpace(identity.ResourceVersion) != "" && recordedResourceVersion != strings.TrimSpace(identity.ResourceVersion) {
+			details = append(details, fmt.Sprintf("recorded k8s resourceVersion %s, local resourceVersion %s", recordedResourceVersion, strings.TrimSpace(identity.ResourceVersion)))
+		}
+	}
+	if len(details) == 0 {
+		return nil
+	}
+	return []Warning{{
+		Code:    WarningSecretDrift,
+		Message: fmt.Sprintf("secret ref %s for %s may have drifted: %s", ref.Ref, ref.EnvKey, strings.Join(details, "; ")),
+	}}
+}
+
+func secretIdentityValue(identity map[string]any, key string) string {
+	if len(identity) == 0 {
+		return ""
+	}
+	value, ok := identity[key]
+	if !ok || value == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(value))
+}
+
+func recordedSecretProvider(ref SecretRef) string {
+	if provider := normalizeSecretProvider(ref.Provider); provider != "" {
+		return provider
+	}
+	return normalizeSecretProvider(secretProviderFromRef(ref.Ref))
+}
+
+func secretProviderFromRef(ref string) string {
+	parsed, err := url.Parse(strings.TrimSpace(ref))
+	if err != nil || parsed.Scheme != "secret" {
+		return ""
+	}
+	return parsed.Host
+}
+
+func normalizeSecretProvider(provider string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "kubernetes" {
+		return "k8s"
+	}
+	return provider
+}
+
 func cleanDetails(details []string) []string {
 	out := make([]string, 0, len(details))
 	for _, detail := range details {
@@ -742,13 +958,24 @@ func isSecretRef(value string) bool {
 	return strings.HasPrefix(strings.TrimSpace(value), "secret://")
 }
 
-func secretRefsByEnv(refs []SecretRef) map[string]string {
-	out := make(map[string]string, len(refs))
+func secretRefsByEnv(refs []SecretRef) map[string]SecretRef {
+	out := make(map[string]SecretRef, len(refs))
 	for _, ref := range refs {
 		if ref.EnvKey != "" {
-			out[ref.EnvKey] = ref.Ref
+			out[ref.EnvKey] = ref
 		}
 	}
+	return out
+}
+
+func sortedSecretRefs(refs []SecretRef) []SecretRef {
+	out := slices.Clone(refs)
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].EnvKey != out[j].EnvKey {
+			return out[i].EnvKey < out[j].EnvKey
+		}
+		return out[i].Ref < out[j].Ref
+	})
 	return out
 }
 
@@ -761,11 +988,29 @@ func appendSecretOmission(omitted []SecretOmission, next SecretOmission) []Secre
 	return append(omitted, next)
 }
 
+func appendSecretResolution(resolved []SecretResolution, next SecretResolution) []SecretResolution {
+	for _, existing := range resolved {
+		if existing.EnvKey == next.EnvKey {
+			return resolved
+		}
+	}
+	return append(resolved, next)
+}
+
 func secretEnvKeys(omitted []SecretOmission) []string {
 	keys := make([]string, 0, len(omitted))
 	for _, omission := range omitted {
 		keys = append(keys, omission.EnvKey)
 	}
+	return keys
+}
+
+func resolvedSecretEnvKeys(resolved []SecretResolution) []string {
+	keys := make([]string, 0, len(resolved))
+	for _, resolution := range resolved {
+		keys = append(keys, resolution.EnvKey)
+	}
+	sort.Strings(keys)
 	return keys
 }
 

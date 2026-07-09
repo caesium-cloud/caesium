@@ -13,10 +13,12 @@ import (
 	"os"
 	osexec "os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/cmd/cliutil"
+	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/internal/localrun"
 	"github.com/caesium-cloud/caesium/internal/outputdiff"
 	ireproduce "github.com/caesium-cloud/caesium/internal/reproduce"
@@ -28,19 +30,21 @@ import (
 )
 
 var (
-	reproduceJobID    string
-	reproduceTask     string
-	reproduceServer   string
-	reproduceAPIKey   string
-	reproduceDryRun   bool
-	reproduceJSON     bool
-	reproduceSet      []string
-	reproduceSetEnv   []string
-	reproduceMounts   []string
-	reproduceTimeout  time.Duration
-	reproducePlatform string
-	reproduceDiff     bool
-	reproduceShell    bool
+	reproduceJobID          string
+	reproduceTask           string
+	reproduceServer         string
+	reproduceAPIKey         string
+	reproduceDryRun         bool
+	reproduceJSON           bool
+	reproduceSet            []string
+	reproduceSetEnv         []string
+	reproduceMounts         []string
+	reproduceTimeout        time.Duration
+	reproducePlatform       string
+	reproduceDiff           bool
+	reproduceShell          bool
+	reproduceImage          string
+	reproduceResolveSecrets bool
 )
 
 var httpClient = &http.Client{Timeout: cliutil.DefaultHTTPTimeout}
@@ -101,6 +105,8 @@ func init() {
 	Cmd.Flags().StringVar(&reproducePlatform, "platform", "", "Platform to use when pulling the image (for example linux/amd64)")
 	Cmd.Flags().BoolVar(&reproduceDiff, "diff", false, "Compare reproduced output markers against recorded output")
 	Cmd.Flags().BoolVar(&reproduceShell, "shell", false, "Open an interactive shell in the reconstructed environment")
+	Cmd.Flags().StringVar(&reproduceImage, "image", "", "Override the image for fix testing (marks output OVERRIDDEN)")
+	Cmd.Flags().BoolVar(&reproduceResolveSecrets, "resolve-secrets", false, "Resolve secret:// refs via local providers (default: omit and warn)")
 }
 
 func runReproduce(cmd *cobra.Command, args []string) error {
@@ -132,6 +138,13 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitWithMessage(stderr, 2, err.Error())
 	}
+	var secretResolver ireproduce.SecretResolver
+	if reproduceResolveSecrets {
+		secretResolver, err = buildReproduceSecretResolver()
+		if err != nil {
+			return exitWithMessage(stderr, 2, err.Error())
+		}
+	}
 
 	server := strings.TrimRight(reproduceServer, "/")
 	if !reproduceDryRun || !reproduceJSON {
@@ -146,13 +159,16 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitWithMessage(stderr, 2, err.Error())
 	}
-	env, err := ireproduce.Reconstruct(desc, ireproduce.ReconstructOptions{
-		SetParams:  setParams,
-		SetEnv:     setEnv,
-		Mounts:     mounts,
-		Timeout:    reproduceTimeout,
-		Platform:   reproducePlatform,
-		ReplaySafe: resp.ReplaySafe,
+	env, err := ireproduce.Reconstruct(cmd.Context(), desc, ireproduce.ReconstructOptions{
+		SetParams:      setParams,
+		SetEnv:         setEnv,
+		Mounts:         mounts,
+		Timeout:        reproduceTimeout,
+		Platform:       reproducePlatform,
+		ReplaySafe:     resp.ReplaySafe,
+		ImageOverride:  reproduceImage,
+		ResolveSecrets: reproduceResolveSecrets,
+		SecretResolver: secretResolver,
 	})
 	if err != nil {
 		return exitWithMessage(stderr, 2, err.Error())
@@ -243,17 +259,18 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	if diff != nil {
 		_, _ = io.WriteString(cmd.OutOrStdout(), diff.Render())
 	}
+	taskLabel := resultTaskLabel(env)
 	if result.ExitCode == 0 {
-		_, _ = fmt.Fprintf(stderr, "%s exited 0\n", env.TaskName)
+		_, _ = fmt.Fprintf(stderr, "%s exited 0\n", taskLabel)
 		printFidelitySummary(stderr, result.Fidelity)
 		return nil
 	}
 	if result.ExitCode == 3 {
-		_, _ = fmt.Fprintf(stderr, "%s exited 0; reproduced output differs from recorded output\n", env.TaskName)
+		_, _ = fmt.Fprintf(stderr, "%s exited 0; reproduced output differs from recorded output\n", taskLabel)
 		printFidelitySummary(stderr, result.Fidelity)
 		return exitWithCode(3)
 	}
-	_, _ = fmt.Fprintf(stderr, "%s failed", env.TaskName)
+	_, _ = fmt.Fprintf(stderr, "%s failed", taskLabel)
 	if result.Error != "" {
 		_, _ = fmt.Fprintf(stderr, ": %s", result.Error)
 	}
@@ -303,6 +320,69 @@ func fetchDescriptor(ctx context.Context, cmd *cobra.Command, server, jobID, run
 		return nil, fmt.Errorf("descriptor unavailable for run %s task %s", runID, task)
 	}
 	return &out, nil
+}
+
+type secretResolverAdapter struct {
+	resolver secret.Resolver
+}
+
+func (a secretResolverAdapter) ResolveWithIdentity(ctx context.Context, ref string) (string, ireproduce.SecretIdentity, error) {
+	value, identity, err := a.resolver.ResolveWithIdentity(ctx, ref)
+	if err != nil {
+		return "", ireproduce.SecretIdentity{}, err
+	}
+	return value, ireproduce.SecretIdentity{
+		Provider:           identity.Provider,
+		Ref:                identity.Ref,
+		Version:            identity.Version,
+		ResourceVersion:    identity.ResourceVersion,
+		Namespace:          identity.Namespace,
+		Name:               identity.Name,
+		Key:                identity.Key,
+		KeyID:              identity.KeyID,
+		HMACSHA256:         identity.HMACSHA256,
+		Verifiable:         identity.Verifiable,
+		UnverifiableReason: identity.UnverifiableReason,
+		Metadata:           identity.Metadata,
+	}, nil
+}
+
+func buildReproduceSecretResolver() (ireproduce.SecretResolver, error) {
+	cfg := secret.Config{
+		EnableEnv:           envBool("CAESIUM_JOBDEF_SECRETS_ENABLE_ENV", true),
+		IdentityHMACKeys:    os.Getenv("CAESIUM_JOBDEF_SECRETS_IDENTITY_HMAC_KEYS"),
+		IdentityHMACCurrent: os.Getenv("CAESIUM_JOBDEF_SECRETS_IDENTITY_HMAC_KEY_ID"),
+	}
+
+	kubeConfig := firstNonEmptyString(os.Getenv("CAESIUM_JOBDEF_SECRETS_KUBECONFIG"), os.Getenv("KUBECONFIG"))
+	kubeNamespaceRaw := os.Getenv("CAESIUM_JOBDEF_SECRETS_KUBE_NAMESPACE")
+	kubeNamespace := firstNonEmptyString(kubeNamespaceRaw, os.Getenv("KUBERNETES_NAMESPACE"), "default")
+	if envBool("CAESIUM_JOBDEF_SECRETS_ENABLE_KUBERNETES", false) ||
+		kubeConfig != "" ||
+		(strings.TrimSpace(kubeNamespaceRaw) != "" && kubeNamespace != "default") ||
+		os.Getenv("KUBERNETES_SERVICE_HOST") != "" {
+		cfg.Kubernetes = &secret.KubernetesConfig{
+			KubeConfigPath: kubeConfig,
+			Namespace:      kubeNamespace,
+		}
+	}
+
+	vaultAddress := firstNonEmptyString(os.Getenv("CAESIUM_JOBDEF_SECRETS_VAULT_ADDRESS"), os.Getenv("VAULT_ADDR"))
+	if vaultAddress != "" {
+		cfg.Vault = &secret.VaultConfig{
+			Address:       vaultAddress,
+			Token:         firstNonEmptyString(os.Getenv("CAESIUM_JOBDEF_SECRETS_VAULT_TOKEN"), os.Getenv("VAULT_TOKEN")),
+			Namespace:     firstNonEmptyString(os.Getenv("CAESIUM_JOBDEF_SECRETS_VAULT_NAMESPACE"), os.Getenv("VAULT_NAMESPACE")),
+			CACertPath:    firstNonEmptyString(os.Getenv("CAESIUM_JOBDEF_SECRETS_VAULT_CA_CERT"), os.Getenv("VAULT_CACERT")),
+			TLSSkipVerify: envBool("CAESIUM_JOBDEF_SECRETS_VAULT_SKIP_VERIFY", false) || envBool("VAULT_SKIP_VERIFY", false),
+		}
+	}
+
+	resolver, err := secret.NewConfiguredResolver(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("build local secret resolver: %w", err)
+	}
+	return secretResolverAdapter{resolver: resolver}, nil
 }
 
 type dockerPuller struct{}
@@ -537,6 +617,16 @@ func printFidelitySummary(w io.Writer, summary *ireproduce.FidelitySummary) {
 	}
 }
 
+func resultTaskLabel(env *ireproduce.Envelope) string {
+	if env == nil {
+		return "task"
+	}
+	if env.ImagePullMode == "OVERRIDDEN" {
+		return fmt.Sprintf("%s (OVERRIDDEN image: %s)", env.TaskName, env.Image)
+	}
+	return env.TaskName
+}
+
 func sortedMapKeys(values map[string]string) []string {
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -608,4 +698,25 @@ func exitWithCode(code int) error {
 		return nil
 	}
 	return &exitError{code: code}
+}
+
+func envBool(key string, fallback bool) bool {
+	value, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
