@@ -152,6 +152,107 @@ func TestExecutePassesRemappedMountsToSynthesizedDefinition(t *testing.T) {
 	}
 }
 
+func TestBuildShellRequestUsesDefaultShellAndClonesEnvelope(t *testing.T) {
+	env := &Envelope{
+		TaskName: "transform",
+		Image:    "alpine:3.23",
+		Env:      map[string]string{"A": "1"},
+		Mounts:   testBindMount("/local/data", "/data"),
+		WorkDir:  "/work",
+	}
+
+	req := BuildShellRequest(env, "linux/amd64")
+	env.Env["A"] = "mutated"
+	env.Mounts[0].Source = "/mutated"
+
+	if req.Shell != DefaultShell {
+		t.Fatalf("Shell = %q, want %q", req.Shell, DefaultShell)
+	}
+	if req.Env["A"] != "1" {
+		t.Fatalf("request env was not cloned: %#v", req.Env)
+	}
+	if req.Mounts[0].Source != "/local/data" {
+		t.Fatalf("request mounts were not cloned: %#v", req.Mounts)
+	}
+	if req.WorkDir != "/work" || req.Platform != "linux/amd64" {
+		t.Fatalf("request = %#v, want workdir and platform", req)
+	}
+}
+
+func TestExecuteShellPullsImageAndRunsShellRequest(t *testing.T) {
+	desc := basicDescriptor("registry.example.com/team/app:1")
+	env, err := Reconstruct(desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	puller := &fakePuller{}
+	runner := &fakeShellRunner{}
+
+	result, err := ExecuteShell(context.Background(), env, ShellExecuteOptions{
+		Puller:      puller,
+		ShellRunner: runner,
+		Platform:    "linux/amd64",
+	})
+	if err != nil {
+		t.Fatalf("ExecuteShell() error = %v", err)
+	}
+	if result.ExitCode != 0 {
+		t.Fatalf("ExitCode = %d, want 0", result.ExitCode)
+	}
+	if puller.imageRef != "registry.example.com/team/app:1" || puller.platform != "linux/amd64" {
+		t.Fatalf("puller = %#v, want image and platform", puller)
+	}
+	if runner.req.Shell != DefaultShell || runner.req.Image != env.Image {
+		t.Fatalf("shell request = %#v, want default shell and env image", runner.req)
+	}
+}
+
+func TestExecuteShellDistrolessGuidance(t *testing.T) {
+	desc := basicDescriptor("gcr.io/distroless/static:nonroot")
+	env, err := Reconstruct(desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	_, err = ExecuteShell(context.Background(), env, ShellExecuteOptions{
+		Puller: &fakePuller{},
+		ShellRunner: &fakeShellRunner{err: &ShellUnavailableError{
+			Image: env.Image,
+			Shell: DefaultShell,
+			Err:   errors.New("exit status 127"),
+		}},
+	})
+	if err == nil {
+		t.Fatal("ExecuteShell() error = nil, want shell unavailable guidance")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "--shell-image") || !strings.Contains(msg, "deferred") || !strings.Contains(msg, "distroless") {
+		t.Fatalf("shell unavailable error = %q, want distroless deferred --shell-image guidance", msg)
+	}
+}
+
+func TestExecuteShellReturnsInteractiveExitCode(t *testing.T) {
+	desc := basicDescriptor("alpine:3.23")
+	env, err := Reconstruct(desc, ReconstructOptions{})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	result, err := ExecuteShell(context.Background(), env, ShellExecuteOptions{
+		Puller: &fakePuller{},
+		ShellRunner: &fakeShellRunner{err: &ShellExitError{
+			Code: 7,
+			Err:  errors.New("exit status 7"),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteShell() error = %v, want shell exit result", err)
+	}
+	if result.ExitCode != 7 || result.Error == "" {
+		t.Fatalf("result = %#v, want shell exit code and error", result)
+	}
+}
+
 func basicDescriptor(image string) *Descriptor {
 	desc := &Descriptor{}
 	desc.SchemaVersion = 1
@@ -201,4 +302,14 @@ func (r *capturingRunner) Run(_ context.Context, def *pkgjobdef.Definition, time
 	r.def = def
 	r.timeout = timeout
 	return r.result, nil
+}
+
+type fakeShellRunner struct {
+	req ShellRequest
+	err error
+}
+
+func (r *fakeShellRunner) RunShell(_ context.Context, req ShellRequest) error {
+	r.req = req
+	return r.err
 }

@@ -60,3 +60,8 @@ func Execute() error {
 
 	return command.Execute()
 }
+
+// ExitCode extracts a command-requested process exit code from an Execute error.
+func ExitCode(err error) (int, bool) {
+	return reproduce.ExitCode(err)
+}

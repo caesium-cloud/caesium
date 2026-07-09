@@ -5,6 +5,7 @@ package reproduce
 import (
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -23,6 +24,19 @@ const (
 	WarningMountNotRemapped    = "mount_not_remapped"
 	WarningMountSkipped        = "mount_skipped"
 	WarningRetryNotApplied     = "retry_policy_not_applied"
+	WarningWorkloadIdentity    = "workload_identity_listed_not_applied"
+	WarningCrossArchEmulation  = "cross_arch_emulation"
+	WarningResourceLimits      = "resource_limits_not_reproduced"
+	WarningWallClock           = "wall_clock_not_reproduced"
+	WarningExternalState       = "external_state_not_reproduced"
+	WarningSideEffects         = "side_effects_not_suppressed"
+)
+
+const (
+	FidelityFaithful         = "faithful"
+	FidelityDegraded         = "degraded"
+	FidelityNotReproduced    = "not_reproduced"
+	FidelityListedNotApplied = "listed_not_applied"
 )
 
 // Assignment is a user-supplied KEY=VALUE override.
@@ -42,6 +56,20 @@ type MountRemap struct {
 type Warning struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// FidelityDimension records how faithfully one descriptor dimension can be
+// reproduced on the operator's local Docker daemon.
+type FidelityDimension struct {
+	Dimension string   `json:"dimension"`
+	Status    string   `json:"status"`
+	Details   []string `json:"details,omitempty"`
+}
+
+// FidelitySummary is the structured machine-readable fidelity block emitted by
+// reproduce and mirrored in compact human output.
+type FidelitySummary struct {
+	Dimensions []FidelityDimension `json:"dimensions"`
 }
 
 // SecretOmission records a secret env var that was deliberately not
@@ -79,6 +107,7 @@ type Envelope struct {
 	Platform            string            `json:"platform,omitempty"`
 	RecordedRetryPolicy *RetryPolicy      `json:"recorded_retry_policy,omitempty"`
 	OmittedSecrets      []SecretOmission  `json:"omitted_secrets,omitempty"`
+	Fidelity            *FidelitySummary  `json:"fidelity,omitempty"`
 	Warnings            []Warning         `json:"warnings,omitempty"`
 }
 
@@ -268,7 +297,7 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 		})
 	}
 
-	return &Envelope{
+	envelope := &Envelope{
 		TaskName:            desc.Baseline.TaskName,
 		JobID:               desc.Baseline.JobID,
 		JobAlias:            desc.Baseline.JobAlias,
@@ -287,8 +316,13 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 		Platform:            strings.TrimSpace(opts.Platform),
 		RecordedRetryPolicy: retryPolicy,
 		OmittedSecrets:      omitted,
-		Warnings:            warnings,
-	}, nil
+	}
+	fidelity, fidelityWarnings := buildFidelitySummary(desc, envelope, opts, omitted)
+	warnings = append(warnings, fidelityWarnings...)
+	sortWarnings(warnings)
+	envelope.Fidelity = fidelity
+	envelope.Warnings = warnings
+	return envelope, nil
 }
 
 // BuildDefinition synthesizes the one-step definition consumed by localrun.
@@ -442,6 +476,243 @@ func imageReference(recorded, digest string) (string, string, []Warning) {
 		base = before
 	}
 	return base + "@" + digest, "DIGEST", nil
+}
+
+func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptions, omitted []SecretOmission) (*FidelitySummary, []Warning) {
+	var dimensions []FidelityDimension
+	var warnings []Warning
+	add := func(dimension, status string, details ...string) {
+		dimensions = append(dimensions, FidelityDimension{
+			Dimension: dimension,
+			Status:    status,
+			Details:   cleanDetails(details),
+		})
+	}
+
+	if strings.TrimSpace(desc.Runtime.ResolvedImageDigest) == "" {
+		add("image_content", FidelityDegraded, fmt.Sprintf("no resolved digest recorded for %s; local pull uses the mutable tag", desc.Runtime.Image))
+	} else {
+		add("image_content", FidelityFaithful, fmt.Sprintf("image pulled by recorded digest %s", desc.Runtime.ResolvedImageDigest))
+	}
+	add("command_argv_workdir", FidelityFaithful, "recorded command, argv, and workdir are used verbatim")
+	add("literal_env_vars", FidelityFaithful, "recorded literal env vars are restored")
+	add("run_params", FidelityFaithful, "recorded run params are restored as CAESIUM_PARAM_*")
+
+	if details := outputRefFidelityDetails(desc); len(details) > 0 {
+		add("predecessor_outputs", FidelityDegraded, details...)
+	} else {
+		add("predecessor_outputs", FidelityFaithful, "recorded scalar predecessor outputs are restored as CAESIUM_OUTPUT_*")
+	}
+	add("schema_config", FidelityFaithful, "recorded output schema and validation mode are applied to the local run")
+
+	if len(omitted) > 0 {
+		add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs omitted by default: %s", strings.Join(secretEnvKeys(omitted), ", ")))
+	} else {
+		add("secret_values", FidelityFaithful, "no recorded secret refs were present")
+	}
+
+	if details := mountFidelityDetails(desc.ContainerSpec, opts.Mounts); len(details) > 0 {
+		add("host_mounts_volumes", FidelityNotReproduced, details...)
+	} else {
+		add("host_mounts_volumes", FidelityFaithful, "no recorded host mounts or volumes were present")
+	}
+
+	if details := workloadIdentityDetails(desc); len(details) > 0 {
+		add("engine_workload_identity", FidelityListedNotApplied, details...)
+		warnings = append(warnings, Warning{
+			Code:    WarningWorkloadIdentity,
+			Message: "engine and workload-identity fields have no local Docker equivalent; listed in fidelity summary and not applied",
+		})
+	} else {
+		add("engine_workload_identity", FidelityFaithful, "recorded task has no non-Docker engine or workload-identity fields")
+	}
+
+	if requestedArch := platformArch(firstNonEmpty(opts.Platform, env.Platform)); requestedArch != "" && requestedArch != runtime.GOARCH {
+		add("cpu_architecture", FidelityDegraded, fmt.Sprintf("requested platform %s differs from local architecture %s; Docker may use emulation", firstNonEmpty(opts.Platform, env.Platform), runtime.GOARCH))
+		warnings = append(warnings, Warning{
+			Code:    WarningCrossArchEmulation,
+			Message: fmt.Sprintf("requested platform %s differs from local architecture %s; cross-arch emulation is DEGRADED", firstNonEmpty(opts.Platform, env.Platform), runtime.GOARCH),
+		})
+	} else if platform := strings.TrimSpace(firstNonEmpty(opts.Platform, env.Platform)); platform != "" {
+		add("cpu_architecture", FidelityFaithful, fmt.Sprintf("requested platform %s matches local architecture %s", platform, runtime.GOARCH))
+	} else {
+		add("cpu_architecture", FidelityFaithful, "no explicit platform override requested; local Docker selects the native architecture")
+	}
+
+	add("resource_limits", FidelityNotReproduced, "descriptor schema v1 does not record resource limits")
+	warnings = append(warnings, Warning{
+		Code:    WarningResourceLimits,
+		Message: "resource limits are not reproduced because descriptor schema v1 does not record them",
+	})
+
+	add("wall_clock_time", FidelityNotReproduced, "task observes the current local wall clock")
+	warnings = append(warnings, Warning{
+		Code:    WarningWallClock,
+		Message: "wall clock is not reproduced; the task runs now",
+	})
+
+	add("external_system_state", FidelityNotReproduced, "databases, APIs, object stores, and other external systems are not rewound")
+	warnings = append(warnings, Warning{
+		Code:    WarningExternalState,
+		Message: "external system state is not reproduced; the task sees whatever is reachable now",
+	})
+
+	add("side_effects", FidelityNotReproduced, "side effects are not suppressed under local reproduce")
+	warnings = append(warnings, Warning{
+		Code:    WarningSideEffects,
+		Message: "side effects are not suppressed; the container can affect systems reachable from this machine",
+	})
+
+	return &FidelitySummary{Dimensions: dimensions}, warnings
+}
+
+func outputRefFidelityDetails(desc *Descriptor) []string {
+	byName := make(map[string]map[string]string)
+	used := make(map[string]struct{})
+	for _, pred := range desc.DAG.Predecessors {
+		if outputs := desc.DAG.PredecessorOutputs[pred.TaskID]; len(outputs) > 0 {
+			byName[firstNonEmpty(pred.TaskName, pred.TaskID)] = outputs
+			used[pred.TaskID] = struct{}{}
+		}
+	}
+	for id, outputs := range desc.DAG.PredecessorOutputs {
+		if len(outputs) == 0 {
+			continue
+		}
+		if _, ok := used[id]; ok {
+			continue
+		}
+		byName[id] = outputs
+	}
+
+	var details []string
+	for stepName, outputs := range byName {
+		for key, value := range outputs {
+			ref, ok := pkgtask.DecodeOutputRef(value)
+			if !ok {
+				continue
+			}
+			envKey := "CAESIUM_OUTPUT_" + pkgtask.NormalizeStepName(stepName) + "_" + pkgtask.NormalizeStepName(key)
+			details = append(details, fmt.Sprintf("%s points at recorded path %s with digest %s; local storage must be mounted or remapped", envKey, ref.Path, ref.Digest))
+		}
+	}
+	sort.Strings(details)
+	return details
+}
+
+func mountFidelityDetails(spec container.Spec, remaps []MountRemap) []string {
+	if len(spec.Mounts) == 0 && len(spec.ResolvedVolumeMounts) == 0 {
+		return nil
+	}
+	remapBySource := make(map[string]string, len(remaps))
+	for _, remap := range remaps {
+		if strings.TrimSpace(remap.From) != "" && strings.TrimSpace(remap.To) != "" {
+			remapBySource[remap.From] = remap.To
+		}
+	}
+
+	var details []string
+	for _, mount := range spec.Mounts {
+		details = append(details, mountDetail(container.Mount{
+			Type:     mount.Type,
+			Source:   mount.Source,
+			Target:   mount.Target,
+			ReadOnly: mount.ReadOnly,
+		}, remapBySource))
+	}
+	for _, mount := range spec.ResolvedVolumeMounts {
+		switch mount.Type {
+		case container.VolumeMountTypeBind, container.VolumeMountTypeVolume, container.VolumeMountTypeTmpfs:
+			details = append(details, mountDetail(container.Mount{
+				Type:     container.MountType(mount.Type),
+				Source:   mount.Source,
+				Target:   mount.Target,
+				ReadOnly: mount.ReadOnly,
+			}, remapBySource))
+		case container.VolumeMountTypePVC, container.VolumeMountTypeClaimTemplate, container.VolumeMountTypeVolumeSource:
+			details = append(details, fmt.Sprintf("Kubernetes-only %s mount %s at %s is skipped under local Docker", mount.Type, firstNonEmpty(mount.Name, mount.Source), mount.Target))
+		default:
+			details = append(details, fmt.Sprintf("unsupported %s mount %s at %s is skipped under local Docker", mount.Type, firstNonEmpty(mount.Name, mount.Source), mount.Target))
+		}
+	}
+	sort.Strings(details)
+	return details
+}
+
+func mountDetail(mount container.Mount, remapBySource map[string]string) string {
+	if mount.Type == container.MountTypeBind {
+		if replacement := remapBySource[mount.Source]; replacement != "" {
+			return fmt.Sprintf("bind mount %s -> %s is remapped to local source %s", mount.Source, mount.Target, replacement)
+		}
+		return fmt.Sprintf("bind mount %s -> %s uses the recorded host path unless remapped", mount.Source, mount.Target)
+	}
+	if mount.Type == container.MountTypeVolume {
+		return fmt.Sprintf("volume %s -> %s uses local Docker volume contents", mount.Source, mount.Target)
+	}
+	if mount.Type == container.MountTypeTmpfs {
+		return fmt.Sprintf("tmpfs mount at %s is recreated locally, not restored from baseline state", mount.Target)
+	}
+	return fmt.Sprintf("%s mount %s -> %s is best-effort under local Docker", mount.Type, mount.Source, mount.Target)
+}
+
+func workloadIdentityDetails(desc *Descriptor) []string {
+	var details []string
+	if engine := strings.TrimSpace(desc.Runtime.Engine); engine != "" && engine != "docker" {
+		details = append(details, fmt.Sprintf("recorded engine %q runs under local Docker", engine))
+	}
+	if len(desc.Runtime.NodeSelector) > 0 {
+		details = append(details, "node selector "+formatStringMap(desc.Runtime.NodeSelector))
+	}
+	if k8s := firstKubernetesSpec(desc); k8s != nil {
+		if k8s.ServiceAccountName != "" {
+			details = append(details, "serviceAccountName "+k8s.ServiceAccountName)
+		}
+		if len(k8s.PodAnnotations) > 0 {
+			details = append(details, "pod annotations "+formatStringMap(k8s.PodAnnotations))
+		}
+		if k8s.AutomountServiceAccountToken != nil {
+			details = append(details, fmt.Sprintf("automountServiceAccountToken %t", *k8s.AutomountServiceAccountToken))
+		}
+		if k8s.QueueName != "" {
+			details = append(details, "Kueue queue "+k8s.QueueName)
+		}
+	}
+	sort.Strings(details)
+	return details
+}
+
+func firstKubernetesSpec(desc *Descriptor) *container.KubernetesSpec {
+	if desc.KubernetesSpec != nil {
+		return desc.KubernetesSpec
+	}
+	return desc.ContainerSpec.Kubernetes
+}
+
+func platformArch(platform string) string {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(platform)), "/")
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+func formatStringMap(values map[string]string) string {
+	keys := sortedKeys(values)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, key+"="+values[key])
+	}
+	return strings.Join(parts, ", ")
+}
+
+func cleanDetails(details []string) []string {
+	out := make([]string, 0, len(details))
+	for _, detail := range details {
+		if strings.TrimSpace(detail) != "" {
+			out = append(out, detail)
+		}
+	}
+	return out
 }
 
 func paramEnvKey(key string) string {
