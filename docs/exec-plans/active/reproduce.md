@@ -104,7 +104,7 @@ the existing loader `run.Store.TaskExecutionDescriptor(ctx, runID, taskID)`
 (`internal/run/store.go`) — do not re-decode. This stream merges first (everything
 downstream fetches from it).
 
-- [ ] A1. Add `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor`. Resolve
+- [x] A1. Add `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor`. Resolve
       `:task` by task **name** within the run (the ergonomic handle; accept a UUID
       too), then return the stored `TaskRun.ExecutionDescriptor` JSON verbatim plus
       a small wrapper (`task_run_id`, `status`, `result`, recorded `output`,
@@ -118,7 +118,10 @@ downstream fetches from it).
       Files: new `api/rest/controller/reproduce/descriptor.go`, new
       `api/rest/service/reproduce/descriptor.go`, `api/rest/bind/bind.go` (one route
       line in the `Protected()` `/v1/jobs/:id` group).
-- [ ] A2. Add the endpoint integration test: run a job with structured outputs and
+      Note: W1-alpha added the reproduce controller/service pair, the protected route,
+      viewer RBAC policy, name-first/UUID-fallback task resolution, raw descriptor
+      wrapper, log pointer, and stable `descriptor unavailable` 404 body.
+- [x] A2. Add the endpoint integration test: run a job with structured outputs and
       digest pinning on the live integration server, fetch the descriptor (200) and
       assert the recorded image/digest, literal env, params, and
       `PredecessorOutputs` round-trip; a **scoped key** fetches an in-scope job's
@@ -127,6 +130,9 @@ downstream fetches from it).
       "descriptor unavailable" error, not a partial payload.
       Files: new `test/reproduce_endpoint_test.go` (`//go:build integration`).
       Depends on: A1.
+      Note: W1-alpha added a live endpoint round-trip with step-level
+      `cache.pinDigests`, name and UUID fetch lanes, absent-descriptor refusal, and
+      an auth-enabled scoped-key 200/403 route test.
 
 ### Stream B — CLI reproduce core (P0 client)
 
