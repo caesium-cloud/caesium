@@ -111,7 +111,7 @@ The CLI emits a fidelity summary in human output and under `fidelity.dimensions[
 | `external_system_state` | `not_reproduced` | Databases, APIs, object stores, and other external systems are not rewound. |
 | `side_effects` | `not_reproduced` | Side effects are not suppressed; the container can affect systems reachable from this machine. |
 
-Warnings use stable JSON codes such as `secret_omitted`, `secret_resolution_failed`, `secret_provider_mismatch`, `secret_drift`, `degraded_image_pull`, `image_overridden`, `output_ref_unresolved`, `mount_not_remapped`, `mount_skipped`, `retry_policy_not_applied`, `workload_identity_listed_not_applied`, `cross_arch_emulation`, `resource_limits_not_reproduced`, `wall_clock_not_reproduced`, `external_state_not_reproduced`, `side_effects_not_suppressed`, and `local_image_used`.
+Warnings use stable JSON codes such as `secret_omitted`, `secret_resolution_failed`, `secret_provider_mismatch`, `secret_drift`, `degraded_image_pull`, `image_overridden`, `output_ref_unresolved`, `predecessor_output_missing_name`, `mount_not_remapped`, `mount_skipped`, `retry_policy_not_applied`, `workload_identity_listed_not_applied`, `cross_arch_emulation`, `resource_limits_not_reproduced`, `wall_clock_not_reproduced`, `external_state_not_reproduced`, `side_effects_not_suppressed`, and `local_image_used`.
 
 ## Secrets
 
