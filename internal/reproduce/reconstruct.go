@@ -579,15 +579,16 @@ func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptio
 		})
 	}
 
-	if env.ImagePullMode == "OVERRIDDEN" {
+	switch {
+	case env.ImagePullMode == "OVERRIDDEN":
 		details := []string{fmt.Sprintf("OVERRIDDEN: local run uses image override %s instead of recorded image %s", env.Image, desc.Runtime.Image)}
 		if strings.TrimSpace(desc.Runtime.ResolvedImageDigest) != "" {
 			details = append(details, fmt.Sprintf("recorded digest %s is not used for the override image", desc.Runtime.ResolvedImageDigest))
 		}
 		add("image_content", FidelityOverridden, details...)
-	} else if strings.TrimSpace(desc.Runtime.ResolvedImageDigest) == "" {
+	case strings.TrimSpace(desc.Runtime.ResolvedImageDigest) == "":
 		add("image_content", FidelityDegraded, fmt.Sprintf("no resolved digest recorded for %s; local pull uses the mutable tag", desc.Runtime.Image))
-	} else {
+	default:
 		add("image_content", FidelityFaithful, fmt.Sprintf("image pulled by recorded digest %s", desc.Runtime.ResolvedImageDigest))
 	}
 	add("command_argv_workdir", FidelityFaithful, "recorded command, argv, and workdir are used verbatim")
@@ -601,15 +602,14 @@ func buildFidelitySummary(desc *Descriptor, env *Envelope, opts ReconstructOptio
 	}
 	add("schema_config", FidelityFaithful, "recorded output schema and validation mode are applied to the local run")
 
-	if len(omitted) > 0 {
-		if opts.ResolveSecrets {
-			add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs unresolved locally and omitted: %s", strings.Join(secretEnvKeys(omitted), ", ")))
-		} else {
-			add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs omitted by default: %s", strings.Join(secretEnvKeys(omitted), ", ")))
-		}
-	} else if len(resolved) > 0 {
+	switch {
+	case len(omitted) > 0 && opts.ResolveSecrets:
+		add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs unresolved locally and omitted: %s", strings.Join(secretEnvKeys(omitted), ", ")))
+	case len(omitted) > 0:
+		add("secret_values", FidelityNotReproduced, fmt.Sprintf("secret refs omitted by default: %s", strings.Join(secretEnvKeys(omitted), ", ")))
+	case len(resolved) > 0:
 		add("secret_values", FidelityDegraded, fmt.Sprintf("secret refs resolved from local providers for %s; local values may differ from the recorded baseline", strings.Join(resolvedSecretEnvKeys(resolved), ", ")))
-	} else {
+	default:
 		add("secret_values", FidelityFaithful, "no recorded secret refs were present")
 	}
 
