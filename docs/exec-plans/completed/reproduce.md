@@ -2,6 +2,12 @@
 
 Last updated: 2026-07-09
 
+> **Status: Complete — all 11 items shipped 2026-07-08→09 across five waves
+> (PRs #334–#341) and archived to `docs/exec-plans/completed/`.** All seven
+> acceptance criteria hold; the three deferred design Open Questions
+> (#1 pruned-descriptor messaging, #4 `--shell-image` fallback, #5 explain
+> integration) remain explicitly deferred.
+
 This plan ships `caesium reproduce <run-id> --job-id <id> --task <name>`: a
 client-side verb that pulls a completed task's immutable
 `TaskExecutionDescriptor` from the server and re-executes that single task on the
@@ -69,7 +75,7 @@ inline by the items below; the rest (#1 pruned-descriptor messaging, #4
 distroless `--shell-image` fallback, #5 explain/mini-`why` integration) are
 recorded as deferred and must not be silently pulled into scope.
 
-## Progress (as of 2026-07-08)
+## Progress (as of 2026-07-09)
 
 ### Wave 1 — shipped 2026-07-08 (A1, A2, H-1; 3 of 11 items)
 
@@ -130,8 +136,79 @@ verify/publish/merge:
   single argv element — reproduce mirrors it), 1 P2 (typed-exit refactor)
   deferred to W3-C alongside exit 3. PR #337.
 
-Wave 3 next: C (C1, C2, C3) then D (D1, D2) serialized on the shared command
-files, N-1 last. Carry-in for W3-C: the RunE typed-exit-error refactor.
+### Wave 3 — shipped 2026-07-09 (C1 + C2 + C3 + typed-exit carry-in; 8 of 11 items)
+
+One codex stream (C1 → C2 → C3 sequentially in one PR), orchestrator
+verify/publish/merge:
+
+- **W3-γ (C1+C2+C3)** — the debug-loop ergonomics. `--diff` compares reproduced
+  vs recorded `##caesium::output` through the new **generic
+  `internal/outputdiff`** package (`Compare(recorded, reproduced) Diff` with
+  Added/Removed/Changed, `Empty()`, deterministic `Render()`, JSON-tagged, zero
+  reproduce-specific types — built once for the backtesting sibling): exit `3`
+  only when the task ran AND succeeded but outputs mismatch, failed tasks stay
+  exit 1, `--diff --dry-run` is a usage error. The fidelity summary derives
+  per-dimension statuses (faithful / degraded / overridden / not_reproduced /
+  listed_not_applied) from the descriptor — mutable-tag pulls, unmounted output
+  refs, engine/workload-identity fields listed-not-applied, cross-arch
+  emulation, and the never-reproduced trio (wall clock, external state, side
+  effects) — as a stderr block in human mode and `fidelity.dimensions[]` in
+  `--json`. `--shell` reuses the exact fetch/pull/env reconstruction and execs
+  the docker CLI interactively with `/bin/sh` discovery; distroless images fail
+  with guidance (OQ#4 `--shell-image` sidecar stays deferred). Carry-in
+  delivered: `RunE` now returns typed exit errors mapped once at the
+  `caesium.go` binary boundary via `cmd.ExitCode(err)` — no more `os.Exit`
+  inside command bodies. Review: 1 P1 declined (ShellUnavailableError exits 2
+  by design — a shell-free image never RAN; registry-auth failures already exit
+  2), P2 fixed (diff silently skipped on task failure now prints a stderr
+  note), 2 mediums fixed (`normalizeArch` platform normalization for
+  bare-arch/`linux/arm64/v8`/`x86_64` forms; `shellStderrTee` daemon-error
+  sniffing so 126/127 typed *inside* a working shell isn't misclassified as
+  shell-unavailable). PR #339.
+
+### Wave 4 — shipped 2026-07-09 (D1 + D2; 10 of 11 items)
+
+One codex stream (D1 → D2 sequentially in one PR), orchestrator
+verify/publish/merge:
+
+- **W4-δ (D1+D2)** — fix-testing and local secrets. `--image ref` replaces the
+  pull target and the synthesized step image while keeping the recorded env,
+  params, and predecessor outputs; the run is unmissably marked **OVERRIDDEN**
+  (human label, `image_pull_mode: "OVERRIDDEN"` + `image_overridden: true` in
+  JSON, `image_content` fidelity dimension `overridden`) and composes with
+  `--diff`/`--set`/`--shell`; W2's local-image-present skip-pull applies to the
+  override ref. `--resolve-secrets` resolves recorded `secret://` refs via the
+  operator's **local** provider config only (env/k8s/vault through
+  `internal/jobdef/secret`, wrapped behind a small `SecretResolver` interface
+  so `internal/reproduce` stays pure-Go) — per-ref omit+warn on resolution
+  failure or provider mismatch (never fails the run), best-effort
+  `secret_drift` warning comparing recorded Vault version / k8s
+  `resourceVersion` (the server-keyed HMAC identity is deliberately not
+  client-verifiable), values never logged in warnings, and the `--json`
+  envelope carries resolved values by design (explicit opt-in). Integration:
+  OVERRIDDEN `--json` leg + env-provider resolve-secrets leg on the docker
+  lane. Review: 2 gocritic ifElseChain lint fixes (fidelity chains → switch);
+  3 greptile P2s fixed post-green — `context.Context` moved from the options
+  struct to an explicit `Reconstruct(ctx, …)` parameter across 17 callsites,
+  `firstNonEmptyString` returns the trimmed value, and the SecretRefs loop
+  marks `processedSecretEnv` to dedup shared env keys. PR #340.
+
+### Wave 5 — shipped 2026-07-09 (N-1; 11 of 11 items)
+
+Docs-only closing stream:
+
+- **W5-ν (N-1)** — the docs now match reality: `docs/design-reproduce.md`
+  banner flipped to Shipped/active (PRs #334–#340), the roadmap Phase 4 row
+  carries the `**Shipped.**` idiom, the `docs/README.md` design bullet flipped
+  (exec-plan ref kept in backtick form per the README guardrail), and a new
+  top-level **`docs/reproduce.md`** operator reference documents the flag
+  table (mirrored from `cmd/reproduce/reproduce.go`), exit codes 0/1/2/3, the
+  per-dimension fidelity contract, secrets behavior, and `--image` OVERRIDDEN
+  semantics — indexed in the README. Cross-links landed in both consuming
+  siblings: `design-agent-in-the-loop.md` gains the escalation repro
+  one-liner, `design-backtesting.md` notes the shared `internal/outputdiff`
+  comparator shipped in C1. Review: gemini caught a genuinely missing warning
+  code (`predecessor_output_missing_name`) in the new doc — added. PR #341.
 
 ### Stream Status
 
@@ -139,10 +216,10 @@ files, N-1 last. Carry-in for W3-C: the RunE typed-exit-error refactor.
 |--------|-------|----------|--------|
 | A | Read-only descriptor endpoint — `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor` under the existing scoped-key auth arm | **P0** | ✅ Shipped W1 (#335) |
 | B | CLI reproduce core — `cmd/reproduce/` + `internal/reproduce/`, envelope reconstruction, `--dry-run`/`--json`, digest pull, run mode + exit codes, `--mount`/`--set`/`--set-env` | **P0** | ✅ Shipped W2 (#337) |
-| C | Output-diff compare + fidelity summary + `--shell` | P1 | Next (W3, carries the typed-exit refactor) |
-| D | Fix-testing (`--image`) + local secret resolution (`--resolve-secrets`) | P2 | Queued (W3, after C) |
+| C | Output-diff compare + fidelity summary + `--shell` | P1 | ✅ Shipped W3 (#339, incl. typed-exit carry-in) |
+| D | Fix-testing (`--image`) + local secret resolution (`--resolve-secrets`) | P2 | ✅ Shipped W4 (#340) |
 | H-1 | Integration harness — record descriptors with digest pinning, drive the real CLI against the harness Docker daemon | — | ✅ Shipped W1 (#334) |
-| N-1 | Docs — design banner, roadmap Phase 4 row, README repoint, CLI reference, sibling cross-links | — | Queued (last) |
+| N-1 | Docs — design banner, roadmap Phase 4 row, README repoint, CLI reference, sibling cross-links | — | ✅ Shipped W5 (#341) |
 
 ## Streams
 
@@ -260,7 +337,7 @@ sequences **after** Stream B.
 - [x] C1. Add `--diff` output-compare as a **shared** package
       (`internal/outputdiff/`) so the recorded-vs-reproduced `##caesium::output` map
       comparison is built once and reused by the N-run
-      [backtesting](backtesting.md) sibling (design Interplay note: "build it once as
+      [backtesting](../active/backtesting.md) sibling (design Interplay note: "build it once as
       a shared package"). On success with a mismatch, exit `3`; on a match, `0`.
       Wire the `--diff` flag through `cmd/reproduce/` to compare parsed markers
       against the recorded `TaskRun.Output` from the descriptor wrapper.
@@ -457,7 +534,7 @@ and touch the same command file.
   intentionally untouched — flag any item that reaches for them as scope creep
   against the Source-Of-Truth Note.
 - `internal/outputdiff/` (C1) is a **new shared package** consumed by the
-  [backtesting](backtesting.md) sibling plan; C1 owns its creation, backtesting
+  [backtesting](../active/backtesting.md) sibling plan; C1 owns its creation, backtesting
   cross-links rather than duplicating the item.
 
 ## Verification (Run For Every PR)
@@ -564,10 +641,10 @@ The plan is done when **all** of these hold:
   env/hash reconstruction (`internal/replay/replay.go`) and inherits the
   never-store-secret-values invariant, but discards the quarantine machinery.
 - [`design-backtesting.md`](../../design-backtesting.md) /
-  [`backtesting.md`](backtesting.md) — the N-run sibling that consumes the shared
+  [`backtesting.md`](../active/backtesting.md) — the N-run sibling that consumes the shared
   `internal/outputdiff` compare primitive built in C1.
 - [`design-agent-in-the-loop.md`](../../design-agent-in-the-loop.md) /
-  [`agent-in-the-loop-remediation.md`](../completed/agent-in-the-loop-remediation.md) — every
+  [`agent-in-the-loop-remediation.md`](agent-in-the-loop-remediation.md) — every
   diagnosed page appends a `caesium reproduce … --diff` one-liner.
 - `internal/models/run.go` (`TaskExecutionDescriptor`), `internal/run/store.go`
   (`TaskExecutionDescriptor` loader), `pkg/task/output.go` (`ParseMarkers`,
