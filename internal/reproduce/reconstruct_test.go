@@ -1,6 +1,8 @@
 package reproduce
 
 import (
+	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/caesium-cloud/caesium/pkg/container"
@@ -133,6 +135,57 @@ func TestReconstructMountRemapAndKubernetesSkip(t *testing.T) {
 	}
 }
 
+func TestReconstructFidelitySummaryListsBestEffortDimensions(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "transform"
+	desc.Runtime.Image = "registry.example.com/team/app:latest"
+	desc.Runtime.Engine = "kubernetes"
+	desc.Runtime.NodeSelector = map[string]string{"disk": "ssd"}
+	desc.KubernetesSpec = &container.KubernetesSpec{
+		ServiceAccountName: "pipeline-runner",
+		QueueName:          "batch",
+	}
+	desc.DAG.Predecessors = []EdgeRef{{TaskID: "33333333-3333-3333-3333-333333333333", TaskName: "extract"}}
+	desc.DAG.PredecessorOutputs = map[string]map[string]string{
+		"33333333-3333-3333-3333-333333333333": {
+			"frame": containerOutputRef("/byo/frame.parquet"),
+		},
+	}
+
+	env, err := Reconstruct(desc, ReconstructOptions{Platform: oppositePlatform()})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	assertFidelityStatus(t, env.Fidelity, "image_content", FidelityDegraded)
+	assertFidelityStatus(t, env.Fidelity, "predecessor_outputs", FidelityDegraded)
+	workload := assertFidelityStatus(t, env.Fidelity, "engine_workload_identity", FidelityListedNotApplied)
+	if !strings.Contains(strings.Join(workload.Details, "; "), "serviceAccountName pipeline-runner") ||
+		!strings.Contains(strings.Join(workload.Details, "; "), "Kueue queue batch") ||
+		!strings.Contains(strings.Join(workload.Details, "; "), "node selector disk=ssd") {
+		t.Fatalf("workload identity details = %#v, want service account, Kueue queue, and node selector", workload.Details)
+	}
+	assertFidelityStatus(t, env.Fidelity, "cpu_architecture", FidelityDegraded)
+	assertFidelityStatus(t, env.Fidelity, "wall_clock_time", FidelityNotReproduced)
+	assertFidelityStatus(t, env.Fidelity, "external_system_state", FidelityNotReproduced)
+	assertFidelityStatus(t, env.Fidelity, "side_effects", FidelityNotReproduced)
+
+	for _, code := range []string{
+		WarningDegradedImagePull,
+		WarningOutputRefUnresolved,
+		WarningWorkloadIdentity,
+		WarningCrossArchEmulation,
+		WarningWallClock,
+		WarningExternalState,
+		WarningSideEffects,
+	} {
+		if !hasWarning(env.Warnings, code) {
+			t.Fatalf("warnings = %#v, want %s", env.Warnings, code)
+		}
+	}
+}
+
 func containerOutputRef(path string) string {
 	return `{"caesiumOutputRef":1,"path":"` + path + `","digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}`
 }
@@ -144,4 +197,28 @@ func hasWarning(warnings []Warning, code string) bool {
 		}
 	}
 	return false
+}
+
+func assertFidelityStatus(t *testing.T, summary *FidelitySummary, dimension, status string) FidelityDimension {
+	t.Helper()
+	if summary == nil {
+		t.Fatalf("fidelity summary is nil")
+	}
+	for _, dim := range summary.Dimensions {
+		if dim.Dimension == dimension {
+			if dim.Status != status {
+				t.Fatalf("fidelity[%s] = %s, want %s (details %#v)", dimension, dim.Status, status, dim.Details)
+			}
+			return dim
+		}
+	}
+	t.Fatalf("fidelity dimension %s not found in %#v", dimension, summary.Dimensions)
+	return FidelityDimension{}
+}
+
+func oppositePlatform() string {
+	if runtime.GOARCH == "amd64" {
+		return "linux/arm64"
+	}
+	return "linux/amd64"
 }

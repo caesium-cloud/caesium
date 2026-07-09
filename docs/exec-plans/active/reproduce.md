@@ -257,7 +257,7 @@ faithful-vs-best-effort table, and drop into a shell inside the exact
 environment. C extends `cmd/reproduce/` and `internal/reproduce/`, so it
 sequences **after** Stream B.
 
-- [ ] C1. Add `--diff` output-compare as a **shared** package
+- [x] C1. Add `--diff` output-compare as a **shared** package
       (`internal/outputdiff/`) so the recorded-vs-reproduced `##caesium::output` map
       comparison is built once and reused by the N-run
       [backtesting](backtesting.md) sibling (design Interplay note: "build it once as
@@ -267,7 +267,13 @@ sequences **after** Stream B.
       Files: new `internal/outputdiff/outputdiff.go` (+ `outputdiff_test.go`),
       `cmd/reproduce/reproduce.go`.
       Depends on: B2.
-- [ ] C2. Add the per-run fidelity summary block derived from the design's
+      Note: W3-gamma added generic `internal/outputdiff.Compare(recorded,
+      reproduced map[string]string) Diff` with deterministic added/removed/changed
+      rendering, wired `caesium reproduce --diff` to recorded descriptor-wrapper
+      output, returns exit `3` only after a successful local task with mismatched
+      outputs, and extended the docker-gated CLI integration lane with match and
+      deliberate mismatch assertions.
+- [x] C2. Add the per-run fidelity summary block derived from the design's
       faithful-vs-best-effort table: emit explicit warnings (never silence) for a
       DEGRADED mutable-tag pull, unmounted output-refs / dangling BYO-storage paths,
       engine & workload-identity dimensions with no local equivalent
@@ -278,13 +284,25 @@ sequences **after** Stream B.
       Files: `internal/reproduce/reconstruct.go`, `internal/reproduce/execute.go`,
       `cmd/reproduce/reproduce.go`.
       Depends on: B2.
-- [ ] C3. Add `--shell` interactive mode: same fetch/pull/env reconstruction, but
+      Note: W3-gamma added a structured `fidelity.dimensions[]` block to dry-run and
+      run JSON plus compact human stderr rendering after local execution. The summary
+      covers faithful, degraded, not_reproduced, and listed_not_applied dimensions
+      from the design table, with warnings for mutable tags, output refs, workload
+      identity, platform emulation, resource limits, wall clock, external state, and
+      unsuppressed side effects.
+- [x] C3. Add `--shell` interactive mode: same fetch/pull/env reconstruction, but
       `docker run -it --entrypoint <shell>` inside the exact environment instead of
       the recorded command. Distroless images without a shell fail here with a clear
       guidance error (run mode still works); the `--shell-image` busybox:1.36.1 sidecar
       fallback (design Open Question #4) is **out of scope** — recorded as deferred.
       Files: `cmd/reproduce/reproduce.go`, `internal/reproduce/execute.go`.
       Depends on: B2.
+      Note: W3-gamma added `--shell` as an interactive Docker CLI runner using the
+      reconstructed image/env/workdir/mounts and inherited stdio, with conflicts
+      against `--diff`, `--dry-run`, and `--json` as exit-2 usage errors. Distroless
+      `/bin/sh` failures return guidance naming the deferred `--shell-image` Open
+      Question #4 fallback; unit coverage exercises shell request construction,
+      conflict handling, and the guidance path.
 
 ### Stream D — Fix-testing + local secret resolution (P2)
 

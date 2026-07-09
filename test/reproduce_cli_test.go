@@ -72,6 +72,7 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		"--job-id", jobID,
 		"--task", "transform",
 		"--json",
+		"--diff",
 		"--server", s.caesiumURL,
 	)
 	s.Require().NoError(runErr, "stderr: %s", runErrOut)
@@ -83,6 +84,33 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Equal("yes", result.Output["clean"])
 	s.Equal("7", result.Output["rows"])
 	s.Equal("raw", result.Output["source"])
+	s.Equal("vanilla", result.Output["flavor"])
+	s.Require().NotNil(result.OutputDiff)
+	s.True(result.OutputDiff.Empty(), "output diff = %+v", result.OutputDiff)
+	s.Require().NotNil(result.Fidelity)
+	s.True(reproduceHasFidelity(result.Fidelity, "image_content", "faithful"), "fidelity = %+v", result.Fidelity)
+	s.True(reproduceHasFidelity(result.Fidelity, "wall_clock_time", "not_reproduced"), "fidelity = %+v", result.Fidelity)
+
+	diffOut, diffErrOut, diffErr := s.runCLISeparate(
+		"reproduce", runID,
+		"--job-id", jobID,
+		"--task", "transform",
+		"--json",
+		"--diff",
+		"--set", "flavor=chocolate",
+		"--server", s.caesiumURL,
+	)
+	s.Require().Error(diffErr)
+	s.Equal(3, reproduceExitCode(diffErr), "stderr: %s", diffErrOut)
+	var mismatch reproduceCLIRunResult
+	s.Require().NoError(json.Unmarshal([]byte(diffOut), &mismatch),
+		"mismatch --json stdout must be parseable; raw stdout: %q; stderr: %q", diffOut, diffErrOut)
+	s.Equal(3, mismatch.ExitCode)
+	s.Equal("succeeded", mismatch.Status)
+	s.Equal("chocolate", mismatch.Output["flavor"])
+	s.Require().NotNil(mismatch.OutputDiff)
+	s.True(reproduceDiffHasChanged(mismatch.OutputDiff, "flavor", "vanilla", "chocolate"),
+		"output diff = %+v", mismatch.OutputDiff)
 }
 
 func (s *IntegrationTestSuite) createReproduceCLIFixture() (jobID, runID, taskRunID string) {
@@ -104,7 +132,7 @@ steps:
     cache: { pinDigests: true }
     env:
       LITERAL_ENV: fixture-literal
-    command: ["sh","-c","test \"$LITERAL_ENV\" = fixture-literal; test \"$CAESIUM_PARAM_FLAVOR\" = vanilla; test \"$CAESIUM_OUTPUT_PRODUCE_ROWS\" = 7; test \"$CAESIUM_OUTPUT_PRODUCE_SOURCE\" = raw; echo '##caesium::output {\"clean\":\"yes\",\"rows\":\"7\",\"source\":\"raw\"}'"]
+    command: ["sh","-c","test \"$LITERAL_ENV\" = fixture-literal; test -n \"$CAESIUM_PARAM_FLAVOR\"; test \"$CAESIUM_OUTPUT_PRODUCE_ROWS\" = 7; test \"$CAESIUM_OUTPUT_PRODUCE_SOURCE\" = raw; printf '##caesium::output {\"clean\":\"yes\",\"rows\":\"%%s\",\"source\":\"%%s\",\"flavor\":\"%%s\"}\\n' \"$CAESIUM_OUTPUT_PRODUCE_ROWS\" \"$CAESIUM_OUTPUT_PRODUCE_SOURCE\" \"$CAESIUM_PARAM_FLAVOR\""]
     dependsOn: produce
 `, alias)
 	dir := s.writeJobManifest(manifest)
@@ -138,9 +166,39 @@ type reproduceCLIEnvelope struct {
 }
 
 type reproduceCLIRunResult struct {
-	Status   string            `json:"status"`
-	ExitCode int               `json:"exit_code"`
-	Output   map[string]string `json:"output"`
+	Status     string                  `json:"status"`
+	ExitCode   int                     `json:"exit_code"`
+	Output     map[string]string       `json:"output"`
+	OutputDiff *reproduceCLIOutputDiff `json:"output_diff"`
+	Fidelity   *reproduceCLIFidelity   `json:"fidelity"`
+}
+
+type reproduceCLIOutputDiff struct {
+	Added []struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	} `json:"added"`
+	Removed []struct {
+		Key   string `json:"key"`
+		Value string `json:"value"`
+	} `json:"removed"`
+	Changed []struct {
+		Key        string `json:"key"`
+		Recorded   string `json:"recorded"`
+		Reproduced string `json:"reproduced"`
+	} `json:"changed"`
+}
+
+func (d *reproduceCLIOutputDiff) Empty() bool {
+	return d != nil && len(d.Added) == 0 && len(d.Removed) == 0 && len(d.Changed) == 0
+}
+
+type reproduceCLIFidelity struct {
+	Dimensions []struct {
+		Dimension string   `json:"dimension"`
+		Status    string   `json:"status"`
+		Details   []string `json:"details"`
+	} `json:"dimensions"`
 }
 
 func addSecretRefToDescriptor(ctx context.Context, conn *sql.DB, taskRunID string) error {
@@ -195,6 +253,30 @@ func reproduceHasWarning(warnings []struct {
 }, code string) bool {
 	for _, warning := range warnings {
 		if warning.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func reproduceHasFidelity(fidelity *reproduceCLIFidelity, dimension, status string) bool {
+	if fidelity == nil {
+		return false
+	}
+	for _, dim := range fidelity.Dimensions {
+		if dim.Dimension == dimension && dim.Status == status {
+			return true
+		}
+	}
+	return false
+}
+
+func reproduceDiffHasChanged(diff *reproduceCLIOutputDiff, key, recorded, reproduced string) bool {
+	if diff == nil {
+		return false
+	}
+	for _, change := range diff.Changed {
+		if change.Key == key && change.Recorded == recorded && change.Reproduced == reproduced {
 			return true
 		}
 	}
