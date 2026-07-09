@@ -73,18 +73,20 @@ type ShellExecuteOptions struct {
 
 // ExecutionResult is the machine-readable result for run mode.
 type ExecutionResult struct {
-	Status       string            `json:"status"`
-	ExitCode     int               `json:"exit_code"`
-	Task         string            `json:"task"`
-	Image        string            `json:"image"`
-	Output       map[string]string `json:"output,omitempty"`
-	Log          string            `json:"log,omitempty"`
-	LogTruncated bool              `json:"log_truncated,omitempty"`
-	Error        string            `json:"error,omitempty"`
-	Envelope     *Envelope         `json:"envelope"`
-	Fidelity     *FidelitySummary  `json:"fidelity,omitempty"`
-	OutputDiff   *outputdiff.Diff  `json:"output_diff,omitempty"`
-	Warnings     []Warning         `json:"warnings,omitempty"`
+	Status          string            `json:"status"`
+	ExitCode        int               `json:"exit_code"`
+	Task            string            `json:"task"`
+	Image           string            `json:"image"`
+	ImagePullMode   string            `json:"image_pull_mode,omitempty"`
+	ImageOverridden bool              `json:"image_overridden,omitempty"`
+	Output          map[string]string `json:"output,omitempty"`
+	Log             string            `json:"log,omitempty"`
+	LogTruncated    bool              `json:"log_truncated,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	Envelope        *Envelope         `json:"envelope"`
+	Fidelity        *FidelitySummary  `json:"fidelity,omitempty"`
+	OutputDiff      *outputdiff.Diff  `json:"output_diff,omitempty"`
+	Warnings        []Warning         `json:"warnings,omitempty"`
 }
 
 // ShellRequest is the docker-run shape for interactive shell mode.
@@ -99,13 +101,15 @@ type ShellRequest struct {
 
 // ShellResult reports the interactive shell process outcome.
 type ShellResult struct {
-	ExitCode int              `json:"exit_code"`
-	Task     string           `json:"task"`
-	Image    string           `json:"image"`
-	Error    string           `json:"error,omitempty"`
-	Envelope *Envelope        `json:"envelope"`
-	Fidelity *FidelitySummary `json:"fidelity,omitempty"`
-	Warnings []Warning        `json:"warnings,omitempty"`
+	ExitCode        int              `json:"exit_code"`
+	Task            string           `json:"task"`
+	Image           string           `json:"image"`
+	ImagePullMode   string           `json:"image_pull_mode,omitempty"`
+	ImageOverridden bool             `json:"image_overridden,omitempty"`
+	Error           string           `json:"error,omitempty"`
+	Envelope        *Envelope        `json:"envelope"`
+	Fidelity        *FidelitySummary `json:"fidelity,omitempty"`
+	Warnings        []Warning        `json:"warnings,omitempty"`
 }
 
 // PullError is returned when the selected image cannot be pulled.
@@ -220,16 +224,18 @@ func Execute(ctx context.Context, desc *Descriptor, env *Envelope, opts ExecuteO
 	}
 
 	result := &ExecutionResult{
-		Status:       task.Status,
-		Task:         env.TaskName,
-		Image:        env.Image,
-		Output:       output,
-		Log:          task.LogText,
-		LogTruncated: task.LogTruncated,
-		Error:        firstNonEmpty(task.Error, runResult.Error),
-		Envelope:     env,
-		Fidelity:     env.Fidelity,
-		Warnings:     env.Warnings,
+		Status:          task.Status,
+		Task:            env.TaskName,
+		Image:           env.Image,
+		ImagePullMode:   env.ImagePullMode,
+		ImageOverridden: env.ImageOverridden,
+		Output:          output,
+		Log:             task.LogText,
+		LogTruncated:    task.LogTruncated,
+		Error:           firstNonEmpty(task.Error, runResult.Error),
+		Envelope:        env,
+		Fidelity:        env.Fidelity,
+		Warnings:        env.Warnings,
 	}
 	if isSuccessfulStatus(task.Status) {
 		result.ExitCode = 0
@@ -262,11 +268,13 @@ func ExecuteShell(ctx context.Context, env *Envelope, opts ShellExecuteOptions) 
 
 	req := BuildShellRequest(env, platform)
 	result := &ShellResult{
-		Task:     env.TaskName,
-		Image:    env.Image,
-		Envelope: env,
-		Fidelity: env.Fidelity,
-		Warnings: env.Warnings,
+		Task:            env.TaskName,
+		Image:           env.Image,
+		ImagePullMode:   env.ImagePullMode,
+		ImageOverridden: env.ImageOverridden,
+		Envelope:        env,
+		Fidelity:        env.Fidelity,
+		Warnings:        env.Warnings,
 	}
 	if err := opts.ShellRunner.RunShell(ctx, req); err != nil {
 		var shellExit *ShellExitError

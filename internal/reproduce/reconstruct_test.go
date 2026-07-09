@@ -1,6 +1,8 @@
 package reproduce
 
 import (
+	"context"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -96,6 +98,200 @@ func TestReconstructOutputRefUsesBuildOutputEnvShape(t *testing.T) {
 	}
 	if !hasWarning(env.Warnings, WarningOutputRefUnresolved) {
 		t.Fatalf("warnings = %#v, want %s", env.Warnings, WarningOutputRefUnresolved)
+	}
+}
+
+func TestReconstructImageOverrideMarksEnvelopeAndFidelity(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "transform"
+	desc.Runtime.Image = "registry.example.com/team/app:prod"
+	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	env, err := Reconstruct(desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	if env.Image != "registry.example.com/team/app:candidate" {
+		t.Fatalf("Image = %q, want override", env.Image)
+	}
+	if env.ImagePullMode != "OVERRIDDEN" || !env.ImageOverridden || env.ImageOverride != "registry.example.com/team/app:candidate" {
+		t.Fatalf("override markers = mode %q overridden %t override %q", env.ImagePullMode, env.ImageOverridden, env.ImageOverride)
+	}
+	if env.RecordedImage != "registry.example.com/team/app:prod" {
+		t.Fatalf("RecordedImage = %q, want original", env.RecordedImage)
+	}
+	if !hasWarning(env.Warnings, WarningImageOverridden) {
+		t.Fatalf("warnings = %#v, want %s", env.Warnings, WarningImageOverridden)
+	}
+	image := assertFidelityStatus(t, env.Fidelity, "image_content", FidelityOverridden)
+	details := strings.Join(image.Details, "; ")
+	if !strings.Contains(details, "OVERRIDDEN") || !strings.Contains(details, "candidate") {
+		t.Fatalf("image fidelity details = %#v, want override marker and ref", image.Details)
+	}
+}
+
+func TestReconstructResolveSecretsInjectsLocalValueBeforeSetEnvOverride(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "transform"
+	desc.Runtime.Image = "alpine:3.23"
+	desc.ContainerSpec.Env = map[string]string{
+		"SECRET_ENV": "secret://env/DB_PASSWORD",
+	}
+	desc.SecretRefs = []SecretRef{{
+		EnvKey:   "SECRET_ENV",
+		Ref:      "secret://env/DB_PASSWORD",
+		Provider: "env",
+	}}
+	resolver := &fakeSecretResolver{values: map[string]fakeSecretValue{
+		"secret://env/DB_PASSWORD": {
+			value: "local-db-password",
+			identity: SecretIdentity{
+				Provider: "env",
+				Ref:      "secret://env/DB_PASSWORD",
+			},
+		},
+	}}
+
+	env, err := Reconstruct(desc, ReconstructOptions{
+		ResolveSecrets: true,
+		SecretResolver: resolver,
+		SetEnv:         []Assignment{{Key: "SECRET_ENV", Value: "manual-final"}},
+	})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	if env.Env["SECRET_ENV"] != "manual-final" {
+		t.Fatalf("SECRET_ENV = %q, want --set-env override after local resolution", env.Env["SECRET_ENV"])
+	}
+	if len(env.OmittedSecrets) != 0 {
+		t.Fatalf("omitted secrets = %#v, want none", env.OmittedSecrets)
+	}
+	if len(env.ResolvedSecrets) != 1 || env.ResolvedSecrets[0].EnvKey != "SECRET_ENV" || env.ResolvedSecrets[0].Provider != "env" {
+		t.Fatalf("resolved secrets = %#v, want SECRET_ENV env metadata", env.ResolvedSecrets)
+	}
+	assertFidelityStatus(t, env.Fidelity, "secret_values", FidelityDegraded)
+	if resolver.refs[0] != "secret://env/DB_PASSWORD" {
+		t.Fatalf("resolver refs = %#v", resolver.refs)
+	}
+	for _, warning := range env.Warnings {
+		if strings.Contains(warning.Message, "local-db-password") || strings.Contains(warning.Message, "manual-final") {
+			t.Fatalf("warning leaked secret value: %#v", warning)
+		}
+	}
+}
+
+func TestReconstructResolveSecretsOmitOnFailureOrProviderMismatch(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "transform"
+	desc.Runtime.Image = "alpine:3.23"
+	desc.ContainerSpec.Env = map[string]string{
+		"MISSING_SECRET":  "secret://env/MISSING",
+		"MISMATCH_SECRET": "secret://vault/secret/data/db?field=password",
+	}
+	desc.SecretRefs = []SecretRef{
+		{EnvKey: "MISSING_SECRET", Ref: "secret://env/MISSING", Provider: "env"},
+		{EnvKey: "MISMATCH_SECRET", Ref: "secret://vault/secret/data/db?field=password", Provider: "vault"},
+	}
+	resolver := &fakeSecretResolver{
+		values: map[string]fakeSecretValue{
+			"secret://vault/secret/data/db?field=password": {
+				value:    "wrong-provider-value",
+				identity: SecretIdentity{Provider: "env", Ref: "secret://vault/secret/data/db?field=password"},
+			},
+		},
+		errs: map[string]error{
+			"secret://env/MISSING": errors.New("environment variable MISSING not set"),
+		},
+	}
+
+	env, err := Reconstruct(desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	if _, ok := env.Env["MISSING_SECRET"]; ok {
+		t.Fatalf("MISSING_SECRET should be omitted: %#v", env.Env)
+	}
+	if _, ok := env.Env["MISMATCH_SECRET"]; ok {
+		t.Fatalf("MISMATCH_SECRET should be omitted on provider mismatch: %#v", env.Env)
+	}
+	if len(env.OmittedSecrets) != 2 {
+		t.Fatalf("omitted secrets = %#v, want two", env.OmittedSecrets)
+	}
+	if !hasWarning(env.Warnings, WarningSecretResolveFailed) {
+		t.Fatalf("warnings = %#v, want resolve failure", env.Warnings)
+	}
+	if !hasWarning(env.Warnings, WarningSecretProvider) {
+		t.Fatalf("warnings = %#v, want provider mismatch", env.Warnings)
+	}
+}
+
+func TestReconstructResolveSecretsWarnsOnComparableDrift(t *testing.T) {
+	desc := &Descriptor{}
+	desc.SchemaVersion = 1
+	desc.Baseline.TaskName = "transform"
+	desc.Runtime.Image = "alpine:3.23"
+	desc.ContainerSpec.Env = map[string]string{
+		"VAULT_SECRET": "secret://vault/secret/data/db?field=password",
+		"K8S_SECRET":   "secret://k8s/default/db/password",
+	}
+	desc.SecretRefs = []SecretRef{
+		{
+			EnvKey:   "VAULT_SECRET",
+			Ref:      "secret://vault/secret/data/db?field=password",
+			Provider: "vault",
+			Identity: map[string]any{"version": "1", "hmacSha256": "server-keyed"},
+		},
+		{
+			EnvKey:   "K8S_SECRET",
+			Ref:      "secret://k8s/default/db/password",
+			Provider: "k8s",
+			Identity: map[string]any{"resourceVersion": "11"},
+		},
+	}
+	resolver := &fakeSecretResolver{values: map[string]fakeSecretValue{
+		"secret://vault/secret/data/db?field=password": {
+			value: "vault-local-value",
+			identity: SecretIdentity{
+				Provider: "vault",
+				Ref:      "secret://vault/secret/data/db?field=password",
+				Version:  "2",
+			},
+		},
+		"secret://k8s/default/db/password": {
+			value: "k8s-local-value",
+			identity: SecretIdentity{
+				Provider:        "k8s",
+				Ref:             "secret://k8s/default/db/password",
+				ResourceVersion: "12",
+			},
+		},
+	}}
+
+	env, err := Reconstruct(desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+
+	if env.Env["VAULT_SECRET"] != "vault-local-value" || env.Env["K8S_SECRET"] != "k8s-local-value" {
+		t.Fatalf("resolved env = %#v", env.Env)
+	}
+	driftCount := 0
+	for _, warning := range env.Warnings {
+		if warning.Code == WarningSecretDrift {
+			driftCount++
+			if strings.Contains(warning.Message, "vault-local-value") || strings.Contains(warning.Message, "k8s-local-value") || strings.Contains(warning.Message, "server-keyed") {
+				t.Fatalf("drift warning leaked secret or HMAC value: %#v", warning)
+			}
+		}
+	}
+	if driftCount != 2 {
+		t.Fatalf("warnings = %#v, want two drift warnings", env.Warnings)
 	}
 }
 
@@ -221,4 +417,27 @@ func oppositePlatform() string {
 		return "linux/arm64"
 	}
 	return "linux/amd64"
+}
+
+type fakeSecretValue struct {
+	value    string
+	identity SecretIdentity
+}
+
+type fakeSecretResolver struct {
+	values map[string]fakeSecretValue
+	errs   map[string]error
+	refs   []string
+}
+
+func (r *fakeSecretResolver) ResolveWithIdentity(_ context.Context, ref string) (string, SecretIdentity, error) {
+	r.refs = append(r.refs, ref)
+	if err := r.errs[ref]; err != nil {
+		return "", SecretIdentity{}, err
+	}
+	value, ok := r.values[ref]
+	if !ok {
+		return "", SecretIdentity{}, errors.New("secret not found")
+	}
+	return value.value, value.identity, nil
 }

@@ -15,10 +15,16 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	reproduceCLISecretEnvName = "CAESIUM_REPRODUCE_CLI_SECRET_ENV"
+	reproduceCLISecretValue   = "local-reproduce-secret"
+)
+
 func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	jobID, runID, taskRunID := s.createReproduceCLIFixture()
 	secretAssertionEnabled := s.engineType != "kubernetes"
 	if secretAssertionEnabled {
+		s.T().Setenv(reproduceCLISecretEnvName, reproduceCLISecretValue)
 		catalogDB := s.openIntegrationCatalogDB()
 		defer func() { s.Require().NoError(catalogDB.Close()) }()
 		s.Require().NoError(addSecretRefToDescriptor(s.T().Context(), catalogDB, taskRunID))
@@ -44,6 +50,23 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 		s.NotContains(envelope.Env, "SECRET_ENV")
 		s.True(reproduceHasOmittedSecret(envelope.OmittedSecrets, "SECRET_ENV"), "omitted secrets = %+v", envelope.OmittedSecrets)
 		s.True(reproduceHasWarning(envelope.Warnings, "secret_omitted"), "warnings = %+v", envelope.Warnings)
+	}
+	if secretAssertionEnabled {
+		resolveOut, err := s.runCLIStdout(
+			"reproduce", runID,
+			"--job-id", jobID,
+			"--task", "transform",
+			"--dry-run",
+			"--json",
+			"--resolve-secrets",
+			"--server", s.caesiumURL,
+		)
+		s.Require().NoError(err)
+		var resolvedEnvelope reproduceCLIEnvelope
+		s.Require().NoError(json.Unmarshal([]byte(resolveOut), &resolvedEnvelope))
+		s.Equal(reproduceCLISecretValue, resolvedEnvelope.Env["SECRET_ENV"])
+		s.False(reproduceHasOmittedSecret(resolvedEnvelope.OmittedSecrets, "SECRET_ENV"), "omitted secrets = %+v", resolvedEnvelope.OmittedSecrets)
+		s.True(reproduceHasResolvedSecret(resolvedEnvelope.ResolvedSecrets, "SECRET_ENV"), "resolved secrets = %+v", resolvedEnvelope.ResolvedSecrets)
 	}
 
 	// The missing-descriptor exit-2 leg is daemon-free — run it on every lane
@@ -90,6 +113,27 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	s.Require().NotNil(result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "image_content", "faithful"), "fidelity = %+v", result.Fidelity)
 	s.True(reproduceHasFidelity(result.Fidelity, "wall_clock_time", "not_reproduced"), "fidelity = %+v", result.Fidelity)
+
+	overrideOut, overrideErrOut, overrideErr := s.runCLISeparate(
+		"reproduce", runID,
+		"--job-id", jobID,
+		"--task", "transform",
+		"--json",
+		"--diff",
+		"--image", "alpine:3.23",
+		"--server", s.caesiumURL,
+	)
+	s.Require().NoError(overrideErr, "stderr: %s", overrideErrOut)
+	s.Contains(overrideOut, "OVERRIDDEN", "override --json should carry an OVERRIDDEN marker")
+	var overrideResult reproduceCLIRunResult
+	s.Require().NoError(json.Unmarshal([]byte(overrideOut), &overrideResult),
+		"override --json stdout must be parseable; raw stdout: %q; stderr: %q", overrideOut, overrideErrOut)
+	s.Equal(0, overrideResult.ExitCode)
+	s.Equal("OVERRIDDEN", overrideResult.ImagePullMode)
+	s.True(overrideResult.ImageOverridden)
+	s.True(reproduceHasFidelity(overrideResult.Fidelity, "image_content", "overridden"), "fidelity = %+v", overrideResult.Fidelity)
+	s.Require().NotNil(overrideResult.OutputDiff)
+	s.True(overrideResult.OutputDiff.Empty(), "output diff = %+v", overrideResult.OutputDiff)
 
 	diffOut, diffErrOut, diffErr := s.runCLISeparate(
 		"reproduce", runID,
@@ -153,12 +197,19 @@ steps:
 }
 
 type reproduceCLIEnvelope struct {
-	Task           string            `json:"task"`
-	Env            map[string]string `json:"env"`
-	OmittedSecrets []struct {
+	Task            string            `json:"task"`
+	ImagePullMode   string            `json:"image_pull_mode"`
+	ImageOverridden bool              `json:"image_overridden"`
+	Env             map[string]string `json:"env"`
+	OmittedSecrets  []struct {
 		EnvKey string `json:"env_key"`
 		Ref    string `json:"ref"`
 	} `json:"omitted_secrets"`
+	ResolvedSecrets []struct {
+		EnvKey   string `json:"env_key"`
+		Ref      string `json:"ref"`
+		Provider string `json:"provider"`
+	} `json:"resolved_secrets"`
 	Warnings []struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
@@ -166,11 +217,13 @@ type reproduceCLIEnvelope struct {
 }
 
 type reproduceCLIRunResult struct {
-	Status     string                  `json:"status"`
-	ExitCode   int                     `json:"exit_code"`
-	Output     map[string]string       `json:"output"`
-	OutputDiff *reproduceCLIOutputDiff `json:"output_diff"`
-	Fidelity   *reproduceCLIFidelity   `json:"fidelity"`
+	Status          string                  `json:"status"`
+	ExitCode        int                     `json:"exit_code"`
+	ImagePullMode   string                  `json:"image_pull_mode"`
+	ImageOverridden bool                    `json:"image_overridden"`
+	Output          map[string]string       `json:"output"`
+	OutputDiff      *reproduceCLIOutputDiff `json:"output_diff"`
+	Fidelity        *reproduceCLIFidelity   `json:"fidelity"`
 }
 
 type reproduceCLIOutputDiff struct {
@@ -220,11 +273,12 @@ func addSecretRefToDescriptor(ctx context.Context, conn *sql.DB, taskRunID strin
 		env = map[string]any{}
 		spec["env"] = env
 	}
-	env["SECRET_ENV"] = "secret://fixture/db-password"
+	ref := "secret://env/" + reproduceCLISecretEnvName
+	env["SECRET_ENV"] = ref
 	descriptor["secretRefs"] = []any{map[string]any{
-		"ref":        "secret://fixture/db-password",
+		"ref":        ref,
 		"envKey":     "SECRET_ENV",
-		"provider":   "fixture",
+		"provider":   "env",
 		"verifiable": false,
 	}}
 	updated, err := json.Marshal(descriptor)
@@ -253,6 +307,19 @@ func reproduceHasWarning(warnings []struct {
 }, code string) bool {
 	for _, warning := range warnings {
 		if warning.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func reproduceHasResolvedSecret(secrets []struct {
+	EnvKey   string `json:"env_key"`
+	Ref      string `json:"ref"`
+	Provider string `json:"provider"`
+}, envKey string) bool {
+	for _, secret := range secrets {
+		if secret.EnvKey == envKey {
 			return true
 		}
 	}

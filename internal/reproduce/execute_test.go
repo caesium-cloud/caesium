@@ -114,6 +114,38 @@ func TestExecuteUsesDegradedTagPullWhenDigestMissing(t *testing.T) {
 	}
 }
 
+func TestExecuteUsesImageOverrideForPullAndSynthesizedDefinition(t *testing.T) {
+	desc := basicDescriptor("registry.example.com/team/app:prod")
+	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	env, err := Reconstruct(desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
+	if err != nil {
+		t.Fatalf("Reconstruct() error = %v", err)
+	}
+	puller := &fakePuller{}
+	runner := &capturingRunner{result: &RunResult{Tasks: []TaskResult{{
+		Name:   "transform",
+		Status: "succeeded",
+	}}}}
+
+	result, err := Execute(context.Background(), desc, env, ExecuteOptions{
+		Puller: puller,
+		Runner: runner,
+	})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	if puller.imageRef != "registry.example.com/team/app:candidate" {
+		t.Fatalf("pulled image = %q, want override", puller.imageRef)
+	}
+	if runner.def == nil || len(runner.def.Steps) != 1 || runner.def.Steps[0].Image != "registry.example.com/team/app:candidate" {
+		t.Fatalf("synthesized definition = %#v, want override image", runner.def)
+	}
+	if result.ImagePullMode != "OVERRIDDEN" || !result.ImageOverridden {
+		t.Fatalf("result override markers = mode %q overridden %t", result.ImagePullMode, result.ImageOverridden)
+	}
+}
+
 func TestExecutePassesRemappedMountsToSynthesizedDefinition(t *testing.T) {
 	desc := basicDescriptor("alpine:3.23")
 	desc.ContainerSpec.Mounts = testBindMount("/recorded/data", "/data")
