@@ -36,7 +36,7 @@ func TestCompareDetectsAddedRemovedAndChangedDeterministically(t *testing.T) {
 	firstChanged := strings.Index(rendered, "d_changed")
 	firstRemoved := strings.Index(rendered, "b_removed")
 	firstAdded := strings.Index(rendered, "a_added")
-	if !(firstChanged > 0 && firstRemoved > firstChanged && firstAdded > firstRemoved) {
+	if firstChanged <= 0 || firstRemoved <= firstChanged || firstAdded <= firstRemoved {
 		t.Fatalf("Render() order is not deterministic changed/removed/added:\n%s", rendered)
 	}
 }
