@@ -1,6 +1,6 @@
 # `caesium reproduce` — Re-Execute a Historical Production Task Locally
 
-Last updated: 2026-07-08
+Last updated: 2026-07-09
 
 This plan ships `caesium reproduce <run-id> --job-id <id> --task <name>`: a
 client-side verb that pulls a completed task's immutable
@@ -101,16 +101,45 @@ order η → α:
   schemaVersion bumps into 500s, pinning the no-typed-decode raw-bytes
   contract in code. PR #335.
 
-Wave 2 next: Stream B (B1 → B2, the CLI core) — unblocked now that A1's
-endpoint is on master. Then W3 = C → D serialized, N-1 last.
+### Wave 2 — shipped 2026-07-09 (B1 + B2; 5 of 11 items)
+
+One codex stream (B1 → B2 sequentially in one PR), orchestrator
+verify/publish/merge:
+
+- **W2-β (B1+B2)** — `caesium reproduce <run-id> --job-id <id> --task <name>`:
+  descriptor fetch (API-key hygiene per `cmd/why`), later-wins envelope
+  reconstruction (recorded literals → `CAESIUM_PARAM_*` → `CAESIUM_OUTPUT_*`
+  via the exact `pkgtask.BuildOutputEnv` mapping replay uses → `--set` →
+  `--set-env`; secrets omitted + named), clean-stdout `--dry-run`/`--json`
+  envelope with a structured warnings array, and single-shot local execution
+  through `internal/localrun` (digest-first pull with DEGRADED tag fallback,
+  marker parsing, `--mount` remap with PVC skip, `--timeout`/`--platform`,
+  exit codes 0/1/2 with actionable registry-auth guidance). Four CI-driven
+  fixes en route, each generalizing beyond the stream: the synthesized
+  one-step definition needed an explicit `type: task` (YAML defaults don't
+  apply to Go-built definitions); **`internal/localrun` opened its ephemeral
+  DB with GORM's default logger, which writes SQL traces to os.Stdout** —
+  found by a self-diagnosing stdout capture, fixed by routing through the
+  repo's zap logger (also cleans `caesium dev`); the run-mode integration leg
+  is docker-engine-gated (podman/k8s test-runners have no docker.sock — the
+  daemon-free dry-run/exit-2 legs run everywhere); and review hardening made
+  Execute use a locally present image instead of failing a private-registry
+  pull (guidance no longer references the not-yet-existing `--image`).
+  Review: 1 P1 fixed (+local-image behavior), 1 P1 declined with the
+  `store.go:1371` faithfulness citation (prod runs raw command strings as a
+  single argv element — reproduce mirrors it), 1 P2 (typed-exit refactor)
+  deferred to W3-C alongside exit 3. PR #337.
+
+Wave 3 next: C (C1, C2, C3) then D (D1, D2) serialized on the shared command
+files, N-1 last. Carry-in for W3-C: the RunE typed-exit-error refactor.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
 | A | Read-only descriptor endpoint — `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor` under the existing scoped-key auth arm | **P0** | ✅ Shipped W1 (#335) |
-| B | CLI reproduce core — `cmd/reproduce/` + `internal/reproduce/`, envelope reconstruction, `--dry-run`/`--json`, digest pull, run mode + exit codes, `--mount`/`--set`/`--set-env` | **P0** | Next (W2) |
-| C | Output-diff compare + fidelity summary + `--shell` | P1 | Queued (W3, after B2) |
+| B | CLI reproduce core — `cmd/reproduce/` + `internal/reproduce/`, envelope reconstruction, `--dry-run`/`--json`, digest pull, run mode + exit codes, `--mount`/`--set`/`--set-env` | **P0** | ✅ Shipped W2 (#337) |
+| C | Output-diff compare + fidelity summary + `--shell` | P1 | Next (W3, carries the typed-exit refactor) |
 | D | Fix-testing (`--image`) + local secret resolution (`--resolve-secrets`) | P2 | Queued (W3, after C) |
 | H-1 | Integration harness — record descriptors with digest pinning, drive the real CLI against the harness Docker daemon | — | ✅ Shipped W1 (#334) |
 | N-1 | Docs — design banner, roadmap Phase 4 row, README repoint, CLI reference, sibling cross-links | — | Queued (last) |
