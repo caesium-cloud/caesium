@@ -690,10 +690,29 @@ func firstKubernetesSpec(desc *Descriptor) *container.KubernetesSpec {
 
 func platformArch(platform string) string {
 	parts := strings.Split(strings.ToLower(strings.TrimSpace(platform)), "/")
-	if len(parts) < 2 {
+	if len(parts) == 0 || parts[0] == "" {
 		return ""
 	}
-	return parts[1]
+	// linux/amd64 → amd64; linux/arm64/v8 → arm64; a bare "arm64" is an arch.
+	arch := parts[len(parts)-1]
+	if len(parts) >= 3 {
+		arch = parts[1]
+	}
+	return normalizeArch(arch)
+}
+
+// normalizeArch maps OCI/uname spellings onto Go's runtime.GOARCH vocabulary
+// so the cross-arch fidelity check compares like with like.
+func normalizeArch(arch string) string {
+	switch arch {
+	case "x86_64", "x86-64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	case "i386", "i686":
+		return "386"
+	}
+	return arch
 }
 
 func formatStringMap(values map[string]string) string {

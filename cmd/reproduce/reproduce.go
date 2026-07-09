@@ -2,6 +2,7 @@
 package reproduce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -216,6 +217,8 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 		if !computed.Empty() {
 			result.ExitCode = 3
 		}
+	} else if reproduceDiff {
+		_, _ = fmt.Fprintln(stderr, "diff skipped: the task exited non-zero, so there is no successful output to compare")
 	}
 
 	if reproduceJSON {
@@ -361,14 +364,38 @@ func (localRunner) Run(ctx context.Context, def *pkgjobdef.Definition, taskTimeo
 
 type dockerShellRunner struct{}
 
+// shellStderrTee mirrors docker's stderr to the operator while keeping a
+// bounded copy so exit 126/127 can be classified: only a docker/daemon
+// exec-failure (shell binary missing from the image) is "shell unavailable";
+// the same codes typed inside a WORKING shell (`exit 127`) must not be.
+type shellStderrTee struct {
+	dst io.Writer
+	buf bytes.Buffer
+}
+
+func (t *shellStderrTee) Write(p []byte) (int, error) {
+	if t.buf.Len() < 8192 {
+		t.buf.Write(p)
+	}
+	return t.dst.Write(p)
+}
+
+func (t *shellStderrTee) indicatesMissingShell() bool {
+	s := t.buf.String()
+	return strings.Contains(s, "Error response from daemon") ||
+		strings.Contains(s, "no such file or directory") ||
+		strings.Contains(s, "executable file not found")
+}
+
 func (dockerShellRunner) RunShell(ctx context.Context, req ireproduce.ShellRequest) error {
+	tee := &shellStderrTee{dst: os.Stderr}
 	command := osexec.CommandContext(ctx, "docker", dockerRunShellArgs(req)...)
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
+	command.Stderr = tee
 	if err := command.Run(); err != nil {
 		code := commandExitCode(err)
-		if code == 126 || code == 127 {
+		if (code == 126 || code == 127) && tee.indicatesMissingShell() {
 			return &ireproduce.ShellUnavailableError{Image: req.Image, Shell: req.Shell, Err: err}
 		}
 		if code >= 0 {
