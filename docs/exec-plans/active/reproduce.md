@@ -172,7 +172,7 @@ preferred, `--api-key` accepted with a visible-in-`ps` warning. This is the
 largest stream; B1 ships the inspection surface (fetch + reconstruct + print),
 B2 adds real local execution.
 
-- [ ] B1. Add the `cmd/reproduce/` command + `internal/reproduce/` reconstruction
+- [x] B1. Add the `cmd/reproduce/` command + `internal/reproduce/` reconstruction
       package + `--dry-run`/`--json` envelope output. Fetch the descriptor from
       Stream A's endpoint; reconstruct the container env in this order (later wins):
       recorded `ContainerSpec.Env` literals → `CAESIUM_PARAM_<KEY>` from recorded
@@ -188,7 +188,11 @@ B2 adds real local execution.
       Files: new `cmd/reproduce/reproduce.go`, new `internal/reproduce/reconstruct.go`
       (+ `reconstruct_test.go`), `cmd/execute.go`.
       Depends on: A1.
-- [ ] B2. Add run mode (default) with local execution + exit codes. Pull the image
+      Note: W2-beta added the top-level `caesium reproduce` command, descriptor
+      fetch/decode, stdout-clean `--dry-run`/`--json` envelope output, exact
+      env layering through `pkgtask.BuildOutputEnv`, secret omission warnings,
+      mount remap/skips, and focused reconstruction tests.
+- [x] B2. Add run mode (default) with local execution + exit codes. Pull the image
       by recorded `ResolvedImageDigest` (mutable tag → pull by tag, marked
       **DEGRADED**), execute the recorded command in the reconstructed environment,
       and parse `##caesium::output` markers from stdout via `pkgtask.ParseMarkers`.
@@ -210,6 +214,11 @@ B2 adds real local execution.
       Files: `cmd/reproduce/reproduce.go`, new `internal/reproduce/execute.go`
       (+ `execute_test.go`).
       Depends on: B1.
+      Note: W2-beta added Docker-SDK pre-pull with registry/`--image` guidance,
+      single-shot local execution via an injected `internal/localrun` adapter,
+      explicit exit codes 0/1/2 through the command layer, parsed marker output,
+      and integration coverage for dry-run JSON, run-mode JSON, and missing-run
+      exit 2.
 
 ### Stream C — Output-diff compare, fidelity summary, shell mode (P1)
 
