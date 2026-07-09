@@ -15,7 +15,7 @@ import (
 func TestExecutePullFailureGuidanceNamesRegistryAndLocalFallback(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:1")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -52,7 +52,7 @@ func (p *localPresentPuller) ExistsLocally(context.Context, string) bool { retur
 // private-registry auth failure cannot block reproducing with a local image.
 func TestExecuteSkipsPullWhenImagePresentLocally(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -83,7 +83,7 @@ func TestExecuteSkipsPullWhenImagePresentLocally(t *testing.T) {
 
 func TestExecuteUsesDegradedTagPullWhenDigestMissing(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:latest")
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -117,7 +117,7 @@ func TestExecuteUsesDegradedTagPullWhenDigestMissing(t *testing.T) {
 func TestExecuteUsesImageOverrideForPullAndSynthesizedDefinition(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:prod")
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	env, err := Reconstruct(desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -150,7 +150,7 @@ func TestExecutePassesRemappedMountsToSynthesizedDefinition(t *testing.T) {
 	desc := basicDescriptor("alpine:3.23")
 	desc.ContainerSpec.Mounts = testBindMount("/recorded/data", "/data")
 	desc.ContainerSpec.ResolvedVolumeMounts = testPVCMount("claim", "/claim")
-	env, err := Reconstruct(desc, ReconstructOptions{
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{
 		Mounts: []MountRemap{{From: "/recorded/data", To: "/local/data"}},
 	})
 	if err != nil {
@@ -213,7 +213,7 @@ func TestBuildShellRequestUsesDefaultShellAndClonesEnvelope(t *testing.T) {
 
 func TestExecuteShellPullsImageAndRunsShellRequest(t *testing.T) {
 	desc := basicDescriptor("registry.example.com/team/app:1")
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -241,7 +241,7 @@ func TestExecuteShellPullsImageAndRunsShellRequest(t *testing.T) {
 
 func TestExecuteShellDistrolessGuidance(t *testing.T) {
 	desc := basicDescriptor("gcr.io/distroless/static:nonroot")
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -265,7 +265,7 @@ func TestExecuteShellDistrolessGuidance(t *testing.T) {
 
 func TestExecuteShellReturnsInteractiveExitCode(t *testing.T) {
 	desc := basicDescriptor("alpine:3.23")
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}

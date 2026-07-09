@@ -159,8 +159,7 @@ func runReproduce(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return exitWithMessage(stderr, 2, err.Error())
 	}
-	env, err := ireproduce.Reconstruct(desc, ireproduce.ReconstructOptions{
-		Context:        cmd.Context(),
+	env, err := ireproduce.Reconstruct(cmd.Context(), desc, ireproduce.ReconstructOptions{
 		SetParams:      setParams,
 		SetEnv:         setEnv,
 		Mounts:         mounts,
@@ -715,8 +714,8 @@ func envBool(key string, fallback bool) bool {
 
 func firstNonEmptyString(values ...string) string {
 	for _, value := range values {
-		if strings.TrimSpace(value) != "" {
-			return value
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
 		}
 	}
 	return ""

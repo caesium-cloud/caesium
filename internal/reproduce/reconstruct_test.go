@@ -35,7 +35,7 @@ func TestReconstructEnvLayeringAndSecretOmission(t *testing.T) {
 		},
 	}
 
-	env, err := Reconstruct(desc, ReconstructOptions{
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{
 		SetParams: []Assignment{{Key: "mode", Value: "manual"}},
 		SetEnv: []Assignment{
 			{Key: "CAESIUM_PARAM_OVERRIDE", Value: "env-final"},
@@ -85,7 +85,7 @@ func TestReconstructOutputRefUsesBuildOutputEnvShape(t *testing.T) {
 		},
 	}
 
-	env, err := Reconstruct(desc, ReconstructOptions{})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -108,7 +108,7 @@ func TestReconstructImageOverrideMarksEnvelopeAndFidelity(t *testing.T) {
 	desc.Runtime.Image = "registry.example.com/team/app:prod"
 	desc.Runtime.ResolvedImageDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	env, err := Reconstruct(desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{ImageOverride: "registry.example.com/team/app:candidate"})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -155,7 +155,7 @@ func TestReconstructResolveSecretsInjectsLocalValueBeforeSetEnvOverride(t *testi
 		},
 	}}
 
-	env, err := Reconstruct(desc, ReconstructOptions{
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{
 		ResolveSecrets: true,
 		SecretResolver: resolver,
 		SetEnv:         []Assignment{{Key: "SECRET_ENV", Value: "manual-final"}},
@@ -209,7 +209,7 @@ func TestReconstructResolveSecretsOmitOnFailureOrProviderMismatch(t *testing.T) 
 		},
 	}
 
-	env, err := Reconstruct(desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -273,7 +273,7 @@ func TestReconstructResolveSecretsWarnsOnComparableDrift(t *testing.T) {
 		},
 	}}
 
-	env, err := Reconstruct(desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{ResolveSecrets: true, SecretResolver: resolver})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}
@@ -310,7 +310,7 @@ func TestReconstructMountRemapAndKubernetesSkip(t *testing.T) {
 		{Type: container.VolumeMountTypePVC, Name: "shared", Source: "claim", Target: "/claim"},
 	}
 
-	env, err := Reconstruct(desc, ReconstructOptions{
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{
 		Mounts: []MountRemap{
 			{From: "/prod/data", To: "/local/data"},
 			{From: "/prod/work", To: "/local/work"},
@@ -349,7 +349,7 @@ func TestReconstructFidelitySummaryListsBestEffortDimensions(t *testing.T) {
 		},
 	}
 
-	env, err := Reconstruct(desc, ReconstructOptions{Platform: oppositePlatform()})
+	env, err := Reconstruct(context.Background(), desc, ReconstructOptions{Platform: oppositePlatform()})
 	if err != nil {
 		t.Fatalf("Reconstruct() error = %v", err)
 	}

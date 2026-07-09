@@ -154,7 +154,6 @@ type Envelope struct {
 
 // ReconstructOptions controls local envelope reconstruction.
 type ReconstructOptions struct {
-	Context        context.Context
 	SetParams      []Assignment
 	SetEnv         []Assignment
 	Mounts         []MountRemap
@@ -255,7 +254,10 @@ func DecodeDescriptor(raw []byte) (*Descriptor, error) {
 }
 
 // Reconstruct builds the local envelope from a descriptor and CLI overrides.
-func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
+func Reconstruct(ctx context.Context, desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if desc == nil {
 		return nil, fmt.Errorf("descriptor is required")
 	}
@@ -266,10 +268,6 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 	resolvedSecrets := make([]SecretResolution, 0)
 	secretRefs := secretRefsByEnv(desc.SecretRefs)
 	processedSecretEnv := make(map[string]struct{})
-	ctx := opts.Context
-	if ctx == nil {
-		ctx = context.Background()
-	}
 
 	for _, key := range sortedKeys(desc.ContainerSpec.Env) {
 		value := desc.ContainerSpec.Env[key]
@@ -299,6 +297,7 @@ func Reconstruct(desc *Descriptor, opts ReconstructOptions) (*Envelope, error) {
 			continue
 		}
 		if _, ok := desc.ContainerSpec.Env[ref.EnvKey]; !ok {
+			processedSecretEnv[ref.EnvKey] = struct{}{}
 			if resolved, resolutionWarnings, ok := resolveRecordedSecret(ctx, ref, opts); ok {
 				env[ref.EnvKey] = resolved.Value
 				resolvedSecrets = appendSecretResolution(resolvedSecrets, resolved.Resolution)
