@@ -1,6 +1,6 @@
 # `caesium reproduce` — Re-Execute a Historical Production Task Locally
 
-Last updated: 2026-07-03
+Last updated: 2026-07-08
 
 This plan ships `caesium reproduce <run-id> --job-id <id> --task <name>`: a
 client-side verb that pulls a completed task's immutable
@@ -69,24 +69,51 @@ inline by the items below; the rest (#1 pruned-descriptor messaging, #4
 distroless `--shell-image` fallback, #5 explain/mini-`why` integration) are
 recorded as deferred and must not be silently pulled into scope.
 
-## Progress (as of 2026-07-03)
+## Progress (as of 2026-07-08)
 
-No implementation waves have shipped yet. The plan was published from
-`docs/design-reproduce.md` (Brainstorm/Design status); the first wave is the next
-eligible run of the `exec-plan-wave` skill against this doc. Stream A (the
-descriptor endpoint) and H-1 (the integration harness) are the leaf items with no
-unmet dependencies.
+### Wave 1 — shipped 2026-07-08 (A1, A2, H-1; 3 of 11 items)
+
+Run via the `exec-plan-wave` skill (codex implementation for Stream A,
+orchestrator-implemented harness stream; GHA CI as the verify gate). Merge
+order η → α:
+
+- **W1-η (H-1)** — digest pinning was the one missing harness gate:
+  `CAESIUM_CACHE_PIN_DIGESTS` was set on NO server-boot site, so descriptors
+  recorded no `ResolvedImageDigest`. Now `=true` on every lane in one sweep
+  (all justfile lanes, local k8s helm `--set`, the CI helm values file, and
+  the three ci.yml server blocks) — degradation-safe because the imagecheck
+  resolver falls back to the tag on registry failure. Docker-daemon
+  reachability from the test-runner and the split-stream `runCLIStdout`/
+  `runCLISeparate` helpers were verified already present. PR #334.
+- **W1-α (A1+A2)** — the entire server-side surface:
+  `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor` (task resolved by
+  name with UUID fallback, both path UUIDs guarded up front, Viewer RBAC under
+  the existing scoped-key arm) returns the RAW stored descriptor bytes in a
+  wrapper (`task_run_id`, `status`, `result`, recorded `output`,
+  `replay_safe`, a log-excerpt pointer) with a stable "descriptor unavailable"
+  404 for pre-descriptor rows. Live integration coverage: digest-pinned
+  fixture (per-step `cache.pinDigests`, independent of η's env) round-trips
+  digest/env/params/`PredecessorOutputs`; scoped-key 200/403 lanes;
+  absent-descriptor error. Lane learnings: the resolved-digest assertion is
+  gated to the docker engine (podman/k8s resolver paths legitimately fall back
+  to the mutable tag — reproduce marks such pulls DEGRADED), and review
+  removed a redundant descriptor re-fetch that would have turned future
+  schemaVersion bumps into 500s, pinning the no-typed-decode raw-bytes
+  contract in code. PR #335.
+
+Wave 2 next: Stream B (B1 → B2, the CLI core) — unblocked now that A1's
+endpoint is on master. Then W3 = C → D serialized, N-1 last.
 
 ### Stream Status
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
-| A | Read-only descriptor endpoint — `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor` under the existing scoped-key auth arm | **P0** | Not started |
-| B | CLI reproduce core — `cmd/reproduce/` + `internal/reproduce/`, envelope reconstruction, `--dry-run`/`--json`, digest pull, run mode + exit codes, `--mount`/`--set`/`--set-env` | **P0** | Not started |
-| C | Output-diff compare + fidelity summary + `--shell` | P1 | Not started |
-| D | Fix-testing (`--image`) + local secret resolution (`--resolve-secrets`) | P2 | Not started |
-| H-1 | Integration harness — record descriptors with digest pinning, drive the real CLI against the harness Docker daemon | — | Not started |
-| N-1 | Docs — design banner, roadmap Phase 4 row, README repoint, CLI reference, sibling cross-links | — | Not started |
+| A | Read-only descriptor endpoint — `GET /v1/jobs/:id/runs/:run_id/tasks/:task/descriptor` under the existing scoped-key auth arm | **P0** | ✅ Shipped W1 (#335) |
+| B | CLI reproduce core — `cmd/reproduce/` + `internal/reproduce/`, envelope reconstruction, `--dry-run`/`--json`, digest pull, run mode + exit codes, `--mount`/`--set`/`--set-env` | **P0** | Next (W2) |
+| C | Output-diff compare + fidelity summary + `--shell` | P1 | Queued (W3, after B2) |
+| D | Fix-testing (`--image`) + local secret resolution (`--resolve-secrets`) | P2 | Queued (W3, after C) |
+| H-1 | Integration harness — record descriptors with digest pinning, drive the real CLI against the harness Docker daemon | — | ✅ Shipped W1 (#334) |
+| N-1 | Docs — design banner, roadmap Phase 4 row, README repoint, CLI reference, sibling cross-links | — | Queued (last) |
 
 ## Streams
 
