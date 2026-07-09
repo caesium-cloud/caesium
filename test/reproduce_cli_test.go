@@ -55,7 +55,8 @@ func (s *IntegrationTestSuite) TestReproduceCLIDryRunAndRunMode() {
 	)
 	s.Require().NoError(runErr, "stderr: %s", runErrOut)
 	var result reproduceCLIRunResult
-	s.Require().NoError(json.Unmarshal([]byte(runOut), &result))
+	s.Require().NoError(json.Unmarshal([]byte(runOut), &result),
+		"run-mode --json stdout must be a single JSON document; raw stdout: %q; stderr: %q", runOut, runErrOut)
 	s.Equal(0, result.ExitCode)
 	s.Equal("succeeded", result.Status)
 	s.Equal("yes", result.Output["clean"])
