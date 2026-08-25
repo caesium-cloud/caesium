@@ -29,6 +29,12 @@ commit. This design adds one key — `cache.chain` — to switch a step to value
 Everything else ships as four published images, example manifests, a lint warning, a Console
 panel that reads ordinary step outputs, and documentation.
 
+**The deliverable is a reusable pattern, not a Terraform feature.** §5 defines it independently of
+any tool — five container roles (materialize, warm, discover, propose, apply) communicating over
+existing stdout markers — and Terraform is presented as the first *binding* of it. dbt, monorepo
+CI, and database migrations are sketched as further bindings, each needing only images. Caesium
+gains no knowledge of any of them.
+
 **Guiding constraint, unchanged from the volumes work:** Caesium declares, orders, and mounts.
 It does not learn Terraform, does not parse HCL, does not hold cloud credentials, and does not
 put itself in the data path.
@@ -74,12 +80,13 @@ Everything else in this design is composition, images, or documentation.
 Five decisions were settled during design. Each is recorded with its rationale and its cost,
 because several are deliberate trade-offs rather than free wins.
 
-### 3.1 A stack is a step-group that also declares itself a dataset
+### 3.1 A stack is a unit that also declares itself a dataset
 
-A stack is a `discover → plan → apply` group inside a per-environment job, and its apply step
-declares `datasets.produces: stack:<env>/<name>`. This gives one run view and explicit
-`dependsOn` ordering, while the lineage/impact/contract machinery handles blast-radius queries
-and cross-job or cross-environment edges for free.
+A stack is one *unit* (§5) in a per-environment job, flowing through `discover → propose → apply`,
+and its apply step declares `datasets.produces: stack:<env>/<name>`. This gives one run view and
+explicit ordering, while the lineage/impact/contract machinery handles blast-radius queries and
+cross-job or cross-environment edges for free. "Unit" rather than "stack" is the load-bearing
+noun: it is a dbt model, a monorepo package, or a migration in the other bindings.
 
 Rejected: stack-as-job (no single "deploy prod" run view; ordering moves into the event router)
 and stack-as-step-group-only (no blast-radius query, no cross-job edges).
@@ -196,9 +203,103 @@ without altering outputs will leave consumers cached. That is exactly what is wa
 exactly what will surprise someone eventually. It needs a documentation callout and the `why`
 rendering above.
 
-## 5. Composition: the stack pattern
+## 5. The generic pattern: unit pipelines
 
-### 5.1 Reference manifest
+Terraform is the first consumer of this pattern, not its definition. The shape below is the
+reusable part, and the Terraform pack is one binding of it. A team wanting the same behaviour for
+dbt, a monorepo CI, or database migrations implements five container contracts and gets
+change-gating, per-unit caching, fingerprint-accurate invalidation, lineage, and audit for free.
+
+### 5.1 The five roles
+
+A **unit** is the thing that changes independently and is deployed independently: a Terraform
+stack, a dbt model, a monorepo package, a migration.
+
+| Role | Responsibility | Runs |
+|---|---|---|
+| **Materialize** | pin and stage inputs; emit their identity | once |
+| **Warm** | populate a shared read-only dependency cache, idempotently | once |
+| **Discover** | enumerate units, fingerprint each, declare inter-unit order | once |
+| **Propose** | per unit: produce a reviewable artifact + summary + proceed/no-op | per unit |
+| **Apply** | per unit: consume exactly that artifact; emit outputs | per unit |
+
+The first three are cheap and run once per job. The last two fan out over the discovered set.
+
+### 5.2 Role contracts
+
+The contracts are stdout markers and environment variables — no SDK, no Go plugin, no
+Caesium-side knowledge of any tool. Any image honouring them is a drop-in.
+
+| Role | Reads | Emits on stdout |
+|---|---|---|
+| Materialize | tool-specific env, `secret://` refs | `##caesium::output {commit, treeDigest, path}` |
+| Warm | source path, cache dir | nothing; self-checks a marker in the cache and exits fast |
+| Discover | source path, scan root | `##caesium::partitions [{key, fingerprint, dependsOn, …}]` |
+| Propose | `CAESIUM_PARTITION`, source, cache | `##caesium::output-ref` for the artifact + proposal outputs |
+| Apply | `CAESIUM_PARTITION`, the artifact ref | `##caesium::output {…}` for downstream units |
+
+Two rules bind the pattern together and are what make it correct rather than merely convenient:
+
+1. **Discover owns the fingerprint.** Caesium never inspects a unit's contents. Whatever the
+   discover image says a unit's inputs digest to *is* that unit's cache key contribution.
+2. **Every role fails closed.** A discover that cannot resolve a dependency exits non-zero. An
+   absent fingerprint is never read as "unchanged" — that is the one failure this pattern must
+   not have, in any binding.
+
+### 5.3 Bindings
+
+| Role | Terraform | dbt / ETL | Monorepo CI | DB migrations |
+|---|---|---|---|---|
+| Materialize | `git-source` | `git-source` | `git-source` | `git-source` |
+| Warm | `providers mirror` | `dbt deps` + adapter | language dep cache | — |
+| Discover | `get` + `modules.json` | `dbt ls --select state:modified+` | affected-package query (nx / turbo / bazel) | pending migration files |
+| Propose | `plan -out` + `show -json` | `dbt compile` / dry-run | build + test → artifact | generate SQL + destructive-op scan |
+| Apply | `apply tf.plan` | `dbt run` | publish / deploy | execute SQL |
+
+dbt is the closest sibling: `state:modified+` is the same idea as the fingerprint, computed
+natively, and dbt models have inter-model dependencies exactly as stacks do.
+
+### 5.4 Fan-out is what makes this scale — and needs one enhancement
+
+Written out by hand, each unit is a four-step group; forty stacks is an unreadable manifest, and
+three hundred dbt models is impossible. [Dynamic fan-out](../../design-dynamic-fanout.md)
+(designed, **no streams started** as of 2026-07) is the right vehicle: a producer emits
+`##caesium::partitions`, the consumer declares `fanOut:`, and one `Task` expands to N `TaskRun`
+rows each carrying `CAESIUM_PARTITION`. That turns any number of units into **five steps**.
+
+Two things this pattern needs that plain string partitions cannot carry:
+
+- **A per-unit fingerprint.** The fan-out design folds the partition *value* into the cache
+  identity hash, which distinguishes units but not *versions* of a unit. Unit `network` must
+  cache-hit when its code is unchanged and miss when it is not, so the fingerprint has to ride
+  along and enter that instance's hash.
+- **Inter-unit ordering.** Fan-out gives parallelism, not a graph. Terraform needs the VPC stack
+  applied before the app stacks; dbt needs dimensions before facts. Without ordering inside the
+  group, the pattern cannot express either.
+
+Both are solved by letting a partition be an object rather than a bare string:
+
+```
+##caesium::partitions [
+  {"key":"network", "fingerprint":"sha256:ab…", "dependsOn":[]},
+  {"key":"account", "fingerprint":"sha256:cd…", "dependsOn":["network"]},
+  {"key":"app-api", "fingerprint":"sha256:ef…", "dependsOn":["account"]}
+]
+```
+
+- `key` → `CAESIUM_PARTITION`, and the whole object → `CAESIUM_PARTITION_JSON`
+- `fingerprint` → folded into that instance's identity hash
+- `dependsOn` → ordering within the group, cycle-checked at expansion time
+
+A bare string array keeps its current meaning exactly, so this is backward compatible with the
+fan-out design as written. **This enhancement belongs in `design-dynamic-fanout.md`, not here** —
+it is data-engineering-first (per-file checksums and dependency-ordered dbt models want it as
+much as stacks do) and this spec is one consumer. Until it lands, the fallback is the
+hand-written per-unit group in §5.5, which works today and is merely verbose.
+
+### 5.5 Reference manifest (Terraform binding)
+
+Shown in the fan-out form. Five steps, whether the repo has three stacks or three hundred.
 
 ```yaml
 apiVersion: v1
@@ -208,10 +309,6 @@ metadata:
   concurrency: { maxRuns: 1, strategy: queue }
   schemaValidation: fail
 
-trigger:
-  type: http
-  configuration: { path: /hooks/infra-prod-deploy }
-
 volumes:
   - name: src
     source: { claimTemplate: { size: 5Gi, accessMode: ReadWriteMany } }
@@ -219,6 +316,7 @@ volumes:
     source: { pvc: tf-cache-rwx }
 
 steps:
+  # ── 1. MATERIALIZE ──────────────────────────────────────────
   - name: checkout
     image: ghcr.io/caesium/git-source@sha256:...
     env:
@@ -231,86 +329,88 @@ steps:
       commit:     { type: string }
       treeDigest: { type: string }
 
+  # ── 2. WARM ─────────────────────────────────────────────────
   - name: warm-cache
     dependsOn: [checkout]
     image: ghcr.io/caesium/tf-warm@sha256:...
     volumeMounts:
       - { volume: src,     path: /src, readOnly: true }
-      - { volume: tfcache, path: /cache }          # the only read-write mount
+      - { volume: tfcache, path: /cache }        # the only read-write mount
 
-  - name: network-discover
+  # ── 3. DISCOVER — enumerates units AND fingerprints them ────
+  - name: discover
     dependsOn: [checkout]
     image: ghcr.io/caesium/tf-discover@sha256:...
-    env: { TF_ROOT: /src/stacks/network }
+    env: { SCAN_ROOT: /src/stacks }
     volumeMounts: [{ volume: src, path: /src, readOnly: true }]
-    outputSchema:
-      fingerprint: { type: string }
+    # emits ##caesium::partitions [{key, fingerprint, dependsOn, root}, …]
 
-  - name: network-plan
-    type: branch
-    dependsOn: [network-discover, warm-cache]
+  # ── 4. PROPOSE — one instance per unit ──────────────────────
+  - name: plan
+    dependsOn: [discover, warm-cache]
     image: ghcr.io/caesium/tf-runner@sha256:...
     command: ["tf-plan"]
     cache: { version: 1, chain: values }
-    env:
-      TF_ROOT:            /src/stacks/network
-      TF_CLI_CONFIG_FILE: /cache/terraformrc
-      CAESIUM_APPLY_STEP: network-apply
+    fanOut: { from: discover, maxParallel: 10, onEmpty: skip }
     volumeMounts:
       - { volume: src,     path: /src }
       - { volume: tfcache, path: /cache, readOnly: true }
+    env: { TF_CLI_CONFIG_FILE: /cache/terraformrc }
     outputSchema:
-      add:     { type: string }
-      change:  { type: string }
-      destroy: { type: string }
+      proposal_kind:     { type: string }
+      proposal_summary:  { type: string }
+      proposal_artifact: { type: string }
 
-  - name: network-apply
-    dependsOn: [network-plan]
+  # ── 5. APPLY — one instance per unit, in dependency order ───
+  - name: apply
+    dependsOn: [plan]
     image: ghcr.io/caesium/tf-runner@sha256:...
     command: ["tf-apply"]
     cache: { version: 1, chain: values, ttl: never }
-    env:
-      TF_ROOT:            /src/stacks/network
-      TF_CLI_CONFIG_FILE: /cache/terraformrc
+    fanOut: { from: discover, maxParallel: 5, failurePolicy: fail_fast }
     volumeMounts:
       - { volume: src,     path: /src }
       - { volume: tfcache, path: /cache, readOnly: true }
     datasets:
       produces:
-        - name: "stack:prod/network"
+        - name: "stack:prod/${CAESIUM_PARTITION}"
           schemaFrom: output
-    outputSchema:
-      vpc_id:     { type: string }
-      subnet_ids: { type: string }
-
-  - name: api-plan
-    type: branch
-    dependsOn: [api-discover, warm-cache, network-apply]
-    cache: { version: 1, chain: values }
-    # network-apply's vpc_id is an upstream OUTPUT, so it is still hashed:
-    # a changed vpc_id re-plans api even though api's own code is untouched.
-
-  # api-discover, api-apply, and the remaining stacks are omitted for brevity;
-  # each is identical in shape to the network-* group above.
 ```
 
-### 5.2 Every part maps to a shipped primitive
+### 5.6 Proposal rendering is a convention, not a schema
+
+A propose step that emits three reserved output keys is rendered as a proposal by the Console:
+
+| Key | Meaning |
+|---|---|
+| `proposal_kind` | renderer selector, e.g. `terraform.plan.v1`, `dbt.compile.v1` |
+| `proposal_summary` | small JSON the generic renderer can display without knowing the kind |
+| `proposal_artifact` | names the `##caesium::output-ref` key holding the reviewable artifact |
+
+The Console keeps a renderer registry keyed on `proposal_kind`, with a **generic key/value
+fallback** so an unknown kind still renders usefully. A team shipping `dbt.compile.v1` gets a
+working panel on day one and can contribute a richer renderer later. This is a documented
+convention over existing outputs — no new marker, no new schema key.
+
+### 5.7 Every part maps to a shipped primitive
 
 | Need | Mechanism | Status |
 |---|---|---|
 | source at a pinned commit | ordinary step + `secret://` in `env` + a volume | shipped |
-| fingerprint transport | `##caesium::output`, hashed as a predecessor output | shipped |
-| plan artifact handoff | `##caesium::output-ref` (path + sha256, digest in the hash) | shipped |
-| skip apply when plan is empty | `##caesium::branch`, emitted by the plan step itself | shipped |
+| fingerprint transport | `##caesium::output` / partition object | shipped / §5.4 |
+| artifact handoff | `##caesium::output-ref` (path + sha256, digest in the hash) | shipped |
 | one writer on the cache volume | `readOnly: true` on every other mount | shipped |
-| cross-stack wiring | `##caesium::output` → `CAESIUM_OUTPUT_*` → `TF_VAR_*` | shipped |
+| cross-unit wiring | `##caesium::output` → `CAESIUM_OUTPUT_*` | shipped |
 | blast radius | `datasets.produces` → `/lineage/impact` | shipped |
-| force re-apply | `caesium cache invalidate` | shipped |
-| **stop hash chaining** | **`cache.chain: values`** | **new** |
+| force re-run | `caesium cache invalidate` | shipped |
+| per-unit expansion | `fanOut` + `##caesium::partitions` | designed, unstarted |
+| per-unit fingerprint + ordering | structured partition objects | §5.4 proposal |
+| **stop hash chaining** | **`cache.chain: values`** | **new, this spec** |
 
-## 6. The Terraform pack
+## 6. The Terraform binding
 
-Four images. No Caesium Go changes beyond §4.
+Four images implementing the five roles in §5.2. No Caesium Go changes beyond §4, and nothing
+here is privileged — a dbt or CI binding is the same exercise with different images.
 
 ### 6.1 `git-source` (generic — not Terraform-specific)
 
@@ -405,12 +505,26 @@ which is why no lock is required.
 
 | exit | meaning | emits |
 |---|---|---|
-| 0 | no changes | zero counts, **no** branch marker → apply skipped |
-| 2 | changes | `output-ref` for `tf.plan`, summary counts from `show -json`, `##caesium::branch $CAESIUM_APPLY_STEP` |
+| 0 | no changes | `proposal_summary` with zero counts, no artifact |
+| 2 | changes | `output-ref` for `tf.plan`, `proposal_*` outputs from `show -json` |
 | 1 | error | task fails |
 
-`tf-apply`: applies the saved plan file received via `CAESIUM_OUTPUT_<PLAN_STEP>_PLAN`, then
-`terraform output -json`.
+`tf-apply`: applies the saved plan file named by `proposal_artifact`, then `terraform output
+-json`.
+
+**How an empty plan skips the apply differs by form**, and both are supported:
+
+- **Fan-out form (§5.5)** — `apply` is its own fan-out group, so there is no per-unit edge to
+  suppress. The apply container reads `proposal_summary`, finds zero counts, and exits 0 without
+  invoking Terraform. The decision lives in the image, which is where a tool-specific no-op
+  belongs.
+- **Hand-written form** — `plan` is a `type: branch` step and emits `##caesium::branch
+  $CAESIUM_APPLY_STEP` only on exit 2, so the apply step is skipped by the DAG. This is the more
+  honest rendering (the run visibly shows apply as skipped) and is why branch steps remain listed
+  in §2.1.
+
+The generic lesson for other bindings: **prefer the branch form while units are hand-written, and
+let the container no-op once fanned out.**
 
 **Two secret-handling requirements, or this leaks into dqlite.** Step outputs land in the
 database and flow onward as environment variables, so the runner MUST drop every output marked
@@ -569,7 +683,9 @@ Fixture: a hermetic fake infra repo — three stacks, two shared modules, `local
 4. Change network's `vpc_id` output → `api-plan` busts although api's code is untouched, proving
    outputs still chain under `chain: values`.
 5. Warm cache populated once; parallel plans consume it read-only; second run exits on the marker.
-6. Empty plan → apply skipped via the branch marker; run is green.
+6. Empty plan → apply does not run Terraform and the run is green. Asserted in **both** forms:
+   skipped via the branch marker when hand-written, and no-opped inside the container when
+   fanned out.
 7. Fail-closed: `discover` exits 1 → plan and apply do not run and the run is **red**, not
    green-with-skips.
 8. Determinism: `discover` twice → byte-identical fingerprint.
@@ -580,6 +696,12 @@ Fixture: a hermetic fake infra repo — three stacks, two shared modules, `local
 11. A module nested two levels deep with a relative `source` → its resolved directory is included
     in the fingerprint, and editing a file in it re-applies exactly the stacks that use it.
     Guards the manifest-vs-`modules -json` distinction.
+
+12. **A second, non-Terraform binding of the same pattern.** A trivial shell binding — a discover
+    that emits two units with hand-computed fingerprints, a propose that writes a file, an apply
+    that reads it — driven through the identical DAG shape with no Terraform involved. This is the
+    genericity guarantee: if the contracts in §5.2 have quietly grown Terraform-shaped
+    assumptions, this test is what fails.
 
 Unit level, one test matters most: a golden test that default `chain: transitive` produces
 **byte-identical** hashes to today, protecting every existing cache entry.
@@ -599,7 +721,7 @@ Repo-specific requirements:
    generated schema-reference update.
 2. `git-source` and `tf-discover` images + the fingerprint determinism and fail-closed tests.
 3. `tf-warm` + the mirror, marker, and parallel-consumption tests.
-4. `tf-runner` plan/apply + branch, output-ref, and sensitive-value tests.
+4. `tf-runner` propose/apply + output-ref, proposal-convention, and sensitive-value tests.
 5. Reference manifests, the drift job, the multi-writer lint warning, and documentation.
 6. Console panel rendering the plan summary from ordinary outputs.
 
@@ -615,7 +737,15 @@ pipeline with a shared upstream step.
    a legitimate two-writer case is hard to construct but should not be blocked outright.
 3. Does the Console plan panel belong on the task detail view or as a run-level summary
    aggregating every stack's counts? The latter is more useful and more work.
-4. **Resolved during design** — the fast/full mode split is dropped in favour of `terraform get`
+4. Should the structured-partition enhancement (§5.4) be raised as a PR against
+   `design-dynamic-fanout.md` before or after this spec is implemented? Before is tidier, but it
+   couples two unshipped designs; after risks fan-out shipping with string-only partitions and
+   needing a follow-up.
+5. How do `fanOut` and `type: branch` interact? The fan-out form of this spec avoids the
+   question (§6.4) — an unchanged unit is a cache hit and a changed-but-empty plan no-ops inside
+   the container — but the hand-written form does use a branch step, the fan-out design says
+   nothing about combining them, and someone will.
+6. **Resolved during design** — the fast/full mode split is dropped in favour of `terraform get`
    plus the `.terraform/modules/modules.json` manifest (§6.2), and the dynamic-source question is
    settled: Terraform hard-errors on any non-const source, so discover fails closed on its own.
    The residual risk is that the manifest is an internal format; the image pins its Terraform
@@ -628,6 +758,11 @@ pipeline with a shared upstream step.
 - **Step-group templates** (roadmap §2.2) — what makes "a stack is a template" literally true and
   removes the per-stack copy-paste.
 - **Node affinity / co-location** — unblocks RWO storage for the cache volume.
+- **Dynamic fan-out** (`design-dynamic-fanout.md`, designed, unstarted) — the vehicle that turns
+  N units into five steps (§5.4). This spec's hand-written form works without it; the pattern does
+  not scale past a handful of units until it lands.
+- **Structured partition objects** — the `{key, fingerprint, dependsOn}` enhancement in §5.4,
+  which belongs in the fan-out design rather than here.
 - **Matrix fan-out** — multi-region and multi-account apply from one stack definition.
 - **Forge status / PR-comment callback** — surface the plan summary on the pull request.
 - **A `caesium` Terraform provider** — `resource "caesium_job"`, `resource "caesium_trigger"`, so
