@@ -1,6 +1,6 @@
 # Design: Dynamic Fan-Out (Data-Proportional Parallelism)
 
-> Status: Brainstorm/Design — proposal for runtime-materialized parallel task instances; nothing here is shipped. Grounded against the executor, run store, claimer, and cache identity code as of 2026-07.
+> Status: Brainstorm/Design — proposal for runtime-materialized parallel task instances; nothing here is shipped. Grounded against the executor, run store, claimer, and cache identity code as of 2026-07, amended 2026-08-25 with [`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson) (re-grounded on that date).
 
 ## Problem
 
@@ -41,7 +41,11 @@ Kubernetes/Kueue's problem (`Step.Kueue`, `pkg/jobdef/definition.go:198-205`).
    `internal/run/store.go:4614`) unchanged partitions cache-hit and only
    stragglers re-execute.
 5. **Data engineering first.** Files, dates, table shards — daily ETL is
-   embarrassingly parallel over a runtime-discovered set.
+   embarrassingly parallel over a runtime-discovered set. The set is not always
+   *embarrassingly* parallel, though: a dbt project's models are a graph with
+   per-model checksums, which is why a partition can be a structured object
+   rather than a bare label
+   ([`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson)).
 
 ## Overview
 
@@ -64,8 +68,10 @@ Kubernetes/Kueue's problem (`Step.Kueue`, `pkg/jobdef/definition.go:198-205`).
   Fan-out multiplies the *run-scoped* `TaskRun` rows
   (`internal/models/run.go:45`), where attempts, claims, hashes, and
   descriptors already live per-execution.
-- **Expansion is transactional**, inside the producer's completion transaction,
-  so distributed workers never observe a half-expanded group.
+- **Expansion is transactional**, inside the producer's completion transaction —
+  normalization, validation (including the in-group cycle check), and every
+  instance insert commit together, so distributed workers never observe a
+  half-expanded group and the local executor runs the identical code path.
 - **Fan-in is group-level.** Downstream sees the fanned predecessor as one node
   with one aggregate status; existing trigger rules
   (`collectPredecessorStatuses` / `satisfiesTriggerRule`,
@@ -120,6 +126,11 @@ ls /drop/*.csv | while read f; do
 done
 ```
 
+An array element may also be a **JSON object** carrying a per-unit content
+fingerprint and intra-group ordering — a strict superset of the string form, with
+identical behavior and identical hashes when only strings are emitted. See
+[`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson).
+
 ## Scenario Walkthroughs
 
 **1. The 400-file vendor drop.** `list-files` emits 400 partition lines.
@@ -142,13 +153,25 @@ group resolves `skipped` in the same transaction; `propagateSkipped` semantics
 (`internal/job/job.go:706`) and trigger rules decide what runs downstream — a
 `publish` with `triggerRule: all_done` still runs, an `all_success` one skips.
 
+**4. The dbt model DAG.** `dbt ls --select state:modified+ --output json` emits
+one partition per model, each an object carrying the model's file checksum as
+`fingerprint` and its parents as `dependsOn`. One `run-model` step becomes 300
+instances that respect dimension-before-fact ordering inside the group, and each
+instance's identity carries its own checksum — so an unchanged model can
+cache-hit while its changed sibling misses. This is the case bare-string
+partitions cannot express at all; see
+[`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson).
+
 ## Backend Design
 
 ### Marker parsing (`pkg/task`)
 
-Extend `Markers` (`pkg/task/output.go:330`) with `Partitions []string`, parsed
-for `##caesium::partitions ` (JSON array, appended across lines) and
-`##caesium::partition ` (single value) in `parseMarkers`. Parse-time
+Extend `Markers` (`pkg/task/output.go:330`) with `Partitions []Partition` — a
+normalized element type whose string form is `{Key: <value>}` and whose object
+form additionally carries `Fingerprint`, `DependsOn`, and scalar `Attributes`
+([`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson))
+— parsed for `##caesium::partitions ` (JSON array, appended across lines) and
+`##caesium::partition ` (single value, string form only) in `parseMarkers`. Parse-time
 enforcement, mirroring the existing caps: scalar outputs are already capped at
 `MaxOutputBytes` = 64 KB (`pkg/task/output.go:45,436-438`); partitions get an
 independent `MaxPartitionListBytes` = 64 KB serialized plus a count cap passed
@@ -172,8 +195,12 @@ expansion of an expansion multiplies unboundedly); `env` must be a valid env
 var name outside the `CAESIUM_PARAM_*` / `CAESIUM_OUTPUT_*` namespaces.
 
 Static topology invariants hold by construction: instances are replicas of an
-existing validated node and no new edges exist at runtime, so apply-time cycle
-detection remains sound.
+existing validated node and no new edges exist **in the catalog graph** at
+runtime, so apply-time cycle detection remains sound over it. That is now only
+half the story — a partition object's `dependsOn` introduces run-scoped edges
+*inside* a group that apply-time validation cannot see, so the instance graph
+carries its own cycle check at expansion time
+([`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson)).
 
 ### Data model (`internal/models`)
 
@@ -281,6 +308,12 @@ as the discriminating field. Two deliberate contracts:
   deferred, same posture as the per-step param-dependency deferral in
   [`design-quarantined-replay.md`](design-quarantined-replay.md).
 
+A partition's optional `fingerprint` adds two more hashed fields
+(`PartitionFingerprint`, `PartitionAttributes`) and is what finally makes that
+deferred contract *expressible*; it does not on its own lift the honest limit
+above, which needs an orthogonal chain break. Both are worked through in
+[`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson).
+
 ### Fan-in: outputs, trigger rules, N-to-one
 
 - **Group status** = `succeeded` iff all instances succeeded/cached; `failed`
@@ -343,6 +376,379 @@ partition set.
   `partition_count` + a status histogram; a 10k-instance run must not bloat
   every run list response.
 
+## Structured Partitions (`key` + `fingerprint` + `dependsOn`)
+
+> Amendment, 2026-08-25. The `file:line` anchors **in this section** were re-read
+> against `master` on that date; anchors in the sections above were captured
+> 2026-07 and have drifted as those files grew (e.g. `CompleteTaskWithResult` is
+> now `internal/run/store.go:1904`, `RetryFromFailure` `:4790`, `Step`
+> `pkg/jobdef/definition.go:541`). Nothing above is wrong in substance; the
+> numbers are stale.
+
+The forcing consumer is
+[`superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+§5.4, which builds per-unit infrastructure delivery on this feature and cannot
+express its pattern on bare-string partitions. That spec is one consumer; the
+capability is data-engineering-first and is specified here, not there.
+
+### Why a bare string is not enough
+
+A partition today is an opaque label. Two things a discovering producer knows,
+and cannot say:
+
+1. **What version of this unit it found.** The design folds the partition
+   *value* into the identity hash (`### Caching: partition identity`, above),
+   which distinguishes partitions from each other but never *versions* of the
+   same partition. `dim_customer` cannot cache-hit when its SQL is unchanged and
+   miss when it changed, because nothing about its content reaches the key. dbt
+   already computes exactly this number — the per-model file checksum that
+   `state:modified+` compares — and throws it away at the container boundary.
+2. **What has to run before what.** Fan-out is parallelism, not a graph. dbt
+   models depend on models (dimensions before facts); Terraform stacks depend on
+   stacks (VPC before apps); a partitioned load may need `create-table` before
+   `load-partition`. None of it is expressible inside a group.
+
+Both are carried by letting a partition be a JSON **object** instead of a string.
+
+### Marker grammar
+
+```sh
+# object form — any element may be an object
+echo '##caesium::partitions [
+  {"key":"dim_customer", "fingerprint":"sha256:ab…", "dependsOn":[]},
+  {"key":"fct_orders",   "fingerprint":"sha256:cd…", "dependsOn":["dim_customer"], "materialization":"incremental"}
+]'
+
+# string form — unchanged meaning, byte-identical behavior
+echo '##caesium::partitions ["2026-07-01","2026-07-02"]'
+ls /drop/*.csv | while read f; do echo "##caesium::partition $f"; done
+```
+
+An element is either a JSON **string** (the partition key, exactly as today) or a
+JSON **object**:
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `key` | string | yes | the partition value; becomes `CAESIUM_PARTITION`. Same rules as the string form (non-empty, ≤ 256 B, valid UTF-8, unique in the set) |
+| `fingerprint` | string | no | content address of this unit's inputs, `sha256:<64 hex>`. Folded into **this instance's** identity hash |
+| `dependsOn` | array[string] | no | sibling `key`s that must reach terminal success before this instance becomes ready |
+| *anything else* | scalar | no | free-form per-unit attributes (`root`, `materialization`, `region`, …). Carried to the container and **hashed** |
+
+`##caesium::partition <value>` (the one-per-line form) stays string-only; a
+producer that needs objects uses the array form. Mixing forms in one array is
+legal — `["a", {"key":"b","dependsOn":["a"]}]` is a two-partition group in which
+`a` carries no fingerprint.
+
+### Backward compatibility
+
+A bare-string array keeps **exactly** its current meaning and, critically, its
+current *hash*. A string element normalizes to `{key: <string>}` with no
+fingerprint, no `dependsOn`, no attributes; every added `HashInput` field is
+omit-when-empty (the `ResolvedImageDigest` pattern,
+`internal/cache/hash.go:301-303`), so a string-form instance hashes
+byte-identically to what the unamended design computes. **No `CacheVersion`
+bump.** A job that never emits an object never observes this amendment — not in
+the key, not in the env, not in ordering.
+
+### Validation — what fails the producer, loudly
+
+The design's cap posture is "fail the producing task, never truncate", because a
+silently dropped partition is a silently skipped unit of work. Structured
+partitions extend that posture rather than soften it. Parse-time (`parseMarkers`,
+`pkg/task/output.go:408`) and expansion-time rejections both **fail the
+producer**:
+
+| Condition | Why it is fatal, not lenient |
+|---|---|
+| element is neither string nor object | ambiguous input; guessing is how data goes missing |
+| `key` missing / empty / > 256 B / invalid UTF-8 | the rule the string form already enforces |
+| duplicate `key`, *identical* payload | deduplicated first-seen — the `ParseBranches` posture (`pkg/task/output.go:329`). **Not** fatal |
+| duplicate `key`, *conflicting* payload | two different fingerprints for one unit: the producer's model of the world is inconsistent |
+| `fingerprint` not `sha256:<64 hex>` | reuses `validSHA256Ref` (`pkg/task/output.go:193`). A malformed digest in a cache key silently weakens content addressing — the argument that validator already makes for `##caesium::output-ref` |
+| attribute value is null / object / array | reuses `scalarOutputValue` (`pkg/task/output.go:229`): only scalars are meaningful values, and `fmt.Sprintf("%v", …)` over a decoded object is how `map[…]` garbage previously reached env vars |
+| `dependsOn` names a key not in the set | the producer believes in a unit it did not emit. Ignoring it would run a fact table before its dimension — the exact failure ordering exists to prevent |
+| `dependsOn` contains the element's own key | a 1-cycle |
+| the in-group graph has a cycle | see below |
+
+Note the asymmetry with `##caesium::output`, which *skips* malformed lines
+(`pkg/task/output.go:290-293`). Outputs are advisory data; partitions are the
+work list. A dropped output degrades a downstream env var; a dropped partition
+means a file never got processed and the run went green.
+
+### Caps
+
+Objects are bigger than strings, and the existing 64 KB list cap and
+1024-partition count cap become mutually unsatisfiable for the object form
+(1024 × ~150 B of dbt model name + checksum ≈ 150 KB). The caps are therefore
+restated over the **normalized** encoding — the same bytes that are hashed,
+injected, and persisted:
+
+| Limit | Value | Enforcement |
+|---|---|---|
+| `MaxPartitionListBytes` | **256 KB** normalized (was 64 KB) | parse-time; fails the producer |
+| Per-partition object | 2 KB normalized | parse-time; fails the producer |
+| Attributes per object | 16 keys | parse-time; fails the producer |
+| `key` value | 256 B | parse-time (unchanged) |
+| Count | `min(fanOut.maxPartitions, CAESIUM_FANOUT_MAX_PARTITIONS)` | parse-time (unchanged) |
+
+256 KB is not free: the normalized list is persisted on the producer's
+`TaskRun.Partitions` column and rides one dqlite Raft write, which is why the
+byte cap exists at all and why it stays a constant rather than becoming a new
+operator dial. It is deliberately **not** shared with `MaxOutputBytes`
+(`pkg/task/output.go:45`): that 64 KB budget covers a step's scalar outputs and
+the fan-in aggregate, and a large partition list must not eat into it.
+
+### Cache identity — exactly which fields
+
+`cache.HashInput` (`internal/cache/hash.go:266`) gains three fields beyond the
+`Partition string` the base design already adds, all written with the
+omit-when-empty pattern:
+
+| Field | Hashed line | When |
+|---|---|---|
+| `Partition string` | `partition:<key>` | non-empty (base design) |
+| `PartitionFingerprint string` | `partition_fingerprint:<value>` | non-empty |
+| `PartitionAttributes map[string]string` | `partition_attr:<k>=<v>`, keys sorted | non-empty |
+
+Sorted-map iteration mirrors how `Env`, `PredecessorOutputs`, and `RunParams` are
+already folded in (`internal/cache/hash.go:307-314,369-384,387-394`). All three
+mirror into `HashInputBlob` (`internal/cache/hash.go:71`) **verbatim** —
+partition data is labels, not credentials — so `caesium why` can name
+`partition_fingerprint` as *the* discriminating field instead of reporting "the
+hashes differ".
+
+`dependsOn` is **not hashed**. It is a scheduling instruction, exactly like the
+sibling list, `kueue.queueName`, and `rateLimit`
+(`pkg/jobdef/definition.go:561-566`; `internal/cache/hash.go:337`). Reordering a
+group must not invalidate work that did not change. The corollary is a rule for
+step authors: **a container must not derive data behavior from `dependsOn`.**
+Anything behavioral belongs in an attribute, which *is* hashed.
+
+Attributes are hashed for a concrete reason:
+`{"key":"app-api","root":"stacks/api"}` tells the container *where to work*. If
+`root` moved and the key did not, an unhashed attribute would serve a stale hit
+against the wrong directory. Hashing every non-`dependsOn` field closes that hole
+by construction, and is why `CAESIUM_PARTITION_JSON` carries the normalized
+object rather than the emitted bytes: injected, hashed, and persisted are the
+same object.
+
+#### The honest limit: a fingerprint alone does not buy per-unit skip
+
+This is the part that does not survive a casual reading of the proposal. An
+instance's identity folds the producer's effective hash through
+`PredecessorHashes` (`internal/job/job.go:964-971`; in the distributed lane
+`internal/run/store.go:4628`, which reads `COALESCE(effective_hash, hash)`). So
+when the producer's own inputs change — a new git commit, a new listing — the
+producer's hash changes, that change propagates into **every** instance, and all
+N re-run *no matter what the fingerprints say*. The base design already records
+this as an honest limit; adding a fingerprint does not by itself lift it.
+
+Two mechanisms close the gap, and neither is this amendment's to invent:
+
+- **`cache.EquivalentPriorHash`** (`internal/cache/shortcircuit.go:56`)
+  suppresses the cascade when a re-executed producer emits **byte-identical
+  output**. It does not help here: one changed model in three hundred changes one
+  fingerprint, the emitted list is no longer byte-identical, and the substitution
+  is (correctly) refused. It is conservative by construction and stays that way.
+- **`cache.chain: values`** — the step-level knob proposed in
+  [`2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
+  §4, which excludes `PredecessorHashes` from a step's key while still hashing
+  `PredecessorOutputs`. That is the chain break, and it is orthogonal to this
+  amendment.
+
+So the composition is explicit: **`fanOut` gives the instances, `fingerprint`
+gives each instance a per-unit discriminator, and `cache.chain: values` decides
+whether the producer's own churn still dominates the key.** Fingerprints without
+the chain break are correct but conservative — every instance re-runs when the
+producer does; never a stale hit. With it, `dim_customer` cache-hits on its
+unchanged checksum while `fct_orders` misses on its changed one, which is the
+"value-verified per-partition skip" the base design defers: made *expressible*
+here, *enabled* there.
+
+One operational corollary, because it will bite someone: under `chain: values`
+the producer's `PredecessorOutputs` **are** still hashed, so a discover step that
+emits `##caesium::output {"unit_count":"41"}` re-keys every instance whenever the
+count moves. Per-unit data belongs in partition attributes, not in the producer's
+scalar outputs.
+
+### Ordering inside the group
+
+Ordering rides the mechanism that already exists. Readiness in **both** lanes is
+a single scalar on the row:
+
+- the distributed claimer's atomic claim gates on
+  `tr.outstanding_predecessors = ?` bound to `0`
+  (`internal/worker/claimer.go:257,266`);
+- owner dispatch gates on the same column (`internal/run/store.go:1739`);
+- the local executor re-seeds its in-memory indegree map **from that column**
+  (`internal/job/job.go:676`).
+
+So an instance is seeded at expansion with
+`outstanding_predecessors = <template's current value> + <in-group indegree>`,
+and the existing "decrement to zero → ready" machinery carries ordering for
+free. **The distributed claimer needs no new predicate to honour ordering** —
+contrary to the obvious worry, the claim side is already general enough. Two
+other places are not:
+
+1. **The decrement is keyed wrong for in-group edges.**
+   `batchDecrementPredecessorsTx` (`internal/run/store.go:2333`) updates
+   `WHERE job_run_id = ? AND task_id IN ?`. That is exactly right for the
+   *cross-step* edge (producer → group: one completion must decrement every
+   sibling) and exactly wrong for the *in-group* edge (`dim_customer` completing
+   must decrement only its dependents). In-group edges therefore need a sibling
+   decrement keyed on the `TaskRun` **primary key** — `WHERE id IN ?`. Inside the
+   completing instance's transaction: one indexed range read of the group over
+   `idx_taskrun_jobrun_task`, decode the non-terminal siblings'
+   `PartitionDependsOn`, one `UPDATE … WHERE id IN (…)`. Bounded by N ≤ 1024
+   rows. A run-scoped instance-edge table was considered and rejected: a new
+   model and a new migration to replace one bounded scan.
+2. **The decrement must ride every terminal-success path**, not only
+   `completeTask` (`internal/run/store.go:2621`). `cacheHitTask`
+   (`internal/run/store.go:1933`) is a separate path that also releases
+   successors, and a cache-hit instance is a satisfied dependency.
+
+#### Failure inside an ordered group is mandatory skip, not a hang
+
+If `dim_customer` exhausts its retries, `fct_orders`'s counter is never
+decremented and never reaches zero. Nothing claims it; nothing fails it. The
+distributed run waits until the run timeout, and the local run trips the
+terminal-count guard with "remaining tasks may be waiting on unresolved
+dependencies" (`internal/job/job.go:1554-1558`). The skip cascade is therefore
+**load-bearing, not a nicety**: `failTask` (`internal/run/store.go:3174`) must
+mark the failed instance's transitive in-group dependents `skipped` with reason
+`"fan-out dependency <key> failed"` — the instance-keyed analogue of
+`skipTaskAndDescendantsTx` (`internal/run/store.go:3075`), reusing
+`markTaskSkippedTx` (`internal/run/store.go:2457`) per row.
+
+Trigger rules are unaffected and stay a **step-level** concept.
+`predecessorStatusesTx` (`internal/run/store.go:2488`) resolves predecessors from
+`task_edges`, which contains no in-group edges, so an instance's
+`shouldRunTaskTx` check (`internal/run/store.go:2596`) evaluates the group's
+cross-step predecessors exactly as today. In-group dependency failure is governed
+by the skip cascade above, never by `triggerRule`.
+
+### Cycle detection at expansion time
+
+The base design asserts: *"Static topology invariants hold by construction:
+instances are replicas of an existing validated node and no new edges exist at
+runtime, so apply-time cycle detection remains sound."* **`dependsOn` makes the
+second clause false.** Run-scoped edges now exist, they are supplied by a
+container at runtime, and the apply-time cycle check
+(`pkg/jobdef/definition.go:2044`, over `computeStepAdjacency` at
+`pkg/jobdef/definition.go:1851`) cannot see them.
+
+The invariant splits, and both halves must be stated:
+
+- **Catalog graph** — unchanged, validated at apply time, still acyclic. Fan-out
+  still adds no node and no edge to it.
+- **Instance graph** — run-scoped, producer-supplied, and validated at
+  **expansion** time: a Kahn pass over the normalized partition set inside the
+  producer's completion transaction, *before* any instance row is inserted. A
+  cycle fails the producing task with the offending keys named and the
+  transaction rolls back — either the producer is complete and a valid group
+  exists, or neither.
+
+The in-group indegree that Kahn pass computes is the number seeded onto each
+instance row, so detection and scheduling come from one traversal.
+
+### Interaction with the existing knobs
+
+| Knob | Interaction |
+|---|---|
+| `maxParallel` | Composes with no special handling: ordering decides which instances are *ready*, `maxParallel` decides how many ready ones are *in flight*. Deadlock is impossible — readiness derives from terminal siblings, never from free slots. A deep chain simply has fewer ready instances than the cap allows |
+| `failurePolicy: fail_fast` | Unchanged: the first failure cancels pending siblings. Dependents of the failure were pending, so the existing rule already cancels them and the skip cascade is a no-op |
+| `failurePolicy: continue` | The skip cascade above is required. Independent instances keep running; the failed instance's transitive dependents resolve `skipped`; group status is `failed` because a sibling exhausted retries. A group may therefore contain succeeded, failed, **and** skipped instances |
+| `onEmpty` | Unchanged. Ordering over an empty set is vacuous |
+| `rateLimit` | Unchanged. Parking via `RateLimitTask` (`internal/run/store.go:1808`) delays an instance; its dependents wait, which is correct |
+| `retries` | Unchanged per instance. A dependent becomes ready only when its dependency reaches terminal success, so retries serialize correctly against ordering |
+| `run retry` | `RetryFromFailure` (`internal/run/store.go:4790`) keeps succeeded/cached instances and resets failed ones; it must **also** reset instances that were `skipped` for a failed in-group dependency, and re-seed every reset instance's `outstanding_predecessors` to its in-group indegree counted over **non-terminal** dependencies only (0 when its dependencies already succeeded). The group is still not re-expanded |
+| `run retry --partition` | Retrying one instance does **not** cascade to dependents that already succeeded. v1 states this as a limitation rather than silently re-running a subtree |
+
+### Both lanes, one mechanism
+
+Ordering must hold identically in local and distributed execution, and the
+cheapest way to guarantee that is to put expansion in exactly one place. It
+already is: local execution calls `store.CompleteTaskWithResult`
+(`internal/job/job.go:1087` → `internal/run/store.go:1904` →
+`completeTask(…, enforceClaim=false)`) — the same transaction the distributed
+lane uses. Normalization, cycle detection, indegree seeding, row insertion, and
+the sibling decrement therefore live in the store and are inherited by both
+executors, rather than being reimplemented in the in-memory Kahn loop where the
+two would drift.
+
+The local loop needs one thing back that it cannot currently get. It maintains
+`adjacency`/`indegree` keyed by **`Task` ID** and decrements them itself
+(`internal/job/job.go:1428-1441,1502-1517`) rather than re-reading the store, so
+it cannot see rows the completion transaction just created. `CompleteTaskResult`
+(`internal/run/store.go:1887`, today only `SkippedTaskIDs`) therefore returns the
+expansion: the instance `TaskRun` IDs, their partition keys, their seeded
+`outstanding_predecessors`, and the in-group edges. The local loop seeds an
+instance-level sub-graph from that and keeps decrementing in memory as it does
+for step edges. This is a strict extension of the base design's local-expansion
+change (queueing `TaskRun` identities instead of `Task` IDs for fanned steps),
+not a second design.
+
+The remaining instance-keying gaps belong to the base design's store re-key, made
+sharper by ordering because several siblings are now legitimately pending at
+once: `ClaimTaskForDispatch` (`internal/run/store.go:1665`) and
+`LoadDispatchedTaskRun` (`internal/run/store.go:1756`) address a row as
+`(job_run_id, task_id[, claimed_by])` and must key on the `TaskRun` primary key.
+
+### `CAESIUM_PARTITION_JSON`
+
+Each instance receives, alongside `CAESIUM_PARTITION=<key>`:
+
+```
+CAESIUM_PARTITION_JSON={"dependsOn":["dim_customer"],"fingerprint":"sha256:cd…","key":"fct_orders","materialization":"incremental"}
+```
+
+The **normalized** object — dropped non-scalar attributes already removed, keys
+sorted — so what the container reads is what was hashed and what was persisted.
+It is injected at the same merge point as `CAESIUM_RUN_ID` / `CAESIUM_JOB_ALIAS`
+(`internal/job/job.go:800-810`, from `buildParamEnv` at `internal/job/job.go:326`;
+the distributed analogue in `internal/worker/runtime_executor.go`), which means
+it is **excluded from the hashed `mergedEnv`** (`internal/job/job.go:956-962`,
+`internal/worker/runtime_executor.go:214-222`). That exclusion is required, not
+incidental: `dependsOn` lives inside this JSON, and hashing the env var would
+drag a scheduling instruction into the cache key through the back door. The
+hashable content of the object is folded in explicitly and visibly as the three
+`HashInput` fields above — the same "fold it explicitly, never smuggle it through
+`Env`" contract the base design states for the partition value.
+
+The name is fixed and is **not** derived from `fanOut.env`. `fanOut.env` renames
+the scalar value var to fit an existing container contract; the JSON var is a new
+Caesium-namespaced fact with no such history.
+
+### Persistence
+
+Beyond the base design's partition columns, the instance `TaskRun` row carries
+`PartitionFingerprint string`, `PartitionAttributes datatypes.JSON`, and
+`PartitionDependsOn datatypes.JSON` (the resolved sibling keys). The `dependsOn`
+column is what makes the sibling decrement and the skip cascade single indexed
+queries, and what lets the REST partition list and the UI render the in-group
+graph without re-deriving it from the producer. The producer's row keeps the full
+normalized list in `Partitions` for `why`, run-diff, and replay.
+
+`PartitionIndex` remains **emission order, not topological order** — instance 0
+is the rewritten template row. Run-diff continues to align instances across runs
+by partition *value*, never by index.
+
+### What this amendment does not change
+
+- **No new YAML field.** `fanOut:` is untouched — `from`, `env`, `maxPartitions`,
+  `maxParallel`, `onEmpty`, `failurePolicy`. Structure is a property of what the
+  producer emits, not of what the consumer declares, so `pkg/jobdef` and the
+  generated [`job-schema-reference.md`](job-schema-reference.md) gain nothing
+  from this amendment beyond what the base design already required.
+- **No new env var / operator dial.** `CAESIUM_FANOUT_MAX_PARTITIONS` remains the
+  only one.
+- **No new metric series.** A group's ordering depth is recorded on the
+  producer's row and its execution descriptor, not as a new collector.
+- **No `CacheVersion` bump**, per the backward-compatibility rule above.
+- **Non-goals stand.** No chained fan-out (a partition still cannot itself fan
+  out), no fan-out of `branch` steps, no cross-partition communication, and
+  Caesium still moves partition *labels and their digests*, never partition data.
+
 ## CLI
 
 ```sh
@@ -373,8 +779,12 @@ caesium dev --once --path job.yaml     # local fan-out with live group progress
 |---|---|---|
 | Server hard cap on N | `CAESIUM_FANOUT_MAX_PARTITIONS` = 1024 | parse-time; exceeding **fails the producer** (never truncates) |
 | Per-step cap | `fanOut.maxPartitions` (required) | lint (≤ hard cap) + parse-time |
-| Partition value size | 256 bytes | parse-time |
-| Partition list bytes | 64 KB serialized | parse-time |
+| Partition value (`key`) size | 256 bytes | parse-time |
+| Partition list bytes | 256 KB normalized | parse-time |
+| Per-partition object bytes | 2 KB normalized | parse-time |
+| Attributes per partition object | 16 keys | parse-time |
+| `fingerprint` shape | `sha256:<64 hex>` (`validSHA256Ref`) | parse-time |
+| In-group `dependsOn` graph | acyclic, no dangling keys | expansion-time; **fails the producer** |
 | Group in-flight | `fanOut.maxParallel` | claim predicate / dispatch loop |
 | Aggregate output size | `MaxOutputBytes` 64 KB | fan-in; degrade to counts, fail closed under `inputSchema` |
 | No chained fan-out | — | lint |
@@ -402,6 +812,26 @@ driving the real binary/server (no hand-seeded rows):
 6. CLI: `run partitions --json` stdout clean and parseable (`runCLIStdout`,
    never the stream-merging capture); partition retry end-to-end.
 7. Playwright: grouped DAG node, partition table, per-partition retry.
+8. Structured partitions — backward compatibility: a string-form producer's
+   instance hashes are **byte-identical** to the pre-amendment values (asserted
+   against a golden digest, not merely "a hash exists").
+9. Structured partitions — ordering: a producer emits `a → b → c`; assert
+   observed start order in **both** the local and distributed lanes, that
+   `maxParallel: 5` never runs `c` before `b` is terminal, and that a failed `a`
+   under `failurePolicy: continue` resolves `b`/`c` as **skipped** rather than
+   hanging the run to its timeout.
+10. Structured partitions — rejection matrix: a `dependsOn` cycle, a dangling
+    `dependsOn` key, a malformed `fingerprint`, a conflicting duplicate `key`,
+    and an over-cap object each **fail the producing task** with the offending
+    key named, leaving no instance rows behind (assert row count, not just the
+    error string).
+11. Structured partitions — identity: two runs whose producer emits the same set
+    with one changed `fingerprint` re-execute exactly that instance under the
+    chain-break configuration, and `caesium why` names
+    `partition_fingerprint` as the discriminating field.
+12. Structured partitions — env: `CAESIUM_PARTITION_JSON` is present, is the
+    normalized object, and changing only `dependsOn` between runs does **not**
+    change any instance's hash.
 
 ## Phasing
 
@@ -414,11 +844,23 @@ driving the real binary/server (no hand-seeded rows):
 4. **Surfaces:** REST + CLI + UI group rendering; `why`/`run diff` alignment.
 5. **Follow-ups:** replay re-expansion, value-verified per-partition skip.
 
+Structured partitions are not a sixth phase: normalization and caps land with the
+marker parsing in phase 1; the fingerprint fields land with `HashInput` in phase
+2; expansion-time cycle detection, indegree seeding, the sibling decrement, and
+the in-group skip cascade land with expansion in phases 2–3; the ordering and
+fingerprint columns surface in phase 4. The one thing that stays a follow-up is
+the *benefit* of the fingerprint — per-unit skip needs the orthogonal chain break
+described above.
+
 ## Non-Goals
 
-- **No shuffle/reshard, no cross-partition communication.** Instances are
-  independent; anything needing exchange between partitions is a data-plane
-  framework (Spark/Beam) running *inside* one step.
+- **No shuffle/reshard, no cross-partition communication.** `dependsOn` orders
+  instances; it does not connect them. There is no data channel between
+  partitions and no per-sibling output plumbing — anything needing exchange
+  between partitions is a data-plane framework (Spark/Beam) running *inside* one
+  step.
+- **No `dependsOn` across groups.** A partition may only depend on a sibling in
+  its own group. Cross-group ordering is what step edges are for.
 - **Not a data plane.** Caesium moves partition *labels* (≤256 B), never
   partition data; data rides BYO volumes/object stores via `output-ref`.
 - **No nested fan-out** (v1) and no fan-out of `branch` steps.
@@ -452,3 +894,11 @@ driving the real binary/server (no hand-seeded rows):
    [`design-freshness-scheduling.md`](design-freshness-scheduling.md) drives
    re-runs, does per-partition staleness justify pulling the deferred
    value-verified per-partition skip forward?
+7. **Ordering visibility.** Should the in-group `dependsOn` graph be renderable
+   (a mini-DAG in the partition table, an ordering column in
+   `run partitions --json`), or is the group deliberately opaque below the node
+   level? The data is on the row either way; this is a surface question.
+8. **Group-level ordering caps.** Deep chains defeat the point of fan-out — 300
+   models in one 300-deep chain is a serial pipeline wearing a fan-out costume.
+   Is a maximum in-group depth (or a warning above some ratio of depth to N) a
+   guardrail worth its complexity?
