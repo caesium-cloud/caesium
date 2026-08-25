@@ -323,38 +323,59 @@ file bytes. Emits `commit`, `treeDigest`, `path`.
 Resolves the module graph and emits `fingerprint` plus per-input digests (so `caesium why` can
 name which input moved).
 
-**Use Terraform's own module introspection, not a hand-rolled HCL scan.** `terraform modules`
-(Terraform 1.10+) reports every declared module call — `key`, `source`, `version` — and
-`-json` carries a `format_version` for forward compatibility. It is native, versioned, maintained
-upstream, and gets HCL edge cases right by construction. Reading the 1.15 implementation
-(`internal/command/modules.go`) establishes its actual contract:
+**Use Terraform's own module installation, not a hand-rolled HCL scan.** The step runs
+`terraform get`, then reads the module manifest it writes at `.terraform/modules/modules.json`,
+and hashes the union of the resolved module directories plus `*.tf`, `*.tfvars`, `*.tfvars.json`,
+`*.tfquery.hcl`, `.terraform.lock.hcl`, and the workspace name.
 
-- It **requires modules to be installed**: it calls `loader.RefreshModules()` /
-  `loader.ModuleManifest()` and fails with `"root module not found. Please run terraform init"`.
-  `terraform get` installs modules without installing providers, so discover should use `get`
-  rather than a full `init` and therefore does **not** need the provider mirror — which is why
-  discover depends only on `checkout`, not on `warm-cache`. Confirm `get` alone satisfies
-  `modules` during implementation.
-- It **recurses**, building a `moduleref.NewResolver(internalManifest)` and crawling the config
-  for references, so transitive edges come for free.
-- It calls `resolveConstVariables` before resolving modules, so 1.15 dynamic sources that reduce
-  to a constant are handled upstream.
+`terraform get` installs modules **without** installing providers, so discover needs no provider
+mirror — which is why it depends only on `checkout`, not on `warm-cache`.
 
-The step therefore runs `terraform get` then `terraform modules -json`, and hashes the union of
-the reported module directories plus `*.tf`, `*.tfvars`, `*.tfvars.json`, `*.tfquery.hcl`,
-`.terraform.lock.hcl`, and the workspace name.
+All of the following was verified empirically against Terraform **v1.15.9** during design, not
+inferred from documentation.
 
-Two consequences to handle:
+**Why the manifest and not `terraform modules -json`.** `terraform modules` (1.10+) is the
+*supported* introspection surface and carries a `format_version`, but its JSON is insufficient
+for fingerprinting. For a module nested one level down it emits:
 
-- **`-json` flattens the hierarchy** that the text output nests, so composition must be
-  reconstructed from each entry's `key` path.
-- **`resolveConstVariables` narrows but does not eliminate the dynamic-source hazard.** A
-  `source` that cannot reduce to a constant still exists. What `terraform modules` emits in that
-  case — an error, an omission, or an unresolved expression — is not documented and could not be
-  verified during design (no Terraform binary available in the design environment). **This must
-  be settled empirically against a real binary before the image ships**, because an omission that
-  is read as "no such edge" produces a green run that deployed nothing. Until it is settled, the
-  image must treat any module entry whose `source` is absent or non-literal as a hard failure.
+```json
+{"key":"inner","source":"../tags","version":""}
+```
+
+The `key` is the local call name with **no parent path**, and `source` is relative to the parent
+module's directory — so the entry cannot be resolved to a real directory, and two different
+parents each declaring an `inner` are indistinguishable. (The *text* output does render the
+hierarchy; only `-json` loses it.) The manifest `terraform get` writes carries both missing
+pieces:
+
+```json
+{"Key":"vpc.inner","Source":"../tags","Dir":"modules/tags"}
+```
+
+Fully-qualified `Key`, and `Dir` already resolved relative to the root module. That is exactly
+what the fingerprint needs.
+
+The trade-off is explicit: `modules.json` is an internal file with no documented compatibility
+promise, while `terraform modules -json` has `format_version` but not enough data. The manifest
+is the only one that works, so the image must pin its Terraform version and treat an unexpected
+manifest shape as a hard failure. `terraform modules -json` remains the right tool if declared-
+source *auditing or policy* is ever wanted — a different job from fingerprinting.
+
+**The dynamic-source hazard is closed by Terraform itself.** A module `source` that is not a
+literal or a const is a hard error at install time, so discover fails closed with no defensive
+heuristic of ours:
+
+```
+Error: Unknown module source
+  source = var.var_src
+Only literal values and const variables can be evaluated during init.
+```
+
+`terraform get` exits non-zero, so the step fails and nothing downstream runs. Worth recording
+because it is counterintuitive: a `locals` value holding a literal **does** resolve, while an
+input **variable does not — even with a literal default, and even when passed explicitly via
+`-var`**. So 1.15 dynamic module sources are far narrower than the name suggests, and the
+"green run that deployed nothing" path is closed upstream rather than by us.
 
 Fail-closed throughout: any error exits non-zero and emits no fingerprint.
 
@@ -415,9 +436,10 @@ existing `secret://` providers.
 
 Verified during design (2026-08-25):
 
-- **`terraform modules` / `terraform modules -json` exists as of Terraform 1.10** and is the
-  supported way to enumerate declared module calls without running a plan (§6.2). This sets the
-  version floor for the `tf-discover` image.
+- **`terraform modules` / `terraform modules -json` exists as of Terraform 1.10** and enumerates
+  declared module calls without running a plan. It is the supported surface, but its JSON drops
+  the parent path and leaves relative sources unresolvable, so the fingerprint uses the
+  `terraform get` manifest instead (§6.2).
 - `terraform rpcapi` went GA in **1.13** but the changelog states it is *"not intended for public
   consumption"*; the pack does not build on it.
 - Terraform **1.14** (Nov 2025) added list resources in `*.tfquery.hcl`, the `terraform query`
@@ -510,9 +532,12 @@ Fixture: a hermetic fake infra repo — three stacks, two shared modules, `local
    green-with-skips.
 8. Determinism: `discover` twice → byte-identical fingerprint.
 9. A `sensitive = true` output never appears in the task output row or the API response.
-10. A module block with a `source` that cannot reduce to a constant → discover exits non-zero and
-    emits no fingerprint; it never silently drops the edge. This test also pins down the actual
-    `terraform modules` behaviour left open in §6.2.
+10. A module block with a `source` that cannot reduce to a constant → `terraform get` errors,
+    discover exits non-zero and emits no fingerprint, and the run is red. Regression-guards the
+    upstream behaviour §6.2 now depends on.
+11. A module nested two levels deep with a relative `source` → its resolved directory is included
+    in the fingerprint, and editing a file in it re-applies exactly the stacks that use it.
+    Guards the manifest-vs-`modules -json` distinction.
 
 Unit level, one test matters most: a golden test that default `chain: transitive` produces
 **byte-identical** hashes to today, protecting every existing cache entry.
@@ -549,9 +574,10 @@ pipeline with a shared upstream step.
 3. Does the Console plan panel belong on the task detail view or as a run-level summary
    aggregating every stack's counts? The latter is more useful and more work.
 4. **Resolved during design** — the fast/full mode split is dropped in favour of `terraform get`
-   + `terraform modules -json` (§6.2). What remains open is empirical, not architectural: what
-   `terraform modules` emits for a `source` that cannot reduce to a constant. That must be
-   verified against a real binary before the `tf-discover` image ships.
+   plus the `.terraform/modules/modules.json` manifest (§6.2), and the dynamic-source question is
+   settled: Terraform hard-errors on any non-const source, so discover fails closed on its own.
+   The residual risk is that the manifest is an internal format; the image pins its Terraform
+   version and treats an unexpected shape as a hard failure.
 
 ## 12. Deferred
 
