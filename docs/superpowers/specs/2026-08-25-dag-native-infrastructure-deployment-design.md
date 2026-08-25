@@ -321,20 +321,40 @@ file bytes. Emits `commit`, `treeDigest`, `path`.
 ### 6.2 `tf-discover`
 
 Resolves the module graph and emits `fingerprint` plus per-input digests (so `caesium why` can
-name which input moved). Two modes:
+name which input moved).
 
-- **Fast (default)** — static scan of `module` blocks with literal local `source` values, walked
-  transitively. No network. Hashes `*.tf`, `*.tfvars`, `*.tfvars.json`, `*.tfquery.hcl`,
-  `.terraform.lock.hcl`, and the workspace name.
-- **Full (opt-in, and required in some configs)** — `terraform init -backend=false` against the
-  warm mirror, then read `.terraform/modules/modules.json` for resolved registry and git module
-  sources.
+**Use Terraform's own module introspection, not a hand-rolled HCL scan.** `terraform modules`
+(Terraform 1.10+) reports every declared module call — `key`, `source`, `version` — and
+`-json` carries a `format_version` for forward compatibility. It is native, versioned, maintained
+upstream, and gets HCL edge cases right by construction. Reading the 1.15 implementation
+(`internal/command/modules.go`) establishes its actual contract:
 
-**Correctness requirement.** Terraform 1.15 permits variables and locals in module `source` and
-`version`. A static scan cannot resolve those. When the fast path encounters a non-literal
-`source` or `version`, it MUST fail or escalate to full mode — never silently skip the edge.
-Silently missing a module edge produces a green run that deployed nothing, which is the single
-worst outcome this feature can have.
+- It **requires modules to be installed**: it calls `loader.RefreshModules()` /
+  `loader.ModuleManifest()` and fails with `"root module not found. Please run terraform init"`.
+  `terraform get` installs modules without installing providers, so discover should use `get`
+  rather than a full `init` and therefore does **not** need the provider mirror — which is why
+  discover depends only on `checkout`, not on `warm-cache`. Confirm `get` alone satisfies
+  `modules` during implementation.
+- It **recurses**, building a `moduleref.NewResolver(internalManifest)` and crawling the config
+  for references, so transitive edges come for free.
+- It calls `resolveConstVariables` before resolving modules, so 1.15 dynamic sources that reduce
+  to a constant are handled upstream.
+
+The step therefore runs `terraform get` then `terraform modules -json`, and hashes the union of
+the reported module directories plus `*.tf`, `*.tfvars`, `*.tfvars.json`, `*.tfquery.hcl`,
+`.terraform.lock.hcl`, and the workspace name.
+
+Two consequences to handle:
+
+- **`-json` flattens the hierarchy** that the text output nests, so composition must be
+  reconstructed from each entry's `key` path.
+- **`resolveConstVariables` narrows but does not eliminate the dynamic-source hazard.** A
+  `source` that cannot reduce to a constant still exists. What `terraform modules` emits in that
+  case — an error, an omission, or an unresolved expression — is not documented and could not be
+  verified during design (no Terraform binary available in the design environment). **This must
+  be settled empirically against a real binary before the image ships**, because an omission that
+  is read as "no such edge" produces a green run that deployed nothing. Until it is settled, the
+  image must treat any module entry whose `source` is absent or non-literal as a hard failure.
 
 Fail-closed throughout: any error exits non-zero and emits no fingerprint.
 
@@ -395,6 +415,11 @@ existing `secret://` providers.
 
 Verified during design (2026-08-25):
 
+- **`terraform modules` / `terraform modules -json` exists as of Terraform 1.10** and is the
+  supported way to enumerate declared module calls without running a plan (§6.2). This sets the
+  version floor for the `tf-discover` image.
+- `terraform rpcapi` went GA in **1.13** but the changelog states it is *"not intended for public
+  consumption"*; the pack does not build on it.
 - Terraform **1.14** (Nov 2025) added list resources in `*.tfquery.hcl`, the `terraform query`
   command, and a provider-defined Actions block.
 - Terraform **1.15** (Apr 2026) added variables and locals in module `source`/`version`, a
@@ -411,8 +436,10 @@ Version floors for the remaining capabilities (`moved`, `import`, `check`, `remo
 images are built rather than asserted here.
 
 Because Caesium never names the binary, everything works identically with OpenTofu. HCP
-Terraform **Stacks** solves a similar problem, but is cloud-only and proprietary; this is the
-self-hosted equivalent. Wiring stacks through `output -json` rather than `terraform_remote_state`
+Terraform **Stacks** solves a similar problem, but requires HCP Terraform and is available in
+neither open-source Terraform nor OpenTofu; the `terraform stacks` CLI command added in 1.13 is a
+client whose availability depends on the stacks plugin implementation, and does not make Stacks
+self-hostable. This design is the self-hosted equivalent. Wiring stacks through `output -json` rather than `terraform_remote_state`
 also avoids granting every application stack read credentials on the network stack's state.
 
 ### 6.6 The drift job (mandatory — see §3.2)
@@ -483,8 +510,9 @@ Fixture: a hermetic fake infra repo — three stacks, two shared modules, `local
    green-with-skips.
 8. Determinism: `discover` twice → byte-identical fingerprint.
 9. A `sensitive = true` output never appears in the task output row or the API response.
-10. A module block with a non-literal `source` → discover fails or escalates; it never silently
-    drops the edge.
+10. A module block with a `source` that cannot reduce to a constant → discover exits non-zero and
+    emits no fingerprint; it never silently drops the edge. This test also pins down the actual
+    `terraform modules` behaviour left open in §6.2.
 
 Unit level, one test matters most: a golden test that default `chain: transitive` produces
 **byte-identical** hashes to today, protecting every existing cache entry.
@@ -520,8 +548,10 @@ pipeline with a shared upstream step.
    a legitimate two-writer case is hard to construct but should not be blocked outright.
 3. Does the Console plan panel belong on the task detail view or as a run-level summary
    aggregating every stack's counts? The latter is more useful and more work.
-4. Should `tf-discover` default to fast or full mode? Fast is proposed, but the 1.15 dynamic-source
-   change may make full mode the safer default sooner than expected.
+4. **Resolved during design** — the fast/full mode split is dropped in favour of `terraform get`
+   + `terraform modules -json` (§6.2). What remains open is empirical, not architectural: what
+   `terraform modules` emits for a `source` that cannot reduce to a constant. That must be
+   verified against a real binary before the `tf-discover` image ships.
 
 ## 12. Deferred
 
