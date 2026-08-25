@@ -292,7 +292,23 @@ Both are solved by letting a partition be an object rather than a bare string:
 - `dependsOn` → ordering within the group, cycle-checked at expansion time
 
 A bare string array keeps its current meaning exactly, so this is backward compatible with the
-fan-out design as written. **This enhancement belongs in `design-dynamic-fanout.md`, not here** —
+fan-out design as written.
+
+**The fingerprint is inert without §4, and the division of labour matters.** Drafting the
+fan-out amendment (PR #344) established that a fingerprint in the partition object does *not*
+by itself give per-unit change detection: `PredecessorHashes` still folds the producer's own
+effective hash into every instance, so a changed discover step invalidates all N regardless of
+what their fingerprints say. Three separate mechanisms compose here:
+
+| Mechanism | Owner | Gives |
+|---|---|---|
+| `fanOut` + `partitions` | fan-out design | N instances from one step |
+| `fingerprint` in the object | fan-out design | a per-instance discriminator |
+| `cache.chain: values` | **§4, this spec** | the producer's churn stops dominating |
+
+All three are required, which is why the reference manifest in §5.5 carries `chain: values` on
+both fanned steps. Without the chain break the behaviour is conservative but still correct —
+over-running, never a stale hit. **This enhancement belongs in `design-dynamic-fanout.md`, not here** —
 it is data-engineering-first (per-file checksums and dependency-ordered dbt models want it as
 much as stacks do) and this spec is one consumer. Until it lands, the fallback is the
 hand-written per-unit group in §5.5, which works today and is merely verbose.
