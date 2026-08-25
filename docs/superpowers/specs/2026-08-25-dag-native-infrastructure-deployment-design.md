@@ -464,6 +464,40 @@ client whose availability depends on the stacks plugin implementation, and does 
 self-hostable. This design is the self-hosted equivalent. Wiring stacks through `output -json` rather than `terraform_remote_state`
 also avoids granting every application stack read credentials on the network stack's state.
 
+### 6.7 Implementation surface: libraries, not plugins
+
+The pack images are Terraform-aware Go binaries, so the question of a "native Terraform
+integration" is really a question about which upstream surface they build on.
+
+**No plugin.** Terraform's plugin surfaces are not aimed at orchestration. Provider plugins
+(resources, data sources, functions, ephemeral resources, list resources, and 1.14 Actions) run
+*inside* Terraform during plan/apply, which would let Terraform call Caesium rather than Caesium
+orchestrate Terraform — inverted control plus a runtime dependency from every invocation back to
+the server. Backends are not pluggable; the set is compiled in. Provisioners are deprecated.
+`terraform rpcapi` is the only orchestration-shaped surface and went GA in 1.13, but the
+changelog states it is *"not intended for public consumption"* — no compatibility promise, for a
+feature whose entire value is not silently under-reporting changes.
+
+**Yes to `terraform-exec` + `terraform-json`.** Actively maintained (published 2026-04-29,
+alongside 1.15), MPL-2.0, with typed returns and best-effort compatibility across minor versions.
+The relevant surface:
+
+```go
+Plan(ctx, opts...) (bool, error)                        // diff non-empty; wraps -detailed-exitcode
+ShowPlanFile(ctx, path, opts...) (*tfjson.Plan, error)
+Output(ctx, opts...) (map[string]OutputMeta, error)     // OutputMeta carries Sensitive
+Get / Init / ProvidersLock
+```
+
+This matters most for the two **security** requirements in §6.4: dropping `sensitive = true`
+outputs and stripping `sensitive_values` from plan JSON become typed field access rather than
+`jq` over a schema we would otherwise hand-track. `Plan`'s boolean is the changes signal
+directly, removing exit-code handling from shell.
+
+Two limits: tfexec exposes **no** module-manifest function, so the `modules.json` read in §6.2
+stays hand-rolled and version-pinned; and this is native integration only *inside the images*,
+where Terraform knowledge already belongs. Caesium core is unaffected.
+
 ### 6.6 The drift job (mandatory — see §3.2)
 
 A separate job on a cron trigger, reusing the same checkout and warm steps, running
@@ -480,6 +514,14 @@ purpose is to detect out-of-band change would defeat it.
 - No approval gates, named locks, or step-group templates in this delivery (§3.5).
 - No RWO/node-affinity support for the cache volume (§12).
 - Not a general CI system. This is dependency-ordered deployment of declarative stacks.
+- **Caesium will not implement Terraform's HTTP backend protocol.** Backends are not pluggable,
+  but the HTTP backend is a documented protocol (state GET/POST plus LOCK/UNLOCK) that any
+  service could implement, which would hand Caesium native state locking and a single pane of
+  glass. Rejected: it puts Caesium in the state data path, storing large sensitive blobs in
+  dqlite, against the principle that Caesium never masters storage — and state is the one file a
+  team cannot afford to lose or corrupt. It would also make Caesium a hard runtime dependency of
+  Terraform runs it is not orchestrating.
+- No Terraform plugin of any kind (§6.7).
 
 ## 8. Failure modes
 
@@ -588,3 +630,7 @@ pipeline with a shared upstream step.
 - **Node affinity / co-location** — unblocks RWO storage for the cache volume.
 - **Matrix fan-out** — multi-region and multi-account apply from one stack definition.
 - **Forge status / PR-comment callback** — surface the plan summary on the pull request.
+- **A `caesium` Terraform provider** — `resource "caesium_job"`, `resource "caesium_trigger"`, so
+  a GitOps team manages Caesium definitions *from* Terraform. This is the inverse direction of
+  this spec (Terraform managing Caesium, rather than Caesium running Terraform) and is a separate
+  feature, but it is the one genuinely useful plugin-shaped idea in this space.
