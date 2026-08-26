@@ -71,7 +71,10 @@ Kubernetes/Kueue's problem (`Step.Kueue`, `pkg/jobdef/definition.go:198-205`).
 - **Expansion is transactional**, inside the producer's completion transaction —
   normalization, validation (including the in-group cycle check), and every
   instance insert commit together, so distributed workers never observe a
-  half-expanded group and the local executor runs the identical code path.
+  half-expanded group. Caesium has **three** DAG-advancement paths, though, and
+  the run-owner in-memory one does not route through that transaction; expansion
+  is wired into all three along the seam branch selections already use
+  ([`## Three advancement paths, one expansion`](#three-advancement-paths-one-expansion)).
 - **Fan-in is group-level.** Downstream sees the fanned predecessor as one node
   with one aggregate status; existing trigger rules
   (`collectPredecessorStatuses` / `satisfiesTriggerRule`,
@@ -465,7 +468,7 @@ producer**:
 | duplicate `key`, *identical* payload | deduplicated first-seen — the `ParseBranches` posture (`pkg/task/output.go:329`). **Not** fatal |
 | duplicate `key`, *conflicting* payload | two different fingerprints for one unit: the producer's model of the world is inconsistent |
 | `fingerprint` not `sha256:<64 hex>` | reuses `validSHA256Ref` (`pkg/task/output.go:193`). A malformed digest in a cache key silently weakens content addressing — the argument that validator already makes for `##caesium::output-ref` |
-| attribute value is null / object / array | reuses `scalarOutputValue` (`pkg/task/output.go:229`): only scalars are meaningful values, and `fmt.Sprintf("%v", …)` over a decoded object is how `map[…]` garbage previously reached env vars |
+| attribute value is null / object / array | reuses `scalarOutputValue` (`pkg/task/output.go:229`) as the *predicate*, but **not** its posture: a non-scalar output value is dropped, a non-scalar attribute **fails the producer**. Normalization never removes a field (see below) — accepting a silently-shortened work description is the failure this whole table exists to prevent |
 | `dependsOn` names a key not in the set | the producer believes in a unit it did not emit. Ignoring it would run a fact table before its dimension — the exact failure ordering exists to prevent |
 | `dependsOn` contains the element's own key | a 1-cycle |
 | the in-group graph has a cycle | see below |
@@ -474,6 +477,25 @@ Note the asymmetry with `##caesium::output`, which *skips* malformed lines
 (`pkg/task/output.go:290-293`). Outputs are advisory data; partitions are the
 work list. A dropped output degrades a downstream env var; a dropped partition
 means a file never got processed and the run went green.
+
+#### Normalization is lossless, by definition
+
+"Normalized", used throughout this section, means exactly three things and
+**never** a fourth:
+
+1. a string element is lifted to `{"key": <string>}`;
+2. object keys are sorted;
+3. the result is canonically re-encoded.
+
+Normalization **never drops a field, and never repairs one**. Every rejection in
+the table above happens *before* normalization and fails the producing task; a
+partition that normalizes is a partition that was already wholly valid. This is
+load-bearing: if normalization could quietly discard, say, a non-scalar
+attribute, the run would proceed against a work description the producer did not
+emit — omitted from `CAESIUM_PARTITION_JSON`, omitted from the identity hash, and
+succeeding with different semantics than the container intended. The only thing
+a producer may emit that Caesium silently absorbs is a *byte-identical duplicate
+key*, which by construction changes no semantics.
 
 ### Caps
 
@@ -530,7 +552,8 @@ Attributes are hashed for a concrete reason:
 against the wrong directory. Hashing every non-`dependsOn` field closes that hole
 by construction, and is why `CAESIUM_PARTITION_JSON` carries the normalized
 object rather than the emitted bytes: injected, hashed, and persisted are the
-same object.
+same object, and normalization is lossless so that object is also what the
+producer emitted.
 
 #### The honest limit: a fingerprint alone does not buy per-unit skip
 
@@ -573,8 +596,8 @@ scalar outputs.
 
 ### Ordering inside the group
 
-Ordering rides the mechanism that already exists. Readiness in **both** lanes is
-a single scalar on the row:
+Ordering rides the mechanism that already exists. Readiness is a single scalar on
+the row in the two SQL-gated paths:
 
 - the distributed claimer's atomic claim gates on
   `tr.outstanding_predecessors = ?` bound to `0`
@@ -582,6 +605,12 @@ a single scalar on the row:
 - owner dispatch gates on the same column (`internal/run/store.go:1739`);
 - the local executor re-seeds its in-memory indegree map **from that column**
   (`internal/job/job.go:676`).
+
+The run-owner in-memory path is the exception and needs the same seeding applied
+to `RunState.indegree` (`internal/run/owner_state.go:65-74`), which it maintains
+itself and never re-reads from SQL. Ordering must be seeded once at expansion and
+mirrored into whichever engine is advancing the run — see
+[`## Three advancement paths, one expansion`](#three-advancement-paths-one-expansion).
 
 So an instance is seeded at expansion with
 `outstanding_predecessors = <template's current value> + <in-group indegree>`,
@@ -661,38 +690,168 @@ instance row, so detection and scheduling come from one traversal.
 | `onEmpty` | Unchanged. Ordering over an empty set is vacuous |
 | `rateLimit` | Unchanged. Parking via `RateLimitTask` (`internal/run/store.go:1808`) delays an instance; its dependents wait, which is correct |
 | `retries` | Unchanged per instance. A dependent becomes ready only when its dependency reaches terminal success, so retries serialize correctly against ordering |
-| `run retry` | `RetryFromFailure` (`internal/run/store.go:4790`) keeps succeeded/cached instances and resets failed ones; it must **also** reset instances that were `skipped` for a failed in-group dependency, and re-seed every reset instance's `outstanding_predecessors` to its in-group indegree counted over **non-terminal** dependencies only (0 when its dependencies already succeeded). The group is still not re-expanded |
+| `run retry` | `RetryFromFailure` (`internal/run/store.go:4790`) keeps succeeded/cached instances and resets failed ones. Two separate defects to fix, not one: **(a)** its terminal-success set is keyed by task ID (`terminalSuccessIDs[tr.TaskID]`, `internal/run/store.go:4852-4856`) and its `outstanding_predecessors` recount tests `terminalSuccessIDs[edge.FromTaskID]` (`:4899`), so **one** succeeded sibling marks the whole predecessor group satisfied and releases downstream work while another sibling is still being retried — the predecessor group must be satisfied only when **every** live sibling row is a terminal success; **(b)** it must also reset instances that were `skipped` for a failed in-group dependency and re-seed every reset instance's `outstanding_predecessors` to its in-group indegree counted over **non-terminal** dependencies only (0 when its dependencies already succeeded). The group is still not re-expanded |
 | `run retry --partition` | Retrying one instance does **not** cascade to dependents that already succeeded. v1 states this as a limitation rather than silently re-running a subtree |
 
-### Both lanes, one mechanism
+### Three advancement paths, one expansion
 
-Ordering must hold identically in local and distributed execution, and the
-cheapest way to guarantee that is to put expansion in exactly one place. It
-already is: local execution calls `store.CompleteTaskWithResult`
-(`internal/job/job.go:1087` → `internal/run/store.go:1904` →
-`completeTask(…, enforceClaim=false)`) — the same transaction the distributed
-lane uses. Normalization, cycle detection, indegree seeding, row insertion, and
-the sibling decrement therefore live in the store and are inherited by both
-executors, rather than being reimplemented in the in-memory Kahn loop where the
-two would drift.
+An earlier draft of this section claimed expansion could live in exactly one
+place — `completeTask` — and that "both lanes" would inherit it. **That was
+wrong, and the error was structural rather than cosmetic: Caesium has three DAG
+advancement implementations, not two, and the third deliberately bypasses
+`completeTask`.**
 
-The local loop needs one thing back that it cannot currently get. It maintains
-`adjacency`/`indegree` keyed by **`Task` ID** and decrements them itself
-(`internal/job/job.go:1428-1441,1502-1517`) rather than re-reading the store, so
-it cannot see rows the completion transaction just created. `CompleteTaskResult`
-(`internal/run/store.go:1887`, today only `SkippedTaskIDs`) therefore returns the
-expansion: the instance `TaskRun` IDs, their partition keys, their seeded
-`outstanding_predecessors`, and the in-group edges. The local loop seeds an
-instance-level sub-graph from that and keeps decrementing in memory as it does
-for step edges. This is a strict extension of the base design's local-expansion
-change (queueing `TaskRun` identities instead of `Task` IDs for fanned steps),
-not a second design.
+| Path | Advancement | Terminal write |
+|---|---|---|
+| Local (`caesium dev`, `CAESIUM_EXECUTION_MODE` unset) | in-memory Kahn loop, `internal/job/job.go:1428-1441,1502-1517` | `CompleteTaskWithResult` → `completeTask(…, enforceClaim=false)` |
+| Distributed, SQL advancement | `outstanding_predecessors` decrement in SQL, `internal/run/store.go:2621` | `completeTask` |
+| Distributed, **run-owner in-memory** (`CAESIUM_RUN_OWNER_IN_MEMORY=true`, `pkg/env/env.go:303-308`) | `run.RunState`, `internal/run/owner_state.go:65` | `CompleteTaskOwner`, `internal/run/store.go:2905` |
 
-The remaining instance-keying gaps belong to the base design's store re-key, made
-sharper by ordering because several siblings are now legitimately pending at
-once: `ClaimTaskForDispatch` (`internal/run/store.go:1665`) and
-`LoadDispatchedTaskRun` (`internal/run/store.go:1756`) address a row as
-`(job_run_id, task_id[, claimed_by])` and must key on the `TaskRun` primary key.
+The third path's contract is explicit in its own docstring: `CompleteTaskOwner`
+*"only persists terminal rows — it does NOT decrement predecessors, evaluate
+trigger rules, or resolve branches in SQL"*. The owner advanced the DAG in memory
+first (`OwnerManager.Complete`, `internal/run/owner_manager.go:215` →
+`RunState.ApplyCompletion`, `internal/run/owner_state.go:160`), and the SQL write
+is a durable record of a decision already made. So an expansion hook placed only
+in `completeTask` is **never reached** in owner mode, and a fan-out group would
+silently collapse to the single template row: no instances created, siblings
+completed as one, and the run finalized early.
+
+Expansion must therefore be wired into the owner engine as well. The good news is
+that the seam already exists and has a precedent with exactly the right shape:
+**branch selections.** A `type: branch` task's runtime decision travels from the
+worker in `CompleteRequest.BranchSelections`
+(`internal/dispatch/dispatch.go:137-140`), is resolved to task IDs by
+`ResolveBranchSkips` (`internal/run/owner_topology.go:140`), and is handed to
+`RunState.ApplyCompletion` as `branchSkipped`. **The partition list is the same
+kind of fact — a container's runtime decision that changes the DAG's live shape —
+and must travel the same route**: `CompleteRequest` gains the emitted partition
+list, `RunState.ApplyCompletion` expands the group in memory, and
+`CompleteTaskOwner` persists the N instance rows in its transaction. One
+normalization/validation implementation (`pkg/task`), three call sites that
+consume it.
+
+`RunState` itself is the harder half, and it is not fan-out-shaped today:
+
+- `tasks`, `indegree`, `outcomes`, `inReady` are all `map[uuid.UUID]` **keyed by
+  task ID** (`internal/run/owner_state.go:65-74`), and `ready` is a
+  `[]uuid.UUID` of task IDs. N siblings sharing one `task_id` collapse into one
+  entry, so the second sibling's completion is a no-op against an
+  already-terminal state.
+- `total` is fixed at construction from the catalog (`NewRunState`,
+  `internal/run/owner_state.go:82-101`) and `IsComplete()` is
+  `terminalCount >= total` (`:351`). Fan-out changes the live row count
+  **mid-run**, so a completion predicate built on a static task count is
+  structurally incompatible with dynamic expansion — it must count live
+  instances, and expansion must raise `total` inside the same critical section
+  that creates the rows.
+- Recovery replays terminal rows by `row.TaskID` (`RecoverRunState`,
+  `internal/run/recovery.go:41`, calling `ApplyTerminalRow`,
+  `internal/run/owner_state.go:243`). N sibling rows arrive with the same
+  `TaskID` and different `terminal_sequence`; the first marks the task terminal
+  and the rest hit the `wasTerminal` early-return, so a recovered owner believes
+  a partly-finished group is done.
+- **The sharpest one: siblings are stamped `terminal_sequence = 0` and then become
+  invisible.** `ApplyCompletion` returns early for an already-terminal task
+  (`internal/run/owner_state.go:163-165`) with `TerminalSequence` left at zero, and
+  `OwnerManager.Complete` passes that zero straight into `CompleteTaskOwner`
+  (`internal/run/owner_manager.go:233-235`). `TerminalTaskRunsSince` selects
+  `terminal_sequence > ?` (`internal/run/checkpoint_store.go:95-108`), so those
+  rows are excluded from the replay tail **entirely** — sibling completions become
+  unrecoverable after a takeover, and the dense-sequence gap check
+  (`internal/run/recovery.go:61,69-75`) reports phantom gaps on top. A sequence
+  space that assumes one terminal transition per task is not merely mis-keyed; it
+  silently loses writes.
+- Checkpoint cadence is driven by `RunState.seq` (`CheckpointWriter.due`,
+  `internal/run/checkpoint_writer.go:56-64`), which only advances on the first
+  sibling — a wide group advances the counter once and starves checkpointing
+  exactly when the run has the most state to lose.
+- `requeueRunning` (`internal/run/owner_state.go:304`) re-dispatches by task ID,
+  so a failover mid-group re-dispatches one instance for the whole group.
+
+The checkpoint format carries a migration hazard worth calling out on its own:
+`runStateSnapshot` (`internal/run/owner_state.go:370`) has **no version field**,
+and `models.RunCheckpoint.StateBlob` (`internal/models/run_checkpoint.go:32-35`)
+is documented as opaque bytes with no format version column. An instance-keyed
+snapshot is a different shape, but JSON unmarshalling of an *old* blob into the
+*new* struct succeeds with zero values rather than erroring — so `Restore`
+(`:398`) never reaches its corrupt-checkpoint fallback and a recovering owner
+silently adopts an empty state. A version discriminator, with unknown/absent
+treated as "replay from terminal rows", is a prerequisite of changing the
+snapshot at all.
+
+Finally, the owner↔worker **wire protocol** is task-ID keyed: `DispatchRequest`
+and `CompleteRequest` (`internal/dispatch/dispatch.go:111-142`) carry `TaskID`
+and no instance identity, so a worker finishing instance 7 reports something that
+matches all N sibling rows. This is a cross-node compatibility surface, not just
+an internal refactor.
+
+The local path's remaining need is smaller but real. Its loop maintains
+`adjacency`/`indegree` keyed by **`Task` ID** and decrements them itself rather
+than re-reading the store, so it cannot see rows the completion transaction just
+created. `CompleteTaskResult` (`internal/run/store.go:1887`, today only
+`SkippedTaskIDs`) therefore returns the expansion: the instance `TaskRun` IDs,
+their partition keys, their seeded `outstanding_predecessors`, and the in-group
+edges.
+
+**None of this is fan-out-specific work, and that is the point.** See
+[`## The task-ID identity assumption`](#the-task-id-identity-assumption) below.
+
+### The task-ID identity assumption
+
+One `TaskRun` per `(job_run_id, task_id)` is not a local convention of the run
+store — it is an assumption the **entire run-lifecycle layer** is built on, and
+fan-out is the first feature to break it. The base design already named the store
+write paths as "the honest hard part". That was an undercount. The same root
+cause appears in at least four independent subsystems:
+
+| Subsystem | Representative site | What breaks under fan-out |
+|---|---|---|
+| SQL advancement | `batchDecrementPredecessorsTx`, `internal/run/store.go:2333` (`task_id IN ?`) | one sibling's completion decrements **every** sibling |
+| Owner in-memory engine | `RunState`, `internal/run/owner_state.go:65-74`; `IsComplete`, `:351` | siblings collapse to one entry; run finalizes early on a static task count |
+| Checkpoint + recovery | `runStateSnapshot` `:370`; `ApplyTerminalRow` `:243`; `RecoverRunState`, `internal/run/recovery.go:41` | unversioned snapshot silently mis-restores; replay collapses N terminal rows into one |
+| Retry accounting | `retryFromFailure`, `internal/run/store.go:4852-4856` (`terminalSuccessIDs[tr.TaskID]`) | one succeeded sibling marks the whole group satisfied, releasing downstream while another sibling is still retrying |
+| Owner↔worker protocol | `DispatchRequest` / `CompleteRequest`, `internal/dispatch/dispatch.go:111-142` | a completion for instance 7 is indistinguishable from a completion for the group |
+| Materialization | `RegisterTasks`, `internal/run/store.go:1121-1132,1164-1175,1183-1189` | it **actively de-duplicates by task ID** (`seenInputTaskIDs`, the `task_id IN ?` existence pluck), so any path registering N instances through it silently keeps one |
+| Destructive sibling writes | `RateLimitTask` `:1808-1824` (`status IN (pending, running)`); `retryTask` `:3256-3265`; `ClaimTaskForDispatch` `:1665-1686` | rate-limiting one instance de-claims **running** siblings and kills in-flight work; retrying one wipes every sibling's output; one claim takes every unclaimed sibling |
+| Identity on the wire and in the API | `convertRunTaskModel`, `internal/run/store.go:4080-4095` (`TaskRun.ID` is set to `model.TaskID`) | N siblings serialize with an **identical `id`**, so `logs.go:80-90` matches the first and streams the wrong container's logs. Same root cause as the known `/v1/jobs/:id/tasks` serialization bug |
+| Cardinality assertions | `stampBatchEventQuarantineTx`, `internal/run/store.go:2414-2433` (`len(taskRows) != len(ids)`) | asserts exactly one row per task id and **hard-errors the whole batched event insert** — a loud failure rather than a silent one, and the only one in this table that surfaces immediately |
+
+The honest consequence for sequencing: **re-keying the run lifecycle onto
+`TaskRun` identity is a prerequisite migration in its own right, not a step
+inside the fan-out feature.** It touches code fan-out does not otherwise care
+about (failover, checkpointing, incident attribution), it must be behavior-neutral
+for unfanned runs, and it must land *before* any expansion or ordering work —
+otherwise ordering is layered on top of a substrate that cannot represent two
+siblings. The execution plan carries it as a dedicated stream with that gating
+property, rather than as scattered bullets inside the streams that consume it.
+
+A useful discipline follows from stating it that way: for every code path that
+takes `(runID, taskID)` and reads, mutates, counts, or checkpoints task state,
+the question is not "does fan-out touch this?" but "**what does this mean when
+`(runID, taskID)` names a set rather than a row?**" — and there are exactly three
+valid answers: re-key it to the `TaskRun` primary key (per-instance state),
+aggregate it explicitly over the set (group status, fan-in), or assert
+`partition_count = 0` and fail loudly (paths that genuinely cannot support
+groups, such as quarantined replay). Silently matching the first row is never one
+of them.
+
+Two sites deserve naming because "aggregate" is the right answer and the *current*
+behavior is a silent change of meaning, not an obvious break:
+
+- `predecessorStatusesTx` (`internal/run/store.go:2488-2537`) already selects
+  `task_id IN ?` and returns **one status per row**. `satisfiesTriggerRule`
+  (`:2540`) reads that slice as one status per *predecessor*. So the moment a
+  predecessor is a group, `one_success` starts passing when any single instance
+  succeeded and `all_success` starts failing when any instance was skipped —
+  the trigger rule quietly changes semantics with no code change and no error.
+  This design's contract is that a fanned predecessor presents **one aggregate
+  status**; that aggregation has to be written, not inherited.
+- `PredecessorHashes` (`internal/run/store.go:4628-4675`) likewise returns N
+  hashes where downstream expects one, changing the *shape* of the
+  `pred_hash:` lines in the identity key and cache-missing every downstream task
+  forever. A fanned predecessor must contribute a single deterministic aggregate
+  identity, for the same reason its outputs aggregate.
 
 ### `CAESIUM_PARTITION_JSON`
 
@@ -702,8 +861,10 @@ Each instance receives, alongside `CAESIUM_PARTITION=<key>`:
 CAESIUM_PARTITION_JSON={"dependsOn":["dim_customer"],"fingerprint":"sha256:cd…","key":"fct_orders","materialization":"incremental"}
 ```
 
-The **normalized** object — dropped non-scalar attributes already removed, keys
-sorted — so what the container reads is what was hashed and what was persisted.
+The **normalized** object — every field the producer emitted, key-sorted and
+canonically encoded, nothing removed (normalization is lossless; an invalid
+attribute failed the producer long before this point) — so what the container
+reads is exactly what was hashed and what was persisted.
 It is injected at the same merge point as `CAESIUM_RUN_ID` / `CAESIUM_JOB_ALIAS`
 (`internal/job/job.go:800-810`, from `buildParamEnv` at `internal/job/job.go:326`;
 the distributed analogue in `internal/worker/runtime_executor.go`), which means
@@ -832,6 +993,22 @@ driving the real binary/server (no hand-seeded rows):
 12. Structured partitions — env: `CAESIUM_PARTITION_JSON` is present, is the
     normalized object, and changing only `dependsOn` between runs does **not**
     change any instance's hash.
+13. **Run-owner in-memory lane** (`CAESIUM_RUN_OWNER_IN_MEMORY=true`): the same
+    fan-out fixtures run under the owner path, asserting N instances materialize
+    (not one), the run does **not** finalize until every instance is terminal,
+    and ordering is honoured — the third advancement path is the one most likely
+    to be forgotten, so it gets its own lane, not a shared assertion.
+14. **Owner failover mid-group:** kill the owner with a group half-complete;
+    the recovering owner rebuilds from checkpoint + terminal tail and
+    re-dispatches only the *unfinished instances*, never the whole group and
+    never a single instance standing in for it. Includes a checkpoint written by
+    the old format being rejected (replay-from-rows) rather than silently
+    restored as empty state.
+15. **Retry does not release downstream early:** a group where one sibling
+    succeeded and one failed, retried — assert the downstream step does **not**
+    start until the retried sibling is terminal. This is the task-ID-keyed
+    `terminalSuccessIDs` defect and it fails silently without an explicit
+    ordering assertion.
 
 ## Phasing
 
@@ -843,6 +1020,15 @@ driving the real binary/server (no hand-seeded rows):
    predicate, distributed integration lane.
 4. **Surfaces:** REST + CLI + UI group rendering; `why`/`run diff` alignment.
 5. **Follow-ups:** replay re-expansion, value-verified per-partition skip.
+
+Phase 1's scope is wider than "the store's write paths": it is the whole
+task-ID-identity migration described in
+[`## The task-ID identity assumption`](#the-task-id-identity-assumption) —
+SQL advancement, the run-owner in-memory engine, the checkpoint format and its
+version discriminator, recovery replay, retry accounting, and the owner↔worker
+wire protocol. That migration is behavior-neutral for unfanned runs and must be
+complete before any expansion or ordering work, because ordering cannot be
+layered on a substrate that cannot represent two siblings.
 
 Structured partitions are not a sixth phase: normalization and caps land with the
 marker parsing in phase 1; the fingerprint fields land with `HashInput` in phase

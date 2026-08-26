@@ -74,7 +74,17 @@ transaction, before any instance row is inserted) because apply-time cycle
 detection cannot see runtime edges; (5) **an in-group dependency failure must skip
 its transitive dependents** — leaving them undecremented hangs the run to its
 timeout, so the skip cascade is load-bearing, not a nicety. The amendment adds
-**no new YAML field, no new env var, and no new metric series**. Strategic
+**no new YAML field, no new env var, and no new metric series**.
+
+A sixth contract was added by the second-pass amendment and is the easiest one to
+violate by omission: **(6) there are three DAG-advancement implementations, and
+every fan-out behavior must hold in all three.** Local and distributed-SQL both
+complete through `completeTask`; run-owner in-memory
+(`CAESIUM_RUN_OWNER_IN_MEMORY=true`) does not — it advances `RunState` in memory
+and persists through `CompleteTaskOwner`, which by its own docstring does not
+decrement predecessors or evaluate trigger rules in SQL. Any item that hooks
+`completeTask` alone is incomplete, and any test that exercises only one owner
+mode is not evidence. Strategic
 priority/status is tracked in
 [`docs/roadmap.md`](../../roadmap.md) Phase 4 design-wave table (the roadmap wins
 on priority/status). The job-definition contract lives in
@@ -93,8 +103,26 @@ the design's structured-partition amendment
 ([`## Structured Partitions`](../../design-dynamic-fanout.md#structured-partitions-key--fingerprint--dependson))
 was absorbed into the existing streams rather than bolted on as a follow-up wave:
 items A3, C1, C2, D1, E1, E2, E3, F2, H-1, and N-1 were **amended in place**, and
-items A4, C4, D3, and E4 are **new**. Nothing moved between streams and no
-dependency edge was reversed, so the wave plan below is unchanged in shape. Two
+items A4, C4, D3, and E4 are **new**.
+
+**Amendment, 2026-08-25 (second pass) — Stream G, and a correction.** Review of
+the amendment found that the plan (and the design) had **undercounted the
+identity problem**. The original plan named it as "the honest hard part" and
+scoped it to the run store's write paths (A2). That is one of at least five
+subsystems: Caesium has **three** DAG-advancement implementations, not two, and
+the third — run-owner in-memory mode (`CAESIUM_RUN_OWNER_IN_MEMORY=true`) —
+deliberately bypasses `completeTask` entirely, so an expansion hook placed there
+is never reached and a fan-out group silently collapses to one row. The same
+task-ID-keyed root cause also sits in the owner's checkpoint format, its recovery
+replay, retry accounting, and the owner↔worker wire protocol. That work is
+behavior-neutral for unfanned runs, touches code fan-out does not otherwise care
+about (failover, checkpointing, incident attribution), and **must land before any
+expansion or ordering work** — so it is now **Stream G**, a gating prerequisite,
+rather than scattered bullets inside the streams that consume it. A2 is
+correspondingly narrowed and now depends on G. See
+[`## The task-ID identity assumption`](../../design-dynamic-fanout.md#the-task-id-identity-assumption).
+
+Two
 line-reference notes for whoever picks this up: (a) the `file:line` anchors in
 items written 2026-07 have drifted as those files grew (`CompleteTaskWithResult`
 is now `internal/run/store.go:1904`, `RetryFromFailure` `:4790`,
@@ -109,6 +137,7 @@ Grep the symbol, do not trust the number.
 
 | Stream | Scope | Priority | Status |
 |--------|-------|----------|--------|
+| G | **Instance identity migration** — re-key the whole run lifecycle off `(run, task)` onto `TaskRun` identity: SQL advancement, the run-owner in-memory engine + checkpoint format + recovery replay, retry accounting, and the owner↔worker wire protocol. Behavior-neutral for unfanned runs; **gates A2 and everything downstream** | **P0 — gating** | Not started |
 | A | Substrate — `TaskRun` partition + fingerprint/ordering columns + unique index, instance-keyed store rewrite, marker parsing (string **and** object form) + caps, server hard cap env | **P0** | Not started |
 | B | Schema + lint contract — `FanOut` on `Step`, `validateSteps` rules, `FanOutConfig` on `models.Task`, runtime spec (**unchanged by the structured-partition amendment — no new YAML field**) | **P0** | Not started |
 | C | Local executor — expansion, per-partition cache identity (`key` + `fingerprint` + attributes), in-group ordering + skip cascade, group fan-in + output aggregation, metrics | **P0** | Not started |
@@ -119,6 +148,187 @@ Grep the symbol, do not trust the number.
 | N-1 | Docs — roadmap row, design banner, schema references, marker object form, examples, README | — | Not started |
 
 ## Streams
+
+### Stream G — Instance identity migration (the gating prerequisite)
+
+One `TaskRun` per `(job_run_id, task_id)` is not a convention of the run store —
+it is an assumption the **whole run-lifecycle layer** is built on, and fan-out is
+the first feature to break it. This stream re-keys that layer onto `TaskRun`
+identity **before** any expansion or ordering work exists, because ordering
+cannot be layered on a substrate that cannot represent two siblings.
+
+Two properties make this a stream rather than a set of bullets inside A–D:
+
+- **It is behavior-neutral.** Every item here must leave unfanned runs
+  byte-identical in observable behavior (one instance, `partition_index = 0`).
+  It ships and merges with no fan-out feature visible at all, which also means it
+  can be reviewed and reverted on its own.
+- **It reaches code fan-out does not otherwise touch** — failover, checkpoint
+  encoding, recovery replay, incident attribution, the owner↔worker HTTP
+  protocol. Landing it inside a feature stream would hide a distributed-systems
+  migration inside a data-parallelism feature.
+
+The discipline for every item: for each path taking `(runID, taskID)` that reads,
+mutates, counts, or checkpoints task state, answer **"what does this mean when
+`(runID, taskID)` names a set rather than a row?"** — and pick one of exactly
+three answers: re-key to the `TaskRun` primary key (per-instance state),
+aggregate explicitly over the set (group status, fan-in), or assert
+`partition_count = 0` and fail loudly (paths that genuinely cannot support
+groups, e.g. quarantined replay). **Silently matching the first row is never an
+answer**, and a review that finds one should block.
+
+- [ ] G1. Establish instance identity end to end in the SQL advancement path.
+      Re-key the run-store write paths that address task state as
+      `WHERE job_run_id = ? AND task_id = ?` onto the `TaskRun` **primary key**
+      (both executors already hold it) — `StartTask` (`internal/run/store.go:1594`),
+      `StartTaskClaimed` (`:1836`), `RateLimitTask` (`:1808`),
+      `ClaimTaskForDispatch` (`:1665`), `LoadDispatchedTaskRun` (`:1756`),
+      `ReleaseTaskClaim` (`:1783`), `retryTask` (`:3256`), `SkipTask` (`:3347`),
+      `failTask` (`:3174`), `completeTask` (`:2621`), `cacheHitTask` (`:1933`),
+      and the descriptor/hash setters (`SetTaskHash*` `:437-471`,
+      `UpdateTaskExecutionDescriptor*` `:472-515`, `SetTaskEffectiveHash` `:516`).
+      Add the sibling-aware variant of `batchDecrementPredecessorsTx`
+      (`:2333`) — its `task_id IN ?` predicate stays correct for the cross-step
+      edge and gains an `id IN ?` sibling form for later use by D3. No behavior
+      change while every task has exactly one row.
+      Three of these are **destructive**, not merely mis-addressed, and should be
+      done first because they are the ones that corrupt live work: `RateLimitTask`
+      (`:1808-1824`) matches `status IN (pending, running)`, so rate-limiting one
+      instance de-claims and re-pends **running** siblings and kills in-flight
+      containers; `retryTask` (`:3256-3265`) resets `output`/`result` on every
+      sibling; `ClaimTaskForDispatch` (`:1665-1686`) claims **all** unclaimed
+      siblings in one `UPDATE`, so one worker silently takes the whole group and
+      `RowsAffected == 0` cannot detect the over-claim.
+      Also fix materialization itself: `RegisterTasks` (`:1121-1132`, `:1164-1175`,
+      `:1183-1189`) **actively de-duplicates by task ID** — `seenInputTaskIDs`, the
+      `task_id IN ?` existence pluck, and the `seenNewTaskIDs` guard each silently
+      drop instances 2…N. Any registration path that is ever handed a group must
+      insert per row, not per task.
+      Files: `internal/run/store.go`.
+- [ ] G2. Re-key the **run-owner in-memory engine**. `RunState`
+      (`internal/run/owner_state.go:65-74`) holds `tasks`, `indegree`, `outcomes`,
+      and `inReady` as `map[uuid.UUID]` keyed by **task ID**, with `ready` a slice
+      of task IDs; N siblings collapse into one entry, so a second sibling's
+      completion is a no-op against an already-terminal state. Introduce an
+      explicit instance key (the `TaskRun` ID, with a task→instances index so
+      `RunTopology` — `internal/run/owner_topology.go:16` — stays task-keyed, which
+      is correct: the *catalog* graph really is one node per step). Make `total`
+      **dynamic**: it is fixed at construction from the catalog (`NewRunState`,
+      `:82-101`) and `IsComplete()` is `terminalCount >= total` (`:351`), so a
+      static task count is structurally incompatible with mid-run expansion —
+      `total` must count live instances and be raised inside the same critical
+      section that creates rows. Also re-key `MarkDispatched` (`:321`),
+      `TaskState` (`:341`), `RunningTasks` (`:290`), and `requeueRunning` (`:304`),
+      the last of which today re-dispatches one instance for a whole group after
+      failover.
+      Files: `internal/run/owner_state.go`, `internal/run/owner_topology.go`,
+      `internal/run/owner_manager.go`.
+      Depends on: G1.
+- [ ] G3. Version and re-key the **checkpoint format**, and fix recovery replay.
+      `runStateSnapshot` (`internal/run/owner_state.go:370`) has **no version
+      field** and `models.RunCheckpoint.StateBlob`
+      (`internal/models/run_checkpoint.go:32-35`) is opaque bytes with no format
+      version column — so an *old* blob unmarshals into the *new* struct with zero
+      values instead of erroring, `Restore` (`:398`) never reaches its
+      corrupt-checkpoint fallback, and a recovering owner silently adopts an empty
+      state. **Add a version discriminator first**, treat unknown/absent as
+      "replay from terminal rows", and only then change the shape. Then fix replay:
+      `RecoverRunState` (`internal/run/recovery.go:41`) applies rows via
+      `ApplyTerminalRow(row.TaskID, …)` (`internal/run/owner_state.go:243`), so N
+      sibling rows sharing a `task_id` arrive in sequence order, the first marks
+      the task terminal, and the rest hit the `wasTerminal` early-return — a
+      recovered owner believes a half-finished group is done. Replay must key on
+      the row's instance identity.
+      **Fix the sequence space in the same item — it loses writes, not just
+      identity.** `ApplyCompletion`'s already-terminal early return
+      (`internal/run/owner_state.go:163-165`) leaves `TerminalSequence` at **zero**,
+      `OwnerManager.Complete` passes that zero into `CompleteTaskOwner`
+      (`internal/run/owner_manager.go:233-235`), and `TerminalTaskRunsSince` selects
+      `terminal_sequence > ?` (`internal/run/checkpoint_store.go:95-108`) — so
+      every sibling completion after the first is **excluded from the replay tail
+      entirely** and is unrecoverable after a takeover. The dense-sequence gap check
+      (`internal/run/recovery.go:61,69-75`) then reports phantom gaps on top.
+      Every terminal transition must get its own sequence. Related: checkpoint
+      cadence (`CheckpointWriter.due`, `internal/run/checkpoint_writer.go:56-64`)
+      keys off `RunState.seq`, which under the current code advances once per group
+      — starving checkpointing exactly when the run holds the most state.
+      Cover with a failover test that kills an owner mid-group and asserts every
+      completed instance survives the takeover.
+      Files: `internal/run/owner_state.go`, `internal/run/recovery.go`,
+      `internal/run/checkpoint_store.go`, `internal/run/checkpoint_writer.go`,
+      `internal/models/run_checkpoint.go`.
+      Depends on: G2.
+- [ ] G4. Carry instance identity on the **owner↔worker wire protocol**.
+      `DispatchRequest` and `CompleteRequest` (`internal/dispatch/dispatch.go:111-142`)
+      identify a task by `TaskID` alone, so a worker finishing instance 7 sends
+      something that matches all N sibling rows; `CompleteTaskOwner`
+      (`internal/run/store.go:2905`) and the SQL fallback both then fence on
+      `job_run_id = ? AND task_id = ? AND claimed_by = ?` and can update the wrong
+      sibling. Add the `TaskRun` ID to both envelopes and to the owner completion
+      seam (`internal/dispatch/dispatch.go:486-489` →
+      `OwnerManager.Complete`, `internal/run/owner_manager.go:215`). This is a
+      **cross-node compatibility surface**: an older worker will not send the new
+      field, so the receiving side must fall back to the unique
+      `(run, task)` row and reject ambiguity when more than one exists, rather
+      than picking one. State the rolling-upgrade behavior explicitly in the PR.
+      Files: `internal/dispatch/dispatch.go`, `internal/dispatch/loop.go`,
+      `internal/run/store.go`, `internal/run/owner_manager.go`,
+      `internal/worker/runtime_executor.go`.
+      Depends on: G2.
+- [ ] G5. Fix **retry accounting** so a group is satisfied only when every live
+      sibling is. `retryFromFailure` (`internal/run/store.go:4810`) builds
+      `terminalSuccessIDs` keyed by `tr.TaskID` (`:4852-4856`) and recomputes each
+      reset task's `outstanding_predecessors` by testing
+      `terminalSuccessIDs[edge.FromTaskID]` (`:4899`). Under fan-out **one**
+      succeeded sibling marks the whole predecessor group satisfied, so retry
+      releases downstream work while another sibling is still being retried — a
+      silent correctness bug, not a scheduling inefficiency. A predecessor task is
+      satisfied only when **all** of its live `TaskRun` rows are terminal
+      successes; `resetTaskIDs` (`:4862`) must likewise become a set of instance
+      rows, not task IDs. (E4 layers the *ordering* semantics on top of this; this
+      item is the accounting fix and is required with or without ordering.)
+      Files: `internal/run/store.go`.
+      Depends on: G1.
+- [ ] G6. Audit the read/observability surfaces for the same assumption and pick
+      one of the three answers per site, explicitly. Deliverable is a table in the
+      PR description: **site → chosen answer (re-key / aggregate / assert-unfanned)
+      → test**. Known entries, so the audit starts from evidence rather than a
+      blank page:
+      **Aggregate** — `predecessorStatusesTx` (`internal/run/store.go:2488-2537`)
+      returns one status per *row* while `satisfiesTriggerRule` (`:2540`) reads it
+      as one per *predecessor*, so a fanned predecessor silently flips `one_success`
+      to "any instance" and `all_success` to "no instance skipped"; and
+      `PredecessorHashes` (`:4628-4675`) returns N hashes where the identity key
+      expects one, changing the shape of its `pred_hash:` lines and cache-missing
+      every downstream task forever. `PredecessorOutputs` (`:4409-4473`) collapses
+      siblings last-writer-wins into a name-keyed map. All three need the design's
+      one-aggregate-status / one-aggregate-identity contract written explicitly.
+      **Re-key** — `convertRunTaskModel` (`:4080-4095`) sets the API payload's
+      `TaskRun.ID` to `model.TaskID`, so N siblings serialize with an identical
+      `id` and `logs.go:80-90` matches the first, streaming the **wrong
+      container's** logs (same root cause as the known `/v1/jobs/:id/tasks`
+      serialization bug); `recordTaskEventTx` (`:4219-4237`) builds every task
+      event payload from an arbitrary sibling; `rundiff.latestTerminalTaskRunsByName`
+      (`internal/run/rundiff.go:162-232`) keys by task name and shows one instance
+      while hiding N-1; `why.resolveTaskRun` (`internal/run/why.go:161-189`) and
+      incident context (`internal/incident/subscriber.go:165-171`,
+      `internal/incident/bundle.go:148-165`) each read an arbitrary sibling — an
+      incident can be classified from a *succeeded* instance's row.
+      **Hard failure, fix or it blocks everything** —
+      `stampBatchEventQuarantineTx` (`:2414-2433`) asserts
+      `len(taskRows) != len(ids)` and errors the entire batched event insert once a
+      task has two rows.
+      **Assert-unfanned** — quarantined replay
+      (`api/rest/service/reproduce/descriptor.go:135-173`, which resolves via
+      `.Take`), matching the design's fail-closed posture.
+      Also settle run-completion accounting: `waitForRunCompletion`
+      (`internal/job/job.go:1577,1659-1698`) counts **rows** but compares to
+      `len(tasks)` (`:661`), and the local branch does the same at `:1554-1558`.
+      Files: `internal/job/job.go`, `internal/run/store.go`, `internal/run/why.go`,
+      `internal/run/whydiff.go`, `internal/run/rundiff.go`,
+      `internal/incident/subscriber.go`, `internal/incident/bundle.go`,
+      `api/rest/controller/job/run/logs.go`, `api/rest/service/`.
+      Depends on: G1, G2.
 
 ### Stream A — Substrate: partition model + instance-keyed store + marker parsing
 
@@ -145,17 +355,19 @@ teaches `pkg/task` to parse the partition marker.
       on an existing registered model migrate from struct tags), but confirm the
       unique-index migration lands on the sharded hot tables.
       Files: `internal/models/run.go`, `pkg/db/db.go`, `pkg/db/router.go`.
-- [ ] A2. Re-key every run-store write path that today addresses task state as
-      `WHERE job_run_id = ? AND task_id = ?` onto the `TaskRun` **primary key**
-      (both executors already hold it): `StartTask` (`internal/run/store.go:1572`),
-      `RateLimitTask` (:1786), `retryTask` (:3224), `SkipTask` (:3315),
-      `completeTask` (:2589) / `CompleteTaskWithResult` (:1882) / the cache-hit path,
-      and the descriptor updates. This is the mechanical-but-wide refactor the design
-      calls "the honest hard part"; land it BEFORE expansion so no path can silently
-      update the wrong sibling. No behavior change for unfanned tasks (one instance,
-      `partition_index = 0`).
-      Files: `internal/run/store.go`.
-      Depends on: A1.
+- [ ] A2. Bind the re-keyed lifecycle to the new partition columns. **Stream G
+      does the re-keying** (G1 for the SQL write paths, G2–G4 for the owner engine,
+      checkpoint, recovery, and wire protocol, G5 for retry accounting); this item
+      is only what could not be done before the columns existed: make the unique
+      `(job_run_id, task_id, partition_index)` index the row's addressing contract,
+      set `partition_index = 0` on the template/unfanned path, and assert the
+      behavior-neutrality property end to end — an unfanned run must be observably
+      identical before and after Streams G + A. Any `WHERE job_run_id = ? AND
+      task_id = ?` write predicate still reachable after G is a **bug to fix here,
+      not a follow-up**; the acceptance test is a grep-level audit recorded in the
+      PR description.
+      Files: `internal/run/store.go`, `internal/models/run.go`.
+      Depends on: A1, G1.
 - [ ] A3. Parse the partition marker: extend `Markers` (`pkg/task/output.go:364`)
       with `Partitions []Partition` — a normalized element type
       (`Key`, `Fingerprint`, `DependsOn []string`, `Attributes map[string]string`)
@@ -173,9 +385,13 @@ teaches `pkg/task` to parse the partition marker.
       `maxPartitions`), and a per-`key` rule (non-empty, ≤ 256 bytes, valid UTF-8).
       Reuse the existing validators rather than writing new ones: `fingerprint`
       must satisfy `validSHA256Ref` (`pkg/task/output.go:193`) and attribute values
-      must satisfy `scalarOutputValue` (`pkg/task/output.go:229`; null/object/array
-      are rejected here rather than silently dropped as they are for outputs —
-      partitions are the work list, not advisory data). A duplicate `key` with an
+      must satisfy `scalarOutputValue` (`pkg/task/output.go:229`) — reuse that
+      predicate but **invert its posture**: a non-scalar *output* value is dropped,
+      a non-scalar *attribute* **fails the producer**, because partitions are the
+      work list, not advisory data. **Normalization is lossless**: it lifts a string
+      element to `{"key": <string>}`, sorts keys, and canonically re-encodes —
+      it must never drop or repair a field, or the run would proceed against a work
+      description the producer did not emit. A duplicate `key` with an
       identical payload dedups; a duplicate `key` with a **conflicting** payload
       fails the producer. Add the server hard cap `CAESIUM_FANOUT_MAX_PARTITIONS`
       (default 1024) to the `Environment` struct (`pkg/env/env.go:68`) — the
@@ -358,15 +574,29 @@ observe a half-expanded group, and the group in-flight cap plugs into the claime
 Reuses the fan-in + output-aggregation semantics established by Stream C. Shares
 `internal/run/store.go` with A2, so it sequences after A.
 
-**Read this before picking up C or D.** The expansion transaction this stream
-builds is **not distributed-only** — local execution completes tasks through the
-same `store.CompleteTaskWithResult` path (`internal/job/job.go:1087` →
-`internal/run/store.go:1904` → `completeTask(…, enforceClaim=false)`). Expansion,
-the in-group cycle check, indegree seeding, the sibling decrement, and the skip
-cascade therefore live **once**, here, and both executors inherit them; Stream C
-owns the local *mirror* of that state, not a second implementation. The practical
-consequence for wave planning is that local fan-out is not end-to-end runnable
-until D1 merges, even though C's items are written against the local executor.
+**Read this before picking up C or D.** There are **three** DAG-advancement
+implementations, not two, and they do not share one completion path:
+
+1. **Local** — in-memory Kahn loop, but it completes through
+   `store.CompleteTaskWithResult` (`internal/job/job.go:1087` →
+   `internal/run/store.go:1904` → `completeTask(…, enforceClaim=false)`), so it
+   *does* run the expansion transaction D1 builds.
+2. **Distributed, SQL advancement** — `completeTask`, same transaction.
+3. **Distributed, run-owner in-memory** (`CAESIUM_RUN_OWNER_IN_MEMORY=true`) —
+   `OwnerManager.Complete` (`internal/run/owner_manager.go:215`) advances
+   `RunState` in memory and persists via `CompleteTaskOwner`
+   (`internal/run/store.go:2905`), which by its own docstring *"does NOT decrement
+   predecessors, evaluate trigger rules, or resolve branches in SQL"*. **It never
+   reaches `completeTask`, so an expansion hook placed only there is never
+   executed and the group silently collapses to the single template row.**
+
+So expansion lands in D1 (paths 1 and 2) **and** D4 (path 3), over the shared
+normalization/validation in `pkg/task` — one implementation of the *rules*, three
+call sites. Stream C owns the local *mirror* of the resulting state, not a second
+implementation. Two consequences for wave planning: local fan-out is not
+end-to-end runnable until D1 merges even though C's items are written against the
+local executor, and **no fan-out item in any stream may merge before Stream G**,
+which makes the substrate able to represent two siblings at all.
 
 - [ ] D1. Expand inside the producer's completion transaction: pass
       `markers.Partitions` into `CompleteTaskWithResult` (`internal/run/store.go:1882`)
@@ -399,7 +629,7 @@ until D1 merges, even though C's items are written against the local executor.
       reads `COALESCE(effective_hash, hash)`) must return the same set the local lane
       folds in — the two lanes must not disagree about an instance's identity.
       Files: `internal/run/store.go`, `internal/worker/runtime_executor.go`.
-      Depends on: A2, A4, B2, C3.
+      Depends on: A2, A4, B2, C3, G1.
 - [ ] D2. Enforce `fanOut.maxParallel` in the distributed scheduler: add an
       in-flight `COUNT(*) … status='running'` subquery to the claimer's atomic claim
       predicate (`internal/worker/claimer.go:248-270`) and the owner-dispatch path
@@ -447,7 +677,32 @@ until D1 merges, even though C's items are written against the local executor.
       edges, so an instance's `shouldRunTaskTx` check (`:2596`) evaluates cross-step
       predecessors exactly as today.
       Files: `internal/run/store.go`.
-      Depends on: D1.
+      Depends on: D1, G1.
+- [ ] D4. Expand in the **run-owner in-memory path**, the third advancement
+      implementation. Today `OwnerManager.Complete`
+      (`internal/run/owner_manager.go:215`) advances `RunState` in memory and
+      persists through `CompleteTaskOwner` (`internal/run/store.go:2905`), never
+      touching `completeTask` — so D1's hook is unreachable in this mode and a
+      fan-out group collapses to one row, completing siblings together and
+      finalizing the run early. Wire it along the seam **branch selections already
+      use**, which is the exact precedent: a `type: branch` task's runtime decision
+      travels in `CompleteRequest.BranchSelections`
+      (`internal/dispatch/dispatch.go:137-140`), is resolved by `ResolveBranchSkips`
+      (`internal/run/owner_topology.go:140`), and reaches
+      `RunState.ApplyCompletion` (`internal/run/owner_state.go:160`) as
+      `branchSkipped`. The partition list is the same kind of fact — a container's
+      runtime decision that changes the DAG's live shape — so: carry it on
+      `CompleteRequest`, expand the group inside `ApplyCompletion` (creating N
+      instance entries, raising `RunState.total` in the same critical section, and
+      seeding in-group indegree per D3), and persist the N rows in
+      `CompleteTaskOwner`'s transaction. **Reuse `pkg/task`'s normalization and
+      A4's validator** — one implementation of the rules, three call sites; a
+      second copy of the cycle check here is a review-blocking defect. Checkpoint
+      after expansion so a takeover recovers the group, and cover with an
+      owner-mode fan-out scenario plus a failover mid-group.
+      Files: `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
+      `internal/run/store.go`, `internal/dispatch/dispatch.go`.
+      Depends on: D1, D3, G2, G3, G4.
 
 ### Stream E — Surfaces: REST + CLI + observability alignment
 
@@ -493,7 +748,10 @@ causal verbs (`why`, `run diff`, replay) that assumed one `TaskRun` per `Task`.
       Files: `cmd/run/diff.go`, `cmd/run/replay.go`, the `why`/`receipt` commands
       under `cmd/run/`, `api/rest/service/rundiff/`, `api/rest/service/why/`.
       Depends on: C2.
-- [ ] E4. Make `run retry` ordering-aware. `RetryFromFailure`
+- [ ] E4. Make `run retry` ordering-aware. **G5 already fixed the accounting**
+      (a predecessor group is satisfied only when every live sibling row is a
+      terminal success, not when any one is); this item adds only the ordering
+      semantics on top. `RetryFromFailure`
       (`internal/run/store.go:4790`) keeps succeeded/cached instances and resets
       failed ones; with an ordered group it must **also** reset instances the store
       marked `skipped` for a failed in-group dependency (D3c) — otherwise retrying
@@ -506,7 +764,7 @@ causal verbs (`why`, `run diff`, replay) that assumed one `TaskRun` per `Task`.
       assert `a` re-executes, `b`/`c` run in order after it, and any independent
       sibling cache-hits.
       Files: `internal/run/store.go`, `cmd/run/retry.go`.
-      Depends on: D3.
+      Depends on: D3, G5.
 
 ### Stream F — UI (Caesium Console)
 
@@ -542,7 +800,10 @@ the Stream E endpoints.
       `.github/workflows/ci.yml`, and ensure the harness can run the **distributed
       lane** (`CAESIUM_EXECUTION_MODE=distributed`) scenario so worker-crash /
       lease-reclaim / rate-limit-drain assertions execute in CI, not an internal
-      call. Add the shared fan-out test helpers to the `test/` harness: a producer
+      call, **and can run the suite in both `CAESIUM_RUN_OWNER_IN_MEMORY` modes**
+      so the run-owner in-memory advancement path (the one that bypasses
+      `completeTask`) is exercised in CI rather than assumed. Add the shared
+      fan-out test helpers to the `test/` harness: a producer
       script that emits a **string-form** list, one that emits an **object-form** list
       with fingerprints and `dependsOn` (the `a → b → c` and diamond fixtures the
       ordering scenarios drive), and one that emits an **invalid** list per rejection
@@ -604,11 +865,21 @@ cross-design questions, not items here.
 
 **Cross-stream order:**
 
+- **Stream G gates everything.** It re-keys the run lifecycle off `(run, task)`
+  onto `TaskRun` identity across the SQL advancement path, the run-owner in-memory
+  engine, the checkpoint format, recovery replay, retry accounting, and the
+  owner↔worker wire protocol. It is behavior-neutral for unfanned runs and ships
+  with **no fan-out feature visible**, so it can be reviewed and reverted on its
+  own — and no item in A–F may merge before it, because ordering and expansion
+  cannot be layered on a substrate that cannot represent two siblings. Within G:
+  G1 → G2 → (G3, G4) and G1 → G5; G6 is the audit and closes the stream.
 - **Streams A and B are the foundation and are independent of each other** (A owns
-  `internal/run/store.go` + `internal/models/run.go` + `pkg/task/output.go`; B owns
-  `pkg/jobdef/definition.go` + `internal/models/task.go` + the runtime spec) — they
-  run in parallel in the first wave. A has the larger blast radius, so it merges
-  first on any same-wave overlap.
+  `internal/models/run.go` + `pkg/task/output.go` and the partition-column binding
+  in `internal/run/store.go`; B owns `pkg/jobdef/definition.go` +
+  `internal/models/task.go` + the runtime spec) — they run in parallel once G1 is
+  in. A has the larger blast radius, so it merges first on any same-wave overlap.
+  A2 is now thin: G does the re-keying, A2 binds it to the partition columns and
+  proves behavior-neutrality.
 - **Stream C** (local executor) depends on A (model + store re-key + markers) and B
   (the `FanOutConfig` the executor reads).
 - **Stream D** (distributed) depends on A2 (the re-keyed store it extends) + A4 (the
@@ -630,31 +901,53 @@ cross-design questions, not items here.
   reality.
 
 **Suggested waves:**
-- **W1 = A (A1→A2→A3→A4) + B (B1→B2) + H-1.** A and B touch disjoint files.
+- **W0 = G (G1→G2→(G3, G4); G5 after G1; G6 last) + H-1.** The identity
+  migration, alone, with no fan-out surface. H-1 rides along because the harness
+  work is independent and W0's failover/owner scenarios need it. This wave is a
+  hard gate: **do not start W1 until G6's audit table is merged.**
+- **W1 = A (A1→A2→A3→A4) + B (B1→B2).** A and B touch disjoint files.
 - **W2 = C (C1→(C2, C3)).** Unblocked once A + B are in.
-- **W3 = D (D1→(D2, D3)).** Unblocked once C3's fan-in contract is in.
+- **W3 = D (D1→(D2, D3)→D4).** Unblocked once C3's fan-in contract is in. D4 —
+  owner-mode expansion — is the item most likely to be dropped as "an edge case";
+  it is not, it is a third of the execution surface.
 - **W4 = C4 + E (E1→E2, E3, E4).** C4 lands here, not in W2 — it mirrors D3's
   store-side ordering. Unblocked once D1's instances exist (E3 needs only C2).
 - **W5 = F (F1, F2) + N-1.** F after E1; N-1 last.
 
-**Within-stream order:** A1 → A2 → A3 → A4 (columns+index, then the store re-key,
-then markers, then the in-group validator — A3's env cap is read by B1's lint and
-C1's executor, and A4 consumes A3's normalized `[]Partition`). B1 → B2. C1 → (C2,
-C3 in parallel — different concerns in the same file, coordinate the merge) → C4
-(after D3). D1 → (D2, D3 in parallel — different funcs in the same file, D2 in the
-claim predicate, D3 in the decrement/skip paths). E1 → E2; E3 parallel to E1/E2
-(depends only on C2); E4 after D3. F1, F2 parallel (F2 needs E1).
+**Within-stream order:** G1 → G2 → (G3, G4 in parallel — G3 owns the snapshot and
+recovery, G4 the wire protocol); G5 needs only G1; G6 closes the stream. A1 → A2 →
+A3 → A4 (columns+index, then the partition-column binding, then markers, then the
+in-group validator — A3's env cap is read by B1's lint and C1's executor, and A4
+consumes A3's normalized `[]Partition`). B1 → B2. C1 → (C2, C3 in parallel —
+different concerns in the same file, coordinate the merge) → C4 (after D3). D1 →
+(D2, D3 in parallel — different funcs in the same file, D2 in the claim predicate,
+D3 in the decrement/skip paths) → D4. E1 → E2; E3 parallel to E1/E2 (depends only
+on C2); E4 after D3 + G5. F1, F2 parallel (F2 needs E1).
 
 **Cross-stream file conflicts:**
 
-- `internal/run/store.go` — A2 *re-keys* every write path; D1 *adds* the expansion
-  transaction to `CompleteTaskWithResult`/`completeTask`; D2 touches the dispatch
-  predicate; D3 adds the instance-keyed sibling decrement and the in-group skip
-  cascade; E4 adjusts `RetryFromFailure`; E1 reads instances via the service layer
-  (no `store.go` edit).
-  **Sequence A2 → D1 → (D2, D3) → E4** (already a dependency chain); never the same
-  wave. D2 and D3 may share a wave — D2 is in the claim predicate, D3 is in the
-  decrement/skip paths.
+- `internal/run/store.go` — the busiest file in the plan. **G1** re-keys every
+  write path; **G5** fixes retry accounting; **A2** binds the partition columns;
+  **D1** adds the expansion transaction to
+  `CompleteTaskWithResult`/`completeTask`; **D2** touches the dispatch predicate;
+  **D3** adds the instance-keyed sibling decrement and the in-group skip cascade;
+  **D4** extends `CompleteTaskOwner`; **E4** adjusts `RetryFromFailure` again;
+  **E1** reads instances via the service layer (no `store.go` edit).
+  **Sequence G1 → (G5, A2) → D1 → (D2, D3) → D4 → E4** (already a dependency
+  chain); never the same wave. D2 and D3 may share a wave — D2 is in the claim
+  predicate, D3 is in the decrement/skip paths. G5 and E4 both touch
+  `retryFromFailure` and are two waves apart by construction.
+- `internal/run/owner_state.go` — G2 re-keys `RunState`, G3 versions and re-keys
+  the snapshot, D4 adds in-memory expansion to `ApplyCompletion`. **Sequence
+  G2 → G3 → D4**; single-threaded through the stream order, never concurrent.
+- `internal/run/owner_manager.go` — G2 (instance keys) and D4 (the partition list
+  on the completion seam). Sequence G2 → D4.
+- `internal/run/recovery.go` — G3 only.
+- `internal/dispatch/dispatch.go` — G4 adds the instance identity to
+  `DispatchRequest`/`CompleteRequest`; D4 adds the partition list to
+  `CompleteRequest`. Both edit the same two structs. **Sequence G4 → D4**; land
+  the identity field first so D4 rebases onto a settled envelope.
+- `internal/models/run_checkpoint.go` — G3 only (the format version column).
 - `internal/job/job.go` — C1, C2, C3, C4 all edit it (Kahn loop, hashing, fan-in,
   the ordering mirror). All in Stream C; land C1 first, then coordinate the C2/C3
   merge (different funcs); C4 comes later, after D3.
@@ -718,6 +1011,27 @@ Per-stream additions:
   step, over-cap `maxPartitions`) rejected at lint.
 - **UI changes (F):** `just ui-lint && just ui-test && just ui-e2e` — the grouped
   DAG node, the partition table, and per-partition retry driven under Playwright.
+- **Instance identity migration (G) — behavior-neutrality is the gate.** G ships
+  with no fan-out surface, so its evidence is that **nothing changed**: the full
+  existing suite green, plus `just integration-test` green in **both**
+  `CAESIUM_RUN_OWNER_IN_MEMORY` modes, plus the existing owner/failover coverage
+  (`internal/run/failover_test.go`, `owner_complete_test.go`, `recovery_test.go`,
+  `checkpoint_test.go`, `retry_admit_test.go`) unchanged in intent and green. A G
+  PR that needs an existing assertion *relaxed* is a red flag: state why in the PR
+  or treat it as a defect.
+- **Checkpoint format migration (G3):** an explicit test that a blob written in
+  the **old** format is rejected and falls back to replay-from-terminal-rows —
+  not silently restored as empty state. This is the one failure mode the missing
+  version field makes invisible, and it cannot be caught by a round-trip test.
+- **Owner-mode fan-out (D4):** the happy-path, ordering, and failover fan-out
+  scenarios run with `CAESIUM_RUN_OWNER_IN_MEMORY=true` on the live integration
+  server, asserting N instances materialize (not one) and the run does not
+  finalize until every instance is terminal. A shared assertion inside another
+  lane does not count — the owner path is the one that silently collapses groups.
+- **Retry does not release downstream early (G5):** a group with one succeeded
+  and one failed sibling, retried; assert the downstream step does **not** start
+  until the retried sibling is terminal. Without an explicit ordering assertion
+  this defect is invisible — the run still goes green, just wrongly.
 - **Structured-partition backward compatibility (A3, C2):** a **golden-digest**
   test proving a string-form producer's instance hashes are byte-identical to the
   pre-amendment values, and that `CacheVersion` is unchanged. "A hash was produced"
@@ -747,6 +1061,17 @@ Per-stream additions:
 
 The plan is done when **all** of these hold:
 
+0. **Stream G — the instance identity migration** is in and was **behavior-neutral
+   on the way in**: the run lifecycle addresses task state by `TaskRun` identity
+   across the SQL advancement path, the run-owner in-memory engine, the versioned
+   checkpoint format, recovery replay, retry accounting, and the owner↔worker wire
+   protocol; a predecessor group is satisfied only when **every** live sibling row
+   is a terminal success; an old-format checkpoint blob is rejected rather than
+   silently restored; and G6's site → answer (re-key / aggregate /
+   assert-unfanned) → test table is recorded. Closed by the existing suite and
+   both owner modes green with no assertion relaxed. **This criterion gates every
+   one below it** — nothing in A–F is meaningful on a substrate that cannot
+   represent two siblings.
 1. **Stream A — the substrate** is in: `TaskRun` carries partition columns under a
    unique `(job_run_id, task_id, partition_index)` index (migrated on the sharded
    hot tables), every run-store write path keys on the `TaskRun` primary key with no
@@ -775,8 +1100,12 @@ The plan is done when **all** of these hold:
    `outstanding_predecessors` so **no new claim predicate is needed**, decrements
    siblings by `TaskRun` primary key, skips a failed instance's transitive
    dependents instead of hanging, enforces `fanOut.maxParallel` in the claim
-   predicate, and survives a mid-group worker crash via lease reclaim. Closed by the
-   `distributed` integration scenarios green in CI, including the ordering fixtures.
+   predicate, and survives a mid-group worker crash via lease reclaim — **and does
+   all of it in run-owner in-memory mode too** (D4), where expansion rides the
+   `ApplyCompletion`/`CompleteTaskOwner` path rather than `completeTask`. Closed by
+   the `distributed` integration scenarios green in CI with the ordering fixtures,
+   run in **both** `CAESIUM_RUN_OWNER_IN_MEMORY` modes, plus an owner-failover
+   mid-group scenario that re-dispatches only the unfinished instances.
 5. **Stream E — the surfaces** ship: `GET …/partitions` (with `fingerprint` and
    `depends_on`) and the per-instance retry endpoint back
    `caesium run partitions --json` (clean stdout) and
@@ -790,8 +1119,9 @@ The plan is done when **all** of these hold:
    retry, and shows fingerprint / `depends on` / `skipped` for ordered groups.
    Closed by the Playwright scenario green under `just ui-e2e`.
 7. **H-1 — the integration server** exercises the fan-out path with the cap set,
-   the distributed lane runnable, and the string-form / object-form / rejection
-   fixtures available, so the A–D scenarios drive the live binary in CI.
+   the distributed lane runnable in **both** `CAESIUM_RUN_OWNER_IN_MEMORY` modes,
+   and the string-form / object-form / rejection fixtures available, so the A–D
+   scenarios drive the live binary in CI.
 8. **N-1 — docs reflect reality:** the `design-dynamic-fanout.md` banner flipped,
    the `docs/roadmap.md` Phase 4 fan-out row marked Shipped, the `fanOut` block +
    both marker element forms + `CAESIUM_PARTITION_JSON` documented in the schema
@@ -845,6 +1175,12 @@ The plan is done when **all** of these hold:
 - [`docs/design-quarantined-replay.md`](../../design-quarantined-replay.md) — the
   fail-closed posture E3 follows for fanned baselines and the deferred
   per-partition skip.
+- `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
+  `internal/run/owner_topology.go`, `internal/run/recovery.go`,
+  `internal/run/checkpoint_store.go`, `internal/run/checkpoint_writer.go`,
+  `internal/dispatch/dispatch.go` — the run-owner in-memory subsystem Stream G
+  re-keys and Stream D4 teaches to expand. The third advancement path, and the one
+  the first draft of this plan missed entirely.
 - `internal/run/store.go`, `internal/job/job.go`, `internal/worker/claimer.go`,
   `pkg/task/output.go`, `internal/cache/hash.go`,
   `internal/cache/shortcircuit.go` — the execution/cache surfaces this plan rewires
