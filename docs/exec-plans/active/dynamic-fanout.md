@@ -995,7 +995,10 @@ when the producer's own inputs change. The structured-partition amendment makes
 this *expressible* (C2 puts each unit's fingerprint in its key) but does **not**
 enable it: the enabling half is the chain break, `cache.chain: values`, owned by
 [`2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
-§4. Nothing in this plan may invent a second mechanism for it; fingerprints
+§4 and implemented by Stream A of [`infra-deploy.md`](infra-deploy.md) (which
+edits the same `hash.go` / `job.go` / `runtime_executor.go` / `definition.go`
+files as Streams A–C here — land one before the other, see that plan's
+Sequencing). Nothing in this plan may invent a second mechanism for it; fingerprints
 without the chain break are correct but conservative (all instances re-run when
 the producer does — never a stale hit). The design's eight Open Questions
 (`minSuccessRatio`, window-derived partitions, per-partition resource profiles,
