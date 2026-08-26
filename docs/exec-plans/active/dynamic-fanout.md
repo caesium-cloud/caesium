@@ -76,6 +76,19 @@ its transitive dependents** — leaving them undecremented hangs the run to its
 timeout, so the skip cascade is load-bearing, not a nicety. The amendment adds
 **no new YAML field, no new env var, and no new metric series**.
 
+A seventh contract came out of the third review pass and is the one to check every
+item against, because the same defect shape has now surfaced three times:
+**(7) route completeness — every piece of state fan-out introduces must have its
+seed, its inverse, and its recovery defined on all four completion routes and all
+three advancement implementations.** A seed with no inverse is a stall; an inverse
+present on only some routes is a *mode-dependent* stall, which is strictly worse
+because it passes CI in the default configuration and fails in production under a
+flag nobody varied. The matrix to fill in per item is in the design's
+[`## Route completeness`](../../design-dynamic-fanout.md#route-completeness-state-this-once-check-every-item-against-it)
+section. Note especially that **a cache hit is a completion** and `cacheHitTask`
+is a different function from `completeTask` — with per-unit fingerprints, a
+cache-hit prerequisite is the *common* path through an ordered group.
+
 A sixth contract was added by the second-pass amendment and is the easiest one to
 violate by omission: **(6) there are three DAG-advancement implementations, and
 every fan-out behavior must hold in all three.** Local and distributed-SQL both
@@ -191,14 +204,17 @@ answer**, and a review that finds one should block.
       (`:2333`) — its `task_id IN ?` predicate stays correct for the cross-step
       edge and gains an `id IN ?` sibling form for later use by D3. No behavior
       change while every task has exactly one row.
-      Three of these are **destructive**, not merely mis-addressed, and should be
-      done first because they are the ones that corrupt live work: `RateLimitTask`
-      (`:1808-1824`) matches `status IN (pending, running)`, so rate-limiting one
-      instance de-claims and re-pends **running** siblings and kills in-flight
-      containers; `retryTask` (`:3256-3265`) resets `output`/`result` on every
-      sibling; `ClaimTaskForDispatch` (`:1665-1686`) claims **all** unclaimed
-      siblings in one `UPDATE`, so one worker silently takes the whole group and
-      `RowsAffected == 0` cannot detect the over-claim.
+      Two of these **fan a write across siblings** rather than merely addressing
+      the wrong one, and should be done first because they corrupt live work:
+      `retryTask` (`:3256-3265`) resets `output`/`result` on every sibling, and
+      `ClaimTaskForDispatch` (`:1665-1686`) claims **all** unclaimed siblings in one
+      `UPDATE`, so one worker silently takes the whole group and `RowsAffected == 0`
+      cannot detect the over-claim. A third, `RateLimitTask` (`:1808-1824`), matches
+      `status IN (pending, running)` and so re-pends **running** siblings, orphaning
+      their in-flight containers (it does not kill them). Matching `running` may be
+      deliberate for the one-row case, so **settle the intent before changing it** —
+      this is an open question for this item, not a presumed bug (recorded as an
+      observation in #345).
       Also fix materialization itself: `RegisterTasks` (`:1121-1132`, `:1164-1175`,
       `:1183-1189`) **actively de-duplicates by task ID** — `seenInputTaskIDs`, the
       `task_id IN ?` existence pluck, and the `seenNewTaskIDs` guard each silently
@@ -239,16 +255,19 @@ answer**, and a review that finds one should block.
       the task terminal, and the rest hit the `wasTerminal` early-return — a
       recovered owner believes a half-finished group is done. Replay must key on
       the row's instance identity.
-      **Fix the sequence space in the same item — it loses writes, not just
-      identity.** `ApplyCompletion`'s already-terminal early return
-      (`internal/run/owner_state.go:163-165`) leaves `TerminalSequence` at **zero**,
-      `OwnerManager.Complete` passes that zero into `CompleteTaskOwner`
-      (`internal/run/owner_manager.go:233-235`), and `TerminalTaskRunsSince` selects
-      `terminal_sequence > ?` (`internal/run/checkpoint_store.go:95-108`) — so
-      every sibling completion after the first is **excluded from the replay tail
-      entirely** and is unrecoverable after a takeover. The dense-sequence gap check
-      (`internal/run/recovery.go:61,69-75`) then reports phantom gaps on top.
-      Every terminal transition must get its own sequence. Related: checkpoint
+      **Fix the sequence space in the same item.** `ApplyCompletion`'s
+      already-terminal early return (`internal/run/owner_state.go:163-165`) leaves
+      `TerminalSequence` at **zero**, `OwnerManager.Complete` passes that zero into
+      `CompleteTaskOwner` (`internal/run/owner_manager.go:233-235`), and
+      `TerminalTaskRunsSince` selects `terminal_sequence > ?`
+      (`internal/run/checkpoint_store.go:95-108`), excluding a zero-stamped row from
+      the replay tail. **Today that is legitimate duplicate suppression** — with one
+      row per `task_id` the early return only fires for a repeat completion of a row
+      that already carries a good sequence. Under fan-out the same path becomes the
+      *normal* one for siblings 2…N, each a distinct terminal transition needing its
+      own sequence; without one they are invisible to replay and the dense-gap check
+      (`internal/run/recovery.go:61,69-75`) reports phantom gaps. Latent today,
+      definite under fan-out — see #345. Related: checkpoint
       cadence (`CheckpointWriter.due`, `internal/run/checkpoint_writer.go:56-64`)
       keys off `RunState.seq`, which under the current code advances once per group
       — starving checkpointing exactly when the run holds the most state.
@@ -643,7 +662,9 @@ which makes the substrate able to represent two siblings at all.
       ordering decides which instances are *ready*, `maxParallel` decides how many
       ready ones are *in flight*. Deadlock is impossible because readiness derives
       from terminal siblings, never from free slots; add a test that proves it on a
-      chain deeper than `maxParallel`.
+      chain deeper than `maxParallel`. **Scope limit:** this item covers the SQL
+      predicates only. Owner in-memory mode dispatches from `RunState.ready` and
+      never reaches them, so the cap is unenforced there until **D6**.
       Files: `internal/worker/claimer.go`, `internal/run/store.go`.
       Depends on: D1.
 - [ ] D3. In-group ordering in the store — the one shared implementation both lanes
@@ -662,7 +683,10 @@ which makes the substrate able to represent two siblings at all.
       Implement as one indexed group read over `idx_taskrun_jobrun_task` plus one
       `UPDATE … WHERE id IN (…)`, bounded by N ≤ 1024, and call it from **every**
       terminal-success path — `cacheHitTask` (`:1933`) as well as `completeTask`
-      (`:2621`), because a cache-hit instance is a satisfied dependency. A run-scoped
+      (`:2621`), because a cache-hit instance is a satisfied dependency, and with a
+      per-unit `fingerprint` a cache-hit prerequisite is the **common** case in an
+      ordered group, not an edge case. This item is the SQL half only; the owner
+      in-memory engine needs its own decrement and skip cascade — **D5**. A run-scoped
       instance-edge table was considered and rejected in the design: a new model and
       migration to replace one bounded scan.
       (c) **Skip cascade**: `failTask` (`:3174`) marks the failed instance's
@@ -703,6 +727,64 @@ which makes the substrate able to represent two siblings at all.
       Files: `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
       `internal/run/store.go`, `internal/dispatch/dispatch.go`.
       Depends on: D1, D3, G2, G3, G4.
+- [ ] D5. Advance in-group ordering in the **owner in-memory engine** — the
+      inverse of D4's seed, without which an ordered group under
+      `CAESIUM_RUN_OWNER_IN_MEMORY=true` **stalls deterministically**. D3 puts the
+      in-group decrement in SQL and D4 seeds the in-group indegree, but
+      `advanceSuccessors` (`internal/run/owner_state.go:196-230`) walks only
+      `rs.topo.Adjacency`, built from `task_edges` (`LoadRunTopology`,
+      `internal/run/owner_topology.go:16`) — and a partition's `dependsOn` is
+      producer-supplied at runtime, so it is *by construction* absent there. Seeded
+      counter, no decrement path, dependent never becomes ready. Four parts:
+      (a) **In-group adjacency in `RunState`**, populated at expansion (D4) in the
+      same critical section that creates the instance entries, and walked by
+      `advanceSuccessors`/`markTerminal` alongside the catalog adjacency. Catalog
+      edges stay task-level; in-group edges are instance-level; one traversal
+      consults both.
+      (b) **The cache-hit route.** A cache hit is a completion, and it is the
+      *common* case here — the whole point of a per-unit `fingerprint` is that
+      prerequisites cache-hit — so the decrement must fire for
+      `TaskStatusCached` too. Note `IsTerminalSuccess`
+      (`internal/run/store.go:57-59`) already counts `cached`, and cached **does**
+      travel the owner path today despite `CompleteTaskOwner`'s docstring
+      (`:2904`) claiming otherwise: `ValidCompleteStatuses`
+      (`internal/dispatch/dispatch.go:103-107`) admits it, the owner block
+      (`:486-489`) forwards `req.Status` unfiltered, and `CompleteTaskOwner` writes
+      `"cache_hit": status == TaskStatusCached`. **Correct that docstring in this
+      item** — an implementer trusting it would skip exactly this wiring and ship a
+      group that stalls only when a prerequisite cache-hits.
+      (c) **The in-group skip cascade**, emitted into the same `res.Skipped` list
+      `ApplyCompletion` already returns and `CompleteTaskOwner` already persists —
+      the owner-side counterpart of D3c. Without it an owner-mode group hangs on a
+      failed prerequisite exactly as the SQL path would.
+      (d) **Replay.** `RecoverRunState` (`internal/run/recovery.go:41`) rehydrates
+      topology from the **catalog**, which has no in-group edges, so a recovering
+      owner would restore counters it can never decrement. Rebuild the in-group
+      adjacency on recovery from the durable instance rows'
+      `PartitionDependsOn` column (A1): the rows are authoritative, the snapshot
+      carries only counters. Do **not** also snapshot the edges — two copies of the
+      same graph can disagree after a partial write.
+      Verified by an ordered-group scenario under owner mode that includes a
+      cache-hit prerequisite and a mid-group failover; a stall reproduces as a run
+      that never terminates, so assert a bounded run duration, not just final
+      status.
+      Files: `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
+      `internal/run/recovery.go`, `internal/run/store.go`.
+      Depends on: D3, D4.
+- [ ] D6. Enforce `fanOut.maxParallel` in **owner in-memory mode**. D2 adds the
+      in-flight cap to the claimer's SQL predicate and the owner-dispatch SQL query,
+      but `dispatchRunInMemory` (`internal/dispatch/loop.go:376`) dispatches from
+      `RunState.ready` and **never calls `PendingTasksForDispatch`**
+      (`internal/run/store.go:1733`), so a SQL-only cap is silently unenforced
+      whenever `CAESIUM_RUN_OWNER_IN_MEMORY=true`. Cap the group's in-flight count
+      when draining the ready queue, using the same per-group accounting
+      `RunState` already needs for group status. A cap that holds in one mode and
+      not the other is worse than no cap — the mode that ignores it is the one
+      running the largest clusters. Test by asserting concurrent in-flight instances
+      never exceed `maxParallel` in **both** modes, not just the default.
+      Files: `internal/dispatch/loop.go`, `internal/run/owner_state.go`,
+      `internal/run/owner_manager.go`.
+      Depends on: D2, D4.
 
 ### Stream E — Surfaces: REST + CLI + observability alignment
 
@@ -907,9 +989,12 @@ cross-design questions, not items here.
   hard gate: **do not start W1 until G6's audit table is merged.**
 - **W1 = A (A1→A2→A3→A4) + B (B1→B2).** A and B touch disjoint files.
 - **W2 = C (C1→(C2, C3)).** Unblocked once A + B are in.
-- **W3 = D (D1→(D2, D3)→D4).** Unblocked once C3's fan-in contract is in. D4 —
-  owner-mode expansion — is the item most likely to be dropped as "an edge case";
-  it is not, it is a third of the execution surface.
+- **W3 = D (D1→(D2, D3)→D4→(D5, D6)).** Unblocked once C3's fan-in contract is
+  in. D4–D6 — owner-mode expansion, advancement, and the in-flight cap — are the
+  items most likely to be dropped as "an edge case"; they are not, they are a third
+  of the execution surface, and D5 in particular is the difference between an
+  ordered group running and stalling forever under
+  `CAESIUM_RUN_OWNER_IN_MEMORY=true`.
 - **W4 = C4 + E (E1→E2, E3, E4).** C4 lands here, not in W2 — it mirrors D3's
   store-side ordering. Unblocked once D1's instances exist (E3 needs only C2).
 - **W5 = F (F1, F2) + N-1.** F after E1; N-1 last.
@@ -921,7 +1006,8 @@ in-group validator — A3's env cap is read by B1's lint and C1's executor, and 
 consumes A3's normalized `[]Partition`). B1 → B2. C1 → (C2, C3 in parallel —
 different concerns in the same file, coordinate the merge) → C4 (after D3). D1 →
 (D2, D3 in parallel — different funcs in the same file, D2 in the claim predicate,
-D3 in the decrement/skip paths) → D4. E1 → E2; E3 parallel to E1/E2 (depends only
+D3 in the decrement/skip paths) → D4 → (D5, D6 in parallel — D5 owns
+`owner_state.go` advancement, D6 owns the dispatch loop). E1 → E2; E3 parallel to E1/E2 (depends only
 on C2); E4 after D3 + G5. F1, F2 parallel (F2 needs E1).
 
 **Cross-stream file conflicts:**
@@ -938,8 +1024,13 @@ on C2); E4 after D3 + G5. F1, F2 parallel (F2 needs E1).
   predicate, D3 is in the decrement/skip paths. G5 and E4 both touch
   `retryFromFailure` and are two waves apart by construction.
 - `internal/run/owner_state.go` — G2 re-keys `RunState`, G3 versions and re-keys
-  the snapshot, D4 adds in-memory expansion to `ApplyCompletion`. **Sequence
-  G2 → G3 → D4**; single-threaded through the stream order, never concurrent.
+  the snapshot, D4 adds in-memory expansion to `ApplyCompletion`, D5 adds in-group
+  adjacency + decrement + skip cascade to `advanceSuccessors`/`markTerminal`, D6
+  adds per-group in-flight accounting. **Sequence G2 → G3 → D4 → D5 → D6**;
+  single-threaded through the stream order, never concurrent. This is the second
+  busiest file in the plan after `store.go`.
+- `internal/dispatch/loop.go` — G4 (instance identity on dispatch) and D6 (the
+  owner-mode `maxParallel` cap in `dispatchRunInMemory`). Sequence G4 → D6.
 - `internal/run/owner_manager.go` — G2 (instance keys) and D4 (the partition list
   on the completion seam). Sequence G2 → D4.
 - `internal/run/recovery.go` — G3 only.
@@ -1023,11 +1114,25 @@ Per-stream additions:
   the **old** format is rejected and falls back to replay-from-terminal-rows —
   not silently restored as empty state. This is the one failure mode the missing
   version field makes invisible, and it cannot be caught by a round-trip test.
-- **Owner-mode fan-out (D4):** the happy-path, ordering, and failover fan-out
-  scenarios run with `CAESIUM_RUN_OWNER_IN_MEMORY=true` on the live integration
-  server, asserting N instances materialize (not one) and the run does not
-  finalize until every instance is terminal. A shared assertion inside another
+- **Owner-mode fan-out (D4, D5, D6):** the happy-path, ordering, and failover
+  fan-out scenarios run with `CAESIUM_RUN_OWNER_IN_MEMORY=true` on the live
+  integration server, asserting N instances materialize (not one) and the run does
+  not finalize until every instance is terminal. A shared assertion inside another
   lane does not count — the owner path is the one that silently collapses groups.
+  Two assertions specifically:
+  **(a) a stall is a timeout, not a failed status.** An ordered group whose
+  in-group decrement is missing never terminates, so the scenario must assert a
+  **bounded run duration**; a final-status assertion alone hangs the suite instead
+  of failing it, and reads as CI flake.
+  **(b) the prerequisite must cache-hit in at least one ordering scenario.** With
+  per-unit fingerprints that is the common path, and it exercises `cacheHitTask` /
+  `CacheHitTaskClaimed` — different functions from `completeTask`, and a route a
+  `succeeded`-only fixture never touches.
+- **Route completeness (every fan-out item):** the PR states which of the four
+  completion routes and three advancement implementations the change touches, and
+  for any state it seeds, where the inverse lives on each. An item that seeds a
+  counter without naming its decrement on all routes should block review — this
+  defect shape has surfaced three times.
 - **Retry does not release downstream early (G5):** a group with one succeeded
   and one failed sibling, retried; assert the downstream step does **not** start
   until the retried sibling is terminal. Without an explicit ordering assertion
@@ -1101,11 +1206,15 @@ The plan is done when **all** of these hold:
    siblings by `TaskRun` primary key, skips a failed instance's transitive
    dependents instead of hanging, enforces `fanOut.maxParallel` in the claim
    predicate, and survives a mid-group worker crash via lease reclaim — **and does
-   all of it in run-owner in-memory mode too** (D4), where expansion rides the
-   `ApplyCompletion`/`CompleteTaskOwner` path rather than `completeTask`. Closed by
-   the `distributed` integration scenarios green in CI with the ordering fixtures,
-   run in **both** `CAESIUM_RUN_OWNER_IN_MEMORY` modes, plus an owner-failover
-   mid-group scenario that re-dispatches only the unfinished instances.
+   all of it in run-owner in-memory mode too** (D4–D6), where expansion rides the
+   `ApplyCompletion`/`CompleteTaskOwner` path rather than `completeTask`, the
+   in-group decrement and skip cascade live in `RunState` rather than SQL, and
+   `maxParallel` is enforced against the owner's ready queue rather than a claim
+   predicate. Closed by the `distributed` integration scenarios green in CI with the
+   ordering fixtures, run in **both** `CAESIUM_RUN_OWNER_IN_MEMORY` modes, with at
+   least one ordering scenario whose prerequisite **cache-hits**, a bounded-duration
+   assertion so a stall fails rather than hangs, and an owner-failover mid-group
+   scenario that re-dispatches only the unfinished instances.
 5. **Stream E — the surfaces** ship: `GET …/partitions` (with `fingerprint` and
    `depends_on`) and the per-instance retry endpoint back
    `caesium run partitions --json` (clean stdout) and

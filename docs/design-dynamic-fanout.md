@@ -707,6 +707,35 @@ advancement implementations, not two, and the third deliberately bypasses
 | Distributed, SQL advancement | `outstanding_predecessors` decrement in SQL, `internal/run/store.go:2621` | `completeTask` |
 | Distributed, **run-owner in-memory** (`CAESIUM_RUN_OWNER_IN_MEMORY=true`, `pkg/env/env.go:303-308`) | `run.RunState`, `internal/run/owner_state.go:65` | `CompleteTaskOwner`, `internal/run/store.go:2905` |
 
+Three advancement implementations, but **four completion routes** reach them, and
+the fourth is the one this feature exercises most:
+
+| Route | Reaches |
+|---|---|
+| `localSink` (`internal/worker/completion_sink.go:70-81`) — the ClaimNext pull path | `completeTask` / `failTask` / **`cacheHitTask`** |
+| `ownerSink` → `POST /internal/complete`, run tracked here | `OwnerManager.Complete` → `ApplyCompletion` + `CompleteTaskOwner` |
+| the same handler's SQL fallback when `res.Owned == false` (`internal/dispatch/dispatch.go:516,523-580`) | `CompleteTaskClaimed` / `FailTaskClaimed` / **`CacheHitTaskClaimed`** |
+| local executor (`internal/job/job.go:1032,1087`) | **`CacheHitTask`** / `CompleteTaskWithResult` |
+
+**A cache hit is a completion, and `cacheHitTask` (`internal/run/store.go:1933`)
+is a different function from `completeTask` (`:2621`).** Every in-group operation
+therefore needs a home in both. This is not an edge case for this feature — the
+entire point of a per-unit `fingerprint` is that prerequisites in an ordered group
+*cache-hit*, so "the prerequisite was cached" is the **common** path through an
+ordered group, not a rare one.
+
+One correction while mapping this: `CompleteTaskOwner`'s docstring claims
+*"Cache-hit completions are not handled here (they remain on the
+`CacheHitTaskClaimed` path); the owner routes only succeeded/failed through this."*
+**That is stale.** `ValidCompleteStatuses` (`internal/dispatch/dispatch.go:103-107`)
+admits `cached`, the owner block (`:486-489`) forwards `req.Status` unfiltered, and
+`CompleteTaskOwner` itself writes `"cache_hit": status == TaskStatusCached`. So
+cached *does* travel the owner path today. The docstring is dangerous precisely
+here: an implementer trusting it would conclude cache hits bypass the owner engine
+and would not wire the in-group decrement into `ApplyCompletion` for them —
+producing a group that stalls only when a prerequisite cache-hits. Fix the
+docstring in the same change that relies on the behavior.
+
 The third path's contract is explicit in its own docstring: `CompleteTaskOwner`
 *"only persists terminal rows — it does NOT decrement predecessors, evaluate
 trigger rules, or resolve branches in SQL"*. The owner advanced the DAG in memory
@@ -751,23 +780,45 @@ consume it.
   `TaskID` and different `terminal_sequence`; the first marks the task terminal
   and the rest hit the `wasTerminal` early-return, so a recovered owner believes
   a partly-finished group is done.
-- **The sharpest one: siblings are stamped `terminal_sequence = 0` and then become
-  invisible.** `ApplyCompletion` returns early for an already-terminal task
+- **The sequence space assumes one terminal transition per task.**
+  `ApplyCompletion` returns early for an already-terminal task
   (`internal/run/owner_state.go:163-165`) with `TerminalSequence` left at zero, and
-  `OwnerManager.Complete` passes that zero straight into `CompleteTaskOwner`
-  (`internal/run/owner_manager.go:233-235`). `TerminalTaskRunsSince` selects
-  `terminal_sequence > ?` (`internal/run/checkpoint_store.go:95-108`), so those
-  rows are excluded from the replay tail **entirely** — sibling completions become
-  unrecoverable after a takeover, and the dense-sequence gap check
-  (`internal/run/recovery.go:61,69-75`) reports phantom gaps on top. A sequence
-  space that assumes one terminal transition per task is not merely mis-keyed; it
-  silently loses writes.
+  `OwnerManager.Complete` passes that zero into `CompleteTaskOwner`
+  (`internal/run/owner_manager.go:233-235`); `TerminalTaskRunsSince` selects
+  `terminal_sequence > ?` (`internal/run/checkpoint_store.go:95-108`), which
+  excludes a zero-stamped row from the replay tail. **Today this is benign and
+  arguably correct**: with one row per `task_id` the early return only fires on a
+  duplicate completion for a row that already carries a good sequence, so
+  suppressing it is the intended behavior. Under fan-out the same code path stops
+  being duplicate suppression and starts being the *normal* path for siblings
+  2…N — each is a distinct terminal transition that needs its own sequence, and
+  without one it is invisible to replay while the dense-gap check
+  (`internal/run/recovery.go:61,69-75`) reports phantom gaps. Latent today,
+  definite under fan-out. Tracked as an observation in #345.
 - Checkpoint cadence is driven by `RunState.seq` (`CheckpointWriter.due`,
   `internal/run/checkpoint_writer.go:56-64`), which only advances on the first
   sibling — a wide group advances the counter once and starves checkpointing
   exactly when the run has the most state to lose.
 - `requeueRunning` (`internal/run/owner_state.go:304`) re-dispatches by task ID,
   so a failover mid-group re-dispatches one instance for the whole group.
+- **`advanceSuccessors` cannot see in-group edges at all.** It walks
+  `rs.topo.Adjacency` (`internal/run/owner_state.go:196-230`), which is built from
+  `task_edges` (`LoadRunTopology`, `internal/run/owner_topology.go:16`). A
+  partition's `dependsOn` is producer-supplied at runtime and is *by construction*
+  absent from `task_edges` — that is the whole reason the instance graph needs its
+  own cycle check. So seeding in-group indegree in the owner engine without also
+  giving it an in-group adjacency to decrement along is a **guaranteed stall**, not
+  a race: the dependent's counter is set once and nothing ever lowers it. The
+  in-group graph must be a first-class part of `RunState`, walked by
+  `advanceSuccessors` alongside the catalog adjacency, and the in-group skip
+  cascade must emit into the same `res.Skipped` list `CompleteTaskOwner` already
+  persists.
+- Recovery compounds it: `RecoverRunState` rehydrates topology from the **catalog**
+  (`internal/run/recovery.go:41`), which by definition has no in-group edges. The
+  edges must be rebuilt on recovery from the durable instance rows'
+  `PartitionDependsOn` column — the rows are the authoritative source, the snapshot
+  carries only the counters. Snapshotting the edges as well would duplicate graph
+  state in two places and let them disagree after a partial write.
 
 The checkpoint format carries a migration hazard worth calling out on its own:
 `runStateSnapshot` (`internal/run/owner_state.go:370`) has **no version field**,
@@ -797,6 +848,40 @@ edges.
 **None of this is fan-out-specific work, and that is the point.** See
 [`## The task-ID identity assumption`](#the-task-id-identity-assumption) below.
 
+### Route completeness (state this once, check every item against it)
+
+Two review rounds each surfaced the same shape of defect — fan-out state seeded on
+one route with no corresponding inverse on another — so it is worth stating as an
+invariant rather than rediscovering per item:
+
+> **Every piece of state fan-out introduces must have its seed, its inverse, and
+> its recovery defined on *all four* completion routes and *all three* advancement
+> implementations. A seed with no inverse is a stall. An inverse present on some
+> routes only is a mode-dependent stall, which is strictly worse: it passes CI in
+> the default configuration and fails in production under a flag nobody varied.**
+
+The matrix an item must be able to fill in:
+
+| Operation | SQL advancement | Owner in-memory | Local Kahn loop | Cache-hit route | Survives replay? |
+|---|---|---|---|---|---|
+| in-group indegree **seed** | expansion tx | `ApplyCompletion` | from the row | n/a (seed happens once, at expansion) | rows are durable |
+| in-group **decrement** | instance-keyed `UPDATE` | in-group adjacency in `RunState` | in-memory mirror | **both** `cacheHitTask` and `CacheHitTaskClaimed` | counters snapshotted, edges rebuilt from rows |
+| in-group **skip cascade** | `failTask` | `res.Skipped` → `CompleteTaskOwner` | mirror | n/a (a cache hit is a success) | skips are terminal rows |
+| live-instance **count** (`total`) | live row count | `RunState.total`, raised in the expansion critical section | live row count | unchanged | snapshotted |
+| `maxParallel` **in-flight cap** | claim predicate | **owner ready queue** — `dispatchRunInMemory` (`internal/dispatch/loop.go:376`) never consults `PendingTasksForDispatch`, so a SQL-only predicate does not apply | dispatch loop | unchanged | derived from live rows |
+
+The bottom row is the third instance of the same asymmetry and was found by
+applying the invariant rather than by review: `maxParallel` enforced only in the
+claimer's SQL predicate is silently unenforced whenever
+`CAESIUM_RUN_OWNER_IN_MEMORY=true`, because owner-mode readiness comes from
+`RunState.ready` and never touches that query. A cap that holds in one mode and
+not another is worse than no cap, because the mode that ignores it is the one
+running the biggest clusters.
+
+The general rule this expresses: **a fan-out behavior is not implemented until it
+is implemented on the route that does not use SQL to advance the DAG**, and not
+verified until it is tested in both `CAESIUM_RUN_OWNER_IN_MEMORY` modes.
+
 ### The task-ID identity assumption
 
 One `TaskRun` per `(job_run_id, task_id)` is not a local convention of the run
@@ -813,7 +898,7 @@ cause appears in at least four independent subsystems:
 | Retry accounting | `retryFromFailure`, `internal/run/store.go:4852-4856` (`terminalSuccessIDs[tr.TaskID]`) | one succeeded sibling marks the whole group satisfied, releasing downstream while another sibling is still retrying |
 | Owner↔worker protocol | `DispatchRequest` / `CompleteRequest`, `internal/dispatch/dispatch.go:111-142` | a completion for instance 7 is indistinguishable from a completion for the group |
 | Materialization | `RegisterTasks`, `internal/run/store.go:1121-1132,1164-1175,1183-1189` | it **actively de-duplicates by task ID** (`seenInputTaskIDs`, the `task_id IN ?` existence pluck), so any path registering N instances through it silently keeps one |
-| Destructive sibling writes | `RateLimitTask` `:1808-1824` (`status IN (pending, running)`); `retryTask` `:3256-3265`; `ClaimTaskForDispatch` `:1665-1686` | rate-limiting one instance de-claims **running** siblings and kills in-flight work; retrying one wipes every sibling's output; one claim takes every unclaimed sibling |
+| Sibling-fanning writes | `retryTask` `:3256-3265`; `ClaimTaskForDispatch` `:1665-1686`; `RateLimitTask` `:1808-1824` (`status IN (pending, running)`) | retrying one instance wipes every sibling's `output`/`result`; one claim takes every unclaimed sibling. `RateLimitTask` additionally re-pends **running** siblings, orphaning their in-flight containers rather than killing them — matching `running` may well be deliberate for the one-row case, so this is an open question for G1 to settle, not a presumed bug (observation in #345) |
 | Identity on the wire and in the API | `convertRunTaskModel`, `internal/run/store.go:4080-4095` (`TaskRun.ID` is set to `model.TaskID`) | N siblings serialize with an **identical `id`**, so `logs.go:80-90` matches the first and streams the wrong container's logs. Same root cause as the known `/v1/jobs/:id/tasks` serialization bug |
 | Cardinality assertions | `stampBatchEventQuarantineTx`, `internal/run/store.go:2414-2433` (`len(taskRows) != len(ids)`) | asserts exactly one row per task id and **hard-errors the whole batched event insert** — a loud failure rather than a silent one, and the only one in this table that surfaces immediately |
 
