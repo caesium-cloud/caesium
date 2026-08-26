@@ -392,7 +392,10 @@ The forcing consumer is
 [`superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
 §5.4, which builds per-unit infrastructure delivery on this feature and cannot
 express its pattern on bare-string partitions. That spec is one consumer; the
-capability is data-engineering-first and is specified here, not there.
+capability is data-engineering-first and is specified here, not there. The
+converse also holds: the chain break (`cache.chain: values`, spec §4) that makes
+a per-unit fingerprint *effective* is specified there and implemented by Stream
+A of `exec-plans/active/infra-deploy.md`, not here.
 
 ### Why a bare string is not enough
 

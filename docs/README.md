@@ -49,7 +49,9 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 
 ## Active Exec Plans
 
-Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. None are open right now — both Console v2 exec plans (bug sweep and operator-loop UX) have shipped and moved to `exec-plans/completed/`; feature exec plans are linked from their design records above.
+Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans that have a design record are linked from that record above; plans whose design of record is a superpowers spec are listed here.
+
+- `exec-plans/active/infra-deploy.md`: DAG-native infrastructure deployment — `cache.chain: values` + `ttl: never` (the one core change), the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` image pack implementing the generic unit-pipeline pattern with Terraform as the first binding, a multi-writer volume lint warning, reference manifests + mandatory drift job, and a Console proposal panel (drafted 2026-08-26; spec `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`).
 
 ## Load Testing
 

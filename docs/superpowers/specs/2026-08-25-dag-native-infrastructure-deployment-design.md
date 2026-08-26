@@ -1,6 +1,6 @@
 # Design: DAG-Native Infrastructure Deployment (Terraform first)
 
-**Status:** Proposed
+**Status:** Proposed → planned — exec plan [`docs/exec-plans/active/infra-deploy.md`](../../exec-plans/active/infra-deploy.md) (drafted 2026-08-26; no implementation wave shipped yet)
 **Date:** 2026-08-25
 **Author:** Christopher Ryan
 **Topic:** Dependency-ordered deployment of infrastructure stacks as Caesium DAGs — with a
