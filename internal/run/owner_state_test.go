@@ -225,12 +225,19 @@ func TestRunState_ApplyCompletionIdempotentOnTerminal(t *testing.T) {
 	b.edge(a, c)
 	rs := NewRunState(b.build(), 0)
 
-	rs.ApplyCompletion(a, TaskStatusSucceeded, nil)
+	first := rs.ApplyCompletion(a, TaskStatusSucceeded, nil)
 	seqBefore := rs.Sequence()
-	// Re-applying a's completion must not double-advance or re-stamp.
+	// Re-applying a's completion must not double-advance or allocate a new
+	// sequence — but it must still report the sequence the first application
+	// stamped, so the caller re-persists that row rather than one with
+	// terminal_sequence = 0 (which recovery's `terminal_sequence > ?` replay
+	// would filter out).
 	res := rs.ApplyCompletion(a, TaskStatusSucceeded, nil)
-	if res.TerminalSequence != 0 {
-		t.Fatalf("re-completing a terminal task should not stamp a sequence, got %d", res.TerminalSequence)
+	if res.Applied {
+		t.Fatal("re-completing a terminal task must not report Applied")
+	}
+	if res.TerminalSequence != first.TerminalSequence {
+		t.Fatalf("re-completing a terminal task should replay sequence %d, got %d", first.TerminalSequence, res.TerminalSequence)
 	}
 	if rs.Sequence() != seqBefore {
 		t.Fatalf("sequence should not advance on duplicate completion: before=%d after=%d", seqBefore, rs.Sequence())
@@ -292,4 +299,108 @@ func TestRunState_SnapshotRestoreRoundTrip(t *testing.T) {
 
 func sortIDs(ids []uuid.UUID) {
 	sort.Slice(ids, func(i, j int) bool { return ids[i].String() < ids[j].String() })
+}
+
+// TestRunState_RepeatCompletionReplaysDurableEffect covers a completion that is
+// delivered twice — a worker re-POSTs the identical /internal/complete envelope
+// after the owner answered 503 for transient contention, so the DAG has already
+// advanced in memory even though the durable write may never have landed.  The
+// repeat must replay the first delivery's sequence and skips (so the caller
+// re-persists the same terminal rows) without advancing anything again.
+func TestRunState_RepeatCompletionReplaysDurableEffect(t *testing.T) {
+	// a -> b, a -> c.  a completes selecting only b; c is branch-skipped.
+	bld := newTopoBuilder()
+	a, br, c := bld.task(""), bld.task(""), bld.task("")
+	bld.edge(a, br)
+	bld.edge(a, c)
+	rs := NewRunState(bld.build(), 0)
+
+	first := rs.ApplyCompletion(a, TaskStatusSucceeded, []uuid.UUID{c})
+	if !first.Applied {
+		t.Fatal("first delivery must report Applied")
+	}
+	if first.TerminalSequence != 1 {
+		t.Fatalf("first delivery should stamp sequence 1, got %d", first.TerminalSequence)
+	}
+	if len(first.Skipped) != 1 || first.Skipped[0].TaskID != c {
+		t.Fatalf("first delivery should skip c, got %v", first.Skipped)
+	}
+	seqBefore := rs.Sequence()
+
+	repeat := rs.ApplyCompletion(a, TaskStatusSucceeded, []uuid.UUID{c})
+	if repeat.Applied {
+		t.Fatal("a re-delivered completion must not report Applied")
+	}
+	if !repeat.Durable() {
+		t.Fatal("a re-delivered completion must still be Durable so the row is re-persisted")
+	}
+	if repeat.TerminalSequence != first.TerminalSequence {
+		t.Fatalf("re-delivery must replay sequence %d, got %d", first.TerminalSequence, repeat.TerminalSequence)
+	}
+	if len(repeat.Skipped) != len(first.Skipped) || repeat.Skipped[0] != first.Skipped[0] {
+		t.Fatalf("re-delivery must replay skips %v, got %v", first.Skipped, repeat.Skipped)
+	}
+	if len(repeat.Ready) != 0 {
+		t.Fatalf("re-delivery must not re-report ready tasks, got %v", repeat.Ready)
+	}
+	if rs.Sequence() != seqBefore {
+		t.Fatalf("re-delivery must not allocate a sequence: %d -> %d", seqBefore, rs.Sequence())
+	}
+}
+
+// TestRunState_CompletionWithNoRecordedEffectIsNotDurable covers the two cases
+// where the owner has nothing of its own to persist: a task this run never had,
+// and a task made terminal by recovery replay (ApplyTerminalRow adopts the row's
+// stored sequence rather than stamping one, so its row is already correct on
+// disk).  Both must report !Durable so the caller skips the write instead of
+// stamping terminal_sequence = 0 over a good row.
+func TestRunState_CompletionWithNoRecordedEffectIsNotDurable(t *testing.T) {
+	bld := newTopoBuilder()
+	a := bld.task("")
+	rs := NewRunState(bld.build(), 0)
+
+	unknown := rs.ApplyCompletion(uuid.New(), TaskStatusSucceeded, nil)
+	if unknown.Applied || unknown.Durable() {
+		t.Fatalf("completion for an unknown task must be neither Applied nor Durable, got %+v", unknown)
+	}
+
+	rs.ApplyTerminalRow(a, TaskStatusSucceeded, 7)
+	replayed := rs.ApplyCompletion(a, TaskStatusSucceeded, nil)
+	if replayed.Applied || replayed.Durable() {
+		t.Fatalf("completion for a replay-terminal task must be neither Applied nor Durable, got %+v", replayed)
+	}
+	if replayed.TerminalSequence != 0 {
+		t.Fatalf("replay-terminal task has no owner-stamped sequence, got %d", replayed.TerminalSequence)
+	}
+}
+
+// TestRunState_SnapshotPreservesCompletionRecords ensures the recorded durable
+// effects survive a checkpoint round-trip, so a re-delivered completion after a
+// Restore still replays the right sequence instead of a zero.
+func TestRunState_SnapshotPreservesCompletionRecords(t *testing.T) {
+	bld := newTopoBuilder()
+	a, br, c := bld.task(""), bld.task(""), bld.task("")
+	bld.edge(a, br)
+	bld.edge(a, c)
+	topo := bld.build()
+	rs := NewRunState(topo, 0)
+
+	first := rs.ApplyCompletion(a, TaskStatusSucceeded, []uuid.UUID{c})
+
+	blob, err := rs.Snapshot()
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	restored, err := Restore(topo, blob)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	repeat := restored.ApplyCompletion(a, TaskStatusSucceeded, []uuid.UUID{c})
+	if repeat.TerminalSequence != first.TerminalSequence {
+		t.Fatalf("restored state must replay sequence %d, got %d", first.TerminalSequence, repeat.TerminalSequence)
+	}
+	if len(repeat.Skipped) != 1 || repeat.Skipped[0].TaskID != c {
+		t.Fatalf("restored state must replay the branch skip, got %v", repeat.Skipped)
+	}
 }

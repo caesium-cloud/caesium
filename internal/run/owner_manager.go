@@ -210,6 +210,16 @@ type CompleteResult struct {
 // Owned is false when this node does not own the run, signalling the caller to
 // fall back to the SQL path.
 //
+// Completions can be delivered more than once — a worker re-POSTs the identical
+// envelope when this handler answers 503 for transient dqlite contention, and by
+// then the DAG has already advanced in memory even though the durable write did
+// not land.  ApplyCompletion replays what that first delivery decided, so the
+// retry re-persists the same terminal rows at the same sequences.  The write is
+// gated on CompletionResult.Durable: a result with nothing this owner stamped
+// must never be persisted, because CompleteTaskOwner would write
+// terminal_sequence = 0 and recovery reads the terminal tail with
+// `terminal_sequence > ?`, making the row invisible after a takeover.
+//
 // All run work is serialized by the run's own lock; finalize/drop run after that
 // lock is released, so the brief map lock is never held during a DB call.
 func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, result, errMsg, claimedBy string, output map[string]string, branchSelections []string) (CompleteResult, error) {
@@ -231,15 +241,33 @@ func (m *OwnerManager) Complete(runID, taskID uuid.UUID, status TaskStatus, resu
 	}
 
 	res := or.state.ApplyCompletion(taskID, status, branchSkips)
-
-	if err := m.store.CompleteTaskOwner(runID, taskID, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, res.Skipped); err != nil {
-		or.mu.Unlock()
-		return CompleteResult{Owned: true}, err
+	if !res.Applied {
+		// The DAG had already advanced for this task when this completion arrived
+		// — most often a worker re-delivering the identical envelope after this
+		// handler answered 503 for transient contention.  Logged rather than
+		// swallowed: a re-delivery means the first delivery's durable write may
+		// never have landed.
+		log.Warn("owner manager: completion re-delivered for an already-terminal task",
+			"run_id", runID, "task_id", taskID, "status", status,
+			"terminal_sequence", res.TerminalSequence, "repersisting", res.Durable())
 	}
 
-	// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable from
-	// the durable terminal rows, so it must not fail the completion).
-	_ = or.writer.Maybe(or.state, or.gen)
+	// Persist only what this owner actually stamped.  A re-delivery replays the
+	// first delivery's sequence and skips, so the retry re-writes the same
+	// terminal rows and repairs a write that never landed.  A result with nothing
+	// stamped must never be written: CompleteTaskOwner would set
+	// terminal_sequence = 0, and recovery reads the terminal tail with
+	// `terminal_sequence > ?`, so the row would be invisible to a future takeover.
+	if res.Durable() {
+		if err := m.store.CompleteTaskOwner(runID, taskID, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, res.Skipped); err != nil {
+			or.mu.Unlock()
+			return CompleteResult{Owned: true}, err
+		}
+
+		// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable
+		// from the durable terminal rows, so it must not fail the completion).
+		_ = or.writer.Maybe(or.state, or.gen)
+	}
 
 	complete := res.Complete
 	hasFailures := or.state.HasFailures()
