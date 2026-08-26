@@ -8,6 +8,7 @@ import (
 
 	"github.com/caesium-cloud/caesium/internal/atom"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/specgen"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -262,6 +263,44 @@ func (s *PodmanTestSuite) TestCreateSkipsPullWhenImageAlreadyPresent() {
 	assert.NotNil(s.T(), c)
 	assert.Equal(s.T(), testAtomID, c.ID())
 	s.engine.backend.(*mockPodmanBackend).AssertNotCalled(s.T(), "ImagePull", req.Image)
+	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
+}
+
+// TestCreateSetsHealthLogDestination guards a podman API trap: the specgen
+// field carries no `omitempty` (upstream defers that to v6.0), so an unset
+// HealthLogDestination is serialized as "" rather than omitted. Podman servers
+// validate it and stat("") fails, rejecting every container create with:
+//
+//	HealthCheck Log '' destination error: stat : no such file or directory
+//
+// Sending the documented default keeps creates working across podman versions.
+func (s *PodmanTestSuite) TestCreateSetsHealthLogDestination() {
+	req := &atom.EngineCreateRequest{
+		Name:    testContainerName,
+		Image:   testImage,
+		Command: []string{"test"},
+	}
+
+	specMatcher := mock.MatchedBy(func(spec *specgen.SpecGenerator) bool {
+		return spec.HealthLogDestination == define.DefaultHealthCheckLocalDestination
+	})
+
+	s.engine.backend.(*mockPodmanBackend).
+		On("ImageExists", req.Image).
+		Return(true, nil)
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerCreate", specMatcher).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerStart", testAtomID).
+		Return()
+	s.engine.backend.(*mockPodmanBackend).
+		On("ContainerInspect", testAtomID).
+		Return()
+
+	c, err := s.engine.Create(req)
+	assert.Nil(s.T(), err)
+	assert.NotNil(s.T(), c)
 	s.engine.backend.(*mockPodmanBackend).AssertExpectations(s.T())
 }
 
