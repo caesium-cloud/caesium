@@ -85,7 +85,15 @@ present on only some routes is a *mode-dependent* stall, which is strictly worse
 because it passes CI in the default configuration and fails in production under a
 flag nobody varied. The matrix to fill in per item is in the design's
 [`## Route completeness`](../../design-dynamic-fanout.md#route-completeness-state-this-once-check-every-item-against-it)
-section. Note especially that **a cache hit is a completion** and `cacheHitTask`
+section. **Read that section's closing subsection before relying on the matrix**:
+a fourth review round found a defect it does not catch, because its axes are
+operation × completion route and the defect lived on a *traversal site* (the owner
+keeps a live and a replay implementation of every traversal, and `ApplyTerminalRow`
+duplicates the successor walk inline rather than calling it). The plan's answer is
+**not** a third matrix axis — a three-dimensional checklist is past the point an
+implementer reliably completes, and a checklist nobody completes launders the
+omission as diligence. The answer is **G7**: collapse the duplication so an edge
+class is enumerated in exactly one place, and the question stops being askable. Note especially that **a cache hit is a completion** and `cacheHitTask`
 is a different function from `completeTask` — with per-unit fingerprints, a
 cache-hit prerequisite is the *common* path through an ordered group.
 
@@ -272,7 +280,10 @@ answer**, and a review that finds one should block.
       keys off `RunState.seq`, which under the current code advances once per group
       — starving checkpointing exactly when the run holds the most state.
       Cover with a failover test that kills an owner mid-group and asserts every
-      completed instance survives the takeover.
+      completed instance survives the takeover. **G7 deduplicates the traversal this
+      item's replay path uses** — sequence G3 before G7 if convenient, but G7 must
+      land before D5 introduces in-group edges, or replay and live will need the
+      same change made twice.
       Files: `internal/run/owner_state.go`, `internal/run/recovery.go`,
       `internal/run/checkpoint_store.go`, `internal/run/checkpoint_writer.go`,
       `internal/models/run_checkpoint.go`.
@@ -348,6 +359,45 @@ answer**, and a review that finds one should block.
       `internal/incident/subscriber.go`, `internal/incident/bundle.go`,
       `api/rest/controller/job/run/logs.go`, `api/rest/service/`.
       Depends on: G1, G2.
+- [ ] G7. Collapse the live/replay traversal duplication **before** any in-group
+      edge exists. This item is the structural answer to a defect that has now
+      produced four P1s in one family: the owner keeps a *live* and a *replay*
+      implementation of every traversal concern, and fan-out must teach both about
+      a new edge class.
+      | Concern | Live | Replay |
+      |---|---|---|
+      | topology build | `LoadRunTopology`, `internal/run/owner_topology.go:16` | `loadReplayRunTopology`, `:72` |
+      | successor walk + indegree decrement | `advanceSuccessors`, `internal/run/owner_state.go:198` | `ApplyTerminalRow`, `:243` — an **inline copy** at `:264-282`, not a call |
+      | indegree seed | `NewRunState`, `:93` | snapshot `Restore`, `:398` |
+      The same fork exists in the store: `replayPredecessorRefsTx`
+      (`internal/run/store.go:603`) branches to a parallel replay implementation at
+      **five** sites — `predecessorStatusesTx` (`:2489`), `shouldRunTaskTx`
+      (`:2599`), `PredecessorOutputs` (`:4410` → `predecessorOutputsFromRefsTx`
+      `:4482`), `PredecessorDescriptorInputs` (`:4529`), and `PredecessorHashes`
+      (`:4629` → `predecessorHashesFromRefsTx` `:4678`).
+      Deliverable: **one** successor-traversal kernel and **one** edge-resolution
+      seam that live and replay both call, so an edge class is enumerated in exactly
+      one place and indegree is decremented in exactly one place. After this, "did
+      you update the replay path too?" is not a question an implementer can answer
+      wrongly, because there is no second copy.
+      **The one thing that must survive the refactor**, because getting it wrong is
+      a correctness bug rather than a stall: the two owner traversals differ
+      **deliberately**. Live allocates a fresh `terminal_sequence` and transitively
+      marks unsatisfied successors `skipped`; replay adopts the row's stored
+      sequence and deliberately does **not** auto-skip, because each skip was itself
+      persisted as a terminal row and arrives later in sequence order
+      (`ApplyTerminalRow`'s comment: re-deriving them "would double-handle them").
+      Extract only the kernel they genuinely share — enumerate successor edges,
+      decrement indegree, test the trigger rule — and leave the
+      unsatisfied-trigger **policy** a parameter. **Merging the two functions
+      outright reintroduces double-handled skips and must be rejected in review.**
+      Behavior-neutral: no edge class changes here, no fan-out surface. Closed by
+      the existing owner/failover suite green with no assertion relaxed, plus a test
+      asserting live and replay produce identical indegree and readiness for the
+      same terminal sequence.
+      Files: `internal/run/owner_state.go`, `internal/run/owner_topology.go`,
+      `internal/run/recovery.go`, `internal/run/store.go`.
+      Depends on: G2.
 
 ### Stream A — Substrate: partition model + instance-keyed store + marker parsing
 
@@ -737,10 +787,13 @@ which makes the substrate able to represent two siblings at all.
       producer-supplied at runtime, so it is *by construction* absent there. Seeded
       counter, no decrement path, dependent never becomes ready. Four parts:
       (a) **In-group adjacency in `RunState`**, populated at expansion (D4) in the
-      same critical section that creates the instance entries, and walked by
-      `advanceSuccessors`/`markTerminal` alongside the catalog adjacency. Catalog
-      edges stay task-level; in-group edges are instance-level; one traversal
-      consults both.
+      same critical section that creates the instance entries, and registered with
+      **G7's single traversal kernel** so catalog and in-group edges are enumerated
+      in one place. Catalog edges stay task-level; in-group edges are
+      instance-level; one traversal consults both. Because G7 landed first, this is
+      an addition to one edge-resolution seam — **not** a parallel change to
+      `advanceSuccessors` and `ApplyTerminalRow`. If this item finds itself editing
+      two traversals, G7 is incomplete and should be finished first.
       (b) **The cache-hit route.** A cache hit is a completion, and it is the
       *common* case here — the whole point of a per-unit `fingerprint` is that
       prerequisites cache-hit — so the decrement must fire for
@@ -757,20 +810,27 @@ which makes the substrate able to represent two siblings at all.
       `ApplyCompletion` already returns and `CompleteTaskOwner` already persists —
       the owner-side counterpart of D3c. Without it an owner-mode group hangs on a
       failed prerequisite exactly as the SQL path would.
-      (d) **Replay.** `RecoverRunState` (`internal/run/recovery.go:41`) rehydrates
-      topology from the **catalog**, which has no in-group edges, so a recovering
-      owner would restore counters it can never decrement. Rebuild the in-group
-      adjacency on recovery from the durable instance rows'
-      `PartitionDependsOn` column (A1): the rows are authoritative, the snapshot
-      carries only counters. Do **not** also snapshot the edges — two copies of the
-      same graph can disagree after a partial write.
+      (d) **Replay — rebuild the edges before replaying any completion, not after.**
+      `RecoverRunState` (`internal/run/recovery.go:41`) rehydrates topology from the
+      **catalog**, which has no in-group edges, so a recovering owner would restore
+      counters it can never decrement. Worse, a completion that landed *after* the
+      last checkpoint is replayed through the replay traversal: if the in-group
+      adjacency is not present at that moment, the dependent keeps its
+      pre-completion indegree, never becomes ready, and the run stalls after
+      takeover — the live-path bug, one function over. So: load the run's instance
+      rows, rebuild in-group adjacency from their `PartitionDependsOn` column (A1),
+      register it with G7's kernel, and **only then** replay the terminal tail. The
+      rows are authoritative and the snapshot carries only counters; do **not** also
+      snapshot the edges, since two copies of one graph can disagree after a partial
+      write. Assert this directly: a failover whose last checkpoint predates a
+      prerequisite's completion must still run the dependent.
       Verified by an ordered-group scenario under owner mode that includes a
       cache-hit prerequisite and a mid-group failover; a stall reproduces as a run
       that never terminates, so assert a bounded run duration, not just final
       status.
       Files: `internal/run/owner_state.go`, `internal/run/owner_manager.go`,
       `internal/run/recovery.go`, `internal/run/store.go`.
-      Depends on: D3, D4.
+      Depends on: D3, D4, G7.
 - [ ] D6. Enforce `fanOut.maxParallel` in **owner in-memory mode**. D2 adds the
       in-flight cap to the claimer's SQL predicate and the owner-dispatch SQL query,
       but `dispatchRunInMemory` (`internal/dispatch/loop.go:376`) dispatches from
@@ -950,11 +1010,14 @@ cross-design questions, not items here.
 - **Stream G gates everything.** It re-keys the run lifecycle off `(run, task)`
   onto `TaskRun` identity across the SQL advancement path, the run-owner in-memory
   engine, the checkpoint format, recovery replay, retry accounting, and the
-  owner↔worker wire protocol. It is behavior-neutral for unfanned runs and ships
-  with **no fan-out feature visible**, so it can be reviewed and reverted on its
-  own — and no item in A–F may merge before it, because ordering and expansion
-  cannot be layered on a substrate that cannot represent two siblings. Within G:
-  G1 → G2 → (G3, G4) and G1 → G5; G6 is the audit and closes the stream.
+  owner↔worker wire protocol, and it collapses the live/replay traversal
+  duplication that has generated four P1s in one family. It is behavior-neutral for
+  unfanned runs and ships with **no fan-out feature visible**, so it can be reviewed
+  and reverted on its own — and no item in A–F may merge before it, because ordering
+  and expansion cannot be layered on a substrate that cannot represent two siblings.
+  Within G: G1 → G2 → (G3, G4, G7) and G1 → G5; G6 is the audit and closes the
+  stream. **G7 is load-bearing for Stream D**: it is what makes D5 a one-place
+  change instead of a two-place change that review has to catch.
 - **Streams A and B are the foundation and are independent of each other** (A owns
   `internal/models/run.go` + `pkg/task/output.go` and the partition-column binding
   in `internal/run/store.go`; B owns `pkg/jobdef/definition.go` +
@@ -983,7 +1046,7 @@ cross-design questions, not items here.
   reality.
 
 **Suggested waves:**
-- **W0 = G (G1→G2→(G3, G4); G5 after G1; G6 last) + H-1.** The identity
+- **W0 = G (G1→G2→(G3, G4, G7); G5 after G1; G6 last) + H-1.** The identity
   migration, alone, with no fan-out surface. H-1 rides along because the harness
   work is independent and W0's failover/owner scenarios need it. This wave is a
   hard gate: **do not start W1 until G6's audit table is merged.**
@@ -999,8 +1062,11 @@ cross-design questions, not items here.
   store-side ordering. Unblocked once D1's instances exist (E3 needs only C2).
 - **W5 = F (F1, F2) + N-1.** F after E1; N-1 last.
 
-**Within-stream order:** G1 → G2 → (G3, G4 in parallel — G3 owns the snapshot and
-recovery, G4 the wire protocol); G5 needs only G1; G6 closes the stream. A1 → A2 →
+**Within-stream order:** G1 → G2 → (G3, G4, G7 — G3 owns the snapshot and recovery,
+G4 the wire protocol, G7 the traversal kernel; G3 and G7 both touch
+`recovery.go`/`owner_state.go`, so sequence G3 → G7 rather than running them
+concurrently); G5 needs only G1; G6 closes the stream. **G7 must merge before D5**
+regardless of wave packing. A1 → A2 →
 A3 → A4 (columns+index, then the partition-column binding, then markers, then the
 in-group validator — A3's env cap is read by B1's lint and C1's executor, and A4
 consumes A3's normalized `[]Partition`). B1 → B2. C1 → (C2, C3 in parallel —
@@ -1024,16 +1090,24 @@ on C2); E4 after D3 + G5. F1, F2 parallel (F2 needs E1).
   predicate, D3 is in the decrement/skip paths. G5 and E4 both touch
   `retryFromFailure` and are two waves apart by construction.
 - `internal/run/owner_state.go` — G2 re-keys `RunState`, G3 versions and re-keys
-  the snapshot, D4 adds in-memory expansion to `ApplyCompletion`, D5 adds in-group
-  adjacency + decrement + skip cascade to `advanceSuccessors`/`markTerminal`, D6
-  adds per-group in-flight accounting. **Sequence G2 → G3 → D4 → D5 → D6**;
-  single-threaded through the stream order, never concurrent. This is the second
-  busiest file in the plan after `store.go`.
+  the snapshot, **G7 extracts the single traversal kernel** that
+  `advanceSuccessors` and `ApplyTerminalRow` both call, D4 adds in-memory expansion
+  to `ApplyCompletion`, D5 registers in-group adjacency with G7's kernel and adds
+  the skip cascade, D6 adds per-group in-flight accounting. **Sequence
+  G2 → G3 → G7 → D4 → D5 → D6**; single-threaded through the stream order, never
+  concurrent. This is the second busiest file in the plan after `store.go`, and G7
+  is the item that stops it getting busier — without it every later item edits two
+  traversals instead of one.
+- `internal/run/owner_topology.go` — G2 (instance keys) and G7 (the shared
+  edge-resolution seam that `LoadRunTopology` and `loadReplayRunTopology` both
+  use). Sequence G2 → G7.
 - `internal/dispatch/loop.go` — G4 (instance identity on dispatch) and D6 (the
   owner-mode `maxParallel` cap in `dispatchRunInMemory`). Sequence G4 → D6.
 - `internal/run/owner_manager.go` — G2 (instance keys) and D4 (the partition list
   on the completion seam). Sequence G2 → D4.
-- `internal/run/recovery.go` — G3 only.
+- `internal/run/recovery.go` — G3 (instance-keyed replay), G7 (replay calls the
+  shared kernel), D5 (rebuild in-group adjacency before replaying the tail).
+  Sequence G3 → G7 → D5.
 - `internal/dispatch/dispatch.go` — G4 adds the instance identity to
   `DispatchRequest`/`CompleteRequest`; D4 adds the partition list to
   `CompleteRequest`. Both edit the same two structs. **Sequence G4 → D4**; land
@@ -1132,7 +1206,17 @@ Per-stream additions:
   completion routes and three advancement implementations the change touches, and
   for any state it seeds, where the inverse lives on each. An item that seeds a
   counter without naming its decrement on all routes should block review — this
-  defect shape has surfaced three times.
+  defect shape has surfaced four times.
+- **Traversal singularity (G7, and every item after it):** after G7 there is one
+  successor-traversal kernel and one edge-resolution seam. A later PR that adds an
+  edge class or a decrement in **two** places has either bypassed G7 or found a
+  gap in it; treat that as a defect in G7, not as normal work. The regression test
+  is a direct one: live and replay must produce identical indegree and readiness
+  for the same terminal sequence.
+- **Post-checkpoint replay (D5d):** a failover whose last checkpoint predates a
+  prerequisite instance's completion must still run the dependent. This is the
+  exact window where the replay traversal, not the live one, decides readiness —
+  a failover test that checkpoints after every completion never enters it.
 - **Retry does not release downstream early (G5):** a group with one succeeded
   and one failed sibling, retried; assert the downstream step does **not** start
   until the retried sibling is terminal. Without an explicit ordering assertion
@@ -1172,8 +1256,9 @@ The plan is done when **all** of these hold:
    checkpoint format, recovery replay, retry accounting, and the owner↔worker wire
    protocol; a predecessor group is satisfied only when **every** live sibling row
    is a terminal success; an old-format checkpoint blob is rejected rather than
-   silently restored; and G6's site → answer (re-key / aggregate /
-   assert-unfanned) → test table is recorded. Closed by the existing suite and
+   silently restored; the live and replay traversals are **one implementation**
+   (G7), so an edge class is enumerated in exactly one place; and G6's site →
+   answer (re-key / aggregate / assert-unfanned) → test table is recorded. Closed by the existing suite and
    both owner modes green with no assertion relaxed. **This criterion gates every
    one below it** — nothing in A–F is meaningful on a substrate that cannot
    represent two siblings.

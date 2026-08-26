@@ -850,9 +850,11 @@ edges.
 
 ### Route completeness (state this once, check every item against it)
 
-Two review rounds each surfaced the same shape of defect — fan-out state seeded on
-one route with no corresponding inverse on another — so it is worth stating as an
-invariant rather than rediscovering per item:
+Three review rounds surfaced the same shape of defect — fan-out state seeded in
+one place with no corresponding inverse in another — so it is worth stating as an
+invariant rather than rediscovering per item. A fourth round then found one the
+invariant as stated does *not* catch; that case, and why the answer is to
+restructure rather than to extend the checklist, is at the end of this section:
 
 > **Every piece of state fan-out introduces must have its seed, its inverse, and
 > its recovery defined on *all four* completion routes and *all three* advancement
@@ -881,6 +883,62 @@ running the biggest clusters.
 The general rule this expresses: **a fan-out behavior is not implemented until it
 is implemented on the route that does not use SQL to advance the DAG**, and not
 verified until it is tested in both `CAESIUM_RUN_OWNER_IN_MEMORY` modes.
+
+#### The matrix has a missing axis — and growing it is the wrong fix
+
+A fourth review round found a defect the matrix above does **not** catch, and the
+miss is instructive. Recovery replays a post-checkpoint completion through
+`ApplyTerminalRow` (`internal/run/owner_state.go:243`), which does not call
+`advanceSuccessors` — it **duplicates the successor walk inline** at `:264-282`
+over `rs.topo.Adjacency` only. Teaching `advanceSuccessors` about in-group edges
+therefore leaves replay walking catalog edges alone: after a takeover the
+dependent keeps its pre-completion indegree and the run stalls. Same failure as
+the live-path bug, one function over.
+
+The matrix's axes are *operation × completion route*. This bug is not on a
+completion route at all — it is on a **traversal site**, and the owner has two of
+those for every traversal concern:
+
+| Concern | Live implementation | Replay implementation |
+|---|---|---|
+| topology build | `LoadRunTopology`, `internal/run/owner_topology.go:16` | `loadReplayRunTopology`, `:72` |
+| successor walk + indegree decrement | `advanceSuccessors`, `internal/run/owner_state.go:198` | `ApplyTerminalRow`, `:243` (inline copy) |
+| indegree seed | `NewRunState`, `:93` | snapshot `Restore`, `:398` |
+
+The pattern is not confined to the owner. `replayPredecessorRefsTx`
+(`internal/run/store.go:603`) forks a parallel replay implementation at **five**
+call sites — `predecessorStatusesTx` (`:2489`), `shouldRunTaskTx` (`:2599`),
+`PredecessorOutputs` (`:4410` → `predecessorOutputsFromRefsTx` `:4482`),
+`PredecessorDescriptorInputs` (`:4529`), and `PredecessorHashes` (`:4629` →
+`predecessorHashesFromRefsTx` `:4678`). Every question of the form *"what are this
+task's edges?"* has a live answer and a replay answer that must agree.
+
+The tempting fix is a third matrix axis (live | replay). **That is the wrong
+call.** A three-dimensional checklist — operation × route × traversal site — is
+past the point where an implementer reliably fills it in, and a checklist nobody
+completes is worse than no checklist because it launders the omission as
+diligence. Four P1s in one family is evidence that the enumeration is not the
+control that works here.
+
+The right fix is to **collapse the axis by construction**: extract the shared
+traversal so there is exactly one place where an edge class is enumerated and one
+place where indegree is decremented, and have both the live and replay paths call
+it. Then "did you also update replay?" stops being a question an implementer can
+get wrong, because there is no second copy to update. Concretely this is a
+prerequisite inside the identity migration (Stream G), *before* in-group edges are
+introduced — it makes the fan-out change smaller, not larger.
+
+One caveat that must survive the refactor, because getting it wrong is a
+correctness bug rather than a stall: **the two owner traversals differ
+deliberately.** The live path allocates a fresh `terminal_sequence` and
+transitively marks unsatisfied successors `skipped`; the replay path adopts the
+row's stored sequence and deliberately does **not** auto-skip, because every skip
+was itself persisted as a terminal row and arrives later in sequence order —
+`ApplyTerminalRow`'s own comment says re-deriving them "would double-handle them".
+So the centralization must extract the *kernel* they genuinely share — enumerate
+successor edges, decrement, test the trigger rule — and leave the
+unsatisfied-trigger **policy** as a parameter. Merging the two functions outright
+would reintroduce double-handled skips.
 
 ### The task-ID identity assumption
 
