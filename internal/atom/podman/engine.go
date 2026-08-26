@@ -10,6 +10,7 @@ import (
 	"github.com/caesium-cloud/caesium/pkg/container"
 	"github.com/caesium-cloud/caesium/pkg/env"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	"github.com/containers/podman/v5/libpod/define"
 	"github.com/containers/podman/v5/pkg/bindings"
 	"github.com/containers/podman/v5/pkg/bindings/containers"
 	"github.com/containers/podman/v5/pkg/bindings/images"
@@ -90,6 +91,14 @@ func (e *podmanEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) 
 		},
 		ContainerStorageConfig: specgen.ContainerStorageConfig{
 			Image: req.Image,
+		},
+		// HealthLogDestination carries no `omitempty` in specgen (upstream
+		// defers that to v6.0), so leaving it unset serializes as "" rather
+		// than omitting it. Podman servers validate the field and stat("")
+		// fails, rejecting every create with "HealthCheck Log '' destination
+		// error". Send the documented default explicitly.
+		ContainerHealthCheckConfig: specgen.ContainerHealthCheckConfig{
+			HealthLogDestination: define.DefaultHealthCheckLocalDestination,
 		},
 	}
 	if req.Spec.WorkDir != "" {
