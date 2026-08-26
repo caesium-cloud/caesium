@@ -31,19 +31,44 @@ type RunTopology struct {
 // SkippedTask records a task the owner transitioned to skipped (a DAG decision,
 // never reported by a worker) along with the terminal_sequence stamped on it.
 type SkippedTask struct {
-	TaskID           uuid.UUID
-	TerminalSequence int64
-	Reason           string
+	TaskID           uuid.UUID `json:"task_id"`
+	TerminalSequence int64     `json:"terminal_sequence"`
+	Reason           string    `json:"reason,omitempty"`
 }
 
 // CompletionResult is what ApplyCompletion returns: the sequence stamped on the
 // completed task, the tasks that newly became ready to dispatch, the tasks the
 // owner skipped as a consequence, and whether the run is now complete.
+//
+// Applied distinguishes a completion this call actually advanced from one that
+// was already applied and is being replayed (see ApplyCompletion).  Callers
+// decide whether to persist with Durable, never by testing TerminalSequence
+// against zero.
 type CompletionResult struct {
 	TerminalSequence int64
 	Ready            []uuid.UUID
 	Skipped          []SkippedTask
 	Complete         bool
+	Applied          bool
+}
+
+// Durable reports whether the result carries terminal rows the owner must write:
+// a sequence stamped on the completing task, or owner-decided skips.  A result
+// that is not Durable must NOT be persisted — CompleteTaskOwner would stamp
+// terminal_sequence = 0 on the row, and recovery reads the terminal tail with a
+// strictly-greater predicate (`terminal_sequence > ?`), so a zero-stamped row is
+// invisible to replay after a takeover.
+func (r CompletionResult) Durable() bool {
+	return r.TerminalSequence > 0 || len(r.Skipped) > 0
+}
+
+// completionRecord is the durable effect one worker completion had: the sequence
+// stamped on the completing task plus every skip that completion decided.  It is
+// retained per task so a repeat completion for the same task replays the same
+// durable write instead of a zero-valued one.
+type completionRecord struct {
+	TerminalSequence int64         `json:"terminal_sequence"`
+	Skipped          []SkippedTask `json:"skipped,omitempty"`
 }
 
 // RunState is the run owner's authoritative in-memory DAG state for one run.
@@ -72,6 +97,10 @@ type RunState struct {
 	seq           int64 // per-run terminal_sequence cursor (monotonic, dense)
 	terminalCount int
 	total         int
+	// completions records, per completed task, the durable effect its completion
+	// had, so a repeat delivery of the same completion replays that effect rather
+	// than a zero-valued one.  See ApplyCompletion.
+	completions map[uuid.UUID]completionRecord
 }
 
 // NewRunState builds a fresh RunState for a run that has not started executing:
@@ -81,12 +110,13 @@ type RunState struct {
 // sequence_high when seeding before replay).
 func NewRunState(topo RunTopology, startSeq int64) *RunState {
 	rs := &RunState{
-		topo:     topo,
-		tasks:    make(map[uuid.UUID]*OwnerTaskState, len(topo.Order)),
-		indegree: make(map[uuid.UUID]int, len(topo.Order)),
-		outcomes: make(map[uuid.UUID]TaskStatus),
-		inReady:  make(map[uuid.UUID]bool),
-		seq:      startSeq,
+		topo:        topo,
+		tasks:       make(map[uuid.UUID]*OwnerTaskState, len(topo.Order)),
+		indegree:    make(map[uuid.UUID]int, len(topo.Order)),
+		outcomes:    make(map[uuid.UUID]TaskStatus),
+		inReady:     make(map[uuid.UUID]bool),
+		seq:         startSeq,
+		completions: make(map[uuid.UUID]completionRecord),
 	}
 	for id := range topo.Order {
 		rs.tasks[id] = &OwnerTaskState{Status: TaskStatusPending, Attempt: 1}
@@ -155,16 +185,37 @@ func (rs *RunState) markTerminal(id uuid.UUID, status TaskStatus) int64 {
 // skip propagates.  Remaining successors have their predecessor count
 // decremented and, on reaching zero, are pushed ready or skipped per their
 // trigger rule.  Returns the sequence stamped on taskID plus the newly ready and
-// skipped tasks.  Applying a completion to an unknown or already-terminal task
-// is a no-op.
+// skipped tasks, with Applied true.
+//
+// A completion can be delivered more than once for the same task: a worker
+// re-POSTs the identical /internal/complete envelope when the owner answers 503
+// after transient dqlite contention, and by then the DAG has already advanced in
+// memory even though the durable write did not land.  Such a repeat delivery
+// does not advance anything (Applied false) but still returns the sequence and
+// skips the first delivery decided, so the caller re-persists the *same* terminal
+// rows.  Returning a zero sequence here would let the caller stamp
+// terminal_sequence = 0, which recovery's `terminal_sequence > ?` replay filters
+// out — the row would be invisible to a future takeover.  Ready is deliberately
+// not replayed: the ready queue lives in this state and the dispatch loop polls
+// it, so a re-delivery must not look like fresh work.
+//
+// A completion for a task this state does not know, or one made terminal by
+// recovery replay (which adopts the row's stored sequence rather than stamping
+// one), has no recorded effect: the result is not Durable and must not be
+// persisted.
 func (rs *RunState) ApplyCompletion(taskID uuid.UUID, status TaskStatus, branchSkipped []uuid.UUID) CompletionResult {
 	var res CompletionResult
 	ts := rs.tasks[taskID]
 	if ts == nil || IsTerminal(ts.Status) {
+		if rec, ok := rs.completions[taskID]; ok {
+			res.TerminalSequence = rec.TerminalSequence
+			res.Skipped = append([]SkippedTask(nil), rec.Skipped...)
+		}
 		res.Complete = rs.terminalCount >= rs.total
 		return res
 	}
 
+	res.Applied = true
 	res.TerminalSequence = rs.markTerminal(taskID, status)
 
 	seeds := []uuid.UUID{taskID}
@@ -186,6 +237,11 @@ func (rs *RunState) ApplyCompletion(taskID uuid.UUID, status TaskStatus, branchS
 	res.Ready = ready
 	res.Skipped = append(res.Skipped, skipped...)
 	res.Complete = rs.terminalCount >= rs.total
+
+	rs.completions[taskID] = completionRecord{
+		TerminalSequence: res.TerminalSequence,
+		Skipped:          append([]SkippedTask(nil), res.Skipped...),
+	}
 	return res
 }
 
@@ -368,13 +424,14 @@ func (rs *RunState) Sequence() int64 { return rs.seq }
 // persisted in a run_checkpoints row.  Topology is NOT serialized — it is
 // reloaded from the catalog on recovery (constant for the run's lifetime).
 type runStateSnapshot struct {
-	Tasks         map[uuid.UUID]*OwnerTaskState `json:"tasks"`
-	Indegree      map[uuid.UUID]int             `json:"indegree"`
-	Outcomes      map[uuid.UUID]TaskStatus      `json:"outcomes"`
-	Ready         []uuid.UUID                   `json:"ready"`
-	Sequence      int64                         `json:"sequence"`
-	TerminalCount int                           `json:"terminal_count"`
-	Total         int                           `json:"total"`
+	Tasks         map[uuid.UUID]*OwnerTaskState  `json:"tasks"`
+	Indegree      map[uuid.UUID]int              `json:"indegree"`
+	Outcomes      map[uuid.UUID]TaskStatus       `json:"outcomes"`
+	Ready         []uuid.UUID                    `json:"ready"`
+	Sequence      int64                          `json:"sequence"`
+	TerminalCount int                            `json:"terminal_count"`
+	Total         int                            `json:"total"`
+	Completions   map[uuid.UUID]completionRecord `json:"completions,omitempty"`
 }
 
 // Snapshot serializes the mutable run state to a checkpoint blob (JSON in v1).
@@ -389,6 +446,7 @@ func (rs *RunState) Snapshot() ([]byte, error) {
 		Sequence:      rs.seq,
 		TerminalCount: rs.terminalCount,
 		Total:         rs.total,
+		Completions:   rs.completions,
 	}
 	return json.Marshal(snap)
 }
@@ -410,6 +468,7 @@ func Restore(topo RunTopology, blob []byte) (*RunState, error) {
 		seq:           snap.Sequence,
 		terminalCount: snap.TerminalCount,
 		total:         snap.Total,
+		completions:   snap.Completions,
 	}
 	if rs.tasks == nil {
 		rs.tasks = make(map[uuid.UUID]*OwnerTaskState)
@@ -419,6 +478,9 @@ func Restore(topo RunTopology, blob []byte) (*RunState, error) {
 	}
 	if rs.outcomes == nil {
 		rs.outcomes = make(map[uuid.UUID]TaskStatus)
+	}
+	if rs.completions == nil {
+		rs.completions = make(map[uuid.UUID]completionRecord)
 	}
 	for _, id := range rs.ready {
 		rs.inReady[id] = true

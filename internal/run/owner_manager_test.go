@@ -120,6 +120,97 @@ func TestOwnerManager_RecoverThenLoopFlow(t *testing.T) {
 	require.Greater(t, aRow.TerminalSequence, int64(0), "owner completion must stamp a terminal_sequence > 0")
 }
 
+// TestOwnerManager_RedeliveredCompletionKeepsTerminalSequence covers the worker
+// re-delivering an identical completion (it re-POSTs /internal/complete when the
+// owner answers 503 for transient dqlite contention).  The second delivery must
+// not stamp terminal_sequence = 0 over the sequence the first one wrote:
+// recovery reads the terminal tail with `terminal_sequence > ?`, so a zeroed row
+// is invisible to replay and the task is re-dispatched after a takeover.
+func TestOwnerManager_RedeliveredCompletionKeepsTerminalSequence(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, _ := seedTwoTaskRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+
+	_, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+
+	var row models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&row).Error)
+	stamped := row.TerminalSequence
+	require.Greater(t, stamped, int64(0), "first completion must stamp a terminal_sequence > 0")
+
+	// The worker re-POSTs the identical envelope.
+	_, err = mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-1", nil, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&row).Error)
+	require.Equal(t, stamped, row.TerminalSequence,
+		"a re-delivered completion must not overwrite the stamped terminal_sequence")
+	require.Equal(t, string(TaskStatusSucceeded), row.Status)
+
+	// The row is still visible to recovery replay.
+	rows, err := store.TerminalTaskRunsSince(runID, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "the terminal row must remain visible to recovery replay")
+	require.Equal(t, taskA, rows[0].TaskID)
+}
+
+// TestOwnerManager_RedeliveryAfterFailedPersistWritesTerminalRows models the
+// case that makes the re-delivery live: the first delivery advanced the DAG in
+// memory and then its durable write failed (transient contention → 503), so the
+// worker retried.  The retry must write the terminal rows the first delivery
+// decided — the completed task at its stamped sequence, and every skip it
+// produced — rather than dropping them because the state is already terminal.
+//
+// The failed persist is modelled by advancing the owner's in-memory state
+// directly (exactly what Complete does before calling CompleteTaskOwner) and
+// then delivering the completion through Complete.
+func TestOwnerManager_RedeliveryAfterFailedPersistWritesTerminalRows(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	runID, taskA, taskB := seedTwoTaskRun(t, db, store, "node-1")
+
+	mgr := NewOwnerManager(store, CheckpointConfig{Events: 1, Interval: time.Hour, KeepFulls: 3})
+	require.NoError(t, mgr.Adopt(runID, 1))
+
+	// Delivery 1: DAG advances in memory (b is branch-skipped), durable write fails.
+	or, ok := mgr.get(runID)
+	require.True(t, ok)
+	first := or.state.ApplyCompletion(taskA, TaskStatusSucceeded, []uuid.UUID{taskB})
+	require.True(t, first.Applied)
+	require.Len(t, first.Skipped, 1)
+
+	var aRow models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&aRow).Error)
+	require.Equal(t, string(TaskStatusPending), aRow.Status, "the failed persist wrote nothing")
+
+	// Delivery 2: the worker retries the identical envelope.
+	res, err := mgr.Complete(runID, taskA, TaskStatusSucceeded, "success", "", "node-1", nil, []string{"selected"})
+	require.NoError(t, err)
+	require.True(t, res.Owned)
+
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskA).First(&aRow).Error)
+	require.Equal(t, string(TaskStatusSucceeded), aRow.Status)
+	require.Equal(t, first.TerminalSequence, aRow.TerminalSequence,
+		"the retry must persist the sequence the first delivery stamped")
+
+	var bRow models.TaskRun
+	require.NoError(t, db.Where("job_run_id = ? AND task_id = ?", runID, taskB).First(&bRow).Error)
+	require.Equal(t, string(TaskStatusSkipped), bRow.Status,
+		"the retry must persist the skip the first delivery decided")
+	require.Equal(t, first.Skipped[0].TerminalSequence, bRow.TerminalSequence)
+
+	// Both terminal rows replay in sequence order after a takeover.
+	rows, err := store.TerminalTaskRunsSince(runID, 0)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "both terminal rows must be visible to recovery replay")
+}
+
 // TestOwnerManager_ConcurrentRunsNoDeadlock exercises several runs through the
 // manager concurrently (adopt, ready, dispatch, complete) to validate the
 // per-run-mutex design: independent runs must proceed in parallel without
