@@ -20,6 +20,14 @@ type OwnerTaskState struct {
 	Attempt          int        `json:"attempt"`
 	ClaimedBy        string     `json:"claimed_by,omitempty"`
 	LeaseExpiresAtMs int64      `json:"lease_expires_at_ms,omitempty"`
+	// Started distinguishes a task whose container is actually up from one that
+	// is merely DISPATCHED — accepted by a peer and sitting in its worker pool
+	// with nothing running yet. Both are Status running here (MarkDispatched is
+	// the only transition into it), and telling them apart is what lets
+	// fail_fast cancel a sibling before it starts instead of watching it start
+	// after the group has already failed. See MarkStarted / SyncStartedFromRows;
+	// the durable marker is the TaskRun's runtime_id.
+	Started bool `json:"started,omitempty"`
 }
 
 // RunTopology is the immutable DAG shape for a run, loaded once at construction.
@@ -283,21 +291,37 @@ func (rs *RunState) ApplyCompletion(taskID uuid.UUID, status TaskStatus, branchS
 		// is a superset of the `continue` cascade below, so the two are mutually
 		// exclusive.
 		//
-		// PENDING siblings only, matching the design ("at first failure,
-		// cancelling pending siblings" — docs/design-dynamic-fanout.md:324, :691,
-		// :1111) and the SQL lane's failFastSkipSiblingsTx. A RUNNING sibling is
-		// deliberately left alone: Caesium cannot kill its container, so marking
+		// Every sibling that has not STARTED, matching the design ("at first
+		// failure, cancelling pending siblings" — docs/design-dynamic-fanout.md:324,
+		// :691, :1111) and the SQL lane's failFastSkipSiblingsTx.
+		//
+		// "Pending" is the design's word for it, but pending is not the whole set
+		// this state can still cancel, and reading it literally is what let a
+		// sibling start after the group had already failed: with one worker slot
+		// the owner had DISPATCHED the next instance (accepted by a peer, queued
+		// behind the failing one, no container yet), so it was `running` here and
+		// the pending-only filter skipped over it. Its container started seconds
+		// after the failure — the exact thing fail_fast exists to prevent, and it
+		// surfaced as a scheduling-dependent CI failure rather than a reliable
+		// one.
+		//
+		// A sibling that is genuinely RUNNING is still left alone, unchanged and
+		// for the original reason: Caesium cannot kill its container, so marking
 		// the row skipped would claim a terminal state for live work and let the
 		// worker's later completion contradict it. It runs to its own terminal
 		// state, the group resolves failed on that transition, and the fan-in is
 		// skipped by its trigger rule — later, but never wrong.
+		//
+		// Started is refreshed from the durable rows immediately before this runs
+		// (OwnerManager.CompleteInstance → SyncStartedFromRows), and the worker
+		// refuses to start a row whose claim this skip revoked, so the cancel and
+		// the start cannot both win.
 		catalogID := rs.catalogOf[taskID]
 		for _, sib := range rs.instancesOf[catalogID] {
 			if sib == taskID {
 				continue
 			}
-			st := rs.tasks[sib]
-			if st == nil || st.Status != TaskStatusPending {
+			if !rs.cancellableBeforeStart(sib) {
 				continue
 			}
 			seq := rs.markTerminal(sib, TaskStatusSkipped)
@@ -511,9 +535,79 @@ func (rs *RunState) requeueRunning() []uuid.UUID {
 		ts.Attempt++
 		ts.ClaimedBy = ""
 		ts.LeaseExpiresAtMs = 0
+		ts.Started = false
 		rs.pushReady(id)
 	}
 	return out
+}
+
+// MarkStarted records that a dispatched task is genuinely executing — a
+// container exists for it, so cancelling it can no longer prevent it from
+// running.  Idempotent; a no-op for an unknown or terminal task.
+//
+// Deliberately unwired in production, and the reason is the whole point of
+// SyncStartedFromRows below: the owner never observes a start. MarkDispatched
+// fires when a PEER accepts the push, and the worker that eventually creates
+// the container reports back only when the task finishes, so there is no
+// callback this would hang off. The single reader of Started
+// (cancellableBeforeStart, on the fail_fast branch) syncs from the durable rows
+// immediately before it reads, which is what makes the flag authoritative
+// exactly when it matters. This states the transition directly, for tests and
+// for any future seam that does observe one.
+func (rs *RunState) MarkStarted(taskID uuid.UUID) {
+	ts := rs.tasks[taskID]
+	if ts == nil || IsTerminal(ts.Status) {
+		return
+	}
+	ts.Started = true
+}
+
+// SyncStartedFromRows refreshes the Started flag from durable TaskRun rows.
+//
+// The owner never observes a start directly: MarkDispatched is called when a
+// peer ACCEPTS the push, and the worker that eventually creates the container
+// reports back only when the task finishes.  The row's runtime_id is the
+// durable record of "a container exists" (StartTask / StartTaskClaimed write it
+// with the engine's atom id, and only after Create returned), so it is the
+// marker both lanes agree on — deliberately not started_at, which
+// ClaimTaskForDispatch stamps at CLAIM time and which therefore cannot tell a
+// queued task from a running one on the owner-push path.
+//
+// Callers sync immediately before a decision that depends on the distinction
+// (fail_fast cancellation), so the flag is authoritative exactly when it is
+// read rather than continuously.  Rows are matched by instance identity first,
+// falling back to the catalog task id for an unfanned step, mirroring how this
+// state keys its nodes.
+func (rs *RunState) SyncStartedFromRows(rows []models.TaskRun) {
+	if rs == nil {
+		return
+	}
+	for i := range rows {
+		row := &rows[i]
+		id := row.TaskID
+		if _, ok := rs.tasks[row.ID]; ok {
+			id = row.ID
+		}
+		ts := rs.tasks[id]
+		if ts == nil || IsTerminal(ts.Status) {
+			continue
+		}
+		ts.Started = taskRunStarted(row)
+	}
+}
+
+// cancellableBeforeStart reports whether a task can still be resolved terminal
+// without stranding live work: it is pending, or it was dispatched and its
+// worker has not created a container yet.
+func (rs *RunState) cancellableBeforeStart(id uuid.UUID) bool {
+	ts := rs.tasks[id]
+	if ts == nil {
+		return false
+	}
+	if ts.Status == TaskStatusPending {
+		return true
+	}
+	return ts.Status == TaskStatusRunning && !ts.Started
 }
 
 // MarkDispatched records that a ready task was pushed to a worker: it leaves the
@@ -527,6 +621,10 @@ func (rs *RunState) MarkDispatched(taskID uuid.UUID, claimedBy string, attempt i
 	ts.ClaimedBy = claimedBy
 	ts.Attempt = attempt
 	ts.LeaseExpiresAtMs = leaseExpiresAtMs
+	// Dispatched is not started: the peer accepted the push and claimed the row,
+	// but its worker pool may not have created a container yet. A re-dispatch
+	// after a takeover must not inherit the previous attempt's Started.
+	ts.Started = false
 	rs.removeReady(taskID)
 	// A group's clock starts at its first instance's dispatch (the design's
 	// "first instance start to group resolve"); TakeResolvedGroups closes it.
@@ -763,13 +861,67 @@ func (rs *RunState) ExpandTask(taskID uuid.UUID, instances []ExpandedInstance) {
 	rs.instancesOf[taskID] = ids
 }
 
+// rebaseExpansionOutstanding re-derives each instance's cross-step predecessor
+// count from THIS state's catalog node rather than from the planner's copy of
+// the persisted template row, and rewrites the payload so the durable rows carry
+// the same number.
+//
+// PlanFanOutExpansion seeds every instance with the template TaskRun's
+// outstanding_predecessors plus its in-group indegree (internal/run/fanout.go).
+// That column is authoritative on the SQL lane, which decrements it on every
+// predecessor completion before expansion copies it. It is NOT authoritative
+// here: CompleteTaskOwner persists terminal rows and deliberately leaves
+// outstanding_predecessors stale (internal/dispatch/dispatch.go trusts the
+// owner's readiness decision for exactly that reason).
+//
+// So for a fanned step with more than one cross-step predecessor, a predecessor
+// that is not fanOut.from and completes FIRST was counted twice: the owner
+// decremented the catalog node in memory, then expansion deleted that node and
+// installed instances carrying the untouched original count. The producer's own
+// completion decremented each instance once, leaving every partition one short
+// of ready with nothing left to decrement — the whole group stayed pending and
+// the run stalled.
+//
+// The catalog node's REMAINING indegree is the count that is right in either
+// order, so it becomes the base and each partition's in-group indegree is added
+// back on top of it. Dependents is the same edge set ValidatePartitionGraph
+// counted into Indegree, so the in-group half is unchanged. RehydrateInGroupEdges
+// already rebases from the in-memory catalog node this way on recovery; this
+// makes the live path agree with it.
+func (rs *RunState) rebaseExpansionOutstanding(g *ExpandedGroup) {
+	if rs == nil || g == nil || len(g.Instances) == 0 {
+		return
+	}
+	// Only when this state actually holds the catalog node the group replaces.
+	// For a group whose task this state never tracked, indegree would read 0 and
+	// every instance would be dispatched immediately; the planner's counts stand.
+	if _, known := rs.tasks[g.TaskID]; !known {
+		return
+	}
+	base := rs.indegree[g.TaskID]
+	inGroup := make(map[string]int, len(g.Instances))
+	for _, deps := range g.Dependents {
+		for _, key := range deps {
+			inGroup[key]++
+		}
+	}
+	for i := range g.Instances {
+		g.Instances[i].OutstandingPredecessors = base + inGroup[g.Instances[i].Partition.Key]
+	}
+}
+
 // ApplyExpansion materializes fanned successor groups and in-group adjacency.
+//
+// It rewrites each instance's OutstandingPredecessors in place before
+// materializing it (see rebaseExpansionOutstanding), so the caller's payload —
+// which CompleteTaskOwner persists — carries the same counts this state applies.
 func (rs *RunState) ApplyExpansion(exp *FanOutExpansion) []SkippedTask {
 	if rs == nil || exp == nil {
 		return nil
 	}
 	var skipped []SkippedTask
-	for _, g := range exp.Groups {
+	for gi := range exp.Groups {
+		g := &exp.Groups[gi]
 		if g.MaxParallel > 0 {
 			rs.maxParallel[g.TaskID] = g.MaxParallel
 		}
@@ -793,6 +945,7 @@ func (rs *RunState) ApplyExpansion(exp *FanOutExpansion) []SkippedTask {
 		if len(g.Instances) == 0 {
 			continue
 		}
+		rs.rebaseExpansionOutstanding(g)
 		rs.ExpandTask(g.TaskID, g.Instances)
 		keyToID := make(map[string]uuid.UUID, len(g.Instances))
 		for _, inst := range g.Instances {

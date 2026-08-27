@@ -586,6 +586,15 @@ type fakeEngine struct {
 	// atomLookupKey. Empty (the default) means a silent container.
 	logsByName map[string]string
 
+	// logsByPartition is the stream a FANNED instance's container prints, keyed
+	// by partition value. Every instance of a fanned step shares one task ID, so
+	// logsByName (keyed on atomLookupKey) cannot give them distinct output.
+	logsByPartition map[string]string
+
+	// partitionByAtomID survives Stop, unlike partitionActiveByAtomID, so a log
+	// read taken after the instance finished still resolves its partition.
+	partitionByAtomID map[string]string
+
 	// Fan-out steering. A fanned instance's container name carries a random
 	// TaskRun UUID, so tests cannot address it by name; these maps key on the
 	// partition value injected into the container instead.
@@ -629,6 +638,8 @@ func newFakeEngine() *fakeEngine {
 		runDurationByName:       map[string]time.Duration{},
 		resultByName:            map[string]atom.Result{},
 		logsByName:              map[string]string{},
+		logsByPartition:         map[string]string{},
+		partitionByAtomID:       map[string]string{},
 		createErrByPartition:    map[string]error{},
 		failCreateTimes:         map[string]int{},
 		createCallsByPartition:  map[string]int{},
@@ -744,6 +755,7 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	if partition != "" {
 		e.partitionStarts = append(e.partitionStarts, partition)
 		e.partitionActiveByAtomID[state.id] = partition
+		e.partitionByAtomID[state.id] = partition
 		e.partitionInFlight++
 		if e.partitionInFlight > e.maxPartitionInFlight {
 			e.maxPartitionInFlight = e.partitionInFlight
@@ -817,6 +829,11 @@ func (e *fakeEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
 	defer e.mu.Unlock()
 	body := ""
 	if req != nil {
+		if partition, ok := e.partitionByAtomID[req.ID]; ok {
+			if partitionBody, ok := e.logsByPartition[partition]; ok {
+				return io.NopCloser(strings.NewReader(partitionBody)), nil
+			}
+		}
 		body = e.logsByName[atomLookupKey(req.ID)]
 	}
 	return io.NopCloser(strings.NewReader(body)), nil

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -700,11 +701,15 @@ func (s *Store) resolveInstanceFailureTx(
 //
 //	fail_fast (the DEFAULT — pkg/jobdef's validateSteps normalizes "" to it):
 //	  the first instance failure stops the group taking on any MORE work. Every
-//	  PENDING sibling is resolved skipped with its own terminal_sequence and its
-//	  own task_skipped event, so none is ever dispatched and a takeover does not
-//	  re-dispatch it. This is a strict SUPERSET of the dependency cascade (a
-//	  dependent of the failure was by definition still pending), so the two
-//	  branches are mutually exclusive.
+//	  sibling that has NOT YET STARTED is resolved skipped with its own
+//	  terminal_sequence and its own task_skipped event, so none is ever
+//	  dispatched and a takeover does not re-dispatch it. Not-yet-started rather
+//	  than merely pending: both claim paths flip a row to `running` before any
+//	  container exists, so a claimed sibling waiting for a worker slot would
+//	  otherwise start AFTER the group had already failed (see
+//	  failFastSkipSiblingsTx and taskRunStarted). This is a strict SUPERSET of
+//	  the dependency cascade (a dependent of the failure had by definition not
+//	  started), so the two branches are mutually exclusive.
 //	continue:
 //	  only the failed instance's TRANSITIVE in-group dependents are skipped
 //	  (skipInGroupDependentsTx); independent siblings run to completion and the
@@ -751,39 +756,82 @@ func (s *Store) groupFailsFastTx(tx *gorm.DB, taskID uuid.UUID) (bool, error) {
 	return fo.FailurePolicy != jobdefschema.FanOutFailureContinue, nil
 }
 
-// failFastSkipSiblingsTx resolves every PENDING sibling of a failed instance,
+// taskRunStarted reports whether a TaskRun has actually begun executing — a
+// container/pod exists for it.
+//
+// runtime_id is the marker, deliberately, and NOT started_at:
+//
+//   - runtime_id is written by StartTask / StartTaskClaimed with the engine's
+//     atom id, which only exists once the runtime accepted the container. The
+//     claim paths never write it, and retryTask clears it, so it is empty for
+//     exactly the window between a claim and a start.
+//   - started_at looks like the natural marker and is not: ClaimTaskForDispatch
+//     stamps it at CLAIM time (internal/run/store.go), so on the owner-push lane
+//     a task queued in a worker pool with no container is indistinguishable from
+//     one halfway through its run. The pull lane's claim leaves it null, so the
+//     two lanes would not even agree.
+//
+// A row is therefore cancellable-before-start when it is pending, or running
+// with no runtime_id. Both claim paths flip a row to running BEFORE any
+// container exists — ClaimNext's single-statement UPDATE and
+// ClaimTaskForDispatch alike — so `pending` alone is NOT the set of rows that
+// have yet to start, on either lane.
+func taskRunStarted(row *models.TaskRun) bool {
+	return row != nil && strings.TrimSpace(row.RuntimeID) != ""
+}
+
+// cancellableBeforeStartPredicate is the SQL half of taskRunStarted: rows that
+// can still be resolved terminal without stranding a live container. It is a
+// predicate rather than a status list because the check must happen INSIDE the
+// guarded UPDATE — a worker that starts the container between the read and the
+// write must make the cancel fail, not lose the race silently.
+func cancellableBeforeStartPredicate() (string, []interface{}) {
+	return "(status = ? OR (status = ? AND COALESCE(runtime_id, '') = ''))",
+		[]interface{}{string(TaskStatusPending), string(TaskStatusRunning)}
+}
+
+// failFastSkipSiblingsTx resolves every not-yet-started sibling of a failed instance,
 // each through the shared terminal-skip primitive so it gets its own
 // terminal_sequence and its own task_skipped event carrying its own partition.
 // The reason string is the exact one the owner lane emits, because consumers
 // (and the integration lane) match on it.
 //
-// PENDING, not merely non-terminal, is the design's contract: fail_fast
-// "cancels pending siblings" (docs/design-dynamic-fanout.md:324, :691, :1111 —
-// :691 is the decisive one, reasoning explicitly in terms of pending). A
-// RUNNING sibling is left alone deliberately, for a reason beyond the doc:
-// Caesium cannot kill a running container, so marking one skipped would claim a
-// terminal state for live work and invite its worker's later completion to
-// contradict the row — the same shape as the local-mode replace-cancel
-// resurrection bug. The run loses nothing by waiting: an in-flight instance
-// reaches a terminal row on its own, at which point groupAllTerminalTx fires and
-// the cross-step successors are resolved against a group that already contains a
-// failure (the failed sibling alone fixes group status, so the fan-in is skipped
-// by its trigger rule either way). What fail_fast buys is that no FURTHER
-// instance is ever dispatched.
+// NOT-YET-STARTED, not merely pending, is the contract. The design says
+// fail_fast "cancels pending siblings" (docs/design-dynamic-fanout.md:324,
+// :691, :1111), but `status = pending` is not that set: both claim paths flip a
+// row to `running` BEFORE any container exists — ClaimNext's single-statement
+// UPDATE, and ClaimTaskForDispatch — and the worker pool may hold the claimed
+// task for as long as it takes a slot to free up. A pending-only skip therefore
+// left a claimed-but-unstarted sibling to start seconds AFTER its group had
+// already failed, which is precisely what fail_fast exists to prevent. It
+// surfaced as a scheduling-dependent CI failure (one worker slot, the sibling
+// queued behind the failing instance), not a deterministic one. taskRunStarted
+// documents why runtime_id, not started_at, decides.
 //
-// The owner in-memory lane is pending-only too, deliberately and for the same
-// reasons: RunState.ApplyCompletion (internal/run/owner_state.go) skips only
-// siblings whose status is pending. The two lanes agree.
+// A genuinely RUNNING sibling is left alone, unchanged: Caesium cannot kill a
+// running container, so marking one skipped would claim a terminal state for
+// live work and invite its worker's later completion to contradict the row —
+// the same shape as the local-mode replace-cancel resurrection bug. The run
+// loses nothing by waiting: an in-flight instance reaches a terminal row on its
+// own, at which point groupAllTerminalTx fires and the cross-step successors are
+// resolved against a group that already contains a failure (the failed sibling
+// alone fixes group status, so the fan-in is skipped by its trigger rule either
+// way).
+//
+// The owner in-memory lane cancels the same set for the same reasons:
+// RunState.ApplyCompletion (internal/run/owner_state.go) skips siblings that are
+// pending or dispatched-but-not-started.
 func (s *Store) failFastSkipSiblingsTx(tx *gorm.DB, runID uuid.UUID, failed *models.TaskRun, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	predSQL, predArgs := cancellableBeforeStartPredicate()
+	args := append([]interface{}{runID, failed.TaskID, failed.ID}, predArgs...)
 	var siblings []models.TaskRun
-	if err := tx.Where("job_run_id = ? AND task_id = ? AND id <> ? AND status = ?",
-		runID, failed.TaskID, failed.ID, string(TaskStatusPending)).
+	if err := tx.Where("job_run_id = ? AND task_id = ? AND id <> ? AND "+predSQL, args...).
 		Order("partition_index ASC").
 		Find(&siblings).Error; err != nil {
 		return err
 	}
 	for i := range siblings {
-		if _, err := s.markInstanceSkippedTx(tx, runID, &siblings[i],
+		if _, err := s.markInstanceCancelledBeforeStartTx(tx, runID, &siblings[i],
 			"fan-out group failed fast", pendingEvents, counts); err != nil {
 			return err
 		}

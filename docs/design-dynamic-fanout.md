@@ -321,7 +321,7 @@ above, which needs an orthogonal chain break. Both are worked through in
 
 - **Group status** = `succeeded` iff all instances succeeded/cached; `failed`
   if any instance exhausted retries (under `continue`, evaluated when the last
-  sibling lands; under `fail_fast`, at first failure, cancelling pending
+  sibling lands; under `fail_fast`, at first failure, cancelling not-yet-started
   siblings); `skipped` if skipped pre-expansion or `onEmpty: skip` fired. This
   single status feeds `taskOutcomes` and trigger rules unchanged; the group
   decrements each downstream successor **once**, when it resolves — never once
@@ -688,7 +688,7 @@ instance row, so detection and scheduling come from one traversal.
 | Knob | Interaction |
 |---|---|
 | `maxParallel` | Composes with no special handling: ordering decides which instances are *ready*, `maxParallel` decides how many ready ones are *in flight*. Deadlock is impossible — readiness derives from terminal siblings, never from free slots. A deep chain simply has fewer ready instances than the cap allows |
-| `failurePolicy: fail_fast` | Unchanged: the first failure cancels pending siblings. Dependents of the failure were pending, so the existing rule already cancels them and the skip cascade is a no-op |
+| `failurePolicy: fail_fast` | Unchanged: the first failure cancels every sibling that has not started (pending, or claimed/dispatched but with no container yet — an empty `runtime_id`); a sibling whose container is running finishes on its own. Dependents of the failure were pending, so the existing rule already cancels them and the skip cascade is a no-op |
 | `failurePolicy: continue` | The skip cascade above is required. Independent instances keep running; the failed instance's transitive dependents resolve `skipped`; group status is `failed` because a sibling exhausted retries. A group may therefore contain succeeded, failed, **and** skipped instances |
 | `onEmpty` | Unchanged. Ordering over an empty set is vacuous |
 | `rateLimit` | Unchanged. Parking via `RateLimitTask` (`internal/run/store.go:1808`) delays an instance; its dependents wait, which is correct |
@@ -1108,7 +1108,7 @@ driving the real binary/server (no hand-seeded rows):
 
 1. Happy path: producer emits 5 partitions; 5 instances run, each sees
    `CAESIUM_PARTITION`; fan-in runs once with the aggregate env visible.
-2. Failure matrix: `fail_fast` cancels pending siblings; `continue` resolves
+2. Failure matrix: `fail_fast` cancels not-yet-started siblings; `continue` resolves
    the group failed after all siblings; downstream `all_done` still runs.
 3. Retry: fail one partition, `caesium run retry`, assert the 4 unchanged
    instances **cache-hit** (per-partition identity) and only one re-executes.

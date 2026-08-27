@@ -2056,6 +2056,41 @@ func (s *Store) RateLimitTask(ctx context.Context, runID, taskRef uuid.UUID, ret
 	})
 }
 
+// EnsureTaskRunStartable reports whether a claimed task may still be started,
+// returning ErrTaskClaimMismatch when it may not.
+//
+// A worker holds its claimed task for as long as its pool takes to free a slot,
+// and in that window the row can be resolved out from under it — fail_fast
+// cancelling a sibling of a group that has already failed is the case this
+// exists for (markInstanceCancelledBeforeStartTx revokes the claim as part of
+// the cancel). The executor calls this immediately before creating the
+// container, because engine.Create both creates AND starts it: checking only
+// afterwards, in StartTaskClaimed, would mean the cancelled work had already
+// run.
+//
+// Two conditions, either of which means the task is no longer this worker's to
+// start: the row reached a terminal status, or its claim now belongs to someone
+// else (including "" after a release). The check is advisory by nature — it is
+// not the same transaction as the container create — so StartTaskClaimed's
+// guarded UPDATE remains the authoritative fence; this only keeps a doomed
+// container from being created in the first place.
+func (s *Store) EnsureTaskRunStartable(runID, taskRef uuid.UUID, claimedBy string) error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("run: ensure task run startable: nil store")
+	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, ErrAmbiguousTaskRun) {
+			return ErrTaskClaimMismatch
+		}
+		return err
+	}
+	if IsTerminal(TaskStatus(row.Status)) || row.ClaimedBy != claimedBy {
+		return ErrTaskClaimMismatch
+	}
+	return nil
+}
+
 // StartTaskClaimed is the distributed-lane counterpart of StartTask. taskRef
 // follows the same TaskRun-primary-key-or-catalog-task-ID contract, so a worker
 // executing a fan-out instance must pass the instance's TaskRun ID.
@@ -2886,36 +2921,88 @@ func (s *Store) markInstanceSkippedTx(tx *gorm.DB, runID uuid.UUID, row *models.
 // markInstanceSkippedFromTx is markInstanceSkippedTx with an explicit set of
 // source statuses the transition is allowed from.
 //
-// It exists so a caller can state that set rather than inherit it. Every route
-// today passes {pending} — skipping a RUNNING row would strand a live container
-// whose worker still owns the claim, the orphaned-container shape behind the
-// local-mode replace-cancel bug — but the set is the caller's decision to make,
-// and stating it at the call site is what makes "fail_fast cancels PENDING
-// siblings" readable as a deliberate choice instead of an accident of this
-// primitive's default.
+// It exists so a caller can state that set rather than inherit it. Most routes
+// pass {pending} — skipping a RUNNING row would strand a live container whose
+// worker still owns the claim, the orphaned-container shape behind the
+// local-mode replace-cancel bug — and stating it at the call site is what makes
+// that a deliberate choice instead of an accident of this primitive's default.
+// The one route that legitimately reaches past pending is cancel-before-start
+// (markInstanceCancelledBeforeStartTx), which uses a predicate rather than a
+// status list because "claimed but no container yet" is not a status.
 func (s *Store) markInstanceSkippedFromTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun, reason string, fromStatuses []string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
-	if row == nil {
-		return false, nil
-	}
 	if len(fromStatuses) == 0 {
 		fromStatuses = []string{string(TaskStatusPending)}
+	}
+	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, "status IN ?", []interface{}{fromStatuses}, nil, pendingEvents, counts)
+}
+
+// markInstanceCancelledBeforeStartTx resolves one instance skipped only while it
+// still has nothing running: pending, or claimed with no container yet (see
+// taskRunStarted for why runtime_id decides). It is fail_fast's cancel, and the
+// window it closes is the one between a claim and a container.
+//
+// Two things beyond an ordinary skip:
+//
+//   - The pre-start test is part of the guarded UPDATE, not a pre-check. A
+//     worker that creates the container between the sibling SELECT and this
+//     write makes the UPDATE match zero rows, so the cancel loses and the row is
+//     left to run — the safe direction. The alternative, testing in Go against a
+//     row read earlier in the transaction, is exactly how a live container ends
+//     up with a terminal row.
+//   - The claim is revoked (claimed_by, claim_expires_at, started_at cleared).
+//     That is what makes the cancel decisive rather than advisory: the worker's
+//     StartTaskClaimed requires `claimed_by = <this worker> AND status =
+//     running`, so once this commits the start cannot succeed, and the executor
+//     treats the resulting ErrTaskClaimMismatch as "resolved out from under me"
+//     — no container, no completion posted. started_at is cleared because
+//     ClaimTaskForDispatch stamped it at claim time for a task that never ran;
+//     leaving it would report a duration for work that never happened.
+func (s *Store) markInstanceCancelledBeforeStartTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
+	predSQL, predArgs := cancellableBeforeStartPredicate()
+	return s.markInstanceSkippedWhereTx(tx, runID, row, reason, predSQL, predArgs, map[string]interface{}{
+		"claimed_by":       "",
+		"claim_expires_at": nil,
+		"started_at":       nil,
+	}, pendingEvents, counts)
+}
+
+// markInstanceSkippedWhereTx is the shared body: one guarded UPDATE by primary
+// key plus the caller's own source predicate, its own terminal_sequence, and its
+// own task_skipped event.
+func (s *Store) markInstanceSkippedWhereTx(
+	tx *gorm.DB,
+	runID uuid.UUID,
+	row *models.TaskRun,
+	reason string,
+	predSQL string,
+	predArgs []interface{},
+	extraUpdates map[string]interface{},
+	pendingEvents *[]event.Event,
+	counts *dbWriteCounts,
+) (bool, error) {
+	if row == nil {
+		return false, nil
 	}
 	seq, err := nextTerminalSequenceTx(tx, runID)
 	if err != nil {
 		return false, err
 	}
+	updates := map[string]interface{}{
+		"status":              string(TaskStatusSkipped),
+		"completed_at":        time.Now().UTC(),
+		"error":               reason,
+		"terminal_sequence":   seq,
+		"cache_hit":           false,
+		"cache_origin_run_id": nil,
+		"cache_created_at":    nil,
+		"cache_expires_at":    nil,
+	}
+	for k, v := range extraUpdates {
+		updates[k] = v
+	}
 	result := tx.Model(&models.TaskRun{}).
-		Where("id = ? AND status IN ?", row.ID, fromStatuses).
-		Updates(map[string]interface{}{
-			"status":              string(TaskStatusSkipped),
-			"completed_at":        time.Now().UTC(),
-			"error":               reason,
-			"terminal_sequence":   seq,
-			"cache_hit":           false,
-			"cache_origin_run_id": nil,
-			"cache_created_at":    nil,
-			"cache_expires_at":    nil,
-		})
+		Where("id = ? AND "+predSQL, append([]interface{}{row.ID}, predArgs...)...).
+		Updates(updates)
 	if result.Error != nil {
 		return false, result.Error
 	}
@@ -3681,16 +3768,40 @@ func (s *Store) CompleteTaskOwner(
 						}
 						seq = allocated
 					}
-					skRes := tx.Model(&models.TaskRun{}).
-						Where("id = ?", skipRows[i].ID).
-						Where("status NOT IN ?", terminalStatusStrings()).
-						Updates(map[string]interface{}{
-							"status":            string(TaskStatusSkipped),
-							"completed_at":      now,
-							"error":             sk.Reason,
-							"terminal_sequence": seq,
-							"owner_generation":  ownerGen,
-						})
+					skipUpdates := map[string]interface{}{
+						"status":            string(TaskStatusSkipped),
+						"completed_at":      now,
+						"error":             sk.Reason,
+						"terminal_sequence": seq,
+						"owner_generation":  ownerGen,
+					}
+					skipQuery := tx.Model(&models.TaskRun{}).Where("id = ?", skipRows[i].ID)
+					if skipRows[i].Status == string(TaskStatusRunning) {
+						// The owner decided to cancel a sibling it had already
+						// DISPATCHED — accepted by a peer, claimed, queued in a
+						// worker pool with no container yet (fail_fast, see
+						// RunState.cancellableBeforeStart). Two conditions apply
+						// that do not for an ordinary pending skip:
+						//
+						// The pre-start test goes INSIDE the UPDATE, so a worker
+						// that created the container between the owner's decision
+						// and this write makes the skip match zero rows and the
+						// live task is left alone (RowsAffected == 0 below already
+						// means "already resolved; emit nothing"). And the claim is
+						// revoked, which is what stops the queued start: the
+						// worker's StartTaskClaimed requires its own claim on a
+						// running row, so it now fails with ErrTaskClaimMismatch
+						// and the executor abandons the task without posting a
+						// completion.
+						predSQL, predArgs := cancellableBeforeStartPredicate()
+						skipQuery = skipQuery.Where(predSQL, predArgs...)
+						skipUpdates["claimed_by"] = ""
+						skipUpdates["claim_expires_at"] = nil
+						skipUpdates["started_at"] = nil
+					} else {
+						skipQuery = skipQuery.Where("status NOT IN ?", terminalStatusStrings())
+					}
+					skRes := skipQuery.Updates(skipUpdates)
 					if skRes.Error != nil {
 						return skRes.Error
 					}

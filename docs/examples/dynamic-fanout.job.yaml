@@ -9,6 +9,11 @@ metadata:
   annotations:
     owner: platform-oncall
     purpose: "Runtime-materialized parallel instances from a partition list"
+  # process-file's outputSchema/publish's inputSchema are declared below, so
+  # violations are enforced. "fail" is safe here: process-file's own emitted
+  # output ({"file": "<partition-key>"}) always matches its declared schema
+  # for every instance, deterministically.
+  schemaValidation: fail
 trigger:
   type: cron
   configuration:
@@ -28,6 +33,11 @@ steps:
   - name: process-file
     engine: docker
     image: alpine:3.23
+    outputSchema:
+      type: object
+      properties:
+        file: { type: string }
+      required: [file]
     command:
       - sh
       - -c
@@ -47,5 +57,22 @@ steps:
   - name: publish
     engine: docker
     image: alpine:3.23
+    inputSchema:
+      process-file:
+        required: [file]
+        properties:
+          file:
+            description: >
+              process-file is fanned (fanOut.from: list-files above), so this
+              key arrives as the fan-in aggregate rather than the plain
+              string process-file's own outputSchema declares per instance:
+              a JSON object mapping each partition value to that instance's
+              "file" output, e.g.
+              {"alpha":"alpha","bravo":"bravo","charlie":"charlie"}. No
+              "type" is declared here because it legitimately differs from
+              the per-instance producer type; see
+              CAESIUM_OUTPUT_PROCESS_FILE_PARTITION_COUNT /
+              CAESIUM_OUTPUT_PROCESS_FILE_SUCCEEDED /
+              CAESIUM_OUTPUT_PROCESS_FILE_FAILED for the accompanying counts.
     command: ["sh", "-c", "echo publishing"]
     dependsOn: [process-file]

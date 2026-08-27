@@ -291,7 +291,7 @@ blocked on a design decision.
    the right call for this branch: the premise, not the assertion, is what needs
    fixing, and the fix is a worker change nobody should smuggle into a fan-out
    wave. Un-skip it in the same PR that reorders claim and capacity.
-12. **`fail_fast` is pending-only, so which siblings get cancelled is
+12. **`fail_fast` cancels only not-yet-started siblings, so which siblings get cancelled is
    scheduling-dependent.** Verified in all three lanes (see D3's note). On a
    one-slot worker a sibling that has already gone `running` is left to finish
    while a still-`pending` one is skipped, so the *set* of cancelled partitions
@@ -888,7 +888,7 @@ env, folds the partition into the cache hash, and resolves the group. Owns
       Depends on: C1.
 - [x] C3. Group fan-in + output aggregation + metrics: resolve group status —
       `succeeded` iff all instances succeeded/cached, `failed` if any instance
-      exhausts retries (`fail_fast` cancels pending siblings at first failure;
+      exhausts retries (`fail_fast` cancels not-yet-started siblings at first failure;
       `continue` resolves when the last sibling lands), `skipped` if pre-expansion or
       `onEmpty: skip` fired — and decrement each downstream successor **once**, when
       the group resolves. Aggregate outputs in `BuildOutputEnv`
@@ -1080,7 +1080,7 @@ which makes the substrate able to represent two siblings at all.
       (`TestSkipInGroupDependentsIsReplayVisibleAndEmitsEvents`). fail_fast is
       `resolveGroupOnInstanceFailureTx` / `groupFailsFastTx` /
       `failFastSkipSiblingsTx`._
-      _`fail_fast` is **pending-only in all three lanes**, and it is the default
+      _`fail_fast` is **not-yet-started-only in all three lanes** — it cancels siblings that are pending *or* claimed/dispatched but without a container yet (keyed on an empty `runtime_id`, the one marker both lanes share; `started_at` is stamped at claim time on the owner-push lane and never by `ClaimNext`, so it cannot be the discriminator) — and it is the default
       whenever `fanOut.failurePolicy` is omitted (`validateSteps` stamps it;
       `normalizeFanOutFailurePolicy` re-derives the same answer in the owner). A
       **running** sibling is deliberately left alone in every lane — Caesium cannot
@@ -1088,7 +1088,7 @@ which makes the substrate able to represent two siblings at all.
       for live work and invite the worker's later completion to contradict it. It
       runs to its own terminal state, the group resolves `failed` on that
       transition, and the fan-in is skipped by its trigger rule: later, never
-      wrong. This matches the design's "cancelling pending siblings"
+      wrong. This refines the design's "cancelling pending siblings"
       (`docs/design-dynamic-fanout.md:324`, `:691`, `:1111`). SQL:
       `markInstanceSkippedTx`, whose `markInstanceSkippedFromTx` makes the
       `{pending}` source set an explicit argument at every call site rather than an

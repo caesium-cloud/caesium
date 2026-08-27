@@ -39,7 +39,14 @@ func TestRunState_FailFastResolvesEveryPendingSibling(t *testing.T) {
 	// "gate" is in flight when "bad" fails; x and y are still pending and have
 	// no dependsOn edge to "bad" at all, so the continue cascade would leave
 	// them to run.
+	//
+	// In flight means a container is UP, which is a stronger statement than
+	// dispatched: a dispatched instance whose worker has not created a container
+	// is still cancellable and fail_fast now cancels it (see
+	// TestRunState_FailFastCancelsDispatchedButUnstartedSibling). MarkStarted is
+	// what the owner records for a live container, so this scenario states it.
 	rs.MarkDispatched(insts[1], "node-1", 1, 0)
+	rs.MarkStarted(insts[1])
 
 	res := rs.ApplyCompletion(insts[0], TaskStatusFailed, nil)
 

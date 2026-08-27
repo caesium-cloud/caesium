@@ -655,6 +655,18 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		spec.Env = merged
 	}
 
+	// engine.Create both creates AND starts the container, so this is the last
+	// moment a task that was resolved out from under this worker can still be
+	// prevented from running. The pool may have held the claimed task for a long
+	// time — one free slot and a queue of fan-out siblings is all it takes — and
+	// fail_fast cancelling a sibling of an already-failed group revokes its claim
+	// (internal/run: markInstanceCancelledBeforeStartTx). Without this check the
+	// cancelled instance's container starts, and only the StartTaskClaimed below
+	// notices, after the work has begun.
+	if err := e.store.EnsureTaskRunStartable(taskRun.JobRunID, taskRun.ID, taskRun.ClaimedBy); err != nil {
+		return nil, err
+	}
+
 	a, err := engine.Create(&atom.EngineCreateRequest{
 		Name:    atomName,
 		Image:   taskRun.Image,
@@ -666,6 +678,20 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 
 	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.ID, a.ID(), taskRun.ClaimedBy); err != nil {
+		// The authoritative fence: the row is no longer running-and-claimed by
+		// this worker, so the task was resolved while Create was in flight. The
+		// container is already up, so tear it down rather than leaving it to run
+		// to completion against a terminal row — the orphaned-container shape.
+		// Execute treats ErrTaskClaimMismatch as "abandon quietly": no
+		// completion is posted and no failure is recorded.
+		if errors.Is(err, run.ErrTaskClaimMismatch) {
+			log.Info("worker task resolved before start; stopping container",
+				"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "task_run_id", taskRun.ID, "atom_id", a.ID())
+			if stopErr := engine.Stop(&atom.EngineStopRequest{ID: a.ID(), Force: true}); stopErr != nil {
+				log.Warn("failed to stop container for a task resolved before start",
+					"run_id", taskRun.JobRunID, "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
+			}
+		}
 		return nil, err
 	}
 
@@ -723,6 +749,16 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		log.Warn("failed to stop atom after task completion", "task_id", taskRun.TaskID, "atom_id", a.ID(), "error", stopErr)
 	}
 
+	// Persist the captured log BEFORE any path that can return early. The Stop
+	// above is stop-AND-remove on every engine, so this snapshot is now the only
+	// copy of the container's output — and a task that fails its declared
+	// outputSchema below is precisely the one whose log someone will open.
+	// Keyed on the TaskRun primary key so a fan-out instance records its own log
+	// instead of broadcasting across (job_run_id, task_id) siblings.
+	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
+		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
+	}
+
 	// Runtime schema validation: if the task declares an outputSchema and the job has
 	// schemaValidation enabled, validate the actual output against the schema.
 	if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
@@ -737,9 +773,6 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		}
 	} else if err := sink.Succeeded(ctx, taskRun, string(a.Result()), taskOutput, branchSelections); err != nil {
 		return nil, err
-	}
-	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
-		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {
 		return partitions, fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())

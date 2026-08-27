@@ -463,11 +463,15 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	cacheConfig := cache.ConfigFromEnv()
-	var cacheStore *cache.Store
+	// Lazily built, but fanned instances resolve their cache identity from
+	// concurrent goroutines, so the initialization must be once-only rather
+	// than a racy nil check.
+	var (
+		cacheStore     *cache.Store
+		cacheStoreOnce sync.Once
+	)
 	getCacheStore := func() *cache.Store {
-		if cacheStore == nil {
-			cacheStore = cache.NewStore(store.DB())
-		}
+		cacheStoreOnce.Do(func() { cacheStore = cache.NewStore(store.DB()) })
 		return cacheStore
 	}
 

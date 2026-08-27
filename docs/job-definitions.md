@@ -154,7 +154,7 @@ steps:
 - `maxPartitions` (required, `> 0`): cap on emitted partitions, itself bounded by the server hard cap `CAESIUM_FANOUT_MAX_PARTITIONS` (default 1024). A producer that emits more than the cap **fails loudly** — the list is never silently truncated.
 - `maxParallel` (optional, `>= 0`, default: no group-specific cap): in-flight cap for this group only. `0` or omitted means no cap beyond the job-level `metadata.maxParallelTasks` pool, which always applies as well.
 - `onEmpty` (optional, default `skip`): `skip` resolves the fanned step (and anything downstream gated on `all_success`) as skipped when the producer emits zero partitions; `fail` fails the run instead.
-- `failurePolicy` (optional, default `fail_fast`): `fail_fast` cancels pending sibling instances the moment one instance exhausts its retries. `continue` lets independent siblings keep running to completion — only the failed instance's in-group dependents (see `dependsOn` below) resolve `skipped` — but the group, and therefore the run, still ends `failed` once any instance fails; `continue` changes how much work finishes, not whether the run succeeds.
+- `failurePolicy` (optional, default `fail_fast`): `fail_fast` cancels every sibling instance that has not yet started (pending, or claimed but with no container yet) the moment one instance exhausts its retries; a sibling whose container is already running finishes on its own. `continue` lets independent siblings keep running to completion — only the failed instance's in-group dependents (see `dependsOn` below) resolve `skipped` — but the group, and therefore the run, still ends `failed` once any instance fails; `continue` changes how much work finishes, not whether the run succeeds.
 
 ### Partition markers
 

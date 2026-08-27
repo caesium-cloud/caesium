@@ -335,6 +335,24 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		}
 	}
 
+	if status == TaskStatusFailed {
+		// fail_fast is about to decide which siblings it can still cancel, and
+		// that turns on which of them have actually STARTED — a distinction this
+		// state cannot make on its own, because a dispatch is recorded when a
+		// peer accepts the push, not when its worker creates the container.
+		// Refresh it from the durable rows first; runtime_id is the marker both
+		// lanes use (see taskRunStarted). Best effort: a read failure leaves the
+		// flags as they were, which can only make the cancel more conservative.
+		if catalogID, isInstance := or.state.CatalogTaskID(identity); isInstance {
+			if rows, rErr := m.store.TaskRunsForTask(runID, catalogID); rErr == nil {
+				or.state.SyncStartedFromRows(rows)
+			} else {
+				log.Warn("owner manager: could not refresh fan-out group start state",
+					"run_id", runID, "task_id", catalogID, "error", rErr)
+			}
+		}
+	}
+
 	res := or.state.ApplyCompletion(identity, status, branchSkips)
 	if len(expansionSkipped) > 0 {
 		res.Skipped = append(expansionSkipped, res.Skipped...)
