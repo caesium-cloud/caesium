@@ -449,7 +449,7 @@ convention over ordinary outputs — no new marker, no schema key, no endpoint.
 The Console never fetches the artifact (Caesium is not in the data path); it
 renders the summary and shows the reference.
 
-- [ ] E1. `ProposalPanel` with a renderer registry. New
+- [x] E1. `ProposalPanel` with a renderer registry. New
       `ui/src/features/jobs/ProposalPanel.tsx` mounted in `TaskDetailPanel.tsx`
       when `runTask.output` carries `proposal_kind`; `proposal-renderers.ts`
       keyed on kind with a **generic key/value fallback** (an unknown kind
@@ -462,6 +462,20 @@ renders the summary and shows the reference.
       `ui/src/features/jobs/proposal-renderers.ts`,
       `ui/src/features/jobs/TaskDetailPanel.tsx`,
       `ui/src/features/jobs/__tests__/ProposalPanel.test.tsx`, `ui/e2e/`.
+      Note (W1-δ): `proposal_summary` is a JSON-*string* value inside the
+      `##caesium::output` map (the marker's scalar-only rule drops raw nested
+      objects — `pkg/task/output.go`'s `scalarOutputValue`), so the assumed
+      wire shape is `{"proposal_kind":"terraform.plan.v1","proposal_summary":
+      "{\"add\":2,...,\"resources\":[{\"address\":...,\"action\":...}]}",
+      "proposal_artifact":"plan"}` plus a sibling `##caesium::output-ref` for
+      the artifact key, encoded exactly as `OutputRef.Encode` writes it
+      (`{"caesiumOutputRef":1,"path":...,"digest":"sha256:...","size":...}`).
+      The renderer parses that encoding defensively (re-implemented in TS,
+      not imported — the UI never imports Go); the Terraform runner (C2)
+      should match this shape. `proposal-renderers.ts` stays a pure `.ts`
+      module (no JSX, per the `cache-utils.ts`/`CacheView.tsx` split already
+      in this file); `ProposalPanel.tsx` does the rendering. E2 (run-level
+      aggregate) is out of scope here.
 - [ ] E2. Run-level proposal summary (Open Question 3 — the "more useful and
       more work" half). A `RunProposalSummary` on `RunDetailPage` aggregating
       counts across every task in the run with a `proposal_kind`, linking each
