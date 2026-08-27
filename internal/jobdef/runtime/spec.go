@@ -2,11 +2,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/internal/jobdef/secret"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 )
 
 // ResolvedSecretIdentity is the identity metadata captured for one resolved
@@ -55,4 +57,17 @@ func ResolveContainerSpecSecretsWithIdentities(ctx context.Context, resolver sec
 	}
 	spec.Env = resolved
 	return spec, identities, nil
+}
+
+// DecodeFanOutConfig unmarshals the catalog Task.FanOutConfig JSON onto the
+// job-definition FanOut struct. Nil/empty raw returns (nil, nil).
+func DecodeFanOutConfig(raw []byte) (*jobdefschema.FanOut, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var fo jobdefschema.FanOut
+	if err := json.Unmarshal(raw, &fo); err != nil {
+		return nil, fmt.Errorf("decode fanOut config: %w", err)
+	}
+	return &fo, nil
 }

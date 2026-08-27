@@ -33,7 +33,16 @@ func (s *Service) WithDatabase(conn *gorm.DB) *Service {
 }
 
 // Why returns the causal explanation for taskRef (a task UUID or name) in run
-// runID.
+// runID. A fanned step is answered as a group summary; use WhyPartition to
+// select one instance.
 func (s *Service) Why(runID uuid.UUID, taskRef string) (*runstorage.WhyExplanation, error) {
 	return s.store.WhyTask(s.ctx, runID, taskRef)
+}
+
+// WhyPartition returns the causal explanation for ONE fan-out instance of
+// taskRef, selected by its partition value. An empty partition is identical to
+// Why. runstorage.ErrPartitionNotFound (whose message lists the available
+// values) when the group holds no such partition.
+func (s *Service) WhyPartition(runID uuid.UUID, taskRef, partition string) (*runstorage.WhyExplanation, error) {
+	return s.store.WhyTaskPartition(s.ctx, runID, taskRef, partition)
 }

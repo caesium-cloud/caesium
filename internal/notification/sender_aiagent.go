@@ -8,6 +8,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/incident"
 	"github.com/caesium-cloud/caesium/internal/models"
+	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -109,18 +110,25 @@ func (s *AIAgentSender) Send(ctx context.Context, ch models.NotificationChannel,
 		}
 	}
 	if payload.TaskID != uuid.Nil && payload.RunID != uuid.Nil {
-		var tr models.TaskRun
+		// Group-aware: under fan-out a (run, task) names N instance rows, so the
+		// old .First() could classify an incident from a SUCCEEDED partition's
+		// row. Read the group in partition order and classify from the instance
+		// that explains the failure.
+		var rows []models.TaskRun
 		if err := s.db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", payload.RunID, payload.TaskID).
-			First(&tr).Error; err == nil {
-			sig.Result = tr.Result
-			sig.HasSchemaViolations = len(tr.SchemaViolations) > 0
-			sig.LogTail = tr.LogText
-			if tr.Error != "" {
-				sig.Error = tr.Error
+			Order("partition_index ASC").
+			Find(&rows).Error; err == nil {
+			if tr := runstorage.FailedOrLastTaskRunForTask(rows); tr != nil {
+				sig.Result = tr.Result
+				sig.HasSchemaViolations = len(tr.SchemaViolations) > 0
+				sig.LogTail = tr.LogText
+				if tr.Error != "" {
+					sig.Error = tr.Error
+				}
+				sig.ExitCode = tr.ExitCode
+				exitCode = tr.ExitCode
 			}
-			sig.ExitCode = tr.ExitCode
-			exitCode = tr.ExitCode
 		}
 		var task models.Task
 		if err := s.db.WithContext(ctx).Select("name").First(&task, "id = ?", payload.TaskID).Error; err == nil {

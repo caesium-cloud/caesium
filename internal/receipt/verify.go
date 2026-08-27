@@ -181,15 +181,22 @@ func diff(committed, rederived *Receipt) []Drift {
 func diffTasks(committed, rederived *Receipt) []Drift {
 	var drifts []Drift
 
-	committedByName := indexByName(committed.Tasks)
-	rederivedByName := indexByName(rederived.Tasks)
+	committedByKey := indexByKey(committed.Tasks)
+	rederivedByKey := indexByKey(rederived.Tasks)
 
-	// Stable iteration order over the union of names.
-	names := unionNames(committedByName, rederivedByName)
+	// Stable iteration order over the union of instance keys.
+	keys := unionKeys(committedByKey, rederivedByKey)
 
-	for _, name := range names {
-		c, inC := committedByName[name]
-		r, inR := rederivedByName[name]
+	for _, key := range keys {
+		c, inC := committedByKey[key]
+		r, inR := rederivedByKey[key]
+
+		// The reported name is the display label, so a dropped or added fan-out
+		// instance reads as `process[b]` rather than a second bare `process`.
+		name := r.Label()
+		if !inR {
+			name = c.Label()
+		}
 
 		switch {
 		case inC && !inR:
@@ -230,20 +237,21 @@ func diffTasks(committed, rederived *Receipt) []Drift {
 	return drifts
 }
 
-// indexByName maps task entries by name. When a name repeats (it should not
-// within a run), the last entry wins — diffTasks's behavior is undefined for
-// duplicate names by design, and Build never produces them.
-func indexByName(tasks []TaskEntry) map[string]TaskEntry {
+// indexByKey maps task entries by INSTANCE key (name + partition). Keying on the
+// name alone would collapse a fanned step's N entries onto one map slot, so a
+// drifted or vanished partition would be invisible to verify — the receipt would
+// claim a clean match while N-1 instances went unchecked.
+func indexByKey(tasks []TaskEntry) map[string]TaskEntry {
 	m := make(map[string]TaskEntry, len(tasks))
 	for _, t := range tasks {
-		m[t.TaskName] = t
+		m[t.key()] = t
 	}
 	return m
 }
 
-// unionNames returns the sorted union of keys from two task maps so drift
+// unionKeys returns the sorted union of keys from two task maps so drift
 // reporting is deterministic regardless of input order.
-func unionNames(a, b map[string]TaskEntry) []string {
+func unionKeys(a, b map[string]TaskEntry) []string {
 	set := make(map[string]struct{}, len(a)+len(b))
 	for k := range a {
 		set[k] = struct{}{}

@@ -496,6 +496,9 @@ func (r staticSecretResolver) ResolveWithIdentity(_ context.Context, ref string)
 
 type captureCreateEngine struct {
 	createReq *atom.EngineCreateRequest
+	// logs is what the container "printed"; empty (the default) is a silent
+	// container, which is what every pre-existing caller expects.
+	logs string
 }
 
 func (e *captureCreateEngine) Get(*atom.EngineGetRequest) (atom.Atom, error) {
@@ -521,5 +524,5 @@ func (e *captureCreateEngine) Stop(*atom.EngineStopRequest) error {
 }
 
 func (e *captureCreateEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("")), nil
+	return io.NopCloser(strings.NewReader(e.logs)), nil
 }

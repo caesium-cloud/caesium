@@ -290,6 +290,15 @@ func isReplayTerminalStatus(status string) bool {
 	}
 }
 
+// fannedBaselineMarker matches the server's fail-closed refusal of a baseline
+// containing a fan-out group (internal/replay.ErrFannedBaseline, surfaced as a
+// 409). Quarantined replay reconstructs a run from per-TaskRun descriptors, and
+// a fanned group's instance set is a RUNTIME property of the producer's output —
+// replaying it would either re-expand (a different run) or silently replay one
+// arbitrary instance. Refusing is the design posture; the CLI's job is to say so
+// in words an operator can act on rather than echoing a bare 409.
+const fannedBaselineMarker = "fanned group"
+
 func replayStatusError(status int, body []byte) error {
 	msg := replayErrorMessage(body)
 	switch status {
@@ -298,6 +307,13 @@ func replayStatusError(status int, body []byte) error {
 	case http.StatusNotFound:
 		return fmt.Errorf("replay target not found (404): %s", msg)
 	case http.StatusConflict:
+		if strings.Contains(strings.ToLower(msg), fannedBaselineMarker) {
+			return fmt.Errorf("replay refused (409): %s\n"+
+				"  quarantined replay is fail-closed on dynamic fan-out: the baseline's partition set was "+
+				"produced at runtime, so it cannot be reproduced from the recorded descriptors\n"+
+				"  inspect the group with `caesium run partitions <run-id> --task <name>`, "+
+				"or re-run the job normally to re-expand it", msg)
+		}
 		return fmt.Errorf("replay refused (409): %s", msg)
 	case http.StatusUnprocessableEntity:
 		return fmt.Errorf("replay-safe refusal (422): %s", msg)

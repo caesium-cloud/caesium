@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
@@ -19,6 +20,14 @@ import (
 // ErrDescriptorUnavailable is returned when an addressed task run exists but
 // predates execution-descriptor capture or otherwise lacks a stored descriptor.
 var ErrDescriptorUnavailable = errors.New("reproduce: descriptor unavailable")
+
+// ErrFannedTaskAmbiguous is returned when a task reference names a fan-out group
+// rather than one instance. The quarantined-replay surface is fail-closed by
+// design: a `(job_run_id, task_id)` `.Take` would have silently returned an
+// arbitrary sibling's descriptor, and reproducing the wrong partition's
+// container is worse than refusing. `caesium run replay` already refuses fanned
+// baselines; this closes the descriptor path the same way.
+var ErrFannedTaskAmbiguous = errors.New("reproduce: task is a fan-out group; descriptors are per-partition and this surface does not select one")
 
 // Service loads task execution descriptors for the REST controller.
 type Service struct {
@@ -54,6 +63,8 @@ type taskDescriptorRow struct {
 	Result              string
 	Output              datatypes.JSON
 	ReplaySafe          bool
+	PartitionValue      string
+	PartitionCount      int
 	ExecutionDescriptor datatypes.JSON
 }
 
@@ -133,25 +144,56 @@ func (s *Service) resolveTaskRun(taskRef string, runID uuid.UUID) (*taskDescript
 }
 
 func (s *Service) resolveTaskRunByName(taskName string, runID uuid.UUID) (*taskDescriptorRow, error) {
-	var row taskDescriptorRow
-	err := s.baseDescriptorQuery(runID).
+	var rows []taskDescriptorRow
+	if err := s.baseDescriptorQuery(runID).
 		Where("tasks.name = ?", taskName).
-		Take(&row).Error
-	if err != nil {
+		Order("task_runs.partition_index ASC").
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return &row, nil
+	return assertUnfanned(rows)
 }
 
 func (s *Service) resolveTaskRunByID(taskID, runID uuid.UUID) (*taskDescriptorRow, error) {
-	var row taskDescriptorRow
-	err := s.baseDescriptorQuery(runID).
+	var rows []taskDescriptorRow
+	if err := s.baseDescriptorQuery(runID).
 		Where("task_runs.task_id = ?", taskID).
-		Take(&row).Error
-	if err != nil {
+		Order("task_runs.partition_index ASC").
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return &row, nil
+	return assertUnfanned(rows)
+}
+
+// assertUnfanned is the descriptor path's assert-unfanned answer to the
+// (job_run_id, task_id) identity question: exactly one row is returned, zero
+// rows is not-found, and two or more is refused rather than resolved to an
+// arbitrary sibling.
+//
+// The single-row case asks whether the row carries a PARTITION IDENTITY, not
+// whether the group happened to be wide. Testing partition_count > 1 let an
+// expansion that produced exactly one partition through: that row still has a
+// partition_value, its descriptor and cache identity are partition-specific, and
+// the same job can expand to N > 1 on the next run — so answering a bare task
+// name with it makes this surface's answer depend on how many work items the
+// producer emitted. runstorage.IsFanOutInstance is the one definition of "this
+// row is a fan-out instance" shared with the SQL and worker lanes; re-deriving
+// it here is exactly how the two drift.
+func assertUnfanned(rows []taskDescriptorRow) (*taskDescriptorRow, error) {
+	switch len(rows) {
+	case 0:
+		return nil, gorm.ErrRecordNotFound
+	case 1:
+		if runstorage.IsFanOutInstance(&models.TaskRun{
+			PartitionValue: rows[0].PartitionValue,
+			PartitionCount: rows[0].PartitionCount,
+		}) {
+			return nil, ErrFannedTaskAmbiguous
+		}
+		return &rows[0], nil
+	default:
+		return nil, ErrFannedTaskAmbiguous
+	}
 }
 
 func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
@@ -165,6 +207,8 @@ func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
 				"task_runs.result AS result, "+
 				"task_runs.output AS output, "+
 				"task_runs.replay_safe AS replay_safe, "+
+				"task_runs.partition_value AS partition_value, "+
+				"task_runs.partition_count AS partition_count, "+
 				"task_runs.execution_descriptor AS execution_descriptor",
 		).
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").

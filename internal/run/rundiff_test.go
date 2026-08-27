@@ -306,6 +306,7 @@ func seedRunDiffTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, atte
 		Hash:             hash,
 		HashInputBlob:    datatypes.JSON(blob),
 		TerminalSequence: int64(attempt),
+		PartitionIndex:   attempt - 1,
 		StartedAt:        &now,
 		CompletedAt:      &now,
 		CreatedAt:        now,
@@ -333,4 +334,117 @@ func withBlobVersion(t *testing.T, blob []byte, version int) []byte {
 	out, err := json.Marshal(raw)
 	require.NoError(t, err)
 	return out
+}
+
+// seedRunDiffPartitionTaskRun seeds one fan-out instance row for a task.
+func seedRunDiffPartitionTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, partition string, partitionIndex, partitionCount int, input cache.HashInput, status string) uuid.UUID {
+	t.Helper()
+
+	id := uuid.New()
+	now := time.Now().UTC()
+	require.NoError(t, db.Create(&models.TaskRun{
+		ID:               id,
+		JobRunID:         runID,
+		TaskID:           taskID,
+		AtomID:           uuid.New(),
+		Engine:           models.AtomEngineDocker,
+		Image:            input.Image,
+		Command:          `["echo"]`,
+		Status:           status,
+		Attempt:          1,
+		MaxAttempts:      1,
+		CacheEnabled:     true,
+		Hash:             input.Compute(),
+		HashInputBlob:    datatypes.JSON(blobBytes(t, input)),
+		TerminalSequence: 1,
+		PartitionValue:   partition,
+		PartitionIndex:   partitionIndex,
+		PartitionCount:   partitionCount,
+		StartedAt:        &now,
+		CompletedAt:      &now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}).Error)
+	return id
+}
+
+// TestDiffRuns_InstanceKeyDoesNotCollideAcrossNameAndPartition pins the fix for
+// the adversarial-review finding that the pairing map keyed instances by the
+// concatenation taskName + ":" + partitionValue. Task "a" partition "b:c" and
+// task "a:b" partition "c" both flattened to "a:b:c", so one instance
+// overwrote the other in latestTerminalTaskRunsByName and the run diff silently
+// dropped a task and compared two unrelated rows.
+func TestDiffRuns_InstanceKeyDoesNotCollideAcrossNameAndPartition(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	ctx := context.Background()
+
+	jobID := uuid.New()
+	plainID := seedRunDiffTask(t, db, jobID, "a")
+	colonID := seedRunDiffTask(t, db, jobID, "a:b")
+
+	base := time.Now().UTC()
+	leftRunID := seedRunDiffRun(t, db, jobID, base, "manual", "", nil)
+	rightRunID := seedRunDiffRun(t, db, jobID, base.Add(time.Hour), "manual", "", nil)
+
+	plainHI := cache.HashInput{TaskName: "a", Image: "alpine:3.23", Partition: "b:c"}
+	colonHI := cache.HashInput{TaskName: "a:b", Image: "alpine:3.23", Partition: "c"}
+
+	for _, runID := range []uuid.UUID{leftRunID, rightRunID} {
+		seedRunDiffPartitionTaskRun(t, db, runID, plainID, "b:c", 0, 1, plainHI, string(TaskStatusSucceeded))
+		seedRunDiffPartitionTaskRun(t, db, runID, colonID, "c", 0, 1, colonHI, string(TaskStatusSucceeded))
+	}
+
+	diff, err := store.DiffRuns(ctx, jobID, leftRunID, rightRunID)
+	require.NoError(t, err)
+	require.Empty(t, diff.PartitionsAdded)
+	require.Empty(t, diff.PartitionsRemoved)
+	require.Empty(t, diff.TasksAdded)
+	require.Empty(t, diff.TasksRemoved)
+	require.Len(t, diff.Tasks, 2, "both instances must survive pairing; the ambiguous string key collapsed them into one")
+
+	byName := map[string]RunDiffTask{}
+	for _, task := range diff.Tasks {
+		byName[task.TaskName] = task
+	}
+	require.Contains(t, byName, "a")
+	require.Contains(t, byName, "a:b")
+	require.Equal(t, "b:c", byName["a"].Partition)
+	require.Equal(t, "c", byName["a:b"].Partition)
+	require.Equal(t, RunDiffVerdictWouldCacheHit, byName["a"].Verdict)
+	require.Equal(t, RunDiffVerdictWouldCacheHit, byName["a:b"].Verdict)
+}
+
+// TestDiffRuns_PartitionAddedRemovedStillPaired keeps the added/removed
+// reporting honest under the struct-keyed pairing: an instance present only on
+// one side is reported once, under its own label.
+func TestDiffRuns_PartitionAddedRemovedStillPaired(t *testing.T) {
+	db := testutil.OpenTestDB(t)
+	t.Cleanup(func() { testutil.CloseDB(db) })
+	store := NewStore(db)
+	ctx := context.Background()
+
+	jobID := uuid.New()
+	taskID := seedRunDiffTask(t, db, jobID, "process")
+
+	base := time.Now().UTC()
+	leftRunID := seedRunDiffRun(t, db, jobID, base, "manual", "", nil)
+	rightRunID := seedRunDiffRun(t, db, jobID, base.Add(time.Hour), "manual", "", nil)
+
+	shared := cache.HashInput{TaskName: "process", Image: "alpine:3.23", Partition: "p1"}
+	onlyLeft := cache.HashInput{TaskName: "process", Image: "alpine:3.23", Partition: "p0"}
+	onlyRight := cache.HashInput{TaskName: "process", Image: "alpine:3.23", Partition: "p2"}
+
+	seedRunDiffPartitionTaskRun(t, db, leftRunID, taskID, "p0", 0, 2, onlyLeft, string(TaskStatusSucceeded))
+	seedRunDiffPartitionTaskRun(t, db, leftRunID, taskID, "p1", 1, 2, shared, string(TaskStatusSucceeded))
+	seedRunDiffPartitionTaskRun(t, db, rightRunID, taskID, "p1", 0, 2, shared, string(TaskStatusSucceeded))
+	seedRunDiffPartitionTaskRun(t, db, rightRunID, taskID, "p2", 1, 2, onlyRight, string(TaskStatusSucceeded))
+
+	diff, err := store.DiffRuns(ctx, jobID, leftRunID, rightRunID)
+	require.NoError(t, err)
+	require.Equal(t, []string{"process:p2"}, diff.PartitionsAdded)
+	require.Equal(t, []string{"process:p0"}, diff.PartitionsRemoved)
+	require.Len(t, diff.Tasks, 1)
+	require.Equal(t, "p1", diff.Tasks[0].Partition)
 }

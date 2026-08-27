@@ -346,6 +346,7 @@ func (s *ReceiptSuite) TestRetryUsesTerminalAttempt() {
 		Command:             "[]",
 		Status:              "succeeded",
 		Attempt:             2,
+		PartitionIndex:      1,
 		Hash:                "attempt-2",
 		ResolvedImageDigest: "sha256:new",
 		CachePinDigests:     true,

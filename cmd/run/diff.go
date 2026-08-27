@@ -38,6 +38,14 @@ type runDiffResponse struct {
 	Tasks          []runDiffTask        `json:"tasks"`
 	TasksAdded     []string             `json:"tasksAdded,omitempty"`
 	TasksRemoved   []string             `json:"tasksRemoved,omitempty"`
+	// PartitionsAdded / PartitionsRemoved are the fan-out counterpart of
+	// TasksAdded / TasksRemoved: instances (rendered "task:partition") that the
+	// right run materialized and the left did not, and vice versa. The server
+	// aligns instances by partition VALUE, never index, so a producer that
+	// emitted its list in a different order does not report every partition as
+	// added+removed.
+	PartitionsAdded   []string `json:"partitionsAdded,omitempty"`
+	PartitionsRemoved []string `json:"partitionsRemoved,omitempty"`
 }
 
 type runDiffTrigger struct {
@@ -48,6 +56,9 @@ type runDiffTrigger struct {
 
 type runDiffTask struct {
 	TaskName string `json:"taskName"`
+	// Partition is the fan-out instance this row compares, empty for an
+	// unfanned task. Two rows can share a TaskName and differ only here.
+	Partition string `json:"partition,omitempty"`
 
 	LeftStatus   string `json:"leftStatus"`
 	RightStatus  string `json:"rightStatus"`
@@ -77,7 +88,9 @@ var diffCmd = &cobra.Command{
 	Short: "Diff two runs of the same job",
 	Long: "Diff two runs of the same job by asking the job-scoped run-diff REST " +
 		"endpoint for cache-bust attribution. Prints a per-task table by default, " +
-		"or machine-readable JSON with --json.",
+		"or machine-readable JSON with --json. Fanned steps are compared per " +
+		"partition VALUE (never index): each instance is its own row and the " +
+		"partitions the two runs did not share are reported as added/removed.",
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		leftRunID := strings.TrimSpace(args[0])
@@ -158,11 +171,38 @@ func renderRunDiffTable(cmd *cobra.Command, diff *runDiffResponse) {
 	if len(diff.TasksRemoved) > 0 {
 		_, _ = fmt.Fprintf(out, "\nTasks removed: %s\n", strings.Join(diff.TasksRemoved, ", "))
 	}
+	// A changed partition list is the headline answer for a fanned pipeline
+	// ("yesterday had 12 regions, today has 11"), so it gets its own lines
+	// rather than being buried in the per-task table.
+	if len(diff.PartitionsAdded) > 0 {
+		_, _ = fmt.Fprintf(out, "\nPartitions added: %s\n", strings.Join(diff.PartitionsAdded, ", "))
+	}
+	if len(diff.PartitionsRemoved) > 0 {
+		_, _ = fmt.Fprintf(out, "\nPartitions removed: %s\n", strings.Join(diff.PartitionsRemoved, ", "))
+	}
 
 	_, _ = fmt.Fprintln(out, "\nTasks:")
 	tasks := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tasks, "TASK\tVERDICT\tLEFT\tRIGHT\tCHANGES")
+	// The PARTITION column appears only when some row carries one, so an
+	// unfanned diff renders exactly the table it always did.
+	fanned := runDiffHasPartitions(diff.Tasks)
+	if fanned {
+		_, _ = fmt.Fprintln(tasks, "TASK\tPARTITION\tVERDICT\tLEFT\tRIGHT\tCHANGES")
+	} else {
+		_, _ = fmt.Fprintln(tasks, "TASK\tVERDICT\tLEFT\tRIGHT\tCHANGES")
+	}
 	for _, task := range diff.Tasks {
+		if fanned {
+			_, _ = fmt.Fprintf(tasks, "%s\t%s\t%s\t%s\t%s\t%d\n",
+				task.TaskName,
+				dashRunDiffEmpty(task.Partition),
+				task.Verdict,
+				formatRunDiffTaskStatus(task.LeftStatus, task.LeftAttempt),
+				formatRunDiffTaskStatus(task.RightStatus, task.RightAttempt),
+				len(task.Changes),
+			)
+			continue
+		}
 		_, _ = fmt.Fprintf(tasks, "%s\t%s\t%s\t%s\t%d\n",
 			task.TaskName,
 			task.Verdict,
@@ -174,12 +214,33 @@ func renderRunDiffTable(cmd *cobra.Command, diff *runDiffResponse) {
 	_ = tasks.Flush()
 
 	for _, task := range diff.Tasks {
+		label := runDiffTaskLabel(task)
 		if task.Degraded != "" {
-			_, _ = fmt.Fprintf(out, "\n%s degraded: %s\n", task.TaskName, task.Degraded)
+			_, _ = fmt.Fprintf(out, "\n%s degraded: %s\n", label, task.Degraded)
 			continue
 		}
-		renderRunDiffChanges(out, task.TaskName+" changes", task.Changes)
+		renderRunDiffChanges(out, label+" changes", task.Changes)
 	}
+}
+
+// runDiffHasPartitions reports whether any compared row is a fan-out instance.
+func runDiffHasPartitions(tasks []runDiffTask) bool {
+	for _, task := range tasks {
+		if task.Partition != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// runDiffTaskLabel names a compared row: "task" unfanned, "task[partition]" for
+// a fan-out instance, so the per-row change blocks below the table are not N
+// identically-headed sections.
+func runDiffTaskLabel(task runDiffTask) string {
+	if task.Partition == "" {
+		return task.TaskName
+	}
+	return task.TaskName + "[" + task.Partition + "]"
 }
 
 func renderRunDiffChanges(out io.Writer, title string, changes []runDiffFieldChange) {

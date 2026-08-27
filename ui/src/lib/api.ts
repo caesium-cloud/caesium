@@ -106,6 +106,19 @@ export interface TaskRun {
   cache_expires_at?: string;
   error?: string;
   outstanding_predecessors?: number;
+  partition_value?: string;
+  partition_index?: number;
+  partition_count?: number;
+  partition_fingerprint?: string;
+  partition_depends_on?: string[];
+  /**
+   * Per-status instance counts for a fanned (grouped) task, e.g.
+   * `{ succeeded: 2, running: 1 }`. Optional: only present once the backend
+   * computes it for a collapsed group; absent for unfanned tasks and for
+   * servers that predate this field. Consumers must render degrade
+   * gracefully (badge-only) when it is missing.
+   */
+  partition_status_counts?: Record<string, number>;
   started_at?: string;
   completed_at?: string;
   created_at: string;
@@ -1364,4 +1377,143 @@ export const api = {
     request<Backfill>(`/jobs/${jobId}/backfills/${backfillId}/cancel`, {
       method: "PUT",
     }),
+  /**
+   * One page of a fanned task's instances. The endpoint is paginated (server
+   * default 100, hard cap 1000), so a caller that needs the WHOLE group must
+   * use `getAllPartitions` — reading this response as "the partitions" is the
+   * truncation bug this replaced.
+   */
+  getPartitions: fetchPartitionPage,
+
+  /**
+   * Every instance of a fanned task, assembled by following the endpoint's
+   * `next_offset` cursor to the end of the list.
+   *
+   * `total` and `status_counts` come from the LAST page read. They describe
+   * different sets, deliberately: `total` counts the FILTERED set being paged
+   * (so total/limit/offset compose correctly), while `status_counts` is the
+   * histogram of the whole unfiltered group — which is what lets a filtered view
+   * still say "3 of 12 failed".
+   */
+  getAllPartitions: async (
+    jobId: string,
+    runId: string,
+    taskId: string,
+    status?: string,
+  ): Promise<PartitionListResponse> => {
+    const partitions: PartitionInstance[] = [];
+    let offset = 0;
+    let page: PartitionListResponse | undefined;
+
+    for (;;) {
+      page = await fetchPartitionPage(jobId, runId, taskId, {
+        status,
+        limit: partitionPageSize,
+        offset,
+      });
+      partitions.push(...(page.partitions ?? []));
+
+      const next = page.next_offset;
+      // null/undefined is the end of the list — and is also what a server that
+      // predates pagination sends, which correctly degrades to a single read.
+      if (next === null || next === undefined) break;
+      // A cursor that fails to advance would spin forever; stop and let the
+      // total-vs-collected gap be visible instead.
+      if (next <= offset) break;
+      offset = next;
+      if (partitions.length >= partitionMaxRows) break;
+    }
+
+    return {
+      ...page,
+      partitions,
+      total: page?.total ?? partitions.length,
+    };
+  },
+
+  retryPartition: (jobId: string, runId: string, taskId: string, index: number) =>
+    request<{ retried: boolean; index: number; value: string }>(
+      `/jobs/${jobId}/runs/${runId}/tasks/${taskId}/partitions/${index}/retry`,
+      { method: "POST" },
+    ),
 };
+
+/** One page of a fanned task's instances. See `api.getPartitions`. */
+function fetchPartitionPage(
+  jobId: string,
+  runId: string,
+  taskId: string,
+  options?: { status?: string; limit?: number; offset?: number },
+): Promise<PartitionListResponse> {
+  const query = new URLSearchParams();
+  if (options?.status) query.set("status", options.status);
+  if (options?.limit !== undefined) query.set("limit", String(options.limit));
+  if (options?.offset) query.set("offset", String(options.offset));
+  const suffix = query.toString() ? `?${query}` : "";
+  return request<PartitionListResponse>(
+    `/jobs/${jobId}/runs/${runId}/tasks/${taskId}/partitions${suffix}`,
+  );
+}
+
+/**
+ * Per-request page size for `getAllPartitions`. The server caps `limit` at 1000;
+ * 500 stays well inside that while halving the round trips of the server default.
+ */
+const partitionPageSize = 500;
+
+/**
+ * Hard stop for the page walk. A fan-out group is capped at 10k instances, so a
+ * walk past that is following a server whose cursor never terminates.
+ */
+const partitionMaxRows = 10_000;
+
+/**
+ * URL of one task's log stream.
+ *
+ * A FANNED task has N containers behind one catalog `task_id`, so `task_id`
+ * alone does not name a log stream: the backend answers 400 with the instance
+ * list unless the caller selects one with `task_run_id` (the TaskRun primary
+ * key, authoritative) or `partition` (the partition value). Unfanned tasks
+ * ignore both.
+ */
+export function taskLogsURL(
+  jobId: string,
+  runId: string,
+  taskId: string,
+  selector?: { taskRunId?: string; partition?: string },
+): string {
+  const query = new URLSearchParams({ task_id: taskId });
+  if (selector?.taskRunId) query.set("task_run_id", selector.taskRunId);
+  else if (selector?.partition) query.set("partition", selector.partition);
+  return `/v1/jobs/${jobId}/runs/${runId}/logs?${query}`;
+}
+
+/**
+ * The paginated envelope returned by the partitions endpoint. `total` counts the
+ * FILTERED set being paged; `status_counts` is the per-status histogram of the
+ * whole unfiltered group, so a filtered view can still report group totals.
+ *
+ * `next_offset` is the cursor for the next page and is `null` on the last one.
+ * All of these are optional so a server that predates pagination still decodes.
+ */
+export interface PartitionListResponse {
+  partitions: PartitionInstance[];
+  total?: number;
+  limit?: number;
+  offset?: number;
+  next_offset?: number | null;
+  status_counts?: Record<string, number>;
+}
+
+export interface PartitionInstance {
+  value: string;
+  index: number;
+  status: string;
+  attempt: number;
+  cache_hit: boolean;
+  duration?: string;
+  error?: string;
+  fingerprint?: string;
+  depends_on?: string[];
+  task_run_id: string;
+}

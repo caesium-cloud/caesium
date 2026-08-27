@@ -89,7 +89,22 @@ type HashInputBlob struct {
 	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
 	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
 	RunParams            map[string]string            `json:"runParams,omitempty"`
-	CacheVersion         int                          `json:"cacheVersion"`
+
+	// Partition / PartitionFingerprint / PartitionAttributes mirror, field by
+	// field, the single framed partition_identity record Compute() folds in (see
+	// HashInput.partitionIdentity). They are kept as three separate JSON fields
+	// here rather than one nested object because `caesium why` diffs the blob
+	// field-by-field and a nested object would report a whole-block change for a
+	// single changed attribute. JSON object fields cannot alias one another, so
+	// the blob was never subject to the delimiter-forging the hash's old
+	// line-oriented form allowed — but the SET of fields must stay in lockstep
+	// with partitionIdentity, or the blob would stop explaining the digest.
+	// dependsOn appears in neither: it is scheduling, not an execution input.
+	Partition            string            `json:"partition,omitempty"`
+	PartitionFingerprint string            `json:"partitionFingerprint,omitempty"`
+	PartitionAttributes  map[string]string `json:"partitionAttributes,omitempty"`
+
+	CacheVersion int `json:"cacheVersion"`
 
 	// Oversized is set (with Digest/EnvCount/PredecessorOutputCount populated
 	// and the verbatim fields cleared) when the full decomposition exceeded
@@ -172,6 +187,9 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
 		PredecessorOutputs:   h.PredecessorOutputs,
 		RunParams:            h.RunParams,
+		Partition:            h.Partition,
+		PartitionFingerprint: h.PartitionFingerprint,
+		PartitionAttributes:  h.PartitionAttributes,
 		CacheVersion:         h.CacheVersion,
 	}
 
@@ -283,7 +301,16 @@ type HashInput struct {
 	PredecessorHashes    []string
 	PredecessorOutputs   map[string]map[string]string
 	RunParams            map[string]string
-	CacheVersion         int
+	// Partition is the instance key. Hashed only when non-empty so unfanned
+	// tasks and pre-fan-out hashes stay byte-identical (no CacheVersion bump).
+	Partition string
+	// PartitionFingerprint is the optional per-unit content address.
+	// Hashed only when non-empty. dependsOn is NOT hashed.
+	PartitionFingerprint string
+	// PartitionAttributes are free-form scalar attributes, hashed with sorted
+	// keys only when the map is non-empty.
+	PartitionAttributes map[string]string
+	CacheVersion        int
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
@@ -393,6 +420,24 @@ func (h HashInput) Compute() string {
 		w(digest, "param:%s=%s\n", k, h.RunParams[k])
 	}
 
+	// Partition identity is folded in as ONE framed record, not as three
+	// newline-delimited "<label>:<value>" lines. A partition key, fingerprint and
+	// attribute are all arbitrary producer-supplied text, so the delimiter-based
+	// form was injectable: the key "x\npartition_fingerprint:sha256:..." produced
+	// a byte stream identical to the key "x" carrying that fingerprint, and the
+	// "=" in the attribute lines aliased the same way. Two distinct execution
+	// identities collapsing to one digest is a wrong-output cache hit. JSON gives
+	// unambiguous framing — control characters and quotes are escaped, and
+	// encoding/json sorts the attribute map's keys, so the encoding is canonical
+	// and injective.
+	//
+	// The record is emitted only when at least one partition field is set, so an
+	// unfanned task's digest stays byte-identical to the pre-fan-out era (see
+	// TestCompute_GoldenStringFormUnchanged) and no CacheVersion bump is needed.
+	if identity := h.partitionIdentity(); identity != nil {
+		w(digest, "partition_identity:%s\n", canonicalJSON(identity))
+	}
+
 	w(digest, "cache_version:%d\n", h.CacheVersion)
 
 	return hex.EncodeToString(digest.Sum(nil))
@@ -413,6 +458,33 @@ func canonicalJSON(value any) string {
 		return fmt.Sprintf("%v", value)
 	}
 	return string(data)
+}
+
+// partitionIdentity is the typed, self-delimiting representation of the three
+// partition fields Compute() folds into the key. It exists so the fields are
+// hashed through one canonical JSON encoding instead of three concatenated
+// text lines whose separators a producer-supplied string could forge.
+//
+// dependsOn is deliberately absent: it is a scheduling instruction, not an
+// execution input (see TestCompute_DependsOnNotHashed).
+type partitionIdentity struct {
+	Key         string            `json:"key"`
+	Fingerprint string            `json:"fingerprint,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// partitionIdentity returns the framed partition record, or nil when the input
+// carries no partition identity at all. nil means the block is skipped entirely,
+// which is what keeps unfanned hashes byte-identical to the pre-fan-out era.
+func (h HashInput) partitionIdentity() *partitionIdentity {
+	if h.Partition == "" && h.PartitionFingerprint == "" && len(h.PartitionAttributes) == 0 {
+		return nil
+	}
+	return &partitionIdentity{
+		Key:         h.Partition,
+		Fingerprint: h.PartitionFingerprint,
+		Attributes:  h.PartitionAttributes,
+	}
 }
 
 // hashableKubernetes returns the KubernetesSpec stripped of fields that do not

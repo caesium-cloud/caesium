@@ -51,6 +51,7 @@ func TestCompleteTaskOwner_WritesTerminalRowsWithoutAdvancing(t *testing.T) {
 		map[string]string{"k": "v"}, nil,
 		5, 7,
 		[]SkippedTask{{TaskID: taskB.ID, TerminalSequence: 6, Reason: "branch not selected"}},
+		nil,
 	)
 	require.NoError(t, err)
 
@@ -100,7 +101,7 @@ func TestCompleteTaskOwner_ClaimMismatch(t *testing.T) {
 	}).Error)
 
 	// A completion from a node that does not hold the claim is rejected.
-	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil)
+	err = store.CompleteTaskOwner(runRecord.ID, task.ID, TaskStatusSucceeded, "success", "", "wrong-node", nil, nil, 1, 1, nil, nil)
 	require.ErrorIs(t, err, ErrTaskClaimMismatch)
 }
 
@@ -133,7 +134,7 @@ func TestClaimTaskForDispatch_TrustOwnerReadiness(t *testing.T) {
 			Engine: atom.Engine, Image: atom.Image, Command: atom.Command,
 			Status: string(TaskStatusPending), Attempt: 1, MaxAttempts: 1,
 			OutstandingPredecessors: 1, // not yet zero in the DB
-			CreatedAt: now, UpdatedAt: now,
+			CreatedAt:               now, UpdatedAt: now,
 		}).Error)
 	}
 

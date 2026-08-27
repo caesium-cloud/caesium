@@ -12,6 +12,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 )
 
 // ownerBusyBackoffs schedules the worker's retries when the owner answers a
@@ -55,6 +56,16 @@ type CompletionSink interface {
 	Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error
 }
 
+// cachedPartitionSink is the optional extension a completion sink implements
+// when it can carry a fan-out producer's partition list on the CACHE-HIT route.
+// It mirrors SucceededWithPartitions and exists for the same reason: a cache hit
+// is a completion, and for a producer it is the completion that must still
+// expand the downstream group. It is an optional interface rather than a method
+// on CompletionSink so third-party sinks keep compiling.
+type cachedPartitionSink interface {
+	CachedWithPartitions(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error
+}
+
 // localSink is the default sink used by ClaimNext'd tasks.  It calls the same
 // run.Store.*Claimed methods the executor called inline before the sink
 // abstraction existed, so the pull path is byte-identical to Phase 1.
@@ -68,15 +79,30 @@ func NewLocalSink(store *run.Store) CompletionSink {
 }
 
 func (s *localSink) Succeeded(_ context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string) error {
-	return s.store.CompleteTaskClaimed(taskRun.JobRunID, taskRun.TaskID, result, taskRun.ClaimedBy, outputs, branchSelections)
+	return s.SucceededWithPartitions(context.Background(), taskRun, result, outputs, branchSelections, nil)
+}
+
+func (s *localSink) SucceededWithPartitions(_ context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
+	return s.store.CompleteTaskClaimedWithPartitions(taskRun.JobRunID, taskRun.ID, result, taskRun.ClaimedBy, outputs, branchSelections, partitions)
 }
 
 func (s *localSink) Failed(_ context.Context, taskRun *models.TaskRun, failure error) error {
-	return s.store.FailTaskClaimed(taskRun.JobRunID, taskRun.TaskID, failure, taskRun.ClaimedBy)
+	return s.store.FailTaskClaimed(taskRun.JobRunID, taskRun.ID, failure, taskRun.ClaimedBy)
 }
 
-func (s *localSink) Cached(_ context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
-	return s.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.TaskID, source, result, taskRun.ClaimedBy, outputs, branchSelections)
+func (s *localSink) Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
+	return s.CachedWithPartitions(ctx, taskRun, source, result, outputs, branchSelections, nil)
+}
+
+func (s *localSink) CachedWithPartitions(_ context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
+	if len(partitions) > 0 {
+		// A cached fan-out producer must still expand its group: the store
+		// persists the hit and the partition list in one transaction. Called
+		// directly (not via an optional interface) so dropping the store method
+		// is a build error rather than a silently un-expanded group.
+		return s.store.CacheHitTaskClaimedWithPartitions(taskRun.JobRunID, taskRun.ID, source, result, taskRun.ClaimedBy, outputs, branchSelections, partitions)
+	}
+	return s.store.CacheHitTaskClaimed(taskRun.JobRunID, taskRun.ID, source, result, taskRun.ClaimedBy, outputs, branchSelections)
 }
 
 // completePoster is the seam the owner sink uses to reach the owner's
@@ -120,11 +146,16 @@ func newOwnerSink(meta dispatchMeta, post completePoster) *ownerSink {
 }
 
 func (s *ownerSink) Succeeded(ctx context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string) error {
+	return s.SucceededWithPartitions(ctx, taskRun, result, outputs, branchSelections, nil)
+}
+
+func (s *ownerSink) SucceededWithPartitions(ctx context.Context, taskRun *models.TaskRun, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
 	return s.send(ctx, taskRun, dispatch.CompleteRequest{
 		Status:           string(run.TaskStatusSucceeded),
 		Result:           result,
 		Outputs:          outputs,
 		BranchSelections: branchSelections,
+		Partitions:       partitions,
 	})
 }
 
@@ -140,6 +171,14 @@ func (s *ownerSink) Failed(ctx context.Context, taskRun *models.TaskRun, failure
 }
 
 func (s *ownerSink) Cached(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string) error {
+	return s.CachedWithPartitions(ctx, taskRun, source, result, outputs, branchSelections, nil)
+}
+
+// CachedWithPartitions reports a cache hit that also carries a producer's
+// partition list. OwnerManager.CompleteInstance plans an expansion for
+// TaskStatusCached exactly as it does for succeeded, so these partitions are
+// what let a warm producer still materialize its group in owner mode.
+func (s *ownerSink) CachedWithPartitions(ctx context.Context, taskRun *models.TaskRun, source run.CacheHitSource, result string, outputs map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
 	// The owner reconstructs CacheHitSource on its side; the worker only needs
 	// to report result + outputs + branch selections.  (Phase A's owner handler
 	// builds a CacheHitSource{RunID: req.RunID}; the richer origin metadata is a
@@ -149,6 +188,7 @@ func (s *ownerSink) Cached(ctx context.Context, taskRun *models.TaskRun, source 
 		Result:           result,
 		Outputs:          outputs,
 		BranchSelections: branchSelections,
+		Partitions:       partitions,
 	})
 }
 
@@ -162,6 +202,13 @@ func (s *ownerSink) Cached(ctx context.Context, taskRun *models.TaskRun, source 
 func (s *ownerSink) send(ctx context.Context, taskRun *models.TaskRun, req dispatch.CompleteRequest) error {
 	req.RunID = taskRun.JobRunID
 	req.TaskID = taskRun.TaskID
+	// Instance identity is set here, once, for every route. A fanned sibling
+	// whose completion arrives with TaskRunID == uuid.Nil falls back to the
+	// catalog task id, which names N rows: the owner's in-memory state no longer
+	// has that key (ExpandTask replaced it with the instances) and the SQL
+	// fallback rejects the ambiguity. Setting it per-route is how the failed and
+	// cached routes were missed the first time.
+	req.TaskRunID = taskRun.ID
 	req.OwnerGeneration = s.generation
 	req.Attempt = s.attempt
 	req.WorkerNode = s.workerNode

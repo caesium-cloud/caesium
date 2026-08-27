@@ -1,6 +1,15 @@
-import { useState, useEffect, useRef, useCallback, useLayoutEffect, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  useLayoutEffect,
+  type ReactNode,
+} from "react";
 import { Link } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   X,
   Info,
@@ -14,12 +23,52 @@ import { toast } from "sonner";
 import { cn, formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
-import { api, type Incident, type JobTask, type TaskRun } from "@/lib/api";
+import { api, type Incident, type JobTask, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
 import { TaskWhyView } from "./TaskWhyView";
 import { isTaskCached } from "./cache-utils";
+
+const PARTITION_STATUS_OPTIONS = ["succeeded", "failed", "running", "pending", "cached", "skipped"];
+
+/**
+ * Whether a run-task entry is a COLLAPSED fan-out group.
+ *
+ * `partition_count` is `>= 1` for every fanned task, including an expansion that
+ * materialized exactly one instance (the backend sets it to `n` whenever
+ * `n > 1 || partition_value !== ""`), and is omitted entirely for an unfanned
+ * one. Gating on `> 1` therefore hid the partition table for N=1 groups, which
+ * still have full partition identity — a value, a fingerprint, its own TaskRun
+ * and its own log — and are the shape a filtered upstream produces.
+ * `partition_value` is the belt-and-braces check for a payload that carries the
+ * identity without the count.
+ */
+function isFannedTask(runTask?: TaskRun): boolean {
+  return (runTask?.partition_count ?? 0) >= 1 || !!runTask?.partition_value;
+}
+
+/**
+ * Every instance of a fanned task, paged to completion.
+ *
+ * Both the partition table and the Logs tab's instance selector read through
+ * this, and an unfiltered call from either shares one react-query cache entry —
+ * so opening the panel does not fetch the group twice.
+ */
+function usePartitionInstances(
+  jobId: string,
+  runId: string,
+  taskId: string,
+  statusFilter: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["partitions", jobId, runId, taskId, statusFilter],
+    queryFn: () => api.getAllPartitions(jobId, runId, taskId, statusFilter || undefined),
+    enabled,
+  });
+}
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -175,7 +224,41 @@ export function TaskDetailPanel({
 
   const resolvedType = taskType || "task";
   const status = runTask?.status ?? "pending";
+  const catalogTaskId = task?.id ?? runTask?.task_id ?? taskId;
   const cached = isTaskCached(runTask);
+  const fanned = isFannedTask(runTask);
+
+  // A fanned task's instances, shared by the partition table and the Logs tab's
+  // instance selector. Unfiltered, so it is the same cache entry the table uses
+  // when no status filter is active.
+  const instancesQuery = usePartitionInstances(jobId, runId, catalogTaskId, "", fanned);
+  const instances = useMemo(() => instancesQuery.data?.partitions ?? [], [instancesQuery.data]);
+
+  // Explicit choice from the selector or a row's "Logs" action. Null means
+  // "whatever the default is", so the default keeps tracking the data as
+  // instances finish and fail.
+  const [selectedTaskRunId, setSelectedTaskRunId] = useState<string | null>(null);
+
+  // Default: the first FAILED instance, because that is the one an operator
+  // opened the panel to read; otherwise instance 0. The server orders instances
+  // by partition_index, so `instances[0]` is index 0.
+  const selectedInstance = useMemo(() => {
+    if (instances.length === 0) return undefined;
+    const explicit = instances.find((row) => row.task_run_id === selectedTaskRunId);
+    if (explicit) return explicit;
+    return instances.find((row) => row.status === "failed") ?? instances[0];
+  }, [instances, selectedTaskRunId]);
+
+  // Opening one instance's log from its row: select it, then show the Logs tab.
+  const showInstanceLogs = useCallback((row: PartitionInstance) => {
+    setSelectedTaskRunId(row.task_run_id);
+    setActiveTab("logs");
+  }, []);
+
+  // No reset-on-task-change is needed: a selection is only honored when it
+  // matches a row of the CURRENT task's instance list, and a TaskRun id is
+  // unique per (run, task), so a stale id simply finds no match and the default
+  // takes over.
 
   const invalidateCacheMutation = useMutation({
     mutationFn: () => {
@@ -381,6 +464,16 @@ export function TaskDetailPanel({
                 />
               </div>
 
+              {fanned && (
+                <PartitionTable
+                  jobId={jobId}
+                  runId={runId}
+                  taskId={catalogTaskId}
+                  partitionCount={runTask?.partition_count ?? 1}
+                  onShowLogs={showInstanceLogs}
+                />
+              )}
+
               <TaskWhyView
                 jobId={jobId}
                 runId={runId}
@@ -406,16 +499,255 @@ export function TaskDetailPanel({
             </div>
           </ScrollArea>
         ) : (
-          <LogViewer
-            key={`${jobId}:${runId}:${taskId}`}
-            jobId={jobId}
-            runId={runId}
-            taskId={taskId}
-            error={runTask?.error}
-            status={status}
-            sizeVersion={panelWidth}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            {fanned && instances.length > 0 ? (
+              <div
+                data-testid="log-partition-picker"
+                className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5"
+              >
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Partition
+                </span>
+                <select
+                  data-testid="log-partition-select"
+                  aria-label="Log partition"
+                  value={selectedInstance?.task_run_id ?? ""}
+                  onChange={(event) => setSelectedTaskRunId(event.target.value)}
+                  className="min-w-0 flex-1 rounded border border-border/50 bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+                >
+                  {instances.map((instance) => (
+                    <option key={instance.task_run_id} value={instance.task_run_id}>
+                      {(instance.value || `#${instance.index}`) + ` — ${instance.status}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            {fanned && instancesQuery.isLoading ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground">
+                Loading partition instances…
+              </div>
+            ) : (
+              <div className="min-h-0 flex-1">
+                <LogViewer
+                  // The instance is part of the identity of the stream: without
+                  // it, switching partitions would reuse the previous mount's
+                  // terminal buffer.
+                  key={`${jobId}:${runId}:${taskId}:${selectedInstance?.task_run_id ?? ""}`}
+                  jobId={jobId}
+                  runId={runId}
+                  taskId={taskId}
+                  taskRunId={fanned ? selectedInstance?.task_run_id : undefined}
+                  error={fanned ? selectedInstance?.error : runTask?.error}
+                  status={fanned ? (selectedInstance?.status ?? status) : status}
+                  sizeVersion={panelWidth}
+                />
+              </div>
+            )}
+          </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Virtualized, status-filterable table of a fanned task's instances.
+ * Fetches independently of the parent so the status filter can refetch
+ * without disturbing the rest of the detail panel.
+ */
+function PartitionTable({
+  jobId,
+  runId,
+  taskId,
+  partitionCount,
+  onShowLogs,
+}: {
+  jobId: string;
+  runId: string;
+  taskId: string;
+  partitionCount: number;
+  onShowLogs?: (row: PartitionInstance) => void;
+}) {
+  const queryClient = useQueryClient();
+  const [statusFilter, setStatusFilter] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Paged to completion: the endpoint returns at most 1000 rows per request and
+  // defaults to 100, so rendering one response was a silently truncated table.
+  const { data, isLoading } = usePartitionInstances(jobId, runId, taskId, statusFilter, true);
+  const rows = data?.partitions ?? [];
+
+  // Two different totals, and they are not interchangeable. `total` counts the
+  // FILTERED set the client is paging; `status_counts` is the histogram of the
+  // whole group, which is the only number that still means "×N" while a filter
+  // is active. partitionCount from the collapsed run payload is the fallback for
+  // a server that sends neither.
+  const groupTotal =
+    data?.status_counts
+      ? Object.values(data.status_counts).reduce((sum, n) => sum + n, 0)
+      : (data?.total ?? partitionCount);
+  const matchedTotal = data?.total ?? rows.length;
+
+  // The fingerprint/depends-on columns only carry information for a
+  // structured (ordered) group — hide them entirely for a plain bag of
+  // partitions rather than rendering a column of dashes.
+  const showOrderingColumns = rows.some(
+    (row) => !!row.fingerprint || (row.depends_on?.length ?? 0) > 0,
+  );
+
+  const retryPartition = useMutation({
+    mutationFn: (index: number) => api.retryPartition(jobId, runId, taskId, index),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["partitions", jobId, runId, taskId] });
+      toast.success("Partition retry requested");
+    },
+    onError: (err: Error) => {
+      toast.error(`Failed to retry partition: ${err.message}`);
+    },
+  });
+
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual's returned helpers (getVirtualItems/getTotalSize) are intentionally not memoized; this component re-renders on every scroll frame already
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 30,
+    overscan: 8,
+    // Without a real layout pass (e.g. under jsdom, or before the first
+    // ResizeObserver callback fires in the browser) the scroll element's
+    // measured size is 0 and no rows would render at all — seed a
+    // reasonable size so the table is never empty before it is measured.
+    initialRect: { width: 640, height: 240 },
+  });
+
+  const gridTemplateColumns = showOrderingColumns
+    ? "1fr 88px 64px 76px 60px 96px 130px 116px"
+    : "1fr 88px 64px 76px 60px 116px";
+
+  return (
+    <div className="mt-3" data-testid="partition-table">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div
+          data-testid="partition-table-total"
+          className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+        >
+          Partitions ×{groupTotal}
+          {statusFilter ? ` · ${matchedTotal} ${statusFilter}` : null}
+        </div>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          data-testid="partition-status-filter"
+          className="rounded border border-border/50 bg-card px-1.5 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+        >
+          <option value="">All statuses</option>
+          {PARTITION_STATUS_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="rounded border border-border/60">
+        <div
+          className="grid gap-0 border-b border-border/40 bg-muted/30 px-2 py-1 text-[10px] font-medium text-muted-foreground"
+          style={{ gridTemplateColumns }}
+        >
+          <span>Value</span>
+          <span>Status</span>
+          <span>Attempt</span>
+          <span>Duration</span>
+          <span>Cache</span>
+          {showOrderingColumns && <span>Fingerprint</span>}
+          {showOrderingColumns && <span>Depends on</span>}
+          <span className="text-right">Actions</span>
+        </div>
+
+        <div ref={scrollRef} className="max-h-48 overflow-auto">
+          {isLoading ? (
+            <div className="px-2 py-3 text-[11px] text-muted-foreground">Loading partitions…</div>
+          ) : rows.length === 0 ? (
+            <div className="px-2 py-3 text-[11px] text-muted-foreground">
+              No partitions match this filter.
+            </div>
+          ) : (
+            <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const row: PartitionInstance = rows[virtualRow.index];
+                return (
+                  <div
+                    key={row.task_run_id}
+                    data-testid="partition-row"
+                    data-index={virtualRow.index}
+                    className="grid items-center gap-0 border-b border-border/30 px-2 text-[11px]"
+                    style={{
+                      gridTemplateColumns,
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: `${virtualRow.size}px`,
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                  >
+                    <span className="truncate font-mono" title={row.value}>
+                      {row.value}
+                    </span>
+                    <span>
+                      <StatusBadge status={row.status} size="sm" />
+                    </span>
+                    <span className="font-mono">{row.attempt}</span>
+                    <span className="truncate font-mono">{row.duration ?? "—"}</span>
+                    <span>
+                      {row.cache_hit ? (
+                        <Archive className="h-3 w-3 text-cached" aria-label="cache hit" />
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </span>
+                    {showOrderingColumns && (
+                      <span className="truncate font-mono" title={row.fingerprint}>
+                        {row.fingerprint ? row.fingerprint.slice(0, 12) : "—"}
+                      </span>
+                    )}
+                    {showOrderingColumns && (
+                      <span className="truncate font-mono" title={(row.depends_on ?? []).join(", ")}>
+                        {(row.depends_on ?? []).join(", ") || "—"}
+                      </span>
+                    )}
+                    <span className="flex items-center justify-end gap-1">
+                      {onShowLogs && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-1.5 text-[10px]"
+                          data-testid="partition-logs-button"
+                          aria-label={`View logs for partition ${row.value || row.index}`}
+                          onClick={() => onShowLogs(row)}
+                        >
+                          Logs
+                        </Button>
+                      )}
+                      {row.status === "failed" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 px-1.5 text-[10px]"
+                          data-testid="partition-retry-button"
+                          disabled={retryPartition.isPending}
+                          onClick={() => retryPartition.mutate(row.index)}
+                        >
+                          Retry
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

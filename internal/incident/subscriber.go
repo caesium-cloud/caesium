@@ -3,6 +3,7 @@ package incident
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -137,12 +138,23 @@ func (s *Subscriber) handle(ctx context.Context, evt event.Event) {
 	}
 }
 
+// taskStatusFailed mirrors run.TaskStatusFailed. It is a local constant rather
+// than an import so the incident subscriber keeps depending only on models —
+// the persisted column value is the contract, and it is covered by the fan-out
+// attribution tests.
+const taskStatusFailed = "failed"
+
 // failureContext carries the resolved facts a failure event contributes.
 type failureContext struct {
-	jobID      uuid.UUID
-	taskName   string
-	taskRun    *models.TaskRun
-	backfillID *uuid.UUID
+	jobID    uuid.UUID
+	taskName string
+	// taskRun is the instance the incident is classified from. For a fanned
+	// step it is the first FAILED instance, never an arbitrary sibling.
+	taskRun *models.TaskRun
+	// failedPartitions lists every failed instance's partition value when the
+	// task is fanned; nil for an unfanned task.
+	failedPartitions []string
+	backfillID       *uuid.UUID
 }
 
 // resolveContext fills in job id, task name, task-run detail, and backfill id
@@ -163,11 +175,20 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 	}
 
 	if evt.TaskID != uuid.Nil && evt.RunID != uuid.Nil {
-		var tr models.TaskRun
+		// A fanned step has N task_runs rows for one (run, task). `.First()` on
+		// that predicate returns an arbitrary sibling, so an incident could be
+		// CLASSIFIED FROM A SUCCEEDED INSTANCE — wrong failure class, wrong
+		// error, wrong attempt count, and a remediation dispatched against a row
+		// that never failed. Read the whole group in a stable order and attribute
+		// to the first FAILED instance; fall back to the lowest-index row only
+		// when nothing failed (a run-level event, or a group still settling).
+		var rows []models.TaskRun
 		if err := s.db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", evt.RunID, evt.TaskID).
-			First(&tr).Error; err == nil {
-			fc.taskRun = &tr
+			Order("partition_index ASC, created_at ASC, id ASC").
+			Find(&rows).Error; err == nil && len(rows) > 0 {
+			fc.taskRun = attributionTaskRun(rows)
+			fc.failedPartitions = failedPartitionValues(rows)
 		}
 		var task models.Task
 		if err := s.db.WithContext(ctx).Select("name").First(&task, "id = ?", evt.TaskID).Error; err == nil {
@@ -175,6 +196,37 @@ func (s *Subscriber) resolveContext(ctx context.Context, evt event.Event) failur
 		}
 	}
 	return fc
+}
+
+// attributionTaskRun picks the row an incident is classified from: the first
+// failed instance in partition order, else the first row. Returning a pointer
+// into rows is safe — rows outlives the call through fc.
+func attributionTaskRun(rows []models.TaskRun) *models.TaskRun {
+	for i := range rows {
+		if rows[i].Status == taskStatusFailed {
+			return &rows[i]
+		}
+	}
+	return &rows[0]
+}
+
+// failedPartitionValues lists the partition keys of every failed instance, so a
+// group failure is reported as "3 of 12 partitions failed" rather than as one
+// anonymous task failure. Empty for an unfanned task.
+func failedPartitionValues(rows []models.TaskRun) []string {
+	if len(rows) == 1 && rows[0].PartitionValue == "" {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		if rows[i].Status == taskStatusFailed {
+			out = append(out, rows[i].PartitionValue)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // runHasTaskAttributedIncident reports whether a task-attributed incident (one
@@ -265,7 +317,7 @@ func (s *Subscriber) handleFailure(ctx context.Context, evt event.Event) {
 		TaskName:               fc.taskName,
 		Class:                  class,
 		LastError:              sig.Error,
-		Evidence:               buildEvidence(class, exitCode, sig.Result),
+		Evidence:               buildEvidence(class, exitCode, sig.Result, &fc),
 		BackfillID:             fc.backfillID,
 		RemediationTargetRunID: runID,
 		Cooldown:               s.cooldown,
@@ -316,6 +368,22 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 		}
 	}
 	if evt.TaskID != uuid.Nil {
+		// A success event names the CATALOG task, which for a fanned step covers
+		// N instance rows. Under fanOut.failurePolicy: continue the group can be
+		// terminal with some partitions failed and some succeeded, so
+		// "task_succeeded arrived" is not the same claim as "this task ran
+		// green". Remediating on it auto-closed the incident the failed sibling
+		// had just opened — a live failure disappearing from every alerting path
+		// that watches open incidents, with no human involved.
+		//
+		// This is belt-and-braces with the store, which no longer emits a
+		// group-level task_succeeded for a partially-failed group
+		// (internal/run/store.go, groupAllSucceededTx). Both guards are wanted:
+		// this one also covers events replayed from history and any future
+		// success route.
+		if !s.taskRanGreen(ctx, evt) {
+			return
+		}
 		var task models.Task
 		if err := s.db.WithContext(ctx).Select("name").First(&task, "id = ?", evt.TaskID).Error; err == nil {
 			taskName = task.Name
@@ -347,8 +415,24 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 	}
 }
 
+// evidencePartitionListCap bounds the partition list embedded in an incident's
+// evidence blob: a 10k-partition group whose every instance failed must not
+// write a 10k-element JSON array into every incident row.
+const evidencePartitionListCap = 25
+
+// cappedPartitionList truncates a partition list for embedding, appending a
+// "(+N more)" marker so the truncation is visible rather than silent.
+func cappedPartitionList(values []string) []string {
+	if len(values) <= evidencePartitionListCap {
+		return values
+	}
+	out := make([]string, 0, evidencePartitionListCap+1)
+	out = append(out, values[:evidencePartitionListCap]...)
+	return append(out, fmt.Sprintf("(+%d more)", len(values)-evidencePartitionListCap))
+}
+
 // buildEvidence renders a small JSON evidence blob for the incident feed.
-func buildEvidence(class FailureClass, exitCode *int, result string) datatypes.JSON {
+func buildEvidence(class FailureClass, exitCode *int, result string, fc *failureContext) datatypes.JSON {
 	m := map[string]any{"class": string(class)}
 	if exitCode != nil {
 		m["exit_code"] = *exitCode
@@ -356,9 +440,57 @@ func buildEvidence(class FailureClass, exitCode *int, result string) datatypes.J
 	if result != "" {
 		m["result"] = result
 	}
+	// Fan-out attribution: name the instance the class was derived from and how
+	// many siblings failed, so a group failure is never read as a single
+	// anonymous task failure. Both keys are omitted for an unfanned task, so
+	// existing evidence blobs are unchanged.
+	if fc != nil {
+		if fc.taskRun != nil && fc.taskRun.PartitionValue != "" {
+			m["partition"] = fc.taskRun.PartitionValue
+		}
+		if len(fc.failedPartitions) > 0 {
+			m["failed_partitions"] = cappedPartitionList(fc.failedPartitions)
+			m["failed_partition_count"] = len(fc.failedPartitions)
+		}
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return nil
 	}
 	return datatypes.JSON(b)
+}
+
+// taskRanGreen reports whether a success event may be trusted as "this task ran
+// green".
+//
+// It is a FAN-OUT-ONLY check, deliberately. An unfanned task has exactly one
+// TaskRun, the success event and that row are written by the same transaction,
+// and the event alone has always been the trigger — so the unfanned path is
+// left byte-for-byte as it was, event-trusting, and this returns true without
+// consulting the row. Only a fanned step (N rows for one catalog task) can be
+// terminal-with-failures while a success event names it, and only there is the
+// group's own state the authority. Unreadable or absent rows also return true,
+// so a missing row never blocks a remediation that used to happen.
+func (s *Subscriber) taskRanGreen(ctx context.Context, evt event.Event) bool {
+	if evt.RunID == uuid.Nil {
+		return true
+	}
+	var rows []models.TaskRun
+	if err := s.db.WithContext(ctx).
+		Select("status", "partition_count").
+		Where("job_run_id = ? AND task_id = ?", evt.RunID, evt.TaskID).
+		Find(&rows).Error; err != nil || len(rows) == 0 {
+		return true
+	}
+	if len(rows) == 1 && rows[0].PartitionCount == 0 {
+		return true
+	}
+	for i := range rows {
+		switch rows[i].Status {
+		case "succeeded", "cached":
+		default:
+			return false
+		}
+	}
+	return true
 }

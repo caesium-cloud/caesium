@@ -26,8 +26,52 @@ const (
 	logHeaderState     = "X-Caesium-Log-State"
 	logHeaderSource    = "X-Caesium-Log-Source"
 	logHeaderTruncated = "X-Caesium-Log-Truncated"
+	// logHeaderTaskRunID names the TaskRun instance whose log is being streamed.
+	// It is set on every fan-out response so a client that let the server choose
+	// still knows which container it got.
+	logHeaderTaskRunID = "X-Caesium-Task-Run-ID"
+	// logHeaderPartition carries the streamed instance's partition value.
+	logHeaderPartition = "X-Caesium-Partition"
 )
 
+// logInstanceLoader reads every TaskRun instance for (run, task). It is a
+// package var purely so the handler's fan-out selection can be unit-tested
+// without the process-wide default store (which would open a real database).
+var logInstanceLoader = func(ctx context.Context, runID, taskID uuid.UUID) ([]*runstorage.TaskRun, error) {
+	return runstorage.Default().TaskRunInstances(ctx, runID, taskID)
+}
+
+// logSnapshotLoader reads one instance's persisted log snapshot by TaskRun
+// primary key. Same test-seam rationale as logInstanceLoader.
+var logSnapshotLoader = func(ctx context.Context, runID, taskRunID uuid.UUID) (*runstorage.TaskLogSnapshot, error) {
+	return runstorage.Default().TaskLogSnapshotForInstance(ctx, runID, taskRunID)
+}
+
+// Logs streams (or replays) one task's container log.
+//
+//	GET /v1/jobs/:id/runs/:run_id/logs?task_id=<uuid>
+//	    [&task_run_id=<uuid>] [&partition=<value>] [&since=<rfc3339>]
+//
+// # Fan-out contract
+//
+// A fanned step has N task_runs rows for one (run, task_id) — N containers, N
+// logs. `task_id` alone therefore does not name a log stream, and the run-detail
+// payload this handler used to match against COLLAPSES the group to one entry
+// whose RuntimeID is an arbitrary instance's. Streaming that was silently
+// serving the wrong container's output.
+//
+// So, on a fanned task, the caller must select an instance:
+//
+//   - `task_run_id=<uuid>` — the TaskRun primary key (from the partitions
+//     endpoint / `caesium run partitions --json`). Authoritative.
+//   - `partition=<value>` — the partition key, when the value is more convenient
+//     than the row id.
+//   - neither — 400 with a JSON body listing every instance (partition value,
+//     index, status, task_run_id) so the client can retry with one. Failing
+//     loudly is deliberate: silently streaming instance 0 is the defect this
+//     replaced, and a truncated/wrong log is worse than an error.
+//
+// An UNFANNED task ignores both selectors and behaves exactly as before.
 func Logs(c *echo.Context) error {
 	ctx := c.Request().Context()
 
@@ -89,9 +133,41 @@ func Logs(c *echo.Context) error {
 		return echo.ErrNotFound
 	}
 
-	snapshot, err := runService.GetTaskLogSnapshot(runID, taskID)
+	// Fan-out: resolve which instance's log this is. selected is nil for an
+	// unfanned task, which keeps the collapsed-entry path below byte-identical.
+	selected, problem, err := resolveLogInstance(ctx, runID, taskID, taskEntry,
+		strings.TrimSpace(c.QueryParam("task_run_id")), c.QueryParam("partition"))
+	if err != nil {
+		return err
+	}
+	if problem != nil {
+		// A JSON body (not a bare error string) because the useful part is the
+		// instance list the client retries with.
+		return c.JSON(problem.Status, problem)
+	}
+
+	var snapshot *runstorage.TaskLogSnapshot
+	if selected != nil {
+		taskEntry = selected
+		c.Response().Header().Set(logHeaderTaskRunID, selected.ID.String())
+		if selected.PartitionValue != "" {
+			c.Response().Header().Set(logHeaderPartition, selected.PartitionValue)
+		}
+		snapshot, err = logSnapshotLoader(ctx, runID, selected.ID)
+	} else {
+		snapshot, err = runService.GetTaskLogSnapshot(runID, taskID)
+	}
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+
+	// A task that has finished has no container left to stream: every engine's
+	// Stop is stop-AND-remove (docker/engine.go, podman/engine.go), and in
+	// distributed mode the container never lived on this node in the first
+	// place. The snapshot captured at completion is therefore the authoritative
+	// log, and asking the runtime for one can only fail.
+	if snapshot != nil && taskLogIsFinal(taskEntry) {
+		return writeLogSnapshot(c, snapshot)
 	}
 
 	if taskEntry.RuntimeID == "" {
@@ -106,15 +182,73 @@ func Logs(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	reader, err := engine.Logs(&atom.EngineLogsRequest{ID: taskEntry.RuntimeID, Since: since})
-	if err != nil {
+	open := func(task *runstorage.TaskRun, from time.Time) (io.ReadCloser, error) {
+		return engine.Logs(&atom.EngineLogsRequest{ID: task.RuntimeID, Since: from})
+	}
+
+	return serveTaskLog(c, open, taskEntry, since, snapshot, runEntry.CompletedAt != nil)
+}
+
+// logStreamOpener opens the live container log of one task run. It is a
+// parameter rather than a direct engine call so the serving rules below can be
+// exercised without a container runtime.
+type logStreamOpener func(task *runstorage.TaskRun, since time.Time) (io.ReadCloser, error)
+
+// taskLogIsFinal reports whether the task can no longer produce log output, in
+// which case its persisted snapshot is the whole log.
+func taskLogIsFinal(task *runstorage.TaskRun) bool {
+	if task == nil {
+		return true
+	}
+	return task.CompletedAt != nil || runstorage.IsTerminal(task.Status)
+}
+
+// serveTaskLog writes one task's log to the response, preferring the live
+// container stream and falling back to the persisted snapshot.
+//
+// Nothing is written to the response until the live stream has produced its
+// first byte, and that ordering is the point: engines disagree about WHEN an
+// unavailable stream reports itself. The docker engine returns the daemon's
+// "no such container" from Logs() synchronously, so the fallback was reachable.
+// The podman engine returns an io.Pipe immediately and delivers the failure to
+// the FIRST READ — podman.go's ContainerLogs runs containers.Logs in a
+// goroutine and reports through pw.CloseWithError. Committing 200 + "live"
+// before reading therefore made the fallback unreachable on podman: since a
+// container is removed the moment its task ends, every finished task's log came
+// back 200-with-an-empty-body there (the podman-lane failure of
+// TestFanOutLogsSelectInstance), while the same request on docker correctly
+// replayed the snapshot.
+func serveTaskLog(
+	c *echo.Context,
+	open logStreamOpener,
+	taskEntry *runstorage.TaskRun,
+	since time.Time,
+	snapshot *runstorage.TaskLogSnapshot,
+	runCompleted bool,
+) error {
+	ctx := c.Request().Context()
+
+	// replay is the "there is no live stream" answer. streamErr is nil when the
+	// stream opened cleanly but carried nothing.
+	replay := func(streamErr error) error {
+		if ctx.Err() != nil {
+			return nil // the caller hung up; there is nobody left to serve
+		}
 		if snapshot != nil {
 			return writeLogSnapshot(c, snapshot)
 		}
-		if taskEntry.CompletedAt != nil || runEntry.CompletedAt != nil {
+		if taskEntry.CompletedAt != nil || runCompleted {
 			return writeLogState(c, "unavailable")
 		}
-		return echo.NewHTTPError(http.StatusBadGateway, "live log stream unavailable").Wrap(err)
+		if streamErr == nil {
+			return writeLogState(c, logStateForTask(taskEntry))
+		}
+		return echo.NewHTTPError(http.StatusBadGateway, "live log stream unavailable").Wrap(streamErr)
+	}
+
+	reader, err := open(taskEntry, since)
+	if err != nil {
+		return replay(err)
 	}
 	defer func() {
 		if closeErr := reader.Close(); closeErr != nil {
@@ -122,46 +256,195 @@ func Logs(c *echo.Context) error {
 		}
 	}()
 
+	buf := make([]byte, 4096)
+
+	// Peek: hold the status line until the stream proves it has output.
+	var (
+		first   []byte
+		pending error
+	)
+	for len(first) == 0 {
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			first = buf[:n]
+			pending = readErr
+			break
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				// Opened and ended without output: a snapshot captured while
+				// the container still existed beats an empty 200.
+				return replay(nil)
+			}
+			return replay(readErr)
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+	}
+
 	res := c.Response()
 	res.Header().Set(echo.HeaderContentType, "text/plain; charset=utf-8")
 	res.Header().Set(logHeaderSource, "live")
 	res.WriteHeader(http.StatusOK)
 
 	flusher, _ := res.(http.Flusher)
-	buf := make([]byte, 4096)
+	write := func(b []byte) error {
+		if _, writeErr := res.Write(b); writeErr != nil {
+			return writeErr
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
+
+	if writeErr := write(first); writeErr != nil {
+		return writeErr
+	}
 
 	for {
+		if pending != nil {
+			if !errors.Is(pending, io.EOF) {
+				log.Error(
+					"log stream error",
+					"run_id", taskEntry.JobRunID,
+					"task_id", taskEntry.TaskID,
+					"task_run_id", taskEntry.ID,
+					"error", pending,
+				)
+			}
+			return nil
+		}
+
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
-			n, readErr := reader.Read(buf)
-			if n > 0 {
-				if _, writeErr := res.Write(buf[:n]); writeErr != nil {
-					return writeErr
-				}
-				if flusher != nil {
-					flusher.Flush()
-				}
-			}
+		}
 
-			if readErr != nil {
-				if errors.Is(readErr, io.EOF) {
-					return nil
-				}
-
-				log.Error(
-					"log stream error",
-					"job_id", jobID,
-					"run_id", runID,
-					"task_id", taskID,
-					"error", readErr,
-				)
-
-				return nil
+		n, readErr := reader.Read(buf)
+		if n > 0 {
+			if writeErr := write(buf[:n]); writeErr != nil {
+				return writeErr
 			}
 		}
+		pending = readErr
 	}
+}
+
+// logInstanceRow is one selectable fan-out instance, echoed in the 400 body when
+// a fanned task is requested without a selector.
+type logInstanceRow struct {
+	TaskRunID string `json:"task_run_id"`
+	Partition string `json:"partition"`
+	Index     int    `json:"partition_index"`
+	Status    string `json:"status"`
+}
+
+// resolveLogInstance applies the fan-out selection contract. It returns:
+//
+//   - (nil, nil) for an unfanned task — the caller keeps its existing behavior;
+//   - (instance, nil) when a fanned group's instance was selected;
+//   - (nil, *echo.HTTPError) for an unknown selector (404) or an unselected
+//     fanned group (400, body listing the instances).
+//
+// collapsed is the run-detail entry, used to skip the instance query entirely
+// for the overwhelmingly common unfanned case: the collapsed payload reports
+// PartitionCount == 0 there, so no extra read happens on the hot path.
+func resolveLogInstance(
+	ctx context.Context,
+	runID, taskID uuid.UUID,
+	collapsed *runstorage.TaskRun,
+	taskRunParam, partitionParam string,
+) (*runstorage.TaskRun, *logSelectionProblem, error) {
+	if collapsed != nil && collapsed.PartitionCount == 0 && taskRunParam == "" && partitionParam == "" {
+		return nil, nil, nil
+	}
+
+	instances, err := logInstanceLoader(ctx, runID, taskID)
+	if err != nil {
+		return nil, nil, echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
+	}
+	if len(instances) == 0 {
+		return nil, nil, echo.ErrNotFound
+	}
+
+	fanned := len(instances) > 1 || instances[0].PartitionValue != ""
+
+	if taskRunParam != "" {
+		taskRunID, parseErr := uuid.Parse(taskRunParam)
+		if parseErr != nil {
+			return nil, nil, echo.NewHTTPError(http.StatusBadRequest, "task_run_id must be a UUID").Wrap(parseErr)
+		}
+		for _, inst := range instances {
+			if inst.ID == taskRunID {
+				return inst, nil, nil
+			}
+		}
+		return nil, &logSelectionProblem{
+			Status:    http.StatusNotFound,
+			Message:   fmt.Sprintf("task_run_id %s is not an instance of this task in this run", taskRunID),
+			Instances: logInstanceRows(instances),
+		}, nil
+	}
+
+	if partitionParam != "" {
+		for _, inst := range instances {
+			if inst.PartitionValue == partitionParam {
+				return inst, nil, nil
+			}
+		}
+		return nil, &logSelectionProblem{
+			Status:    http.StatusNotFound,
+			Message:   fmt.Sprintf("task has no partition %q in this run", partitionParam),
+			Instances: logInstanceRows(instances),
+		}, nil
+	}
+
+	if !fanned {
+		// A single unfanned row that only reached here because the collapsed
+		// entry was unavailable: behave as before.
+		return nil, nil, nil
+	}
+
+	return nil, &logSelectionProblem{
+		Status: http.StatusBadRequest,
+		Message: fmt.Sprintf(
+			"task is fanned into %d partitions; select one with task_run_id=<uuid> or partition=<value>",
+			len(instances)),
+		PartitionCount: len(instances),
+		Instances:      logInstanceRows(instances),
+	}, nil
+}
+
+// logSelectionProblem is the JSON body returned when a fan-out log request
+// cannot be resolved to one instance. It carries the instance list precisely so
+// the client's retry needs no extra round trip.
+type logSelectionProblem struct {
+	Status         int              `json:"-"`
+	Message        string           `json:"message"`
+	PartitionCount int              `json:"partition_count,omitempty"`
+	Instances      []logInstanceRow `json:"instances"`
+}
+
+// logInstanceRows renders the selectable instances, capped so a 10k-partition
+// group cannot return a multi-megabyte error body.
+func logInstanceRows(instances []*runstorage.TaskRun) []logInstanceRow {
+	const maxListed = 200
+	rows := make([]logInstanceRow, 0, len(instances))
+	for i, inst := range instances {
+		if i == maxListed {
+			break
+		}
+		rows = append(rows, logInstanceRow{
+			TaskRunID: inst.ID.String(),
+			Partition: inst.PartitionValue,
+			Index:     inst.PartitionIndex,
+			Status:    string(inst.Status),
+		})
+	}
+	return rows
 }
 
 func writeLogSnapshot(c *echo.Context, snapshot *runstorage.TaskLogSnapshot) error {

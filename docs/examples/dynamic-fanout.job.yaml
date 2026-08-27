@@ -1,0 +1,78 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: dynamic-fanout-demo
+  labels:
+    team: platform
+    scenario: dynamic-fanout
+  annotations:
+    owner: platform-oncall
+    purpose: "Runtime-materialized parallel instances from a partition list"
+  # process-file's outputSchema/publish's inputSchema are declared below, so
+  # violations are enforced. "fail" is safe here: process-file's own emitted
+  # output ({"file": "<partition-key>"}) always matches its declared schema
+  # for every instance, deterministically.
+  schemaValidation: fail
+trigger:
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
+    timezone: "UTC"
+steps:
+  - name: list-files
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo '##caesium::partitions [{"key":"alpha","fingerprint":"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"},{"key":"bravo","fingerprint":"sha256:f144a6907dc4284d1f9fe6a7d9b9ff53c02c1d07ba68f24d413d7ff7f757a782","dependsOn":["alpha"]},{"key":"charlie","fingerprint":"sha256:b9dd960c1753459a78115d3cb845a57d924b6877e805b08bd01086ccdf34433c"}]'
+    next: [process-file]
+
+  - name: process-file
+    engine: docker
+    image: alpine:3.23
+    outputSchema:
+      type: object
+      properties:
+        file: { type: string }
+      required: [file]
+    command:
+      - sh
+      - -c
+      - |
+        echo "processing $CAESIUM_PARTITION"
+        echo "##caesium::output {\"file\": \"$CAESIUM_PARTITION\"}"
+    dependsOn: [list-files]
+    fanOut:
+      from: list-files
+      env: CAESIUM_PARTITION
+      maxPartitions: 64
+      maxParallel: 4
+      onEmpty: skip
+      failurePolicy: continue
+    next: [publish]
+
+  - name: publish
+    engine: docker
+    image: alpine:3.23
+    inputSchema:
+      process-file:
+        required: [file]
+        properties:
+          file:
+            description: >
+              process-file is fanned (fanOut.from: list-files above), so this
+              key arrives as the fan-in aggregate rather than the plain
+              string process-file's own outputSchema declares per instance:
+              a JSON object mapping each partition value to that instance's
+              "file" output, e.g.
+              {"alpha":"alpha","bravo":"bravo","charlie":"charlie"}. No
+              "type" is declared here because it legitimately differs from
+              the per-instance producer type; see
+              CAESIUM_OUTPUT_PROCESS_FILE_PARTITION_COUNT /
+              CAESIUM_OUTPUT_PROCESS_FILE_SUCCEEDED /
+              CAESIUM_OUTPUT_PROCESS_FILE_FAILED for the accompanying counts.
+    command: ["sh", "-c", "echo publishing"]
+    dependsOn: [process-file]

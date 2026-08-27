@@ -33,6 +33,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -50,7 +51,69 @@ const (
 	// could not apply a completion because of transient dqlite contention and
 	// answered 503 so the worker retries.  It is NOT a fence violation.
 	ReasonContention = "contention"
+	// ReasonAmbiguousTask rejects a dispatch that names only a catalog task id
+	// for a fan-out group that is already expanded into N instance rows.  There
+	// is no answer to "run this task" in that case, and every downstream write
+	// resolves the identity through loadTaskRunByIDOrUnique, so accepting it
+	// either strands a claim inside a transaction or drives a legacy group-wide
+	// write.  Only an owner from BEFORE instance-addressed dispatch sends one.
+	ReasonAmbiguousTask = "ambiguous_task"
 )
+
+// Internal dispatch protocol versioning.
+//
+// The owner and the worker are separate processes that are upgraded separately,
+// so a rolling deploy always has a window where a new owner is dispatching to an
+// old peer.  An old peer ignores the JSON field it does not know
+// (DispatchRequest.TaskRunID) and silently processes the catalog id instead —
+// which for an expanded fan-out group is ambiguous.  The owner therefore asks a
+// peer what it supports before it entrusts an INSTANCE to it.
+const (
+	// InternalProtocolVersion is the internal coordination protocol this build
+	// speaks.  Bumped when the wire contract gains a field a peer must
+	// understand rather than merely tolerate.  v1 was catalog-addressed
+	// dispatch; v2 added instance-addressed dispatch.
+	InternalProtocolVersion = 2
+
+	// CapabilityInstanceIdentity names the ability to execute a dispatch
+	// addressed by TaskRun id (a fan-out instance) rather than by catalog task
+	// id.  A node advertising it honours DispatchRequest.TaskRunID end to end:
+	// claim, load, rollback, and the completion envelope it posts back.
+	CapabilityInstanceIdentity = "instance_identity"
+)
+
+// CapabilitiesResponse is the body of GET /internal/capabilities: what this node
+// can be asked to do.  Additive by construction — an unknown capability string
+// is ignored, and a peer that does not serve the endpoint at all is read as
+// supporting nothing beyond v1.
+type CapabilitiesResponse struct {
+	NodeID          string   `json:"node_id"`
+	ProtocolVersion int      `json:"protocol_version"`
+	Capabilities    []string `json:"capabilities"`
+}
+
+// Supports reports whether the response advertises the named capability.
+func (c *CapabilitiesResponse) Supports(name string) bool {
+	if c == nil {
+		return false
+	}
+	for _, have := range c.Capabilities {
+		if have == name {
+			return true
+		}
+	}
+	return false
+}
+
+// CapabilityAdvertiser is implemented by a worker that can name the internal
+// protocol features it supports.  The WORKER is the honest source: the handler
+// only routes, while the worker is what actually executes an instance-addressed
+// dispatch and posts an instance-addressed completion back.  A node with no
+// worker attached advertises nothing, which is exactly right — it would reject
+// the dispatch anyway.
+type CapabilityAdvertiser interface {
+	Capabilities() []string
+}
 
 // ErrOwnerBusy is returned by PostComplete when the owner answered 503 Service
 // Unavailable: it could not apply the completion because of transient dqlite
@@ -58,6 +121,13 @@ const (
 // distinct from a fence rejection (409), which is terminal — callers should
 // retry on ErrOwnerBusy and give up on any other error.
 var ErrOwnerBusy = errors.New("owner busy: retryable")
+
+// ErrPeerUnreachable wraps a TRANSPORT failure talking to a peer, as distinct
+// from a peer that answered with an unwelcome status.  The dispatch loop needs
+// the difference: an unreachable peer should be benched from the whole rotation,
+// while a peer that answers 404 to the capability probe is a perfectly healthy
+// older node that must keep receiving unfanned work.
+var ErrPeerUnreachable = errors.New("peer unreachable")
 
 // internalClient is the shared HTTP client used for both PostDispatch and
 // PostComplete. Sharing keeps the underlying TCP/keep-alive pool warm
@@ -109,8 +179,12 @@ var ValidCompleteStatuses = map[string]bool{
 // DispatchRequest is the envelope pushed by the owner to a worker to ask it
 // to execute a specific task.
 type DispatchRequest struct {
-	RunID           uuid.UUID `json:"run_id"`
-	TaskID          uuid.UUID `json:"task_id"`
+	RunID  uuid.UUID `json:"run_id"`
+	TaskID uuid.UUID `json:"task_id"`
+	// TaskRunID identifies the specific instance. Empty on older workers;
+	// the owner falls back to the unique (run, task) row and rejects
+	// ambiguity when more than one instance exists.
+	TaskRunID       uuid.UUID `json:"task_run_id,omitempty"`
 	OwnerGeneration int64     `json:"owner_generation"`
 	Attempt         int       `json:"attempt"`
 	WorkerNode      string    `json:"worker_node"`
@@ -128,6 +202,7 @@ type DispatchRequest struct {
 type CompleteRequest struct {
 	RunID           uuid.UUID         `json:"run_id"`
 	TaskID          uuid.UUID         `json:"task_id"`
+	TaskRunID       uuid.UUID         `json:"task_run_id,omitempty"`
 	OwnerGeneration int64             `json:"owner_generation"`
 	Attempt         int               `json:"attempt"`
 	WorkerNode      string            `json:"worker_node"`
@@ -138,7 +213,10 @@ type CompleteRequest struct {
 	// task chose at runtime. The owner uses this to propagate `skipped` to the
 	// non-selected branches. Empty for non-branch tasks.
 	BranchSelections []string `json:"branch_selections,omitempty"`
-	Error            string   `json:"error,omitempty"`
+	// Partitions is the producer's parsed partition list. Empty for non-producers
+	// and for older workers (the owner then treats the group as unfanned).
+	Partitions []pkgtask.Partition `json:"partitions,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 // CompleteResponse is the JSON body returned by /internal/complete.
@@ -247,6 +325,41 @@ func (h *Handler) authorized(r *http.Request) bool {
 	return false
 }
 
+// capabilities is the capability set this node advertises.
+func (h *Handler) capabilities() []string {
+	if h.submitter == nil {
+		return nil
+	}
+	if adv, ok := h.submitter.(CapabilityAdvertiser); ok {
+		return adv.Capabilities()
+	}
+	return nil
+}
+
+// HandleCapabilities handles GET /internal/capabilities: the peer-capability
+// probe an owner issues before dispatching a fan-out INSTANCE to a node.  It is
+// deliberately a plain read with no side effects, guarded by the same bearer
+// token as the other internal endpoints.
+func (h *Handler) HandleCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !h.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	caps := h.capabilities()
+	if caps == nil {
+		caps = []string{}
+	}
+	writeJSON(w, http.StatusOK, CapabilitiesResponse{
+		NodeID:          h.nodeID,
+		ProtocolVersion: InternalProtocolVersion,
+		Capabilities:    caps,
+	})
+}
+
 // HandleDispatch handles POST /internal/dispatch.
 //
 // The worker accepts the dispatch by:
@@ -313,7 +426,28 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// outstanding_predecessors counter is intentionally stale), so trust the
 	// owner's readiness decision rather than re-checking it here.
 	trustOwnerReadiness := h.ownerManager != nil
-	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
+	if err := h.store.ClaimTaskForDispatch(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
+		// An instance-blind dispatch for a group that is already expanded.  Only
+		// an owner that predates instance-addressed dispatch omits TaskRunID, and
+		// for an expanded group its catalog id names N rows, so the claim's
+		// loadTaskRunByIDOrUnique resolves nothing and the transaction rolls back
+		// having written nothing.  Reported with its own code rather than folded
+		// into the generic "not running" 409, which reads like an ordinary lost
+		// claim race and hides the rolling-upgrade mismatch behind it.  Detected
+		// from the claim itself rather than by a pre-flight count so the check and
+		// the claim are one transaction: a group that expands in between cannot
+		// slip through with a stale "unambiguous" answer.
+		if errors.Is(err, run.ErrAmbiguousTaskRun) {
+			log.Warn("dispatch: rejected instance-blind dispatch for an expanded fan-out group",
+				"run_id", req.RunID, "task_id", req.TaskID, "error", err)
+			writeJSON(w, http.StatusConflict, ErrorResponse{
+				Code: ReasonAmbiguousTask,
+				Message: fmt.Sprintf(
+					"task %s is expanded into fan-out instances; dispatch must name task_run_id",
+					req.TaskID),
+			})
+			return
+		}
 		if err == run.ErrTaskClaimMismatch {
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonTaskNotRunning,
@@ -336,7 +470,7 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// Load the full task row to execute (image/command/engine/etc.).  If the
 	// row vanished between claim and load (reclaimed by another node in the
 	// race window), roll back and reject.
-	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, req.TaskID, h.nodeID)
+	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, dispatchTaskRef(req), h.nodeID)
 	if err != nil {
 		h.rollbackClaim(req)
 		// Surface the underlying error rather than dropping it: a missing row is
@@ -382,12 +516,26 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// dispatchTaskRef is the row this dispatch addresses.  The claim, the load, and
+// the rollback must all resolve the *same* row, and for a fanned step the
+// catalog task id names N of them: every one of ClaimTaskForDispatch /
+// LoadDispatchedTaskRun / ReleaseTaskClaim resolves through
+// loadTaskRunByIDOrUnique, which rejects that ambiguity rather than picking a
+// sibling.  An older owner omits TaskRunID, and the catalog id then still names
+// exactly one row (the rolling-upgrade fallback).
+func dispatchTaskRef(req DispatchRequest) uuid.UUID {
+	if req.TaskRunID != uuid.Nil {
+		return req.TaskRunID
+	}
+	return req.TaskID
+}
+
 // rollbackClaim reverts a just-claimed task back to the dispatchable pending
 // state so the owner re-dispatches it.  Logged but not surfaced to the caller
 // beyond the 409 the caller already returns; a failed rollback is rare (the
 // claim lease still expires and ClaimNext recovery covers it).
 func (h *Handler) rollbackClaim(req DispatchRequest) {
-	if err := h.store.ReleaseTaskClaim(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration); err != nil {
+	if err := h.store.ReleaseTaskClaim(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration); err != nil {
 		log.Error("dispatch: failed to roll back claim after worker rejected task",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
@@ -484,9 +632,9 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
 	// falls through to the SQL path below as a safety net.
 	if h.ownerManager != nil {
-		res, omErr := h.ownerManager.Complete(
-			req.RunID, req.TaskID, run.TaskStatus(req.Status),
-			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections,
+		res, omErr := h.ownerManager.CompleteInstance(
+			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
+			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions,
 		)
 		if omErr != nil {
 			if dqlite.IsContentionError(omErr) {
@@ -524,9 +672,17 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	case run.TaskStatusSucceeded, run.TaskStatusFailed:
 		var applyErr error
 		if run.TaskStatus(req.Status) == run.TaskStatusSucceeded {
-			applyErr = h.store.CompleteTaskClaimed(req.RunID, req.TaskID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+			completeID := req.TaskID
+			if req.TaskRunID != uuid.Nil {
+				completeID = req.TaskRunID
+			}
+			applyErr = h.store.CompleteTaskClaimedWithPartitions(req.RunID, completeID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
 		} else {
-			applyErr = h.store.FailTaskClaimed(req.RunID, req.TaskID, fmt.Errorf("%s", req.Error), req.WorkerNode)
+			failID := req.TaskID
+			if req.TaskRunID != uuid.Nil {
+				failID = req.TaskRunID
+			}
+			applyErr = h.store.FailTaskClaimed(req.RunID, failID, fmt.Errorf("%s", req.Error), req.WorkerNode)
 		}
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
@@ -556,7 +712,20 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	case run.TaskStatusCached:
 		source := run.CacheHitSource{RunID: req.RunID}
-		applyErr := h.store.CacheHitTaskClaimed(req.RunID, req.TaskID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+		cacheID := req.TaskID
+		if req.TaskRunID != uuid.Nil {
+			cacheID = req.TaskRunID
+		}
+		// A cached fan-out producer still carries its partition list, and the SQL
+		// lane expands the group inside the cache-hit transaction. Called
+		// directly so removing the store method is a build error, never a
+		// silently un-expanded group.
+		var applyErr error
+		if len(req.Partitions) > 0 {
+			applyErr = h.store.CacheHitTaskClaimedWithPartitions(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
+		} else {
+			applyErr = h.store.CacheHitTaskClaimed(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+		}
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
 			writeJSON(w, http.StatusConflict, ErrorResponse{
@@ -673,6 +842,39 @@ func PostDispatch(ctx context.Context, targetURL, token string, req DispatchRequ
 	}
 	// 409 or any non-202: worker rejected.
 	return false, nil
+}
+
+// GetCapabilities probes a peer's GET /internal/capabilities.
+//
+// Every failure mode — an old build with no such route (404), an unreachable
+// node, a malformed body — is reported as an error, and the caller reads that as
+// "supports nothing beyond v1".  Failing closed is the whole point: guessing
+// that a silent peer understands instance identity is what strands a claim.
+func GetCapabilities(ctx context.Context, targetURL, token string) (*CapabilitiesResponse, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, dispatchPostTimeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(probeCtx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("capabilities: new request: %w", err)
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := internalClient.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("capabilities: http: %w: %w", ErrPeerUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("capabilities: peer returned status %d", resp.StatusCode)
+	}
+	var out CapabilitiesResponse
+	if err := json.Unmarshal(respBody, &out); err != nil {
+		return nil, fmt.Errorf("capabilities: decode: %w", err)
+	}
+	return &out, nil
 }
 
 // PostComplete sends a CompleteRequest from a worker to the owner node.

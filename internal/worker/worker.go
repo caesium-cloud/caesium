@@ -253,6 +253,26 @@ func (w *Worker) SubmitDispatched(d dispatch.InboundDispatch) error {
 	}
 }
 
+// Capabilities names the internal dispatch protocol features this worker
+// supports, and is what a remote owner reads from GET /internal/capabilities
+// before deciding whether to entrust it with a fan-out INSTANCE.
+//
+// The worker is the honest place to answer from: the dispatch handler only
+// routes, while this is the component that executes a task addressed by TaskRun
+// id and posts back a completion stamped with the same id.  A worker that is not
+// accepting dispatched tasks at all (WithInboundDispatch never called) advertises
+// nothing — it would reject the dispatch anyway, and an owner is better served
+// by never picking it for an instance.
+//
+// *Worker satisfies dispatch.CapabilityAdvertiser via this method, so wiring it
+// as the handler's WorkerSubmitter is all the advertisement takes.
+func (w *Worker) Capabilities() []string {
+	if w == nil || w.inbound == nil {
+		return nil
+	}
+	return []string{dispatch.CapabilityInstanceIdentity}
+}
+
 // batchLeaseRenewInterval derives the per-node batched renewal interval.
 // If override > 0 it is used directly; otherwise leaseTTL/4 is used (minimum 1s).
 func batchLeaseRenewInterval(leaseTTL, override time.Duration) time.Duration {

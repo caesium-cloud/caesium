@@ -4,6 +4,12 @@
 // GET /v1/jobs/:id/runs/:run_id/why?task=<t> endpoint and renders either a
 // human-readable summary table (default) or the raw machine-readable JSON
 // (--json), so the explanation can be both eyeballed and asserted in a harness.
+//
+// On a FANNED step (dynamic fan-out) `--task` alone names N task instances, not
+// one, so the server answers with a group summary — partition count, status
+// histogram, the first failed partition's cause, and the aggregate timing — and
+// `--partition <value>` selects a single instance for the full per-instance
+// explanation.
 package why
 
 import (
@@ -13,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"text/tabwriter"
 
@@ -22,26 +29,29 @@ import (
 const apiKeyEnvVar = "CAESIUM_API_KEY"
 
 var (
-	whyJobID  string
-	whyTask   string
-	whyServer string
-	whyAPIKey string
-	whyJSON   bool
+	whyJobID     string
+	whyTask      string
+	whyPartition string
+	whyServer    string
+	whyAPIKey    string
+	whyJSON      bool
 )
 
 // explanation mirrors the server's run.WhyExplanation JSON so the CLI can render
 // a table. Only the fields the table renders are typed; the rest round-trips via
 // --json (which prints the server body verbatim).
 type explanation struct {
-	RunID    string `json:"runId"`
-	JobID    string `json:"jobId"`
-	TaskID   string `json:"taskId"`
-	TaskName string `json:"taskName"`
-	Verdict  string `json:"verdict"`
-	Status   string `json:"status"`
-	Hash     string `json:"hash"`
-	Summary  string `json:"summary"`
-	Trigger  struct {
+	RunID     string `json:"runId"`
+	JobID     string `json:"jobId"`
+	TaskID    string `json:"taskId"`
+	TaskName  string `json:"taskName"`
+	TaskRunID string `json:"taskRunId"`
+	Partition string `json:"partition"`
+	Verdict   string `json:"verdict"`
+	Status    string `json:"status"`
+	Hash      string `json:"hash"`
+	Summary   string `json:"summary"`
+	Trigger   struct {
 		Type   string            `json:"type"`
 		Alias  string            `json:"alias"`
 		Params map[string]string `json:"params"`
@@ -50,7 +60,8 @@ type explanation struct {
 		Kind  string `json:"kind"`
 		RunID string `json:"runId"`
 	} `json:"baseline"`
-	Diff *struct {
+	Group *groupSummary `json:"group"`
+	Diff  *struct {
 		HashEqual    bool   `json:"hashEqual"`
 		SubjectHash  string `json:"subjectHash"`
 		BaselineHash string `json:"baselineHash"`
@@ -67,14 +78,38 @@ type explanation struct {
 	} `json:"diff"`
 }
 
+// groupSummary mirrors run.WhyGroup: the aggregate answer the server returns for
+// a fanned step addressed without a --partition selector.
+type groupSummary struct {
+	PartitionCount      int            `json:"partitionCount"`
+	StatusCounts        map[string]int `json:"statusCounts"`
+	CacheHits           int            `json:"cacheHits"`
+	Partitions          []string       `json:"partitions"`
+	PartitionsTruncated bool           `json:"partitionsTruncated"`
+	FirstFailure        *groupFailure  `json:"firstFailure"`
+	DurationMS          int64          `json:"durationMs"`
+}
+
+// groupFailure mirrors run.WhyGroupFailure.
+type groupFailure struct {
+	Partition      string `json:"partition"`
+	PartitionIndex int    `json:"partitionIndex"`
+	TaskRunID      string `json:"taskRunId"`
+	Status         string `json:"status"`
+	Attempt        int    `json:"attempt"`
+	Error          string `json:"error"`
+}
+
 // Cmd is the `caesium why` command.
 var Cmd = &cobra.Command{
-	Use:   "why <run-id> --task <task> --job-id <job-id>",
+	Use:   "why <run-id> --task <task> --job-id <job-id> [--partition <value>]",
 	Short: "Explain why a task ran, hit the cache, or re-ran",
 	Long: "Explain why a specific task in a run executed, was served from cache, " +
 		"or re-ran — by diffing the task's persisted identity-hash inputs against " +
 		"the prior/cached run and naming the discriminating field(s). Prints a " +
-		"human-readable summary by default, or machine-readable JSON with --json.",
+		"human-readable summary by default, or machine-readable JSON with --json. " +
+		"A fanned step answers with the group summary (partition count, status " +
+		"histogram, first failure); pass --partition <value> for one instance.",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		runID := strings.TrimSpace(args[0])
@@ -86,8 +121,13 @@ var Cmd = &cobra.Command{
 		}
 
 		server := strings.TrimSuffix(whyServer, "/")
-		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/why?task=%s",
-			server, whyJobID, runID, url.QueryEscape(whyTask))
+		query := url.Values{}
+		query.Set("task", whyTask)
+		if partition := strings.TrimSpace(whyPartition); partition != "" {
+			query.Set("partition", partition)
+		}
+		reqURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/why?%s",
+			server, whyJobID, runID, query.Encode())
 
 		req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, reqURL, nil)
 		if err != nil {
@@ -146,6 +186,9 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintf(tw, "TASK\t%s\n", exp.TaskName)
+	if exp.Partition != "" {
+		_, _ = fmt.Fprintf(tw, "PARTITION\t%s\n", exp.Partition)
+	}
 	_, _ = fmt.Fprintf(tw, "VERDICT\t%s\n", exp.Verdict)
 	_, _ = fmt.Fprintf(tw, "STATUS\t%s\n", exp.Status)
 	if exp.Hash != "" {
@@ -166,6 +209,11 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 		_, _ = fmt.Fprintf(tw, "COMPARED-TO\t%s\n", baseline)
 	}
 	_ = tw.Flush()
+
+	if exp.Group != nil {
+		renderGroup(out, exp.Group)
+		return
+	}
 
 	if exp.Diff == nil {
 		return
@@ -213,6 +261,52 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	_ = dw.Flush()
 }
 
+// renderGroup prints the fanned-step aggregate: the status histogram, the
+// cache-hit count, the first failure, and the selector hint. A group has no
+// single identity hash or baseline, so no field diff is printed — that is what
+// --partition is for.
+func renderGroup(out io.Writer, group *groupSummary) {
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Fan-out group (%d partitions):\n", group.PartitionCount)
+
+	gw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	statuses := make([]string, 0, len(group.StatusCounts))
+	for status := range group.StatusCounts {
+		statuses = append(statuses, status)
+	}
+	sort.Strings(statuses)
+	for _, status := range statuses {
+		_, _ = fmt.Fprintf(gw, "%s\t%d\n", strings.ToUpper(status), group.StatusCounts[status])
+	}
+	if group.CacheHits > 0 {
+		_, _ = fmt.Fprintf(gw, "CACHE-HITS\t%d\n", group.CacheHits)
+	}
+	if group.DurationMS > 0 {
+		_, _ = fmt.Fprintf(gw, "DURATION\t%dms\n", group.DurationMS)
+	}
+	if len(group.Partitions) > 0 {
+		list := strings.Join(group.Partitions, ", ")
+		if group.PartitionsTruncated {
+			list += " …"
+		}
+		_, _ = fmt.Fprintf(gw, "PARTITIONS\t%s\n", list)
+	}
+	_ = gw.Flush()
+
+	if group.FirstFailure != nil {
+		_, _ = fmt.Fprintln(out)
+		cause := group.FirstFailure.Error
+		if cause == "" {
+			cause = group.FirstFailure.Status
+		}
+		_, _ = fmt.Fprintf(out, "First failure: partition %q (index %d, attempt %d): %s\n",
+			group.FirstFailure.Partition, group.FirstFailure.PartitionIndex, group.FirstFailure.Attempt, cause)
+	}
+
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out, "Select one instance for the field-level explanation: --partition <value>")
+}
+
 func dashIfEmpty(s string) string {
 	if s == "" {
 		return "-"
@@ -231,6 +325,7 @@ func resolveAPIKey(cmd *cobra.Command, flagValue string) string {
 func init() {
 	Cmd.Flags().StringVar(&whyJobID, "job-id", "", "Job ID that owns the run (required)")
 	Cmd.Flags().StringVar(&whyTask, "task", "", "Task name or ID to explain (required)")
+	Cmd.Flags().StringVar(&whyPartition, "partition", "", "Explain ONE fan-out instance of --task by its partition value (default: the group summary)")
 	Cmd.Flags().StringVar(&whyServer, "server", "http://localhost:8080", "Caesium server base URL")
 	Cmd.Flags().StringVar(&whyAPIKey, "api-key", "", "API key for authentication (prefer "+apiKeyEnvVar+"; --api-key is visible in process listings)")
 	Cmd.Flags().BoolVar(&whyJSON, "json", false, "Emit machine-readable JSON instead of a table")

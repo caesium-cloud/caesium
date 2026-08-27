@@ -678,6 +678,7 @@ func (i *Importer) reconcileTasksTx(tx *gorm.DB, jobModel *models.Job, def *sche
 				"replay_safe":         taskModel.ReplaySafe,
 				"rate_limit_resource": taskModel.RateLimitResource,
 				"rate_limit_units":    taskModel.RateLimitUnits,
+				"fan_out_config":      taskModel.FanOutConfig,
 				"cache_config":        taskModel.CacheConfig,
 				"output_schema":       taskModel.OutputSchema,
 				"input_schema":        taskModel.InputSchema,
@@ -1096,6 +1097,14 @@ func populateTaskFromStep(taskModel *models.Task, atomID uuid.UUID, step *schema
 	if step.RateLimit != nil {
 		taskModel.RateLimitResource = strings.TrimSpace(step.RateLimit.Resource)
 		taskModel.RateLimitUnits = step.RateLimit.Units
+	}
+	taskModel.FanOutConfig = nil
+	if step.FanOut != nil {
+		encoded, err := marshalOptionalJSON(step.FanOut)
+		if err != nil {
+			return fmt.Errorf("step %s: fanOut: %w", step.Name, err)
+		}
+		taskModel.FanOutConfig = encoded
 	}
 	taskModel.CacheConfig = cacheConfig
 	taskModel.OutputSchema = outputSchema

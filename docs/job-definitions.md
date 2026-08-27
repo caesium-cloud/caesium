@@ -118,6 +118,103 @@ steps:
       - branch-b
 ```
 
+## Dynamic Fan-Out
+
+The DAG shapes above are fixed when the manifest is applied. `fanOut` instead lets a single catalog step materialize N parallel `TaskRun` **instances** at run time, driven by a predecessor's emitted partition list — the DAG shape itself never changes, only the run-scoped instance count is dynamic. It composes with the edges above: `next`/`dependsOn` still wire the one fanned step into the graph, not its instances.
+
+```yaml
+steps:
+  - name: list-files
+    image: alpine:3.23
+    command: ["sh", "-c", "echo '##caesium::partitions [\"alpha\",\"bravo\",\"charlie\"]'"]
+    next: [process-file]
+
+  - name: process-file
+    image: alpine:3.23
+    dependsOn: [list-files]
+    fanOut:
+      from: list-files        # must already be a declared predecessor of this step
+      env: CAESIUM_PARTITION  # optional; this is the default
+      maxPartitions: 64
+      maxParallel: 4
+      onEmpty: skip
+      failurePolicy: continue
+    command: ["sh", "-c", "echo processing $CAESIUM_PARTITION"]
+    next: [publish]
+
+  - name: publish               # fan-in: runs once, after every instance is terminal
+    image: alpine:3.23
+    dependsOn: [process-file]
+```
+
+`fanOut` fields:
+
+- `from` (required): the predecessor step whose `##caesium::partitions`/`##caesium::partition` markers drive expansion. It must already be a declared predecessor of this step (fan-out cannot reach across a branch or an unrelated step); `fanOut` is not allowed on `type: branch` steps; and a step that is itself another step's `fanOut.from` cannot also carry `fanOut` — chained fan-out is rejected.
+- `env` (optional, default `CAESIUM_PARTITION`): the env var name each instance sees carrying its partition key. Must be a legal environment variable name, and may not be `CAESIUM_PARTITION_JSON` or fall in the reserved `CAESIUM_PARAM_*`/`CAESIUM_OUTPUT_*` namespaces.
+- `maxPartitions` (required, `> 0`): cap on emitted partitions, itself bounded by the server hard cap `CAESIUM_FANOUT_MAX_PARTITIONS` (default 1024). A producer that emits more than the cap **fails loudly** — the list is never silently truncated.
+- `maxParallel` (optional, `>= 0`, default: no group-specific cap): in-flight cap for this group only. `0` or omitted means no cap beyond the job-level `metadata.maxParallelTasks` pool, which always applies as well.
+- `onEmpty` (optional, default `skip`): `skip` resolves the fanned step (and anything downstream gated on `all_success`) as skipped when the producer emits zero partitions; `fail` fails the run instead.
+- `failurePolicy` (optional, default `fail_fast`): `fail_fast` cancels every sibling instance that has not yet started (pending, or claimed but with no container yet) the moment one instance exhausts its retries; a sibling whose container is already running finishes on its own. `continue` lets independent siblings keep running to completion — only the failed instance's in-group dependents (see `dependsOn` below) resolve `skipped` — but the group, and therefore the run, still ends `failed` once any instance fails; `continue` changes how much work finishes, not whether the run succeeds.
+
+### Partition markers
+
+The predecessor step (`fanOut.from`) emits the partition list on stdout as a single `##caesium::partitions` line carrying a JSON array — a bare string element is shorthand for `{key: <string>}`:
+
+```sh
+# String-list form
+echo '##caesium::partitions ["alpha","bravo","charlie"]'
+
+# Object form: key + optional fingerprint/dependsOn/free-form scalar attributes
+echo '##caesium::partitions [{"key":"alpha","fingerprint":"sha256:<64-hex>"},{"key":"bravo","fingerprint":"sha256:<64-hex>","dependsOn":["alpha"]}]'
+
+# Single-partition shorthand (string form only)
+echo '##caesium::partition alpha'
+```
+
+- `key` (required): the partition identity. Trimmed, must be non-empty valid UTF-8, and capped at 256 bytes.
+- `fingerprint` (optional): a content digest — `sha256:` followed by exactly 64 lowercase hex characters. It enters the instance's cache identity, so an unchanged `key` plus an unchanged `fingerprint` is a cache hit on retry even if unrelated attributes moved.
+- `dependsOn` (optional): sibling `key`s from the same emitted list that must reach terminal success before this instance becomes ready. It is a **scheduling instruction only** — a container must not derive data behavior from it — and is excluded from the cache identity hash. A dangling reference (a key not in the emitted set), a self-reference, or a cycle across the group fails the producer.
+- Any other object key is a free-form scalar attribute (string/number/bool), capped at 16 attributes per partition; attributes enter the cache identity like `key`.
+- Duplicate `key`s are deduplicated when byte-identical; a duplicate `key` emitted with a **different** payload fails the producer.
+
+Each instance receives its `key` on `$CAESIUM_PARTITION` (or `fanOut.env`) and the full normalized object on `$CAESIUM_PARTITION_JSON`. Overflowing `maxPartitions`, a malformed `fingerprint`, or a `dependsOn` cycle/dangling-key fails the producing task and materializes zero instance rows for the group.
+
+### Retrying a fanned group
+
+- `caesium run partitions <run-id> --job-id <job-id> --task <name> [--status failed] [--limit N] [--offset N] [--json]` lists a fanned task's materialized instances — value, index, status, attempt, cache-hit, and (when present) fingerprint/depends_on. By default it pages through the whole group (the REST endpoint returns `total`, `limit`, `offset` and `next_offset`); an explicit `--limit`/`--offset` fetches one page and prints a truncation note on stderr so `--json` stays parseable. `caesium run retry --partition <value>` resolves the instance with the keyed `?partition=<value>` lookup, so it works past the first page.
+- `caesium run retry --job-id <job-id> --run-id <run-id>` retries a failed run: succeeded and cache-hit instances are preserved; failed instances reset for re-execution; instances that were skipped because an in-group `dependsOn` predecessor failed are also reset so the retry can reach them once that predecessor succeeds.
+- `caesium run retry --job-id <job-id> --run-id <run-id> --task <name> --partition <value>` resets a single instance by partition value. It does **not** cascade to dependents that already succeeded — retry the group, or the specific downstream instances, if that's what you need.
+
+### Explaining, diffing, and replaying a fanned group
+
+Caesium's causal tooling (`why`, logs, receipts, `run diff`, quarantined `replay`) is fan-out aware: a fanned step has N instances with N distinct identity hashes, so each tool either answers about the *group* or requires you to name *which* instance.
+
+- **`caesium why <run-id> --job-id <job-id> --task <name>`** on a fanned step returns the group summary rather than an arbitrary sibling's explanation: `partitionCount`, `statusCounts` (a status histogram), `cacheHits`, up to 50 `partitions` values (`partitionsTruncated` beyond that), and — when any instance failed — `firstFailure` (`partition`, `partitionIndex`, `taskRunId`, `status`, `attempt`, `error`). `baseline.kind` is `per_partition`, signaling there is no single baseline to diff against. Add `--partition <value>` (REST: `GET /v1/jobs/:id/runs/:run_id/why?task=<t>&partition=<v>`) for the full single-instance explanation, which carries `partition` and `taskRunId`; an unknown value 404s with the available partitions listed.
+
+  ```sh
+  $ caesium why <run-id> --job-id <job-id> --task process-file
+  Fan-out group (3 partitions):
+  SUCCEEDED   2
+  FAILED      1
+  PARTITIONS  alpha, bravo, charlie
+
+  First failure: partition "bravo" (index 1, attempt 3): exit code 1
+
+  Select one instance for the field-level explanation: --partition <value>
+
+  $ caesium why <run-id> --job-id <job-id> --task process-file --partition bravo
+  ```
+
+- **Logs** (`GET /v1/jobs/:id/runs/:run_id/logs?task_id=<uuid>`) on a fanned task without a selector return `400` with a JSON body — `{message, partition_count, instances: [{task_run_id, partition, partition_index, status}]}` — instead of guessing which container to stream. Select an instance with `&task_run_id=<uuid>` or `&partition=<value>`; a resolved response carries `X-Caesium-Task-Run-ID` and `X-Caesium-Partition` headers so the caller always knows which instance it got.
+
+- **`caesium receipt get`** attests one entry per instance — there is intentionally no partition filter, since filtering would change what the content digest covers. Each fanned entry carries a `partition` key and labels as `process-file[bravo]`; a stderr note reports how many of the run's receipt entries are fan-out instances.
+
+- **`caesium run diff <left-run> <right-run> --job-id <job-id>`** aligns fanned instances by partition **value**, never index, so a producer that reorders its list doesn't spuriously report every partition as both added and removed. The table gains a `PARTITION` column whenever any compared row has one, `Partitions added:`/`Partitions removed:` lines summarize the headline change, and each instance's field-change block is headed `process-file[bravo] changes`. `--json` carries `partition` on each task row plus top-level `partitionsAdded`/`partitionsRemoved`.
+
+- **`caesium run replay`** refuses a fanned baseline outright (`409`): a fan-out group's instance set is a runtime property of the producer's output, so quarantined replay's from-descriptors reconstruction cannot reproduce it. The CLI's error points at `caesium run partitions <run-id> --task <name>` to inspect the group, or suggests re-running the job normally to re-expand it.
+
+See `docs/examples/dynamic-fanout.job.yaml` for a runnable three-step example — a producer, a fanned step whose partitions carry fingerprints and one `dependsOn` edge, and a fan-in publish step — and the [generated schema reference](job-schema-reference.md#fan-out) for the authoritative field table.
+
 ## Authoring Guidelines
 
 - `apiVersion`/`kind` are fixed (`v1`, `Job`).
@@ -476,6 +573,7 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Callback-enabled workflow (`callbacks.job.yaml`).
   - Explicit edge wiring (`explicit-links.job.yaml`).
   - Fan-out/fan-in DAG (`fanout-join.job.yaml`).
+  - Dynamic fan-out (`dynamic-fanout.job.yaml`).
   - Data contract validation across producer and consumer steps (`data-contracts.job.yaml`).
   - Artifact handoff through shared task volumes (`volume-artifacts.job.yaml`).
   - Kubernetes workload identity with projected credentials and volume mounts (`k8s-workload-identity-volume.job.yaml`).

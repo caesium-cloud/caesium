@@ -224,6 +224,32 @@ type StepRateLimit struct {
 	Units    int    `yaml:"units" json:"units"`
 }
 
+const (
+	FanOutOnEmptySkip = "skip"
+	FanOutOnEmptyFail = "fail"
+
+	FanOutFailureFailFast = "fail_fast"
+	FanOutFailureContinue = "continue"
+
+	DefaultFanOutEnv           = "CAESIUM_PARTITION"
+	FanOutPartitionJSONEnv     = "CAESIUM_PARTITION_JSON"
+	DefaultFanOutMaxPartitions = 1024
+)
+
+var fanOutEnvNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// FanOut declares that a step materializes N parallel task instances from a
+// predecessor's ##caesium::partitions marker. It is scheduling metadata and is
+// excluded from the cache identity hash.
+type FanOut struct {
+	From          string `yaml:"from" json:"from"`
+	Env           string `yaml:"env,omitempty" json:"env,omitempty"`
+	MaxPartitions int    `yaml:"maxPartitions" json:"maxPartitions"`
+	MaxParallel   int    `yaml:"maxParallel,omitempty" json:"maxParallel,omitempty"`
+	OnEmpty       string `yaml:"onEmpty,omitempty" json:"onEmpty,omitempty"`
+	FailurePolicy string `yaml:"failurePolicy,omitempty" json:"failurePolicy,omitempty"`
+}
+
 // Dataset direction constants describe how a declaration relates a step (or the
 // job's metadata) to a dataset. They are the canonical values persisted on the
 // DatasetDeclaration registry model and read by the cross-job lint.
@@ -564,6 +590,9 @@ type Step struct {
 	// RateLimit references a job-level shared resource budget for this step.
 	// It is scheduling metadata and does not affect the cache hash.
 	RateLimit *StepRateLimit `yaml:"rateLimit,omitempty" json:"rateLimit,omitempty"`
+	// FanOut materializes N parallel instances from a predecessor's partition
+	// marker. Scheduling metadata; excluded from the cache identity hash.
+	FanOut *FanOut `yaml:"fanOut,omitempty" json:"fanOut,omitempty"`
 	// OutputSchema is a JSON Schema describing this step's expected output keys.
 	OutputSchema map[string]any `yaml:"outputSchema,omitempty" json:"outputSchema,omitempty"`
 	// InputSchema maps predecessor step names to JSON Schema fragments describing
@@ -598,6 +627,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 		AutomountServiceAccountToken *bool                     `yaml:"automountServiceAccountToken"`
 		Kueue                        *Kueue                    `yaml:"kueue"`
 		RateLimit                    *StepRateLimit            `yaml:"rateLimit"`
+		FanOut                       *FanOut                   `yaml:"fanOut"`
 		OutputSchema                 map[string]any            `yaml:"outputSchema"`
 		InputSchema                  map[string]map[string]any `yaml:"inputSchema"`
 		Datasets                     *StepDatasets             `yaml:"datasets"`
@@ -645,6 +675,7 @@ func (s *Step) UnmarshalYAML(value *yaml.Node) error {
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.Kueue = rs.Kueue
 	s.RateLimit = rs.RateLimit
+	s.FanOut = rs.FanOut
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Datasets = rs.Datasets
@@ -677,6 +708,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 		AutomountServiceAccountToken *bool                     `json:"automountServiceAccountToken"`
 		Kueue                        *Kueue                    `json:"kueue"`
 		RateLimit                    *StepRateLimit            `json:"rateLimit"`
+		FanOut                       *FanOut                   `json:"fanOut"`
 		OutputSchema                 map[string]any            `json:"outputSchema"`
 		InputSchema                  map[string]map[string]any `json:"inputSchema"`
 		Datasets                     *StepDatasets             `json:"datasets"`
@@ -714,6 +746,7 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	s.AutomountServiceAccountToken = rs.AutomountServiceAccountToken
 	s.Kueue = rs.Kueue
 	s.RateLimit = rs.RateLimit
+	s.FanOut = rs.FanOut
 	s.OutputSchema = rs.OutputSchema
 	s.InputSchema = rs.InputSchema
 	s.Datasets = rs.Datasets
@@ -1490,6 +1523,9 @@ func validateSteps(steps []Step, volumes map[string]*Volume, rateLimitResources 
 	if err := validateStepRateLimits(steps, rateLimitResources); err != nil {
 		return err
 	}
+	if err := validateFanOut(steps, names, adj); err != nil {
+		return err
+	}
 	if err := detectCycles(adj, names); err != nil {
 		return err
 	}
@@ -1505,6 +1541,100 @@ func validateSteps(steps []Step, volumes map[string]*Volume, rateLimitResources 
 	}
 	if err := validateSchemas(steps, names, predecessors); err != nil {
 		return err
+	}
+	return nil
+}
+
+func validateFanOut(steps []Step, names map[string]int, adj map[string]map[string]struct{}) error {
+	predecessors := make(map[string]map[string]struct{}, len(names))
+	for from, targets := range adj {
+		for to := range targets {
+			if predecessors[to] == nil {
+				predecessors[to] = make(map[string]struct{})
+			}
+			predecessors[to][from] = struct{}{}
+		}
+	}
+
+	fanOutFrom := make(map[string]string, len(steps))
+	for i := range steps {
+		step := &steps[i]
+		if step.FanOut == nil {
+			continue
+		}
+		fo := step.FanOut
+		if step.Type == StepTypeBranch {
+			return fmt.Errorf("steps[%d] %q: fanOut is not allowed on type: branch", i, step.Name)
+		}
+		from := strings.TrimSpace(fo.From)
+		if from == "" {
+			return fmt.Errorf("steps[%d] %q: fanOut.from is required", i, step.Name)
+		}
+		if _, ok := names[from]; !ok {
+			return fmt.Errorf("steps[%d] %q: fanOut.from %q is not a declared step", i, step.Name, from)
+		}
+		if _, isPred := predecessors[step.Name][from]; !isPred {
+			return fmt.Errorf("steps[%d] %q: fanOut.from %q is not a predecessor of %q", i, step.Name, from, step.Name)
+		}
+		if fo.MaxPartitions <= 0 {
+			return fmt.Errorf("steps[%d] %q: fanOut.maxPartitions is required and must be > 0", i, step.Name)
+		}
+		if fo.MaxPartitions > DefaultFanOutMaxPartitions {
+			return fmt.Errorf("steps[%d] %q: fanOut.maxPartitions %d exceeds server hard cap %d", i, step.Name, fo.MaxPartitions, DefaultFanOutMaxPartitions)
+		}
+		if fo.MaxParallel < 0 {
+			return fmt.Errorf("steps[%d] %q: fanOut.maxParallel must be >= 0", i, step.Name)
+		}
+		envName := strings.TrimSpace(fo.Env)
+		if envName == "" {
+			envName = DefaultFanOutEnv
+		}
+		if !fanOutEnvNamePattern.MatchString(envName) {
+			return fmt.Errorf("steps[%d] %q: fanOut.env %q is not a valid environment variable name", i, step.Name, envName)
+		}
+		if strings.HasPrefix(envName, "CAESIUM_PARAM_") || strings.HasPrefix(envName, "CAESIUM_OUTPUT_") {
+			return fmt.Errorf("steps[%d] %q: fanOut.env %q is in a reserved CAESIUM_PARAM_*/CAESIUM_OUTPUT_* namespace", i, step.Name, envName)
+		}
+		if envName == FanOutPartitionJSONEnv {
+			return fmt.Errorf("steps[%d] %q: fanOut.env may not be %s", i, step.Name, FanOutPartitionJSONEnv)
+		}
+		fo.Env = envName
+
+		onEmpty := strings.TrimSpace(fo.OnEmpty)
+		if onEmpty == "" {
+			onEmpty = FanOutOnEmptySkip
+		}
+		switch onEmpty {
+		case FanOutOnEmptySkip, FanOutOnEmptyFail:
+		default:
+			return fmt.Errorf("steps[%d] %q: fanOut.onEmpty %q must be one of [%s,%s]", i, step.Name, onEmpty, FanOutOnEmptySkip, FanOutOnEmptyFail)
+		}
+		fo.OnEmpty = onEmpty
+
+		policy := strings.TrimSpace(fo.FailurePolicy)
+		if policy == "" {
+			policy = FanOutFailureFailFast
+		}
+		switch policy {
+		case FanOutFailureFailFast, FanOutFailureContinue:
+		default:
+			return fmt.Errorf("steps[%d] %q: fanOut.failurePolicy %q must be one of [%s,%s]", i, step.Name, policy, FanOutFailureFailFast, FanOutFailureContinue)
+		}
+		fo.FailurePolicy = policy
+		// Persist the CANONICAL producer name, not just the validated one. The
+		// importer marshals this struct verbatim into tasks.fan_out_config and the
+		// runtime expander compares fo.From to the producer's task name with ==,
+		// so leaving the raw value here let `from: "producer "` lint clean and
+		// then never expand at run time. Written back the same way env/onEmpty/
+		// failurePolicy already are.
+		fo.From = from
+		fanOutFrom[step.Name] = from
+	}
+
+	for consumer, producer := range fanOutFrom {
+		if _, chained := fanOutFrom[producer]; chained {
+			return fmt.Errorf("step %q fanOut.from %q is itself a fanOut step; chained fan-out is not allowed", consumer, producer)
+		}
 	}
 	return nil
 }

@@ -406,3 +406,69 @@ func TestCaptureMarkers_AllowsLargeLinesWithinSnapshotLimit(t *testing.T) {
 	assert.Equal(t, line+"\n", result.LogText)
 	assert.False(t, result.LogTruncated)
 }
+
+// TestAggregateFanInOutputs_UnderCap is the unchanged happy path: every scalar
+// key folds into a JSON object keyed by partition value, alongside the synthetic
+// counters.
+func TestAggregateFanInOutputs_UnderCap(t *testing.T) {
+	got, err := AggregateFanInOutputs("process", map[string]map[string]string{
+		"a": {"rows": "1"},
+		"b": {"rows": "2"},
+	}, 2, 0)
+	require.NoError(t, err)
+	assert.Equal(t, `{"a":"1","b":"2"}`, got["rows"])
+	assert.Equal(t, "2", got["PARTITION_COUNT"])
+	assert.Equal(t, "2", got["SUCCEEDED"])
+	assert.Equal(t, "0", got["FAILED"])
+}
+
+// TestAggregateFanInOutputs_EmptyGroup: a group with no per-partition outputs
+// still publishes the counters, and that is not an error.
+func TestAggregateFanInOutputs_EmptyGroup(t *testing.T) {
+	got, err := AggregateFanInOutputs("process", nil, 0, 3)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{
+		"PARTITION_COUNT": "3",
+		"SUCCEEDED":       "0",
+		"FAILED":          "3",
+	}, got)
+}
+
+// TestAggregateFanInOutputs_OversizedReturnsError pins the fix for the
+// adversarial-review finding that an over-cap aggregate silently dropped EVERY
+// user key and returned counters only. A downstream consumer reading
+// CAESIUM_OUTPUT_<PRODUCER>_<KEY> would see the variable simply vanish — a
+// structural change to the data contract reported as success, and one that also
+// slipped past the producer's declared outputSchema. The group must fail loudly
+// instead.
+func TestAggregateFanInOutputs_OversizedReturnsError(t *testing.T) {
+	byPartition := make(map[string]map[string]string, 64)
+	blob := strings.Repeat("x", 2048)
+	for i := 0; i < 64; i++ {
+		byPartition[fmt.Sprintf("p%03d", i)] = map[string]string{"payload": blob}
+	}
+
+	got, err := AggregateFanInOutputs("process", byPartition, 64, 0)
+	require.Error(t, err)
+	assert.Nil(t, got, "no partial aggregate may be returned alongside the error")
+
+	var tooLarge *FanInAggregateTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+	require.ErrorIs(t, err, ErrFanInAggregateTooLarge)
+	assert.Equal(t, "process", tooLarge.Producer)
+	assert.Equal(t, MaxOutputBytes, tooLarge.Cap)
+	assert.Greater(t, tooLarge.Size, MaxOutputBytes)
+	assert.Contains(t, err.Error(), "process")
+}
+
+// TestAggregateFanInOutputs_JustUnderCapKeepsUserKeys guards the boundary: an
+// aggregate that fits must keep every user key, not degrade to counters.
+func TestAggregateFanInOutputs_JustUnderCapKeepsUserKeys(t *testing.T) {
+	byPartition := map[string]map[string]string{
+		"only": {"payload": strings.Repeat("x", MaxOutputBytes/2)},
+	}
+	got, err := AggregateFanInOutputs("process", byPartition, 1, 0)
+	require.NoError(t, err)
+	assert.Contains(t, got, "payload")
+	assert.Equal(t, "1", got["PARTITION_COUNT"])
+}

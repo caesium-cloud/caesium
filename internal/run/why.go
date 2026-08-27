@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/event"
@@ -71,7 +73,9 @@ type WhyTrigger struct {
 // answer is auditable.
 type WhyBaseline struct {
 	// Kind is "cache_origin" (the run that populated the matched cache entry),
-	// "prior_run" (the most-recent earlier run of the same task), or "none".
+	// "prior_run" (the most-recent earlier run of the same task), "per_partition"
+	// (the subject is a fanned GROUP, so the baseline is per-instance and only a
+	// --partition selection can name one), or "none".
 	Kind string `json:"kind"`
 	// RunID is the baseline run, when applicable.
 	RunID *uuid.UUID `json:"runId,omitempty"`
@@ -84,11 +88,17 @@ type WhyBaseline struct {
 // WhyExplanation is the full, machine-readable answer the why service returns.
 // It is rendered as JSON by the API and as both a table and JSON by the CLI.
 type WhyExplanation struct {
-	RunID     uuid.UUID `json:"runId"`
-	JobID     uuid.UUID `json:"jobId"`
-	TaskID    uuid.UUID `json:"taskId"`
-	TaskName  string    `json:"taskName"`
-	TaskRunID uuid.UUID `json:"taskRunId"`
+	RunID    uuid.UUID `json:"runId"`
+	JobID    uuid.UUID `json:"jobId"`
+	TaskID   uuid.UUID `json:"taskId"`
+	TaskName string    `json:"taskName"`
+	// TaskRunID is the explained instance's TaskRun primary key. It is nil — and
+	// omitted from the JSON — for a fanned GROUP summary, which has no single
+	// instance; select one with a partition to get it back.
+	TaskRunID *uuid.UUID `json:"taskRunId,omitempty"`
+	// Partition is the selected instance's partition value. Empty (omitted) for
+	// an unfanned task and for a group summary.
+	Partition string `json:"partition,omitempty"`
 
 	Verdict WhyVerdict `json:"verdict"`
 	Status  string     `json:"status"`
@@ -105,47 +115,132 @@ type WhyExplanation struct {
 	Trigger  WhyTrigger  `json:"trigger"`
 	Baseline WhyBaseline `json:"baseline"`
 	Diff     *BlobDiff   `json:"diff,omitempty"`
+
+	// Group is populated ONLY for a fanned step explained without a partition
+	// selector: the aggregate answer over all N instances. It is omitted for an
+	// unfanned task and for a single selected instance, so unfanned output is
+	// byte-identical to the pre-fan-out shape.
+	Group *WhyGroup `json:"group,omitempty"`
 }
+
+// WhyGroup is the aggregate explanation for a fanned step. `caesium why --task
+// <name>` on a fanned step cannot answer "why did THE task run" — there are N
+// instances with N identity hashes and possibly N different verdicts — so it
+// answers about the group and points at the per-instance selector.
+type WhyGroup struct {
+	// PartitionCount is the number of live instance rows in the group.
+	PartitionCount int `json:"partitionCount"`
+	// StatusCounts is the status histogram over the instances, keyed by task
+	// status ("succeeded", "failed", "cached", "skipped", "running", ...).
+	StatusCounts map[string]int `json:"statusCounts"`
+	// CacheHits counts instances served from cache.
+	CacheHits int `json:"cacheHits"`
+	// Partitions lists the group's partition values in emission order, capped at
+	// whyGroupPartitionListCap so a 10k-instance group does not bloat the
+	// response; PartitionsTruncated reports the cap.
+	Partitions          []string `json:"partitions,omitempty"`
+	PartitionsTruncated bool     `json:"partitionsTruncated,omitempty"`
+	// FirstFailure is the lowest-index failed instance — the one whose cause
+	// explains the group's failed status. Nil when no instance failed.
+	FirstFailure *WhyGroupFailure `json:"firstFailure,omitempty"`
+	// StartedAt / CompletedAt are the aggregate envelope: the earliest instance
+	// start and the latest instance end. DurationMS is their span (0 while the
+	// group is still running).
+	StartedAt   *time.Time `json:"startedAt,omitempty"`
+	CompletedAt *time.Time `json:"completedAt,omitempty"`
+	DurationMS  int64      `json:"durationMs,omitempty"`
+}
+
+// WhyGroupFailure names the instance a fanned group's failure is attributed to.
+type WhyGroupFailure struct {
+	Partition      string    `json:"partition"`
+	PartitionIndex int       `json:"partitionIndex"`
+	TaskRunID      uuid.UUID `json:"taskRunId"`
+	Status         string    `json:"status"`
+	Attempt        int       `json:"attempt"`
+	Error          string    `json:"error,omitempty"`
+}
+
+// whyGroupPartitionListCap bounds the partition-value list echoed in a group
+// summary and in the ErrPartitionNotFound message.
+const whyGroupPartitionListCap = 50
 
 // ErrTaskRunNotFound is returned when no task matching the given id/name exists
 // in the run.
 var ErrTaskRunNotFound = errors.New("run: task not found in run")
 
+// ErrPartitionNotFound is returned when a --partition selector names a value
+// that the task's fan-out group does not contain (or when the task is not fanned
+// at all). Its message lists the available partition values so the operator can
+// retry without a second round trip.
+var ErrPartitionNotFound = errors.New("run: partition not found")
+
 // WhyTask explains why the task identified by taskRef (a task UUID or a task
 // name) in run runID executed / hit cache / re-ran. taskRef is matched first as
 // a UUID against task_id, then as a task name within the run's job.
+//
+// On a FANNED step it returns the group summary (see WhyTaskPartition for the
+// per-instance answer).
 func (s *Store) WhyTask(ctx context.Context, runID uuid.UUID, taskRef string) (*WhyExplanation, error) {
+	return s.WhyTaskPartition(ctx, runID, taskRef, "")
+}
+
+// WhyTaskPartition is WhyTask with an explicit fan-out instance selector.
+//
+//   - partition == "": an unfanned task is explained exactly as before; a fanned
+//     step returns the aggregate WhyGroup summary rather than an arbitrary
+//     sibling's explanation (the pre-fan-out code path `.First()`-ed one row of
+//     N, so the answer depended on database row order).
+//   - partition != "": the named instance is explained with the full
+//     single-instance diff. ErrPartitionNotFound (listing the available values)
+//     when the group has no such partition.
+func (s *Store) WhyTaskPartition(ctx context.Context, runID uuid.UUID, taskRef, partition string) (*WhyExplanation, error) {
 	var jobRun models.JobRun
 	if err := s.db.WithContext(ctx).First(&jobRun, "id = ?", runID).Error; err != nil {
 		return nil, err
 	}
 
-	taskRun, taskName, err := s.resolveTaskRun(ctx, runID, jobRun.JobID, taskRef)
+	instances, taskID, taskName, err := s.resolveTaskRuns(ctx, runID, jobRun.JobID, taskRef)
 	if err != nil {
 		return nil, err
 	}
 
+	subject, err := selectWhyInstance(instances, taskName, partition)
+	if err != nil {
+		return nil, err
+	}
+
+	// Fanned group, no selector: answer about the group.
+	if subject == nil {
+		exp := newWhyGroupExplanation(runID, jobRun.JobID, taskID, taskName, instances)
+		exp.Trigger = s.loadTrigger(ctx, &jobRun)
+		exp.Summary = summarize(exp)
+		return exp, nil
+	}
+
+	taskRunID := subject.ID
 	exp := &WhyExplanation{
 		RunID:        runID,
 		JobID:        jobRun.JobID,
-		TaskID:       taskRun.TaskID,
+		TaskID:       subject.TaskID,
 		TaskName:     taskName,
-		TaskRunID:    taskRun.ID,
-		Status:       taskRun.Status,
-		CacheEnabled: taskRun.CacheEnabled,
-		Hash:         taskRun.Hash,
-		Verdict:      classifyVerdict(taskRun),
+		TaskRunID:    &taskRunID,
+		Partition:    subject.PartitionValue,
+		Status:       subject.Status,
+		CacheEnabled: subject.CacheEnabled,
+		Hash:         subject.Hash,
+		Verdict:      classifyVerdict(subject),
 	}
 
 	exp.Trigger = s.loadTrigger(ctx, &jobRun)
 
-	baselineBlob, baseline, err := s.resolveBaseline(ctx, taskRun, jobRun.JobID, jobRun.StartedAt)
+	baselineBlob, baseline, err := s.resolveBaseline(ctx, subject, jobRun.JobID, jobRun.StartedAt)
 	if err != nil {
 		return nil, err
 	}
 	exp.Baseline = baseline
 
-	diff, err := DiffHashInputBlobs(taskRun.HashInputBlob, baselineBlob)
+	diff, err := DiffHashInputBlobs(subject.HashInputBlob, baselineBlob)
 	if err != nil {
 		return nil, err
 	}
@@ -155,10 +250,14 @@ func (s *Store) WhyTask(ctx context.Context, runID uuid.UUID, taskRef string) (*
 	return exp, nil
 }
 
-// resolveTaskRun finds the task_runs row for taskRef in the run, returning the
-// row and the resolved task name. taskRef is tried as a task UUID first, then as
-// a task name (looked up via the job's tasks table).
-func (s *Store) resolveTaskRun(ctx context.Context, runID, jobID uuid.UUID, taskRef string) (*models.TaskRun, string, error) {
+// resolveTaskRuns finds EVERY task_runs row for taskRef in the run, in stable
+// partition order, plus the resolved task id and name. taskRef is tried as a
+// task UUID first, then as a task name (looked up via the job's tasks table).
+//
+// It deliberately returns the whole group: the historic `.First()` on
+// (job_run_id, task_id) silently answered for an arbitrary sibling once a task
+// could fan out.
+func (s *Store) resolveTaskRuns(ctx context.Context, runID, jobID uuid.UUID, taskRef string) ([]models.TaskRun, uuid.UUID, string, error) {
 	db := s.db.WithContext(ctx)
 
 	var taskID uuid.UUID
@@ -172,20 +271,19 @@ func (s *Store) resolveTaskRun(ctx context.Context, runID, jobID uuid.UUID, task
 			Where("job_id = ? AND name = ?", jobID, taskRef).
 			First(&task).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, "", ErrTaskRunNotFound
+				return nil, uuid.Nil, "", ErrTaskRunNotFound
 			}
-			return nil, "", err
+			return nil, uuid.Nil, "", err
 		}
 		taskID = task.ID
 	}
 
-	var taskRun models.TaskRun
-	if err := db.Where("job_run_id = ? AND task_id = ?", runID, taskID).
-		First(&taskRun).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, "", ErrTaskRunNotFound
+	rows, err := loadTaskRunsOrdered(db, runID, taskID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, uuid.Nil, "", ErrTaskRunNotFound
 		}
-		return nil, "", err
+		return nil, uuid.Nil, "", err
 	}
 
 	// Backfill the task name when taskRef was a UUID.
@@ -196,7 +294,147 @@ func (s *Store) resolveTaskRun(ctx context.Context, runID, jobID uuid.UUID, task
 		}
 	}
 
-	return &taskRun, taskName, nil
+	return rows, taskID, taskName, nil
+}
+
+// selectWhyInstance applies the E3 selection contract to an ordered instance
+// slice. It returns (nil, nil) to mean "explain the group": a fanned step with
+// no partition selector. An unfanned task always resolves to its single row, so
+// its explanation is unchanged by fan-out.
+func selectWhyInstance(rows []models.TaskRun, taskName, partition string) (*models.TaskRun, error) {
+	if len(rows) == 0 {
+		return nil, ErrTaskRunNotFound
+	}
+
+	if partition == "" {
+		if isFannedGroup(rows) {
+			return nil, nil
+		}
+		return &rows[0], nil
+	}
+
+	for i := range rows {
+		if rows[i].PartitionValue == partition {
+			return &rows[i], nil
+		}
+	}
+
+	if !isFannedGroup(rows) {
+		return nil, fmt.Errorf("%w: task %q is not fanned, so it has no partition %q", ErrPartitionNotFound, taskName, partition)
+	}
+	return nil, fmt.Errorf("%w: task %q has no partition %q; available partitions: %s",
+		ErrPartitionNotFound, taskName, partition, strings.Join(partitionValuesCapped(rows), ", "))
+}
+
+// isFannedGroup reports whether the instance rows describe a fan-out group. A
+// single-partition group (N=1) is still fanned — it carries a partition value —
+// and must not be answered as if it were an ordinary task.
+func isFannedGroup(rows []models.TaskRun) bool {
+	if len(rows) > 1 {
+		return true
+	}
+	return len(rows) == 1 && rows[0].PartitionValue != ""
+}
+
+// partitionValuesCapped renders the group's partition values for an operator
+// message, truncated at whyGroupPartitionListCap with a "(+N more)" tail so a
+// 10k-instance group cannot produce a 10k-token error string.
+func partitionValuesCapped(rows []models.TaskRun) []string {
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		if i == whyGroupPartitionListCap {
+			out = append(out, fmt.Sprintf("(+%d more)", len(rows)-whyGroupPartitionListCap))
+			break
+		}
+		out = append(out, rows[i].PartitionValue)
+	}
+	return out
+}
+
+// newWhyGroupExplanation builds the aggregate answer for a fanned step: the
+// status histogram, the cache-hit count, the first failed instance's cause, and
+// the start→end envelope over all instances.
+func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, rows []models.TaskRun) *WhyExplanation {
+	group := &WhyGroup{
+		PartitionCount: len(rows),
+		StatusCounts:   make(map[string]int, 4),
+	}
+
+	cacheEnabled := false
+	allTerminal := true
+	allCached := true
+	for i := range rows {
+		row := &rows[i]
+		group.StatusCounts[row.Status]++
+		status := TaskStatus(row.Status)
+		if row.CacheHit || status == TaskStatusCached {
+			group.CacheHits++
+		} else {
+			allCached = false
+		}
+		if row.CacheEnabled {
+			cacheEnabled = true
+		}
+		if !IsTerminal(status) {
+			allTerminal = false
+		}
+		if row.StartedAt != nil && (group.StartedAt == nil || row.StartedAt.Before(*group.StartedAt)) {
+			started := *row.StartedAt
+			group.StartedAt = &started
+		}
+		if row.CompletedAt != nil && (group.CompletedAt == nil || row.CompletedAt.After(*group.CompletedAt)) {
+			completed := *row.CompletedAt
+			group.CompletedAt = &completed
+		}
+	}
+
+	group.Partitions = partitionValuesCapped(rows)
+	group.PartitionsTruncated = len(rows) > whyGroupPartitionListCap
+
+	if failed := firstFailedTaskRun(rows); failed != nil {
+		group.FirstFailure = &WhyGroupFailure{
+			Partition:      failed.PartitionValue,
+			PartitionIndex: failed.PartitionIndex,
+			TaskRunID:      failed.ID,
+			Status:         failed.Status,
+			Attempt:        failed.Attempt,
+			Error:          failed.Error,
+		}
+	}
+
+	if group.StartedAt != nil && group.CompletedAt != nil && allTerminal {
+		group.DurationMS = group.CompletedAt.Sub(*group.StartedAt).Milliseconds()
+	}
+
+	return &WhyExplanation{
+		RunID:        runID,
+		JobID:        jobID,
+		TaskID:       taskID,
+		TaskName:     taskName,
+		Status:       string(groupStatusFromInstances(rows)),
+		CacheEnabled: cacheEnabled,
+		Verdict:      classifyGroupVerdict(cacheEnabled, allTerminal, allCached),
+		// A group has N identity hashes and N baselines; only a --partition
+		// selection can name one. Say so rather than diffing an arbitrary sibling.
+		Baseline: WhyBaseline{Kind: "per_partition"},
+		Group:    group,
+	}
+}
+
+// classifyGroupVerdict folds the instance verdicts into one group verdict. A
+// partially-cached group is a MISS: the group as a whole did re-execute work,
+// and the exact split is visible in Group.CacheHits / Group.StatusCounts.
+func classifyGroupVerdict(cacheEnabled, allTerminal, allCached bool) WhyVerdict {
+	switch {
+	case !allTerminal:
+		return VerdictUnknown
+	case !cacheEnabled:
+		return VerdictCacheOff
+	case allCached:
+		return VerdictCacheHit
+	default:
+		return VerdictCacheMiss
+	}
 }
 
 func classifyVerdict(tr *models.TaskRun) WhyVerdict {
@@ -266,6 +504,7 @@ func (s *Store) loadTrigger(ctx context.Context, jobRun *models.JobRun) WhyTrigg
 //     hash) if the origin task-run row is gone.
 //   - Cache MISS / OFF: the most-recent earlier run of the same task that has a
 //     persisted blob, so the diff names what changed and forced the re-run.
+//
 // subjectStartedAt is the subject run's start time (already loaded by the
 // caller); the prior-run lookup uses it to consider only strictly-earlier runs,
 // avoiding a redundant re-query.
@@ -279,8 +518,13 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 	// mislabel a hit as a re-run.)
 	if TaskStatus(subject.Status) == TaskStatusCached {
 		if subject.CacheOriginRunID != nil {
+			// Scope the origin lookup to the SAME partition value: a fanned group
+			// has N rows per (run, task) in the origin run too, and the cache
+			// identity that produced this hit is per-instance. An unscoped
+			// .First() would prove the hit against a sibling's inputs.
 			var origin models.TaskRun
-			err := db.Where("job_run_id = ? AND task_id = ?", *subject.CacheOriginRunID, subject.TaskID).
+			err := db.Where("job_run_id = ? AND task_id = ? AND COALESCE(partition_value, '') = ?",
+				*subject.CacheOriginRunID, subject.TaskID, subject.PartitionValue).
 				First(&origin).Error
 			if err == nil {
 				b := WhyBaseline{Kind: "cache_origin", RunID: subject.CacheOriginRunID, TaskRunID: &origin.ID}
@@ -313,12 +557,15 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 		return nil, WhyBaseline{Kind: "none"}, nil
 	}
 
-	// MISS / OFF: most-recent earlier run of the same task with a blob.
+	// MISS / OFF: most-recent earlier run of the same task with a blob. The
+	// partition predicate keeps a fanned instance diffed against the SAME
+	// partition of the prior run — comparing partition "a" against partition "c"
+	// would report every per-partition input as a discriminating change.
 	var prior models.TaskRun
 	err := db.
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").
-		Where("task_runs.task_id = ? AND job_runs.job_id = ? AND task_runs.job_run_id <> ? AND job_runs.started_at < ? AND task_runs.hash_input_blob IS NOT NULL",
-			subject.TaskID, jobID, subject.JobRunID, subjectStartedAt).
+		Where("task_runs.task_id = ? AND job_runs.job_id = ? AND task_runs.job_run_id <> ? AND job_runs.started_at < ? AND task_runs.hash_input_blob IS NOT NULL AND COALESCE(task_runs.partition_value, '') = ?",
+			subject.TaskID, jobID, subject.JobRunID, subjectStartedAt, subject.PartitionValue).
 		Order("job_runs.started_at DESC").
 		First(&prior).Error
 	if err != nil {
@@ -339,6 +586,9 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 // explanation: the headline discriminating field for a miss, or the
 // identical-inputs proof for a hit.
 func summarize(exp *WhyExplanation) string {
+	if exp.Group != nil {
+		return summarizeGroup(exp)
+	}
 	switch exp.Verdict {
 	case VerdictCacheHit:
 		if exp.Diff != nil && exp.Diff.HashEqual {
@@ -355,6 +605,33 @@ func summarize(exp *WhyExplanation) string {
 	default:
 		return fmt.Sprintf("task %q is %s — no cache verdict yet", exp.TaskName, exp.Status)
 	}
+}
+
+// summarizeGroup renders the one-line answer for a fanned step: how many
+// partitions ran, the status histogram, the first failure's cause, and the
+// selector that gets the per-instance explanation.
+func summarizeGroup(exp *WhyExplanation) string {
+	g := exp.Group
+	statuses := make([]string, 0, len(g.StatusCounts))
+	for status := range g.StatusCounts {
+		statuses = append(statuses, status)
+	}
+	sort.Strings(statuses)
+	parts := make([]string, 0, len(statuses))
+	for _, status := range statuses {
+		parts = append(parts, fmt.Sprintf("%d %s", g.StatusCounts[status], status))
+	}
+
+	out := fmt.Sprintf("FANNED GROUP — task %q ran %d partition(s): %s",
+		exp.TaskName, g.PartitionCount, strings.Join(parts, ", "))
+	if g.FirstFailure != nil {
+		cause := g.FirstFailure.Error
+		if cause == "" {
+			cause = g.FirstFailure.Status
+		}
+		out += fmt.Sprintf("; first failure partition %q: %s", g.FirstFailure.Partition, cause)
+	}
+	return out + ". Re-run with --partition <value> for the per-instance explanation."
 }
 
 func summarizeChanged(exp *WhyExplanation, verdict, ranVerb string) string {

@@ -33,6 +33,8 @@ type runTaskResponse struct {
 	SchemaViolations []schemaViolationResponse `json:"schema_violations,omitempty"`
 	Error            string                    `json:"error,omitempty"`
 	StartedAt        *time.Time                `json:"started_at,omitempty"`
+	PartitionCount   int                       `json:"partition_count,omitempty"`
+	PartitionValue   string                    `json:"partition_value,omitempty"`
 }
 
 type schemaViolationResponse struct {

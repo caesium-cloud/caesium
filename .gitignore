@@ -46,3 +46,6 @@ ui/pnpm-debug.log*
 ui/lerna-debug.log*
 ui/.cache
 ui/.temp
+
+# CLI binary extracted by the integration-test recipes
+.tmp/

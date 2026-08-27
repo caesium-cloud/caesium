@@ -11,7 +11,7 @@ import (
 )
 
 // InternalServer hosts the run-owner coordination endpoints
-// (/internal/dispatch, /internal/complete) on a dedicated, mutually
+// (/internal/dispatch, /internal/complete, /internal/capabilities) on a dedicated, mutually
 // authenticated TLS listener — separate from the public API server, which stays
 // plain HTTP behind the operator's own proxy.  Node-to-node coordination
 // traffic therefore never touches the public surface and every peer is
@@ -26,6 +26,10 @@ func NewInternalServer(handler *Handler, addr string, tlsConfig *tls.Config) *In
 	mux := http.NewServeMux()
 	mux.HandleFunc("/internal/dispatch", handler.HandleDispatch)
 	mux.HandleFunc("/internal/complete", handler.HandleComplete)
+	// The peer-capability probe an owner issues before entrusting a fan-out
+	// INSTANCE to this node.  It lives on the same listener as the traffic it
+	// gates, so "reachable for dispatch" and "answered the probe" cannot disagree.
+	mux.HandleFunc("/internal/capabilities", handler.HandleCapabilities)
 	return &InternalServer{
 		srv: &http.Server{
 			Addr:      addr,

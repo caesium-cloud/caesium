@@ -777,3 +777,151 @@ func TestCanonicalJSON_KueueQueueOnlyOmitsKubernetes(t *testing.T) {
 	blob := unmarshalBlob(t, data)
 	assert.Nil(t, blob.Kubernetes, "a queue-only KubernetesSpec must not appear in the blob")
 }
+
+// Frozen 2026-08-26 against the pre-partition HashInput of baseInput().
+// omit-when-empty partition fields must not change this digest, and
+// CacheVersion is unchanged.
+const goldenStringFormHash = "5d6290009f017f6307aa5e20a383b88b81c7197322018b7c148f45d65bb95007"
+
+func TestCompute_StringFormPartitionKeepsLegacyHash(t *testing.T) {
+	legacy := baseInput()
+	withEmpty := baseInput()
+	withEmpty.Partition = ""
+	withEmpty.PartitionFingerprint = ""
+	withEmpty.PartitionAttributes = nil
+	assert.Equal(t, legacy.Compute(), withEmpty.Compute(),
+		"empty partition fields must not change the hash")
+}
+
+func TestCompute_PartitionKeyChangesHash(t *testing.T) {
+	a := baseInput()
+	b := baseInput()
+	b.Partition = "file-a.csv"
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_PartitionFingerprintChangesHash(t *testing.T) {
+	a := baseInput()
+	a.Partition = "dim_customer"
+	b := a
+	b.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_PartitionAttributesChangeHash(t *testing.T) {
+	a := baseInput()
+	a.Partition = "app-api"
+	b := a
+	b.PartitionAttributes = map[string]string{"root": "stacks/api"}
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_DependsOnNotHashed(t *testing.T) {
+	// dependsOn is a scheduling instruction and is not a HashInput field.
+	// Two instances that differ only in dependsOn share an identity.
+	a := baseInput()
+	a.Partition = "fct_orders"
+	a.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	b := a
+	assert.Equal(t, a.Compute(), b.Compute())
+}
+
+func TestCanonicalJSON_PartitionFieldsRoundTrip(t *testing.T) {
+	in := baseInput()
+	in.Partition = "dim_customer"
+	in.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	in.PartitionAttributes = map[string]string{"root": "models", "materialization": "table"}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, in.Partition, blob.Partition)
+	assert.Equal(t, in.PartitionFingerprint, blob.PartitionFingerprint)
+	assert.Equal(t, in.PartitionAttributes, blob.PartitionAttributes)
+}
+
+func TestCompute_GoldenStringFormUnchanged(t *testing.T) {
+	got := baseInput().Compute()
+	assert.Equal(t, goldenStringFormHash, got,
+		"string-form (empty partition fields) hashes must stay byte-identical; no CacheVersion bump")
+	assert.Equal(t, 1, baseInput().CacheVersion, "CacheVersion must not be bumped for partition fields")
+}
+
+// TestCompute_PartitionFramingIsUnambiguous pins the fix for the
+// adversarial-review finding that the three partition fields were folded in as
+// separate newline-delimited "<label>:<value>" lines. Because a partition key is
+// arbitrary producer-supplied text, a key containing an embedded newline plus a
+// forged "partition_fingerprint:" line produced the exact same byte stream as a
+// clean key carrying that fingerprint — two distinct execution identities
+// collapsing to one cache entry, i.e. a wrong-output cache hit.
+func TestCompute_PartitionFramingIsUnambiguous(t *testing.T) {
+	const fp = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	forged := baseInput()
+	forged.Partition = "x\npartition_fingerprint:" + fp
+
+	honest := baseInput()
+	honest.Partition = "x"
+	honest.PartitionFingerprint = fp
+
+	assert.NotEqual(t, forged.Compute(), honest.Compute(),
+		"a key with an embedded field-delimiter must not alias a different partition identity")
+}
+
+// TestCompute_PartitionAttributeFramingIsUnambiguous is the same aliasing class
+// on the attribute lines, where both the "\n" record separator and the "=" pair
+// separator were injectable.
+func TestCompute_PartitionAttributeFramingIsUnambiguous(t *testing.T) {
+	forged := baseInput()
+	forged.Partition = "p"
+	forged.PartitionAttributes = map[string]string{"root": "a\npartition_attr:region=eu"}
+
+	honest := baseInput()
+	honest.Partition = "p"
+	honest.PartitionAttributes = map[string]string{"root": "a", "region": "eu"}
+
+	assert.NotEqual(t, forged.Compute(), honest.Compute(),
+		"an attribute value with an embedded record separator must not alias a second attribute")
+}
+
+// TestCompute_PartitionAttributeKeyValueSeparatorUnambiguous covers the "="
+// split specifically: attr key "a" value "b=c" must not alias key "a=b" value
+// "c".
+func TestCompute_PartitionAttributeKeyValueSeparatorUnambiguous(t *testing.T) {
+	a := baseInput()
+	a.Partition = "p"
+	a.PartitionAttributes = map[string]string{"a": "b=c"}
+
+	b := baseInput()
+	b.Partition = "p"
+	b.PartitionAttributes = map[string]string{"a=b": "c"}
+
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+// TestCompute_PartitionKeyAliasingAcrossFieldsRejected: an empty key with a
+// forged partition line inside the fingerprint must not alias a real key.
+func TestCompute_PartitionFingerprintFramingIsUnambiguous(t *testing.T) {
+	forged := baseInput()
+	forged.Partition = "p"
+	forged.PartitionFingerprint = "sha256:aa\npartition_attr:root=models"
+
+	honest := baseInput()
+	honest.Partition = "p"
+	honest.PartitionFingerprint = "sha256:aa"
+	honest.PartitionAttributes = map[string]string{"root": "models"}
+
+	assert.NotEqual(t, forged.Compute(), honest.Compute())
+}
+
+// TestCompute_PartitionIdentityStillDeterministic: the new framing must remain
+// stable across calls and insensitive to Go map iteration order.
+func TestCompute_PartitionIdentityStillDeterministic(t *testing.T) {
+	in := baseInput()
+	in.Partition = "dim_customer"
+	in.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	in.PartitionAttributes = map[string]string{"root": "models", "materialization": "table", "region": "eu"}
+	first := in.Compute()
+	for i := 0; i < 32; i++ {
+		assert.Equal(t, first, in.Compute())
+	}
+}

@@ -31,6 +31,7 @@ var (
 	ErrUnavailableBaselineProof = errors.New("replay: unchanged baseline result unavailable")
 	ErrSecretIdentity           = errors.New("replay: baseline secret identity cannot be verified")
 	ErrQuarantinedBaseline      = errors.New("replay: baseline run is quarantined")
+	ErrFannedBaseline           = errors.New("replay: quarantined replay refuses baselines containing fanned groups")
 )
 
 // Dispatcher is the narrow B3 seam B4/B5 use to hand a durable replay run to
@@ -249,6 +250,11 @@ func (c *Constructor) loadBaseline(ctx context.Context, runID uuid.UUID) (models
 	}
 	if len(rows) == 0 {
 		return models.JobRun{}, nil, fmt.Errorf("%w: baseline run %s has no task runs", ErrUnavailableBaselineProof, runID)
+	}
+	for i := range rows {
+		if rows[i].PartitionCount > 1 || rows[i].PartitionValue != "" {
+			return models.JobRun{}, nil, fmt.Errorf("%w: run %s", ErrFannedBaseline, runID)
+		}
 	}
 
 	tasks := make([]*baselineTask, 0, len(rows))

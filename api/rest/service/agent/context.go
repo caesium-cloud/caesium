@@ -37,14 +37,20 @@ func (s *Service) FailingLog(inc *models.Incident) (string, bool, error) {
 	if inc.RunID == nil || inc.TaskID == nil {
 		return "", false, ErrNoFailingRun
 	}
-	var tr models.TaskRun
+	// Group-aware: a fanned step has N TaskRun rows under one (run, task), so a
+	// bare .First() could hand back a SUCCEEDED partition's log while the
+	// incident is about a failed one. Read every instance in partition order and
+	// pick the one that explains the failure.
+	var rows []models.TaskRun
 	if err := s.db.WithContext(s.ctx).
 		Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).
-		First(&tr).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return "", false, ErrNoFailingRun
-		}
+		Order("partition_index ASC").
+		Find(&rows).Error; err != nil {
 		return "", false, err
+	}
+	tr := runstorage.FailedOrLastTaskRunForTask(rows)
+	if tr == nil {
+		return "", false, ErrNoFailingRun
 	}
 	return iincident.NewScrubber(nil).Scrub(tr.LogText), true, nil
 }

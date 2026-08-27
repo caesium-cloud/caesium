@@ -82,6 +82,11 @@ func Post(c *echo.Context) error {
 	if baseline.JobID != jobID {
 		return echo.ErrNotFound
 	}
+	for _, t := range baseline.Tasks {
+		if t != nil && t.PartitionCount > 0 {
+			return echo.NewHTTPError(http.StatusConflict, "quarantined replay refuses baselines containing fanned groups")
+		}
+	}
 
 	result, err := replaysvc.New(ctx).Replay(replaysvc.Request{
 		JobID:          jobID,
@@ -163,6 +168,11 @@ func replayError(err error) error {
 	case errors.Is(err, replaycore.ErrUnsupportedDescriptor):
 		return echo.NewHTTPError(http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, replaycore.ErrQuarantinedBaseline):
+		return echo.NewHTTPError(http.StatusConflict, err.Error())
+	case errors.Is(err, replaycore.ErrFannedBaseline):
+		// Fail-closed refusal, not a server fault: without it this would fall
+		// through to the 500 default and the operator would never learn that the
+		// baseline contains a fan-out group.
 		return echo.NewHTTPError(http.StatusConflict, err.Error())
 	case errors.Is(err, replaycore.ErrBaselineNotTerminal):
 		return echo.NewHTTPError(http.StatusConflict, err.Error())

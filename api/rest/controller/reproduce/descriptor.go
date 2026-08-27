@@ -35,6 +35,10 @@ func Get(c *echo.Context) error {
 		switch {
 		case errors.Is(err, rsvc.ErrDescriptorUnavailable):
 			return echo.NewHTTPError(http.StatusNotFound, "descriptor unavailable")
+		case errors.Is(err, rsvc.ErrFannedTaskAmbiguous):
+			// Fail closed on a fanned baseline rather than reproducing an
+			// arbitrary partition's container.
+			return echo.NewHTTPError(http.StatusConflict, "task is a fan-out group; descriptors are per-partition")
 		case errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
 			return echo.ErrNotFound
 		default:

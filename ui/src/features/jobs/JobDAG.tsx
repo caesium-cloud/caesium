@@ -161,13 +161,16 @@ export function JobDAG({ dag, atoms, taskDefinitions, taskStatus, taskMetadata, 
                   completedAt: meta?.completed_at,
                   error: meta?.error,
                   rateLimitRetryAfter: meta?.rate_limit_retry_after,
+                  partitionCount: taskRunData?.[n.id]?.partition_count,
+                  partitionValue: taskRunData?.[n.id]?.partition_value,
+                  partitionStatusCounts: taskRunData?.[n.id]?.partition_status_counts,
                   taskType: n.type,
                   edgeDegree: edgeDegreeByNode.get(n.id) ?? { incoming: 0, outgoing: 0, total: 0 },
                 },
                 position: { x: 0, y: 0 }
             }
         });
-    }, [dag, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, selectedTaskId, edgeDegreeByNode]);
+    }, [dag, atoms, taskDefinitions, resolvedTaskStatus, taskMetadata, taskRunData, selectedTaskId, edgeDegreeByNode]);
 
     const initialEdges: Edge[] = useMemo(() => {
         if (!dag.edges) return [];

@@ -47,8 +47,12 @@ type RunResult struct {
 
 // TaskResult captures the persisted outcome of one task execution.
 type TaskResult struct {
-	TaskID           uuid.UUID
-	Name             string
+	TaskID uuid.UUID
+	Name   string
+	// Partition is set for each materialized instance of a fanned step (one
+	// TaskResult per partition, Name rendered as "step[partition]"); empty for
+	// unfanned steps.
+	Partition        string
 	Status           string
 	Output           map[string]string
 	SchemaViolations []pkgtask.SchemaViolation
@@ -230,6 +234,39 @@ func collectRunResult(store *run.Store, db *gorm.DB, jobModel *models.Job) (*Run
 				Name:   taskModel.Name,
 				Status: string(run.TaskStatusPending),
 			})
+			continue
+		}
+
+		// A fanned step has N instance rows under one catalog task; the run
+		// payload collapses them to a group head. Report every instance with
+		// its own log rather than an arbitrary sibling's (the (run, task) log
+		// lookup is ambiguous for a group).
+		if taskRun.PartitionCount > 0 {
+			instances, err := store.TaskRunInstances(context.Background(), runRecord.ID, taskModel.ID)
+			if err != nil {
+				return nil, fmt.Errorf("load fan-out instances for %s: %w", taskModel.Name, err)
+			}
+			for _, inst := range instances {
+				taskResult := TaskResult{
+					TaskID:           taskModel.ID,
+					Name:             fmt.Sprintf("%s[%s]", taskModel.Name, inst.PartitionValue),
+					Partition:        inst.PartitionValue,
+					Status:           string(inst.Status),
+					Output:           inst.Output,
+					SchemaViolations: inst.SchemaViolations,
+					CacheHit:         inst.CacheHit,
+					Error:            inst.Error,
+				}
+				snapshot, err := store.TaskLogSnapshotForInstance(context.Background(), runRecord.ID, inst.ID)
+				if err != nil {
+					return nil, fmt.Errorf("load task log snapshot for %s: %w", taskResult.Name, err)
+				}
+				if snapshot != nil {
+					taskResult.LogText = snapshot.Text
+					taskResult.LogTruncated = snapshot.Truncated
+				}
+				result.Tasks = append(result.Tasks, taskResult)
+			}
 			continue
 		}
 

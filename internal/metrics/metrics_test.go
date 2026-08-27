@@ -84,6 +84,22 @@ func (s *MetricsSuite) TestJobRunDurationObserves() {
 	s.True(found, "expected histogram sample")
 }
 
+func (s *MetricsSuite) TestFanOutMetricsRegistered() {
+	s.registry.MustRegister(FanOutPartitionsTotal, FanOutGroupDurationSeconds)
+	FanOutPartitionsTotal.WithLabelValues("ingest", "process-file").Add(4)
+	FanOutGroupDurationSeconds.WithLabelValues("ingest", "process-file").Observe(12.5)
+
+	families, err := s.registry.Gather()
+	s.Require().NoError(err)
+
+	names := map[string]bool{}
+	for _, fam := range families {
+		names[fam.GetName()] = true
+	}
+	s.True(names["caesium_fanout_partitions_total"], "fan-out partition counter must be gatherable")
+	s.True(names["caesium_fanout_group_duration_seconds"], "fan-out group duration histogram must be gatherable")
+}
+
 func (s *MetricsSuite) TestTaskRunsTotalIncrements() {
 	TaskRunsTotal.WithLabelValues("job-1", "task-1", "docker", "succeeded").Inc()
 

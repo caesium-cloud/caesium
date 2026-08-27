@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -211,7 +214,11 @@ func validSHA256Ref(s string) bool {
 	return true
 }
 
-var initialScannerBuffer = make([]byte, 0, 64*1024)
+// initialScannerBufferSize is the starting capacity of each log scanner's
+// buffer. Every scanner gets its OWN buffer: a package-level shared slice
+// raced the moment two logs were parsed concurrently (the worker pool and
+// fan-out instances both do), because bufio.Scanner writes into it.
+const initialScannerBufferSize = 64 * 1024
 
 // scalarOutputValue coerces a decoded ##caesium::output value to its stored
 // string form, but ONLY for scalar JSON types (string, number, bool). It
@@ -364,6 +371,7 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 type Markers struct {
 	Output       map[string]string
 	Branches     []string
+	Partitions   []Partition
 	LogText      string
 	LogTruncated bool
 }
@@ -373,7 +381,13 @@ type Markers struct {
 // markers.  This is more memory-efficient than calling ParseOutput and
 // ParseBranches separately, as it avoids buffering the entire log stream.
 func ParseMarkers(logs io.Reader) (*Markers, error) {
-	return parseMarkers(logs, nil, 0)
+	return parseMarkers(logs, nil, 0, 0)
+}
+
+// ParseMarkersWithLimits is ParseMarkers plus operator/executor caps on
+// large-object references and the partition count.
+func ParseMarkersWithLimits(logs io.Reader, maxRefBytes int64, maxPartitions int) (*Markers, error) {
+	return parseMarkers(logs, nil, maxRefBytes, maxPartitions)
 }
 
 // CaptureMarkers reads container log output in a single pass, extracting
@@ -389,12 +403,18 @@ func CaptureMarkers(logs io.Reader, maxSnapshotBytes int) (*Markers, error) {
 // cap is dropped (the producer's other outputs still apply); see
 // env.Environment.OutputRefMaxBytes for the rationale.
 func CaptureMarkersWithRefLimit(logs io.Reader, maxSnapshotBytes int, maxRefBytes int64) (*Markers, error) {
+	return CaptureMarkersWithLimits(logs, maxSnapshotBytes, maxRefBytes, 0)
+}
+
+// CaptureMarkersWithLimits is CaptureMarkersWithRefLimit plus the executor's
+// effective partition count cap.
+func CaptureMarkersWithLimits(logs io.Reader, maxSnapshotBytes int, maxRefBytes int64, maxPartitions int) (*Markers, error) {
 	if maxSnapshotBytes <= 0 {
-		return parseMarkers(logs, nil, maxRefBytes)
+		return parseMarkers(logs, nil, maxRefBytes, maxPartitions)
 	}
 
 	snapshot := &boundedSnapshotWriter{limit: maxSnapshotBytes}
-	result, err := parseMarkers(logs, snapshot, maxRefBytes)
+	result, err := parseMarkers(logs, snapshot, maxRefBytes, maxPartitions)
 	if err != nil {
 		return nil, err
 	}
@@ -405,10 +425,11 @@ func CaptureMarkersWithRefLimit(logs io.Reader, maxSnapshotBytes int, maxRefByte
 	return result, nil
 }
 
-func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Markers, error) {
+func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPartitions int) (*Markers, error) {
 	output := make(map[string]string)
 	var branches []string
 	branchSeen := make(map[string]struct{})
+	acc := newPartitionAccumulator(maxPartitions)
 
 	reader := logs
 	if snapshot != nil {
@@ -444,6 +465,18 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Marke
 			}
 		}
 
+		if idx := strings.Index(line, partitionsMarker); idx >= 0 {
+			payload := strings.TrimSpace(line[idx+len(partitionsMarker):])
+			if err := parsePartitionsArrayLine(payload, acc); err != nil {
+				return nil, asPartitionError(err)
+			}
+		} else if idx := strings.Index(line, partitionMarker); idx >= 0 {
+			payload := line[idx+len(partitionMarker):]
+			if err := parsePartitionLine(payload, acc); err != nil {
+				return nil, asPartitionError(err)
+			}
+		}
+
 		// Check for branch marker (same line could theoretically match both,
 		// but in practice markers are distinct).
 		if idx := strings.Index(line, branchMarker); idx >= 0 {
@@ -476,6 +509,11 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Marke
 	}
 
 	result.Branches = branches
+	parts, err := acc.finish()
+	if err != nil {
+		return nil, err
+	}
+	result.Partitions = parts
 	return result, nil
 }
 
@@ -520,7 +558,7 @@ func (w *boundedSnapshotWriter) String() string {
 
 func newLogScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(initialScannerBuffer, MaxLogSnapshotBytes)
+	scanner.Buffer(make([]byte, 0, initialScannerBufferSize), MaxLogSnapshotBytes)
 	return scanner
 }
 
@@ -573,4 +611,94 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 		return nil
 	}
 	return env
+}
+
+// ErrFanInAggregateTooLarge is the sentinel behind FanInAggregateTooLargeError,
+// for callers that only need errors.Is.
+var ErrFanInAggregateTooLarge = errors.New("task: fan-in aggregate exceeds the output size cap")
+
+// FanInAggregateTooLargeError reports that a fan-out group's aggregated output
+// does not fit inside MaxOutputBytes. It carries the observed size, the cap, and
+// the producing step so the failure names the step an operator has to fix.
+//
+// This is deliberately an error and not a degraded result. The aggregate used to
+// be silently replaced by the three counters when it crossed the cap, which
+// dropped EVERY user key: a downstream step's CAESIUM_OUTPUT_<PRODUCER>_<KEY>
+// simply stopped existing, the run was reported successful, and the producer's
+// declared outputSchema was never consulted because the synthesized aggregate
+// does not flow through schema validation. A group whose contract cannot be
+// honored must fail, not quietly change shape.
+type FanInAggregateTooLargeError struct {
+	// Producer is the fan-out step whose group was being aggregated.
+	Producer string
+	// Size is the encoded size of the full aggregate, in bytes.
+	Size int
+	// Cap is MaxOutputBytes at the time of the failure.
+	Cap int
+}
+
+func (e *FanInAggregateTooLargeError) Error() string {
+	producer := e.Producer
+	if producer == "" {
+		producer = "<unknown>"
+	}
+	return fmt.Sprintf(
+		"fan-in aggregate for step %q is %d bytes, exceeding the %d byte output limit; reduce per-partition output or emit a large-object reference (##caesium::output-ref)",
+		producer, e.Size, e.Cap)
+}
+
+func (e *FanInAggregateTooLargeError) Unwrap() error { return ErrFanInAggregateTooLarge }
+
+// AggregateFanInOutputs folds per-partition instance outputs into the fan-in
+// contract: each scalar key becomes a JSON object keyed by partition value,
+// plus synthetic PARTITION_COUNT / SUCCEEDED / FAILED.
+//
+// producer names the fan-out step, used only to attribute an over-cap failure.
+// An aggregate that does not fit in MaxOutputBytes returns a
+// *FanInAggregateTooLargeError and a nil map; callers must fail the group rather
+// than publish a partial contract.
+func AggregateFanInOutputs(producer string, byPartition map[string]map[string]string, succeeded, failed int) (map[string]string, error) {
+	if len(byPartition) == 0 {
+		return map[string]string{
+			"PARTITION_COUNT": strconv.Itoa(succeeded + failed),
+			"SUCCEEDED":       strconv.Itoa(succeeded),
+			"FAILED":          strconv.Itoa(failed),
+		}, nil
+	}
+	keys := map[string]struct{}{}
+	partKeys := make([]string, 0, len(byPartition))
+	for p, outs := range byPartition {
+		partKeys = append(partKeys, p)
+		for k := range outs {
+			keys[k] = struct{}{}
+		}
+	}
+	sort.Strings(partKeys)
+	out := make(map[string]string, len(keys)+3)
+	for key := range keys {
+		obj := make(map[string]string, len(partKeys))
+		for _, p := range partKeys {
+			if v, ok := byPartition[p][key]; ok {
+				obj[p] = v
+			}
+		}
+		encoded, err := json.Marshal(obj)
+		if err != nil {
+			// Dropping the key here would be the same silent contract change the
+			// size cap used to make. Surface it.
+			return nil, fmt.Errorf("marshalling fan-in aggregate for key %q: %w", key, err)
+		}
+		out[key] = string(encoded)
+	}
+	out["PARTITION_COUNT"] = strconv.Itoa(len(byPartition))
+	out["SUCCEEDED"] = strconv.Itoa(succeeded)
+	out["FAILED"] = strconv.Itoa(failed)
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling fan-in aggregate: %w", err)
+	}
+	if len(encoded) > MaxOutputBytes {
+		return nil, &FanInAggregateTooLargeError{Producer: producer, Size: len(encoded), Cap: MaxOutputBytes}
+	}
+	return out, nil
 }

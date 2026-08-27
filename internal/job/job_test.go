@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -581,6 +582,36 @@ type fakeEngine struct {
 	runDurationByName map[string]time.Duration
 	resultByName      map[string]atom.Result
 
+	// logsByName is the marker stream a container "prints", keyed by
+	// atomLookupKey. Empty (the default) means a silent container.
+	logsByName map[string]string
+
+	// logsByPartition is the stream a FANNED instance's container prints, keyed
+	// by partition value. Every instance of a fanned step shares one task ID, so
+	// logsByName (keyed on atomLookupKey) cannot give them distinct output.
+	logsByPartition map[string]string
+
+	// partitionByAtomID survives Stop, unlike partitionActiveByAtomID, so a log
+	// read taken after the instance finished still resolves its partition.
+	partitionByAtomID map[string]string
+
+	// Fan-out steering. A fanned instance's container name carries a random
+	// TaskRun UUID, so tests cannot address it by name; these maps key on the
+	// partition value injected into the container instead.
+	createErrByPartition   map[string]error
+	failCreateTimes        map[string]int
+	createCallsByPartition map[string]int
+	resultByPartition      map[string]atom.Result
+	runDurationByPartition map[string]time.Duration
+
+	// partitionStarts records dispatch order; partitionInFlight tracks how many
+	// instances of a fanned group ran concurrently.
+	partitionStarts          []string
+	partitionInFlight        int
+	maxPartitionInFlight     int
+	partitionActiveByAtomID  map[string]string
+	partitionCompletionOrder []string
+
 	atoms map[string]*fakeEngineAtomState
 
 	inFlight      int
@@ -603,11 +634,20 @@ type fakeEngineAtomState struct {
 
 func newFakeEngine() *fakeEngine {
 	return &fakeEngine{
-		createErrByName:   map[string]error{},
-		runDurationByName: map[string]time.Duration{},
-		resultByName:      map[string]atom.Result{},
-		atoms:             map[string]*fakeEngineAtomState{},
-		stopForceByID:     map[string]bool{},
+		createErrByName:         map[string]error{},
+		runDurationByName:       map[string]time.Duration{},
+		resultByName:            map[string]atom.Result{},
+		logsByName:              map[string]string{},
+		logsByPartition:         map[string]string{},
+		partitionByAtomID:       map[string]string{},
+		createErrByPartition:    map[string]error{},
+		failCreateTimes:         map[string]int{},
+		createCallsByPartition:  map[string]int{},
+		resultByPartition:       map[string]atom.Result{},
+		runDurationByPartition:  map[string]time.Duration{},
+		partitionActiveByAtomID: map[string]string{},
+		atoms:                   map[string]*fakeEngineAtomState{},
+		stopForceByID:           map[string]bool{},
 	}
 }
 
@@ -657,18 +697,44 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	name := req.Name
 	key := atomLookupKey(name)
 
+	partition := ""
+	if req.Spec.Env != nil {
+		partition = req.Spec.Env[schema.DefaultFanOutEnv]
+	}
+	if partition != "" {
+		e.createCallsByPartition[partition]++
+	}
+
 	if err, ok := e.createErrByName[key]; ok {
 		return nil, err
+	}
+	if partition != "" {
+		if err, ok := e.createErrByPartition[partition]; ok {
+			return nil, err
+		}
+		if n, ok := e.failCreateTimes[partition]; ok && e.createCallsByPartition[partition] <= n {
+			return nil, fmt.Errorf("transient create failure for partition %q", partition)
+		}
 	}
 
 	duration := 10 * time.Millisecond
 	if configured, ok := e.runDurationByName[key]; ok {
 		duration = configured
 	}
+	if partition != "" {
+		if configured, ok := e.runDurationByPartition[partition]; ok {
+			duration = configured
+		}
+	}
 
 	result := atom.Success
 	if configured, ok := e.resultByName[key]; ok {
 		result = configured
+	}
+	if partition != "" {
+		if configured, ok := e.resultByPartition[partition]; ok {
+			result = configured
+		}
 	}
 
 	now := time.Now().UTC()
@@ -685,6 +751,15 @@ func (e *fakeEngine) Create(req *atom.EngineCreateRequest) (atom.Atom, error) {
 	e.inFlight++
 	if e.inFlight > e.maxInFlight {
 		e.maxInFlight = e.inFlight
+	}
+	if partition != "" {
+		e.partitionStarts = append(e.partitionStarts, partition)
+		e.partitionActiveByAtomID[state.id] = partition
+		e.partitionByAtomID[state.id] = partition
+		e.partitionInFlight++
+		if e.partitionInFlight > e.maxPartitionInFlight {
+			e.maxPartitionInFlight = e.partitionInFlight
+		}
 	}
 
 	return state.snapshot(), nil
@@ -710,6 +785,13 @@ func (e *fakeEngine) Stop(req *atom.EngineStopRequest) error {
 		state.active = false
 		if e.inFlight > 0 {
 			e.inFlight--
+		}
+		if partition, ok := e.partitionActiveByAtomID[state.id]; ok {
+			delete(e.partitionActiveByAtomID, state.id)
+			if e.partitionInFlight > 0 {
+				e.partitionInFlight--
+			}
+			e.partitionCompletionOrder = append(e.partitionCompletionOrder, partition)
 		}
 	}
 
@@ -742,14 +824,48 @@ func (e *fakeEngine) Wait(req *atom.EngineWaitRequest) (atom.Atom, error) {
 	}
 }
 
-func (e *fakeEngine) Logs(*atom.EngineLogsRequest) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("")), nil
+func (e *fakeEngine) Logs(req *atom.EngineLogsRequest) (io.ReadCloser, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	body := ""
+	if req != nil {
+		if partition, ok := e.partitionByAtomID[req.ID]; ok {
+			if partitionBody, ok := e.logsByPartition[partition]; ok {
+				return io.NopCloser(strings.NewReader(partitionBody)), nil
+			}
+		}
+		body = e.logsByName[atomLookupKey(req.ID)]
+	}
+	return io.NopCloser(strings.NewReader(body)), nil
 }
 
 func (e *fakeEngine) maxConcurrent() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.maxInFlight
+}
+
+// maxPartitionConcurrent reports the peak number of fan-out instances that were
+// running at the same moment.
+func (e *fakeEngine) maxPartitionConcurrent() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.maxPartitionInFlight
+}
+
+// partitionStartOrder is the order in which instance containers were created.
+func (e *fakeEngine) partitionStartOrder() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.partitionStarts...)
+}
+
+// createCount reports how many containers were created for a partition
+// (including retried attempts).
+func (e *fakeEngine) createCount(partition string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.createCallsByPartition[partition]
 }
 
 func (e *fakeEngine) wasForceStopped(id string) bool {
