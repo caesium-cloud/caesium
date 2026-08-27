@@ -47,9 +47,31 @@ TaskIdentityHash = SHA-256(
 
 Key decisions: **image tags are literal** — `etl:latest` re-hashes only when the tag string changes; use digest refs (`etl@sha256:…`) for content-addressed correctness (resolving digests at hash time would add network latency to every check). **Predecessor hashes are included**, so any upstream change transitively invalidates downstream even if the upstream output is identical. **Run params are included** (`date=2026-03-20` ≠ `date=2026-03-21`). **Only step-defined env** is hashed; system vars (`CAESIUM_RUN_ID`, etc.) are excluded.
 
+### Chain mode (`cache.chain`)
+
+"Predecessor hashes are included" above is the right default and the wrong one for a shared upstream step whose identity churns without changing what it produces. The hash is computed **before** execution — that is what decides whether to execute — so a checkout step's key can only contain its *inputs*, including the git ref, which moves on every commit. That churn propagates through `predecessor_hashes` to every downstream step in the repo.
+
+There is no upstream fix: the checkout cannot hash its own output tree into its own key, because the key must exist before the step runs. The chain has to be broken downstream, which is what `cache.chain` does:
+
+| | `transitive` (default) | `values` |
+|---|---|---|
+| `predecessor_hashes` | hashed | **excluded** |
+| `predecessor_outputs` | hashed | hashed |
+| everything else | hashed | hashed |
+
+`values` means *"my key is what I consume, not my predecessors' internal churn."* It is sufficient — rather than merely convenient — because `predecessor_outputs` is already **direct-edge only**: a step sees the outputs of its immediate predecessors, so excluding the transitive hash chain does not silently drop a real input, it drops exactly the transitive one.
+
+Implementation (`internal/cache/hash.go`): in values mode `Compute()` skips the `pred_hash:` lines and writes one framed `cache_chain:values` line instead. Transitive mode writes **nothing new**, so every existing cache entry survives — `TestCompute_GoldenTransitiveChainUnchanged` pins that digest as a string literal. The marker is unconditional in values mode because the mode itself is part of the identity: a step must not share a key with its transitive-mode self, whose key means something different.
+
+The resolved mode is snapshot on `TaskRun.cache_chain` and on the task execution descriptor's `cache.chain`, so the local executor, the distributed worker and replay all rebuild the same key rather than re-resolving from a mutable job definition.
+
+`caesium why` must render the exclusion or a values-mode skip is unexplainable: the persisted `HashInputBlob` carries `chain`, the diff emits a `predecessorHashes` entry of kind `excluded` instead of a phantom add/remove, and `BlobDiff.Notes` carries `predecessor hashes excluded (chain: values)` for the summary line, the CLI table and the Console.
+
+**Sharp edge.** An upstream change that alters behaviour without altering its declared outputs leaves consumers cached. That is the intent and the hazard; the mitigation is the `why` rendering above plus the documentation callout in `job-definitions.md`.
+
 ### Cache entry & modes
 
-A `task_cache` row associates a hash with its result, structured output, branch selections, originating run/task-run IDs, `created_at`, and optional `expires_at`. The `cache` field controls behaviour per step: `false` (default, always run), `true` (default TTL via `CAESIUM_CACHE_TTL`, 24h), `{ttl: "7d"}`, `{version: 2}` (bump to force invalidation), or both. Step-level `cache` overrides the `metadata.cache` job-level default; `cache: false` on a step opts out even when the job default is on.
+A `task_cache` row associates a hash with its result, structured output, branch selections, originating run/task-run IDs, `created_at`, and optional `expires_at`. The `cache` field controls behaviour per step: `false` (default, always run), `true` (default TTL via `CAESIUM_CACHE_TTL`, 24h), `{ttl: "7d"}`, `{ttl: "never"}` (null `expires_at` — no wall-clock expiry at all, for a step keyed on a content fingerprint), `{version: 2}` (bump to force invalidation), `{chain: "values"}`, or any combination. Step-level `cache` overrides the `metadata.cache` job-level default; `cache: false` on a step opts out even when the job default is on. `chain` and `ttl` layer job → step exactly like `pinDigests`.
 
 ---
 
@@ -86,7 +108,7 @@ The scheduler is the single source of truth for predecessor context in both mode
 
 ## Invalidation & pruning
 
-- **Automatic**: TTL expiry (`Get` treats expired entries as misses); transitive invalidation via predecessor hashing (no explicit walk needed); job-definition changes re-hash changed steps on the next run (unchanged steps still hit).
+- **Automatic**: TTL expiry (`Get` treats expired entries as misses; `ttl: never` writes a null `expires_at`, which never expires); transitive invalidation via predecessor hashing (no explicit walk needed, and deliberately opted out of by `chain: values`); job-definition changes re-hash changed steps on the next run (unchanged steps still hit).
 - **Manual**: `DELETE /v1/jobs/{id}/cache`, `DELETE …/cache/{task_name}`, `POST /v1/cache/prune`; `caesium cache invalidate`/`prune`. Bump `cache.version` to force a single task's re-execution.
 - **Pruning**: `cache.StartPruner` runs on `CACHE_PRUNE_INTERVAL` (default 1h), deleting expired entries.
 

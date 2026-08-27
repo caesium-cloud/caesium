@@ -32,7 +32,7 @@ This document is generated from the job definition Go structs (`pkg/jobdef`). It
 | `rateLimits` | array[object] | optional | Shared resource budgets declared as `{resource, limit, window}`. `window` is a duration string. Scheduling metadata excluded from the cache identity hash. |
 | `schemaValidation` | string | optional | Runtime output validation mode: `warn` or `fail`. Empty disables validation. |
 | `replaySafe` | boolean | optional | Marks every step in this job as eligible for quarantined what-if replay. Recorded on each baseline task run; excluded from the cache identity hash. |
-| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true`, `{ttl: "24h"}`, or `{pinDigests: true}`. Step-level `cache` overrides these defaults. |
+| `cache` | boolean or object | optional | Job-level cache defaults; accepts `true`, `{ttl: "24h"}`, `{ttl: "never"}`, `{pinDigests: true}`, or `{chain: "values"}`. Step-level `cache` overrides these defaults. |
 | `serviceAccountName` | string | optional | Default Kubernetes ServiceAccount for Kubernetes steps. |
 | `podAnnotations` | map[string]string | optional | Default annotations applied to Kubernetes step pods. |
 | `automountServiceAccountToken` | boolean | optional | Default Kubernetes pod service-account token setting. |
@@ -128,16 +128,33 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `outputSchema` | object | optional | JSON Schema fragment describing this step's emitted outputs. |
 | `inputSchema` | map[string]object | optional | Required output keys per predecessor step for contract validation. |
 | `datasets` | object | optional | Per-step dataset surface: `consumes` (legacy dataset names or objects with `name`/`schema`) and `produces` (datasets with freshness SLOs and optional contract schemas). See [Datasets & Freshness](#datasets--freshness). Scheduling and apply-time contract metadata are excluded from the cache identity hash. |
-| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
+| `cache` | boolean or object | optional | Enable task caching; accepts `true`, `false`, `{ttl: "12h"}`, `{ttl: "12h", version: 2}`, `{ttl: "never"}`, `{chain: "values"}`, `{pinDigests: true}`, or `{pinDigests: true, digestTTL: 0}`. |
 
 ### Cache
 
 | Field | Type | Required | Notes |
 |-------|------|----------|-------|
-| `ttl` | duration string | optional | Cache entry lifetime (e.g. "24h", "7d"). Defaults to CAESIUM_CACHE_TTL. |
+| `ttl` | duration string or `never` | optional | Cache entry lifetime (e.g. "24h", "7d"). Defaults to CAESIUM_CACHE_TTL. The literal `never` suppresses expiry entirely (a null expiry) and overrides any inherited default — use it for a step keyed on a content fingerprint, which should not be re-executed because a wall clock moved. |
+| `chain` | string | optional | How predecessor identity enters this step's cache key: `transitive` (default) or `values`. See [Cache Chain](#cache-chain) below. |
 | `version` | integer | optional | Bump to invalidate existing cache entries without changing task definition. |
 | `pinDigests` | boolean | optional | Resolve each step's image tag to its content digest (`sha256:…`) and fold the digest, not the mutable tag, into the cache key. A tag that moves to new content (e.g. a re-pushed `:latest`) then produces a cache **miss** instead of serving a stale hit. Defaults to `CAESIUM_CACHE_PIN_DIGESTS`. Set at job (`metadata.cache`) or step level; a step value overrides the job default. Resolution is opt-in because it costs a registry round-trip on first sight; the resolved tag→digest mapping is cached for `digestTTL` so steady-state runs pay no network cost. |
 | `digestTTL` | duration string or 0 | optional | How long a resolved tag→digest mapping is reused before re-resolution (a **perf cache**). Within the window a moved tag is **not** re-detected — the prior digest is served. `0` re-resolves on every check, so a moved tag is detected immediately at the cost of a registry round-trip per check. Defaults to `CAESIUM_CACHE_DIGEST_TTL` (5m). Only meaningful with `pinDigests`. |
+
+### Cache Chain
+
+`cache.chain` selects whether a step's identity hash folds in its predecessors' identity hashes. It layers job (`metadata.cache.chain`) → step exactly like `pinDigests`, so a job-level value is the default for every step that omits it.
+
+| | `transitive` (default) | `values` |
+|---|---|---|
+| Predecessor identity hashes | hashed | **excluded** |
+| Predecessor outputs | hashed | hashed |
+| Everything else (image, command, env, mounts, params, partition, `version`) | hashed | hashed |
+
+`transitive` is byte-identical to the historical behaviour: any upstream change cascades to every downstream step. `values` means *"my key is what I consume, not my predecessors' internal churn"* — an upstream step whose own inputs moved (a git ref, a timestamp) no longer invalidates this step, but a changed upstream **output** still does.
+
+Use it when a shared upstream step's identity churns for reasons that do not change what it produces. The canonical case is a source-checkout step: its hash contains the git ref, which moves on every commit, so under `transitive` a one-line edit anywhere invalidates every downstream stack in the repo.
+
+**Sharp edge.** `values` is a sharper knife than the default: an upstream change that alters behaviour *without* altering its declared outputs will leave consumers cached. That is exactly the point, and exactly what will surprise someone eventually — so make the upstream step's outputs a faithful summary of what it produced (a content digest or fingerprint, not a timestamp), and prefer setting `chain` on the specific steps that need it over `metadata.cache.chain`, which hides the sharp edge behind a job-wide default. `caesium why` always names the exclusion (`predecessor hashes excluded (chain: values)`) so a skip is never unexplainable.
 
 ### Replay Safety
 
@@ -242,3 +259,4 @@ Remediation action names accepted in `allow`, `perClass[].allow`, and `requireAp
 ## Secret References
 
 Use `secret://` URIs for sensitive values. Supported providers: `env`, `k8s`, `vault`. See `docs/job-definitions.md` for details.
+
