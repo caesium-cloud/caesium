@@ -265,7 +265,7 @@ fails closed on anything unexpected.
       fail-closed "not implemented" entrypoints so `build-pack` yields four
       images from day one; B2/B4 and Stream C replace them.
 
-- [ ] B2. `git-source` (generic materialize role, spec §6.1). Env: `GIT_URL`,
+- [x] B2. `git-source` (generic materialize role, spec §6.1). Env: `GIT_URL`,
       `GIT_REF`, `GIT_SPARSE` (space-separated paths), `GIT_SSH_KEY` (already
       resolved from `secret://` by Caesium; written to a 0600 temp file and
       never logged), `DEST` (default `/src`). Sparse shallow clone at the ref,
@@ -275,6 +275,17 @@ fails closed on anything unexpected.
       Fail closed on every git error. Go tests over a temp repo.
       Files: new `pack/cmd/git-source/main.go` + `_test.go`.
       Depends on: B1.
+      Landed. Deviation from the item text: the digest is taken over
+      `git ls-files -s -z -- :(glob)<pattern>` rather than `git ls-tree -r`
+      — `ls-tree` supports neither pathspec magic nor globbing, so the
+      documented `stacks/**` patterns match nothing there and the digest
+      would silently cover an empty set. The clone is fresh into an empty
+      DEST, so the index is exactly the tree at the pinned commit. A `!`
+      negation in `GIT_SPARSE` is rejected (no pathspec equivalent, so
+      checkout and digest would describe different trees), and
+      `GIT_SSH_KNOWN_HOSTS` was added so host-key checking can be strict
+      rather than disabled.
+
 - [x] B3. Hermetic fixture repo + test helper. `pack/testdata/infra/` with three
       stacks (`stacks/network` exporting `vpc_id`, `stacks/account` depending on
       network, `stacks/app-web` consuming `vpc_id` via `TF_VAR_vpc_id`), two
