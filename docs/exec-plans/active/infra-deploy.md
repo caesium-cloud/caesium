@@ -136,7 +136,7 @@ cache entry survives. This stream is independently useful to any pipeline with
 a shared upstream step, and is the prerequisite for scenario 2 (the
 load-bearing "edit one stack, re-apply one stack" test).
 
-- [ ] A1. Add `chain` and `ttl: never` to the resolved cache config. Extend
+- [x] A1. Add `chain` and `ttl: never` to the resolved cache config. Extend
       `CacheConfig` with `Chain string` (constants `CacheChainTransitive =
       "transitive"`, `CacheChainValues = "values"`; default transitive) and
       `TTLNever bool`; teach `applyCache` to read `chain` (string) and the
@@ -151,7 +151,17 @@ load-bearing "edit one stack, re-apply one stack" test).
       Files: `pkg/jobdef/definition.go` (`CacheConfig`, `ResolveCacheConfig`,
       `applyCache`, `Validate`), `pkg/jobdef/schema.go`, the existing cache
       config tests beside `definition.go`.
-- [ ] A2. Implement the hash semantics with a golden guard. Add `Chain string`
+      Done (W1-α): `CacheChainTransitive`/`CacheChainValues`/`CacheTTLNever`
+      constants + `NormalizeCacheChain`; `Chain`/`TTLNever` on `CacheConfig`;
+      `validateCacheConfigs` rejects an unknown `chain` at job and step level
+      while the resolver falls back to the inherited/transitive default so an
+      unvalidated manifest fails safe. Tests in new
+      `pkg/jobdef/cache_chain_test.go` (incl. a real YAML round-trip).
+      **Deviation:** this repo has no machine JSON Schema for the manifest
+      (`pkg/jobdef/schema.go` validates `outputSchema`/`inputSchema` only); the
+      schema surface is the generated `docs/job-schema-reference.md`, updated in
+      A7.
+- [x] A2. Implement the hash semantics with a golden guard. Add `Chain string`
       to `cache.HashInput`; in `Compute()` skip the `pred_hash:` lines and write
       exactly one `cache_chain:values\n` line when `Chain == values`; write
       **nothing new** in transitive mode. Add `Chain string
@@ -164,7 +174,13 @@ load-bearing "edit one stack, re-apply one stack" test).
       predecessor output changes it; `CanonicalJSON` round-trips `chain`.
       Files: `internal/cache/hash.go`, `internal/cache/hash_test.go`.
       Depends on: A1.
-- [ ] A3. Wire the resolved config into all three `HashInput` construction sites
+      Done (W1-α): `HashInput.Chain`; `Compute()` writes one framed
+      `cache_chain:values` line in place of the `pred_hash:` lines and nothing
+      new in transitive mode. The blob gains `chain,omitempty` and the oversized
+      summary gains `predecessorHashesExcluded`; `HashInputBlobVersion` stays 1.
+      `TestCompute_GoldenTransitiveChainUnchanged` pins the transitive digest as
+      a string literal for BOTH an unset and an explicit `transitive` Chain.
+- [x] A3. Wire the resolved config into all three `HashInput` construction sites
       and persist it. Add `CacheChain string` and `CacheTTLNever bool` columns to
       `TaskRun` beside `CachePinDigests` (scheduler-set in the initial snapshot at
       `internal/run/store.go:1210`; `TaskRun` is already a hot-path model so the
@@ -183,7 +199,12 @@ load-bearing "edit one stack, re-apply one stack" test).
       `internal/job/job.go`, `internal/worker/runtime_executor.go`,
       `internal/replay/replay.go`, tests beside each.
       Depends on: A2.
-- [ ] A4. Render the exclusion in `caesium why` (spec §4.3: "or the skip becomes
+      Done (W1-α): `TaskRun.CacheChain`/`CacheTTLNever` columns +
+      `TaskExecutionCache.Chain`/`TTLNever` on the descriptor; `Chain` passed at
+      all three construction sites. The THREE (not two) cache-entry writers now
+      share a new `cache.EntryExpiry(createdAt, ttl, ttlNever)` helper so no lane
+      can forget the `never` check.
+- [x] A4. Render the exclusion in `caesium why` (spec §4.3: "or the skip becomes
       unexplainable"). `diffBlobs` emits a `predecessorHashes` `FieldChange`
       with change `excluded (chain: values)` whenever either side is
       values-mode, and `BlobDiff` carries a `Notes []string` (or equivalent)
@@ -194,7 +215,21 @@ load-bearing "edit one stack, re-apply one stack" test).
       `cmd/why/why.go`, `ui/src/features/jobs/TaskWhyView.tsx`,
       `ui/src/lib/api.ts` (explanation type), `ui/src/features/jobs/__tests__/`.
       Depends on: A2.
-- [ ] A5. Integration scenario for the chain break on a plain pipeline (no
+      Done (W1-α): new `fieldExcluded` kind + `FieldChange.Note`;
+      `BlobDiff.Notes`, attached BEFORE the degraded early-returns so an
+      oversized blob still names the exclusion. Excluded entries are filtered out
+      of every "what changed" count (`discriminatingChanges`) in the summary, the
+      CLI table and the Console, and out of `run diff`'s per-task change list —
+      otherwise a cache HIT would report a changed field. Console testid:
+      `task-why-chain-exclusion`. Fix round 1: (I-1) a FANNED step addressed
+      without `--partition` carries no `Diff` at all, so `WhyGroup.Notes` was
+      added (populated from the scheduler-set `cache_chain` column) and both
+      `summarize` and the CLI's `renderTable` now read whichever channel the
+      answer shape uses — this is the shape spec §5.5 itself uses; (I-2) a
+      chain-mode SWITCH is now emitted as a real `chain` `FieldChange`, so a miss
+      caused by adding `chain: values` is no longer mis-explained as "cause is
+      outside the persisted hash inputs".
+- [x] A5. Integration scenario for the chain break on a plain pipeline (no
       Terraform, `alpine:3.23` only): job with `upstream` (env derived from a run
       param, constant output) → `mid` (`cache: {version: 1, chain: values}`) →
       `leaf` (default chain). Run twice with a changed param: `upstream` re-runs,
@@ -204,7 +239,16 @@ load-bearing "edit one stack, re-apply one stack" test).
       <run> mid` contains the exclusion note. All machine output via
       `runCLIStdout`. Files: new `test/cache_chain_test.go`.
       Depends on: A3, A4.
-- [ ] A6. The generic unit-pipeline binding (spec §9.12 — the genericity
+      Done (W1-α) with two **deviations**, both forced by shipped behaviour:
+      (1) run params are hashed into EVERY step's key, so a changed param busts
+      `mid` too; the churn is instead a re-applied edit to the upstream step's
+      command, which is the real git-ref case. (2) an upstream that re-runs with
+      byte-identical OUTPUT is neutralised by the value-verified short-circuit
+      (`EquivalentPriorHash`), so the churning upstream is a `warm-cache`-shaped
+      step that emits NOTHING (short-circuit guard 2). A `direct` control on the
+      default chain re-runs in the same run, proving the cascade is real. Also
+      fixed `caesium cache list` writing its JSON to stderr via `cmd.Print*`.
+- [x] A6. The generic unit-pipeline binding (spec §9.12 — the genericity
       guarantee). A Terraform-free job over a docker named volume driving the
       exact DAG shape of the Terraform form: two per-unit `discover` steps that
       emit hand-computed `fingerprint` outputs, `propose` steps (`chain:
@@ -216,7 +260,17 @@ load-bearing "edit one stack, re-apply one stack" test).
       a pack image** — if the §5.2 contracts grow Terraform-shaped, this is what
       fails. Files: new `test/unit_pipeline_generic_test.go`.
       Depends on: A3.
-- [ ] A7. Docs + generated schema reference for the new keys. Update the job-
+      Done (W1-α): `source → discover-{a,b} → propose-{a,b} → apply-{a,b}` plus
+      the §5.5 `warm` role (emits nothing, feeds every propose/apply) and a
+      default-chain `control` consumer of it, over a docker/podman named volume,
+      alpine:3.23 only; the test asserts the fixture contains neither
+      `caesiumcloud/` nor `terraform`. Per spec §5.5 (which overrides the item
+      text) BOTH propose and apply carry `chain: values`, and apply also
+      `ttl: never`. Fix round 1 (review I-3): the fingerprint-bump scenario alone
+      was confounded by the value-verified short-circuit, so a `warm`-churn
+      scenario was added — it fails if `chain: values` is removed from any
+      propose/apply step (verified by temporarily removing it).
+- [x] A7. Docs + generated schema reference for the new keys. Update the job-
       and step-level `cache` rows in `internal/jobdef/report/report.go` (never
       hand-edit `docs/job-schema-reference.md` — regenerate it, or
       `TestGeneratedSchemaReferenceIsCurrent` goes red), then document the
@@ -229,6 +283,11 @@ load-bearing "edit one stack, re-apply one stack" test).
       (generated), `docs/job-definitions.md`,
       `docs/caesium-job-llm-reference.md`, `docs/design-incremental-execution.md`.
       Depends on: A1, A4.
+      Done (W1-α): a new "Cache Chain" section in `report.go` (semantics table +
+      sharp edge) and `docs/job-schema-reference.md` regenerated from it; prose
+      + example in `job-definitions.md` and the LLM reference; rationale and
+      lane-threading in `design-incremental-execution.md`.
+      `caesium job lint --path docs/examples/` validates 28 definitions.
 
 ### Stream B — Pack scaffold, `git-source`, `tf-discover`, hermetic fixture
 

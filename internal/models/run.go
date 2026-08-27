@@ -97,6 +97,17 @@ type TaskRun struct {
 	// reused before re-resolution (0 = re-resolve every check). Scheduler-set so
 	// distributed workers apply the same freshness window as local execution.
 	CacheDigestTTL time.Duration `gorm:"not null;default:0" json:"-"`
+	// CacheChain snapshots the resolved cache.chain mode ("transitive" default,
+	// or "values"). Scheduler-set beside CachePinDigests so a distributed worker
+	// builds the same identity key as local execution without reloading the job
+	// definition. Empty means transitive — that is what every row written before
+	// this column existed carries, and it is the mode whose hash is unchanged.
+	CacheChain string `gorm:"type:text" json:"-"`
+	// CacheTTLNever snapshots the literal `cache.ttl: never`, which suppresses
+	// the cache entry's expiry entirely (nil ExpiresAt) regardless of any
+	// inherited TTL default. It is distinct from CacheTTL == 0, which means "no
+	// explicit TTL" and still inherits CAESIUM_CACHE_TTL.
+	CacheTTLNever bool `gorm:"not null;default:false" json:"-"`
 	// ResolvedImageDigest records the content digest (sha256:...) the image tag
 	// resolved to when pinning is on. Nullable: empty/unset when pinning is off
 	// or the digest could not be resolved (in which case the cache key falls
@@ -268,14 +279,22 @@ type TaskExecutionTiming struct {
 }
 
 type TaskExecutionCache struct {
-	Enabled             bool          `json:"enabled"`
-	TTL                 time.Duration `json:"ttl"`
-	Version             int           `json:"version"`
-	PinDigests          bool          `json:"pinDigests"`
-	DigestTTL           time.Duration `json:"digestTTL"`
-	ComputedHash        string        `json:"computedHash,omitempty"`
-	EffectiveHash       string        `json:"effectiveHash,omitempty"`
-	HashInputBlobStored bool          `json:"hashInputBlobStored,omitempty"`
+	Enabled    bool          `json:"enabled"`
+	TTL        time.Duration `json:"ttl"`
+	Version    int           `json:"version"`
+	PinDigests bool          `json:"pinDigests"`
+	DigestTTL  time.Duration `json:"digestTTL"`
+	// Chain is the resolved cache.chain mode. Recorded on the descriptor so
+	// replay and reproduce rebuild the SAME key: without it a values-mode step
+	// replayed from its descriptor would fold predecessor hashes back in and
+	// miss on every entry it should have hit. Omitempty keeps descriptors
+	// written before this field byte-identical.
+	Chain string `json:"chain,omitempty"`
+	// TTLNever is the resolved `cache.ttl: never`, carried for the same reason.
+	TTLNever            bool   `json:"ttlNever,omitempty"`
+	ComputedHash        string `json:"computedHash,omitempty"`
+	EffectiveHash       string `json:"effectiveHash,omitempty"`
+	HashInputBlobStored bool   `json:"hashInputBlobStored,omitempty"`
 }
 
 type TaskExecutionSchema struct {

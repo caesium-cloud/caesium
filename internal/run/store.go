@@ -1400,6 +1400,8 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					ReplaySafe:              replaySafe,
 					CachePinDigests:         resolvedCache.PinDigests,
 					CacheDigestTTL:          resolvedCache.DigestTTL,
+					CacheChain:              resolvedCache.Chain,
+					CacheTTLNever:           resolvedCache.TTLNever,
 					OutputSchema:            append(datatypes.JSON(nil), task.OutputSchema...),
 					SchemaValidation:        schemaValidation,
 					Quarantine:              jobRun.Quarantine,
@@ -1594,6 +1596,8 @@ func (s *Store) initialTaskExecutionDescriptorTx(
 			Version:    cacheCfg.Version,
 			PinDigests: cacheCfg.PinDigests,
 			DigestTTL:  cacheCfg.DigestTTL,
+			Chain:      cacheCfg.Chain,
+			TTLNever:   cacheCfg.TTLNever,
 		},
 		Schema: models.TaskExecutionSchema{
 			InputSchema:    append(datatypes.JSON(nil), task.InputSchema...),

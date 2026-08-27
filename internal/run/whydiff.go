@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+
+	"github.com/caesium-cloud/caesium/internal/cache"
 )
 
 // whydiff.go implements the read-side, field-by-field diff that powers
@@ -40,6 +42,22 @@ const (
 	// omitted because a full structural dump is rarely the useful signal; the
 	// renderer reports only that it changed.
 	fieldStructural blobFieldKind = "structural"
+	// fieldExcluded is a field that was deliberately kept OUT of the identity
+	// hash, so a difference in it did not (and could not) discriminate the two
+	// runs. It is emitted rather than silently dropped because the alternative is
+	// an unexplainable skip: under `cache.chain: values` a consumer stays cached
+	// while its predecessor's identity visibly moved, and a reader comparing the
+	// two blobs by hand would otherwise conclude the cache was wrong. An excluded
+	// entry is NOT a discriminating field — summaries and counts must skip it.
+	fieldExcluded blobFieldKind = "excluded"
+)
+
+// predecessorHashesExcludedChange / predecessorHashesExcludedNote are the two
+// renderings of the same fact: the human-readable note for the summary line and
+// the CLI/Console, and the per-field "change" verb for a diff row.
+const (
+	predecessorHashesExcludedChange = "excluded (chain: values)"
+	predecessorHashesExcludedNote   = "predecessor hashes excluded (chain: values)"
 )
 
 // FieldChange is one discriminating field between two HashInput blobs.
@@ -64,6 +82,11 @@ type FieldChange struct {
 	// renderer can label it "(redacted; digest differs)" rather than printing the
 	// digest as if it were the literal value.
 	Redacted bool `json:"redacted,omitempty"`
+	// Note is a human-readable qualifier a renderer prints in place of a
+	// before/after comparison. It is set on fieldExcluded entries
+	// ("excluded (chain: values)") so both the CLI table's CHANGE column and the
+	// Console render one authored phrase rather than each inventing its own.
+	Note string `json:"note,omitempty"`
 }
 
 // hashInputBlob is a read-side mirror of the persisted blob produced by
@@ -92,9 +115,26 @@ type hashInputBlob struct {
 	Partition            string                       `json:"partition,omitempty"`
 	PartitionFingerprint string                       `json:"partitionFingerprint,omitempty"`
 	PartitionAttributes  map[string]string            `json:"partitionAttributes,omitempty"`
-	CacheVersion         int                          `json:"cacheVersion"`
+	// Chain is the cache chain mode, written by cache.HashInput.CanonicalJSON
+	// only in values mode (absent means the default transitive). It is what tells
+	// the diff that PredecessorHashes never entered this blob's digest.
+	Chain        string `json:"chain,omitempty"`
+	CacheVersion int    `json:"cacheVersion"`
 
 	Oversized *oversizedBlob `json:"oversized,omitempty"`
+}
+
+// excludesPredecessorHashes reports whether this blob's digest was computed with
+// predecessor identity hashes left out. It reads the degraded marker too, so an
+// oversized blob still explains itself.
+func (b *hashInputBlob) excludesPredecessorHashes() bool {
+	if b == nil {
+		return false
+	}
+	if b.Oversized != nil && b.Oversized.PredecessorHashesExcluded {
+		return true
+	}
+	return b.Chain == cache.ChainValues
 }
 
 // envBlobValue mirrors cache's persisted env entry: either a verbatim secret://
@@ -126,17 +166,24 @@ type redactedEnvValue struct {
 // exceed the size bound. When either side is oversized the diff cannot report
 // field-level changes and says so.
 type oversizedBlob struct {
-	EnvCount               int `json:"envCount"`
-	PredecessorCount       int `json:"predecessorCount"`
-	PredecessorOutputCount int `json:"predecessorOutputCount"`
+	EnvCount                  int  `json:"envCount"`
+	PredecessorCount          int  `json:"predecessorCount"`
+	PredecessorOutputCount    int  `json:"predecessorOutputCount"`
+	PredecessorHashesExcluded bool `json:"predecessorHashesExcluded,omitempty"`
 }
 
 // BlobDiff is the structured result of diffing two HashInput blobs.
 type BlobDiff struct {
 	// HashEqual is true when the two blobs decompose the same identity hash. By
 	// construction equal hashes mean every hashed input was identical, so Changes
-	// is empty; HashEqual=false with empty Changes can only happen when a blob is
-	// oversized/unparseable (see Degraded).
+	// holds no DISCRIMINATING entry; HashEqual=false with none can only happen
+	// when a blob is oversized/unparseable (see Degraded).
+	//
+	// Changes itself is not necessarily empty when HashEqual is true: a values-mode
+	// hit carries a fieldExcluded marker naming an input that was deliberately kept
+	// OUT of the key (its predecessor hashes may well differ — that is the point).
+	// Every consumer that counts or headlines "what changed" must therefore filter
+	// through discriminatingChanges rather than reading len(Changes).
 	HashEqual bool `json:"hashEqual"`
 	// SubjectHash / BaselineHash are the inline Compute() digests each blob
 	// carries, surfaced so a caller can confirm the diff matched the runs it
@@ -150,6 +197,39 @@ type BlobDiff struct {
 	// The hash-level verdict (HashEqual) is still valid; only the field detail is
 	// unavailable.
 	Degraded string `json:"degraded,omitempty"`
+	// Notes are qualifiers about HOW the two keys were computed, as opposed to
+	// which inputs differ. Today the only note is the chain: values exclusion,
+	// which the summary line and every renderer must surface: without it a
+	// consumer that stayed cached while its predecessor visibly changed is an
+	// unexplainable skip (spec §4.3).
+	Notes []string `json:"notes,omitempty"`
+}
+
+// displayChain renders a blob's chain mode for a diff. The blob omits the field
+// in the default mode — that omission is what keeps pre-chain blobs
+// byte-identical — so an empty string is spelled out rather than shown as a
+// missing value: "chain changed transitive→values" is the useful line, "chain
+// changed →values" is not.
+func displayChain(chain string) string {
+	if chain == "" {
+		return cache.ChainTransitive
+	}
+	return chain
+}
+
+// discriminatingChanges filters out the entries that record an EXCLUDED input
+// rather than a differing one. Callers that count "how many inputs changed" must
+// use this: an excluded entry is an explanation, not a discriminator, and
+// counting it would report a cache hit as having a changed field.
+func discriminatingChanges(changes []FieldChange) []FieldChange {
+	out := make([]FieldChange, 0, len(changes))
+	for _, c := range changes {
+		if c.Kind == fieldExcluded {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // DiffHashInputBlobs decodes and diffs two canonical HashInput blobs: subject is
@@ -189,6 +269,14 @@ func DiffHashInputBlobs(subject, baseline []byte) (*BlobDiff, error) {
 	d.SubjectHash = sb.Hash
 	d.BaselineHash = bb.Hash
 	d.HashEqual = sb.Hash != "" && sb.Hash == bb.Hash
+
+	// The exclusion note is attached BEFORE the degraded early-returns: a version
+	// mismatch or an oversized blob costs the field-level detail, but "predecessor
+	// hashes were not part of this key" is still the single most important thing
+	// to say about a values-mode skip, and both degraded paths can still tell.
+	if sb.excludesPredecessorHashes() || bb.excludesPredecessorHashes() {
+		d.Notes = append(d.Notes, predecessorHashesExcludedNote)
+	}
 
 	if sb.BlobVersion != bb.BlobVersion {
 		d.Degraded = fmt.Sprintf("blob version mismatch (subject v%d, baseline v%d): cannot diff field-by-field; comparing identity hash only", sb.BlobVersion, bb.BlobVersion)
@@ -247,7 +335,33 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 	}
 
 	changes = append(changes, diffEnv(before.Env, after.Env)...)
-	changes = append(changes, diffPredecessorHashes(before.PredecessorHashes, after.PredecessorHashes)...)
+
+	// The chain MODE is key material in its own right (Compute writes a framed
+	// cache_chain:values line into the digest), so a switch between modes is a
+	// real — and usually the ONLY — discriminating field. It must be reported as
+	// one: the exclusion marker below is deliberately filtered out of every count
+	// by discriminatingChanges, so without this a step that missed purely because
+	// an operator added `chain: values` was explained as "no input field differs
+	// from the prior run (cause is outside the persisted hash inputs, e.g. an
+	// expired/pruned cache entry)". That is false — the cause is inside the
+	// blob — and it sends the reader hunting for a pruned entry that never existed.
+	addScalar("chain", displayChain(before.Chain), displayChain(after.Chain))
+
+	// Under chain: values the predecessor hashes never entered either digest, so
+	// reporting an add/remove for them would name a "change" that provably did
+	// not discriminate the runs. Report the exclusion itself instead — once,
+	// whenever EITHER side is in values mode (a mode switch is also worth
+	// surfacing, and in that case the two keys really are incomparable field by
+	// field on this input).
+	if before.excludesPredecessorHashes() || after.excludesPredecessorHashes() {
+		changes = append(changes, FieldChange{
+			Field: "predecessorHashes",
+			Kind:  fieldExcluded,
+			Note:  predecessorHashesExcludedChange,
+		})
+	} else {
+		changes = append(changes, diffPredecessorHashes(before.PredecessorHashes, after.PredecessorHashes)...)
+	}
 	changes = append(changes, diffPredecessorOutputs(before.PredecessorOutputs, after.PredecessorOutputs)...)
 	changes = append(changes, diffStringMap("runParams", before.RunParams, after.RunParams)...)
 	addScalar("partition", before.Partition, after.Partition)

@@ -329,7 +329,12 @@ func diffRunTask(taskName string, left, right models.TaskRun) RunDiffTask {
 
 	base.Verdict = classifyRunDiffVerdict(diff)
 	base.HashEqual = diff.HashEqual
-	base.Changes = diff.Changes
+	// Only genuinely discriminating fields: `run diff` reports "N changed
+	// fields" per task, and a chain: values exclusion marker is an explanation of
+	// how the key was built, not an input that differed. Naming the exclusion is
+	// `caesium why`'s job (spec §4.3), which has a Notes channel for it; counting
+	// it here would report an identical pair of tasks as having a changed field.
+	base.Changes = discriminatingChanges(diff.Changes)
 	base.Degraded = diff.Degraded
 	return base
 }

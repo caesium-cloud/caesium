@@ -808,6 +808,9 @@ func (d *Definition) Validate() error {
 	if err := validateSteps(d.Steps, volumes, rateLimitResources); err != nil {
 		return err
 	}
+	if err := validateCacheConfigs(d); err != nil {
+		return err
+	}
 	if err := validateDatasets(d); err != nil {
 		return err
 	}
@@ -816,6 +819,44 @@ func (d *Definition) Validate() error {
 	}
 	if err := validateRemediation(d); err != nil {
 		return err
+	}
+	return nil
+}
+
+// validateCacheConfigs rejects an unknown `cache.chain` value at job and step
+// level. It is deliberately the ONLY new cache validation: an unparseable
+// `cache.ttl` keeps its historical silent-ignore behaviour, because manifests
+// carrying one apply cleanly today and turning that into an error would break
+// them. `chain` is new, so nothing can already depend on a typo being ignored —
+// and silently ignoring a misspelt `chain: value` would leave the user with the
+// transitive cascade they were trying to break, with no signal.
+func validateCacheConfigs(d *Definition) error {
+	if err := validateCacheChainValue("metadata.cache", d.Metadata.Cache); err != nil {
+		return err
+	}
+	for i := range d.Steps {
+		if err := validateCacheChainValue(fmt.Sprintf("steps[%d].cache", i), d.Steps[i].Cache); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateCacheChainValue(path string, raw interface{}) error {
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return nil
+	}
+	chain, present := m["chain"]
+	if !present {
+		return nil
+	}
+	value, ok := chain.(string)
+	if !ok {
+		return fmt.Errorf("%s.chain must be a string, one of [%q, %q]", path, CacheChainTransitive, CacheChainValues)
+	}
+	if _, valid := NormalizeCacheChain(value); !valid {
+		return fmt.Errorf("%s.chain %q must be one of [%q, %q]", path, value, CacheChainTransitive, CacheChainValues)
 	}
 	return nil
 }
@@ -2194,11 +2235,59 @@ func detectCycles(adj map[string]map[string]struct{}, names map[string]int) erro
 	return nil
 }
 
+// Cache chain modes select whether a step's identity hash folds in its
+// predecessors' identity hashes.
+const (
+	// CacheChainTransitive is the default and preserves the historical hash
+	// exactly: every predecessor's identity hash is folded into this step's key,
+	// so any upstream change — including one that produced identical outputs —
+	// cascades to every downstream step.
+	CacheChainTransitive = "transitive"
+	// CacheChainValues excludes predecessor identity hashes from the key while
+	// still hashing predecessor OUTPUTS. The meaning is "my key is what I
+	// consume, not my predecessors' internal churn": an upstream step whose own
+	// inputs moved (a git ref, a timestamp) no longer invalidates this step, but
+	// a changed upstream *output* still does. It is a sharper knife than the
+	// default — an upstream change that alters behaviour without altering
+	// outputs leaves consumers cached (see docs/job-definitions.md).
+	CacheChainValues = "values"
+	// CacheTTLNever is the literal `ttl: never`, which maps to a nil ExpiresAt
+	// on the cache entry: a step keyed purely on a content fingerprint should
+	// not expire on a wall clock.
+	CacheTTLNever = "never"
+)
+
+// NormalizeCacheChain canonicalizes a user-supplied cache.chain value. It
+// returns the canonical form and whether the value is a known mode; unknown
+// values are rejected by Validate() and ignored (leaving the inherited default,
+// which is the byte-identical-to-today transitive behaviour) at resolve time,
+// so a manifest that somehow bypassed validation still fails safe.
+func NormalizeCacheChain(raw string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case CacheChainTransitive:
+		return CacheChainTransitive, true
+	case CacheChainValues:
+		return CacheChainValues, true
+	default:
+		return "", false
+	}
+}
+
 // CacheConfig is the resolved cache configuration for a step.
 type CacheConfig struct {
 	Enabled bool
 	TTL     time.Duration
 	Version int
+	// Chain selects how predecessor identity enters this step's cache key:
+	// CacheChainTransitive (default, today's behaviour) or CacheChainValues.
+	// It layers job -> step exactly like PinDigests, so `metadata.cache.chain`
+	// is a job-wide default.
+	Chain string
+	// TTLNever records the literal `ttl: never`, which suppresses the expiry
+	// entirely (nil ExpiresAt) regardless of any inherited TTL default. It is
+	// distinct from TTL == 0, which means "inherit / no explicit TTL" and is
+	// still subject to the CAESIUM_CACHE_TTL default.
+	TTLNever bool
 	// PinDigests resolves each step's image tag to its content digest and folds
 	// the digest (not the mutable tag) into the cache key, so a moving :latest
 	// produces a cache miss rather than a stale hit.
@@ -2219,7 +2308,13 @@ type CacheConfig struct {
 // them. Resolution is layered env -> job -> step so the most specific
 // declaration wins for each field.
 func ResolveCacheConfig(stepCache, metaCache interface{}, envEnabled bool, envTTL time.Duration, envPinDigests bool, envDigestTTL time.Duration) CacheConfig {
-	cfg := CacheConfig{Enabled: envEnabled, TTL: envTTL, PinDigests: envPinDigests, DigestTTL: envDigestTTL}
+	cfg := CacheConfig{
+		Enabled:    envEnabled,
+		TTL:        envTTL,
+		Chain:      CacheChainTransitive,
+		PinDigests: envPinDigests,
+		DigestTTL:  envDigestTTL,
+	}
 
 	// Apply job-level defaults
 	applyCache(&cfg, metaCache)
@@ -2237,8 +2332,27 @@ func applyCache(cfg *CacheConfig, raw interface{}) {
 		cfg.Enabled = true
 		if ttl, ok := v["ttl"]; ok {
 			if s, ok := ttl.(string); ok {
-				if d, err := time.ParseDuration(s); err == nil {
+				// The literal `ttl: never` disables expiry outright; every other
+				// string keeps the historical time.ParseDuration path, including
+				// its silent-ignore of unparseable values (tightening that would
+				// break manifests that already apply cleanly).
+				if strings.EqualFold(strings.TrimSpace(s), CacheTTLNever) {
+					cfg.TTLNever = true
+				} else if d, err := time.ParseDuration(s); err == nil {
 					cfg.TTL = d
+					cfg.TTLNever = false
+				}
+			}
+		}
+		// chain is only overridden when explicitly present at this level, so a
+		// job-level `metadata.cache.chain` flows through to steps that omit it —
+		// the same layering pinDigests uses. An unknown value is ignored here
+		// (Validate rejects it at lint/apply time) so the resolved config always
+		// falls back to the safe transitive default.
+		if chain, ok := v["chain"]; ok {
+			if s, ok := chain.(string); ok {
+				if normalized, valid := NormalizeCacheChain(s); valid {
+					cfg.Chain = normalized
 				}
 			}
 		}

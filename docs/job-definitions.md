@@ -444,15 +444,56 @@ Cache can be enabled at the job level or overridden per step. Step-level setting
 
 | Scope | Field | Example |
 |-------|-------|---------|
-| Job default | `metadata.cache` | `true` or `{ttl: "24h"}` |
-| Step override | `steps[].cache` | `true`, `false`, or `{ttl: "12h", version: 2}` |
+| Job default | `metadata.cache` | `true`, `{ttl: "24h"}`, or `{chain: "values"}` |
+| Step override | `steps[].cache` | `true`, `false`, or `{ttl: "12h", version: 2, chain: "values"}` |
 | Global | env `CAESIUM_CACHE_ENABLED=true` | Enables caching for all jobs |
 
 ### Configuration Options
 
 - **`true` / `false`** -- enable or disable caching.
-- **`ttl`** -- duration string controlling how long an entry remains valid (e.g. `"1h"`, `"24h"`, `"7d"`). Expired entries are ignored and the task re-executes.
+- **`ttl`** -- duration string controlling how long an entry remains valid (e.g. `"1h"`, `"24h"`, `"7d"`). Expired entries are ignored and the task re-executes. The literal `ttl: never` suppresses expiry entirely and overrides any inherited `CAESIUM_CACHE_TTL` default -- use it for a step keyed on a content fingerprint, which should not be re-executed just because a wall clock moved.
 - **`version`** -- integer that forms part of the cache key. Bump this value to force re-execution without modifying the rest of the manifest.
+- **`chain`** -- `transitive` (default) or `values`; selects whether predecessor *identity hashes* enter this step's key. See [Cache Chain](#cache-chain).
+
+### Cache Chain
+
+A step's identity hash is computed **before** it executes -- that is what decides whether to execute at all. A step's key can therefore only contain its *inputs*, and by default those inputs include every predecessor's identity hash. Change anything upstream and the change cascades to every step downstream of it.
+
+That default is right until a shared upstream step's identity churns for reasons that do not change what it produces. The canonical case is a source checkout: its hash contains the git ref, which moves on **every** commit, so a one-line edit anywhere invalidates every downstream step in the repo. There is no upstream fix -- the checkout cannot hash its own output tree into its own key, because the key must exist before the step runs. The chain has to be broken downstream.
+
+`cache.chain: values` does that:
+
+| | `transitive` (default) | `values` |
+|---|---|---|
+| Predecessor identity hashes | hashed | **excluded** |
+| Predecessor outputs | hashed | hashed |
+| Everything else (image, command, env, mounts, params, partition, `version`) | hashed | hashed |
+
+The meaning is *"my key is what I consume, not my predecessors' internal churn."* A predecessor that re-ran but published the same outputs leaves this step cached; a predecessor that publishes a **changed output** still invalidates it, because outputs are still hashed.
+
+```yaml
+steps:
+  - name: checkout                 # identity moves on every commit
+    image: ghcr.io/acme/git-checkout:1.4
+    next: [plan]
+  - name: plan
+    image: ghcr.io/acme/planner:1.4
+    cache:
+      version: 1
+      chain: values                # do not inherit checkout's churn
+      ttl: never                   # keyed on a fingerprint, not a clock
+```
+
+`chain` layers job -> step exactly like `pinDigests`, so `metadata.cache.chain: values` is a job-wide default for every step that omits it.
+
+> **Sharp edge.** `values` is a sharper knife than the default. An upstream change that alters behaviour **without** altering its declared outputs will leave consumers cached. That is exactly what is wanted here, and exactly what will surprise someone eventually. Two mitigations: make the upstream step's outputs a faithful summary of what it produced (a content digest or fingerprint, not a timestamp), and prefer setting `chain` on the specific steps that need it rather than at `metadata.cache`, which hides the sharp edge behind a job-wide default. `caesium why` always names the exclusion -- `predecessor hashes excluded (chain: values)` -- so a skip is never unexplainable:
+>
+> ```sh
+> caesium why <run-id> --job-id <job-id> --task plan
+> # CACHE HIT — every hashed input identical to the cached run; predecessor hashes excluded (chain: values)
+> #
+> # note: predecessor hashes excluded (chain: values)
+> ```
 
 ### When to Use
 
@@ -465,8 +506,9 @@ Caching is appropriate for idempotent, side-effect-free tasks such as data trans
 - Scheduled cron runs now always include `logical_date`, so the scheduler naturally invalidates cache across distinct cron slots.
 - Manual reruns hit cache only when they use the same effective parameters as the original run.
 - Backfills also carry `logical_date`, so each replayed slot gets its own cache namespace.
-- Expired entries are ignored even if the hash still matches.
+- Expired entries are ignored even if the hash still matches. `ttl: never` writes a null expiry, so the entry is valid until it is invalidated or pruned.
 - Bumping `cache.version` forces a miss without changing the rest of the manifest.
+- Under `chain: values` a predecessor's identity hash is not part of the key, so a predecessor re-run with unchanged outputs is a hit; a changed predecessor **output** is still a miss. The chain mode itself is part of the identity, so switching a step between `transitive` and `values` invalidates its existing entries.
 
 ### Best Practices
 

@@ -508,7 +508,13 @@ func computeDescriptorHash(desc models.TaskExecutionDescriptor, params map[strin
 		PredecessorHashes:    append([]string(nil), predHashes...),
 		PredecessorOutputs:   cloneNestedStringMap(predOutputs),
 		RunParams:            maps.Clone(params),
-		CacheVersion:         desc.Cache.Version,
+		// The chain mode is read from the descriptor, not re-resolved from the
+		// live job definition: replay must rebuild the baseline's key, and a
+		// values-mode step re-hashed as transitive would miss every entry it
+		// should hit. An absent field (a descriptor written before this) is
+		// transitive, which is what those baselines were.
+		Chain:        desc.Cache.Chain,
+		CacheVersion: desc.Cache.Version,
 	}.Compute()
 }
 
@@ -857,6 +863,8 @@ func taskRunRecord(replayID uuid.UUID, plan plannedTask, now time.Time, priority
 		ReplaySafe:              plan.base.row.ReplaySafe,
 		CachePinDigests:         desc.Cache.PinDigests,
 		CacheDigestTTL:          desc.Cache.DigestTTL,
+		CacheChain:              desc.Cache.Chain,
+		CacheTTLNever:           desc.Cache.TTLNever,
 		ResolvedImageDigest:     desc.Runtime.ResolvedImageDigest,
 		OutputSchema:            append(datatypes.JSON(nil), desc.Schema.OutputSchema...),
 		SchemaValidation:        desc.Schema.ValidationMode,
