@@ -677,6 +677,13 @@ renders the summary and shows the reference.
       > Could not be exercised locally (no Docker Hub credentials / tag push in
       > this environment); validated via YAML parse + `actionlint` (zero new
       > findings) and `just build-pack` for the host arch.
+      > Known gap: arm64 pack images are build-verified only until the infra
+      > lane gains an arm64 twin — `build-and-integration-test-arm64` runs the
+      > general `integration-test` suite, not TestInfra (that suite is
+      > amd64-only per H-1's deferred-harness note above), so the arm64
+      > `git-source`/`tf-discover`/`tf-warm`/`tf-runner` images pushed by this
+      > job are `docker build`-verified only, never exercised by TestInfra the
+      > way the amd64 images are.
 
 #### Deferred (harness)
 

@@ -260,7 +260,10 @@ jobs:
   build-and-integration-test-arm64:
     needs: builder-arm64
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    # 60, matching build-and-integration-test-infra: this job also now runs
+    # `just build-pack` (4 Docker targets incl. a Terraform download+checksum
+    # stage) on top of the release build + integration-test suite.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
