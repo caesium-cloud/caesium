@@ -14,6 +14,7 @@ modules/tags      shared; calls modules/tags/inner by a RELATIVE source
 fail-closed/dynamic-source   a module source that is a variable
 remote/subrepo    module content the helper turns into a git repository
 remote/consumer   a stack whose module source is git::file:// (not a local path)
+drift/canary      the one stack whose provider READS the real world
 stacks.yaml       inter-stack order for multi-root discover
 ```
 
@@ -45,6 +46,17 @@ Three things here are load-bearing and easy to break by "tidying":
   is rendered from `main.tf.tmpl` by the test helper because `git::file://`
   needs an absolute path that no committed file can carry, and `remote/` sits
   outside `stacks/` so multi-root discover never scans it.
+
+- **`drift/canary` is the only stack whose refresh can detect anything.**
+  `null` and `random` are state-only providers: their `ReadResource` hands back
+  whatever state already says, so `plan -refresh-only` returns exit 0 for the
+  three stacks under `stacks/` no matter how their state is edited — including
+  after a `terraform state rm`. `local_file` is different: its read checks that
+  the file still exists and still hashes to what state recorded, and drops the
+  resource when it does not. Deleting that file is therefore a real out-of-band
+  change, and it is what makes the drift job (design §6.6) testable at all. Its
+  `canary_path` must point outside the checked-out tree, because the materialize
+  role stages a fresh clone on every run.
 
 `.terraform.lock.hcl` is committed and locked for `linux_amd64` and
 `linux_arm64` so the warm step's mirror key is stable across CI runners.
