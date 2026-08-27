@@ -168,7 +168,16 @@ func (r *Runner) RefreshOnlyPlan(ctx context.Context, outPath string) (bool, err
 // ShowPlanFile decodes a saved plan into terraform-json's typed representation.
 // The caller must pass the result through StripSensitive before anything
 // derived from it is emitted.
+//
+// The command's own stdout is discarded for the duration. terraform-exec's JSON
+// commands tee the raw response into the handle's stdout writer as well as into
+// the decoder, so leaving it connected would dump the ENTIRE unsanitised plan
+// JSON — sensitive_values and all — into the task log on every propose step.
+// The typed value is the only thing that should survive this call.
 func (r *Runner) ShowPlanFile(ctx context.Context, path string) (*tfjson.Plan, error) {
+	r.tf.SetStdout(io.Discard)
+	defer r.tf.SetStdout(r.log)
+
 	plan, err := r.tf.ShowPlanFile(ctx, path)
 	if err != nil {
 		return nil, fmt.Errorf("terraform show %s: %w", path, err)
@@ -187,7 +196,17 @@ func (r *Runner) Apply(ctx context.Context, planPath string) error {
 }
 
 // Outputs returns the root module's outputs, each carrying its Sensitive flag.
+//
+// Stdout is discarded for the duration, and here that is a security control
+// rather than tidiness: `terraform output -json` prints sensitive values IN
+// FULL (the CLI only masks them in its human rendering), and terraform-exec
+// tees a JSON command's raw response into the handle's stdout writer. Leaving
+// it connected would put every secret this function then carefully withholds
+// from the output row straight into the task log instead.
 func (r *Runner) Outputs(ctx context.Context) (map[string]tfexec.OutputMeta, error) {
+	r.tf.SetStdout(io.Discard)
+	defer r.tf.SetStdout(r.log)
+
 	outputs, err := r.tf.Output(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("terraform output in %s: %w", r.root, err)

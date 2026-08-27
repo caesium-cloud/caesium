@@ -57,7 +57,7 @@ func TestSummarizePlanOfAnEmptyPlanHasChangesFalse(t *testing.T) {
 	// Every count present at zero, and an empty (not null) resource list: a
 	// renderer that has to tell "zero" from "key absent" eventually shows an
 	// empty panel for a real plan.
-	for _, want := range []string{`"add":0`, `"change":0`, `"destroy":0`, `"replace":0`, `"import":0`, `"resources":[]`} {
+	for _, want := range []string{`"add":0`, `"change":0`, `"destroy":0`, `"replace":0`, `"import":0`, `"outputs":0`, `"resources":[]`} {
 		if !strings.Contains(encoded, want) {
 			t.Fatalf("encoded summary is missing %s: %s", want, encoded)
 		}
@@ -220,7 +220,7 @@ func TestStripSensitiveRemovesEveryValueBearingField(t *testing.T) {
 	if strings.Contains(string(encoded), secret) {
 		t.Fatalf("a value survived the strip:\n%s", encoded)
 	}
-	for _, name := range []string{"sensitive_values", "after_sensitive", "before_sensitive", "planned_values", "configuration", "prior_state", "variables", "output_changes"} {
+	for _, name := range []string{"sensitive_values", "after_sensitive", "before_sensitive", "planned_values", "configuration", "prior_state", "variables"} {
 		if strings.Contains(string(encoded), name) {
 			t.Fatalf("%q survived the strip:\n%s", name, encoded)
 		}
@@ -302,6 +302,66 @@ func TestPublishableOutputsWithholdsEverySensitiveOutput(t *testing.T) {
 		if strings.Contains(v, "s3cr3t") || strings.Contains(v, "another") {
 			t.Fatalf("a sensitive value reached the published map: %v", values)
 		}
+	}
+}
+
+// A plan whose only change is an output still has to be applied: `terraform
+// output` reads the state, so an unapplied output change leaves every consuming
+// stack reading a stale value.
+func TestSummarizePlanCountsOutputChangesAsChanges(t *testing.T) {
+	plan := &tfjson.Plan{
+		ResourceChanges: []*tfjson.ResourceChange{change("null_resource.a", tfjson.ActionNoop)},
+		OutputChanges: map[string]*tfjson.Change{
+			"vpc_id":    {Actions: tfjson.Actions{tfjson.ActionUpdate}},
+			"unchanged": {Actions: tfjson.Actions{tfjson.ActionNoop}},
+		},
+	}
+	got := SummarizePlan(StripSensitive(plan))
+	if got.Outputs != 1 {
+		t.Fatalf("outputs = %d, want 1", got.Outputs)
+	}
+	if !got.HasChanges() {
+		t.Fatal("a plan that moves an output reports no changes; the apply would be skipped and every consumer would read a stale value")
+	}
+}
+
+// `plan -refresh-only -detailed-exitcode` returns 2 for an output change as
+// readily as for resource drift, so the drift summary has to account for them
+// or a real exit 2 arrives with an all-zero summary — the shape an operator
+// reads as a false alarm.
+func TestSummarizeDriftCountsOutputChanges(t *testing.T) {
+	plan := &tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
+		"canary_path": {Actions: tfjson.Actions{tfjson.ActionUpdate}},
+	}}
+	got := SummarizeDrift(StripSensitive(plan))
+	if got.Outputs != 1 || !got.HasChanges() {
+		t.Fatalf("drift summary = %+v", got)
+	}
+}
+
+// The output NAME is declared in the configuration and is not a secret; the
+// value very much can be.
+func TestStripSensitiveKeepsOutputNamesAndActionsButNoOutputValues(t *testing.T) {
+	const secret = "output-secret"
+	stripped := StripSensitive(&tfjson.Plan{OutputChanges: map[string]*tfjson.Change{
+		"admin_token": {
+			Actions:        tfjson.Actions{tfjson.ActionCreate},
+			After:          secret,
+			AfterSensitive: true,
+		},
+	}})
+	encoded, err := json.Marshal(stripped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), secret) {
+		t.Fatalf("an output value survived the strip:\n%s", encoded)
+	}
+	if !strings.Contains(string(encoded), "admin_token") {
+		t.Fatalf("the output name did not survive; the count would be unattributable:\n%s", encoded)
+	}
+	if !stripped.OutputChanges["admin_token"].Actions.Create() {
+		t.Fatal("the output's action set did not survive")
 	}
 }
 

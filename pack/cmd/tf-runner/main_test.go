@@ -258,6 +258,50 @@ func TestPlanNeverEmitsASensitiveValue(t *testing.T) {
 	}
 }
 
+// terraform-exec tees a JSON command's raw response into the handle's stdout
+// writer as well as into its decoder. For `show -json` that would dump the
+// entire unsanitised plan — sensitive_values and all — into the task log on
+// every propose step, undoing the strip one line downstream of it.
+func TestPlanDoesNotEchoThePlanJSONIntoTheLog(t *testing.T) {
+	cfg := newStack(t)
+	_, log, err := emitWithLog(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	for _, forbidden := range []string{sensitiveCanary, `"sensitive_values"`, `"after_sensitive"`, `"prior_state"`} {
+		if strings.Contains(log, forbidden) {
+			t.Fatalf("the raw plan JSON reached the task log (found %q):\n%s", forbidden, log)
+		}
+	}
+	// The human-readable plan is still there — the point is to suppress the
+	// JSON dump, not Terraform's diagnostics.
+	if !strings.Contains(log, "terraform_data.canary") {
+		t.Fatalf("terraform's own output stopped reaching the log:\n%s", log)
+	}
+}
+
+// `terraform output -json` prints sensitive values IN FULL — the CLI masks them
+// only in its human rendering. With the same tee left connected, every secret
+// tf-apply carefully withholds from the output row would land in the task log
+// instead.
+func TestApplyDoesNotEchoTerraformOutputJSONIntoTheLog(t *testing.T) {
+	cfg := newStack(t)
+	planLines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	plannedEnv(t, "plan-offline", planLines)
+	cfg.PlanStep = "plan-offline"
+
+	_, log, err := emitWithLog(t, runApply, cfg)
+	if err != nil {
+		t.Fatalf("tf-apply: %v", err)
+	}
+	if strings.Contains(log, sensitiveCanary) {
+		t.Fatalf("the sensitive output value reached the task log:\n%s", log)
+	}
+}
+
 func TestPlanOnAnAlreadyAppliedStackProposesNothing(t *testing.T) {
 	cfg := newStack(t)
 	planLines, err := emit(t, runPlan, cfg)
@@ -486,7 +530,7 @@ func TestApplyRejectsAnIncompleteOrForeignProposal(t *testing.T) {
 	})
 
 	t.Run("another tool's proposal", func(t *testing.T) {
-		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"resources":[]}`)
+		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"outputs":0,"resources":[]}`)
 		t.Setenv(prefix+"PROPOSAL_KIND", "dbt.compile.v1")
 		_, err := emit(t, runApply, base)
 		if err == nil || !strings.Contains(err.Error(), "cannot apply") {
@@ -495,7 +539,7 @@ func TestApplyRejectsAnIncompleteOrForeignProposal(t *testing.T) {
 	})
 
 	t.Run("changes proposed but no artifact", func(t *testing.T) {
-		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"resources":[]}`)
+		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"outputs":0,"resources":[]}`)
 		t.Setenv(prefix+"PROPOSAL_KIND", tf.ProposalKind)
 		_, err := emit(t, runApply, base)
 		if err == nil || !strings.Contains(err.Error(), "named no artifact") {
@@ -504,7 +548,7 @@ func TestApplyRejectsAnIncompleteOrForeignProposal(t *testing.T) {
 	})
 
 	t.Run("artifact named but not located", func(t *testing.T) {
-		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"resources":[]}`)
+		t.Setenv(prefix+"PROPOSAL_SUMMARY", `{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"outputs":0,"resources":[]}`)
 		t.Setenv(prefix+"PROPOSAL_KIND", tf.ProposalKind)
 		t.Setenv(prefix+"PROPOSAL_ARTIFACT", "plan")
 		_, err := emit(t, runApply, base)
@@ -567,7 +611,7 @@ func TestDriftEmitsItsOutputBeforeFailing(t *testing.T) {
 	var out, logs bytes.Buffer
 	e := protocol.New("tf-drift", &out, &logs)
 
-	if err := e.Output(map[string]string{"drift": "true", "drift_summary": `{"add":0,"change":1,"destroy":0,"replace":0,"import":0,"resources":[]}`}); err != nil {
+	if err := e.Output(map[string]string{"drift": "true", "drift_summary": `{"add":0,"change":1,"destroy":0,"replace":0,"import":0,"outputs":0,"resources":[]}`}); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.Flush(); err != nil {

@@ -43,6 +43,16 @@ type Summary struct {
 	Destroy int `json:"destroy"`
 	Replace int `json:"replace"`
 	Import  int `json:"import"`
+	// Outputs counts root-module output changes.
+	//
+	// It is a first-class count, not a detail. A plan whose only change is an
+	// output value still has to be applied: `terraform output` reads the STATE,
+	// so an unapplied output change leaves every consuming stack reading a
+	// stale value — a green run that deployed nothing, one stack over. It also
+	// keeps a refresh-only plan from reporting drift with an all-zero summary,
+	// which reads as a false alarm: `plan -refresh-only -detailed-exitcode`
+	// returns 2 for an output change as readily as for resource drift.
+	Outputs int `json:"outputs"`
 	// Resources is capped; ResourcesTruncated says how many were dropped.
 	Resources          []ResourceChange `json:"resources"`
 	ResourcesTruncated int              `json:"resources_truncated,omitempty"`
@@ -55,7 +65,7 @@ type Summary struct {
 // the presence of a file would be a decision derived from the filesystem rather
 // than from the proposal that was actually reviewed.
 func (s Summary) HasChanges() bool {
-	return s.Add+s.Change+s.Destroy+s.Replace+s.Import > 0
+	return s.Add+s.Change+s.Destroy+s.Replace+s.Import+s.Outputs > 0
 }
 
 // Encode renders the summary as the JSON string the marker carries.
@@ -100,7 +110,9 @@ func SummarizePlan(plan *tfjson.Plan) Summary {
 	if plan == nil {
 		return Summary{Resources: []ResourceChange{}}
 	}
-	return summarizeChanges(plan.ResourceChanges)
+	summary := summarizeChanges(plan.ResourceChanges)
+	summary.Outputs = countOutputChanges(plan.OutputChanges)
+	return summary
 }
 
 // SummarizeDrift counts the differences a refresh-only plan found between state
@@ -115,7 +127,22 @@ func SummarizeDrift(plan *tfjson.Plan) Summary {
 	if plan == nil {
 		return Summary{Resources: []ResourceChange{}}
 	}
-	return summarizeChanges(plan.ResourceDrift)
+	summary := summarizeChanges(plan.ResourceDrift)
+	summary.Outputs = countOutputChanges(plan.OutputChanges)
+	return summary
+}
+
+// countOutputChanges counts root-module outputs the plan would move. Only the
+// action set is read — StripSensitive has already reduced each Change to it.
+func countOutputChanges(changes map[string]*tfjson.Change) int {
+	count := 0
+	for _, change := range changes {
+		if change == nil || change.Actions.NoOp() {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func summarizeChanges(changes []*tfjson.ResourceChange) Summary {
@@ -206,12 +233,26 @@ func StripSensitive(plan *tfjson.Plan) *tfjson.Plan {
 	}
 	out.ResourceChanges = stripResourceChanges(plan.ResourceChanges)
 	out.ResourceDrift = stripResourceChanges(plan.ResourceDrift)
+	// Output changes are kept as ACTION SETS ONLY, keyed by output name. The
+	// name is declared in the configuration and is not a secret; the value very
+	// much can be, so Before/After and the sensitivity maps are dropped like
+	// every other value. The count matters (see Summary.Outputs), so dropping
+	// the whole map would be dropping a signal, not a risk.
+	if len(plan.OutputChanges) > 0 {
+		out.OutputChanges = make(map[string]*tfjson.Change, len(plan.OutputChanges))
+		for name, change := range plan.OutputChanges {
+			if change == nil {
+				continue
+			}
+			out.OutputChanges[name] = &tfjson.Change{Actions: change.Actions}
+		}
+	}
 	// Everything else is dropped by omission: Variables, PlannedValues,
-	// PriorState, Config, OutputChanges, RelevantAttributes, Checks and
-	// DeferredChanges all carry values. Constructing the copy field by field
-	// (rather than copying the struct and blanking fields) means a field added
-	// by a future terraform-json is dropped by DEFAULT rather than leaked until
-	// someone notices.
+	// PriorState, Config, RelevantAttributes, Checks and DeferredChanges all
+	// carry values. Constructing the copy field by field (rather than copying
+	// the struct and blanking fields) means a field added by a future
+	// terraform-json is dropped by DEFAULT rather than leaked until someone
+	// notices.
 	return out
 }
 
