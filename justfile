@@ -14,6 +14,7 @@ bld_dir := "/bld/caesium"
 repo_dir := `pwd`
 it_container := "caesium-server-test"
 agent_it_container := "caesium-server-agent-test"
+infra_it_container := "caesium-server-infra-test"
 uid := `id -u`
 
 # Podman support: set CAESIUM_PODMAN=true to use podman and localhost-prefixed local image refs.
@@ -46,6 +47,8 @@ auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
 contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
 agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
+# Suite-qualified: a bare method name matches no test at all.
+infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
 agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
@@ -375,6 +378,9 @@ integration-down:
 integration-down-agent:
     {{ container_cli }} rm -f {{ agent_it_container }}
 
+integration-down-infra:
+    {{ container_cli }} rm -f {{ infra_it_container }}
+
 # Run integration tests against a Caesium server using the Podman engine.
 # Requires Podman to be installed and the Podman socket to be active
 
@@ -530,6 +536,72 @@ integration-up-owner-memory: build-test
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
         {{ local_image_ref }}:{{ tag }}-test start
+
+# The infra lane runs its own server so it can coexist with the default lane,
+# and it builds the pack images the TestInfra scenarios mount. Those scenarios
+# skip everywhere else (see CAESIUM_INFRA_LANE in test/infra_fixture_test.go):
+# the podman, helm and kubernetes lanes bring up their own servers without the
+# pack images and would drift red otherwise.
+
+# Start the infra lane's server (own container, pack images built).
+integration-up-infra: build-test build-pack
+    {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
+    {{ container_cli }} run -d --platform {{ platform }} \
+        --name {{ infra_it_container }} \
+        --privileged \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
+        -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        {{ local_image_ref }}:{{ tag }}-test start
+
+# Run the TestInfra scenarios against the infra lane's server.
+integration-test-infra:
+    just tag={{ tag }} integration-up-infra
+    @cli_dir={{ repo_dir }}/.tmp/caesium-cli-infra; \
+    rm -rf "$cli_dir"; \
+    mkdir -p "$cli_dir"; \
+    cli_ctr=$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true); \
+    trap '{{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"' EXIT; \
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
+    chmod +x "$cli_dir/caesium"; \
+    {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
+    if {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-infra/caesium \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e CAESIUM_INFRA_LANE=true \
+        -e CAESIUM_PACK_IMAGE_TAG={{ tag }} \
+        -e CAESIUM_HOST_PROJECT_ROOT={{ repo_dir }} \
+        --network=container:{{ infra_it_container }} \
+        -w {{ bld_dir }} \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v'; then \
+      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
+    else \
+      echo "infra integration tests failed; caesium server logs:"; \
+      {{ container_cli }} logs {{ infra_it_container }} || true; \
+      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi
 
 integration-up-agent: build-test build-triage-agent
     {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true

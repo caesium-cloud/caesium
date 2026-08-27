@@ -514,7 +514,7 @@ renders the summary and shows the reference.
 
 ## Harness Strengthening
 
-- [ ] H-1. `integration-test-infra` lane + CI wiring. Add `integration-up-infra`
+- [x] H-1. `integration-test-infra` lane + CI wiring. Add `integration-up-infra`
       (`build-test` + `build-pack`; same env as `integration-up`) and
       `integration-test-infra` (runs `go test ./test/ -tags=integration -run
       'TestInfra'` against it, mirroring `integration-test-agent`'s own-server
@@ -528,6 +528,17 @@ renders the summary and shows the reference.
       `./...`). Files: `justfile`, `.github/workflows/ci.yml`,
       `test/infra_fixture_test.go` (lane guard helper).
       Depends on: B1.
+      Landed: `integration-up-infra` / `integration-test-infra` /
+      `integration-down-infra` on their own container
+      (`caesium-server-infra-test`, no published port so the lane coexists
+      with the others), running
+      `-run 'TestIntegrationTestSuite/TestInfra'` with `CAESIUM_INFRA_LANE`,
+      `CAESIUM_PACK_IMAGE_TAG` and `CAESIUM_HOST_PROJECT_ROOT` set. CI gains
+      `build-and-integration-test-infra` (amd64, mirroring the other
+      specialised lanes, which are not matrixed), a `pack-lint` step in
+      `lint`, a `pack-test` step in `unit-test`, and the new job in
+      `publish`'s `needs`.
+
 - [ ] H-2. Publish the pack images. Extend the `publish` job to build and push
       multi-arch manifests for `caesiumcloud/git-source`, `tf-discover`,
       `tf-warm`, `tf-runner` with the same tag scheme as `caesiumcloud/caesium`,
