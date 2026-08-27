@@ -177,10 +177,7 @@ func (s *IntegrationTestSuite) deployManifest(f *infraDeployFixture, alias, spar
 	s.writePipelinePreamble(&b, f, alias, sparse)
 
 	for _, stack := range stacks {
-		planDeps := []string{"discover-" + stack.Name, "warm-cache"}
-		for _, up := range stack.ImportFrom {
-			planDeps = append(planDeps, up)
-		}
+		planDeps := append([]string{"discover-" + stack.Name, "warm-cache"}, stack.ImportFrom...)
 
 		fmt.Fprintf(&b, `
   - name: discover-%[1]s
@@ -214,6 +211,13 @@ func (s *IntegrationTestSuite) deployManifest(f *infraDeployFixture, alias, spar
 		}
 		s.writeRunnerMounts(&b)
 
+		// The dataset name carries the job alias as its environment segment.
+		// A dataset is global — Caesium rejects two jobs producing the same
+		// name outright — and each scenario here applies its own job over its
+		// own fixture, so a fixed "test" segment would make the second scenario
+		// to run fail at apply time. The spec's own form is
+		// `stack:prod/${CAESIUM_PARTITION}`, i.e. environment then stack, so
+		// this is that shape with the scenario standing in for the environment.
 		fmt.Fprintf(&b, `
   - name: apply-%[1]s
     image: %[2]s
@@ -225,11 +229,10 @@ func (s *IntegrationTestSuite) deployManifest(f *infraDeployFixture, alias, spar
     dependsOn: [plan-%[1]s]
     datasets:
       produces:
-        - name: "stack:test/%[1]s"
-          schemaFrom: output
+        - name: "stack:%[3]s/%[1]s"
     env:
       PLAN_STEP: "plan-%[1]s"
-`, stack.Name, s.packImage("tf-runner"))
+`, stack.Name, s.packImage("tf-runner"), alias)
 		s.writeRunnerEnv(&b, f, stack)
 		s.writeRunnerMounts(&b)
 	}

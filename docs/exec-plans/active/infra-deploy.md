@@ -421,7 +421,7 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
 `terraform-json` so the two security requirements are typed field access, not
 `jq`.
 
-- [ ] C1. `tf-warm` (spec §6.3). Read every `.terraform.lock.hcl` under
+- [x] C1. `tf-warm` (spec §6.3). Read every `.terraform.lock.hcl` under
       `SRC` (default `/src`), derive the mirror key from the sorted
       provider/version/hash union, check `/cache/.warm/<key>` → exit fast if
       present. Otherwise `terraform providers mirror -platform=<TARGET_PLATFORM>`
@@ -434,7 +434,14 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       Files: new `pack/cmd/tf-warm/main.go`, new `pack/internal/tf/mirror.go` +
       tests.
       Depends on: B1.
-- [ ] C2. `tf-runner tf-plan` (propose). Env: `STACK_ROOT` (or
+      Done (W2-α). `pack/internal/tf/mirror.go` hand-parses `.terraform.lock.hcl`
+      strictly (an unrecognised line is an error naming it) rather than pulling
+      an HCL parser into the pack. `terraform providers mirror` refuses to run
+      against a configuration whose modules are not installed, so the mirror is
+      populated from a SYNTHETIC root module rendered from the lock file itself
+      — no module resolution, and the `src` mount stays read-only. The key
+      covers the target platforms as well as the provider set.
+- [x] C2. `tf-runner tf-plan` (propose). Env: `STACK_ROOT` (or
       `CAESIUM_PARTITION_JSON.root` when fanned), `TF_CLI_CONFIG_FILE`,
       `TF_WORKSPACE`, `IMPORT_OUTPUTS_FROM=<step>[,<step>]` (exports every
       `CAESIUM_OUTPUT_<STEP>_<KEY>` of the named upstream apply steps as
@@ -452,7 +459,13 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       Files: new `pack/cmd/tf-runner/main.go`, new `pack/internal/tf/plan.go`,
       `pack/internal/tf/summary.go` + tests.
       Depends on: B1, B3.
-- [ ] C3. `tf-runner tf-apply`. Env: `PLAN_STEP` (locates
+      Done (W2-α), in one commit with C3 and C4: the three phases share one
+      config, one prepared `tf.Runner` and one proposal type, so splitting them
+      would have produced commits that do not compile. The phases are tested
+      against REAL Terraform with no network at all, over a new provider-free
+      root module (`pack/testdata/offline`) — the infra fixture needs
+      `null`/`random`, which `just pack-test` cannot download.
+- [x] C3. `tf-runner tf-apply`. Env: `PLAN_STEP` (locates
       `CAESIUM_OUTPUT_<PLAN>_PROPOSAL_*`). Parse `proposal_summary`; when counts
       are non-zero, verify the artifact file's sha256 matches the ref digest
       before `Apply(planfile)`; when zero, do **not** invoke apply. In **both**
@@ -464,7 +477,15 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       Files: `pack/cmd/tf-runner/main.go`, new `pack/internal/tf/apply.go` +
       tests.
       Depends on: C2.
-- [ ] C4. `tf-runner tf-drift` (spec §6.6). `plan -refresh-only
+      Done (W2-α), in `pack/internal/tf/apply.go` plus the shared `tf-runner`
+      commit. `PublishableOutputs` withholds every `Sensitive` output through
+      terraform-json's typed `OutputMeta`, and a non-scalar output is rendered
+      as compact JSON so `pkg/task.ParseOutput`'s scalar filter does not drop
+      the key. One addition: `HasChanges()` counts OUTPUT changes too — a plan
+      whose only change is an output still has to be applied, because
+      `terraform output` reads the state and an unapplied output change leaves
+      every consuming stack on a stale value.
+- [x] C4. `tf-runner tf-drift` (spec §6.6). `plan -refresh-only
       -detailed-exitcode`: exit 0 → `##caesium::output {"drift":"false"}`; exit 2
       → emit `{"drift":"true", "drift_summary": <sensitive-stripped counts>}`
       then **exit non-zero** so the task and run fail and the shipped
@@ -472,7 +493,17 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       never writes an artifact. Files: `pack/cmd/tf-runner/main.go`, new
       `pack/internal/tf/drift.go` + tests.
       Depends on: C2.
-- [ ] C5. The Terraform end-to-end gate: `test/infra_deploy_test.go` generating
+      Done (W2-α), in `pack/cmd/tf-runner/main.go` plus `plan.go`'s
+      `RefreshOnlyPlan`. No separate `drift.go`: the phase is ~30 lines over the
+      shared Runner and a file of its own would only spread the Terraform
+      surface. Two corrections. The refresh-only plan is written to a SCRATCH
+      file (never the artifact directory, and never referenced) so the counts
+      come from typed `resource_drift` rather than scraped text. And output
+      changes are counted: `plan -refresh-only -detailed-exitcode` returns 2 for
+      an output change as readily as for resource drift, so without that a real
+      exit 2 arrived with an all-zero summary — the shape an operator reads as a
+      false alarm.
+- [x] C5. The Terraform end-to-end gate: `test/infra_deploy_test.go` generating
       the hand-written three-stack job (`checkout` → `warm-cache` + per-stack
       `discover-<s>` → `plan-<s>` (`chain: values`) → `apply-<s>` (`chain:
       values, ttl: never`, `datasets.produces: stack:test/<s>`); `plan-app-web`
@@ -494,7 +525,18 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       `--json` via `runCLIStdout`.
       Files: new `test/infra_deploy_test.go`.
       Depends on: A3, B2, B3, B4, C1, C3, H-1.
-- [ ] C6. Drift scenario: the drift job over the fixture (cron trigger fired
+      Done (W2-α), as three scenarios (the change gate, the empty plan, the
+      nested module) so a failure is attributable. Three corrections to the
+      item. There is no `GET /v1/jobs/:id/runs/:run/tasks` endpoint — the run's
+      task list with its outputs is `GET /v1/jobs/:id/runs/:run_id`, and #9
+      scans that response body verbatim. The pipeline needs a `cache: false`
+      `prepare` step that clears the workspace, because the materialize role
+      refuses a non-empty destination and a cached checkout would pin the
+      pipeline to the first run's tree. And Terraform state needs
+      `-backend-config` onto a separate volume, because the source tree is
+      re-cloned on every run and the fixture's `backend "local"` path is inside
+      it — without that no plan is ever empty and #6 is untestable.
+- [x] C6. Drift scenario: the drift job over the fixture (cron trigger fired
       manually; `checkout` + `warm-cache` reused; per-stack `drift-<s>` with
       **no** `cache` block). Clean state → green with `drift=false`; an
       out-of-band state edit (e.g. `terraform state rm` on a fixture resource)
@@ -502,6 +544,19 @@ sensitive values never reach dqlite. `tf-runner` is one binary with `tf-plan`,
       never `cached` across runs.
       Files: `test/infra_deploy_test.go` (or new `test/infra_drift_test.go`).
       Depends on: C4, C5.
+      Done (W2-α), in `test/infra_deploy_test.go`. Two corrections. The item's
+      suggested `terraform state rm` does NOT produce refresh drift: `null` and
+      `random` are state-only providers whose read is a no-op, so
+      `plan -refresh-only` returns exit 0 for the three stacks under `stacks/`
+      however their state is edited (verified against Terraform 1.15.9). The
+      fixture therefore gains `drift/canary` — one `local_file` on a path
+      outside the checked-out tree, whose provider read genuinely consults the
+      filesystem — and the out-of-band change is deleting that file. And the
+      drift steps carry `cache: false`, not merely "no cache block": the infra
+      lane runs with `CAESIUM_CACHE_ENABLED=true`, under which an omitted block
+      means cacheable, and the second run would then replay `drift=false`
+      forever. Stream D's reference manifests should say `cache: false`
+      explicitly for the same reason.
 
 ### Stream D — Multi-writer volume lint warning + reference manifests
 
