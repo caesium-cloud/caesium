@@ -542,3 +542,49 @@ func TestDiscoverLeavesTheSourceTreeUntouchedWithARemoteModule(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 }
+
+// TestTerraformEnvPinsAGitIdentity guards the same hostname-resolution stall
+// git-source pins against, reached through Terraform this time: a git module
+// source makes `terraform get` shell out to git, which resolves the machine's
+// own hostname to synthesize a reflog identity when none is configured. In a
+// pod with no DNS entry for itself that blocks for the resolver timeout or
+// fails, on a module install that has nothing to do with identity.
+func TestTerraformEnvPinsAGitIdentity(t *testing.T) {
+	env := terraformEnv(t.TempDir())
+
+	for _, key := range []string{
+		"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL",
+		"GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+	} {
+		if env[key] == "" {
+			t.Fatalf("%s is not pinned in the terraform environment: %v", key, protocol.SortedKeys(env))
+		}
+	}
+}
+
+func TestTerraformEnvKeepsTheDataDirAndDropsWhatTfexecOwns(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("TF_WORKSPACE", "should-be-stripped")
+	t.Setenv("TF_VAR_secret", "should-be-stripped")
+	t.Setenv("GIT_AUTHOR_EMAIL", "operator@example.test")
+
+	env := terraformEnv(dataDir)
+
+	// TF_DATA_DIR is what lets discover run against a read-only source mount,
+	// so losing it would silently reintroduce writes into the source tree.
+	if env["TF_DATA_DIR"] != dataDir {
+		t.Fatalf("TF_DATA_DIR = %q, want %q", env["TF_DATA_DIR"], dataDir)
+	}
+	// terraform-exec rejects the variables it drives itself; they are stripped
+	// rather than passed through, because a job may legitimately set TF_VAR_*
+	// on every step in the group and discover has no use for them.
+	for _, key := range []string{"TF_WORKSPACE", "TF_VAR_secret"} {
+		if _, present := env[key]; present {
+			t.Fatalf("%s survived; terraform-exec would reject it", key)
+		}
+	}
+	// An identity the operator supplied wins over the default.
+	if env["GIT_AUTHOR_EMAIL"] != "operator@example.test" {
+		t.Fatalf("GIT_AUTHOR_EMAIL = %q, want the operator's value", env["GIT_AUTHOR_EMAIL"])
+	}
+}

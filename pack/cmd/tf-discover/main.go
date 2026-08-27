@@ -316,6 +316,25 @@ func terraformEnv(dataDir string) map[string]string {
 		env[key] = value
 	}
 	env["TF_DATA_DIR"] = dataDir
+
+	// A git module source makes `terraform get` shell out to git, and git
+	// synthesizes a reflog identity by resolving the machine's own hostname
+	// when none is configured. In a pod with no DNS entry for its name that
+	// lookup stalls until the resolver gives up (measured at ~5 s per fetch on
+	// a network-isolated container) or fails outright, on a module install that
+	// has nothing to do with identity. Pinning an inert one removes the lookup;
+	// discover never creates a commit. Same reasoning as git-source's gitEnv.
+	for key, value := range map[string]string{
+		"GIT_AUTHOR_NAME":     "caesium tf-discover",
+		"GIT_AUTHOR_EMAIL":    "tf-discover@caesium.invalid",
+		"GIT_COMMITTER_NAME":  "caesium tf-discover",
+		"GIT_COMMITTER_EMAIL": "tf-discover@caesium.invalid",
+	} {
+		if _, set := env[key]; !set {
+			env[key] = value
+		}
+	}
+
 	return tfexec.CleanEnv(env)
 }
 
