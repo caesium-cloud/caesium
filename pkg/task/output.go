@@ -214,7 +214,11 @@ func validSHA256Ref(s string) bool {
 	return true
 }
 
-var initialScannerBuffer = make([]byte, 0, 64*1024)
+// initialScannerBufferSize is the starting capacity of each log scanner's
+// buffer. Every scanner gets its OWN buffer: a package-level shared slice
+// raced the moment two logs were parsed concurrently (the worker pool and
+// fan-out instances both do), because bufio.Scanner writes into it.
+const initialScannerBufferSize = 64 * 1024
 
 // scalarOutputValue coerces a decoded ##caesium::output value to its stored
 // string form, but ONLY for scalar JSON types (string, number, bool). It
@@ -554,7 +558,7 @@ func (w *boundedSnapshotWriter) String() string {
 
 func newLogScanner(r io.Reader) *bufio.Scanner {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(initialScannerBuffer, MaxLogSnapshotBytes)
+	scanner.Buffer(make([]byte, 0, initialScannerBufferSize), MaxLogSnapshotBytes)
 	return scanner
 }
 
