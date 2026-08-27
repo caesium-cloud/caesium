@@ -925,3 +925,150 @@ func TestCompute_PartitionIdentityStillDeterministic(t *testing.T) {
 		assert.Equal(t, first, in.Compute())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// cache.chain (infra-deploy A1/A2)
+// ---------------------------------------------------------------------------
+
+// TestChainConstantsMatchJobdef pins internal/cache's duplicated chain constants
+// to the jobdef spellings users actually write. They are duplicated rather than
+// imported because pkg/jobdef's own tests import this package, so a non-test
+// import of pkg/jobdef here would be a test-build import cycle — this assertion
+// is what keeps the duplication honest.
+func TestChainConstantsMatchJobdef(t *testing.T) {
+	assert.Equal(t, schema.CacheChainTransitive, ChainTransitive)
+	assert.Equal(t, schema.CacheChainValues, ChainValues)
+}
+
+// TestCompute_GoldenTransitiveChainUnchanged is THE guard on this feature: the
+// default transitive mode must write nothing new into the digest, or every cache
+// entry in every existing deployment is silently invalidated on upgrade. The
+// expected value is a string LITERAL frozen from the pre-chain code (it is the
+// same digest TestCompute_GoldenStringFormUnchanged pins), never a recomputation
+// through the function under test.
+func TestCompute_GoldenTransitiveChainUnchanged(t *testing.T) {
+	// Chain unset — how every existing caller constructs a HashInput today.
+	assert.Equal(t, goldenStringFormHash, baseInput().Compute(),
+		"an unset Chain must hash byte-identically to the pre-chain era")
+
+	// Chain explicitly transitive — how every caller constructs one AFTER A3
+	// threads the resolved config through, since ResolveCacheConfig defaults to
+	// "transitive" rather than "". These two MUST agree.
+	explicit := baseInput()
+	explicit.Chain = ChainTransitive
+	assert.Equal(t, goldenStringFormHash, explicit.Compute(),
+		"an explicit transitive Chain must hash byte-identically to an unset one")
+
+	// And the blob is likewise unchanged: no `chain` key appears.
+	data, err := canonicalBlob(t, explicit)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"chain"`,
+		"transitive blobs must not gain a chain field; HashInputBlobVersion stays 1")
+	assert.Equal(t, HashInputBlobVersion, unmarshalBlob(t, data).BlobVersion)
+}
+
+// TestCompute_ValuesChainIgnoresPredecessorHashes is the core semantic: a
+// checkout step's hash churns on every commit and that churn propagates through
+// PredecessorHashes to every downstream stack. Under chain: values it must not.
+func TestCompute_ValuesChainIgnoresPredecessorHashes(t *testing.T) {
+	a := baseInput()
+	a.Chain = ChainValues
+
+	b := a
+	b.PredecessorHashes = []string{"totally", "different", "upstream", "hashes"}
+
+	assert.Equal(t, a.Compute(), b.Compute(),
+		"under chain: values a changed predecessor identity hash must not change the key")
+
+	// Removing them entirely is likewise a no-op.
+	c := a
+	c.PredecessorHashes = nil
+	assert.Equal(t, a.Compute(), c.Compute())
+}
+
+// TestCompute_ValuesChainStillHashesPredecessorOutputs is the other half of the
+// contract: outputs still chain, so changing the network stack's vpc_id output
+// re-plans every consumer even though their code is untouched (spec §4.3).
+func TestCompute_ValuesChainStillHashesPredecessorOutputs(t *testing.T) {
+	a := baseInput()
+	a.Chain = ChainValues
+
+	b := a
+	b.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "CHANGED"}}
+
+	assert.NotEqual(t, a.Compute(), b.Compute(),
+		"under chain: values a changed predecessor OUTPUT must still change the key")
+
+	// A new output key on an existing producer also counts.
+	c := a
+	c.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "val", "extra": "1"}}
+	assert.NotEqual(t, a.Compute(), c.Compute())
+}
+
+// TestCompute_ValuesChainDiffersFromTransitive: the mode is part of the identity.
+// Two otherwise-identical inputs in different modes must not collide, or a step
+// switched to values mode would inherit a key computed under different rules.
+func TestCompute_ValuesChainDiffersFromTransitive(t *testing.T) {
+	transitive := baseInput()
+	values := baseInput()
+	values.Chain = ChainValues
+	assert.NotEqual(t, transitive.Compute(), values.Compute())
+
+	// True even with no predecessor hashes at all: the marker is unconditional.
+	noPredsTransitive := baseInput()
+	noPredsTransitive.PredecessorHashes = nil
+	noPredsValues := noPredsTransitive
+	noPredsValues.Chain = ChainValues
+	assert.NotEqual(t, noPredsTransitive.Compute(), noPredsValues.Compute())
+}
+
+// TestCompute_ValuesChainOnlyForExactValue guards against a near-miss spelling
+// silently excluding predecessor hashes. Anything that is not exactly "values"
+// keeps the transitive behaviour — the safe direction (an extra re-run, never a
+// stale hit). Validate() is what surfaces the typo to the user.
+func TestCompute_ValuesChainOnlyForExactValue(t *testing.T) {
+	for _, chain := range []string{"", "transitive", "Values", "value", "VALUES"} {
+		in := baseInput()
+		in.Chain = chain
+		assert.Equal(t, goldenStringFormHash, in.Compute(),
+			"chain %q must fall back to the transitive hash", chain)
+	}
+}
+
+// TestCanonicalJSON_ChainRoundTrips: `caesium why` reads the blob, so the mode
+// has to survive serialization, and PredecessorHashes must still be recorded
+// (they are provenance even when they are not key material).
+func TestCanonicalJSON_ChainRoundTrips(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, ChainValues, blob.Chain)
+	assert.Equal(t, in.Compute(), blob.Hash, "the blob must decompose the digest it carries")
+	assert.Equal(t, []string{"abc123", "def456"}, blob.PredecessorHashes,
+		"values mode still records predecessor hashes as provenance")
+	assert.Equal(t, HashInputBlobVersion, blob.BlobVersion,
+		"chain is additive+omitempty, so the blob version must not move")
+}
+
+// TestCanonicalJSON_OversizedChainMarksExclusion: when the blob degrades to the
+// compact summary, the exclusion must still be nameable — PredecessorCount on a
+// values-mode blob would otherwise read as "N inputs that entered the key".
+func TestCanonicalJSON_OversizedChainMarksExclusion(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	in.Env = make(map[string]string, 4096)
+	for i := 0; i < 4096; i++ {
+		in.Env["VAR_"+strconv.Itoa(i)] = strings.Repeat("x", 64)
+	}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(data), maxHashInputBlobBytes)
+
+	blob := unmarshalBlob(t, data)
+	require.NotNil(t, blob.Oversized, "this input must exceed the blob bound")
+	assert.True(t, blob.Oversized.PredecessorHashesExcluded)
+	assert.Equal(t, ChainValues, blob.Chain)
+}
