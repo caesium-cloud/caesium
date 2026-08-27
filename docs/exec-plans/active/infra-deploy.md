@@ -424,12 +424,22 @@ has no warnings channel, while the server lint response already carries
       `api/rest/controller/jobdef/lint.go`, `cmd/job/lint.go`, new scenario in
       `test/` (e.g. `test/lint_volumes_test.go`).
       > Shipped (W1-γ). `CheckVolumeWriters` groups write mounts (`readOnly`
-      > omitted/false) by `(volume, subPath)` within a definition — two steps
-      > writing disjoint subPaths of the same volume are a legitimate
-      > two-writer case (Open Question 2) and stay silent, matching the
-      > shipped `docs/examples/k8s-workload-identity-volume.job.yaml`
-      > (`plan-access` at the volume root, `write-cloud-report` at
-      > `subPath: reports`) without changes to that fixture.
+      > omitted/false) by volume within a definition and clusters them by
+      > subPath **containment**, not exact match: a mount with no subPath
+      > exposes the whole volume and conflicts with every other write mount
+      > of it, and a subPath conflicts with any subPath nested under it —
+      > only genuinely disjoint siblings (`subPath: a` vs `subPath: b`) stay
+      > silent (Open Question 2). Also covers the lower-level `mounts:
+      > [{type: volume, source: <name>}]` mechanism (`container.Spec.Mounts`),
+      > which has no subPath so any two of its write mounts of the same
+      > source always conflict; the two mechanisms are checked independently
+      > (not cross-referenced against each other — a documented v1 gap).
+      > Fix round 1 corrected an initial exact-subPath-match version that
+      > missed root-vs-subPath and nested-subPath conflicts; that also
+      > required a root-vs-subPath fix in
+      > `docs/examples/k8s-workload-identity-volume.job.yaml` (`plan-access`
+      > moved from the volume root to a sibling `subPath: plans`, disjoint
+      > from `write-cloud-report`'s `subPath: reports`).
 - [ ] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes

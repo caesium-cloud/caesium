@@ -51,17 +51,52 @@ func (s *IntegrationTestSuite) TestLintVolumesWarnsOnMultipleWriters() {
 	s.Contains(serverStdout, "writer-two")
 }
 
-// TestLintVolumesSilentOnDisjointSubPaths regression-guards the subPath
-// carve-out: two steps writing to distinct subPaths of the same volume are a
-// legitimate two-writer case (spec §11 Open Question 2) and must not warn.
-func (s *IntegrationTestSuite) TestLintVolumesSilentOnDisjointSubPaths() {
+// TestLintVolumesWarnsOnRootVsSubPathWriters regression-guards containment:
+// a mount with no subPath exposes the ENTIRE volume, so it still conflicts
+// with a sibling step that only write-mounts a subPath of it (e.g. the
+// shipped docs/examples/k8s-workload-identity-volume.job.yaml shape before
+// its fix) — overlap is not decided by subPath string equality.
+func (s *IntegrationTestSuite) TestLintVolumesWarnsOnRootVsSubPathWriters() {
+	alias := fmt.Sprintf("integration-lint-volumes-root-vs-subpath-%d", time.Now().UnixNano())
+	dir := s.writeLintVolumesManifest(alias, rootVsSubPathVolumeManifest(alias))
+	defer os.RemoveAll(dir)
+
+	stdout, err := s.runCLIStdout("job", "lint", "--path", dir)
+	s.Require().NoError(err)
+	s.Contains(stdout, "Warnings:")
+	s.Contains(stdout, `"shared"`)
+	s.Contains(stdout, "writer-root")
+	s.Contains(stdout, "writer-reports")
+}
+
+// TestLintVolumesSilentOnDisjointSiblingSubPaths regression-guards the
+// genuinely-disjoint two-writer case Open Question 2 anticipates: two
+// sibling subPaths that share no ancestor/descendant relationship never
+// overlap on disk and must not warn.
+func (s *IntegrationTestSuite) TestLintVolumesSilentOnDisjointSiblingSubPaths() {
 	alias := fmt.Sprintf("integration-lint-volumes-disjoint-%d", time.Now().UnixNano())
-	dir := s.writeLintVolumesManifest(alias, disjointSubPathVolumeManifest(alias))
+	dir := s.writeLintVolumesManifest(alias, disjointSiblingSubPathVolumeManifest(alias))
 	defer os.RemoveAll(dir)
 
 	stdout, err := s.runCLIStdout("job", "lint", "--path", dir)
 	s.Require().NoError(err)
 	s.NotContains(stdout, "Warnings:")
+}
+
+// TestLintVolumesWarnsOnRawMountTypeVolume covers the low-level mounts:
+// [{type: volume, source: <name>}] mechanism (container.Spec.Mounts),
+// which bypasses the job-level volumes:/volumeMounts: abstraction entirely.
+func (s *IntegrationTestSuite) TestLintVolumesWarnsOnRawMountTypeVolume() {
+	alias := fmt.Sprintf("integration-lint-volumes-raw-mount-%d", time.Now().UnixNano())
+	dir := s.writeLintVolumesManifest(alias, rawMountTypeVolumeManifest(alias))
+	defer os.RemoveAll(dir)
+
+	stdout, err := s.runCLIStdout("job", "lint", "--path", dir)
+	s.Require().NoError(err)
+	s.Contains(stdout, "Warnings:")
+	s.Contains(stdout, `"caesium-lint-raw-volume-test"`)
+	s.Contains(stdout, "writer-one")
+	s.Contains(stdout, "writer-two")
 }
 
 // TestLintVolumesExamplesProduceNoWarning guards the reference manifests
@@ -118,7 +153,7 @@ steps:
 `, alias)
 }
 
-func disjointSubPathVolumeManifest(alias string) string {
+func rootVsSubPathVolumeManifest(alias string) string {
 	return fmt.Sprintf(`
 apiVersion: v1
 kind: Job
@@ -151,5 +186,70 @@ steps:
       - volume: shared
         path: /data
         subPath: reports
+`, alias)
+}
+
+func disjointSiblingSubPathVolumeManifest(alias string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 * * * *"
+volumes:
+  - name: shared
+    sources:
+      docker:
+        volume: caesium-lint-volumes-test
+      podman:
+        volume: caesium-lint-volumes-test
+      kubernetes:
+        pvc: caesium-lint-volumes-test-rwx
+steps:
+  - name: writer-a
+    image: alpine:3.23
+    command: ["sh", "-c", "true"]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: a
+  - name: writer-b
+    image: alpine:3.23
+    command: ["sh", "-c", "true"]
+    volumeMounts:
+      - volume: shared
+        path: /data
+        subPath: b
+`, alias)
+}
+
+func rawMountTypeVolumeManifest(alias string) string {
+	return fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 * * * *"
+steps:
+  - name: writer-one
+    image: alpine:3.23
+    command: ["sh", "-c", "true"]
+    mounts:
+      - type: volume
+        source: caesium-lint-raw-volume-test
+        target: /data
+  - name: writer-two
+    image: alpine:3.23
+    command: ["sh", "-c", "true"]
+    mounts:
+      - type: volume
+        source: caesium-lint-raw-volume-test
+        target: /other
 `, alias)
 }
