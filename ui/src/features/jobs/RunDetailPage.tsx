@@ -27,6 +27,7 @@ import { JobDAG } from "./JobDAG";
 import { ReceiptPanel } from "./ReceiptPanel";
 import { ReplayDialog } from "./ReplayDialog";
 import { RunCacheSummary } from "./RunCacheSummary";
+import { RunProposalSummary } from "./RunProposalSummary";
 import { RunTimeline } from "./RunTimeline";
 import { TaskDetailPanel } from "./TaskDetailPanel";
 
@@ -91,6 +92,8 @@ export function RunDetailPage() {
 
   const isLoading = isLoadingRun || isLoadingDAG || isLoadingAtoms || isLoadingTasks;
   const [dagContainerRef, dagHeight] = useDagHeight(isLoading);
+
+  const handleTaskSelect = (taskId: string) => setSelectedTaskId((prev) => (prev === taskId ? null : taskId));
 
   useEffect(() => {
     if (!runId || !jobId) return;
@@ -514,7 +517,7 @@ export function RunDetailPage() {
               taskDefinitions={taskDefinitions}
               taskMetadata={taskMetadata}
               taskRunData={runTasks}
-              onNodeClick={(id) => setSelectedTaskId((prev) => (prev === id ? null : id))}
+              onNodeClick={handleTaskSelect}
               selectedTaskId={selectedTaskId}
             />
           ) : null}
@@ -534,6 +537,8 @@ export function RunDetailPage() {
           ) : null}
         </div>
       </div>
+
+      <RunProposalSummary tasks={run.tasks} taskDefinitions={taskDefinitions} onSelectTask={handleTaskSelect} />
 
       {callbackRuns.length > 0 ? <CallbackRunsSection callbacks={callbackRuns} /> : null}
 

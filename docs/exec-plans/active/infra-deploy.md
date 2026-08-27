@@ -552,13 +552,30 @@ renders the summary and shows the reference.
       module (no JSX, per the `cache-utils.ts`/`CacheView.tsx` split already
       in this file); `ProposalPanel.tsx` does the rendering. E2 (run-level
       aggregate) is out of scope here.
-- [ ] E2. Run-level proposal summary (Open Question 3 — the "more useful and
+- [x] E2. Run-level proposal summary (Open Question 3 — the "more useful and
       more work" half). A `RunProposalSummary` on `RunDetailPage` aggregating
       counts across every task in the run with a `proposal_kind`, linking each
       row to its task panel. Files: new
       `ui/src/features/jobs/RunProposalSummary.tsx`,
       `ui/src/features/jobs/RunDetailPage.tsx`, tests.
       Depends on: E1.
+      Note (W2-γ): `RunProposalSummary` iterates `run.tasks`, calls
+      `parseProposal` (from `proposal-renderers.ts`, not duplicated) per task,
+      and drops any task without a `proposal_kind`; renders nothing when the
+      resulting list is empty. Per-action counts are summed only across
+      `structured`-section proposals (currently just `terraform.plan.v1`); a
+      `generic`-section proposal (unregistered kind, or an unparsable
+      `proposal_summary`) still gets a row — kind badge + task name — with a
+      blank-count marker instead of crashing or fabricating zero counts. Each
+      row is a button wired to the same toggle handler now shared with the
+      DAG's `onNodeClick` (`handleTaskSelect` in `RunDetailPage`, extracted
+      from the inline lambda that previously only fed the DAG) so row-click
+      and node-click open/close the same `TaskDetailPanel` identically.
+      Mounted between the interactive DAG section and `CallbackRunsSection`.
+      Did not touch `ProposalPanel.tsx`/`proposal-renderers.ts`; the
+      count-to-badge-variant color mapping is a small local copy (not
+      exported by `ProposalPanel.tsx`, and it's display-only, not the parsing
+      this item was told to reuse rather than duplicate).
 
 ## Harness Strengthening
 
