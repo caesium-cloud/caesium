@@ -42,17 +42,22 @@ var listCmd = &cobra.Command{
 			return fmt.Errorf("cache list failed (%d): %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
 
+		// NOTE: write machine-readable output via cmd.OutOrStdout(), NOT
+		// cmd.Print/Println — cobra's Print* helpers route to stderr (the root
+		// command sets no output writer), which left this command's JSON
+		// unpipeable and unassertable. Same fix as `caesium why`.
+		stdout := cmd.OutOrStdout()
 		var out interface{}
 		if err := json.Unmarshal(body, &out); err != nil {
-			cmd.Print(string(body))
+			_, _ = stdout.Write(body)
 			return nil
 		}
 		pretty, err := json.MarshalIndent(out, "", "  ")
 		if err != nil {
-			cmd.Print(string(body))
+			_, _ = stdout.Write(body)
 			return nil
 		}
-		cmd.Println(string(pretty))
+		_, _ = fmt.Fprintln(stdout, string(pretty))
 		return nil
 	},
 }
