@@ -589,6 +589,21 @@ func summarize(exp *WhyExplanation) string {
 	if exp.Group != nil {
 		return summarizeGroup(exp)
 	}
+	return withDiffNotes(exp, summarizeVerdict(exp))
+}
+
+// withDiffNotes appends the diff's qualifiers to a summary line. Today that is
+// the chain: values exclusion, which spec §4.3 requires `caesium why` to render
+// explicitly — a consumer that stayed cached while its predecessor's identity
+// moved is otherwise an unexplainable skip.
+func withDiffNotes(exp *WhyExplanation, summary string) string {
+	if exp.Diff == nil || len(exp.Diff.Notes) == 0 {
+		return summary
+	}
+	return summary + "; " + strings.Join(exp.Diff.Notes, "; ")
+}
+
+func summarizeVerdict(exp *WhyExplanation) string {
 	switch exp.Verdict {
 	case VerdictCacheHit:
 		if exp.Diff != nil && exp.Diff.HashEqual {
@@ -598,7 +613,7 @@ func summarize(exp *WhyExplanation) string {
 	case VerdictCacheMiss:
 		return summarizeChanged(exp, "CACHE MISS", "re-ran")
 	case VerdictCacheOff:
-		if exp.Diff != nil && len(exp.Diff.Changes) > 0 {
+		if exp.Diff != nil && len(discriminatingChanges(exp.Diff.Changes)) > 0 {
 			return summarizeChanged(exp, "CACHE DISABLED", "ran")
 		}
 		return fmt.Sprintf("CACHE DISABLED — caching was not enabled for task %q, so it ran unconditionally", exp.TaskName)
@@ -648,14 +663,17 @@ func summarizeChanged(exp *WhyExplanation, verdict, ranVerb string) string {
 	if exp.Diff.Degraded != "" {
 		return fmt.Sprintf("%s — task %q %s; %s", verdict, exp.TaskName, ranVerb, exp.Diff.Degraded)
 	}
-	if len(exp.Diff.Changes) == 0 {
+	// Excluded entries explain how the key was built; they are not fields that
+	// differed, so they must not be counted or promoted to the headline.
+	changes := discriminatingChanges(exp.Diff.Changes)
+	if len(changes) == 0 {
 		return fmt.Sprintf("%s — task %q %s; no input field differs from the prior run (cause is outside the persisted hash inputs, e.g. an expired/pruned cache entry)", verdict, exp.TaskName, ranVerb)
 	}
 
-	head := exp.Diff.Changes[0]
+	head := changes[0]
 	detail := describeChange(head)
-	if len(exp.Diff.Changes) > 1 {
-		detail = fmt.Sprintf("%s (and %d other field(s))", detail, len(exp.Diff.Changes)-1)
+	if len(changes) > 1 {
+		detail = fmt.Sprintf("%s (and %d other field(s))", detail, len(changes)-1)
 	}
 	return fmt.Sprintf("%s — %s", verdict, detail)
 }
@@ -664,6 +682,8 @@ func summarizeChanged(exp *WhyExplanation, verdict, ranVerb string) string {
 // values are labeled rather than printed as if literal.
 func describeChange(c FieldChange) string {
 	switch {
+	case c.Kind == fieldExcluded:
+		return fmt.Sprintf("`%s` %s", c.Field, c.Note)
 	case c.Added:
 		if c.Redacted {
 			return fmt.Sprintf("`%s` was added (redacted; digest %s)", c.Field, c.After)

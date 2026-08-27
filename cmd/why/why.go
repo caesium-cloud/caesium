@@ -66,7 +66,11 @@ type explanation struct {
 		SubjectHash  string `json:"subjectHash"`
 		BaselineHash string `json:"baselineHash"`
 		Degraded     string `json:"degraded"`
-		Changes      []struct {
+		// Notes are qualifiers about how the key was computed rather than which
+		// input differed — today, the `chain: values` predecessor-hash exclusion,
+		// which the table must render or a values-mode skip is unexplainable.
+		Notes   []string `json:"notes"`
+		Changes []struct {
 			Field    string `json:"field"`
 			Kind     string `json:"kind"`
 			Before   string `json:"before"`
@@ -74,6 +78,7 @@ type explanation struct {
 			Added    bool   `json:"added"`
 			Removed  bool   `json:"removed"`
 			Redacted bool   `json:"redacted"`
+			Note     string `json:"note"`
 		} `json:"changes"`
 	} `json:"diff"`
 }
@@ -218,12 +223,34 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	if exp.Diff == nil {
 		return
 	}
+
+	// Notes come first and are printed on EVERY path, degraded included: the
+	// chain: values exclusion is the reason a task can stay cached while its
+	// predecessor visibly changed, so it must not be hidden behind an early
+	// return.
+	for _, note := range exp.Diff.Notes {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "note: %s\n", note)
+	}
+
 	if exp.Diff.Degraded != "" {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintf(out, "note: %s\n", exp.Diff.Degraded)
 		return
 	}
-	if len(exp.Diff.Changes) == 0 {
+
+	// An excluded entry records an input that was deliberately kept OUT of the
+	// key; it is rendered above as a note, and counting it as a discriminating
+	// field would report a cache hit as having a changed field.
+	changes := exp.Diff.Changes[:0:0]
+	for _, ch := range exp.Diff.Changes {
+		if ch.Kind == "excluded" {
+			continue
+		}
+		changes = append(changes, ch)
+	}
+
+	if len(changes) == 0 {
 		_, _ = fmt.Fprintln(out)
 		if exp.Diff.HashEqual {
 			_, _ = fmt.Fprintln(out, "All hashed inputs are identical (no discriminating field).")
@@ -234,10 +261,10 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	}
 
 	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintf(out, "Discriminating fields (%d):\n", len(exp.Diff.Changes))
+	_, _ = fmt.Fprintf(out, "Discriminating fields (%d):\n", len(changes))
 	dw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(dw, "FIELD\tCHANGE\tBEFORE\tAFTER")
-	for _, ch := range exp.Diff.Changes {
+	for _, ch := range changes {
 		before, after := ch.Before, ch.After
 		if ch.Redacted {
 			if before != "" {

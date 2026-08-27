@@ -133,6 +133,7 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
         </p>
       </div>
 
+      <ChainNotes diff={explanation.diff} />
       <DiscriminatingField
         explanation={explanation}
         discriminatingChange={discriminatingChange}
@@ -152,11 +153,52 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
   );
 }
 
+/**
+ * An "excluded" entry records an input that was deliberately kept OUT of the
+ * identity hash (predecessor hashes under `cache.chain: values`). It explains
+ * how the key was built; it is not a field that differed, so it must never be
+ * promoted to the discriminating field or counted among the changed ones. It is
+ * surfaced separately by ChainNotes.
+ */
+function isExcluded(change: FieldChange) {
+  return change.kind === "excluded";
+}
+
+function discriminatingChanges(changes: FieldChange[]) {
+  return changes.filter((change) => !isExcluded(change));
+}
+
 function getDiscriminatingChange(explanation: WhyExplanation) {
   if (explanation.verdict !== "CACHE_MISS") {
     return undefined;
   }
-  return explanation.diff?.changes?.[0];
+  return discriminatingChanges(explanation.diff?.changes ?? [])[0];
+}
+
+/**
+ * ChainNotes renders the hash-construction qualifiers the server attached —
+ * today only the `cache.chain: values` predecessor-hash exclusion. Spec §4.3
+ * requires this: without it, a step reported `cached` while its predecessor's
+ * identity visibly moved reads as a cache bug.
+ */
+function ChainNotes({ diff }: { diff?: BlobDiff }) {
+  const notes = diff?.notes ?? [];
+  if (notes.length === 0) {
+    return null;
+  }
+  return (
+    <div
+      data-testid="task-why-chain-exclusion"
+      className="rounded-md border border-border/50 bg-background/40 p-3 text-xs text-text-2"
+    >
+      <div className="font-semibold text-foreground">How this key was built</div>
+      <ul className="mt-1 space-y-1">
+        {notes.map((note) => (
+          <li key={note}>{note}</li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function DiscriminatingField({
@@ -223,7 +265,7 @@ function DiffDetails({
     return null;
   }
 
-  const changes = diff.changes ?? [];
+  const changes = discriminatingChanges(diff.changes ?? []);
   const visibleChanges = changes
     .map((change, index) => ({ change, index }))
     .slice(skipFirstChange ? 1 : 0);
@@ -419,6 +461,9 @@ function SectionLabel({ children }: { children: ReactNode }) {
 }
 
 function describeChange(change: FieldChange) {
+  if (isExcluded(change)) {
+    return change.note ?? "Excluded from the identity hash";
+  }
   if (change.added) {
     return `Added ${formatFieldValue(change.after)}`;
   }
