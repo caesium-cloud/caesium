@@ -287,13 +287,39 @@ func TestGlobPathspec(t *testing.T) {
 	}
 }
 
+func TestGitEnvPinsAnIdentitySoGitNeverResolvesTheHostname(t *testing.T) {
+	env, cleanup, err := gitEnv(config{})
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("gitEnv: %v", err)
+	}
+	// Without these, fetch and checkout make git synthesize a reflog identity
+	// by resolving the machine's own hostname — which blocks for the resolver
+	// timeout, or fails, in a pod that has no DNS entry for itself.
+	for _, want := range []string{
+		"GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=",
+		"GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL=",
+	} {
+		found := false
+		for _, kv := range env {
+			if strings.HasPrefix(kv, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%s is not pinned in the git environment: %v", want, env)
+		}
+	}
+}
+
 func TestSSHKeyLandsInAPrivateFileAndNeverInTheEnvironment(t *testing.T) {
 	const secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nnot-a-real-key\n-----END OPENSSH PRIVATE KEY-----"
 
-	env, cleanup, err := sshEnv(config{SSHKey: secret, SSHKnownHosts: "example.test ssh-ed25519 AAAA"})
+	env, cleanup, err := gitEnv(config{SSHKey: secret, SSHKnownHosts: "example.test ssh-ed25519 AAAA"})
 	defer cleanup()
 	if err != nil {
-		t.Fatalf("sshEnv: %v", err)
+		t.Fatalf("gitEnv: %v", err)
 	}
 
 	var sshCommand string
@@ -343,11 +369,11 @@ func TestSSHKeyLandsInAPrivateFileAndNeverInTheEnvironment(t *testing.T) {
 	}
 }
 
-func TestSSHEnvNeverDisablesHostKeyChecking(t *testing.T) {
-	env, cleanup, err := sshEnv(config{SSHKey: "key"})
+func TestGitEnvNeverDisablesHostKeyChecking(t *testing.T) {
+	env, cleanup, err := gitEnv(config{SSHKey: "key"})
 	defer cleanup()
 	if err != nil {
-		t.Fatalf("sshEnv: %v", err)
+		t.Fatalf("gitEnv: %v", err)
 	}
 	for _, kv := range env {
 		lowered := strings.ToLower(kv)

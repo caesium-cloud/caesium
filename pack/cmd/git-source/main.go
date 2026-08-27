@@ -100,7 +100,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 }
 
 func materialize(ctx context.Context, cfg config, e *protocol.Emitter) error {
-	env, cleanup, err := sshEnv(cfg)
+	env, cleanup, err := gitEnv(cfg)
 	defer cleanup()
 	if err != nil {
 		return err
@@ -275,15 +275,15 @@ func localRepoPath(url string) (string, bool) {
 	}
 }
 
-// sshEnv materializes GIT_SSH_KEY (and, when supplied, GIT_SSH_KNOWN_HOSTS)
-// into 0600 files and returns the environment git should run with.
+// gitEnv builds the environment git runs with, materializing GIT_SSH_KEY (and,
+// when supplied, GIT_SSH_KNOWN_HOSTS) into 0600 files.
 //
 // Two properties matter. The key never appears in a command line, an error, or
 // the inherited environment of the git subprocess — only in a file the process
 // deletes on the way out. And host-key checking is never disabled: with a
 // known_hosts supplied, checking is strict against it; without one, ssh's own
 // default applies and an unknown host fails rather than being trusted.
-func sshEnv(cfg config) ([]string, func(), error) {
+func gitEnv(cfg config) ([]string, func(), error) {
 	// Start from a scrubbed environment: git inherits only what it needs, so a
 	// resolved secret in the role's own environment cannot leak into a
 	// subprocess (or into `git config --show-origin` style diagnostics).
@@ -293,6 +293,16 @@ func sshEnv(cfg config) ([]string, func(), error) {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_ADVICE=0",
+		// A fixed identity, because fetch and checkout write reflog entries and
+		// git otherwise synthesizes an address by resolving the machine's own
+		// hostname. In a pod with no DNS for its name that lookup blocks until
+		// the resolver gives up — measured at 5 s per fetch on a
+		// network-isolated container — or fails outright. This role never
+		// creates a commit, so the value itself is inert.
+		"GIT_AUTHOR_NAME=caesium git-source",
+		"GIT_AUTHOR_EMAIL=git-source@caesium.invalid",
+		"GIT_COMMITTER_NAME=caesium git-source",
+		"GIT_COMMITTER_EMAIL=git-source@caesium.invalid",
 	}
 	if cfg.SSHKey == "" {
 		return env, func() {}, nil

@@ -170,12 +170,12 @@ pack-lint: pack-toolchain
             go vet ./...; \
             golangci-lint run ./...'
 
-# Run the pack module's tests inside the toolchain stage, so `terraform` is on
-# PATH for the tests that drive it. Those tests use `terraform get` (modules
-# only — no provider installation) against pack/testdata, so they need no
-# registry credentials, but they DO need outbound network for any stack whose
-# providers are resolved.
-# Run the pack module's unit tests (terraform on PATH; needs network).
+# Runs inside the toolchain stage so `terraform` is on PATH for the tests that
+# drive it. The suite is hermetic: `terraform get` installs modules only (never
+# providers) and the fixture's module sources are all relative, while
+# git-source clones over file://. Verified to pass under `--network none`.
+
+# Run the pack module's unit tests (terraform on PATH; no network needed).
 pack-test: pack-toolchain
     {{ container_cli }} run --rm --platform {{ platform }} \
         -v {{ repo_dir }}:{{ bld_dir }} \
