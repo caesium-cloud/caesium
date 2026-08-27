@@ -221,7 +221,14 @@ load-bearing "edit one stack, re-apply one stack" test).
       of every "what changed" count (`discriminatingChanges`) in the summary, the
       CLI table and the Console, and out of `run diff`'s per-task change list —
       otherwise a cache HIT would report a changed field. Console testid:
-      `task-why-chain-exclusion`.
+      `task-why-chain-exclusion`. Fix round 1: (I-1) a FANNED step addressed
+      without `--partition` carries no `Diff` at all, so `WhyGroup.Notes` was
+      added (populated from the scheduler-set `cache_chain` column) and both
+      `summarize` and the CLI's `renderTable` now read whichever channel the
+      answer shape uses — this is the shape spec §5.5 itself uses; (I-2) a
+      chain-mode SWITCH is now emitted as a real `chain` `FieldChange`, so a miss
+      caused by adding `chain: values` is no longer mis-explained as "cause is
+      outside the persisted hash inputs".
 - [x] A5. Integration scenario for the chain break on a plain pipeline (no
       Terraform, `alpine:3.23` only): job with `upstream` (env derived from a run
       param, constant output) → `mid` (`cache: {version: 1, chain: values}`) →
@@ -253,11 +260,16 @@ load-bearing "edit one stack, re-apply one stack" test).
       a pack image** — if the §5.2 contracts grow Terraform-shaped, this is what
       fails. Files: new `test/unit_pipeline_generic_test.go`.
       Depends on: A3.
-      Done (W1-α): `source → discover-{a,b} → propose-{a,b} → apply-{a,b}` over a
-      docker/podman named volume, alpine:3.23 only; the test asserts the fixture
-      contains neither `caesiumcloud/` nor `terraform`. Per spec §5.5 (which
-      overrides the item text) BOTH propose and apply carry `chain: values`, and
-      apply also `ttl: never`.
+      Done (W1-α): `source → discover-{a,b} → propose-{a,b} → apply-{a,b}` plus
+      the §5.5 `warm` role (emits nothing, feeds every propose/apply) and a
+      default-chain `control` consumer of it, over a docker/podman named volume,
+      alpine:3.23 only; the test asserts the fixture contains neither
+      `caesiumcloud/` nor `terraform`. Per spec §5.5 (which overrides the item
+      text) BOTH propose and apply carry `chain: values`, and apply also
+      `ttl: never`. Fix round 1 (review I-3): the fingerprint-bump scenario alone
+      was confounded by the value-verified short-circuit, so a `warm`-churn
+      scenario was added — it fails if `chain: values` is removed from any
+      propose/apply step (verified by temporarily removing it).
 - [x] A7. Docs + generated schema reference for the new keys. Update the job-
       and step-level `cache` rows in `internal/jobdef/report/report.go` (never
       hand-edit `docs/job-schema-reference.md` — regenerate it, or
