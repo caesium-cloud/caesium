@@ -10,7 +10,11 @@
 //
 //	GIT_URL             repository to clone (https://, ssh://, git@host:path, file://)
 //	GIT_REF             the ref to pin: a branch, tag or full commit sha (required)
-//	GIT_SPARSE          space-separated sparse-checkout patterns; empty = whole tree
+//	GIT_SPARSE          space-separated path patterns; empty = whole tree. Each must
+//	                    contain a "/" and be repo-root-relative, e.g. "stacks/**".
+//	                    They are used BOTH as sparse-checkout patterns and, with
+//	                    :(glob) magic, as the pathspec the tree digest covers, so
+//	                    an unanchored pattern would stage more than it digests.
 //	GIT_SSH_KEY         private key, already resolved from a secret:// URI by Caesium
 //	GIT_SSH_KNOWN_HOSTS known_hosts content for the forge, enabling strict host-key checking
 //	DEST                where to stage the tree (default /src)
@@ -34,6 +38,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -82,6 +87,19 @@ func loadConfig(getenv func(string) string) (config, error) {
 	if cfg.Ref == "" {
 		return config{}, fmt.Errorf("GIT_REF is required (a branch, tag or commit sha)")
 	}
+	// A leading "-" makes git parse the value as an option instead of an
+	// operand. That matters most for GIT_REF, which the reference manifest
+	// wires from a run parameter (`GIT_REF: "${CAESIUM_PARAM_SHA}"`) — a
+	// lower-trust input than the manifest itself. `--upload-pack=<cmd>` on a
+	// local or file:// remote executes <cmd> in this container, next to the
+	// mounted deploy key. --end-of-options in the fetch below is the second
+	// half of the same guard.
+	if strings.HasPrefix(cfg.Ref, "-") {
+		return config{}, fmt.Errorf("GIT_REF %q may not begin with '-'; it would be parsed as a git option", cfg.Ref)
+	}
+	if strings.HasPrefix(cfg.URL, "-") {
+		return config{}, fmt.Errorf("GIT_URL %q may not begin with '-'; it would be parsed as a git option", redactURL(cfg.URL))
+	}
 	if cfg.Dest == "" {
 		cfg.Dest = "/src"
 	}
@@ -89,14 +107,46 @@ func loadConfig(getenv func(string) string) (config, error) {
 		return config{}, fmt.Errorf("DEST %q must be an absolute path", cfg.Dest)
 	}
 	for _, pattern := range cfg.Sparse {
-		// A negation is a sparse-checkout concept with no pathspec equivalent,
-		// so honouring it in the checkout while ignoring it in the digest would
-		// silently describe a different tree than the one that was staged.
-		if strings.HasPrefix(pattern, "!") {
-			return config{}, fmt.Errorf("GIT_SPARSE pattern %q: negation is not supported; list the paths to include", pattern)
+		if err := validSparsePattern(pattern); err != nil {
+			return config{}, err
 		}
 	}
 	return cfg, nil
+}
+
+// validSparsePattern rejects the patterns for which the checkout and the digest
+// would not describe the same set of files.
+//
+// GIT_SPARSE is used twice: verbatim as a sparse-checkout pattern (gitignore
+// syntax) and, with :(glob) magic, as the pathspec the tree digest covers. The
+// two agree for the canonical repo-root-relative form "stacks/**". They do not
+// agree for an unanchored pattern: gitignore matches "*.tf" at any depth, while
+// the pathspec anchors at the repo root, so such a pattern would stage every
+// .tf in the tree but digest only the top-level ones — an edit under
+// stacks/network/ would move neither treeDigest nor anything derived from it.
+// That is a silent under-report, the failure class this whole design is built
+// to avoid, so the ambiguous patterns are refused rather than guessed at.
+func validSparsePattern(pattern string) error {
+	switch {
+	case strings.HasPrefix(pattern, "!"):
+		// A negation is a sparse-checkout concept with no pathspec equivalent,
+		// so honouring it in the checkout while ignoring it in the digest would
+		// describe a different tree than the one that was staged.
+		return fmt.Errorf("GIT_SPARSE pattern %q: negation is not supported; list the paths to include", pattern)
+	case strings.HasPrefix(pattern, ":"):
+		// Explicit pathspec magic passes through to the digest untouched but is
+		// meaningless to sparse-checkout, so the two would diverge.
+		return fmt.Errorf("GIT_SPARSE pattern %q: pathspec magic is not supported; use a plain path pattern", pattern)
+	case strings.HasPrefix(pattern, "/"):
+		// A leading slash anchors a gitignore pattern at the repo root but is
+		// an absolute path to the pathspec parser.
+		return fmt.Errorf("GIT_SPARSE pattern %q: drop the leading '/'; patterns are already relative to the repository root", pattern)
+	case !strings.Contains(pattern, "/"):
+		return fmt.Errorf(
+			"GIT_SPARSE pattern %q: patterns must be repo-root-relative and contain a '/' (e.g. %q); "+
+				"an unanchored pattern stages files it does not digest", pattern, pattern+"/**")
+	}
+	return nil
 }
 
 func materialize(ctx context.Context, cfg config, e *protocol.Emitter) error {
@@ -133,8 +183,8 @@ func materialize(ctx context.Context, cfg config, e *protocol.Emitter) error {
 			return err
 		}
 	}
-	if _, err := git.run(ctx, "fetch", "--depth=1", "--no-tags", "origin", cfg.Ref); err != nil {
-		return fmt.Errorf("fetch %s at %s: %w", cfg.URL, cfg.Ref, err)
+	if _, err := git.run(ctx, fetchArgs(cfg.Ref)...); err != nil {
+		return fmt.Errorf("fetch %s at %s: %w", redactURL(cfg.URL), cfg.Ref, err)
 	}
 	if _, err := git.run(ctx, "checkout", "--detach", "FETCH_HEAD"); err != nil {
 		return err
@@ -211,6 +261,18 @@ func treeDigest(ctx context.Context, git *gitRunner, sparse []string) (string, e
 	return protocol.Digest(sum.Sum(nil)), nil
 }
 
+// fetchArgs is the shallow fetch of one ref.
+//
+// --end-of-options makes everything after it an operand, so a ref that looks
+// like a flag cannot be parsed as one however it was constructed. loadConfig
+// already rejects a leading "-"; this is the belt to that pair of braces,
+// because the value originates in a run parameter (spec §5.5 wires
+// `GIT_REF: "${CAESIUM_PARAM_SHA}"`) and `--upload-pack=<cmd>` on a local or
+// file:// remote executes <cmd> in this container.
+func fetchArgs(ref string) []string {
+	return []string{"fetch", "--depth=1", "--no-tags", "--end-of-options", "origin", ref}
+}
+
 // globPathspec turns one GIT_SPARSE pattern into the pathspec that selects the
 // same paths. A pattern that already carries pathspec magic (":(exclude)…") is
 // passed through untouched.
@@ -248,10 +310,32 @@ func (g *gitRunner) run(ctx context.Context, args ...string) (string, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
+		// Both the arguments (git remote add carries the URL) and git's own
+		// stderr can echo the URL, and this string is what FailClosed writes to
+		// the task log Caesium persists. A URL with embedded credentials — the
+		// standard PAT form https://x-access-token:<token>@host/… — would put a
+		// live token in the run history and the API response.
+		return "", fmt.Errorf("git %s: %w: %s",
+			redactAll(strings.Join(args, " ")), err, redactAll(strings.TrimSpace(stderr.String())))
 	}
 	return string(out), nil
 }
+
+// urlUserinfo matches the credential span of a URL: the "user:password@" (or
+// bare "user@") between a scheme and a host.
+var urlUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/@\s]*@`)
+
+// redactURL replaces any credentials embedded in a URL with a placeholder.
+// It is deliberately applied to the whole URL rather than only to a password:
+// a bare "user@" is still an identifier the operator did not choose to publish,
+// and a token is frequently carried in the username position.
+func redactURL(raw string) string {
+	return urlUserinfo.ReplaceAllString(raw, "${1}<redacted>@")
+}
+
+// redactAll strips credentials from every URL-looking span in a free-form
+// string — a command line, or git's own stderr, which echoes the remote.
+func redactAll(text string) string { return redactURL(text) }
 
 // localSafeDirs returns the filesystem paths git must be told are intentional.
 func localSafeDirs(url, dest string) []string {
@@ -293,6 +377,11 @@ func gitEnv(cfg config) ([]string, func(), error) {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_ADVICE=0",
+		// An allow-list over git's transports. Without it `GIT_URL=ext::sh -c …`
+		// reaches the ext helper, which runs an arbitrary command in this
+		// container; the same door as the option-injection guard above, through
+		// the transport layer rather than the parser.
+		"GIT_ALLOW_PROTOCOL=file:git:http:https:ssh",
 		// A fixed identity, because fetch and checkout write reflog entries and
 		// git otherwise synthesizes an address by resolving the machine's own
 		// hostname. In a pod with no DNS for its name that lookup blocks until

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -400,6 +402,181 @@ func TestLocalRepoPath(t *testing.T) {
 		got, ok := localRepoPath(url)
 		if ok != want.ok || got != want.want {
 			t.Fatalf("localRepoPath(%q) = (%q, %v), want (%q, %v)", url, got, ok, want.want, want.ok)
+		}
+	}
+}
+
+// TestLoadConfigRejectsOptionLikeValues guards the option-injection path. The
+// reference manifest wires GIT_REF from a run parameter, so it is attacker-
+// reachable in a way the manifest itself is not; `--upload-pack=<cmd>` against
+// a local or file:// remote runs <cmd> in this container, beside the mounted
+// deploy key.
+func TestLoadConfigRejectsOptionLikeValues(t *testing.T) {
+	cases := map[string]map[string]string{
+		"option-like ref": {
+			"GIT_URL": "https://example.test/r.git",
+			"GIT_REF": "--upload-pack=sh -c 'id'",
+		},
+		"short option ref": {
+			"GIT_URL": "https://example.test/r.git",
+			"GIT_REF": "-c",
+		},
+		"option-like url": {
+			"GIT_URL": "--upload-pack=sh -c 'id'",
+			"GIT_REF": "main",
+		},
+	}
+	for name, env := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadConfig(func(k string) string { return env[k] })
+			if err == nil {
+				t.Fatalf("%v was accepted; git would parse it as an option", env)
+			}
+			if !strings.Contains(err.Error(), "option") {
+				t.Fatalf("error should explain why, got %v", err)
+			}
+		})
+	}
+}
+
+// TestFetchPassesEndOfOptions is the second half of the option-injection
+// guard: even a ref that reached the command some other way must be parsed as
+// an operand, not a flag.
+func TestFetchPassesEndOfOptions(t *testing.T) {
+	args := fetchArgs("main")
+
+	endIdx, refIdx := -1, -1
+	for i, a := range args {
+		switch a {
+		case "--end-of-options":
+			endIdx = i
+		case "main":
+			refIdx = i
+		}
+	}
+	if endIdx < 0 {
+		t.Fatalf("fetch is invoked without --end-of-options: %v", args)
+	}
+	if refIdx < 0 {
+		t.Fatalf("the ref is missing from the fetch: %v", args)
+	}
+	// It has to come before the operands, or it protects nothing.
+	if endIdx > refIdx {
+		t.Fatalf("--end-of-options must precede the refspec: %v", args)
+	}
+	// A ref that looks like an option still lands after the separator.
+	hostile := fetchArgs("--upload-pack=sh -c id")
+	if hostile[len(hostile)-1] != "--upload-pack=sh -c id" {
+		t.Fatalf("the ref is not the final operand: %v", hostile)
+	}
+}
+
+// TestGitEnvRestrictsTransports closes the same class through the transport
+// layer: `GIT_URL=ext::sh -c …` hands git an arbitrary command to run.
+func TestGitEnvRestrictsTransports(t *testing.T) {
+	env, cleanup, err := gitEnv(config{})
+	defer cleanup()
+	if err != nil {
+		t.Fatalf("gitEnv: %v", err)
+	}
+	var allow string
+	for _, kv := range env {
+		if after, ok := strings.CutPrefix(kv, "GIT_ALLOW_PROTOCOL="); ok {
+			allow = after
+		}
+	}
+	if allow == "" {
+		t.Fatalf("GIT_ALLOW_PROTOCOL is not set: %v", env)
+	}
+	for _, want := range []string{"file", "git", "http", "https", "ssh"} {
+		if !slices.Contains(strings.Split(allow, ":"), want) {
+			t.Fatalf("GIT_ALLOW_PROTOCOL %q does not permit %q", allow, want)
+		}
+	}
+	if slices.Contains(strings.Split(allow, ":"), "ext") {
+		t.Fatalf("GIT_ALLOW_PROTOCOL %q permits the ext transport, which runs an arbitrary command", allow)
+	}
+}
+
+// TestErrorsNeverEchoURLCredentials is the credential-leak guard. The role
+// takes care to keep GIT_SSH_KEY out of the logs; a token embedded in GIT_URL —
+// the standard PAT form — must not reach the same place through an error
+// string, because FailClosed writes those to the persisted task log.
+func TestErrorsNeverEchoURLCredentials(t *testing.T) {
+	const (
+		user  = "x-access-token"
+		token = "ghp_ThisIsTheSecretValue0000000000000000"
+	)
+	url := "https://" + user + ":" + token + "@127.0.0.1:1/acme/infra.git"
+
+	_, stdout, err := runRole(t, config{URL: url, Ref: "main", Dest: filepath.Join(t.TempDir(), "src")})
+	if err == nil {
+		t.Fatal("the unreachable remote should have failed")
+	}
+	if stdout != "" {
+		t.Fatalf("failed run wrote to stdout: %q", stdout)
+	}
+
+	// The error is what Emitter.FailClosed writes to the task log.
+	var buf bytes.Buffer
+	e := protocol.New("git-source", io.Discard, &buf)
+	e.FailClosed(err)
+	logged := buf.String()
+
+	for _, secret := range []string{token, user + ":" + token} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("the credential reached the task log: %q", logged)
+		}
+	}
+	if !strings.Contains(logged, "<redacted>") {
+		t.Fatalf("the redaction marker is missing, so the URL may not have been scrubbed: %q", logged)
+	}
+	// The non-secret part must survive, or the message stops being useful.
+	if !strings.Contains(logged, "127.0.0.1") {
+		t.Fatalf("redaction removed the host too: %q", logged)
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	cases := map[string]string{
+		"https://user:tok@example.test/r.git": "https://<redacted>@example.test/r.git",
+		"https://tok@example.test/r.git":      "https://<redacted>@example.test/r.git",
+		"https://example.test/r.git":          "https://example.test/r.git",
+		"ssh://git@example.test/r.git":        "ssh://<redacted>@example.test/r.git",
+		"file:///srv/infra":                   "file:///srv/infra",
+		"/srv/infra":                          "/srv/infra",
+	}
+	for in, want := range cases {
+		if got := redactURL(in); got != want {
+			t.Fatalf("redactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLoadConfigRejectsUnanchoredSparsePatterns keeps the checkout and the
+// digest describing the same set of files. "*.tf" stages every .tf at any depth
+// (gitignore semantics) but digests only the root-level ones (pathspec
+// semantics anchored at the repo root) — a silent under-report.
+func TestLoadConfigRejectsUnanchoredSparsePatterns(t *testing.T) {
+	for _, pattern := range []string{"*.tf", "stacks", ":(glob)stacks/**", "/stacks/**", "!stacks/legacy/**"} {
+		t.Run(pattern, func(t *testing.T) {
+			_, err := loadConfig(func(k string) string {
+				return map[string]string{
+					"GIT_URL":    "https://example.test/r.git",
+					"GIT_REF":    "main",
+					"GIT_SPARSE": pattern,
+				}[k]
+			})
+			if err == nil {
+				t.Fatalf("GIT_SPARSE=%q was accepted", pattern)
+			}
+		})
+	}
+
+	// The canonical forms still work.
+	for _, pattern := range []string{"stacks/**", "modules/**", "stacks/network/*.tf"} {
+		if err := validSparsePattern(pattern); err != nil {
+			t.Fatalf("validSparsePattern(%q) = %v, want accepted", pattern, err)
 		}
 	}
 }

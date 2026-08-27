@@ -43,9 +43,13 @@ var ConfigGlobs = []string{
 type Input struct {
 	// Name is the stable label, e.g. "root" or a module key.
 	Name string
-	// Path is the directory as it appears in the module manifest — relative to
-	// the root module, never absolute.
-	Path string
+	// Identity is what distinguishes this input from another with the same
+	// content: a path relative to the root module for something in the source
+	// tree, or a declared source for something fetched into a scratch
+	// directory. It must never carry a machine- or run-specific path — that is
+	// the fingerprint-nondeterminism failure this package exists to avoid — and
+	// callers are responsible for normalizing it (see tf.Manifest.Resolve).
+	Identity string
 	// Digest is DigestPrefix + hex.
 	Digest string
 }
@@ -78,11 +82,32 @@ func DigestDir(dir string) (string, error) {
 	return DigestPrefix + hexOf(sum.Sum(nil)), nil
 }
 
-// Combine folds a sorted set of inputs, plus any extra scalar facts (the
-// workspace name), into one fingerprint.
-func Combine(inputs []Input, extras ...string) string {
+// Combine folds a set of inputs, plus any extra scalar facts (the workspace
+// name), into one fingerprint.
+//
+// The ordering is total, not merely by Name: names are a lossy projection of
+// module keys (tf.ModuleName maps ".", "-", "/" and " " all to "_", so the keys
+// "a-b" and "a.b" both become "a_b"), and sorting a set with equal keys leaves
+// the order — and therefore the digest — unspecified. A digest that can flip
+// between two runs over the same tree is exactly the failure this package
+// promises not to have, so a collision is rejected outright rather than
+// ordered around: the caller would also have silently dropped one of the two
+// per-input output rows.
+func Combine(inputs []Input, extras ...string) (string, error) {
 	sorted := append([]Input(nil), inputs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Name < sorted[j].Name })
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Name != sorted[j].Name {
+			return sorted[i].Name < sorted[j].Name
+		}
+		return sorted[i].Identity < sorted[j].Identity
+	})
+	for i := 1; i < len(sorted); i++ {
+		if sorted[i].Name == sorted[i-1].Name {
+			return "", fmt.Errorf(
+				"inputs %q and %q both reduce to the name %q; rename one of the module calls so the fingerprint is well defined",
+				sorted[i-1].Identity, sorted[i].Identity, sorted[i].Name)
+		}
+	}
 
 	sum := sha256.New()
 	for _, extra := range extras {
@@ -92,10 +117,10 @@ func Combine(inputs []Input, extras ...string) string {
 	for _, in := range sorted {
 		writeLine(sum, "input")
 		writeLine(sum, in.Name)
-		writeLine(sum, filepath.ToSlash(filepath.Clean(in.Path)))
+		writeLine(sum, in.Identity)
 		writeLine(sum, in.Digest)
 	}
-	return DigestPrefix + hexOf(sum.Sum(nil))
+	return DigestPrefix + hexOf(sum.Sum(nil)), nil
 }
 
 // configFiles lists the configuration file names directly inside dir, sorted in

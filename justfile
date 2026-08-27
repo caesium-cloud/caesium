@@ -547,6 +547,13 @@ integration-up-owner-memory: build-test
 # skip everywhere else (see CAESIUM_INFRA_LANE in test/infra_fixture_test.go):
 # the podman, helm and kubernetes lanes bring up their own servers without the
 # pack images and would drift red otherwise.
+#
+# CAESIUM_CACHE_ENABLED is set here because the whole point of this feature is
+# change-gating: without it every "must not be cached" assertion passes
+# vacuously and the cache-behaviour scenarios would measure nothing. It is NOT
+# added to integration-up, because every scenario there sets `metadata.cache:
+# true`, which pkg/jobdef.applyCache layers over the env default — so the
+# default lane genuinely does not depend on it.
 
 # Start the infra lane's server (own container, pack images built).
 integration-up-infra: build-test build-pack
@@ -574,6 +581,7 @@ integration-up-infra: build-test build-pack
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CACHE_ENABLED=true \
         -e {{ infra_deploy_key_env }}={{ infra_deploy_key_value }} \
         {{ local_image_ref }}:{{ tag }}-test start
 

@@ -312,3 +312,136 @@ func (s *IntegrationTestSuite) TestInfraDynamicModuleSourceIsRejected() {
 	s.Contains(s.taskLog(job.ID, run.ID, taskID), "Unknown module source",
 		"the failure should name Terraform's own diagnosis")
 }
+
+// TestInfraMultiRootDiscoverDrivesFanOut is the end-to-end proof that the
+// object-form partitions discover emits are accepted by the real expansion
+// path — not merely by the pack's own hand-copy of the rules.
+//
+// The pack cannot import Caesium, so `##caesium::partitions` is the only thing
+// holding the two together. Everything else in this stream drives discover in
+// single-root mode, where it emits a plain output row; multi-root mode is the
+// form §5.4 calls the real one and it produces a marker nothing else here
+// consumes. This scenario runs it through fanOut and asserts the three things a
+// bare string array cannot carry survive the round trip: the per-unit
+// fingerprint, the ordering edge, and the free-form `root` attribute.
+func (s *IntegrationTestSuite) TestInfraMultiRootDiscoverDrivesFanOut() {
+	s.requireInfraLane()
+
+	f := s.newInfraFixture("fanout")
+	alias := fmt.Sprintf("infra-fanout-%d", time.Now().UnixNano())
+
+	manifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Job
+metadata:
+  alias: %[1]s
+trigger:
+  type: cron
+  configuration:
+    expression: "0 0 31 2 *"
+volumes:
+  - name: fixture
+    source:
+      bind: %[2]q
+  - name: src
+    source:
+      bind: %[3]q
+steps:
+  - name: checkout
+    image: %[4]s
+    env:
+      GIT_URL: "file:///fixture"
+      GIT_REF: "main"
+      GIT_SPARSE: "stacks/** modules/**"
+      DEST: "/src"
+    volumeMounts:
+      - {volume: fixture, path: /fixture, readOnly: true}
+      - {volume: src, path: /src}
+    next: discover
+  - name: discover
+    image: %[5]s
+    dependsOn: [checkout]
+    env:
+      SCAN_ROOT: "/src/stacks"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+    next: plan
+  - name: plan
+    image: alpine:3.23
+    dependsOn: [discover]
+    command: ["sh", "-c", "echo stack=$CAESIUM_PARTITION && echo json=$CAESIUM_PARTITION_JSON && echo '##caesium::output {\"planned\": \"'$CAESIUM_PARTITION'\"}'"]
+    fanOut:
+      from: discover
+      maxPartitions: 8
+      onEmpty: fail
+`, alias, f.hostRepo, f.hostWorkspace, s.packImage("git-source"), s.packImage("tf-discover"))
+
+	dir := s.writeJobManifest(manifest)
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, 5*time.Minute)
+
+	s.Require().Equal("succeeded", run.Status,
+		"the fan-out run failed; task statuses: %v", s.taskStatusesByName(job.ID, run))
+
+	planID := s.jobTaskIDByName(job.ID, "plan")
+	instances := s.expandedPartitions(s.listPartitions(job.ID, run.ID, planID))
+	s.Require().Len(instances, 3, "discover's three stacks should expand to three instances: %#v", instances)
+
+	byValue := map[string]partitionInstance{}
+	for _, p := range instances {
+		byValue[p.Value] = p
+	}
+	for _, key := range []string{"network", "account", "app-web"} {
+		s.Require().Containsf(byValue, key, "no instance for stack %q (got %v)", key, byValue)
+	}
+
+	// The per-unit fingerprint rode along and was persisted per instance —
+	// without it every instance shares the producer's identity and no stack can
+	// ever be individually cache-gated.
+	fingerprints := map[string]string{}
+	for value, p := range byValue {
+		s.Truef(strings.HasPrefix(p.Fingerprint, "sha256:"),
+			"instance %q has no fingerprint (%q)", value, p.Fingerprint)
+		s.Equal("succeeded", p.Status, "instance %q", value)
+		fingerprints[p.Fingerprint] = value
+	}
+	s.Len(fingerprints, 3, "each stack must have its own fingerprint, got %v", fingerprints)
+
+	// The ordering edge survived: account and app-web wait on network.
+	s.Empty(byValue["network"].DependsOn, "network has no upstream stack")
+	for _, key := range []string{"account", "app-web"} {
+		s.Equal([]string{"network"}, byValue[key].DependsOn,
+			"stack %q lost its ordering edge", key)
+	}
+
+	// CAESIUM_PARTITION and the free-form `root` attribute reached the
+	// container, which is how tf-runner learns which directory to plan.
+	for _, key := range []string{"network", "account", "app-web"} {
+		logText := s.taskRunLog(job.ID, run.ID, planID, byValue[key].TaskRunID)
+		s.Containsf(logText, "stack="+key, "instance %q did not see its partition key", key)
+		s.Containsf(logText, `"root":"`+key+`"`,
+			"instance %q did not receive the root attribute in CAESIUM_PARTITION_JSON: %s", key, logText)
+		s.Containsf(logText, byValue[key].Fingerprint,
+			"instance %q did not receive its fingerprint in CAESIUM_PARTITION_JSON", key)
+	}
+}
+
+// taskRunLog fetches one fan-out instance's log.
+func (s *IntegrationTestSuite) taskRunLog(jobID, runID, taskID, taskRunID string) string {
+	s.T().Helper()
+
+	resp, err := s.doJSONRequest(http.MethodGet, fmt.Sprintf(
+		"%s/v1/jobs/%s/runs/%s/logs?task_id=%s&task_run_id=%s",
+		s.caesiumURL, jobID, runID, taskID, taskRunID), nil)
+	s.Require().NoError(err)
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(resp.Body)
+	s.Require().NoError(err)
+	s.Require().Equal(http.StatusOK, resp.StatusCode, "instance logs: %s", body)
+	return string(body)
+}

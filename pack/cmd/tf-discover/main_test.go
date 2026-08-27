@@ -385,3 +385,160 @@ func TestLoadConfigRequiresAScanRoot(t *testing.T) {
 		t.Fatal("terraform exec path was not resolved")
 	}
 }
+
+// remoteModuleStack prepares the fixture's non-local-module stack inside an
+// already-copied fixture root: it turns remote/subrepo into a git repository
+// and renders remote/consumer/main.tf to point at it over git::file://. It
+// returns the consumer stack's path.
+//
+// This is the shape almost every real Terraform repo has and the rest of the
+// fixture deliberately does not: a module Terraform must FETCH, which it
+// installs into TF_DATA_DIR rather than reading from the source tree.
+func remoteModuleStack(t *testing.T, root string) string {
+	t.Helper()
+
+	subrepo := filepath.Join(root, "remote", "subrepo")
+	gitInFixture(t, subrepo, "init", "--quiet", "--initial-branch=main")
+	commitFixtureRepo(t, subrepo, "subrepo")
+
+	consumer := filepath.Join(root, "remote", "consumer")
+	tmpl, err := os.ReadFile(filepath.Join(consumer, "main.tf.tmpl"))
+	if err != nil {
+		t.Fatalf("read consumer template: %v", err)
+	}
+	rendered := strings.ReplaceAll(string(tmpl), "__SUBREPO__", subrepo)
+	if err := os.WriteFile(filepath.Join(consumer, "main.tf"), []byte(rendered), 0o644); err != nil {
+		t.Fatalf("render consumer stack: %v", err)
+	}
+	return consumer
+}
+
+func gitInFixture(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	full := append([]string{
+		"-c", "user.name=Pack Test",
+		"-c", "user.email=pack@caesium.test",
+		"-c", "commit.gpgsign=false",
+		"-c", "safe.directory=" + dir,
+	}, args...)
+	cmd := exec.CommandContext(t.Context(), "git", full...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v in %s: %v\n%s", args, dir, err, out)
+	}
+	return string(out)
+}
+
+func commitFixtureRepo(t *testing.T, dir, msg string) {
+	t.Helper()
+	gitInFixture(t, dir, "add", "-A")
+	gitInFixture(t, dir, "commit", "-m", msg)
+}
+
+// TestFingerprintsAStackWithANonLocalModuleSource is the regression guard for
+// the shape the rest of the fixture cannot reach.
+//
+// Terraform installs a git/registry/http module into TF_DATA_DIR and records
+// the install path as the manifest Dir; because discover relocates TF_DATA_DIR
+// to an absolute per-run scratch directory (so the source mount can stay
+// read-only), that Dir is ABSOLUTE. Joining it onto the root module produced a
+// path that does not exist, so discover exited 1 on every such stack.
+func TestFingerprintsAStackWithANonLocalModuleSource(t *testing.T) {
+	root := fixtureCopy(t)
+	stack := remoteModuleStack(t, root)
+
+	values := singleRootOutput(t, testConfig(t, stack))
+	if !protocol.ValidDigest(values["fingerprint"]) {
+		t.Fatalf("fingerprint = %q", values["fingerprint"])
+	}
+	// The fetched module contributes its own input digest, so a change to it is
+	// visible to `caesium why` exactly like a local one.
+	if !protocol.ValidDigest(values["input_remote"]) {
+		t.Fatalf("input_remote = %q, want the fetched module's digest (keys %v)",
+			values["input_remote"], protocol.SortedKeys(values))
+	}
+	for _, key := range []string{"input_root", "input_local", "input_local_inner"} {
+		if !protocol.ValidDigest(values[key]) {
+			t.Fatalf("%s = %q (keys %v)", key, values[key], protocol.SortedKeys(values))
+		}
+	}
+}
+
+// TestInstalledModuleFingerprintIsIndependentOfTheDataDirectory is the
+// second-order half of the same defect: every run gets a fresh TF_DATA_DIR, so
+// if the install path reached the digest the fingerprint would move on every
+// single run and re-apply every stack forever (design §8, "fingerprint
+// nondeterminism").
+func TestInstalledModuleFingerprintIsIndependentOfTheDataDirectory(t *testing.T) {
+	root := fixtureCopy(t)
+	stack := remoteModuleStack(t, root)
+	cfg := testConfig(t, stack)
+
+	first := singleRootOutput(t, cfg)
+	second := singleRootOutput(t, cfg)
+
+	if first["fingerprint"] != second["fingerprint"] {
+		t.Fatalf("two runs of the same tree produced different fingerprints (%q vs %q); "+
+			"the per-run TF_DATA_DIR is leaking into the digest",
+			first["fingerprint"], second["fingerprint"])
+	}
+	if first["input_remote"] != second["input_remote"] {
+		t.Fatalf("the fetched module's input digest moved between runs: %q vs %q",
+			first["input_remote"], second["input_remote"])
+	}
+}
+
+// TestInstalledModuleFingerprintTracksItsContent proves the previous test is
+// not passing because the fetched module is being ignored.
+func TestInstalledModuleFingerprintTracksItsContent(t *testing.T) {
+	root := fixtureCopy(t)
+	stack := remoteModuleStack(t, root)
+	cfg := testConfig(t, stack)
+
+	before := singleRootOutput(t, cfg)
+
+	subrepo := filepath.Join(root, "remote", "subrepo")
+	main := filepath.Join(subrepo, "main.tf")
+	body, err := os.ReadFile(main)
+	if err != nil {
+		t.Fatalf("read subrepo module: %v", err)
+	}
+	if err := os.WriteFile(main, append(body, []byte("\n# touched\n")...), 0o644); err != nil {
+		t.Fatalf("edit subrepo module: %v", err)
+	}
+	commitFixtureRepo(t, subrepo, "touch")
+
+	after := singleRootOutput(t, cfg)
+	if after["input_remote"] == before["input_remote"] {
+		t.Fatal("editing the fetched module did not move its input digest")
+	}
+	if after["fingerprint"] == before["fingerprint"] {
+		t.Fatal("editing the fetched module did not move the stack fingerprint")
+	}
+}
+
+// TestDiscoverLeavesTheSourceTreeUntouchedWithARemoteModule keeps the
+// read-only-source property that motivated relocating TF_DATA_DIR in the first
+// place — the fetched module must land in the scratch directory, not in the
+// stack.
+func TestDiscoverLeavesTheSourceTreeUntouchedWithARemoteModule(t *testing.T) {
+	root := fixtureCopy(t)
+	stack := remoteModuleStack(t, root)
+
+	if _, err := runDiscover(t, testConfig(t, stack)); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+	if err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == tf.DataDirName {
+			rel, _ := filepath.Rel(root, path)
+			t.Fatalf("discover wrote %s into the source tree", rel)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("walk: %v", err)
+	}
+}

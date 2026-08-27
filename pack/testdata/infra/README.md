@@ -12,6 +12,8 @@ stacks/app-web    consumes network's vpc_id through TF_VAR_vpc_id
 modules/vpc       shared; used by network and app-web
 modules/tags      shared; calls modules/tags/inner by a RELATIVE source
 fail-closed/dynamic-source   a module source that is a variable
+remote/subrepo    module content the helper turns into a git repository
+remote/consumer   a stack whose module source is git::file:// (not a local path)
 stacks.yaml       inter-stack order for multi-root discover
 ```
 
@@ -32,6 +34,17 @@ Three things here are load-bearing and easy to break by "tidying":
   A stack that cannot be resolved must make the run red, never green-with-skips.
 - **`network`'s `admin_token` is `sensitive = true`.** It must never reach a
   task output row or an API response.
+- **`remote/consumer` is the only stack whose module Terraform must *fetch*.**
+  Registry, git and http sources all get installed into `TF_DATA_DIR`, and
+  discover relocates that to a per-run scratch directory so the source mount can
+  stay read-only — which makes the manifest's `Dir` for such a module an
+  absolute, per-run path. It has to be read from and must never be digested;
+  the module's stable identity is its source and version. Every other stack here
+  uses local relative sources, so without this one that whole path — the shape
+  of nearly every real Terraform repo — is untested. `remote/consumer/main.tf`
+  is rendered from `main.tf.tmpl` by the test helper because `git::file://`
+  needs an absolute path that no committed file can carry, and `remote/` sits
+  outside `stacks/` so multi-root discover never scans it.
 
 `.terraform.lock.hcl` is committed and locked for `linux_amd64` and
 `linux_arm64` so the warm step's mirror key is stable across CI runners.

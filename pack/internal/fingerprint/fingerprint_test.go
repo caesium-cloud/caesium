@@ -127,42 +127,102 @@ func TestDigestDirFailsClosedOnAnEmptyModule(t *testing.T) {
 	}
 }
 
-func TestCombineIsOrderIndependentAndCoversEveryField(t *testing.T) {
-	a := Input{Name: "root", Path: "./", Digest: DigestPrefix + "aa"}
-	b := Input{Name: "tags", Path: "../../modules/tags", Digest: DigestPrefix + "bb"}
+func mustCombine(t *testing.T, inputs []Input, extras ...string) string {
+	t.Helper()
+	got, err := Combine(inputs, extras...)
+	if err != nil {
+		t.Fatalf("Combine: %v", err)
+	}
+	return got
+}
 
-	if Combine([]Input{a, b}) != Combine([]Input{b, a}) {
+func TestCombineIsOrderIndependentAndCoversEveryField(t *testing.T) {
+	a := Input{Name: "root", Identity: ".", Digest: DigestPrefix + "aa"}
+	b := Input{Name: "tags", Identity: "../../modules/tags", Digest: DigestPrefix + "bb"}
+
+	if mustCombine(t, []Input{a, b}) != mustCombine(t, []Input{b, a}) {
 		t.Fatal("Combine depends on input order")
 	}
 
-	base := Combine([]Input{a, b}, "workspace=default")
-	if base == Combine([]Input{a, b}, "workspace=staging") {
+	base := mustCombine(t, []Input{a, b}, "workspace=default")
+	if base == mustCombine(t, []Input{a, b}, "workspace=staging") {
 		t.Fatal("an extra fact did not change the fingerprint")
 	}
 
 	moved := b
 	moved.Digest = DigestPrefix + "cc"
-	if base == Combine([]Input{a, moved}, "workspace=default") {
+	if base == mustCombine(t, []Input{a, moved}, "workspace=default") {
 		t.Fatal("a changed input digest did not change the fingerprint")
 	}
 
 	relocated := b
-	relocated.Path = "../../shared/tags"
-	if base == Combine([]Input{a, relocated}, "workspace=default") {
+	relocated.Identity = "../../shared/tags"
+	if base == mustCombine(t, []Input{a, relocated}, "workspace=default") {
 		t.Fatal("a relocated module did not change the fingerprint")
 	}
 
 	renamed := b
 	renamed.Name = "tags2"
-	if base == Combine([]Input{a, renamed}, "workspace=default") {
+	if base == mustCombine(t, []Input{a, renamed}, "workspace=default") {
 		t.Fatal("a renamed module call did not change the fingerprint")
 	}
 }
 
-func TestCombineNormalizesEquivalentPaths(t *testing.T) {
-	a := Input{Name: "tags", Path: "../../modules/tags", Digest: DigestPrefix + "aa"}
-	b := Input{Name: "tags", Path: "../../modules/./tags/", Digest: DigestPrefix + "aa"}
-	if Combine([]Input{a}) != Combine([]Input{b}) {
-		t.Fatal("two spellings of the same relative path produced different fingerprints")
+// TestCombineRejectsCollidingNames guards the ordering hazard directly: module
+// names are a lossy projection of module keys ("a-b" and "a.b" both reduce to
+// "a_b"), and a set with two equal names has no defined order, so the digest
+// could differ between two runs over the same tree. Rejecting is the only
+// answer that keeps the fingerprint well defined — and the caller would also
+// have silently dropped one of the two per-input output rows.
+func TestCombineRejectsCollidingNames(t *testing.T) {
+	a := Input{Name: "a_b", Identity: "modules/a-b", Digest: DigestPrefix + "aa"}
+	b := Input{Name: "a_b", Identity: "modules/a/b", Digest: DigestPrefix + "bb"}
+
+	_, err := Combine([]Input{a, b})
+	if err == nil {
+		t.Fatal("two inputs reducing to the same name were accepted")
+	}
+	if !strings.Contains(err.Error(), "a_b") {
+		t.Fatalf("error should name the collision, got %v", err)
+	}
+	// Both spellings must be named so the operator knows which calls to rename.
+	for _, want := range []string{"modules/a-b", "modules/a/b"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should name %q, got %v", want, err)
+		}
+	}
+
+	// The same rejection regardless of the order they arrive in.
+	if _, err := Combine([]Input{b, a}); err == nil {
+		t.Fatal("the collision was accepted in the reverse order")
+	}
+}
+
+// TestCombineIsDeterministicForNearCollisions is the property the non-stable
+// sort put at risk: a set must fold to the same digest whatever order it
+// arrives in.
+func TestCombineIsDeterministicForNearCollisions(t *testing.T) {
+	inputs := []Input{
+		{Name: "tags", Identity: "modules/tags", Digest: DigestPrefix + "aa"},
+		{Name: "vpc", Identity: "modules/vpc", Digest: DigestPrefix + "bb"},
+		{Name: "root", Identity: ".", Digest: DigestPrefix + "cc"},
+	}
+	want := mustCombine(t, inputs)
+	for range 25 {
+		shuffled := []Input{inputs[2], inputs[0], inputs[1]}
+		if got := mustCombine(t, shuffled); got != want {
+			t.Fatalf("fingerprint is not order-stable: %q vs %q", got, want)
+		}
+	}
+}
+
+// TestCombineTakesIdentityVerbatim documents that normalization is the
+// caller's job: an identity may be a relative path OR a module source string,
+// and path-cleaning the latter would mangle its scheme separators.
+func TestCombineTakesIdentityVerbatim(t *testing.T) {
+	a := Input{Name: "m", Identity: "git::https://example.test/m.git", Digest: DigestPrefix + "aa"}
+	b := Input{Name: "m", Identity: "git:/https:/example.test/m.git", Digest: DigestPrefix + "aa"}
+	if mustCombine(t, []Input{a}) == mustCombine(t, []Input{b}) {
+		t.Fatal("Combine collapsed two distinct source strings")
 	}
 }

@@ -178,20 +178,31 @@ func fingerprintStack(ctx context.Context, cfg config, dir string) ([]fingerprin
 		return nil, "", err
 	}
 
-	inputs := make([]fingerprint.Input, 0, len(manifest.Modules))
-	for _, entry := range manifest.Modules {
-		moduleDir := filepath.Join(dir, filepath.FromSlash(entry.Dir))
-		digest, err := fingerprint.DigestDir(moduleDir)
+	// Resolve before digesting: an installed module (registry, git, http) lives
+	// in the data directory, so its manifest Dir is a per-run scratch path that
+	// must be read from but never digested.
+	modules, err := manifest.Resolve(dir, dataDir)
+	if err != nil {
+		return nil, "", err
+	}
+
+	inputs := make([]fingerprint.Input, 0, len(modules))
+	for _, module := range modules {
+		digest, err := fingerprint.DigestDir(module.Dir)
 		if err != nil {
-			return nil, "", fmt.Errorf("module %q (%s): %w", entry.Key, entry.Dir, err)
+			return nil, "", fmt.Errorf("module %q (%s): %w", module.Key, module.Identity, err)
 		}
 		inputs = append(inputs, fingerprint.Input{
-			Name:   tf.ModuleName(entry.Key),
-			Path:   entry.Dir,
-			Digest: digest,
+			Name:     tf.ModuleName(module.Key),
+			Identity: module.Identity,
+			Digest:   digest,
 		})
 	}
-	return inputs, fingerprint.Combine(inputs, "workspace="+cfg.Workspace), nil
+	fp, err := fingerprint.Combine(inputs, "workspace="+cfg.Workspace)
+	if err != nil {
+		return nil, "", fmt.Errorf("fingerprint %s: %w", dir, err)
+	}
+	return inputs, fp, nil
 }
 
 // ---------------------------------------------------------------------------
