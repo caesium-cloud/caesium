@@ -1,0 +1,260 @@
+package tf
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+
+	"github.com/hashicorp/terraform-exec/tfexec"
+	tfjson "github.com/hashicorp/terraform-json"
+)
+
+// Runner wraps one root module's terraform-exec handle with the settings every
+// tf-runner phase shares.
+//
+// Building on terraform-exec rather than shelling out is what makes the two
+// §6.4 security requirements typed field access instead of `jq` over a schema
+// the pack would otherwise hand-track, and what makes "did anything change" a
+// boolean rather than exit-code handling in shell (design §6.7).
+type Runner struct {
+	tf   *tfexec.Terraform
+	root string
+	log  io.Writer
+}
+
+// NewRunner prepares Terraform for root.
+//
+// It deliberately does NOT call tfexec's SetEnv. terraform-exec's SetEnv
+// rejects the TF_VAR_* and TF_CLI_ARGS_* prefixes and TF_WORKSPACE outright,
+// and CleanEnv strips them — so an environment installed that way could never
+// carry the cross-stack variables IMPORT_OUTPUTS_FROM exports. Leaving the
+// handle's env nil makes terraform-exec copy os.Environ() at each invocation
+// instead, which is why the runner's callers set TF_VAR_* and TF_DATA_DIR on
+// their own process (see ExportVariable). terraform-exec still removes
+// TF_WORKSPACE from what it builds, so workspace selection stays with
+// SelectWorkspace and cannot be silently overridden by a manifest.
+func NewRunner(root, execPath string, log io.Writer) (*Runner, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve root module %s: %w", root, err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return nil, fmt.Errorf("root module %s: %w", abs, err)
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("root module %s is not a directory", abs)
+	}
+
+	terraform, err := tfexec.NewTerraform(abs, execPath)
+	if err != nil {
+		return nil, fmt.Errorf("initialize terraform in %s: %w", abs, err)
+	}
+	// stdout belongs to the marker protocol alone. Terraform's own output is
+	// routed to the log stream, where it is still captured in the task log but
+	// can never be mistaken for a marker line.
+	//
+	// Both streams are pumped by terraform-exec on their OWN goroutines, and
+	// both land in the same writer here, so the writer is serialized. Without
+	// that, any caller passing something other than an *os.File — a buffer, a
+	// tee, a structured logger — races on every Terraform invocation.
+	serialized := &syncWriter{w: log}
+	terraform.SetStdout(serialized)
+	terraform.SetStderr(serialized)
+
+	return &Runner{tf: terraform, root: abs, log: serialized}, nil
+}
+
+// syncWriter serializes concurrent writes from terraform-exec's two output
+// pumps. A single *os.File would be safe on its own (one write syscall), but the
+// Runner's contract must not depend on which writer a caller happens to pass.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
+}
+
+// Root is the absolute root module directory.
+func (r *Runner) Root() string { return r.root }
+
+// Init runs `terraform init -input=false`, offline against the warm step's
+// filesystem mirror (the mirror is selected by TF_CLI_CONFIG_FILE, which the
+// manifest points at the generated /cache/terraformrc).
+//
+// backendConfig carries `-backend-config=key=value` settings, which is how a
+// pipeline keeps Terraform state on a volume that survives the source tree
+// being re-materialized on every run. Reconfigure is passed alongside it so a
+// data directory left by an earlier run with different settings is replaced
+// rather than prompting for a state migration in a non-interactive container.
+func (r *Runner) Init(ctx context.Context, backendConfig []string) error {
+	opts := []tfexec.InitOption{tfexec.Upgrade(false)}
+	for _, cfg := range backendConfig {
+		opts = append(opts, tfexec.BackendConfig(cfg))
+	}
+	if len(backendConfig) > 0 {
+		opts = append(opts, tfexec.Reconfigure(true))
+	}
+	if err := r.tf.Init(ctx, opts...); err != nil {
+		return fmt.Errorf("terraform init in %s: %w", r.root, err)
+	}
+	return nil
+}
+
+// SelectWorkspace switches to workspace, creating it if it does not exist yet.
+//
+// `workspace select` fails on an unknown workspace, and a pipeline that has
+// never run against a new environment has no workspace for it — so a bare
+// select would make the first run of every new environment red for a reason
+// that has nothing to do with the change under review.
+func (r *Runner) SelectWorkspace(ctx context.Context, workspace string) error {
+	if workspace == "" || workspace == "default" {
+		// `default` always exists and selecting it on a backend that does not
+		// support workspaces is an error, so it is left alone.
+		return nil
+	}
+	if err := r.tf.WorkspaceSelect(ctx, workspace); err == nil {
+		return nil
+	}
+	if err := r.tf.WorkspaceNew(ctx, workspace); err != nil {
+		return fmt.Errorf("select or create workspace %q in %s: %w", workspace, r.root, err)
+	}
+	return nil
+}
+
+// Plan writes a plan to outPath and reports whether the diff is non-empty.
+//
+// terraform-exec always passes -detailed-exitcode and -input=false, and turns
+// exit 2 into (true, nil) — so "did anything change" arrives as a boolean and
+// exit 1 arrives as an error, with no exit-code handling of our own to get
+// wrong (design §6.5).
+func (r *Runner) Plan(ctx context.Context, outPath string) (bool, error) {
+	changes, err := r.tf.Plan(ctx, tfexec.Out(outPath))
+	if err != nil {
+		return false, fmt.Errorf("terraform plan in %s: %w", r.root, err)
+	}
+	return changes, nil
+}
+
+// RefreshOnlyPlan reports whether refreshing state against the real world finds
+// a difference — the drift signal (design §6.6).
+//
+// outPath receives a plan file so the drift phase can read TYPED counts back
+// out of it rather than scraping Terraform's human output. It is scratch, not
+// an artifact: a refresh-only plan is not something anyone applies, so the
+// drift role never emits an output reference for it.
+func (r *Runner) RefreshOnlyPlan(ctx context.Context, outPath string) (bool, error) {
+	opts := []tfexec.PlanOption{tfexec.RefreshOnly(true)}
+	if outPath != "" {
+		opts = append(opts, tfexec.Out(outPath))
+	}
+	drifted, err := r.tf.Plan(ctx, opts...)
+	if err != nil {
+		return false, fmt.Errorf("terraform plan -refresh-only in %s: %w", r.root, err)
+	}
+	return drifted, nil
+}
+
+// ShowPlanFile decodes a saved plan into terraform-json's typed representation.
+// The caller must pass the result through StripSensitive before anything
+// derived from it is emitted.
+func (r *Runner) ShowPlanFile(ctx context.Context, path string) (*tfjson.Plan, error) {
+	plan, err := r.tf.ShowPlanFile(ctx, path)
+	if err != nil {
+		return nil, fmt.Errorf("terraform show %s: %w", path, err)
+	}
+	return plan, nil
+}
+
+// Apply applies exactly the saved plan at path — never a fresh plan computed at
+// apply time. Applying the reviewed artifact is the entire point of the
+// propose/apply split: a re-plan could differ from what was approved.
+func (r *Runner) Apply(ctx context.Context, planPath string) error {
+	if err := r.tf.Apply(ctx, tfexec.DirOrPlan(planPath)); err != nil {
+		return fmt.Errorf("terraform apply %s: %w", planPath, err)
+	}
+	return nil
+}
+
+// Outputs returns the root module's outputs, each carrying its Sensitive flag.
+func (r *Runner) Outputs(ctx context.Context) (map[string]tfexec.OutputMeta, error) {
+	outputs, err := r.tf.Output(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("terraform output in %s: %w", r.root, err)
+	}
+	return outputs, nil
+}
+
+// ExportVariable sets TF_VAR_<name> on this process so the next Terraform
+// invocation sees it.
+//
+// The process environment is the transport because terraform-exec refuses to
+// install TF_VAR_* through SetEnv, and because `-var` is not a substitute: an
+// undeclared variable passed with `-var` is a hard Terraform error, while an
+// undeclared TF_VAR_ is ignored. That difference decides the design. A stack
+// imports the whole output set of the stacks it depends on, and most of those
+// outputs are for other consumers — so with `-var` the cross-stack wiring would
+// fail the moment an upstream stack grew an output this one does not read.
+func ExportVariable(name, value string) error {
+	if !validVariableName(name) {
+		return fmt.Errorf("%q is not a Terraform variable name", name)
+	}
+	if strings.ContainsAny(value, "\x00") {
+		return fmt.Errorf("value for variable %q contains a NUL byte", name)
+	}
+	if err := os.Setenv("TF_VAR_"+name, value); err != nil {
+		return fmt.Errorf("export TF_VAR_%s: %w", name, err)
+	}
+	return nil
+}
+
+// validVariableName mirrors Terraform's identifier grammar.
+func validVariableName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case (r >= '0' && r <= '9') || r == '-':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// OutputValue renders one Terraform output as the scalar string a Caesium
+// output row can carry.
+//
+// A string output is emitted verbatim so a downstream TF_VAR_ receives exactly
+// the value Terraform produced. Everything else — an object, a list, a number —
+// is emitted as its compact JSON, because pkg/task.ParseOutput stores only
+// scalars and would otherwise DROP the key entirely.
+func OutputValue(meta tfexec.OutputMeta) (string, error) {
+	if len(meta.Value) == 0 {
+		return "", nil
+	}
+	var asString string
+	if err := json.Unmarshal(meta.Value, &asString); err == nil {
+		return asString, nil
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, meta.Value); err != nil {
+		return "", fmt.Errorf("render output value: %w", err)
+	}
+	return compact.String(), nil
+}
