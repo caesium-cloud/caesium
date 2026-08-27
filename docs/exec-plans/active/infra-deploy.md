@@ -313,7 +313,7 @@ fails closed on anything unexpected.
       must cover every stack directory it scans, so a permanently broken
       stack inside `stacks/` would make every multi-root discover red.
 
-- [ ] B4. `tf-discover` (spec §6.2). Env: `SCAN_ROOT`, `TF_WORKSPACE`. Single-root
+- [x] B4. `tf-discover` (spec §6.2). Env: `SCAN_ROOT`, `TF_WORKSPACE`. Single-root
       mode (one stack; the hand-written form): `tfexec.Get`, read
       `.terraform/modules/modules.json` with a version-pinned parser (unexpected
       shape → hard failure), hash the union of resolved module `Dir`s plus
@@ -331,6 +331,17 @@ fails closed on anything unexpected.
       Files: new `pack/cmd/tf-discover/main.go`, new
       `pack/internal/fingerprint/`, new `pack/internal/tf/modules.go` + tests.
       Depends on: B1, B3.
+      Landed. `pack/internal/tf` parses `modules.json` with
+      `DisallowUnknownFields` + structural checks (verified against
+      Terraform 1.15.9); `pack/internal/fingerprint` digests each module
+      directory non-recursively over `*.tf`, `*.tf.json`, `*.tfvars`,
+      `*.tfvars.json`, `*.tfquery.hcl`, `.terraform.lock.hcl`. Two
+      additions beyond the item: `TF_DATA_DIR` is relocated to a per-stack
+      temp dir so `terraform get` works against the `readOnly: true` source
+      mount §5.5 declares (verified: without it, discover needs a writable
+      source); and `stacks.yaml` must name exactly the stack directories on
+      disk, since a stack present but unlisted would be silently dropped.
+
 - [ ] B5. Integration scenarios for materialize + discover through the live
       server (docker engine, fixture repo bind-mounted, images from the H-1
       lane): spec §9 #7 (`discover` exit 1 → `plan`/`apply` never run and the

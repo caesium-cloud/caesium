@@ -11,6 +11,7 @@ go 1.25.6
 require (
 	github.com/hashicorp/terraform-exec v0.25.3
 	github.com/hashicorp/terraform-json v0.28.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
