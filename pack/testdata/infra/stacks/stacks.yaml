@@ -1,0 +1,25 @@
+# Inter-stack order for multi-root discover.
+#
+# Terraform has no cross-stack dependency declaration — a stack knows nothing
+# about the stack that produced the value it consumes — so the order lives here
+# and tf-discover copies it into each partition's `dependsOn` (design §5.4,
+# plan Open Question 4). Only the fan-out form consumes it; the hand-written
+# form orders stacks with `dependsOn` in the job YAML instead.
+#
+# Every stack directory under the scan root must appear here. A stack that
+# exists on disk but is missing from this file is a hard error in discover, not
+# a silent omission: dropping a stack from the plan is exactly the "green run
+# that deployed nothing" failure (design §8).
+stacks:
+  - name: network
+    root: network
+
+  - name: account
+    root: account
+    dependsOn:
+      - network
+
+  - name: app-web
+    root: app-web
+    dependsOn:
+      - network

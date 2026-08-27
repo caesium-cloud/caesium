@@ -275,7 +275,7 @@ fails closed on anything unexpected.
       Fail closed on every git error. Go tests over a temp repo.
       Files: new `pack/cmd/git-source/main.go` + `_test.go`.
       Depends on: B1.
-- [ ] B3. Hermetic fixture repo + test helper. `pack/testdata/infra/` with three
+- [x] B3. Hermetic fixture repo + test helper. `pack/testdata/infra/` with three
       stacks (`stacks/network` exporting `vpc_id`, `stacks/account` depending on
       network, `stacks/app-web` consuming `vpc_id` via `TF_VAR_vpc_id`), two
       shared modules (`modules/vpc`; `modules/tags` with a nested
@@ -290,6 +290,18 @@ fails closed on anything unexpected.
       path the job's docker `volumes` source points at. Files: new
       `pack/testdata/infra/**`, new `test/infra_fixture_test.go` (behind
       `//go:build integration`).
+      Landed as `pack/testdata/infra/**` (three stacks, `modules/vpc`,
+      `modules/tags` -> `modules/tags/inner` by relative source, `local`
+      backend, `null`/`random` with committed multi-arch
+      `.terraform.lock.hcl`, `network.admin_token` sensitive,
+      `stacks/app-web/extra.auto.tfvars.json`) plus
+      `test/infra_fixture_test.go` (copy + `git init` + edit-and-commit,
+      host/container bind-path mapping, lane guard). Deviation: the
+      dynamic-source stack lives at `fail-closed/dynamic-source`, NOT under
+      `stacks/` — `stacks.yaml` is authoritative for the multi-root set and
+      must cover every stack directory it scans, so a permanently broken
+      stack inside `stacks/` would make every multi-root discover red.
+
 - [ ] B4. `tf-discover` (spec §6.2). Env: `SCAN_ROOT`, `TF_WORKSPACE`. Single-root
       mode (one stack; the hand-written form): `tfexec.Get`, read
       `.terraform/modules/modules.json` with a version-pinned parser (unexpected
