@@ -299,7 +299,7 @@ owns the fingerprint, uses `terraform get` + the `.terraform/modules/modules.jso
 manifest (not `terraform modules -json`, whose JSON drops the parent path), and
 fails closed on anything unexpected.
 
-- [ ] B1. Scaffold the pack. Create the nested module `pack/go.mod`
+- [x] B1. Scaffold the pack. Create the nested module `pack/go.mod`
       (`github.com/caesium-cloud/caesium/pack`; **no** dependency on the root
       module; add `hashicorp/terraform-exec` + `hashicorp/terraform-json` here
       up front so B and C never both add deps), `pack/internal/protocol/`
@@ -316,7 +316,15 @@ fails closed on anything unexpected.
       so `terraform` is on `PATH` for tests). Files: new `pack/go.mod`,
       `pack/internal/protocol/*.go` + tests, new `build/Dockerfile.pack`,
       `justfile`.
-- [ ] B2. `git-source` (generic materialize role, spec §6.1). Env: `GIT_URL`,
+      Landed: `pack/go.mod` (terraform-exec + terraform-json pinned up front
+      via `pack/tools.go`), `pack/internal/protocol` (buffered emitter +
+      `FailClosed`), `build/Dockerfile.pack` (Terraform 1.15.9, checksum-
+      verified, `TF_DIST` switchable), justfile `pack-toolchain` / `pack-lint`
+      / `pack-test` / `build-pack`. The four role `main.go`s exist as
+      fail-closed "not implemented" entrypoints so `build-pack` yields four
+      images from day one; B2/B4 and Stream C replace them.
+
+- [x] B2. `git-source` (generic materialize role, spec §6.1). Env: `GIT_URL`,
       `GIT_REF`, `GIT_SPARSE` (space-separated paths), `GIT_SSH_KEY` (already
       resolved from `secret://` by Caesium; written to a 0600 temp file and
       never logged), `DEST` (default `/src`). Sparse shallow clone at the ref,
@@ -326,7 +334,18 @@ fails closed on anything unexpected.
       Fail closed on every git error. Go tests over a temp repo.
       Files: new `pack/cmd/git-source/main.go` + `_test.go`.
       Depends on: B1.
-- [ ] B3. Hermetic fixture repo + test helper. `pack/testdata/infra/` with three
+      Landed. Deviation from the item text: the digest is taken over
+      `git ls-files -s -z -- :(glob)<pattern>` rather than `git ls-tree -r`
+      — `ls-tree` supports neither pathspec magic nor globbing, so the
+      documented `stacks/**` patterns match nothing there and the digest
+      would silently cover an empty set. The clone is fresh into an empty
+      DEST, so the index is exactly the tree at the pinned commit. A `!`
+      negation in `GIT_SPARSE` is rejected (no pathspec equivalent, so
+      checkout and digest would describe different trees), and
+      `GIT_SSH_KNOWN_HOSTS` was added so host-key checking can be strict
+      rather than disabled.
+
+- [x] B3. Hermetic fixture repo + test helper. `pack/testdata/infra/` with three
       stacks (`stacks/network` exporting `vpc_id`, `stacks/account` depending on
       network, `stacks/app-web` consuming `vpc_id` via `TF_VAR_vpc_id`), two
       shared modules (`modules/vpc`; `modules/tags` with a nested
@@ -341,7 +360,19 @@ fails closed on anything unexpected.
       path the job's docker `volumes` source points at. Files: new
       `pack/testdata/infra/**`, new `test/infra_fixture_test.go` (behind
       `//go:build integration`).
-- [ ] B4. `tf-discover` (spec §6.2). Env: `SCAN_ROOT`, `TF_WORKSPACE`. Single-root
+      Landed as `pack/testdata/infra/**` (three stacks, `modules/vpc`,
+      `modules/tags` -> `modules/tags/inner` by relative source, `local`
+      backend, `null`/`random` with committed multi-arch
+      `.terraform.lock.hcl`, `network.admin_token` sensitive,
+      `stacks/app-web/extra.auto.tfvars.json`) plus
+      `test/infra_fixture_test.go` (copy + `git init` + edit-and-commit,
+      host/container bind-path mapping, lane guard). Deviation: the
+      dynamic-source stack lives at `fail-closed/dynamic-source`, NOT under
+      `stacks/` — `stacks.yaml` is authoritative for the multi-root set and
+      must cover every stack directory it scans, so a permanently broken
+      stack inside `stacks/` would make every multi-root discover red.
+
+- [x] B4. `tf-discover` (spec §6.2). Env: `SCAN_ROOT`, `TF_WORKSPACE`. Single-root
       mode (one stack; the hand-written form): `tfexec.Get`, read
       `.terraform/modules/modules.json` with a version-pinned parser (unexpected
       shape → hard failure), hash the union of resolved module `Dir`s plus
@@ -359,7 +390,18 @@ fails closed on anything unexpected.
       Files: new `pack/cmd/tf-discover/main.go`, new
       `pack/internal/fingerprint/`, new `pack/internal/tf/modules.go` + tests.
       Depends on: B1, B3.
-- [ ] B5. Integration scenarios for materialize + discover through the live
+      Landed. `pack/internal/tf` parses `modules.json` with
+      `DisallowUnknownFields` + structural checks (verified against
+      Terraform 1.15.9); `pack/internal/fingerprint` digests each module
+      directory non-recursively over `*.tf`, `*.tf.json`, `*.tfvars`,
+      `*.tfvars.json`, `*.tfquery.hcl`, `.terraform.lock.hcl`. Two
+      additions beyond the item: `TF_DATA_DIR` is relocated to a per-stack
+      temp dir so `terraform get` works against the `readOnly: true` source
+      mount §5.5 declares (verified: without it, discover needs a writable
+      source); and `stacks.yaml` must name exactly the stack directories on
+      disk, since a stack present but unlisted would be silently dropped.
+
+- [x] B5. Integration scenarios for materialize + discover through the live
       server (docker engine, fixture repo bind-mounted, images from the H-1
       lane): spec §9 #7 (`discover` exit 1 → `plan`/`apply` never run and the
       run is **red**, not green-with-skips), #8 (two runs → identical
@@ -577,9 +619,22 @@ renders the summary and shows the reference.
       exported by `ProposalPanel.tsx`, and it's display-only, not the parsing
       this item was told to reuse rather than duplicate).
 
+      Landed as `test/infra_discover_test.go`: five `TestInfra…` scenarios on
+      the live server covering §9 #7 (discover exits 1 -> run red, plan and
+      apply never run, no fingerprint), #8 (two checkouts of the same tree
+      at DIFFERENT host paths -> byte-identical fingerprint, which also
+      proves path-independence), #10 (dynamic module source -> red, no
+      fingerprint, Terraform's own diagnosis in the log), and the
+      `git-source` contract (`commit` matches the fixture HEAD,
+      `treeDigest` present, `GIT_SSH_KEY` resolved through the real
+      `secret://env` provider with its value absent from every task log and
+      from the stored spec). The fixture repo and the shared workspace are
+      bind-mounted from HOST paths (`CAESIUM_HOST_PROJECT_ROOT`); discover's
+      source mount is `readOnly: true`.
+
 ## Harness Strengthening
 
-- [ ] H-1. `integration-test-infra` lane + CI wiring. Add `integration-up-infra`
+- [x] H-1. `integration-test-infra` lane + CI wiring. Add `integration-up-infra`
       (`build-test` + `build-pack`; same env as `integration-up`) and
       `integration-test-infra` (runs `go test ./test/ -tags=integration -run
       'TestInfra'` against it, mirroring `integration-test-agent`'s own-server
@@ -593,6 +648,17 @@ renders the summary and shows the reference.
       `./...`). Files: `justfile`, `.github/workflows/ci.yml`,
       `test/infra_fixture_test.go` (lane guard helper).
       Depends on: B1.
+      Landed: `integration-up-infra` / `integration-test-infra` /
+      `integration-down-infra` on their own container
+      (`caesium-server-infra-test`, no published port so the lane coexists
+      with the others), running
+      `-run 'TestIntegrationTestSuite/TestInfra'` with `CAESIUM_INFRA_LANE`,
+      `CAESIUM_PACK_IMAGE_TAG` and `CAESIUM_HOST_PROJECT_ROOT` set. CI gains
+      `build-and-integration-test-infra` (amd64, mirroring the other
+      specialised lanes, which are not matrixed), a `pack-lint` step in
+      `lint`, a `pack-test` step in `unit-test`, and the new job in
+      `publish`'s `needs`.
+
 - [ ] H-2. Publish the pack images. Extend the `publish` job to build and push
       multi-arch manifests for `caesiumcloud/git-source`, `tf-discover`,
       `tf-warm`, `tf-runner` with the same tag scheme as `caesiumcloud/caesium`,

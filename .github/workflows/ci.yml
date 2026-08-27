@@ -70,6 +70,10 @@ jobs:
         run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
       - name: Lint
         run: just tag=${{ env.IMAGE_TAG }}-amd64 lint
+      # pack/ is a separate Go module, so `./...` in the root module never
+      # reaches it. Without this step the pack is unlinted.
+      - name: Lint pack module
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 pack-lint
 
   helm-lint:
     runs-on: ubuntu-24.04
@@ -99,6 +103,10 @@ jobs:
         run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
       - name: Unit tests
         run: just tag=${{ env.IMAGE_TAG }}-amd64 unit-test
+      # Same reason as the lint job: the nested pack module is invisible to the
+      # root module's ./... .
+      - name: Pack unit tests
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 pack-test
 
   unit-test-arm64:
     needs: builder-arm64
@@ -217,6 +225,23 @@ jobs:
         run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
       - name: Agent auth integration tests (amd64)
         run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-agent
+
+  build-and-integration-test-infra:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: docker/setup-docker-action@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Infra pack integration tests (amd64)
+        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-infra
 
   build-and-integration-test-arm64:
     needs: builder-arm64
@@ -573,6 +598,7 @@ jobs:
       - build-and-integration-test-distributed
       - build-and-integration-test-owner-memory
       - build-and-integration-test-agent-auth
+      - build-and-integration-test-infra
       - build-and-integration-test-arm64
       - helm-lint
       - helm-integration-test

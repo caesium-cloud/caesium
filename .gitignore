@@ -49,3 +49,11 @@ ui/.temp
 
 # CLI binary extracted by the integration-test recipes
 .tmp/
+
+# Terraform working state created when the pack fixture is exercised. The
+# committed .terraform.lock.hcl files are NOT ignored: they are fingerprint
+# input and the warm step's mirror key.
+pack/testdata/**/.terraform/
+pack/testdata/**/terraform.tfstate
+pack/testdata/**/terraform.tfstate.backup
+pack/testdata/**/tf.plan

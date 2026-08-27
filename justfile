@@ -14,6 +14,7 @@ bld_dir := "/bld/caesium"
 repo_dir := `pwd`
 it_container := "caesium-server-test"
 agent_it_container := "caesium-server-agent-test"
+infra_it_container := "caesium-server-infra-test"
 uid := `id -u`
 
 # Podman support: set CAESIUM_PODMAN=true to use podman and localhost-prefixed local image refs.
@@ -27,6 +28,17 @@ local_image_ref := if podman == "true" { "localhost/" + repo + "/" + image } els
 local_builder_ref := if podman == "true" { "localhost/" + repo + "/" + builder_image } else { repo + "/" + builder_image }
 triage_agent_image := repo + "/triage-agent"
 local_triage_agent_ref := if podman == "true" { "localhost/" + triage_agent_image } else { triage_agent_image }
+
+# The unit-pipeline pack images (git-source, tf-discover, tf-warm, tf-runner)
+# publish under the same Docker Hub org as the product image.
+local_pack_repo := if podman == "true" { "localhost/" + repo } else { repo }
+pack_toolchain_image := repo + "/caesium-pack-toolchain"
+local_pack_toolchain_ref := if podman == "true" { "localhost/" + pack_toolchain_image } else { pack_toolchain_image }
+# The single place the Terraform distribution/version is pinned; it flows into
+# build/Dockerfile.pack's ARG defaults. Changing TF_VERSION or TF_DIST also
+# requires the matching TF_SHA256_LINUX_* build-args (checksum-verified).
+tf_dist := env("CAESIUM_TF_DIST", "terraform")
+tf_version := env("CAESIUM_TF_VERSION", "1.15.9")
 publish_image_ref := repo + "/" + image
 publish_builder_ref := repo + "/" + builder_image
 sock := env("CAESIUM_SOCK", default_sock)
@@ -35,6 +47,13 @@ auth_mode := env("CAESIUM_AUTH_MODE", "none")
 event_ingest_api_key := env("CAESIUM_EVENT_INGEST_API_KEY", "integration-test-key")
 contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
 agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
+# Suite-qualified: a bare method name matches no test at all.
+infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
+# A deliberately fake deploy key. The infra lane resolves it through the real
+# secret://env provider and then asserts the value never reaches a task log —
+# it is a canary, not a credential, and it opens nothing.
+infra_deploy_key_env := "CAESIUM_INFRA_FAKE_DEPLOY_KEY"
+infra_deploy_key_value := "caesium-infra-lane-canary-not-a-real-key"
 agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
@@ -121,6 +140,63 @@ build-triage-agent: validate-platform
         -t {{ local_triage_agent_ref }}:{{ tag }} \
         -t {{ triage_agent_image }}:latest \
         -f build/Dockerfile.triage-agent .
+
+# ---------------------------------------------------------------------------
+# The unit-pipeline pack (docs/superpowers/specs/…-infrastructure-deployment…).
+# `pack/` is a separate Go module, so it is invisible to the root `./...` and
+# needs its own lint/test targets — these are wired into CI's lint and
+# unit-test jobs alongside the root ones.
+# ---------------------------------------------------------------------------
+
+# Build the pack toolchain image (Go + golangci-lint + pinned terraform).
+pack-toolchain: validate-platform
+    {{ container_cli }} build --platform {{ platform }} \
+        --build-arg TF_DIST={{ tf_dist }} \
+        --build-arg TF_VERSION={{ tf_version }} \
+        --target toolchain \
+        -t {{ local_pack_toolchain_ref }}:{{ tag }} \
+        -f build/Dockerfile.pack .
+
+# gofmt + go vet + golangci-lint over the nested pack module.
+pack-lint: pack-toolchain
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }}/pack \
+        -e GOFLAGS=-buildvcs=false \
+        {{ local_pack_toolchain_ref }}:{{ tag }} \
+        sh -c 'set -eu; \
+            unformatted=$(gofmt -l .); \
+            if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi; \
+            go vet ./...; \
+            golangci-lint run ./...'
+
+# Runs inside the toolchain stage so `terraform` is on PATH for the tests that
+# drive it. The suite is hermetic: `terraform get` installs modules only (never
+# providers) and the fixture's module sources are all relative, while
+# git-source clones over file://. Verified to pass under `--network none`.
+
+# Run the pack module's unit tests (terraform on PATH; no network needed).
+pack-test: pack-toolchain
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }}/pack \
+        -e GOFLAGS=-buildvcs=false \
+        {{ local_pack_toolchain_ref }}:{{ tag }} \
+        go test -race ./...
+
+# Build all four pack role images (--target per role in Dockerfile.pack).
+build-pack: validate-platform
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for role in git-source tf-discover tf-warm tf-runner; do
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg TF_DIST={{ tf_dist }} \
+            --build-arg TF_VERSION={{ tf_version }} \
+            --target "$role" \
+            -t "{{ local_pack_repo }}/$role:{{ tag }}" \
+            -t "{{ repo }}/$role:latest" \
+            -f build/Dockerfile.pack .
+    done
 
 push:
     docker push {{ publish_image_ref }}:{{ tag }}
@@ -307,6 +383,9 @@ integration-down:
 integration-down-agent:
     {{ container_cli }} rm -f {{ agent_it_container }}
 
+integration-down-infra:
+    {{ container_cli }} rm -f {{ infra_it_container }}
+
 # Run integration tests against a Caesium server using the Podman engine.
 # Requires Podman to be installed and the Podman socket to be active
 
@@ -462,6 +541,83 @@ integration-up-owner-memory: build-test
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
         {{ local_image_ref }}:{{ tag }}-test start
+
+# The infra lane runs its own server so it can coexist with the default lane,
+# and it builds the pack images the TestInfra scenarios mount. Those scenarios
+# skip everywhere else (see CAESIUM_INFRA_LANE in test/infra_fixture_test.go):
+# the podman, helm and kubernetes lanes bring up their own servers without the
+# pack images and would drift red otherwise.
+#
+# CAESIUM_CACHE_ENABLED is set here because the whole point of this feature is
+# change-gating: without it every "must not be cached" assertion passes
+# vacuously and the cache-behaviour scenarios would measure nothing. It is NOT
+# added to integration-up, because every scenario there sets `metadata.cache:
+# true`, which pkg/jobdef.applyCache layers over the env default — so the
+# default lane genuinely does not depend on it.
+
+# Start the infra lane's server (own container, pack images built).
+integration-up-infra: build-test build-pack
+    {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true
+    {{ container_cli }} run -d --platform {{ platform }} \
+        --name {{ infra_it_container }} \
+        --privileged \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        --user 0:0 \
+        -e CAESIUM_MANUAL_TRIGGER_API_KEY=integration-test-key \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e CAESIUM_LOG_LEVEL=debug \
+        -e CAESIUM_DATABASE_SHARDS=4 \
+        -e CAESIUM_OPEN_LINEAGE_ENABLED=true \
+        -e CAESIUM_OPEN_LINEAGE_TRANSPORT=console \
+        -e CAESIUM_FRESHNESS_ENABLED=true \
+        -e CAESIUM_CONTRACT_ENFORCEMENT=fail \
+        -e CAESIUM_CONTRACT_DEPRECATION_WINDOW={{ contract_deprecation_window }} \
+        -e CAESIUM_CACHE_PIN_DIGESTS=true \
+        -e CAESIUM_NOTIFICATION_WATCHER_INTERVAL=1s \
+        -e CAESIUM_RATE_LIMIT_PRUNER_ENABLED=true \
+        -e CAESIUM_RATE_LIMIT_PRUNE_INTERVAL=500ms \
+        -e CAESIUM_RUN_QUEUE_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
+        -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
+        -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e CAESIUM_CACHE_ENABLED=true \
+        -e {{ infra_deploy_key_env }}={{ infra_deploy_key_value }} \
+        {{ local_image_ref }}:{{ tag }}-test start
+
+# Run the TestInfra scenarios against the infra lane's server.
+integration-test-infra:
+    just tag={{ tag }} integration-up-infra
+    @cli_dir={{ repo_dir }}/.tmp/caesium-cli-infra; \
+    rm -rf "$cli_dir"; \
+    mkdir -p "$cli_dir"; \
+    cli_ctr=$({{ container_cli }} create --platform {{ platform }} {{ local_image_ref }}:{{ tag }}-test true); \
+    trap '{{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; rm -rf "$cli_dir"' EXIT; \
+    {{ container_cli }} cp "$cli_ctr":/bin/caesium "$cli_dir/caesium"; \
+    chmod +x "$cli_dir/caesium"; \
+    {{ container_cli }} rm -f "$cli_ctr" >/dev/null 2>&1 || true; \
+    if {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -v {{ sock }}:/var/run/docker.sock \
+        -e CAESIUM_CLI_PATH={{ bld_dir }}/.tmp/caesium-cli-infra/caesium \
+        -e CAESIUM_EVENT_INGEST_API_KEY={{ event_ingest_api_key }} \
+        -e DOCKER_HOST=unix:///var/run/docker.sock \
+        -e CAESIUM_INFRA_LANE=true \
+        -e CAESIUM_PACK_IMAGE_TAG={{ tag }} \
+        -e CAESIUM_HOST_PROJECT_ROOT={{ repo_dir }} \
+        -e CAESIUM_INFRA_DEPLOY_KEY_REF=secret://env/{{ infra_deploy_key_env }} \
+        -e CAESIUM_INFRA_DEPLOY_KEY_CANARY={{ infra_deploy_key_value }} \
+        --network=container:{{ infra_it_container }} \
+        -w {{ bld_dir }} \
+        {{ local_builder_ref }}:{{ tag }}-full \
+        sh -c 'mkdir -p ui/dist && touch ui/dist/index.html && go test ./test/ -tags=integration -run "{{ infra_integration_run }}" -timeout 20m -v'; then \
+      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
+    else \
+      echo "infra integration tests failed; caesium server logs:"; \
+      {{ container_cli }} logs {{ infra_it_container }} || true; \
+      {{ container_cli }} rm -f {{ infra_it_container }} >/dev/null 2>&1 || true; \
+      exit 1; \
+    fi
 
 integration-up-agent: build-test build-triage-agent
     {{ container_cli }} rm -f {{ agent_it_container }} >/dev/null 2>&1 || true
