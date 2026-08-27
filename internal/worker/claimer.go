@@ -170,7 +170,14 @@ func (c *Claimer) ClaimNext(ctx context.Context) (*models.TaskRun, error) {
 		}
 		if !acquired {
 			counts.commit()
-			if err := c.store.RateLimitTask(ctx, claimed.JobRunID, claimed.TaskID, retryAfter); err != nil {
+			// claimed.ID, never claimed.TaskID. The park must name the ROW this
+			// worker just claimed: for a fanned step the catalog task id matches
+			// all N siblings, so RateLimitTask returned ErrAmbiguousTaskRun and
+			// ClaimNext bailed out AFTER the claim UPDATE had already flipped the
+			// row to running — leaving an instance running, claimed, with no
+			// container and no worker that would ever start one. That stalls the
+			// whole run, and only for partitions above index 0.
+			if err := c.store.RateLimitTask(ctx, claimed.JobRunID, claimed.ID, retryAfter); err != nil {
 				return nil, err
 			}
 			metrics.RunSkippedTotal.WithLabelValues(jobAlias, "rate_limit").Inc()

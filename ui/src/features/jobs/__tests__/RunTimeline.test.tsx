@@ -104,4 +104,22 @@ describe("RunTimeline", () => {
     expect(groupRow).toHaveTextContent("×3");
     expect(within(groupRow).queryByTestId("run-timeline-density-strip")).not.toBeInTheDocument();
   });
+
+  it("renders a group lane for a single-partition group carrying partition identity", () => {
+    // Regression: an expansion that materializes exactly one instance still has
+    // a partition value and its own cache identity — gating on
+    // `partition_count > 1` alone silently rendered it as a plain row, so the
+    // same step's lane changed shape run to run as N crossed 1.
+    const tasks = [
+      makeTask({ task_id: "task-2", partition_count: 1, partition_value: "alpha" }),
+    ];
+
+    render(
+      <RunTimeline tasks={tasks} taskDefinitions={taskDefinitions} runStartedAt="2026-08-01T00:00:00.000Z" />,
+    );
+
+    const row = screen.getByTestId("run-timeline-task-row");
+    const groupRow = within(row).getByTestId("run-timeline-group-row");
+    expect(groupRow).toHaveTextContent("×1");
+  });
 });

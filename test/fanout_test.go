@@ -459,6 +459,14 @@ func (s *IntegrationTestSuite) TestFanOutConflictingKeyFailsProducer() {
 	s.Empty(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
 }
 
+// TestFanOutHTTPRetryPartition drives the per-instance retry ENDPOINT, whose
+// contract is deliberately lane-dependent: retrying one instance means
+// re-executing it, and only a distributed lane runs the dispatcher that can, so
+// the local server answers 409 instead of resetting a row nothing would pick up.
+// The endpoint also accepts a `failed` instance only — retrying a success would
+// discard a good result and re-run the work for nothing — so the fixture must
+// hand it a genuinely failed one, which the assertion below pins rather than
+// assumes.
 func (s *IntegrationTestSuite) TestFanOutHTTPRetryPartition() {
 	alias := fmt.Sprintf("fanout-retry-%d", time.Now().UnixNano())
 	manifest := fmt.Sprintf(`
@@ -498,19 +506,64 @@ steps:
 	runID := s.triggerRun(job.ID)
 	run := s.awaitRun(job.ID, runID, runTimeout)
 	processID := s.jobTaskIDByName(job.ID, "process")
-	parts := s.listPartitions(job.ID, run.ID, processID)
-	s.Require().GreaterOrEqual(len(parts), 2)
-	failIdx := -1
-	for _, p := range parts {
-		if p.Value == "fail" {
-			failIdx = p.Index
-		}
-	}
-	s.Require().GreaterOrEqual(failIdx, 0)
-	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry", s.caesiumURL, job.ID, run.ID, processID, failIdx), nil)
+	before := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.Require().Len(before, 2, "both partitions must materialize: %v", before)
+	failRow, ok := before["fail"]
+	s.Require().True(ok, "the fixture must produce a `fail` instance: %v", before)
+	s.Require().Equal("failed", failRow.Status,
+		"the endpoint accepts a FAILED instance only, so the fixture has to hand it one (got %q)", failRow.Status)
+	keepRow := before["keep"]
+
+	resp, err := s.doJSONRequest(http.MethodPost, fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry", s.caesiumURL, job.ID, run.ID, processID, failRow.Index), nil)
 	s.Require().NoError(err)
-	defer resp.Body.Close()
-	s.Equal(http.StatusOK, resp.StatusCode)
+	body, readErr := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	s.Require().NoError(readErr)
+
+	if !distributedLane() {
+		s.Require().Equal(http.StatusConflict, resp.StatusCode,
+			"local mode must refuse per-partition retry rather than reset an instance nothing re-dispatches: %s", body)
+		s.Contains(string(body), "distributed execution mode",
+			"the refusal must name the condition an operator can act on: %s", body)
+
+		after := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+		s.Equal("failed", after["fail"].Status,
+			"a refused retry must leave the instance exactly as it was, never half-reset")
+		s.Equal(failRow.TaskRunID, after["fail"].TaskRunID, "a refused retry must not re-key the instance")
+		return
+	}
+
+	s.Require().Equal(http.StatusOK, resp.StatusCode,
+		"retrying a failed instance in a distributed lane must be accepted: %s", body)
+
+	// The reset happens inside the request, so this half is deterministic in
+	// every distributed configuration regardless of dispatch cadence.
+	after := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+	s.NotEqual("failed", after["fail"].Status,
+		"a 200 retry must reset the instance for another attempt, got %q", after["fail"].Status)
+	s.Equal(failRow.TaskRunID, after["fail"].TaskRunID,
+		"a retry reuses the instance row; a new row would orphan its logs and receipts")
+	s.Equal(keepRow.Status, after["keep"].Status, "retrying `fail` must not disturb its sibling")
+	s.Equal(keepRow.TaskRunID, after["keep"].TaskRunID, "retrying `fail` must not re-key its sibling")
+
+	// Re-dispatch: a 200 claims the instance will run again, so the reopened run
+	// must drain rather than leave it non-terminal forever. WHICH terminal state
+	// is deliberately not asserted — this fixture's command still fails for
+	// `fail`, so failing a second time proves the re-execution just as well.
+	redispatchDeadline := time.Now().Add(60 * time.Second)
+	for {
+		current := partitionsByValue(s.expandedPartitions(s.listPartitions(job.ID, run.ID, processID)))
+		if isTerminalPartitionStatus(current["fail"].Status) {
+			break
+		}
+		if time.Now().After(redispatchDeadline) {
+			s.Failf("a reset instance never ran again",
+				"partition `fail` is still %q 60s after a 200 retry: the endpoint accepted a retry that "+
+					"nothing performed, so the reopened run is not being dispatched", current["fail"].Status)
+			break
+		}
+		time.Sleep(fanOutPollInterval)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1158,9 +1211,13 @@ echo partition=$CAESIUM_PARTITION`, rootHealthyAt.Unix(), rootHealthyAt.Unix()),
 		"the sibling's instance row must be reused, not recreated")
 
 	// `caesium run retry --partition` is the single-instance verb over the same
-	// group: it resets exactly one terminal instance and leaves its siblings
-	// alone. Driven through the CLI (not the endpoint) because the CLI is the
-	// surface an operator uses, and its stdout must stay clean.
+	// group — and at this point every instance in it has SUCCEEDED, so what the
+	// CLI must do is REFUSE. Review settled two guards, and this asserts both
+	// through the operator's surface: the endpoint accepts a `failed` instance
+	// only (retrying a success would discard a good result and re-run the work
+	// for nothing), and the verb requires distributed execution mode. A
+	// successful --partition retry of a genuinely failed instance is covered by
+	// TestFanOutPartitionsPaginateAndResolveByKey.
 	args := []string{
 		"run", "retry",
 		"--job-id", jobEntry.ID,
@@ -1172,37 +1229,29 @@ echo partition=$CAESIUM_PARTITION`, rootHealthyAt.Unix(), rootHealthyAt.Unix()),
 	if s.authAPIKey != "" {
 		args = append(args, "--api-key", s.authAPIKey)
 	}
-	stdout, cliErr := s.runCLIStdout(args...)
-	s.Require().NoError(cliErr, "caesium run retry --partition failed:\n%s", stdout)
-	s.Contains(stdout, "partition", "the CLI must report what it retried: %q", stdout)
-	s.Contains(stdout, `"b"`, "the CLI must name the partition it retried: %q", stdout)
-
-	// The reset is synchronous in the request, so the sibling assertion is
-	// deterministic in every lane regardless of when the instance is re-dispatched.
-	single := partitionsByValue(s.expandedPartitions(s.listPartitions(jobEntry.ID, runID, "process")))
-	for _, value := range []string{"a", "c", "solo"} {
-		s.Equal(after[value].Status, single[value].Status,
-			"retrying partition b must not disturb sibling %s", value)
-		s.Equal(after[value].TaskRunID, single[value].TaskRunID,
-			"retrying partition b must not re-key sibling %s", value)
+	// Stdout and stderr are kept apart, and the match is on the MESSAGE: the CLI
+	// prints cobra usage alongside the error, so asserting over the whole output
+	// would pin the usage text rather than the refusal.
+	stdout, stderr, cliErr := s.runCLISeparate(args...)
+	combined := stdout + stderr
+	s.Require().Error(cliErr,
+		"retrying a succeeded instance must fail the command, not silently re-run it:\n%s", combined)
+	if distributedLane() {
+		s.Contains(combined, "only a failed partition can be retried",
+			"the refusal must say WHY this instance is ineligible:\n%s", combined)
+	} else {
+		s.Contains(combined, "distributed execution mode",
+			"in local mode the verb is refused for the lane, before instance eligibility:\n%s", combined)
 	}
-	s.NotContains([]string{"failed", "skipped"}, single["b"].Status,
-		"the retried instance must be reset for another attempt, got %q", single["b"].Status)
 
-	// Best-effort: where the lane has a dispatcher watching re-opened runs, the
-	// reset instance re-executes and lands successful. This is asserted
-	// conditionally on purpose — the reset above is the contract of the verb and
-	// holds in every lane, while re-dispatch of an instance in an already-finished
-	// run belongs to the dispatch loop, which only the distributed lanes run.
-	deadline := time.Now().Add(45 * time.Second)
-	for time.Now().Before(deadline) {
-		current := partitionsByValue(s.expandedPartitions(s.listPartitions(jobEntry.ID, runID, "process")))
-		if isTerminalPartitionStatus(current["b"].Status) {
-			s.Contains([]string{"succeeded", "cached"}, current["b"].Status,
-				"a re-dispatched instance must land successful, got %q", current["b"].Status)
-			break
-		}
-		time.Sleep(fanOutPollInterval)
+	// Either refusal must be inert. A retry that half-applied before rejecting
+	// would leave the group inconsistent in a way the run's status never shows.
+	single := partitionsByValue(s.expandedPartitions(s.listPartitions(jobEntry.ID, runID, "process")))
+	for _, value := range []string{"a", "b", "c", "solo"} {
+		s.Equal(after[value].Status, single[value].Status,
+			"a refused --partition retry must not disturb instance %s", value)
+		s.Equal(after[value].TaskRunID, single[value].TaskRunID,
+			"a refused --partition retry must not re-key instance %s", value)
 	}
 }
 
@@ -1460,4 +1509,188 @@ esac`,
 
 	s.NotEqual("succeeded", s.taskStatusesByName(job.ID, run)["publish"],
 		"the fan-in must not run when the group failed under the default policy")
+}
+
+// partitionPageResponse is the PAGINATED envelope of the partitions endpoint.
+// The narrower partitionListResponse above decodes only the rows, which is why
+// nothing caught the endpoint silently truncating a group at its default page:
+// `total`, `limit`, `offset` and `next_offset` are the whole contract a client
+// pages on, and a test that never decoded them could not observe it.
+//
+// NextOffset is a *int because the last page reports JSON null, and a plain int
+// would decode that as 0 — "start over", which is an infinite loop, not an end.
+type partitionPageResponse struct {
+	Partitions   []partitionInstance `json:"partitions"`
+	Total        int                 `json:"total"`
+	Limit        int                 `json:"limit"`
+	Offset       int                 `json:"offset"`
+	NextOffset   *int                `json:"next_offset"`
+	StatusCounts map[string]int      `json:"status_counts"`
+}
+
+// listPartitionsPage reads one page of the partitions endpoint with an explicit
+// query string, returning the full envelope rather than only the rows.
+func (s *IntegrationTestSuite) listPartitionsPage(jobID, runID, taskRef, query string) partitionPageResponse {
+	s.T().Helper()
+	path := fmt.Sprintf("/v1/jobs/%s/runs/%s/tasks/%s/partitions", jobID, runID, taskRef)
+	if query != "" {
+		path += "?" + query
+	}
+	var out partitionPageResponse
+	s.getJSON(path, &out)
+	return out
+}
+
+// partitionValuesOf projects instance rows onto their partition values, in the
+// order the endpoint returned them (partition_index ascending).
+func partitionValuesOf(rows []partitionInstance) []string {
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, r.Value)
+	}
+	return out
+}
+
+// TestFanOutPartitionsPaginateAndResolveByKey drives the PAGINATION contract of
+// the partitions endpoint and the two CLI consumers of it, end to end.
+//
+// Both consumers were reading page one and calling it the group:
+//
+//   - `caesium run partitions` rendered one response as the whole table, so a
+//     group larger than a page was silently truncated with nothing saying so;
+//   - `caesium run retry --partition <value>` listed and SCANNED for the value,
+//     so any instance past page one came back `partition "x" not found` — the
+//     larger the fan-out, the more of it was unreachable.
+//
+// Server-cap constraint on the fixture: every integration server runs with
+// CAESIUM_FANOUT_MAX_PARTITIONS=8, so a group big enough to overflow the
+// endpoint's real default page (100) cannot be materialized here. Paging is
+// therefore exercised by shrinking the PAGE to the group instead of growing the
+// group past the page — `limit=3` over five instances is the same two-page walk
+// the default page size performs over 250, and it exercises the identical
+// server code path (partitionPageBounds/nextPartitionOffset).
+//
+// `e` is the last instance by partition_index and is the one made to fail: it
+// is both the row a page-one scan cannot see and the only kind of row a
+// per-partition retry accepts (terminal).
+func (s *IntegrationTestSuite) TestFanOutPartitionsPaginateAndResolveByKey() {
+	alias := fmt.Sprintf("fanout-paging-%d", time.Now().UnixNano())
+	manifest := fanOutManifest(fanOutJob{
+		Alias:       alias,
+		ProducerCmd: `echo '##caesium::partitions ["a","b","c","d","e"]'`,
+		// `e` fails so it ends terminal-failed: a per-partition retry is refused
+		// on a non-terminal instance, and `continue` keeps its siblings running
+		// so the group really does materialize all five rows.
+		ConsumerCmd: `echo "processing $CAESIUM_PARTITION"
+if [ "$CAESIUM_PARTITION" = e ]; then
+  echo "e is expected to fail"
+  exit 1
+fi`,
+		FanOutOpts: []string{"failurePolicy: continue"},
+	})
+
+	dir := s.writeJobManifest(manifest)
+	defer os.RemoveAll(dir)
+
+	s.runCLI("job", "apply", "--path", dir, "--server", s.caesiumURL)
+	job := s.requireJobByAlias(alias)
+	runID := s.triggerRun(job.ID)
+	run := s.awaitRun(job.ID, runID, runTimeout)
+	s.Require().Equal("failed", run.Status, "instance `e` fails, so the run must fail under any policy")
+
+	all := s.expandedPartitions(s.listPartitions(job.ID, run.ID, "process"))
+	s.Require().Len(all, 5, "every emitted partition must have an instance row: %v", partitionStatusMap(all))
+	s.Require().Equal("failed", partitionStatusMap(all)["e"])
+
+	// ---- the endpoint's pagination contract -------------------------------
+
+	first := s.listPartitionsPage(job.ID, run.ID, "process", "limit=3")
+	s.Require().Len(first.Partitions, 3, "limit=3 must return three rows")
+	s.Equal([]string{"a", "b", "c"}, partitionValuesOf(first.Partitions),
+		"a page must be ordered by partition_index, not by arrival")
+	s.Equal(5, first.Total, "total describes the paged set, not the page")
+	s.Equal(3, first.Limit)
+	s.Equal(0, first.Offset)
+	s.Require().NotNil(first.NextOffset, "a truncated page must hand back a continuation cursor")
+	s.Equal(3, *first.NextOffset)
+	// status_counts is computed over the whole group, so a page still reports
+	// the group's mix — the number an operator needs while paging.
+	total := 0
+	for _, n := range first.StatusCounts {
+		total += n
+	}
+	s.Equal(5, total, "status_counts must describe the whole group, not the page: %v", first.StatusCounts)
+	s.Equal(1, first.StatusCounts["failed"], "status_counts: %v", first.StatusCounts)
+
+	second := s.listPartitionsPage(job.ID, run.ID, "process",
+		fmt.Sprintf("limit=3&offset=%d", *first.NextOffset))
+	s.Require().Len(second.Partitions, 2, "the tail page must carry the remaining rows")
+	s.Equal([]string{"d", "e"}, partitionValuesOf(second.Partitions))
+	s.Nil(second.NextOffset, "the last page must report next_offset null, not an offset past the end")
+
+	// The keyed read: `e` lives on page two, and this is the lookup that makes
+	// it addressable without walking there.
+	keyed := s.listPartitionsPage(job.ID, run.ID, "process", "partition=e")
+	s.Require().Len(keyed.Partitions, 1, "a keyed lookup must resolve exactly one instance")
+	s.Equal("e", keyed.Partitions[0].Value)
+	s.Equal(1, keyed.Total, "total must describe the filtered set for a keyed read")
+	s.Nil(keyed.NextOffset)
+
+	// ---- `caesium run partitions` -----------------------------------------
+
+	stdout, stderr, err := s.runCLISeparate("run", "partitions", run.ID,
+		"--job-id", job.ID, "--task", "process", "--server", s.caesiumURL)
+	s.Require().NoError(err, "run partitions failed: %s", stderr)
+	for _, value := range []string{"a", "b", "c", "d", "e"} {
+		s.Contains(stdout, value,
+			"the default table must page to completion, not stop at the first page:\n%s", stdout)
+	}
+	s.Contains(stdout, "5 partitions", "the table must state the size of the whole group:\n%s", stdout)
+
+	// --json must carry the whole group too, on clean stdout.
+	jsonOut, jsonErr, err := s.runCLISeparate("run", "partitions", run.ID,
+		"--job-id", job.ID, "--task", "process", "--server", s.caesiumURL, "--json")
+	s.Require().NoError(err, "run partitions --json failed: %s", jsonErr)
+	var doc partitionPageResponse
+	s.Require().NoError(json.Unmarshal([]byte(jsonOut), &doc),
+		"--json stdout was not parseable (stderr contamination?):\n%s", jsonOut)
+	s.Len(doc.Partitions, 5, "--json must emit every page's rows")
+	s.Equal(5, doc.Total)
+	s.ElementsMatch([]string{"a", "b", "c", "d", "e"}, partitionValuesOf(doc.Partitions))
+
+	// An explicit --limit hands paging back to the caller: one page, and the
+	// truncation note goes to STDERR so --json stays machine-readable.
+	windowOut, windowErr, err := s.runCLISeparate("run", "partitions", run.ID,
+		"--job-id", job.ID, "--task", "process", "--server", s.caesiumURL, "--limit", "3", "--json")
+	s.Require().NoError(err, "run partitions --limit failed: %s", windowErr)
+	var window partitionPageResponse
+	s.Require().NoError(json.Unmarshal([]byte(windowOut), &window),
+		"--limit --json stdout was not parseable:\n%s", windowOut)
+	s.Len(window.Partitions, 3, "--limit must fetch exactly one page")
+	s.Require().NotNil(window.NextOffset, "a windowed --json read must carry the continuation cursor")
+	s.Equal(3, *window.NextOffset)
+	s.Contains(windowErr, "showing 3 of 5 partitions",
+		"a windowed read must say so, on stderr:\n%s", windowErr)
+
+	// ---- `caesium run retry --partition` ----------------------------------
+
+	// The regression: `e` is on page two of a limit-3 walk and was the row a
+	// page-one scan reported as missing. The retry's OUTCOME is lane-dependent —
+	// per-partition retry requires distributed execution mode, and the local
+	// integration server refuses it with 409 — but "not found" is a defect in
+	// EVERY lane, which is what this asserts.
+	retryOut, retryErr, err := s.runCLISeparate("run", "retry",
+		"--job-id", job.ID, "--run-id", run.ID, "--task", "process",
+		"--partition", "e", "--server", s.caesiumURL)
+	combined := retryOut + retryErr
+	s.NotContains(combined, "not found",
+		"--partition must resolve through the keyed lookup; a page-one scan is what made an "+
+			"instance past the first page unreachable:\n%s", combined)
+	if err != nil {
+		s.Contains(combined, "distributed execution mode",
+			"the only acceptable failure here is the documented local-mode refusal:\n%s", combined)
+	} else {
+		s.Contains(retryOut, `Retried partition "e" (index 4)`,
+			"a successful retry must name the instance it reset:\n%s", retryOut)
+	}
 }

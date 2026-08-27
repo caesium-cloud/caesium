@@ -133,19 +133,19 @@ func (s *Store) DiffRuns(ctx context.Context, jobID, leftRunID, rightRunID uuid.
 		GeneratedAt:    time.Now().UTC(),
 	}
 
-	for _, taskName := range sortedTaskNames(leftTasks, rightTasks) {
-		leftTask, leftOK := leftTasks[taskName]
-		rightTask, rightOK := rightTasks[taskName]
+	for _, instanceID := range sortedInstanceIDs(leftTasks, rightTasks) {
+		leftTask, leftOK := leftTasks[instanceID]
+		rightTask, rightOK := rightTasks[instanceID]
 		switch {
 		case !leftOK:
-			label := runDiffInstanceKey(rightTask.TaskName, rightTask.PartitionValue)
+			label := runDiffInstanceLabel(rightTask.TaskName, rightTask.PartitionValue)
 			if rightTask.PartitionValue != "" {
 				out.PartitionsAdded = append(out.PartitionsAdded, label)
 			} else {
 				out.TasksAdded = append(out.TasksAdded, label)
 			}
 		case !rightOK:
-			label := runDiffInstanceKey(leftTask.TaskName, leftTask.PartitionValue)
+			label := runDiffInstanceLabel(leftTask.TaskName, leftTask.PartitionValue)
 			if leftTask.PartitionValue != "" {
 				out.PartitionsRemoved = append(out.PartitionsRemoved, label)
 			} else {
@@ -177,7 +177,29 @@ func loadRunDiffRun(db *gorm.DB, runID uuid.UUID) (*models.JobRun, error) {
 	return &run, nil
 }
 
-func (s *Store) latestTerminalTaskRunsByName(ctx context.Context, runID uuid.UUID) (map[string]runDiffTaskRunRow, error) {
+// runDiffInstanceID identifies one comparable unit in a run diff: an unfanned
+// task (empty Partition) or one fan-out instance of it.
+//
+// It is a STRUCT, not the string taskName+":"+partition it replaced. That
+// concatenation was ambiguous — task "a" partition "b:c" and task "a:b"
+// partition "c" both flattened to "a:b:c" — so two unrelated instances shared a
+// pairing slot and one silently overwrote the other, dropping a task from the
+// diff and comparing rows that never corresponded. Neither component is
+// constrained to exclude ":", so the only sound key is one that never joins
+// them.
+type runDiffInstanceID struct {
+	TaskName  string
+	Partition string
+}
+
+func (id runDiffInstanceID) less(other runDiffInstanceID) bool {
+	if id.TaskName != other.TaskName {
+		return id.TaskName < other.TaskName
+	}
+	return id.Partition < other.Partition
+}
+
+func (s *Store) latestTerminalTaskRunsByName(ctx context.Context, runID uuid.UUID) (map[runDiffInstanceID]runDiffTaskRunRow, error) {
 	var rows []runDiffTaskRunRow
 	if err := s.db.WithContext(ctx).
 		Table("task_runs").
@@ -189,9 +211,9 @@ func (s *Store) latestTerminalTaskRunsByName(ctx context.Context, runID uuid.UUI
 		return nil, err
 	}
 
-	byName := make(map[string]runDiffTaskRunRow, len(rows))
+	byName := make(map[runDiffInstanceID]runDiffTaskRunRow, len(rows))
 	for _, row := range rows {
-		key := runDiffInstanceKey(row.TaskName, row.PartitionValue)
+		key := runDiffInstanceID{TaskName: row.TaskName, Partition: row.PartitionValue}
 		if current, ok := byName[key]; !ok || laterTerminalTaskRun(row.TaskRun, current.TaskRun) {
 			byName[key] = row
 		}
@@ -199,7 +221,10 @@ func (s *Store) latestTerminalTaskRunsByName(ctx context.Context, runID uuid.UUI
 	return byName, nil
 }
 
-func runDiffInstanceKey(taskName, partition string) string {
+// runDiffInstanceLabel is the human-readable name an added/removed instance is
+// reported under. It is presentation only — never a map key (see
+// runDiffInstanceID for why).
+func runDiffInstanceLabel(taskName, partition string) string {
 	if partition == "" {
 		return taskName
 	}
@@ -257,20 +282,20 @@ func optionalTimeAfter(a, b *time.Time) bool {
 	}
 }
 
-func sortedTaskNames(left, right map[string]runDiffTaskRunRow) []string {
-	seen := make(map[string]struct{}, len(left)+len(right))
-	for name := range left {
-		seen[name] = struct{}{}
+func sortedInstanceIDs(left, right map[runDiffInstanceID]runDiffTaskRunRow) []runDiffInstanceID {
+	seen := make(map[runDiffInstanceID]struct{}, len(left)+len(right))
+	for id := range left {
+		seen[id] = struct{}{}
 	}
-	for name := range right {
-		seen[name] = struct{}{}
+	for id := range right {
+		seen[id] = struct{}{}
 	}
-	names := make([]string, 0, len(seen))
-	for name := range seen {
-		names = append(names, name)
+	ids := make([]runDiffInstanceID, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
 	}
-	sort.Strings(names)
-	return names
+	sort.Slice(ids, func(i, j int) bool { return ids[i].less(ids[j]) })
+	return ids
 }
 
 func diffRunTask(taskName string, left, right models.TaskRun) RunDiffTask {

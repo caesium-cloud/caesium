@@ -107,7 +107,14 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
           const color = colorFor(task.status);
           const label = taskLabel(task, taskDefinitions);
           const duration = end - start;
-          const isFanned = typeof task.partition_count === "number" && task.partition_count > 1;
+          // Partition IDENTITY, not count: an expansion that materializes exactly
+          // one instance still has a partition value and its own cache identity,
+          // so gating on `> 1` alone made the same step's lane silently change
+          // shape from run to run as N crosses 1. Mirrors
+          // internal/run.IsFanOutInstance / TaskDetailPanel's isFannedTask.
+          const isFanned =
+            typeof task.partition_count === "number" &&
+            (task.partition_count > 1 || (task.partition_count > 0 && !!task.partition_value));
           const displayLabel = isFanned ? `${label} ×${task.partition_count}` : label;
           const densitySegments = isFanned ? fanoutStatusSegments(task.partition_status_counts) : [];
 

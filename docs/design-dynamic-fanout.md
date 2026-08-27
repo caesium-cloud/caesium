@@ -1059,7 +1059,7 @@ by partition *value*, never by index.
 ## CLI
 
 ```sh
-caesium run partitions <run-id> --task process-file [--status failed] [--json]
+caesium run partitions <run-id> --task process-file [--status failed] [--limit N] [--offset N] [--json]
 caesium run retry <run-id> --task process-file --partition "2026-07-01"
 caesium job lint --path jobs/          # fanOut validation errors
 caesium dev --once --path job.yaml     # local fan-out with live group progress

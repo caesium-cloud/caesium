@@ -203,6 +203,14 @@ const (
 	executionModeDistributed = "distributed"
 )
 
+// fanOutSweepTimeout bounds the fan-out straggler sweep, which runs on a context
+// detached from the run's so a CANCELLED run still resolves its instance rows
+// (local mode has no recovery owner to revisit them). Detaching removes the
+// deadline the run's context supplied, so the sweep carries its own: generous
+// enough for a 10k-instance group's reads and writes, short enough that a wedged
+// database cannot hold the run loop open indefinitely.
+const fanOutSweepTimeout = 10 * time.Second
+
 func WithTriggerID(id *uuid.UUID) JobOption {
 	return func(j *job) {
 		j.triggerID = id
@@ -1203,6 +1211,53 @@ func (j *job) Run(ctx context.Context) error {
 		}, predHashByID
 	}
 
+	rateLimiter := ratelimit.NewLimiter(store.DB())
+
+	// acquireRateLimitFor consumes one rate-limit token for ONE UNIT OF WORK.
+	//
+	// taskID selects the RULE — declarations are per step, so every instance of a
+	// fanned step shares one. taskRef is the row a rejection parks, and it is a
+	// different thing: the catalog task id for an unfanned step, the instance's
+	// own TaskRun id for a fan-out instance. RateLimitTask refuses a catalog id
+	// that names N siblings (ErrAmbiguousTaskRun), so conflating the two both
+	// halted the run and, before that, let a whole group through on one token.
+	//
+	// One token per instance is what makes the local lane agree with the
+	// distributed ones: the claimer and the owner dispatcher each acquire per
+	// TaskRun row against the same catalog rule, so a `2 per minute` rule means
+	// two PARTITIONS a minute wherever the step runs. Acquiring once for the
+	// group meant a 1000-partition step consumed a single token locally and a
+	// thousand under a worker.
+	acquireRateLimitFor := func(taskID, taskRef uuid.UUID, partition string) (bool, time.Time, error) {
+		rule, ok, err := ratelimit.RuleForTask(ctx, store.DB(), runID, taskID)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if !ok {
+			return true, time.Time{}, nil
+		}
+		acquired, err := rateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
+		if err != nil {
+			return false, time.Time{}, err
+		}
+		if acquired {
+			return true, time.Time{}, nil
+		}
+
+		now := time.Now().UTC()
+		retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
+		if err := store.RateLimitTask(ctx, runID, taskRef, retryAfter); err != nil {
+			return false, time.Time{}, err
+		}
+		metrics.RunSkippedTotal.WithLabelValues(j.alias, "rate_limit").Inc()
+		logArgs := []any{"job_id", j.id, "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter}
+		if partition != "" {
+			logArgs = append(logArgs, "partition", partition)
+		}
+		log.Info("task delayed by rate limit", logArgs...)
+		return false, retryAfter, nil
+	}
+
 	// runFannedGroup executes one expanded fan-out group.
 	//
 	// Readiness is NOT tracked in memory here: it is read from each instance
@@ -1315,10 +1370,16 @@ func (j *job) Run(ctx context.Context) error {
 			hashByInstance = make(map[uuid.UUID]string, len(group.Instances))
 			inFlight       int
 			sawFailure     bool
-			firstErr       error
-			results        = make(chan instanceResult, len(group.Instances))
-			attempts       = make(map[uuid.UUID]int, len(group.Instances))
-			running        = make(map[uuid.UUID]bool, len(group.Instances))
+			// rateLimitFailed records that acquiring a rate-limit token itself
+			// errored (a store/limiter fault, not a rejection). It is separate
+			// from sawFailure because a rejected acquisition is normal and a
+			// broken one must not leave the group parked for a whole window
+			// waiting on a decision nothing is going to make.
+			rateLimitFailed bool
+			firstErr        error
+			results         = make(chan instanceResult, len(group.Instances))
+			attempts        = make(map[uuid.UUID]int, len(group.Instances))
+			running         = make(map[uuid.UUID]bool, len(group.Instances))
 		)
 
 		// dispatch runs one attempt of one instance. It owns every terminal write
@@ -1413,7 +1474,12 @@ func (j *job) Run(ctx context.Context) error {
 			cancel()
 
 			if execErr == nil && taskModel != nil {
-				if err := run.ValidateTaskOutputSchema(store, runID, taskModel.ID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
+				// Record violations on THIS INSTANCE's row. SaveSchemaViolations
+				// refuses a catalog task id that resolves to N siblings and only
+				// logs the refusal, so keying on taskModel.ID meant a fanned step
+				// recorded nothing: fail mode lost the evidence for the failure
+				// it was reporting, and warn mode opened an incident with no row.
+				if err := run.ValidateTaskOutputSchemaInstance(store, runID, taskModel.ID, taskRunID, output, taskModel.OutputSchema, j.schemaValidation); err != nil {
 					execErr = err
 				}
 			}
@@ -1500,14 +1566,65 @@ func (j *job) Run(ctx context.Context) error {
 			results <- instanceResult{taskRunID: taskRunID, partition: m.partition.Key, output: output, skippedTasks: completeSkipped, identityHash: inputHash}
 		}
 
+		// absorb folds one reported instance result into the group's bookkeeping.
+		// Shared by the loop and by the cancellation drain below so a cancelled
+		// group still collects the identities and outputs of instances that DID
+		// finish — the fan-in aggregate is rebuilt from them.
+		absorb := func(res instanceResult) {
+			inFlight--
+			delete(running, res.taskRunID)
+			for _, id := range res.skippedTasks {
+				if !seenSkipped[id] {
+					seenSkipped[id] = true
+					skippedTaskIDs = append(skippedTaskIDs, id)
+				}
+			}
+			if res.identityHash != "" {
+				hashByInstance[res.taskRunID] = res.identityHash
+			}
+		}
+
 		for {
 			rows, err := store.TaskRunInstances(ctx, runID, taskID)
 			if err != nil {
-				return skippedTaskIDs, err
+				if ctx.Err() == nil {
+					return skippedTaskIDs, err
+				}
+				// The run was cancelled out from under the loop, and this read
+				// carries the run's context, so it fails before a single row has
+				// been examined. Returning here is what left a cancelled run's
+				// instances stranded even after the SWEEP was detached: the sweep
+				// was never reached. Drain what is still in flight — those
+				// containers' contexts are cancelled too, so they resolve
+				// promptly — and fall through to the sweep, which runs detached
+				// and is the only thing that will resolve what was never
+				// dispatched.
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				sawFailure = true
+				for inFlight > 0 {
+					absorb(<-results)
+				}
+				break
 			}
 
 			terminal := 0
 			var ready []*run.TaskRun
+			// rateLimitedUntil is the earliest moment a parked instance becomes
+			// dispatchable again. RateLimitTask persists the deadline on the row,
+			// so a parked instance is recognizable across loop passes without any
+			// in-memory bookkeeping — the same way readiness is read, not tracked.
+			var rateLimitedUntil time.Time
+			noteRateLimited := func(at time.Time) {
+				if at.IsZero() {
+					return
+				}
+				if rateLimitedUntil.IsZero() || at.Before(rateLimitedUntil) {
+					rateLimitedUntil = at
+				}
+			}
+			now := time.Now().UTC()
 			for _, row := range rows {
 				if row == nil {
 					continue
@@ -1522,6 +1639,10 @@ func (j *job) Run(ctx context.Context) error {
 				// Readiness is the store's scalar, seeded at expansion and
 				// decremented by each terminal sibling.
 				if row.Status == run.TaskStatusPending && row.OutstandingPredecessors == 0 {
+					if row.RateLimitRetryAfter != nil && row.RateLimitRetryAfter.After(now) {
+						noteRateLimited(*row.RateLimitRetryAfter)
+						continue
+					}
 					ready = append(ready, row)
 				}
 			}
@@ -1541,6 +1662,24 @@ func (j *job) Run(ctx context.Context) error {
 						// cannot be executed safely; leave it to the store.
 						continue
 					}
+					// One token per INSTANCE, acquired before the container is
+					// launched and against the step's own rule. The token is not
+					// taken for the group at dispatch time, so a `2 per minute`
+					// rule admits two partitions a minute here exactly as it does
+					// under the claimer and the owner dispatcher.
+					acquired, retryAfter, rlErr := acquireRateLimitFor(taskID, row.ID, m.partition.Key)
+					if rlErr != nil {
+						if firstErr == nil {
+							firstErr = rlErr
+						}
+						sawFailure = true
+						rateLimitFailed = true
+						break
+					}
+					if !acquired {
+						noteRateLimited(retryAfter)
+						continue
+					}
 					attempts[row.ID]++
 					running[row.ID] = true
 					inFlight++
@@ -1549,6 +1688,28 @@ func (j *job) Run(ctx context.Context) error {
 			}
 
 			if inFlight == 0 {
+				if !rateLimitedUntil.IsZero() && !rateLimitFailed && (!failFast || !sawFailure) {
+					// Every dispatchable instance is parked behind the rate-limit
+					// window. Waiting here is what keeps the group alive: breaking
+					// out would hand still-runnable partitions to the straggler
+					// sweep, which resolves them as "never dispatched" and fails a
+					// run whose only problem was that it was going too fast.
+					wait := time.Until(rateLimitedUntil)
+					if wait <= 0 {
+						continue
+					}
+					timer := time.NewTimer(wait)
+					select {
+					case <-ctx.Done():
+						timer.Stop()
+						if firstErr == nil {
+							firstErr = ctx.Err()
+						}
+					case <-timer.C:
+						timer.Stop()
+						continue
+					}
+				}
 				// Nothing running and nothing dispatchable. Either fail_fast has
 				// tripped, or the remaining instances are blocked behind siblings
 				// the store has already resolved. Either way the straggler sweep
@@ -1557,18 +1718,7 @@ func (j *job) Run(ctx context.Context) error {
 			}
 
 			res := <-results
-			inFlight--
-			delete(running, res.taskRunID)
-
-			for _, id := range res.skippedTasks {
-				if !seenSkipped[id] {
-					seenSkipped[id] = true
-					skippedTaskIDs = append(skippedTaskIDs, id)
-				}
-			}
-			if res.identityHash != "" {
-				hashByInstance[res.taskRunID] = res.identityHash
-			}
+			absorb(res)
 
 			if res.retry {
 				// The row is pending again; the next loop pass re-reads it.
@@ -1604,12 +1754,29 @@ func (j *job) Run(ctx context.Context) error {
 		// does not, because a distributed worker may still POST a completion, and
 		// resolving a live row there would invite that worker to contradict it.
 		// Same operation, opposite epistemic position, correctly different guards.
-		rows, err := store.TaskRunInstances(ctx, runID, taskID)
+		//
+		// The sweep runs on a DETACHED context, and that is the whole reason it
+		// still works when it is needed most. It used to read through the run's
+		// own ctx, so a cancelled run made the very first query return
+		// context.Canceled and the sweep returned before resolving anything —
+		// exactly the "stranded for good" outcome the paragraph above says is not
+		// an available option in local mode. Cancellation is not a reason to skip
+		// the cleanup; it is the most common reason to need it. The timeout keeps
+		// a detached context from becoming an unbounded one if the DB is wedged.
+		sweepCtx, cancelSweep := context.WithTimeout(context.WithoutCancel(ctx), fanOutSweepTimeout)
+		defer cancelSweep()
+
+		// Captured once, before the writes below, so every row in this sweep gets
+		// the same explanation. ctx here is the RUN's context, not sweepCtx.
+		runCancelled := ctx.Err() != nil
+
+		rows, err := store.TaskRunInstances(sweepCtx, runID, taskID)
 		if err != nil {
 			return skippedTaskIDs, err
 		}
 		var stranded []string
 		var unrecorded []string
+		cancelledUnresolved := 0
 		for _, row := range rows {
 			if row == nil || run.IsTerminal(row.Status) {
 				continue
@@ -1630,12 +1797,30 @@ func (j *job) Run(ctx context.Context) error {
 			// good and hangs the accounting this sweep exists to protect. Say the
 			// true thing about it instead of leaving it.
 			wasRunning := row.Status == run.TaskStatusRunning
+			// A row still parked behind its rate-limit window is a third animal
+			// again: it was dispatchable, it was deliberately held back, and the
+			// run ended (cancelled, timed out) before the window rolled. Calling
+			// that "never dispatched (unresolved in-group dependency)" sends the
+			// reader hunting a dependsOn bug that does not exist.
+			rateLimited := !wasRunning && row.RateLimitRetryAfter != nil && row.RateLimitRetryAfter.After(time.Now().UTC())
+			// The status stays SKIPPED even for a cancelled run: these instances
+			// never ran, so `failed` — what the unfanned local path stamps on the
+			// task it was actually executing — would be a lie about work that
+			// never started, and would drag the failure accounting and the
+			// in-group cascade along with it. Only the REASON mirrors that path,
+			// so both lanes read the same way in `caesium run partitions`.
 			reason := "fan-out instance was never dispatched (unresolved in-group dependency)"
 			switch {
 			case wasRunning:
 				reason = "fan-out instance outcome unrecorded: completion write failed"
 			case failFast && sawFailure:
 				reason = "fan-out group failed fast"
+			case runCancelled && rateLimited:
+				reason = fmt.Sprintf("fan-out instance was parked by the step's rate limit when the run was cancelled: %v", ctx.Err())
+			case runCancelled:
+				reason = fmt.Sprintf("fan-out instance cancelled before dispatch: %v", ctx.Err())
+			case rateLimited:
+				reason = "fan-out instance still parked by the step's rate limit when the run ended"
 			}
 			// Note this resolves an INSTANCE row; its id is deliberately not
 			// added to skippedTaskIDs, which the run loop reads as catalog task
@@ -1646,6 +1831,11 @@ func (j *job) Run(ctx context.Context) error {
 			switch {
 			case wasRunning:
 				unrecorded = append(unrecorded, row.PartitionValue)
+			case runCancelled:
+				// Counted, not "stranded": the run was cancelled, and reporting
+				// these as unresolved partitions would bury the one fact that
+				// explains all of them under a list of symptoms.
+				cancelledUnresolved++
 			case !failFast || !sawFailure:
 				stranded = append(stranded, row.PartitionValue)
 			}
@@ -1665,33 +1855,77 @@ func (j *job) Run(ctx context.Context) error {
 				firstErr = fmt.Errorf("fan-out step %s left %d partition(s) unresolved: %v", taskID, len(stranded), stranded)
 			}
 		}
+		// Only when the cancellation actually left work unresolved. A group whose
+		// every instance had already finished when the run was cancelled did not
+		// fail, and manufacturing an error for it would turn a clean group into a
+		// failed one on the way out.
+		if cancelledUnresolved > 0 && firstErr == nil {
+			firstErr = fmt.Errorf("fan-out step %s left %d partition(s) unresolved when the run was cancelled: %w",
+				taskID, cancelledUnresolved, ctx.Err())
+		}
 
 		// Aggregate from the store so cache hits, skips and failures are all
 		// reflected, not just what this loop executed.
-		rows, err = store.TaskRunInstances(ctx, runID, taskID)
+		//
+		// The instance ROWS are the aggregate's source of truth, not the
+		// byPartition/hashByInstance maps above: those only ever describe the
+		// instances THIS invocation dispatched. After a manual partition retry
+		// (`caesium run retry --partition`) or a RetryFromFailure that preserved
+		// the succeeded siblings, that is a single instance — so the rebuilt
+		// fan-in aggregate reported PARTITION_COUNT=1 for an N-partition group
+		// and the group identity hash folded one instance instead of N, re-keying
+		// every downstream step purely because someone retried a partition.
+		// Hydrating from the rows makes a retried run's aggregate and group hash
+		// identical to a fresh run's.
+		// sweepCtx, not ctx: this rebuild is the other half of the cleanup above
+		// and is just as necessary on a cancelled run — a downstream step's
+		// predecessor hashes and fan-in aggregate must not silently vanish
+		// because the run's context died between the last instance and here.
+		identities, err := store.FanOutInstanceIdentities(sweepCtx, runID, taskID)
 		if err != nil {
 			return skippedTaskIDs, err
 		}
 		succeeded, failed := 0, 0
 		// groupHashes are the terminal-success instances' identities in
-		// partition-index order (TaskRunInstances orders by partition_index), the
-		// order run.GroupIdentityHash requires.
+		// partition-index order (FanOutInstanceIdentities orders by
+		// partition_index), the order run.GroupIdentityHash requires.
 		var groupHashes []string
-		for _, row := range rows {
-			if row == nil {
-				continue
-			}
-			switch row.Status {
+		for _, inst := range identities {
+			switch inst.Status {
 			case run.TaskStatusSucceeded, run.TaskStatusCached:
 				succeeded++
-				if h := hashByInstance[row.ID]; h != "" {
+				// The persisted (effective) identity is preferred over this
+				// invocation's computed one so the value folded here is
+				// byte-identical to what the SQL read path
+				// (store.PredecessorHashes) folds for the same group. The
+				// in-memory value is the fallback for the narrow case where
+				// persisting the hash failed.
+				h := inst.IdentityHash
+				if h == "" {
+					h = hashByInstance[inst.TaskRunID]
+				}
+				if h != "" {
 					groupHashes = append(groupHashes, h)
+				}
+				if _, seen := byPartition[inst.PartitionValue]; !seen && len(inst.Output) > 0 {
+					byPartition[inst.PartitionValue] = inst.Output
 				}
 			case run.TaskStatusFailed:
 				failed++
 			}
 		}
-		taskOutputs[taskID] = pkgtask.AggregateFanInOutputs(byPartition, succeeded, failed)
+		// An aggregate that does not fit MaxOutputBytes fails the GROUP rather
+		// than publishing a partial contract: silently collapsing to the three
+		// counters would drop every user key a downstream step reads.
+		aggregate, aggErr := pkgtask.AggregateFanInOutputs(taskName, byPartition, succeeded, failed)
+		if aggErr != nil {
+			log.Error("failed to aggregate fan-in outputs", "job_id", j.id, "task_id", taskID, "error", aggErr)
+			if firstErr == nil {
+				firstErr = aggErr
+			}
+		} else {
+			taskOutputs[taskID] = aggregate
+		}
 
 		// Publish ONE aggregate identity for the group so a downstream step folds
 		// the fanned predecessor into its own cache key as a single
@@ -1982,33 +2216,6 @@ func (j *job) Run(ctx context.Context) error {
 	active := 0
 	halt := false
 	deferred := make(map[uuid.UUID]time.Time)
-	rateLimiter := ratelimit.NewLimiter(store.DB())
-
-	acquireTaskRateLimit := func(taskID uuid.UUID) (bool, time.Time, error) {
-		rule, ok, err := ratelimit.RuleForTask(ctx, store.DB(), runID, taskID)
-		if err != nil {
-			return false, time.Time{}, err
-		}
-		if !ok {
-			return true, time.Time{}, nil
-		}
-		acquired, err := rateLimiter.Acquire(ctx, rule.Resource, rule.Units, rule.Limit, rule.Window)
-		if err != nil {
-			return false, time.Time{}, err
-		}
-		if acquired {
-			return true, time.Time{}, nil
-		}
-
-		now := time.Now().UTC()
-		retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
-		if err := store.RateLimitTask(ctx, runID, taskID, retryAfter); err != nil {
-			return false, time.Time{}, err
-		}
-		metrics.RunSkippedTotal.WithLabelValues(j.alias, "rate_limit").Inc()
-		log.Info("task delayed by rate limit", "job_id", j.id, "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter)
-		return false, retryAfter, nil
-	}
 
 	moveDueDeferred := func() bool {
 		now := time.Now().UTC()
@@ -2035,13 +2242,21 @@ func (j *job) Run(ctx context.Context) error {
 	}
 
 	dispatch := func(taskID uuid.UUID) error {
-		acquired, retryAfter, err := acquireTaskRateLimit(taskID)
-		if err != nil {
-			return err
-		}
-		if !acquired {
-			deferred[taskID] = retryAfter
-			return nil
+		// An EXPANDED fan-out step acquires its tokens per instance inside
+		// runFannedGroup, not once here for the whole group. Acquiring here would
+		// be wrong twice over: one token would admit all N partitions, and the
+		// rejection path would park the row by catalog task id — which names N
+		// rows, so RateLimitTask returns ErrAmbiguousTaskRun and this dispatch
+		// error halts the entire run.
+		if group, ok := lookupFanOutGroup(taskID); !ok || len(group.Instances) == 0 {
+			acquired, retryAfter, err := acquireRateLimitFor(taskID, taskID, "")
+			if err != nil {
+				return err
+			}
+			if !acquired {
+				deferred[taskID] = retryAfter
+				return nil
+			}
 		}
 
 		active++

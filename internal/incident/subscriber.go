@@ -368,6 +368,22 @@ func (s *Subscriber) handleSuccess(ctx context.Context, evt event.Event) {
 		}
 	}
 	if evt.TaskID != uuid.Nil {
+		// A success event names the CATALOG task, which for a fanned step covers
+		// N instance rows. Under fanOut.failurePolicy: continue the group can be
+		// terminal with some partitions failed and some succeeded, so
+		// "task_succeeded arrived" is not the same claim as "this task ran
+		// green". Remediating on it auto-closed the incident the failed sibling
+		// had just opened — a live failure disappearing from every alerting path
+		// that watches open incidents, with no human involved.
+		//
+		// This is belt-and-braces with the store, which no longer emits a
+		// group-level task_succeeded for a partially-failed group
+		// (internal/run/store.go, groupAllSucceededTx). Both guards are wanted:
+		// this one also covers events replayed from history and any future
+		// success route.
+		if !s.taskRanGreen(ctx, evt) {
+			return
+		}
 		var task models.Task
 		if err := s.db.WithContext(ctx).Select("name").First(&task, "id = ?", evt.TaskID).Error; err == nil {
 			taskName = task.Name
@@ -442,4 +458,39 @@ func buildEvidence(class FailureClass, exitCode *int, result string, fc *failure
 		return nil
 	}
 	return datatypes.JSON(b)
+}
+
+// taskRanGreen reports whether a success event may be trusted as "this task ran
+// green".
+//
+// It is a FAN-OUT-ONLY check, deliberately. An unfanned task has exactly one
+// TaskRun, the success event and that row are written by the same transaction,
+// and the event alone has always been the trigger — so the unfanned path is
+// left byte-for-byte as it was, event-trusting, and this returns true without
+// consulting the row. Only a fanned step (N rows for one catalog task) can be
+// terminal-with-failures while a success event names it, and only there is the
+// group's own state the authority. Unreadable or absent rows also return true,
+// so a missing row never blocks a remediation that used to happen.
+func (s *Subscriber) taskRanGreen(ctx context.Context, evt event.Event) bool {
+	if evt.RunID == uuid.Nil {
+		return true
+	}
+	var rows []models.TaskRun
+	if err := s.db.WithContext(ctx).
+		Select("status", "partition_count").
+		Where("job_run_id = ? AND task_id = ?", evt.RunID, evt.TaskID).
+		Find(&rows).Error; err != nil || len(rows) == 0 {
+		return true
+	}
+	if len(rows) == 1 && rows[0].PartitionCount == 0 {
+		return true
+	}
+	for i := range rows {
+		switch rows[i].Status {
+		case "succeeded", "cached":
+		default:
+			return false
+		}
+	}
+	return true
 }

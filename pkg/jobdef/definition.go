@@ -1621,6 +1621,13 @@ func validateFanOut(steps []Step, names map[string]int, adj map[string]map[strin
 			return fmt.Errorf("steps[%d] %q: fanOut.failurePolicy %q must be one of [%s,%s]", i, step.Name, policy, FanOutFailureFailFast, FanOutFailureContinue)
 		}
 		fo.FailurePolicy = policy
+		// Persist the CANONICAL producer name, not just the validated one. The
+		// importer marshals this struct verbatim into tasks.fan_out_config and the
+		// runtime expander compares fo.From to the producer's task name with ==,
+		// so leaving the raw value here let `from: "producer "` lint clean and
+		// then never expand at run time. Written back the same way env/onEmpty/
+		// failurePolicy already are.
+		fo.From = from
 		fanOutFrom[step.Name] = from
 	}
 

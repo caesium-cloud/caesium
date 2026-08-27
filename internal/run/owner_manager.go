@@ -1,8 +1,10 @@
 package run
 
 import (
+	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/caesium-cloud/caesium/internal/metrics"
 	"github.com/caesium-cloud/caesium/internal/models"
@@ -33,25 +35,40 @@ import (
 type OwnerManager struct {
 	store *Store
 	cfg   CheckpointConfig
+	// reclaimInterval bounds how often a run re-queries the durable rows for
+	// expired worker claims when its own bookkeeping shows nothing overdue.
+	reclaimInterval time.Duration
 
 	mu   sync.Mutex
 	runs map[uuid.UUID]*ownedRun
 }
+
+// defaultOwnerReclaimInterval is the floor between owner-side expired-claim
+// queries for one run.  The owner's in-memory lease bookkeeping triggers a reap
+// immediately when it already knows a lease has lapsed, so this interval only
+// governs the safety-net sweep that catches leases the owner cannot see expire
+// (a worker renews claim_expires_at without telling its owner).
+const defaultOwnerReclaimInterval = 15 * time.Second
 
 type ownedRun struct {
 	mu     sync.Mutex
 	state  *RunState
 	writer *CheckpointWriter
 	gen    int64
+	// lastReap is when this run last ran the owner-side expired-claim query.
+	// It bounds that query to one per reclaimInterval per run in the common case
+	// where nothing has gone wrong (see OwnerManager.ReclaimExpiredClaims).
+	lastReap time.Time
 }
 
 // NewOwnerManager builds a manager backed by store, using cfg for checkpoint
 // cadence and retention.
 func NewOwnerManager(store *Store, cfg CheckpointConfig) *OwnerManager {
 	m := &OwnerManager{
-		store: store,
-		cfg:   cfg,
-		runs:  make(map[uuid.UUID]*ownedRun),
+		store:           store,
+		cfg:             cfg,
+		reclaimInterval: defaultOwnerReclaimInterval,
+		runs:            make(map[uuid.UUID]*ownedRun),
 	}
 	// This manager is a CACHE of the store's task_runs rows, so the store has to
 	// be able to invalidate it. Registering here rather than in the server
@@ -114,6 +131,22 @@ func (m *OwnerManager) Recover(runID uuid.UUID, generation int64) (RecoveryResul
 	checkpoint, err := m.store.LatestFullCheckpoint(runID)
 	if err != nil {
 		return RecoveryResult{}, err
+	}
+	// Decide whether the checkpoint is usable BEFORE the tail query, not after.
+	// The tail is filtered by the checkpoint's sequence_high; RecoverRunState
+	// then falls back to a from-scratch replay (replay start zero) if Restore
+	// rejects the blob — but the rows in hand would still be only the
+	// post-checkpoint tail, so every terminal transition at or below
+	// sequence_high vanished and the recovered owner re-dispatched work that had
+	// already completed.  Validating here lets the fallback drop the sequence
+	// filter in the same breath it drops the checkpoint.  ValidateCheckpointBlob
+	// is the same acceptance test Restore applies, so the two cannot disagree.
+	if checkpoint != nil {
+		if vErr := ValidateCheckpointBlob(checkpoint.StateBlob); vErr != nil {
+			log.Warn("owner manager: unusable checkpoint; replaying every terminal row",
+				"run_id", runID, "sequence_high", checkpoint.SequenceHigh, "error", vErr)
+			checkpoint = nil
+		}
 	}
 	var afterSeq int64
 	if checkpoint != nil {
@@ -298,10 +331,23 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 
 	or.mu.Lock()
 
+	// Every transition below is staged on a CLONE and published only after the
+	// durable write commits.  Applying to the authoritative state first and
+	// writing second meant a failed transaction left the two disagreeing in the
+	// one direction that cannot heal: the producer was already terminal in
+	// memory, so the worker's redelivery took ApplyCompletion's already-terminal
+	// branch, skipped expansion re-planning, and re-persisted the completion with
+	// expansion = nil — while this owner's ready queue held instance ids that
+	// exist in no row and dispatched them, forever, against a missing row.
+	// Staging makes the pair atomic in the only sense that matters: either the
+	// rows and the state both advanced, or neither did and the retry replans from
+	// scratch.
+	staged := or.state.Clone()
+
 	// The worker stamps a TaskRunID on EVERY completion, but this state keys an
 	// unfanned task by its catalog id — so ask the state which of the two it
 	// stored rather than assuming. See RunState.CompletionIdentity.
-	identity := or.state.CompletionIdentity(taskID, taskRunID)
+	identity := staged.CompletionIdentity(taskID, taskRunID)
 
 	var branchSkips []uuid.UUID
 	if len(branchSelections) > 0 {
@@ -316,21 +362,35 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	var expansion *FanOutExpansion
 	var expansionSkipped []SkippedTask
 	if status == TaskStatusSucceeded || status == TaskStatusCached {
-		if ts, ok := or.state.TaskState(identity); !ok || !IsTerminal(ts.Status) {
+		if ts, ok := staged.TaskState(identity); !ok || !IsTerminal(ts.Status) {
 			// Both identities: the catalog task carries the fanOut wiring, while
 			// `identity` names the row that ran. A fanned instance's catalog id
 			// resolves to N rows, and the resulting ErrAmbiguousTaskRun would be
 			// read below as the task having failed.
 			exp, planErr := m.store.PlanFanOutExpansionForRow(runID, taskID, identity, partitions)
-			if planErr != nil {
+			switch {
+			case planErr == nil:
+				if exp != nil && len(exp.Groups) > 0 {
+					expansion = exp
+					expansionSkipped = staged.ApplyExpansion(exp)
+					m.seedFanOutPolicies(staged, exp)
+				}
+			case errors.Is(planErr, ErrAmbiguousTaskRun):
+				// The successor group already has N rows, so the planner cannot
+				// find a unique template.  That means a previous delivery's write
+				// DID land even though this owner saw it fail (a commit the client
+				// never got the ack for) and then rolled its staged state back.
+				// Failing the producer here would kill a group that is already
+				// materialized; adopt the durable rows instead, which is the same
+				// reconstruction recovery performs on takeover.
+				log.Warn("owner manager: fan-out group already expanded durably; adopting persisted rows",
+					"run_id", runID, "task_id", taskID, "error", planErr)
+				m.adoptPersistedExpansion(staged, runID)
+			default:
 				status = TaskStatusFailed
 				if errMsg == "" {
 					errMsg = planErr.Error()
 				}
-			} else if exp != nil && len(exp.Groups) > 0 {
-				expansion = exp
-				expansionSkipped = or.state.ApplyExpansion(exp)
-				m.seedFanOutPolicies(or.state, exp)
 			}
 		}
 	}
@@ -343,9 +403,9 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		// Refresh it from the durable rows first; runtime_id is the marker both
 		// lanes use (see taskRunStarted). Best effort: a read failure leaves the
 		// flags as they were, which can only make the cancel more conservative.
-		if catalogID, isInstance := or.state.CatalogTaskID(identity); isInstance {
+		if catalogID, isInstance := staged.CatalogTaskID(identity); isInstance {
 			if rows, rErr := m.store.TaskRunsForTask(runID, catalogID); rErr == nil {
-				or.state.SyncStartedFromRows(rows)
+				staged.SyncStartedFromRows(rows)
 			} else {
 				log.Warn("owner manager: could not refresh fan-out group start state",
 					"run_id", runID, "task_id", catalogID, "error", rErr)
@@ -353,10 +413,10 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 		}
 	}
 
-	res := or.state.ApplyCompletion(identity, status, branchSkips)
+	res := staged.ApplyCompletion(identity, status, branchSkips)
 	if len(expansionSkipped) > 0 {
 		res.Skipped = append(expansionSkipped, res.Skipped...)
-		or.state.prependCompletionSkips(identity, expansionSkipped)
+		staged.prependCompletionSkips(identity, expansionSkipped)
 	}
 	if !res.Applied {
 		// The DAG had already advanced for this task when this completion arrived
@@ -377,16 +437,26 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	// `terminal_sequence > ?`, so the row would be invisible to a future takeover.
 	if res.Durable() {
 		if err := m.store.CompleteTaskOwner(runID, identity, status, result, errMsg, claimedBy, output, branchSelections, res.TerminalSequence, or.gen, res.Skipped, expansion); err != nil {
+			// The staged state is dropped on the floor: nothing was published, so
+			// the authoritative state still shows this task in flight and the
+			// worker's retry re-plans the expansion and re-stamps the same
+			// sequence from an unchanged cursor.  Publishing here is what created
+			// instance ids with no rows behind them.
 			or.mu.Unlock()
 			return CompleteResult{Owned: true}, err
 		}
+		// The write landed — publish the staged transition.
+		or.state = staged
 
 		// Checkpoint on cadence (best-effort: a failed checkpoint is recoverable
 		// from the durable terminal rows, so it must not fail the completion).
 		_ = or.writer.Maybe(or.state, or.gen)
 	}
+	// A result with nothing durable is a no-op replay (or a completion for a task
+	// this state never tracked); its staged copy is discarded for the same reason
+	// a failed commit's is — nothing was written, so nothing may be published.
 
-	complete := res.Complete
+	complete := or.state.IsComplete()
 	hasFailures := or.state.HasFailures()
 	// A fan-out group's duration is measured from its first instance's dispatch
 	// to the completion that made its last instance terminal — the transition
@@ -431,6 +501,97 @@ func (m *OwnerManager) CompleteInstance(runID, taskID, taskRunID uuid.UUID, stat
 	}
 
 	return CompleteResult{Ready: res.Ready, Complete: complete, Owned: true}, nil
+}
+
+// WithReclaimInterval overrides the floor between owner-side expired-claim
+// queries for one run.  Zero or negative restores the default.
+func (m *OwnerManager) WithReclaimInterval(d time.Duration) *OwnerManager {
+	if d <= 0 {
+		d = defaultOwnerReclaimInterval
+	}
+	m.reclaimInterval = d
+	return m
+}
+
+// ReclaimExpiredClaims returns this run's in-flight tasks whose worker claim
+// lease has lapsed to the ready queue, and reports which it re-queued.
+//
+// It closes the one hole the two existing reapers leave between them.  A worker
+// that dies mid-task leaves its row `running` with a dead claim_expires_at.
+// Claimer.ReclaimExpired will not touch it — its live-lease guard deliberately
+// skips rows belonging to a run whose owner is alive, so the reaper can never
+// race the owner's dispatch loop.  The owner, meanwhile, only ever re-queued
+// in-flight work on TAKEOVER (Recover → requeueRunning); for a run whose owner
+// is perfectly healthy, the instance stayed `running` in memory forever,
+// consuming a fanOut.maxParallel slot and blocking the run from ever completing.
+//
+// The durable claim_expires_at is authoritative, not the owner's own
+// LeaseExpiresAtMs: a worker renews its claim lease directly and never tells the
+// owner, so the in-memory copy is only a filter (see RunState.AnyLeaseOverdue) —
+// it can over-report, never under-report, and the query settles it.
+//
+// The reset and the re-queue happen under the run's own lock, so this cannot
+// race the dispatch it feeds.  Returns nil for a run this node does not own.
+func (m *OwnerManager) ReclaimExpiredClaims(runID uuid.UUID) []uuid.UUID {
+	or, ok := m.get(runID)
+	if !ok {
+		return nil
+	}
+	or.mu.Lock()
+	defer or.mu.Unlock()
+
+	now := time.Now()
+	// Two cheap gates before the query, in order of cost: nothing in flight whose
+	// lease looks overdue, or a reap already run recently for this run.  Together
+	// they keep the steady state at zero queries and the worst case at one per
+	// run per interval, even for a task that legitimately outlives the owner's
+	// (never-renewed) copy of its lease.
+	if !or.state.AnyLeaseOverdue(now.UnixMilli()) {
+		return nil
+	}
+	if now.Sub(or.lastReap) < m.reclaimInterval {
+		return nil
+	}
+	or.lastReap = now
+
+	rows, err := m.store.ReclaimOwnerExpiredClaims(runID, or.gen)
+	if err != nil {
+		log.Warn("owner manager: expired-claim reap failed", "run_id", runID, "error", err)
+		return nil
+	}
+	requeued := or.state.RequeueExpiredRows(rows)
+	if len(requeued) > 0 {
+		log.Warn("run owner: re-queued tasks whose worker claim lease expired",
+			"run_id", runID, "generation", or.gen, "count", len(requeued))
+	}
+	return requeued
+}
+
+// adoptPersistedExpansion rebuilds a fan-out group's in-memory nodes from the
+// run's durable instance rows.  It is the "reload from rows" arm of the staged
+// completion path: when the planner reports the successor template is ambiguous,
+// the group is already materialized in the DB and the owner must adopt it rather
+// than fail the producer.  Best-effort — a read failure leaves the state as it
+// was, and the completion proceeds against the unexpanded catalog node.
+func (m *OwnerManager) adoptPersistedExpansion(state *RunState, runID uuid.UUID) {
+	if state == nil || m.store == nil || m.store.DB() == nil {
+		return
+	}
+	var rows []models.TaskRun
+	if err := m.store.DB().Where("job_run_id = ?", runID).Find(&rows).Error; err != nil {
+		log.Warn("owner manager: could not load rows to adopt persisted expansion",
+			"run_id", runID, "error", err)
+		return
+	}
+	var catalog []models.Task
+	var jobRun models.JobRun
+	if err := m.store.DB().Select("job_id").First(&jobRun, "id = ?", runID).Error; err == nil {
+		if err := m.store.DB().Where("job_id = ?", jobRun.JobID).Find(&catalog).Error; err != nil {
+			log.Warn("owner manager: could not load catalog to adopt persisted expansion",
+				"run_id", runID, "error", err)
+		}
+	}
+	state.RehydrateInGroupEdges(rows, catalog)
 }
 
 // seedFanOutPolicies records each freshly-expanded group's fanOut.failurePolicy

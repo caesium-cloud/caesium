@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/caesium-cloud/caesium/internal/models"
 	runstorage "github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	"github.com/google/uuid"
@@ -168,12 +169,25 @@ func (s *Service) resolveTaskRunByID(taskID, runID uuid.UUID) (*taskDescriptorRo
 // (job_run_id, task_id) identity question: exactly one row is returned, zero
 // rows is not-found, and two or more is refused rather than resolved to an
 // arbitrary sibling.
+//
+// The single-row case asks whether the row carries a PARTITION IDENTITY, not
+// whether the group happened to be wide. Testing partition_count > 1 let an
+// expansion that produced exactly one partition through: that row still has a
+// partition_value, its descriptor and cache identity are partition-specific, and
+// the same job can expand to N > 1 on the next run — so answering a bare task
+// name with it makes this surface's answer depend on how many work items the
+// producer emitted. runstorage.IsFanOutInstance is the one definition of "this
+// row is a fan-out instance" shared with the SQL and worker lanes; re-deriving
+// it here is exactly how the two drift.
 func assertUnfanned(rows []taskDescriptorRow) (*taskDescriptorRow, error) {
 	switch len(rows) {
 	case 0:
 		return nil, gorm.ErrRecordNotFound
 	case 1:
-		if rows[0].PartitionCount > 1 {
+		if runstorage.IsFanOutInstance(&models.TaskRun{
+			PartitionValue: rows[0].PartitionValue,
+			PartitionCount: rows[0].PartitionCount,
+		}) {
 			return nil, ErrFannedTaskAmbiguous
 		}
 		return &rows[0], nil

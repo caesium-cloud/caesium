@@ -181,7 +181,7 @@ Each instance receives its `key` on `$CAESIUM_PARTITION` (or `fanOut.env`) and t
 
 ### Retrying a fanned group
 
-- `caesium run partitions <run-id> --job-id <job-id> --task <name> [--status failed] [--json]` lists a fanned task's materialized instances — value, index, status, attempt, cache-hit, and (when present) fingerprint/depends_on.
+- `caesium run partitions <run-id> --job-id <job-id> --task <name> [--status failed] [--limit N] [--offset N] [--json]` lists a fanned task's materialized instances — value, index, status, attempt, cache-hit, and (when present) fingerprint/depends_on. By default it pages through the whole group (the REST endpoint returns `total`, `limit`, `offset` and `next_offset`); an explicit `--limit`/`--offset` fetches one page and prints a truncation note on stderr so `--json` stays parseable. `caesium run retry --partition <value>` resolves the instance with the keyed `?partition=<value>` lookup, so it works past the first page.
 - `caesium run retry --job-id <job-id> --run-id <run-id>` retries a failed run: succeeded and cache-hit instances are preserved; failed instances reset for re-execution; instances that were skipped because an in-group `dependsOn` predecessor failed are also reset so the retry can reach them once that predecessor succeeds.
 - `caesium run retry --job-id <job-id> --run-id <run-id> --task <name> --partition <value>` resets a single instance by partition value. It does **not** cascade to dependents that already succeeded — retry the group, or the specific downstream instances, if that's what you need.
 

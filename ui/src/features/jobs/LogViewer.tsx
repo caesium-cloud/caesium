@@ -17,6 +17,7 @@ import {
   LogToolbar,
 } from "@/components/logs";
 import { withAuthHeaders } from "@/lib/auth";
+import { taskLogsURL } from "@/lib/api";
 import { buildLogFilterResult, stripAnsi } from "./logFiltering";
 
 const logHeaderState = "X-Caesium-Log-State";
@@ -30,12 +31,29 @@ interface LogViewerProps {
   jobId: string;
   runId: string;
   taskId: string;
+  /**
+   * Fan-out instance selector. A fanned task has N containers behind one
+   * catalog `taskId`, so the backend answers 400 (listing the instances) unless
+   * one is named. `taskRunId` is the TaskRun primary key and is authoritative;
+   * `partition` selects by partition value. Both are ignored for unfanned tasks.
+   */
+  taskRunId?: string;
+  partition?: string;
   error?: string | null;
   status?: string;
   sizeVersion?: number;
 }
 
-export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: LogViewerProps) {
+export function LogViewer({
+  jobId,
+  runId,
+  taskId,
+  taskRunId,
+  partition,
+  error,
+  status,
+  sizeVersion,
+}: LogViewerProps) {
   const terminalRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -185,7 +203,7 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     async function streamLogs() {
       try {
         const response = await fetch(
-          `/v1/jobs/${jobId}/runs/${runId}/logs?${new URLSearchParams({ task_id: taskId })}`,
+          taskLogsURL(jobId, runId, taskId, { taskRunId, partition }),
           { signal: abortController.signal, headers: withAuthHeaders() },
         );
 
@@ -263,7 +281,10 @@ export function LogViewer({ jobId, runId, taskId, error, status, sizeVersion }: 
     return () => {
       abortController.abort();
     };
-  }, [jobId, runId, taskId, retryKey]);
+    // taskRunId/partition are dependencies: switching the selected instance must
+    // tear down the previous stream and open the new one, or the panel would
+    // keep showing another partition's output.
+  }, [jobId, runId, taskId, taskRunId, partition, retryKey]);
 
   const filterResult = useMemo(
     () => buildLogFilterResult(rawLogText, searchTerm, caseSensitive),

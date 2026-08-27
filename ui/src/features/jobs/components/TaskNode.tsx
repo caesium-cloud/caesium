@@ -26,11 +26,18 @@ import {
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter, partitionCount, partitionStatusCounts } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter, partitionCount, partitionStatusCounts, partitionValue } = data;
   const taskLabel = typeof label === 'string' ? label : '';
   const runtimeHints = getRuntimeHints(atom?.spec);
   const { showTargetHandle, showSourceHandle } = getHandleVisibility(data.edgeDegree);
-  const isFanned = typeof partitionCount === 'number' && partitionCount > 1;
+  // Partition IDENTITY, not count: an expansion that materializes exactly one
+  // instance still has a partition value, its own cache identity, and its own
+  // log — hiding fan-out chrome for it would make the same task's UI silently
+  // change shape from run to run as N crosses 1. Mirrors
+  // internal/run.IsFanOutInstance / TaskDetailPanel's isFannedTask.
+  const isFanned =
+    typeof partitionCount === 'number' &&
+    (partitionCount > 1 || (partitionCount > 0 && !!partitionValue));
   const fanoutSegments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
 
   const getStatusIcon = () => {

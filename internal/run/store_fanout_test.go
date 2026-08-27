@@ -152,10 +152,11 @@ func TestPredecessorOutputsAggregatesFannedPredecessor(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, got, "process")
 
-	want := pkgtask.AggregateFanInOutputs(map[string]map[string]string{
+	want, aggErr := pkgtask.AggregateFanInOutputs("process", map[string]map[string]string{
 		"east": {"rows": "10"},
 		"west": {"rows": "20"},
 	}, 2, 1)
+	require.NoError(t, aggErr)
 	assert.Equal(t, want, got["process"],
 		"the distributed lane must produce the same aggregate the local lane does")
 
@@ -431,10 +432,14 @@ func TestRetryPartitionReseedsInGroupIndegreeOverNonTerminalDeps(t *testing.T) {
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)
 	assert.Equal(t, 0, b.OutstandingPredecessors)
 
-	// Now fail a too and retry it; b must NOT be dragged along, and retrying b
-	// while a is non-terminal must leave b waiting on a.
+	// Now fail a too and retry b again; b must NOT be dragged along, and retrying
+	// b while a is non-terminal must leave b waiting on a. b is put back into the
+	// FAILED state for the second retry because failed is the retryable set
+	// (RetryPartition rejects skipped with ErrPartitionNotRetryable); the
+	// indegree re-seed under test is unaffected by which terminal state b came
+	// from.
 	setInstanceOutcome(t, f.db, byKey["a"].ID, TaskStatusFailed, nil)
-	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusSkipped, nil)
+	setInstanceOutcome(t, f.db, byKey["b"].ID, TaskStatusFailed, nil)
 	_, err = f.store.RetryPartition(context.Background(), f.runID, byKey["b"].ID)
 	require.NoError(t, err)
 	require.NoError(t, f.db.Where("id = ?", byKey["b"].ID).First(&b).Error)

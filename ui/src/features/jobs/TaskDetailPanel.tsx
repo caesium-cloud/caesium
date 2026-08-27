@@ -1,4 +1,12 @@
-import { useState, useEffect, useRef, useCallback, useLayoutEffect, type ReactNode } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  useCallback,
+  useLayoutEffect,
+  type ReactNode,
+} from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -24,6 +32,43 @@ import { TaskWhyView } from "./TaskWhyView";
 import { isTaskCached } from "./cache-utils";
 
 const PARTITION_STATUS_OPTIONS = ["succeeded", "failed", "running", "pending", "cached", "skipped"];
+
+/**
+ * Whether a run-task entry is a COLLAPSED fan-out group.
+ *
+ * `partition_count` is `>= 1` for every fanned task, including an expansion that
+ * materialized exactly one instance (the backend sets it to `n` whenever
+ * `n > 1 || partition_value !== ""`), and is omitted entirely for an unfanned
+ * one. Gating on `> 1` therefore hid the partition table for N=1 groups, which
+ * still have full partition identity — a value, a fingerprint, its own TaskRun
+ * and its own log — and are the shape a filtered upstream produces.
+ * `partition_value` is the belt-and-braces check for a payload that carries the
+ * identity without the count.
+ */
+function isFannedTask(runTask?: TaskRun): boolean {
+  return (runTask?.partition_count ?? 0) >= 1 || !!runTask?.partition_value;
+}
+
+/**
+ * Every instance of a fanned task, paged to completion.
+ *
+ * Both the partition table and the Logs tab's instance selector read through
+ * this, and an unfiltered call from either shares one react-query cache entry —
+ * so opening the panel does not fetch the group twice.
+ */
+function usePartitionInstances(
+  jobId: string,
+  runId: string,
+  taskId: string,
+  statusFilter: string,
+  enabled: boolean,
+) {
+  return useQuery({
+    queryKey: ["partitions", jobId, runId, taskId, statusFilter],
+    queryFn: () => api.getAllPartitions(jobId, runId, taskId, statusFilter || undefined),
+    enabled,
+  });
+}
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -181,6 +226,39 @@ export function TaskDetailPanel({
   const status = runTask?.status ?? "pending";
   const catalogTaskId = task?.id ?? runTask?.task_id ?? taskId;
   const cached = isTaskCached(runTask);
+  const fanned = isFannedTask(runTask);
+
+  // A fanned task's instances, shared by the partition table and the Logs tab's
+  // instance selector. Unfiltered, so it is the same cache entry the table uses
+  // when no status filter is active.
+  const instancesQuery = usePartitionInstances(jobId, runId, catalogTaskId, "", fanned);
+  const instances = useMemo(() => instancesQuery.data?.partitions ?? [], [instancesQuery.data]);
+
+  // Explicit choice from the selector or a row's "Logs" action. Null means
+  // "whatever the default is", so the default keeps tracking the data as
+  // instances finish and fail.
+  const [selectedTaskRunId, setSelectedTaskRunId] = useState<string | null>(null);
+
+  // Default: the first FAILED instance, because that is the one an operator
+  // opened the panel to read; otherwise instance 0. The server orders instances
+  // by partition_index, so `instances[0]` is index 0.
+  const selectedInstance = useMemo(() => {
+    if (instances.length === 0) return undefined;
+    const explicit = instances.find((row) => row.task_run_id === selectedTaskRunId);
+    if (explicit) return explicit;
+    return instances.find((row) => row.status === "failed") ?? instances[0];
+  }, [instances, selectedTaskRunId]);
+
+  // Opening one instance's log from its row: select it, then show the Logs tab.
+  const showInstanceLogs = useCallback((row: PartitionInstance) => {
+    setSelectedTaskRunId(row.task_run_id);
+    setActiveTab("logs");
+  }, []);
+
+  // No reset-on-task-change is needed: a selection is only honored when it
+  // matches a row of the CURRENT task's instance list, and a TaskRun id is
+  // unique per (run, task), so a stale id simply finds no match and the default
+  // takes over.
 
   const invalidateCacheMutation = useMutation({
     mutationFn: () => {
@@ -386,12 +464,13 @@ export function TaskDetailPanel({
                 />
               </div>
 
-              {(runTask?.partition_count ?? 0) > 1 && (
+              {fanned && (
                 <PartitionTable
                   jobId={jobId}
                   runId={runId}
                   taskId={catalogTaskId}
-                  partitionCount={runTask?.partition_count ?? 0}
+                  partitionCount={runTask?.partition_count ?? 1}
+                  onShowLogs={showInstanceLogs}
                 />
               )}
 
@@ -420,15 +499,52 @@ export function TaskDetailPanel({
             </div>
           </ScrollArea>
         ) : (
-          <LogViewer
-            key={`${jobId}:${runId}:${taskId}`}
-            jobId={jobId}
-            runId={runId}
-            taskId={taskId}
-            error={runTask?.error}
-            status={status}
-            sizeVersion={panelWidth}
-          />
+          <div className="flex h-full min-h-0 flex-col">
+            {fanned && instances.length > 0 ? (
+              <div
+                data-testid="log-partition-picker"
+                className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5"
+              >
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Partition
+                </span>
+                <select
+                  data-testid="log-partition-select"
+                  aria-label="Log partition"
+                  value={selectedInstance?.task_run_id ?? ""}
+                  onChange={(event) => setSelectedTaskRunId(event.target.value)}
+                  className="min-w-0 flex-1 rounded border border-border/50 bg-card px-1.5 py-0.5 font-mono text-[11px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+                >
+                  {instances.map((instance) => (
+                    <option key={instance.task_run_id} value={instance.task_run_id}>
+                      {(instance.value || `#${instance.index}`) + ` — ${instance.status}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : null}
+            {fanned && instancesQuery.isLoading ? (
+              <div className="px-3 py-3 text-[11px] text-muted-foreground">
+                Loading partition instances…
+              </div>
+            ) : (
+              <div className="min-h-0 flex-1">
+                <LogViewer
+                  // The instance is part of the identity of the stream: without
+                  // it, switching partitions would reuse the previous mount's
+                  // terminal buffer.
+                  key={`${jobId}:${runId}:${taskId}:${selectedInstance?.task_run_id ?? ""}`}
+                  jobId={jobId}
+                  runId={runId}
+                  taskId={taskId}
+                  taskRunId={fanned ? selectedInstance?.task_run_id : undefined}
+                  error={fanned ? selectedInstance?.error : runTask?.error}
+                  status={fanned ? (selectedInstance?.status ?? status) : status}
+                  sizeVersion={panelWidth}
+                />
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -445,21 +561,33 @@ function PartitionTable({
   runId,
   taskId,
   partitionCount,
+  onShowLogs,
 }: {
   jobId: string;
   runId: string;
   taskId: string;
   partitionCount: number;
+  onShowLogs?: (row: PartitionInstance) => void;
 }) {
   const queryClient = useQueryClient();
   const [statusFilter, setStatusFilter] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["partitions", jobId, runId, taskId, statusFilter],
-    queryFn: () => api.getPartitions(jobId, runId, taskId, statusFilter || undefined),
-  });
+  // Paged to completion: the endpoint returns at most 1000 rows per request and
+  // defaults to 100, so rendering one response was a silently truncated table.
+  const { data, isLoading } = usePartitionInstances(jobId, runId, taskId, statusFilter, true);
   const rows = data?.partitions ?? [];
+
+  // Two different totals, and they are not interchangeable. `total` counts the
+  // FILTERED set the client is paging; `status_counts` is the histogram of the
+  // whole group, which is the only number that still means "×N" while a filter
+  // is active. partitionCount from the collapsed run payload is the fallback for
+  // a server that sends neither.
+  const groupTotal =
+    data?.status_counts
+      ? Object.values(data.status_counts).reduce((sum, n) => sum + n, 0)
+      : (data?.total ?? partitionCount);
+  const matchedTotal = data?.total ?? rows.length;
 
   // The fingerprint/depends-on columns only carry information for a
   // structured (ordered) group — hide them entirely for a plain bag of
@@ -493,14 +621,18 @@ function PartitionTable({
   });
 
   const gridTemplateColumns = showOrderingColumns
-    ? "1fr 88px 64px 76px 60px 96px 130px 64px"
-    : "1fr 88px 64px 76px 60px 64px";
+    ? "1fr 88px 64px 76px 60px 96px 130px 116px"
+    : "1fr 88px 64px 76px 60px 116px";
 
   return (
     <div className="mt-3" data-testid="partition-table">
       <div className="mb-1 flex items-center justify-between gap-2">
-        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Partitions ×{partitionCount}
+        <div
+          data-testid="partition-table-total"
+          className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+        >
+          Partitions ×{groupTotal}
+          {statusFilter ? ` · ${matchedTotal} ${statusFilter}` : null}
         </div>
         <select
           value={statusFilter}
@@ -529,7 +661,7 @@ function PartitionTable({
           <span>Cache</span>
           {showOrderingColumns && <span>Fingerprint</span>}
           {showOrderingColumns && <span>Depends on</span>}
-          <span aria-hidden="true" />
+          <span className="text-right">Actions</span>
         </div>
 
         <div ref={scrollRef} className="max-h-48 overflow-auto">
@@ -584,12 +716,24 @@ function PartitionTable({
                         {(row.depends_on ?? []).join(", ") || "—"}
                       </span>
                     )}
-                    <span>
+                    <span className="flex items-center justify-end gap-1">
+                      {onShowLogs && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 px-1.5 text-[10px]"
+                          data-testid="partition-logs-button"
+                          aria-label={`View logs for partition ${row.value || row.index}`}
+                          onClick={() => onShowLogs(row)}
+                        >
+                          Logs
+                        </Button>
+                      )}
                       {row.status === "failed" && (
                         <Button
                           size="sm"
                           variant="outline"
-                          className="h-6 text-[10px]"
+                          className="h-6 px-1.5 text-[10px]"
                           data-testid="partition-retry-button"
                           disabled={retryPartition.isPending}
                           onClick={() => retryPartition.mutate(row.index)}

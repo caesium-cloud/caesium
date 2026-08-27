@@ -217,6 +217,25 @@ describe('TaskNode', () => {
     expect(screen.queryByTestId('fanout-status-strip')).not.toBeInTheDocument();
   });
 
+  it('renders fan-out chrome for a single-partition group carrying partition identity', () => {
+    // Regression: an expansion that materializes exactly one instance still has
+    // a partition value (and its own cache identity/log) — gating on
+    // `partitionCount > 1` alone silently hid the badge for it, so the same
+    // step's node changed shape run to run as N crossed 1.
+    renderTaskNode({
+      label: 'process-file',
+      status: 'succeeded',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'partition'] },
+      engine: 'docker',
+      command: ['echo', 'partition'],
+      partitionCount: 1,
+      partitionValue: 'alpha',
+    });
+
+    expect(screen.getByTestId('fanout-badge')).toHaveTextContent('×1');
+    expect(screen.getAllByTestId('fanout-stack-card')).toHaveLength(2);
+  });
+
   it('renders a fan-out status strip proportional to partition_status_counts', () => {
     renderTaskNode({
       label: 'process-file',

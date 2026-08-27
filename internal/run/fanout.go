@@ -147,6 +147,26 @@ func (s *Store) expandFanOutSuccessors(
 	if producerRow == nil {
 		return nil, nil
 	}
+
+	// Canonicalize ONCE, before anything reads the list. The in-group indegree
+	// comes from pkgtask.ValidatePartitionGraph, which canonicalizes dependsOn
+	// internally, while the persisted partition_depends_on used to be marshalled
+	// from the RAW partition — so a dependency written " a" produced indegree 1
+	// (the graph saw "a") beside a persisted [" a"] that
+	// decrementInGroupDependentsTx, which matches d == completed.PartitionValue,
+	// can never satisfy. The dependent instance then waits forever on a
+	// decrement that never comes.
+	//
+	// The marker parser canonicalizes at the source, so this covers the
+	// non-parser producers: a cached producer replaying entry.Partitions and the
+	// owner's replan path. Normalizing here also makes the producer's persisted
+	// `partitions` column and the planned expansion agree with the graph.
+	normalized, err := pkgtask.NormalizePartitions(partitions)
+	if err != nil {
+		return nil, asFanOutProducerError(err)
+	}
+	partitions = normalized
+
 	if persist {
 		if err := s.persistProducerPartitionsTx(tx, producerRow.ID, partitions); err != nil {
 			return nil, err
@@ -192,6 +212,18 @@ func (s *Store) expandFanOutSuccessors(
 		template, err := loadUniqueTaskRun(tx, runID, succID)
 		if err != nil {
 			return nil, fmt.Errorf("run: fan-out template for %s: %w", succTask.Name, err)
+		}
+
+		// Expansion may only run from the successor's UNEXPANDED, UNRESOLVED
+		// state. Without this the expansion loaded whatever row was there and
+		// rewrote it into N pending instances — so a successor the DAG had
+		// ALREADY resolved (skipped by a branch selection, skipped by an
+		// unsatisfied trigger rule, cancelled with the run) was resurrected:
+		// its own row kept the terminal status while N-1 brand-new PENDING
+		// sibling rows appeared beside it and got dispatched. A step the DAG
+		// decided not to run must stay not-run, and so must its descendants.
+		if !fanOutTemplateExpandable(template) {
+			continue
 		}
 
 		if len(partitions) == 0 {
@@ -273,6 +305,18 @@ func (s *Store) expandFanOutSuccessors(
 	}
 
 	return expansion, nil
+}
+
+// fanOutTemplateExpandable reports whether a successor's TaskRun is still the
+// pre-expansion template: pending (nothing has resolved it) and unfanned
+// (partition_count 0, so it has not already been expanded by an earlier
+// completion or a replayed one). Anything else — a terminal row, or a row that
+// is already one of N — must be left exactly as it is.
+func fanOutTemplateExpandable(template *models.TaskRun) bool {
+	if template == nil {
+		return false
+	}
+	return template.Status == string(TaskStatusPending) && template.PartitionCount == 0
 }
 
 func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanOutExpansion, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
@@ -508,6 +552,9 @@ func (s *Store) jobAliasForRunTx(tx *gorm.DB, runID uuid.UUID) string {
 // histogram from owner_manager.go; this is the SQL lane's half, without which
 // the metric only ever has data under CAESIUM_RUN_OWNER_IN_MEMORY.
 func (s *Store) groupAllTerminalTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, error) {
+	if err := lockGroupForTerminalDecisionTx(tx, runID, taskID); err != nil {
+		return false, err
+	}
 	var rows []models.TaskRun
 	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&rows).Error; err != nil {
 		return false, err
@@ -522,6 +569,78 @@ func (s *Store) groupAllTerminalTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, 
 	}
 	s.observeFanOutGroupDurationTx(tx, runID, taskID, rows)
 	return true, nil
+}
+
+// groupAllSucceededTx reports whether EVERY instance of a fan-out group is a
+// terminal SUCCESS (succeeded or cached).
+//
+// Distinct from groupAllTerminalTx, and the distinction is the whole point:
+// "terminal" answers "may the DAG move on?" (yes — a failed group's successors
+// are resolved by their trigger rules), while "succeeded" answers "did this step
+// work?". Conflating them let a group with failed partitions announce
+// task_succeeded. A group with no rows is not a success.
+func (s *Store) groupAllSucceededTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, error) {
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&rows).Error; err != nil {
+		return false, err
+	}
+	return predecessorGroupSatisfied(rows), nil
+}
+
+// lockGroupForTerminalDecisionTx serializes the "is this whole group terminal?"
+// decision across concurrently completing siblings.
+//
+// PostgreSQL is a first-class catalog backend (pkg/db/db.go opens
+// gorm.io/driver/postgres for CAESIUM_DATABASE_TYPE=postgres), and there two
+// sibling completion transactions genuinely run at the same time under READ
+// COMMITTED. Each writes its OWN row terminal and then reads the group; neither
+// sees the other's uncommitted write, so both conclude "a sibling is still
+// running", both return false, and the group's cross-step successors are never
+// released. Every instance is terminal and the run hangs until its timeout —
+// and it only reproduces under real write concurrency, which is why no test
+// caught it.
+//
+// Taking an exclusive lock on ONE deterministic row of the group (the lowest
+// partition index, tie-broken by id) fixes both halves: the transactions
+// serialize, and the loser's post-lock read under READ COMMITTED sees the
+// winner's COMMITTED row. Exactly one transaction therefore observes the
+// complete terminal set. The row is chosen deterministically so two groups can
+// never lock each other's rows in opposite orders.
+//
+// dqlite/SQLite need nothing: every writer already serializes (through the Raft
+// log and the single write connection respectively), and `FOR UPDATE` is not
+// parseable there — hence the empty statement rather than a shared one.
+func lockGroupForTerminalDecisionTx(tx *gorm.DB, runID, taskID uuid.UUID) error {
+	if tx == nil || tx.Dialector == nil {
+		return nil
+	}
+	stmt, err := groupTerminalLockSQL(tx.Name())
+	if err != nil {
+		return err
+	}
+	if stmt == "" {
+		return nil
+	}
+	var locked []struct {
+		ID uuid.UUID `gorm:"column:id"`
+	}
+	return tx.Raw(stmt, runID, taskID).Scan(&locked).Error
+}
+
+// groupTerminalLockSQL returns the dialect's lock statement for the terminal
+// group decision, or "" for a dialect whose writers already serialize. An
+// unknown dialect is an error rather than a silent "" so a future backend
+// surfaces the missing guard at run time instead of shipping the hang.
+func groupTerminalLockSQL(dialect string) (string, error) {
+	switch dialect {
+	case "postgres":
+		return "SELECT id FROM task_runs WHERE job_run_id = ? AND task_id = ? " +
+			"ORDER BY partition_index ASC, id ASC LIMIT 1 FOR UPDATE", nil
+	case "dqlite", "sqlite", "sqlite3":
+		return "", nil
+	default:
+		return "", fmt.Errorf("run: unsupported dialect %q for fan-out group terminal lock", dialect)
+	}
 }
 
 // observeFanOutGroupDurationTx records the fanned group's span. Unfanned tasks

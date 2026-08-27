@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -608,16 +609,57 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 	return env
 }
 
+// ErrFanInAggregateTooLarge is the sentinel behind FanInAggregateTooLargeError,
+// for callers that only need errors.Is.
+var ErrFanInAggregateTooLarge = errors.New("task: fan-in aggregate exceeds the output size cap")
+
+// FanInAggregateTooLargeError reports that a fan-out group's aggregated output
+// does not fit inside MaxOutputBytes. It carries the observed size, the cap, and
+// the producing step so the failure names the step an operator has to fix.
+//
+// This is deliberately an error and not a degraded result. The aggregate used to
+// be silently replaced by the three counters when it crossed the cap, which
+// dropped EVERY user key: a downstream step's CAESIUM_OUTPUT_<PRODUCER>_<KEY>
+// simply stopped existing, the run was reported successful, and the producer's
+// declared outputSchema was never consulted because the synthesized aggregate
+// does not flow through schema validation. A group whose contract cannot be
+// honored must fail, not quietly change shape.
+type FanInAggregateTooLargeError struct {
+	// Producer is the fan-out step whose group was being aggregated.
+	Producer string
+	// Size is the encoded size of the full aggregate, in bytes.
+	Size int
+	// Cap is MaxOutputBytes at the time of the failure.
+	Cap int
+}
+
+func (e *FanInAggregateTooLargeError) Error() string {
+	producer := e.Producer
+	if producer == "" {
+		producer = "<unknown>"
+	}
+	return fmt.Sprintf(
+		"fan-in aggregate for step %q is %d bytes, exceeding the %d byte output limit; reduce per-partition output or emit a large-object reference (##caesium::output-ref)",
+		producer, e.Size, e.Cap)
+}
+
+func (e *FanInAggregateTooLargeError) Unwrap() error { return ErrFanInAggregateTooLarge }
+
 // AggregateFanInOutputs folds per-partition instance outputs into the fan-in
 // contract: each scalar key becomes a JSON object keyed by partition value,
-// plus synthetic _PARTITION_COUNT / _SUCCEEDED / _FAILED.
-func AggregateFanInOutputs(byPartition map[string]map[string]string, succeeded, failed int) map[string]string {
+// plus synthetic PARTITION_COUNT / SUCCEEDED / FAILED.
+//
+// producer names the fan-out step, used only to attribute an over-cap failure.
+// An aggregate that does not fit in MaxOutputBytes returns a
+// *FanInAggregateTooLargeError and a nil map; callers must fail the group rather
+// than publish a partial contract.
+func AggregateFanInOutputs(producer string, byPartition map[string]map[string]string, succeeded, failed int) (map[string]string, error) {
 	if len(byPartition) == 0 {
 		return map[string]string{
 			"PARTITION_COUNT": strconv.Itoa(succeeded + failed),
 			"SUCCEEDED":       strconv.Itoa(succeeded),
 			"FAILED":          strconv.Itoa(failed),
-		}
+		}, nil
 	}
 	keys := map[string]struct{}{}
 	partKeys := make([]string, 0, len(byPartition))
@@ -638,7 +680,9 @@ func AggregateFanInOutputs(byPartition map[string]map[string]string, succeeded, 
 		}
 		encoded, err := json.Marshal(obj)
 		if err != nil {
-			continue
+			// Dropping the key here would be the same silent contract change the
+			// size cap used to make. Surface it.
+			return nil, fmt.Errorf("marshalling fan-in aggregate for key %q: %w", key, err)
 		}
 		out[key] = string(encoded)
 	}
@@ -646,12 +690,11 @@ func AggregateFanInOutputs(byPartition map[string]map[string]string, succeeded, 
 	out["SUCCEEDED"] = strconv.Itoa(succeeded)
 	out["FAILED"] = strconv.Itoa(failed)
 	encoded, err := json.Marshal(out)
-	if err == nil && len(encoded) > MaxOutputBytes {
-		return map[string]string{
-			"PARTITION_COUNT": strconv.Itoa(len(byPartition)),
-			"SUCCEEDED":       strconv.Itoa(succeeded),
-			"FAILED":          strconv.Itoa(failed),
-		}
+	if err != nil {
+		return nil, fmt.Errorf("marshalling fan-in aggregate: %w", err)
 	}
-	return out
+	if len(encoded) > MaxOutputBytes {
+		return nil, &FanInAggregateTooLargeError{Producer: producer, Size: len(encoded), Cap: MaxOutputBytes}
+	}
+	return out, nil
 }

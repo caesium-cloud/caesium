@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	jsvc "github.com/caesium-cloud/caesium/api/rest/service/job"
@@ -50,13 +51,24 @@ var retryCmd = &cobra.Command{
 			return fmt.Errorf("invalid run id: %w", err)
 		}
 
+		if retryFromFailurePartition != "" && retryFromFailureTask == "" {
+			return fmt.Errorf("--task is required with --partition")
+		}
+
 		ctx := cmd.Context()
 
+		// Past argument validation. Everything below talks to the server or the
+		// store, and those failures are not usage errors: cobra prints the whole
+		// usage block after ANY error from RunE, which buried the actionable
+		// line — a per-partition retry against a local-mode server answers 409
+		// with "requires distributed execution mode", and that message was
+		// followed by forty lines of flag help. Same convention as cmd/verify:
+		// flipped here rather than declared on the command, so a missing or
+		// malformed flag above still gets its usage block.
+		cmd.SilenceUsage = true
+
 		if retryFromFailurePartition != "" {
-			if retryFromFailureTask == "" {
-				return fmt.Errorf("--task is required with --partition")
-			}
-			return retrySinglePartition(cmd.Context(), cmd, retryFromFailureJobID, retryFromFailureRunID, retryFromFailureTask, retryFromFailurePartition)
+			return retrySinglePartition(ctx, cmd, retryFromFailureJobID, retryFromFailureRunID, retryFromFailureTask, retryFromFailurePartition)
 		}
 
 		j, err := jsvc.Service(ctx).Get(jobID)
@@ -103,51 +115,84 @@ func init() {
 	Cmd.AddCommand(retryCmd)
 }
 
-func retrySinglePartition(ctx context.Context, cmd *cobra.Command, jobID, runID, task, value string) error {
-	server := strings.TrimSuffix(retryFromFailureServer, "/")
-	if server == "" {
-		server = "http://localhost:8080"
-	}
-	listURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions", server, jobID, runID, task)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, nil)
+// keyedPartition is the one instance a keyed lookup resolves to.
+type keyedPartition struct {
+	Value  string `json:"value"`
+	Index  int    `json:"index"`
+	Status string `json:"status"`
+}
+
+// lookupPartitionByValue resolves one partition value to its instance via the
+// server's KEYED lookup (`?partition=<value>`).
+//
+// It deliberately does not list-and-scan. The listing endpoint is paginated
+// (default page 100, hard cap 1000), so scanning "the" response only ever saw
+// page one: `--partition` against a group larger than a page failed with
+// `partition "x" not found` for every instance past the first page, and the
+// larger the fan-out the more likely that is. The keyed lookup is O(1) on the
+// server and cannot be truncated.
+//
+// The response is accepted in either shape the endpoint may return — a bare
+// instance object, or the list envelope narrowed to one row — so the CLI is not
+// coupled to which of the two the server settled on.
+func lookupPartitionByValue(ctx context.Context, cmd *cobra.Command, server, jobID, runID, task, value string) (*keyedPartition, error) {
+	lookupURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions?%s",
+		server, jobID, runID, task, url.Values{"partition": {value}}.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, lookupURL, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if apiKey := resolveRunDiffAPIKey(cmd, retryFromFailureAPIKey); apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 	resp, err := retryPartitionHTTPClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return err
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("partition %q not found in task %q of run %s", value, task, runID)
 	}
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("partitions: %s: %s", resp.Status, body)
+		return nil, fmt.Errorf("partitions: %s: %s", resp.Status, body)
 	}
-	var parsed struct {
-		Partitions []struct {
-			Value  string `json:"value"`
-			Index  int    `json:"index"`
-			Status string `json:"status"`
-		} `json:"partitions"`
+
+	var envelope struct {
+		Partitions []keyedPartition `json:"partitions"`
 	}
-	if err := json.Unmarshal(body, &parsed); err != nil {
+	if err := json.Unmarshal(body, &envelope); err == nil && len(envelope.Partitions) > 0 {
+		for i := range envelope.Partitions {
+			if envelope.Partitions[i].Value == value {
+				return &envelope.Partitions[i], nil
+			}
+		}
+		return nil, fmt.Errorf("partition %q not found in task %q of run %s", value, task, runID)
+	}
+
+	var bare keyedPartition
+	if err := json.Unmarshal(body, &bare); err != nil {
+		return nil, fmt.Errorf("partitions response was not valid JSON: %w", err)
+	}
+	if bare.Value != value {
+		return nil, fmt.Errorf("partition %q not found in task %q of run %s", value, task, runID)
+	}
+	return &bare, nil
+}
+
+func retrySinglePartition(ctx context.Context, cmd *cobra.Command, jobID, runID, task, value string) error {
+	server := strings.TrimSuffix(retryFromFailureServer, "/")
+	if server == "" {
+		server = "http://localhost:8080"
+	}
+	instance, err := lookupPartitionByValue(ctx, cmd, server, jobID, runID, task, value)
+	if err != nil {
 		return err
 	}
-	index := -1
-	for _, p := range parsed.Partitions {
-		if p.Value == value {
-			index = p.Index
-			break
-		}
-	}
-	if index < 0 {
-		return fmt.Errorf("partition %q not found", value)
-	}
+	index := instance.Index
 	retryURL := fmt.Sprintf("%s/v1/jobs/%s/runs/%s/tasks/%s/partitions/%d/retry", server, jobID, runID, task, index)
 	postReq, err := http.NewRequestWithContext(ctx, http.MethodPost, retryURL, nil)
 	if err != nil {

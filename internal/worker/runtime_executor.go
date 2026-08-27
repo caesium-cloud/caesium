@@ -369,7 +369,7 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut, attempt >= maxAttempts)
 		if execErr == nil {
 			// Store successful result in cache, including any partition list this
 			// producer emitted: a later hit replays the result without running
@@ -420,7 +420,19 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			metrics.TaskRetriesTotal.WithLabelValues(resolveJobAlias(), taskRun.TaskID.String(), strconv.Itoa(attempt)).Inc()
 		}
 
-		if retryErr := e.store.RetryTaskClaimed(taskRun.JobRunID, taskRun.TaskID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
+		// Address the INSTANCE, not the catalog task: RetryTaskClaimed resolved
+		// its reference through loadTaskRunByIDOrUnique, so a fanned step's
+		// catalog id named N rows and the reset was refused (ErrAmbiguousTaskRun)
+		// — silently, because the failure is only logged.
+		//
+		// It is also the CLAIM-HOLDING reset. RetryTaskClaimed re-pends the row,
+		// but StartTaskClaimed only starts a row that is `running`, so the very
+		// next attempt tore its container down with ErrTaskClaimMismatch and
+		// abandoned the task — the worker's in-process retry budget was
+		// unreachable on both lanes. This worker never released the claim and is
+		// about to launch the next container itself, so the row stays running and
+		// claimed between attempts.
+		if retryErr := e.store.RetryTaskClaimedInstance(taskRun.JobRunID, taskRun.ID, attempt+1, taskRun.ClaimedBy); retryErr != nil {
 			if errors.Is(retryErr, run.ErrTaskClaimMismatch) {
 				log.Info("worker task claim changed before retry persistence", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 				return
@@ -584,7 +596,13 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 // executeTask runs one attempt and returns the partition list the container
 // emitted (nil for a non-producer), which the caller folds into the task's cache
 // entry so a later hit can still expand the group.
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut) ([]pkgtask.Partition, error) {
+//
+// finalAttempt tells the attempt whether it is allowed to write a terminal
+// outcome for a container that reported failure. On any earlier attempt the
+// failure is returned to the retry loop and NOTHING is persisted, so the row
+// stays this worker's to reset. A successful result is always reported: success
+// ends the task whatever the attempt budget said.
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut, finalAttempt bool) ([]pkgtask.Partition, error) {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -765,27 +783,78 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		return nil, err
 	}
 
-	if withParts, ok := sink.(interface {
-		SucceededWithPartitions(context.Context, *models.TaskRun, string, map[string]string, []string, []pkgtask.Partition) error
-	}); ok && len(partitions) > 0 {
-		if err := withParts.SucceededWithPartitions(ctx, taskRun, string(a.Result()), taskOutput, branchSelections, partitions); err != nil {
+	// Decide the attempt's outcome BEFORE any terminal write.
+	//
+	// A non-success engine result on a NON-FINAL attempt is a failed ATTEMPT, not
+	// a failed task. Routing it through the completion sink anyway durably
+	// terminalizes the row — and for a fan-out producer expands its successors,
+	// and for a group member runs the failurePolicy cascade — after which the
+	// retry loop is resetting a row that is already terminal. For a fanned
+	// instance that reset used to be addressed by the catalog task id, which
+	// names N rows and is refused, so the next attempt ran against the terminal
+	// row and its completion was claim-rejected: the instance ended failed with
+	// its remaining attempts silently discarded. Only the final attempt may
+	// terminalize, which is also what makes a retried instance record exactly one
+	// terminal write instead of one per attempt.
+	result := string(a.Result())
+	if !run.IsSuccessfulTaskResult(result) {
+		failure := fmt.Errorf("task %s failed with result %q", taskRun.TaskID, result)
+		if !finalAttempt {
+			return partitions, failure
+		}
+		// Final attempt: the container ran and reported its own result, so the
+		// COMPLETION route owns the full set of failure consequences (the
+		// group's failurePolicy, the in-group skip cascade, the successor
+		// advance). That is deliberately the success sink carrying a failure
+		// result — see the comment on run.completeTask's TaskStatusFailed branch.
+		if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
 			return nil, err
 		}
-	} else if err := sink.Succeeded(ctx, taskRun, string(a.Result()), taskOutput, branchSelections); err != nil {
-		return nil, err
+		return partitions, failure
 	}
-	if !run.IsSuccessfulTaskResult(string(a.Result())) {
-		return partitions, fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
+
+	if err := e.reportCompletion(ctx, sink, taskRun, result, taskOutput, branchSelections, partitions); err != nil {
+		return nil, err
 	}
 
 	return partitions, nil
 }
 
+// reportCompletion routes a finished attempt's terminal outcome through the
+// completion sink, preferring the partition-carrying route when the sink
+// implements it and this container emitted a partition list.
+func (e *runtimeExecutor) reportCompletion(
+	ctx context.Context,
+	sink CompletionSink,
+	taskRun *models.TaskRun,
+	result string,
+	taskOutput map[string]string,
+	branchSelections []string,
+	partitions []pkgtask.Partition,
+) error {
+	if withParts, ok := sink.(interface {
+		SucceededWithPartitions(context.Context, *models.TaskRun, string, map[string]string, []string, []pkgtask.Partition) error
+	}); ok && len(partitions) > 0 {
+		return withParts.SucceededWithPartitions(ctx, taskRun, result, taskOutput, branchSelections, partitions)
+	}
+	return sink.Succeeded(ctx, taskRun, result, taskOutput, branchSelections)
+}
+
+// runSchemaValidation records any output-schema violations on THIS INSTANCE's
+// row. The instance TaskRun id is load-bearing: SaveSchemaViolations refuses a
+// catalog task id that resolves to N sibling rows, and the refusal is only
+// logged — so keying on taskRun.TaskID meant a fanned step recorded nothing at
+// all. In fail mode that discards the evidence for the very failure being
+// reported; in warn mode it opens a schema_violation incident with no row
+// behind it.
 func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
 	if taskRun == nil {
 		return nil
 	}
-	return run.ValidateTaskOutputSchema(e.store, taskRun.JobRunID, taskRun.TaskID, output, taskRun.OutputSchema, taskRun.SchemaValidation)
+	return run.ValidateTaskOutputSchemaInstance(
+		e.store, taskRun.JobRunID, taskRun.TaskID, taskRun.ID,
+		output, taskRun.OutputSchema, taskRun.SchemaValidation,
+	)
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.

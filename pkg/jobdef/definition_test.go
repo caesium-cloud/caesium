@@ -1256,3 +1256,71 @@ func TestMarshalPreservesFalseCacheOverrides(t *testing.T) {
 		t.Fatalf("step.cache not preserved as false: %s", string(body))
 	}
 }
+
+// TestFanOutFromNormalizedForPersistence pins the fix for the adversarial-review
+// finding that validateFanOut trimmed fanOut.from into a local variable it never
+// wrote back. The importer marshals step.FanOut verbatim into
+// tasks.fan_out_config, and the runtime expander compares fo.From to the
+// producer's task name with ==, so an untrimmed value validated cleanly at lint
+// time and then silently never expanded at run time. Validation must persist the
+// canonical value, exactly as it already does for env/onEmpty/failurePolicy.
+func TestFanOutFromNormalizedForPersistence(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: fanout-from-whitespace
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+    next: [process]
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut:
+      from: "  list  "
+      maxPartitions: 8
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	require.NotNil(t, def.Steps[1].FanOut)
+	require.Equal(t, "list", def.Steps[1].FanOut.From,
+		"fanOut.from must be normalized in the model that gets persisted, not only in a validation temporary")
+}
+
+// TestFanOutFromNormalizedSurvivesJSONRoundTrip covers the importer's actual
+// persistence path: the Step is JSON-marshalled into tasks.fan_out_config, so
+// the trimmed value has to be on the struct, not just accepted by the validator.
+func TestFanOutFromNormalizedSurvivesJSONRoundTrip(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: fanout-from-whitespace-json
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+    next: [process]
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut:
+      from: "list\t"
+      maxPartitions: 8
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+
+	encoded, err := json.Marshal(def.Steps[1].FanOut)
+	require.NoError(t, err)
+
+	var decoded FanOut
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	require.Equal(t, "list", decoded.From)
+}

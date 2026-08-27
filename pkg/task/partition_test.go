@@ -189,3 +189,140 @@ func TestParseMarkers_1025ExceedsDefaultCap(t *testing.T) {
 	assert.Contains(t, err.Error(), "count cap")
 	assert.Contains(t, err.Error(), `"p1024"`)
 }
+
+// TestParseMarkers_DependsOnNormalizedForPersistence pins the fix for the
+// adversarial-review finding that dependsOn was normalized only inside
+// ValidatePartitionGraph's local loop variable. internal/run/fanout.go marshals
+// p.DependsOn verbatim into task_runs.partition_depends_on, so " a " validated
+// as an edge to "a" and was then persisted with the whitespace intact — the
+// stored edge never matched any sibling's partition_value. The parser must hand
+// back the canonical form so the graph and the persisted rows use one key set.
+func TestParseMarkers_DependsOnNormalizedForPersistence(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions ["a",{"key":"b","dependsOn":["  a  "]}]
+`)
+	got, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.Len(t, got.Partitions, 2)
+	assert.Equal(t, []string{"a"}, got.Partitions[1].DependsOn,
+		"dependsOn must be trimmed by the parser so persistence stores the same key the graph resolved")
+
+	// The encoded form is what fanout.go writes to partition_depends_on.
+	encoded, err := EncodePartitions(got.Partitions)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), `"  a  "`)
+
+	g, err := ValidatePartitionGraph(got.Partitions)
+	require.NoError(t, err)
+	assert.Equal(t, 1, g.Indegree["b"])
+	assert.Equal(t, []string{"b"}, g.Dependents["a"])
+}
+
+// TestParseMarkers_DependsOnDedupedForPersistence: the graph counts a repeated
+// dep once (indegree 1). Persistence must agree, or the stored edge list and the
+// seeded outstanding_predecessors describe different graphs.
+func TestParseMarkers_DependsOnDedupedForPersistence(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions ["a",{"key":"b","dependsOn":["a"," a ","a\t"]}]
+`)
+	got, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.Len(t, got.Partitions, 2)
+	assert.Equal(t, []string{"a"}, got.Partitions[1].DependsOn)
+
+	g, err := ValidatePartitionGraph(got.Partitions)
+	require.NoError(t, err)
+	assert.Equal(t, 1, g.Indegree["b"])
+	assert.Equal(t, []string{"b"}, g.Dependents["a"])
+}
+
+// TestParseMarkers_DependsOnWhitespaceOnlyRejected: a dep that is empty after
+// trimming is a producer bug, not an edge to drop silently.
+func TestParseMarkers_DependsOnWhitespaceOnlyRejected(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions ["a",{"key":"b","dependsOn":["   "]}]
+`)
+	_, err := ParseMarkers(logs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dependsOn")
+	assert.Contains(t, err.Error(), "empty")
+}
+
+// TestParseMarkers_DependsOnWhitespaceVariantsDedupToOnePartition: the key set
+// is trimmed at parse time, so two emissions whose keys differ only in
+// surrounding whitespace are the same partition. Their dependsOn lists must
+// canonicalize identically too, or the identical-payload dedup would report a
+// spurious conflict.
+func TestParseMarkers_DependsOnWhitespaceVariantsDedupToOnePartition(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions ["a",{"key":"b","dependsOn":["a"]},{"key":" b ","dependsOn":[" a "]}]
+`)
+	got, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.Equal(t, []Partition{{Key: "a"}, {Key: "b", DependsOn: []string{"a"}}}, got.Partitions)
+}
+
+// TestParseMarkers_NullPartitionsArrayRejected pins the fix for the
+// adversarial-review finding that `##caesium::partitions null` unmarshalled into
+// a nil []json.RawMessage without error, so a producer that emitted a null work
+// list was silently treated as "emitted nothing" and routed through onEmpty
+// (skip by default) instead of failing the producer.
+func TestParseMarkers_NullPartitionsArrayRejected(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions null
+`)
+	_, err := ParseMarkers(logs)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
+}
+
+// TestParseMarkers_EmptyPartitionsArrayStillValid: `[]` is the documented way to
+// emit an empty work list and must keep routing through onEmpty.
+func TestParseMarkers_EmptyPartitionsArrayStillValid(t *testing.T) {
+	logs := strings.NewReader(`##caesium::partitions []
+`)
+	got, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	assert.Empty(t, got.Partitions)
+}
+
+// TestParseMarkers_NonArrayPartitionsRejected: any non-array top-level token is
+// a producer bug and must fail the task rather than parse as "no partitions".
+func TestParseMarkers_NonArrayPartitionsRejected(t *testing.T) {
+	for name, payload := range map[string]string{
+		"object": `{"key":"a"}`,
+		"string": `"a"`,
+		"number": `7`,
+		"bool":   `true`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := strings.NewReader("##caesium::partitions " + payload + "\n")
+			_, err := ParseMarkers(logs)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "JSON array")
+		})
+	}
+}
+
+// TestNormalizePartitions is the entry point for callers that obtain a partition
+// list from somewhere other than the marker parser (a recovery path rebuilding
+// from persisted rows, a test fixture). It must apply the identical dependsOn
+// rules, and must not mutate the caller's slice.
+func TestNormalizePartitions(t *testing.T) {
+	in := []Partition{
+		{Key: "a"},
+		{Key: "b", DependsOn: []string{" a ", "a"}},
+	}
+	got, err := NormalizePartitions(in)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a"}, got[1].DependsOn)
+	assert.Equal(t, []string{" a ", "a"}, in[1].DependsOn, "the caller's slice must not be mutated")
+
+	// Idempotent.
+	again, err := NormalizePartitions(got)
+	require.NoError(t, err)
+	assert.Equal(t, got, again)
+}
+
+// TestNormalizePartitions_EmptyDepRejected mirrors the parser's rejection so a
+// non-parser source cannot smuggle an unresolvable edge into persistence.
+func TestNormalizePartitions_EmptyDepRejected(t *testing.T) {
+	_, err := NormalizePartitions([]Partition{{Key: "b", DependsOn: []string{"\t"}}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "dependsOn")
+}

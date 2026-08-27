@@ -37,22 +37,24 @@ func ValidatePartitionGraph(parts []Partition) (*PartitionGraph, error) {
 	}
 
 	for _, p := range parts {
-		seen := make(map[string]struct{}, len(p.DependsOn))
-		for _, dep := range p.DependsOn {
-			dep = strings.TrimSpace(dep)
-			if dep == "" {
-				return nil, fmt.Errorf("partition %q dependsOn contains an empty key", p.Key)
-			}
+		// Normalize through the SAME helper the marker parser applies before the
+		// list is persisted (NormalizeDependsOn: trim, reject empty-after-trim,
+		// dedup). Doing the trimming inline here — on a loop-local copy — was the
+		// bug: the graph resolved " a " as an edge to "a" while
+		// internal/run/fanout.go marshalled the untrimmed p.DependsOn into
+		// task_runs.partition_depends_on, so the stored edge matched no sibling.
+		// Applying one shared rule on both paths is what keeps them in lockstep.
+		deps, err := NormalizeDependsOn(p.Key, p.DependsOn)
+		if err != nil {
+			return nil, err
+		}
+		for _, dep := range deps {
 			if dep == p.Key {
 				return nil, fmt.Errorf("partition %q depends on itself", p.Key)
 			}
 			if _, ok := keys[dep]; !ok {
 				return nil, fmt.Errorf("partition %q dependsOn %q which is not in the emitted set", p.Key, dep)
 			}
-			if _, dup := seen[dep]; dup {
-				continue
-			}
-			seen[dep] = struct{}{}
 			indegree[p.Key]++
 			dependents[dep] = append(dependents[dep], p.Key)
 		}

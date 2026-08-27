@@ -119,7 +119,10 @@ here than a tidy one. A first-pass agent ticked **every** checklist item in this
 file and marked all nine streams "Shipped" without verifying a single claim
 against the code. A subsequent audit found roughly half of those claims real and
 the rest absent or stubbed. A second wave of agents then closed the gaps stream by
-stream.
+stream, over three rounds on PR #349: the initial ship, a commit closing the gaps
+CI and review surfaced, and a third answering the maintainer's **25-finding
+adversarial review** — every one of the 25 confirmed real, none argued away. That
+third round produced follow-ups 13–15 below.
 Every tick below was re-derived from the working tree on 2026-08-26 by grepping
 the named symbol; items whose shipped behaviour diverges from the plan's original
 wording now carry a `_Shipped 2026-08-26: …_` evidence line or an `_Open: …_`
@@ -315,6 +318,46 @@ blocked on a design decision.
    (`test/fanout_test.go:36`) decodes them — which is exactly what
    `assertFailFastGroup` now relies on. That helper's snapshot-based approach is
    also where follow-up 5's dead fields live.
+13. **Per-partition retry is refused outside distributed mode.**
+   `POST …/partitions/:index/retry` now answers **409** unless
+   `CAESIUM_EXECUTION_MODE=distributed` (`partitionRetryIsDispatchable`,
+   `api/rest/controller/job/run/partitions.go`), mirroring the replay service's
+   `isDistributedExecutionMode`. The reason is structural, not a missing feature:
+   execution mode is **server-wide, not per-run**, and the local engine drives its
+   own DAG and exits when the run finishes — no dispatcher poll, no claim loop.
+   Resetting an instance there returned 200 and left it `pending` forever, with
+   the run re-opened to `running` so the run never completed again either. Wiring
+   a single-partition resume through `job.New(...)` → `(*job).Run(ctx)`
+   (`internal/job/job.go:157`, `:461`) is feasible, but it could not be verified
+   outside the integration lane, so it was **deliberately refused rather than
+   guessed**. The 409 names the path that does work locally (retry the run).
+14. **The fan-in aggregate still bypasses the producer's `outputSchema`, by
+   design.** `AggregateFanInOutputs` (`pkg/task/output.go`) no longer truncates on
+   overflow — it fails typed, with `*FanInAggregateTooLargeError` carrying the
+   producer, the encoded size, and the cap, wrapping the
+   `ErrFanInAggregateTooLarge` sentinel so a caller fails the group instead of
+   silently shipping a short work list. What is **not** solved: a declared
+   `outputSchema` describes one instance's emission, not the group fold, so the
+   synthesized aggregate is never validated against it. That is a **design
+   question** — a group-level schema needs its own vocabulary for the
+   per-partition map and the synthetic `_PARTITION_COUNT` / `_SUCCEEDED` /
+   `_FAILED` keys — and no item in this plan owns it. Do not paper over it by
+   validating the aggregate against the per-instance schema; that would reject
+   every correct fold.
+15. **Rolling-upgrade capability gate — delete it once the fleet is on protocol
+   2.** Fanned dispatch is routed only to peers advertising
+   `CapabilityInstanceIdentity` (`"instance_identity"`) from the new
+   `GET /internal/capabilities` probe (`internal/dispatch/internal_server.go`;
+   `HandleCapabilities` / `GetCapabilities` in `internal/dispatch/dispatch.go`,
+   cached per peer in `internal/dispatch/loop.go`), with
+   `InternalProtocolVersion = 2` (`internal/dispatch/dispatch.go:76`). An
+   instance-blind dispatch that reaches an expanded group is refused as a 409
+   carrying `ReasonAmbiguousTask` (`"ambiguous_task"`) rather than resolved to an
+   arbitrary sibling — the fail-closed half of G4's rolling-upgrade contract. The
+   gate is **transitional scaffolding**: once every deployed node is ≥ protocol 2
+   it buys nothing but a probe and a branch, and leaving it indefinitely means the
+   negotiation outlives the incompatibility it was written for. Remove the gate,
+   not the 409.
 
 ## Streams
 

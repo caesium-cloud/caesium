@@ -99,9 +99,20 @@ func newOwnerIdentityFixture(t *testing.T, fanned bool) *ownerIdentityFixture {
 
 func (f *ownerIdentityFixture) state(t *testing.T) *RunState {
 	t.Helper()
+	return f.owned(t).state
+}
+
+// owned returns the manager's per-run entry.  Tests that need to observe state
+// AFTER a transition that completes (and therefore drops) the run must hold this
+// rather than the *RunState behind it: CompleteInstance stages each transition on
+// a clone and publishes it by swapping or.state, so a RunState pointer captured
+// beforehand is the pre-transition copy by design.  The ownedRun struct survives
+// the drop — Drop only removes it from the manager's map.
+func (f *ownerIdentityFixture) owned(t *testing.T) *ownedRun {
+	t.Helper()
 	or, ok := f.mgr.get(f.runID)
 	require.True(t, ok)
-	return or.state
+	return or
 }
 
 // TestOwnerCompleteInstanceAcceptsUnfannedTaskRunID is the stall: a fan-out
@@ -279,8 +290,11 @@ func TestOwnerCompleteInstanceDerivesFailureFromResult(t *testing.T) {
 	require.Len(t, ready, 3)
 
 	// Held across the call: resolving the group makes the run complete, and a
-	// complete run is dropped from the manager's map.
-	state := f.state(t)
+	// complete run is dropped from the manager's map.  The ownedRun is what is
+	// held, not the *RunState inside it — a completion publishes its transition
+	// by swapping that pointer, so `or.state` read afterwards is the state the
+	// durable write committed.
+	or := f.owned(t)
 
 	// Exactly the envelope a non-zero exit produces.
 	res, err := f.mgr.CompleteInstance(
@@ -291,13 +305,13 @@ func TestOwnerCompleteInstanceDerivesFailureFromResult(t *testing.T) {
 	require.True(t, res.Complete,
 		"fail_fast resolves the whole group, so the run finishes on this transition")
 
-	st, ok := state.TaskState(ready[0].TaskRunID)
+	st, ok := or.state.TaskState(ready[0].TaskRunID)
 	require.True(t, ok)
 	require.Equal(t, TaskStatusFailed, st.Status,
 		"a `failure` result must be recorded failed by the owner, as the SQL lane records it")
 
 	for _, dt := range ready[1:] {
-		sib, ok := state.TaskState(dt.TaskRunID)
+		sib, ok := or.state.TaskState(dt.TaskRunID)
 		require.True(t, ok)
 		require.Equal(t, TaskStatusSkipped, sib.Status,
 			"fail_fast must cancel a pending sibling in owner mode too")

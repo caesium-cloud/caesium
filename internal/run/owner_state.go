@@ -1249,9 +1249,11 @@ func (rs *RunState) Snapshot() ([]byte, error) {
 	return json.Marshal(snap)
 }
 
-// Restore rebuilds a RunState from a checkpoint blob produced by Snapshot,
-// rehydrating the immutable topology from topo (reloaded from the catalog).
-func Restore(topo RunTopology, blob []byte) (*RunState, error) {
+// parseRunStateSnapshot decodes and version-checks a checkpoint blob.  It is the
+// single acceptance test for a checkpoint: Restore and ValidateCheckpointBlob
+// both go through it, so "the validator said yes" and "Restore succeeded" can
+// never disagree.
+func parseRunStateSnapshot(blob []byte) (*runStateSnapshot, error) {
 	var probe struct {
 		Version int `json:"version"`
 	}
@@ -1264,6 +1266,30 @@ func Restore(topo RunTopology, blob []byte) (*RunState, error) {
 	var snap runStateSnapshot
 	if err := json.Unmarshal(blob, &snap); err != nil {
 		return nil, fmt.Errorf("run state: unmarshal checkpoint: %w", err)
+	}
+	return &snap, nil
+}
+
+// ValidateCheckpointBlob reports whether Restore would accept blob.
+//
+// A recovering owner must decide this BEFORE it queries the terminal tail.  The
+// tail query is filtered by the checkpoint's sequence_high, so if the checkpoint
+// is then rejected and recovery falls back to a from-scratch replay with a
+// replay start of zero, the rows in hand are still only the post-checkpoint
+// tail: every terminal transition at or below sequence_high is silently lost,
+// and the run resurrects work it already finished.  Validating first lets the
+// caller drop the sequence filter in the same breath it drops the checkpoint.
+func ValidateCheckpointBlob(blob []byte) error {
+	_, err := parseRunStateSnapshot(blob)
+	return err
+}
+
+// Restore rebuilds a RunState from a checkpoint blob produced by Snapshot,
+// rehydrating the immutable topology from topo (reloaded from the catalog).
+func Restore(topo RunTopology, blob []byte) (*RunState, error) {
+	snap, err := parseRunStateSnapshot(blob)
+	if err != nil {
+		return nil, err
 	}
 	rs := &RunState{
 		topo:          topo,
@@ -1303,4 +1329,174 @@ func Restore(topo RunTopology, blob []byte) (*RunState, error) {
 		rs.inReady[id] = true
 	}
 	return rs, nil
+}
+
+// Clone returns a deep copy of the mutable state: every map, every slice, and
+// every *OwnerTaskState is duplicated, so a mutation applied to the copy is
+// invisible to the original.  The topology is shared by reference — it is
+// immutable for the run's lifetime.
+//
+// It exists for one reason: the owner must not PUBLISH a DAG transition that
+// its durable write then fails to commit.  CompleteInstance used to apply
+// ApplyExpansion + ApplyCompletion straight to the authoritative state and only
+// then call CompleteTaskOwner.  When that transaction failed, the producer was
+// already terminal in memory, so the worker's redelivery took the
+// already-terminal branch, skipped expansion re-planning, and re-persisted the
+// completion WITHOUT the expansion — while the owner's ready queue held instance
+// ids that exist in no row.  Those dispatch forever against a missing row.
+// Staging in a clone and swapping it in only after the commit makes the two
+// converge: either both the rows and the state advanced, or neither did.
+func (rs *RunState) Clone() *RunState {
+	if rs == nil {
+		return nil
+	}
+	out := &RunState{
+		topo:          rs.topo,
+		tasks:         make(map[uuid.UUID]*OwnerTaskState, len(rs.tasks)),
+		indegree:      make(map[uuid.UUID]int, len(rs.indegree)),
+		outcomes:      make(map[uuid.UUID]TaskStatus, len(rs.outcomes)),
+		ready:         append([]uuid.UUID(nil), rs.ready...),
+		inReady:       make(map[uuid.UUID]bool, len(rs.inReady)),
+		seq:           rs.seq,
+		terminalCount: rs.terminalCount,
+		total:         rs.total,
+		completions:   make(map[uuid.UUID]completionRecord, len(rs.completions)),
+		catalogOf:     make(map[uuid.UUID]uuid.UUID, len(rs.catalogOf)),
+		instancesOf:   make(map[uuid.UUID][]uuid.UUID, len(rs.instancesOf)),
+		inGroupAdj:    make(map[uuid.UUID][]uuid.UUID, len(rs.inGroupAdj)),
+		instanceOrder: make(map[uuid.UUID]int, len(rs.instanceOrder)),
+		maxParallel:   make(map[uuid.UUID]int, len(rs.maxParallel)),
+		partitionKeys: make(map[uuid.UUID]string, len(rs.partitionKeys)),
+		failurePolicy: make(map[uuid.UUID]string, len(rs.failurePolicy)),
+		groupNames:    make(map[uuid.UUID]string, len(rs.groupNames)),
+		groupStarted:  make(map[uuid.UUID]time.Time, len(rs.groupStarted)),
+		groupObserved: make(map[uuid.UUID]bool, len(rs.groupObserved)),
+	}
+	for id, ts := range rs.tasks {
+		if ts == nil {
+			continue
+		}
+		copied := *ts
+		out.tasks[id] = &copied
+	}
+	for id, n := range rs.indegree {
+		out.indegree[id] = n
+	}
+	for id, st := range rs.outcomes {
+		out.outcomes[id] = st
+	}
+	for id, ok := range rs.inReady {
+		out.inReady[id] = ok
+	}
+	for id, rec := range rs.completions {
+		out.completions[id] = completionRecord{
+			TerminalSequence: rec.TerminalSequence,
+			Skipped:          append([]SkippedTask(nil), rec.Skipped...),
+		}
+	}
+	for id, cat := range rs.catalogOf {
+		out.catalogOf[id] = cat
+	}
+	// instancesOf / inGroupAdj are appended to, so the slices must be copied and
+	// not merely re-headered: append into a shared backing array would write
+	// through to the original.
+	for id, insts := range rs.instancesOf {
+		out.instancesOf[id] = append([]uuid.UUID(nil), insts...)
+	}
+	for id, deps := range rs.inGroupAdj {
+		out.inGroupAdj[id] = append([]uuid.UUID(nil), deps...)
+	}
+	for id, n := range rs.instanceOrder {
+		out.instanceOrder[id] = n
+	}
+	for id, n := range rs.maxParallel {
+		out.maxParallel[id] = n
+	}
+	for id, key := range rs.partitionKeys {
+		out.partitionKeys[id] = key
+	}
+	for id, policy := range rs.failurePolicy {
+		out.failurePolicy[id] = policy
+	}
+	for id, name := range rs.groupNames {
+		out.groupNames[id] = name
+	}
+	for id, at := range rs.groupStarted {
+		out.groupStarted[id] = at
+	}
+	for id, seen := range rs.groupObserved {
+		out.groupObserved[id] = seen
+	}
+	return out
+}
+
+// RequeueExpiredRows returns the tasks named by rows — in-flight rows whose
+// worker claim lease the store just reclaimed — to the ready queue with an
+// incremented attempt, and reports which it actually re-queued in dispatch
+// order.
+//
+// It is the in-memory half of owner-side claim reaping.  A worker that dies
+// mid-task leaves its row `running` with a lapsed claim_expires_at, and the
+// claimer's reaper deliberately skips rows belonging to a LIVE-owned run (the
+// owner is supposed to re-dispatch them).  Nothing did: the owner counted the
+// instance in flight forever, so a fanOut.maxParallel group wedged and the run
+// never completed.  Rows are matched by instance identity first, falling back to
+// the catalog task id for an unfanned step, exactly as SyncStartedFromRows does.
+// Only tasks this state still believes are running are re-queued, so a row reset
+// underneath a completion that already landed is ignored.
+func (rs *RunState) RequeueExpiredRows(rows []models.TaskRun) []uuid.UUID {
+	if rs == nil || len(rows) == 0 {
+		return nil
+	}
+	var out []uuid.UUID
+	for i := range rows {
+		row := &rows[i]
+		id := row.TaskID
+		if _, ok := rs.tasks[row.ID]; ok {
+			id = row.ID
+		}
+		ts := rs.tasks[id]
+		if ts == nil || ts.Status != TaskStatusRunning {
+			continue
+		}
+		ts.Status = TaskStatusPending
+		ts.Attempt++
+		ts.ClaimedBy = ""
+		ts.LeaseExpiresAtMs = 0
+		ts.Started = false
+		rs.pushReady(id)
+		out = append(out, id)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return rs.orderOf(out[i]) < rs.orderOf(out[j])
+	})
+	return out
+}
+
+// AnyLeaseOverdue reports whether some in-flight task's dispatch lease has
+// lapsed — or was never recorded — according to the owner's own bookkeeping.
+//
+// It is the cheap, allocation-free precondition on the owner-side claim reaper:
+// a run with nothing in flight, or with every in-flight lease still fresh, skips
+// the reap query entirely.  It is a NECESSARY condition, never a sufficient one.
+// The owner's copy of a lease is set once at dispatch and never renewed, while
+// the worker renews the durable claim_expires_at without telling the owner — so
+// this can say "overdue" about a task that is alive and well (harmless: the
+// query then finds nothing), but it cannot say "fresh" about a task whose
+// durable claim has already lapsed, because both start from the same deadline.
+// A task with no recorded lease at all is treated as overdue so an unbookkept
+// dispatch can never wedge the run.
+func (rs *RunState) AnyLeaseOverdue(nowMs int64) bool {
+	if rs == nil {
+		return false
+	}
+	for _, ts := range rs.tasks {
+		if ts == nil || ts.Status != TaskStatusRunning {
+			continue
+		}
+		if ts.LeaseExpiresAtMs <= 0 || ts.LeaseExpiresAtMs < nowMs {
+			return true
+		}
+	}
+	return false
 }

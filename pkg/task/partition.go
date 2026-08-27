@@ -192,6 +192,14 @@ func parsePartitionsArrayLine(payload string, acc *partitionAccumulator) error {
 	if payload == "" {
 		return nil
 	}
+	// Require an actual array token before decoding. JSON `null` unmarshals into
+	// a nil []json.RawMessage WITHOUT an error, so `##caesium::partitions null`
+	// used to be indistinguishable from "emitted nothing" and was routed through
+	// onEmpty (skip, by default) instead of failing the producer. `[]` remains
+	// the documented way to declare an empty work list.
+	if payload[0] != '[' {
+		return partitionErrorf("##caesium::partitions payload must be a JSON array, got %s", truncateForErr(payload))
+	}
 	var raw []json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return fmt.Errorf("malformed ##caesium::partitions JSON array: %w", err)
@@ -273,7 +281,18 @@ func parsePartitionObject(raw []byte) (Partition, error) {
 		if err := json.Unmarshal(depRaw, &deps); err != nil {
 			return Partition{}, fmt.Errorf("partition %q dependsOn: %w", p.Key, err)
 		}
-		p.DependsOn = deps
+		// Normalize HERE, on the value that gets persisted. internal/run/fanout.go
+		// marshals p.DependsOn verbatim into task_runs.partition_depends_on, so
+		// normalizing only inside ValidatePartitionGraph's loop meant " a "
+		// resolved as an edge to "a" for indegree purposes and was then stored
+		// with the whitespace intact — a stored edge matching no sibling's
+		// partition_value. Keys are already trimmed by partitionFromKey; the same
+		// rules have to apply to the references to them.
+		normalized, err := NormalizeDependsOn(p.Key, deps)
+		if err != nil {
+			return Partition{}, err
+		}
+		p.DependsOn = normalized
 	}
 
 	attrs := make(map[string]string)
@@ -312,6 +331,54 @@ func partitionFromKey(key string) (Partition, error) {
 		return Partition{}, fmt.Errorf("partition key %q exceeds %d bytes", truncateForErr(key), MaxPartitionKeyBytes)
 	}
 	return Partition{Key: key}, nil
+}
+
+// NormalizeDependsOn canonicalizes one partition's dependsOn list: each entry is
+// trimmed (matching partitionFromKey's treatment of the keys those entries
+// reference), an entry that is empty after trimming is rejected as a producer
+// bug rather than silently dropped, and duplicates are collapsed so the stored
+// edge list and the indegree the scheduler seeds describe the same graph.
+//
+// It is applied at parse time (so the persisted value is canonical) and again by
+// ValidatePartitionGraph (so partitions constructed by any other path get the
+// identical treatment). It is idempotent.
+func NormalizeDependsOn(key string, deps []string) ([]string, error) {
+	if len(deps) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(deps))
+	seen := make(map[string]struct{}, len(deps))
+	for _, dep := range deps {
+		dep = strings.TrimSpace(dep)
+		if dep == "" {
+			return nil, fmt.Errorf("partition %q dependsOn contains an empty key", key)
+		}
+		if _, dup := seen[dep]; dup {
+			continue
+		}
+		seen[dep] = struct{}{}
+		out = append(out, dep)
+	}
+	return out, nil
+}
+
+// NormalizePartitions returns parts with every dependsOn list canonicalized. It
+// is the single entry point callers outside the marker parser (recovery paths,
+// tests) use so the graph and the persisted rows never disagree about keys.
+func NormalizePartitions(parts []Partition) ([]Partition, error) {
+	if len(parts) == 0 {
+		return parts, nil
+	}
+	out := make([]Partition, len(parts))
+	copy(out, parts)
+	for i := range out {
+		normalized, err := NormalizeDependsOn(out[i].Key, out[i].DependsOn)
+		if err != nil {
+			return nil, err
+		}
+		out[i].DependsOn = normalized
+	}
+	return out, nil
 }
 
 func isJSONNull(raw json.RawMessage) bool {
