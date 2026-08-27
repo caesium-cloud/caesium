@@ -410,7 +410,7 @@ only the secret checks; local `caesium job lint` prints only "Validated N" and
 has no warnings channel, while the server lint response already carries
 `Warnings []LintMessage`.
 
-- [ ] D1. Multi-writer volume lint warning. Add
+- [x] D1. Multi-writer volume lint warning. Add
       `internal/jobdef/lint/volumes.go` `CheckVolumeWriters(defs) []string`
       that warns when a named volume is mounted by more than one step without
       `readOnly: true` (per definition; message names the volume and the
@@ -423,6 +423,13 @@ has no warnings channel, while the server lint response already carries
       Files: new `internal/jobdef/lint/volumes.go` + `_test.go`,
       `api/rest/controller/jobdef/lint.go`, `cmd/job/lint.go`, new scenario in
       `test/` (e.g. `test/lint_volumes_test.go`).
+      > Shipped (W1-γ). `CheckVolumeWriters` groups write mounts (`readOnly`
+      > omitted/false) by `(volume, subPath)` within a definition — two steps
+      > writing disjoint subPaths of the same volume are a legitimate
+      > two-writer case (Open Question 2) and stay silent, matching the
+      > shipped `docs/examples/k8s-workload-identity-volume.job.yaml`
+      > (`plan-access` at the volume root, `write-cloud-report` at
+      > `subPath: reports`) without changes to that fixture.
 - [ ] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes

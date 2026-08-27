@@ -77,6 +77,9 @@ var lintCmd = &cobra.Command{
 			if err := writeCmdOut(cmd, "Validated %d job definition(s)\n", len(defs)); err != nil {
 				return err
 			}
+			if err := writeLintVolumeWarnings(cmd, defs); err != nil {
+				return err
+			}
 			for _, def := range defs {
 				if summary := contractSummary(def.Steps); summary != "" {
 					if err := writeCmdOut(cmd, "  %s: %s\n", def.Metadata.Alias, summary); err != nil {
@@ -109,6 +112,9 @@ var lintCmd = &cobra.Command{
 		}
 
 		if err := writeCmdOut(cmd, "Validated %d job definition(s) with secrets\n", len(defs)); err != nil {
+			return err
+		}
+		if err := writeLintVolumeWarnings(cmd, defs); err != nil {
 			return err
 		}
 		if err := writeLintTriggerScopeNote(cmd); err != nil {
@@ -388,6 +394,27 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
+}
+
+// writeLintVolumeWarnings prints the "two read-write mounts on one volume"
+// lint warning (spec §8) as a warnings block on stdout, mirroring the shape
+// server lint uses for resp.Warnings. It never fails the command: the check
+// is a warning, not an error (spec §11 Open Question 2), so exit code stays
+// 0 regardless of what it finds.
+func writeLintVolumeWarnings(cmd *cobra.Command, defs []jobdef.Definition) error {
+	warnings := lintpkg.CheckVolumeWriters(defs)
+	if len(warnings) == 0 {
+		return nil
+	}
+	if err := writeCmdOut(cmd, "Warnings:\n"); err != nil {
+		return err
+	}
+	for _, msg := range warnings {
+		if err := writeCmdOut(cmd, "  - %s\n", msg); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func writeLintTriggerScopeNote(cmd *cobra.Command) error {
