@@ -43,6 +43,55 @@ const chainHitBody = `{
   }
 }`
 
+// chainGroupBody is the shape spec §5.5's reference manifest uses: a step
+// carrying both `fanOut` and `chain: values`, addressed WITHOUT a --partition
+// selector. A group answer has N hashes and N baselines, so it carries no
+// `diff` — the exclusion rides on `group.notes` instead.
+const chainGroupBody = `{
+  "runId": "22222222-2222-2222-2222-222222222222",
+  "jobId": "11111111-1111-1111-1111-111111111111",
+  "taskId": "33333333-3333-3333-3333-333333333333",
+  "taskName": "apply",
+  "verdict": "CACHE_MISS",
+  "status": "succeeded",
+  "cacheEnabled": true,
+  "summary": "FANNED GROUP — task \"apply\" ran 3 partition(s): 2 cached, 1 succeeded. Re-run with --partition <value> for the per-instance explanation.; predecessor hashes excluded (chain: values)",
+  "trigger": {"type": "cron", "alias": "nightly"},
+  "baseline": {"kind": "per_partition"},
+  "group": {
+    "partitionCount": 3,
+    "statusCounts": {"cached": 2, "succeeded": 1},
+    "cacheHits": 2,
+    "partitions": ["stacks/app-web", "stacks/app-api", "stacks/network"],
+    "notes": ["predecessor hashes excluded (chain: values)"]
+  }
+}`
+
+// TestRenderTable_ChainExclusionRendersForAFannedGroup pins review finding I-1:
+// `renderGroup`'s early return used to precede the note loop, so the flagship
+// fan-out shape printed the partition histogram and never mentioned that
+// predecessor hashes had been excluded from the cached instances' keys.
+func TestRenderTable_ChainExclusionRendersForAFannedGroup(t *testing.T) {
+	out := renderBody(t, chainGroupBody)
+
+	require.Contains(t, out, "note: predecessor hashes excluded (chain: values)",
+		"a fanned group must name the exclusion; --partition should not be required to discover it")
+	// The existing group rendering must survive unchanged.
+	require.Contains(t, out, "Fan-out group (3 partitions)")
+	require.Contains(t, out, "CACHE-HITS")
+	require.Contains(t, out, "--partition <value>")
+	require.NotContains(t, out, "Discriminating fields",
+		"a group still has no single field diff to show")
+}
+
+// TestRenderTable_TransitiveGroupUnchanged is the no-regression half.
+func TestRenderTable_TransitiveGroupUnchanged(t *testing.T) {
+	out := renderBody(t, groupBody)
+	require.NotContains(t, out, "note:",
+		"a transitive group must render exactly as it did before")
+	require.Contains(t, out, "Fan-out group (3 partitions)")
+}
+
 func TestRenderTable_ChainExclusionIsRenderedAsANote(t *testing.T) {
 	out := renderBody(t, chainHitBody)
 

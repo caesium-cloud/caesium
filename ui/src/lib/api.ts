@@ -667,6 +667,19 @@ export interface WhyBaseline {
 
 export type WhyVerdict = "CACHE_HIT" | "CACHE_MISS" | "CACHE_DISABLED" | "UNKNOWN";
 
+/**
+ * WhyGroup is the aggregate answer the server returns for a FANNED step
+ * addressed without a partition selector. Only the fields the Console reads are
+ * typed; a group has N identity hashes and no `diff`, so `notes` is where its
+ * key-construction qualifiers (the `chain: values` exclusion) live.
+ */
+export interface WhyGroup {
+  partitionCount?: number;
+  statusCounts?: Record<string, number>;
+  cacheHits?: number;
+  notes?: string[];
+}
+
 export interface WhyExplanation {
   runId: string;
   jobId: string;
@@ -681,6 +694,7 @@ export interface WhyExplanation {
   trigger: WhyTrigger;
   baseline: WhyBaseline;
   diff?: BlobDiff;
+  group?: WhyGroup;
 }
 
 export interface BlameOptions {

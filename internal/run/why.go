@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/caesium-cloud/caesium/internal/cache"
 	"github.com/caesium-cloud/caesium/internal/event"
 	"github.com/caesium-cloud/caesium/internal/models"
 	"github.com/google/uuid"
@@ -149,6 +150,15 @@ type WhyGroup struct {
 	StartedAt   *time.Time `json:"startedAt,omitempty"`
 	CompletedAt *time.Time `json:"completedAt,omitempty"`
 	DurationMS  int64      `json:"durationMs,omitempty"`
+	// Notes are qualifiers about HOW the group's instance keys were computed, the
+	// group-level counterpart of BlobDiff.Notes. A group carries no Diff — it has
+	// N hashes and N baselines — so without this channel the flagship shape of
+	// this feature (spec 5.5 puts `fanOut` AND `chain: values` on the same step)
+	// would answer "6 cached, 1 succeeded" and never mention that predecessor
+	// hashes were excluded from those six keys. That is the unexplainable skip
+	// spec 4.3 exists to prevent, and an operator who does not yet know the
+	// partition keys reaches the group form first.
+	Notes []string `json:"notes,omitempty"`
 }
 
 // WhyGroupFailure names the instance a fanned group's failure is attributed to.
@@ -363,8 +373,16 @@ func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, row
 	cacheEnabled := false
 	allTerminal := true
 	allCached := true
+	// valuesMode is read from the scheduler-set column rather than by decoding N
+	// instance blobs: it is the same value every instance of one step carries
+	// (the chain is resolved per step, not per partition), and it is populated
+	// even when an instance has no blob at all.
+	valuesMode := false
 	for i := range rows {
 		row := &rows[i]
+		if row.CacheChain == cache.ChainValues {
+			valuesMode = true
+		}
 		group.StatusCounts[row.Status]++
 		status := TaskStatus(row.Status)
 		if row.CacheHit || status == TaskStatusCached {
@@ -404,6 +422,10 @@ func newWhyGroupExplanation(runID, jobID, taskID uuid.UUID, taskName string, row
 
 	if group.StartedAt != nil && group.CompletedAt != nil && allTerminal {
 		group.DurationMS = group.CompletedAt.Sub(*group.StartedAt).Milliseconds()
+	}
+
+	if valuesMode {
+		group.Notes = append(group.Notes, predecessorHashesExcludedNote)
 	}
 
 	return &WhyExplanation{
@@ -587,20 +609,51 @@ func (s *Store) resolveBaseline(ctx context.Context, subject *models.TaskRun, jo
 // identical-inputs proof for a hit.
 func summarize(exp *WhyExplanation) string {
 	if exp.Group != nil {
-		return summarizeGroup(exp)
+		return withNotes(exp, summarizeGroup(exp))
 	}
-	return withDiffNotes(exp, summarizeVerdict(exp))
+	return withNotes(exp, summarizeVerdict(exp))
 }
 
-// withDiffNotes appends the diff's qualifiers to a summary line. Today that is
-// the chain: values exclusion, which spec §4.3 requires `caesium why` to render
-// explicitly — a consumer that stayed cached while its predecessor's identity
-// moved is otherwise an unexplainable skip.
-func withDiffNotes(exp *WhyExplanation, summary string) string {
-	if exp.Diff == nil || len(exp.Diff.Notes) == 0 {
+// withNotes appends the explanation's key-construction qualifiers to a summary
+// line. Today that is the chain: values exclusion, which spec §4.3 requires
+// `caesium why` to render explicitly — a consumer that stayed cached while its
+// predecessor's identity moved is otherwise an unexplainable skip.
+//
+// It reads BOTH channels because the two answer shapes carry the note
+// differently: a single instance has a Diff, a fanned group has N hashes and no
+// Diff at all, so its note rides on WhyGroup.Notes. Both land in this one line,
+// which is what every renderer — the CLI table, `--json`, and the Console's
+// server-summary panel — shows first.
+func withNotes(exp *WhyExplanation, summary string) string {
+	notes := explanationNotes(exp)
+	if len(notes) == 0 {
 		return summary
 	}
-	return summary + "; " + strings.Join(exp.Diff.Notes, "; ")
+	return summary + "; " + strings.Join(notes, "; ")
+}
+
+// explanationNotes collects the key-construction notes from whichever channel
+// this explanation shape uses, de-duplicated so a future explanation carrying
+// both does not repeat itself.
+func explanationNotes(exp *WhyExplanation) []string {
+	var notes []string
+	seen := make(map[string]struct{}, 2)
+	add := func(candidates []string) {
+		for _, n := range candidates {
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			notes = append(notes, n)
+		}
+	}
+	if exp.Diff != nil {
+		add(exp.Diff.Notes)
+	}
+	if exp.Group != nil {
+		add(exp.Group.Notes)
+	}
+	return notes
 }
 
 func summarizeVerdict(exp *WhyExplanation) string {

@@ -135,12 +135,87 @@ func TestDiff_ChainModeSwitchIsExplained(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DiffHashInputBlobs: %v", err)
 	}
+	if diff.HashEqual {
+		t.Fatal("the chain mode is part of the identity, so a switch must change the key")
+	}
 	if len(diff.Notes) != 1 {
 		t.Fatalf("a one-sided values mode must still be explained: %+v", diff.Notes)
 	}
 	c, ok := findChange(diff.Changes, "predecessorHashes")
 	if !ok || c.Kind != fieldExcluded {
 		t.Fatalf("expected the exclusion marker, got %+v", diff.Changes)
+	}
+
+	// The mode itself must be reported as a REAL discriminating field. The
+	// exclusion marker above is filtered out of every count, so without a `chain`
+	// entry the miss has no attributable cause and summarizeChanged falls through
+	// to "cause is outside the persisted hash inputs" — which is false here: the
+	// cause is the blob's own chain field.
+	mode, ok := findChange(diff.Changes, "chain")
+	if !ok {
+		t.Fatalf("expected the chain mode switch to be named, got %+v", diff.Changes)
+	}
+	if mode.Kind != fieldScalar {
+		t.Fatalf("the chain switch is a scalar change, got kind %q", mode.Kind)
+	}
+	if mode.Before != cache.ChainTransitive || mode.After != cache.ChainValues {
+		t.Fatalf("chain change must read transitive→values, got %q→%q", mode.Before, mode.After)
+	}
+
+	got := discriminatingChanges(diff.Changes)
+	if len(got) != 1 || got[0].Field != "chain" {
+		t.Fatalf("the mode switch must be the discriminating field, got %+v", got)
+	}
+}
+
+// TestDiff_ChainOmittedMeansTransitive: the blob omits `chain` in the default
+// mode (that omission is what keeps pre-chain blobs byte-identical), so an
+// unset-vs-"transitive" pair must NOT be reported as a mode switch.
+func TestDiff_ChainOmittedMeansTransitive(t *testing.T) {
+	baseline := blobFor(t, chainInput("", "upstream-hash-run-1", "same"))
+	subject := blobFor(t, chainInput(cache.ChainTransitive, "upstream-hash-run-1", "same"))
+
+	diff, err := DiffHashInputBlobs(subject, baseline)
+	if err != nil {
+		t.Fatalf("DiffHashInputBlobs: %v", err)
+	}
+	if !diff.HashEqual {
+		t.Fatal("an unset chain must hash identically to an explicit transitive")
+	}
+	if _, ok := findChange(diff.Changes, "chain"); ok {
+		t.Fatalf("an omitted chain must not read as a mode change, got %+v", diff.Changes)
+	}
+}
+
+// TestSummarize_ChainModeSwitchIsNotMisattributed is the user-visible half of
+// the fix: the one-line summary a mode switch produces must name the mode, and
+// must NOT claim the cause lies outside the persisted hash inputs.
+func TestSummarize_ChainModeSwitchIsNotMisattributed(t *testing.T) {
+	baseline := blobFor(t, chainInput(cache.ChainTransitive, "upstream-hash-run-1", "same"))
+	subject := blobFor(t, chainInput(cache.ChainValues, "upstream-hash-run-1", "same"))
+
+	diff, err := DiffHashInputBlobs(subject, baseline)
+	if err != nil {
+		t.Fatalf("DiffHashInputBlobs: %v", err)
+	}
+
+	exp := &WhyExplanation{
+		TaskName: "plan",
+		Verdict:  VerdictCacheMiss,
+		Status:   string(TaskStatusSucceeded),
+		Baseline: WhyBaseline{Kind: "prior_run"},
+		Diff:     diff,
+	}
+	summary := summarize(exp)
+
+	if strings.Contains(summary, "outside the persisted hash inputs") {
+		t.Fatalf("a mode switch IS inside the persisted hash inputs; summary: %q", summary)
+	}
+	if !strings.Contains(summary, "`chain` changed transitive→values") {
+		t.Fatalf("the summary must name the mode switch; got %q", summary)
+	}
+	if !strings.Contains(summary, predecessorHashesExcludedNote) {
+		t.Fatalf("the summary must still carry the exclusion note; got %q", summary)
 	}
 }
 

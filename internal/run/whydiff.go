@@ -176,8 +176,14 @@ type oversizedBlob struct {
 type BlobDiff struct {
 	// HashEqual is true when the two blobs decompose the same identity hash. By
 	// construction equal hashes mean every hashed input was identical, so Changes
-	// is empty; HashEqual=false with empty Changes can only happen when a blob is
-	// oversized/unparseable (see Degraded).
+	// holds no DISCRIMINATING entry; HashEqual=false with none can only happen
+	// when a blob is oversized/unparseable (see Degraded).
+	//
+	// Changes itself is not necessarily empty when HashEqual is true: a values-mode
+	// hit carries a fieldExcluded marker naming an input that was deliberately kept
+	// OUT of the key (its predecessor hashes may well differ — that is the point).
+	// Every consumer that counts or headlines "what changed" must therefore filter
+	// through discriminatingChanges rather than reading len(Changes).
 	HashEqual bool `json:"hashEqual"`
 	// SubjectHash / BaselineHash are the inline Compute() digests each blob
 	// carries, surfaced so a caller can confirm the diff matched the runs it
@@ -197,6 +203,18 @@ type BlobDiff struct {
 	// consumer that stayed cached while its predecessor visibly changed is an
 	// unexplainable skip (spec §4.3).
 	Notes []string `json:"notes,omitempty"`
+}
+
+// displayChain renders a blob's chain mode for a diff. The blob omits the field
+// in the default mode — that omission is what keeps pre-chain blobs
+// byte-identical — so an empty string is spelled out rather than shown as a
+// missing value: "chain changed transitive→values" is the useful line, "chain
+// changed →values" is not.
+func displayChain(chain string) string {
+	if chain == "" {
+		return cache.ChainTransitive
+	}
+	return chain
 }
 
 // discriminatingChanges filters out the entries that record an EXCLUDED input
@@ -317,6 +335,18 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 	}
 
 	changes = append(changes, diffEnv(before.Env, after.Env)...)
+
+	// The chain MODE is key material in its own right (Compute writes a framed
+	// cache_chain:values line into the digest), so a switch between modes is a
+	// real — and usually the ONLY — discriminating field. It must be reported as
+	// one: the exclusion marker below is deliberately filtered out of every count
+	// by discriminatingChanges, so without this a step that missed purely because
+	// an operator added `chain: values` was explained as "no input field differs
+	// from the prior run (cause is outside the persisted hash inputs, e.g. an
+	// expired/pruned cache entry)". That is false — the cause is inside the
+	// blob — and it sends the reader hunting for a pruned entry that never existed.
+	addScalar("chain", displayChain(before.Chain), displayChain(after.Chain))
+
 	// Under chain: values the predecessor hashes never entered either digest, so
 	// reporting an add/remove for them would name a "change" that provably did
 	// not discriminate the runs. Report the exclusion itself instead — once,

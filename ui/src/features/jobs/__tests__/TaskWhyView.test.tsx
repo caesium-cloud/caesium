@@ -94,6 +94,33 @@ describe("TaskWhyView chain exclusion", () => {
     );
   });
 
+  it("names the exclusion for a fanned group, which carries no diff", async () => {
+    // Spec §5.5 puts `fanOut` and `chain: values` on the same step, and a group
+    // answer has N hashes and N baselines — so it has no `diff` to hang the note
+    // on. It rides on `group.notes` instead, and the panel must still show it.
+    mockFetch.mockResolvedValue(
+      jsonResponse({
+        ...valuesModeHit,
+        verdict: "CACHE_MISS",
+        status: "succeeded",
+        summary:
+          'FANNED GROUP — task "apply" ran 3 partition(s): 2 cached, 1 succeeded; predecessor hashes excluded (chain: values)',
+        diff: undefined,
+        group: {
+          partitionCount: 3,
+          statusCounts: { cached: 2, succeeded: 1 },
+          cacheHits: 2,
+          notes: ["predecessor hashes excluded (chain: values)"],
+        },
+      }),
+    );
+
+    renderView(<TaskWhyView jobId="job-1" runId="run-1" taskName="apply" />);
+
+    const note = await screen.findByTestId("task-why-chain-exclusion");
+    expect(note.textContent).toContain("predecessor hashes excluded (chain: values)");
+  });
+
   it("omits the note entirely for a transitive explanation", async () => {
     mockFetch.mockResolvedValue(
       jsonResponse({

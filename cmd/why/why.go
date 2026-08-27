@@ -93,6 +93,35 @@ type groupSummary struct {
 	PartitionsTruncated bool           `json:"partitionsTruncated"`
 	FirstFailure        *groupFailure  `json:"firstFailure"`
 	DurationMS          int64          `json:"durationMs"`
+	// Notes mirrors run.WhyGroup.Notes: the group-level channel for
+	// key-construction qualifiers, which a group needs because it carries no
+	// diff to hang them on.
+	Notes []string `json:"notes"`
+}
+
+// explanationNotes collects the key-construction notes from whichever channel
+// this answer shape uses — a single instance carries them on its diff, a fanned
+// group on the group summary — de-duplicated so a future shape carrying both
+// does not print the same line twice. It mirrors run.explanationNotes.
+func explanationNotes(exp *explanation) []string {
+	var notes []string
+	seen := make(map[string]struct{}, 2)
+	add := func(candidates []string) {
+		for _, n := range candidates {
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			notes = append(notes, n)
+		}
+	}
+	if exp.Diff != nil {
+		add(exp.Diff.Notes)
+	}
+	if exp.Group != nil {
+		add(exp.Group.Notes)
+	}
+	return notes
 }
 
 // groupFailure mirrors run.WhyGroupFailure.
@@ -215,6 +244,17 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	}
 	_ = tw.Flush()
 
+	// Notes are printed on EVERY path — degraded blobs and fanned groups
+	// included, and BEFORE either early return below. The chain: values exclusion
+	// is the reason a task can stay cached while its predecessor visibly changed,
+	// so hiding it behind a `return` would leave exactly the skips spec §4.3 says
+	// must be explainable unexplained. A fanned group carries no Diff (N hashes,
+	// N baselines), so its note rides on group.notes.
+	for _, note := range explanationNotes(exp) {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "note: %s\n", note)
+	}
+
 	if exp.Group != nil {
 		renderGroup(out, exp.Group)
 		return
@@ -222,15 +262,6 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 
 	if exp.Diff == nil {
 		return
-	}
-
-	// Notes come first and are printed on EVERY path, degraded included: the
-	// chain: values exclusion is the reason a task can stay cached while its
-	// predecessor visibly changed, so it must not be hidden behind an early
-	// return.
-	for _, note := range exp.Diff.Notes {
-		_, _ = fmt.Fprintln(out)
-		_, _ = fmt.Fprintf(out, "note: %s\n", note)
 	}
 
 	if exp.Diff.Degraded != "" {

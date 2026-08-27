@@ -67,6 +67,8 @@ The resolved mode is snapshot on `TaskRun.cache_chain` and on the task execution
 
 `caesium why` must render the exclusion or a values-mode skip is unexplainable: the persisted `HashInputBlob` carries `chain`, the diff emits a `predecessorHashes` entry of kind `excluded` instead of a phantom add/remove, and `BlobDiff.Notes` carries `predecessor hashes excluded (chain: values)` for the summary line, the CLI table and the Console.
 
+**Relationship to the value-verified short-circuit.** The two overlap but neither subsumes the other. `EquivalentPriorHash` stops a cascade *after the fact*, only when a re-executed step is **proven** to have published byte-identical output — so it does nothing for a step that emits no output at all (guard 2: silence is not proof of equality; the `warm` role is exactly that shape), and nothing for a consumer that cares about only part of what its predecessor publishes. `chain: values` decides *before* execution and is a declaration rather than a proof, so it covers those cases — and, unlike the short-circuit, it costs nothing when the upstream step would have re-run anyway. Use the short-circuit's automatic behaviour where outputs are stable; reach for `chain: values` when the upstream churns for reasons it does not publish.
+
 **Sharp edge.** An upstream change that alters behaviour without altering its declared outputs leaves consumers cached. That is the intent and the hazard; the mitigation is the `why` rendering above plus the documentation callout in `job-definitions.md`.
 
 ### Cache entry & modes

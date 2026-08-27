@@ -133,7 +133,7 @@ function WhyContent({ explanation }: { explanation: WhyExplanation }) {
         </p>
       </div>
 
-      <ChainNotes diff={explanation.diff} />
+      <ChainNotes explanation={explanation} />
       <DiscriminatingField
         explanation={explanation}
         discriminatingChange={discriminatingChange}
@@ -180,9 +180,16 @@ function getDiscriminatingChange(explanation: WhyExplanation) {
  * today only the `cache.chain: values` predecessor-hash exclusion. Spec §4.3
  * requires this: without it, a step reported `cached` while its predecessor's
  * identity visibly moved reads as a cache bug.
+ *
+ * It reads both channels because the two answer shapes carry the note
+ * differently: a single task instance has a `diff`, while a FANNED step
+ * addressed at group level has N hashes and no diff at all, so its note rides on
+ * `group.notes`. Duplicates are collapsed.
  */
-function ChainNotes({ diff }: { diff?: BlobDiff }) {
-  const notes = diff?.notes ?? [];
+function ChainNotes({ explanation }: { explanation: WhyExplanation }) {
+  const notes = Array.from(
+    new Set([...(explanation.diff?.notes ?? []), ...(explanation.group?.notes ?? [])]),
+  );
   if (notes.length === 0) {
     return null;
   }
