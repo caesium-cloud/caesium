@@ -240,7 +240,7 @@ owns the fingerprint, uses `terraform get` + the `.terraform/modules/modules.jso
 manifest (not `terraform modules -json`, whose JSON drops the parent path), and
 fails closed on anything unexpected.
 
-- [ ] B1. Scaffold the pack. Create the nested module `pack/go.mod`
+- [x] B1. Scaffold the pack. Create the nested module `pack/go.mod`
       (`github.com/caesium-cloud/caesium/pack`; **no** dependency on the root
       module; add `hashicorp/terraform-exec` + `hashicorp/terraform-json` here
       up front so B and C never both add deps), `pack/internal/protocol/`
@@ -257,6 +257,14 @@ fails closed on anything unexpected.
       so `terraform` is on `PATH` for tests). Files: new `pack/go.mod`,
       `pack/internal/protocol/*.go` + tests, new `build/Dockerfile.pack`,
       `justfile`.
+      Landed: `pack/go.mod` (terraform-exec + terraform-json pinned up front
+      via `pack/tools.go`), `pack/internal/protocol` (buffered emitter +
+      `FailClosed`), `build/Dockerfile.pack` (Terraform 1.15.9, checksum-
+      verified, `TF_DIST` switchable), justfile `pack-toolchain` / `pack-lint`
+      / `pack-test` / `build-pack`. The four role `main.go`s exist as
+      fail-closed "not implemented" entrypoints so `build-pack` yields four
+      images from day one; B2/B4 and Stream C replace them.
+
 - [ ] B2. `git-source` (generic materialize role, spec §6.1). Env: `GIT_URL`,
       `GIT_REF`, `GIT_SPARSE` (space-separated paths), `GIT_SSH_KEY` (already
       resolved from `secret://` by Caesium; written to a 0600 temp file and

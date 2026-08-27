@@ -1,0 +1,159 @@
+# The Caesium pack: the four role images of the unit-pipeline pattern
+# (design §5.1/§6). Build one with `--target <role>`:
+#
+#   git-source   materialize — pin and stage a source tree, emit its identity
+#   tf-discover  discover    — enumerate stacks and fingerprint each one
+#   tf-warm      warm        — populate the shared provider mirror, idempotently
+#   tf-runner    propose/apply — plan and apply one stack
+#
+# `just build-pack` builds all four. The pack is a separate Go module
+# (pack/go.mod) so Terraform's Go dependencies never enter Caesium's root
+# module; nothing in here links against Caesium.
+
+# ---------------------------------------------------------------------------
+# Stage: tf-binary — the pinned Terraform (or OpenTofu) CLI.
+#
+# The manifest at .terraform/modules/modules.json that tf-discover reads is an
+# internal file with no compatibility promise (design §6.2), so the CLI version
+# is pinned by build-arg AND verified against a checksum recorded here. The
+# defaults are Terraform 1.15.9 — the version the design was verified against.
+# Changing TF_VERSION or TF_DIST without also passing the matching
+# TF_SHA256_LINUX_* values fails the checksum check, which is the intent: an
+# unverified Terraform binary must never reach a runtime stage.
+# ---------------------------------------------------------------------------
+FROM alpine:3.23 AS tf-binary
+
+ARG TARGETARCH
+ARG TF_DIST=terraform
+ARG TF_VERSION=1.15.9
+ARG TF_SHA256_LINUX_AMD64=76edd0b22d2f27d3d2e097cd793209646f719cf60f02ff3af626b07361137da1
+ARG TF_SHA256_LINUX_ARM64=0afa6c29f61ca5ea270e950e43e50ecf2418b598507bf580e8ae76e1e6699b19
+
+RUN apk add --no-cache ca-certificates curl unzip
+
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) sum="${TF_SHA256_LINUX_AMD64}" ;; \
+      arm64) sum="${TF_SHA256_LINUX_ARM64}" ;; \
+      *) echo "unsupported TARGETARCH '${TARGETARCH}' (want amd64 or arm64)" >&2; exit 1 ;; \
+    esac; \
+    if [ -z "${sum}" ]; then \
+      echo "no checksum recorded for ${TF_DIST} ${TF_VERSION} linux/${TARGETARCH}" >&2; exit 1; \
+    fi; \
+    case "${TF_DIST}" in \
+      terraform) \
+        url="https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_${TARGETARCH}.zip" ;; \
+      opentofu) \
+        url="https://github.com/opentofu/opentofu/releases/download/v${TF_VERSION}/tofu_${TF_VERSION}_linux_${TARGETARCH}.zip" ;; \
+      *) echo "unsupported TF_DIST '${TF_DIST}' (want terraform or opentofu)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL --retry 3 -o /tmp/tf.zip "${url}"; \
+    printf '%s  %s\n' "${sum}" /tmp/tf.zip | sha256sum -c -; \
+    unzip -q /tmp/tf.zip -d /tmp/tfbin; \
+    # OpenTofu ships the binary as `tofu`. Both are installed as `terraform` so
+    # the role binaries (and terraform-exec) address one fixed name.
+    if [ -f /tmp/tfbin/tofu ]; then mv /tmp/tfbin/tofu /usr/local/bin/terraform; \
+    else mv /tmp/tfbin/terraform /usr/local/bin/terraform; fi; \
+    chmod 0755 /usr/local/bin/terraform; \
+    rm -rf /tmp/tf.zip /tmp/tfbin; \
+    /usr/local/bin/terraform version
+
+# ---------------------------------------------------------------------------
+# Stage: build — compiles every role binary from the nested pack module.
+# ---------------------------------------------------------------------------
+FROM golang:1.25.6-alpine3.23 AS build
+
+RUN apk add --no-cache ca-certificates git
+COPY --from=tf-binary /usr/local/bin/terraform /usr/local/bin/terraform
+
+WORKDIR /bld/caesium/pack
+ARG TARGETARCH
+ENV CGO_ENABLED=0 \
+    GOOS=linux \
+    GOARCH=${TARGETARCH}
+
+# Dependencies first so a source-only change does not re-download them. The
+# module cache this leaves behind is also what makes the `pack-test` stage
+# usable without network access.
+COPY pack/go.mod pack/go.sum ./
+RUN go mod download
+
+COPY pack/ ./
+RUN set -eu; \
+    mkdir -p /out; \
+    for role in git-source tf-discover tf-warm tf-runner; do \
+      go build -trimpath -ldflags="-s -w" -o "/out/${role}" "./cmd/${role}"; \
+    done
+
+# ---------------------------------------------------------------------------
+# Stage: toolchain — the build stage plus the test/lint tooling. `just
+# pack-test` and `just pack-lint` run inside this image with the repo
+# bind-mounted, so `terraform` is on PATH for the tests that need it and the
+# _test.go files and pack/testdata fixture (both excluded from the build
+# context by .dockerignore) come from the working tree. The module cache baked
+# in by `go mod download` above means neither target re-downloads dependencies.
+# ---------------------------------------------------------------------------
+FROM build AS toolchain
+# GOOS/GOARCH are pinned for cross-compiling the role binaries; clear them so
+# `go test` builds and runs for the container's own platform.
+ENV GOOS= \
+    GOARCH= \
+    CGO_ENABLED=1
+RUN apk add --no-cache gcc musl-dev && \
+    wget -qO- https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+      | sh -s -- -b "$(go env GOPATH)/bin" v2.4.0
+WORKDIR /bld/caesium/pack
+
+# ---------------------------------------------------------------------------
+# Stage: runtime — the shared, non-root base for every role image.
+# ---------------------------------------------------------------------------
+FROM alpine:3.23 AS runtime
+RUN apk add --no-cache ca-certificates tzdata && \
+    adduser -D -H -u 10001 caesium
+USER 10001:10001
+
+# ---------------------------------------------------------------------------
+# Role: git-source (materialize). Needs git plus an ssh client so a
+# `secret://`-resolved deploy key can reach a private forge.
+# ---------------------------------------------------------------------------
+FROM runtime AS git-source
+USER 0:0
+RUN apk add --no-cache git openssh-client
+COPY --from=build /out/git-source /usr/local/bin/git-source
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/git-source"]
+
+# ---------------------------------------------------------------------------
+# Role: tf-discover. Runs `terraform get` (modules only — no providers, which
+# is why discover needs no warm cache) and fingerprints each stack.
+# ---------------------------------------------------------------------------
+FROM runtime AS tf-discover
+USER 0:0
+RUN apk add --no-cache git
+COPY --from=tf-binary /usr/local/bin/terraform /usr/local/bin/terraform
+COPY --from=build /out/tf-discover /usr/local/bin/tf-discover
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/tf-discover"]
+
+# ---------------------------------------------------------------------------
+# Role: tf-warm. Populates /cache with a provider filesystem_mirror.
+# ---------------------------------------------------------------------------
+FROM runtime AS tf-warm
+USER 0:0
+RUN apk add --no-cache git
+COPY --from=tf-binary /usr/local/bin/terraform /usr/local/bin/terraform
+COPY --from=build /out/tf-warm /usr/local/bin/tf-warm
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/tf-warm"]
+
+# ---------------------------------------------------------------------------
+# Role: tf-runner (propose and apply). The subcommand selects the phase, so the
+# manifest's `command:` is e.g. ["tf-plan"] / ["tf-apply"] / ["tf-drift"].
+# ---------------------------------------------------------------------------
+FROM runtime AS tf-runner
+USER 0:0
+RUN apk add --no-cache git
+COPY --from=tf-binary /usr/local/bin/terraform /usr/local/bin/terraform
+COPY --from=build /out/tf-runner /usr/local/bin/tf-runner
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/tf-runner"]

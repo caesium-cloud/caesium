@@ -27,6 +27,17 @@ local_image_ref := if podman == "true" { "localhost/" + repo + "/" + image } els
 local_builder_ref := if podman == "true" { "localhost/" + repo + "/" + builder_image } else { repo + "/" + builder_image }
 triage_agent_image := repo + "/triage-agent"
 local_triage_agent_ref := if podman == "true" { "localhost/" + triage_agent_image } else { triage_agent_image }
+
+# The unit-pipeline pack images (git-source, tf-discover, tf-warm, tf-runner)
+# publish under the same Docker Hub org as the product image.
+local_pack_repo := if podman == "true" { "localhost/" + repo } else { repo }
+pack_toolchain_image := repo + "/caesium-pack-toolchain"
+local_pack_toolchain_ref := if podman == "true" { "localhost/" + pack_toolchain_image } else { pack_toolchain_image }
+# The single place the Terraform distribution/version is pinned; it flows into
+# build/Dockerfile.pack's ARG defaults. Changing TF_VERSION or TF_DIST also
+# requires the matching TF_SHA256_LINUX_* build-args (checksum-verified).
+tf_dist := env("CAESIUM_TF_DIST", "terraform")
+tf_version := env("CAESIUM_TF_VERSION", "1.15.9")
 publish_image_ref := repo + "/" + image
 publish_builder_ref := repo + "/" + builder_image
 sock := env("CAESIUM_SOCK", default_sock)
@@ -121,6 +132,63 @@ build-triage-agent: validate-platform
         -t {{ local_triage_agent_ref }}:{{ tag }} \
         -t {{ triage_agent_image }}:latest \
         -f build/Dockerfile.triage-agent .
+
+# ---------------------------------------------------------------------------
+# The unit-pipeline pack (docs/superpowers/specs/…-infrastructure-deployment…).
+# `pack/` is a separate Go module, so it is invisible to the root `./...` and
+# needs its own lint/test targets — these are wired into CI's lint and
+# unit-test jobs alongside the root ones.
+# ---------------------------------------------------------------------------
+
+# Build the pack toolchain image (Go + golangci-lint + pinned terraform).
+pack-toolchain: validate-platform
+    {{ container_cli }} build --platform {{ platform }} \
+        --build-arg TF_DIST={{ tf_dist }} \
+        --build-arg TF_VERSION={{ tf_version }} \
+        --target toolchain \
+        -t {{ local_pack_toolchain_ref }}:{{ tag }} \
+        -f build/Dockerfile.pack .
+
+# gofmt + go vet + golangci-lint over the nested pack module.
+pack-lint: pack-toolchain
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }}/pack \
+        -e GOFLAGS=-buildvcs=false \
+        {{ local_pack_toolchain_ref }}:{{ tag }} \
+        sh -c 'set -eu; \
+            unformatted=$(gofmt -l .); \
+            if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi; \
+            go vet ./...; \
+            golangci-lint run ./...'
+
+# Run the pack module's tests inside the toolchain stage, so `terraform` is on
+# PATH for the tests that drive it. Those tests use `terraform get` (modules
+# only — no provider installation) against pack/testdata, so they need no
+# registry credentials, but they DO need outbound network for any stack whose
+# providers are resolved.
+# Run the pack module's unit tests (terraform on PATH; needs network).
+pack-test: pack-toolchain
+    {{ container_cli }} run --rm --platform {{ platform }} \
+        -v {{ repo_dir }}:{{ bld_dir }} \
+        -w {{ bld_dir }}/pack \
+        -e GOFLAGS=-buildvcs=false \
+        {{ local_pack_toolchain_ref }}:{{ tag }} \
+        go test -race ./...
+
+# Build all four pack role images (--target per role in Dockerfile.pack).
+build-pack: validate-platform
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for role in git-source tf-discover tf-warm tf-runner; do
+        {{ container_cli }} build --platform {{ platform }} \
+            --build-arg TF_DIST={{ tf_dist }} \
+            --build-arg TF_VERSION={{ tf_version }} \
+            --target "$role" \
+            -t "{{ local_pack_repo }}/$role:{{ tag }}" \
+            -t "{{ repo }}/$role:latest" \
+            -f build/Dockerfile.pack .
+    done
 
 push:
     docker push {{ publish_image_ref }}:{{ tag }}
