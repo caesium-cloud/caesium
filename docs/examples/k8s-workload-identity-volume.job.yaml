@@ -41,7 +41,8 @@ steps:
         echo '##caesium::output {"plan": "/workspace/plans/access-plan.txt"}'
     volumeMounts:
       - volume: cloud-workspace
-        path: /workspace
+        path: /workspace/plans
+        subPath: plans
 
   - name: write-cloud-report
     engine: kubernetes

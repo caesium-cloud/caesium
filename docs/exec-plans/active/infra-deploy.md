@@ -410,7 +410,7 @@ only the secret checks; local `caesium job lint` prints only "Validated N" and
 has no warnings channel, while the server lint response already carries
 `Warnings []LintMessage`.
 
-- [ ] D1. Multi-writer volume lint warning. Add
+- [x] D1. Multi-writer volume lint warning. Add
       `internal/jobdef/lint/volumes.go` `CheckVolumeWriters(defs) []string`
       that warns when a named volume is mounted by more than one step without
       `readOnly: true` (per definition; message names the volume and the
@@ -423,6 +423,23 @@ has no warnings channel, while the server lint response already carries
       Files: new `internal/jobdef/lint/volumes.go` + `_test.go`,
       `api/rest/controller/jobdef/lint.go`, `cmd/job/lint.go`, new scenario in
       `test/` (e.g. `test/lint_volumes_test.go`).
+      > Shipped (W1-γ). `CheckVolumeWriters` groups write mounts (`readOnly`
+      > omitted/false) by volume within a definition and clusters them by
+      > subPath **containment**, not exact match: a mount with no subPath
+      > exposes the whole volume and conflicts with every other write mount
+      > of it, and a subPath conflicts with any subPath nested under it —
+      > only genuinely disjoint siblings (`subPath: a` vs `subPath: b`) stay
+      > silent (Open Question 2). Also covers the lower-level `mounts:
+      > [{type: volume, source: <name>}]` mechanism (`container.Spec.Mounts`),
+      > which has no subPath so any two of its write mounts of the same
+      > source always conflict; the two mechanisms are checked independently
+      > (not cross-referenced against each other — a documented v1 gap).
+      > Fix round 1 corrected an initial exact-subPath-match version that
+      > missed root-vs-subPath and nested-subPath conflicts; that also
+      > required a root-vs-subPath fix in
+      > `docs/examples/k8s-workload-identity-volume.job.yaml` (`plan-access`
+      > moved from the volume root to a sibling `subPath: plans`, disjoint
+      > from `write-cloud-report`'s `subPath: reports`).
 - [ ] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes
