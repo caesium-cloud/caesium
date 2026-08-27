@@ -49,6 +49,11 @@ contract_deprecation_window := env("CAESIUM_CONTRACT_DEPRECATION_WINDOW", "5s")
 agent_integration_run := env("CAESIUM_AGENT_INTEGRATION_RUN", "TestIntegrationTestSuite/TestAgent")
 # Suite-qualified: a bare method name matches no test at all.
 infra_integration_run := env("CAESIUM_INFRA_INTEGRATION_RUN", "TestIntegrationTestSuite/TestInfra")
+# A deliberately fake deploy key. The infra lane resolves it through the real
+# secret://env provider and then asserts the value never reaches a task log —
+# it is a canary, not a credential, and it opens nothing.
+infra_deploy_key_env := "CAESIUM_INFRA_FAKE_DEPLOY_KEY"
+infra_deploy_key_value := "caesium-infra-lane-canary-not-a-real-key"
 agent_api_external_url := env("CAESIUM_AGENT_API_EXTERNAL_URL", "http://172.17.0.1:" + port)
 
 # Local Docker registry used by `just k8s-distributed` to push freshly-built
@@ -569,6 +574,7 @@ integration-up-infra: build-test build-pack
         -e CAESIUM_RUN_QUEUE_DEQUEUER_ENABLED=true \
         -e CAESIUM_RUN_QUEUE_DEQUEUE_INTERVAL=500ms \
         -e CAESIUM_FANOUT_MAX_PARTITIONS=8 \
+        -e {{ infra_deploy_key_env }}={{ infra_deploy_key_value }} \
         {{ local_image_ref }}:{{ tag }}-test start
 
 # Run the TestInfra scenarios against the infra lane's server.
@@ -591,6 +597,8 @@ integration-test-infra:
         -e CAESIUM_INFRA_LANE=true \
         -e CAESIUM_PACK_IMAGE_TAG={{ tag }} \
         -e CAESIUM_HOST_PROJECT_ROOT={{ repo_dir }} \
+        -e CAESIUM_INFRA_DEPLOY_KEY_REF=secret://env/{{ infra_deploy_key_env }} \
+        -e CAESIUM_INFRA_DEPLOY_KEY_CANARY={{ infra_deploy_key_value }} \
         --network=container:{{ infra_it_container }} \
         -w {{ bld_dir }} \
         {{ local_builder_ref }}:{{ tag }}-full \

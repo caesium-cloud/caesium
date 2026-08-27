@@ -342,7 +342,7 @@ fails closed on anything unexpected.
       source); and `stacks.yaml` must name exactly the stack directories on
       disk, since a stack present but unlisted would be silently dropped.
 
-- [ ] B5. Integration scenarios for materialize + discover through the live
+- [x] B5. Integration scenarios for materialize + discover through the live
       server (docker engine, fixture repo bind-mounted, images from the H-1
       lane): spec §9 #7 (`discover` exit 1 → `plan`/`apply` never run and the
       run is **red**, not green-with-skips), #8 (two runs → identical
@@ -511,6 +511,19 @@ renders the summary and shows the reference.
       `ui/src/features/jobs/RunProposalSummary.tsx`,
       `ui/src/features/jobs/RunDetailPage.tsx`, tests.
       Depends on: E1.
+
+      Landed as `test/infra_discover_test.go`: five `TestInfra…` scenarios on
+      the live server covering §9 #7 (discover exits 1 -> run red, plan and
+      apply never run, no fingerprint), #8 (two checkouts of the same tree
+      at DIFFERENT host paths -> byte-identical fingerprint, which also
+      proves path-independence), #10 (dynamic module source -> red, no
+      fingerprint, Terraform's own diagnosis in the log), and the
+      `git-source` contract (`commit` matches the fixture HEAD,
+      `treeDigest` present, `GIT_SSH_KEY` resolved through the real
+      `secret://env` provider with its value absent from every task log and
+      from the stored spec). The fixture repo and the shared workspace are
+      bind-mounted from HOST paths (`CAESIUM_HOST_PROJECT_ROOT`); discover's
+      source mount is `readOnly: true`.
 
 ## Harness Strengthening
 
