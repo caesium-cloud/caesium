@@ -1,0 +1,326 @@
+package task
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"unicode/utf8"
+)
+
+// PartitionError is a parse/validation failure of the partition marker
+// protocol. It must fail the producing task; the list is never truncated.
+type PartitionError struct {
+	Msg string
+}
+
+func (e *PartitionError) Error() string { return e.Msg }
+
+func partitionErrorf(format string, args ...any) error {
+	return &PartitionError{Msg: fmt.Sprintf(format, args...)}
+}
+
+func asPartitionError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var pe *PartitionError
+	if errors.As(err, &pe) {
+		return err
+	}
+	return &PartitionError{Msg: err.Error()}
+}
+
+const (
+	// partitionsMarker is the stdout line prefix for a JSON array of partition
+	// elements (strings or objects). Multiple lines are appended.
+	partitionsMarker = "##caesium::partitions "
+
+	// partitionMarker is the stdout line prefix for one string-form partition
+	// value. Object form is not accepted on this marker.
+	partitionMarker = "##caesium::partition "
+
+	// MaxPartitionListBytes caps the normalized encoding of the full partition
+	// list. Independent of MaxOutputBytes — a large work list must not eat the
+	// scalar-output / fan-in budget.
+	MaxPartitionListBytes = 256 * 1024
+
+	// MaxPartitionObjectBytes caps one normalized partition object.
+	MaxPartitionObjectBytes = 2048
+
+	// MaxPartitionAttributes is the maximum number of free-form scalar
+	// attributes a structured partition may carry.
+	MaxPartitionAttributes = 16
+
+	// MaxPartitionKeyBytes is the maximum UTF-8 size of a partition key.
+	MaxPartitionKeyBytes = 256
+
+	// DefaultMaxPartitions is the default count cap when the executor does not
+	// pass one (matches CAESIUM_FANOUT_MAX_PARTITIONS's default).
+	DefaultMaxPartitions = 1024
+
+	// PartitionEnv is the default injected env var for the partition key.
+	PartitionEnv = "CAESIUM_PARTITION"
+
+	// PartitionJSONEnv is the fixed injected env var for the normalized
+	// partition object. It is not renameable via fanOut.env.
+	PartitionJSONEnv = "CAESIUM_PARTITION_JSON"
+)
+
+// reservedPartitionObjectKeys are the structured-partition fields; every other
+// object key is a free-form scalar attribute.
+var reservedPartitionObjectKeys = map[string]struct{}{
+	"key":         {},
+	"fingerprint": {},
+	"dependsOn":   {},
+}
+
+// Partition is the normalized partition element. A string-form emission is
+// {Key: <value>} with empty Fingerprint/DependsOn/Attributes.
+type Partition struct {
+	Key         string            `json:"key"`
+	Fingerprint string            `json:"fingerprint,omitempty"`
+	DependsOn   []string          `json:"dependsOn,omitempty"`
+	Attributes  map[string]string `json:"attributes,omitempty"`
+}
+
+// CanonicalObject lifts the partition to the lossless object form used for
+// hashing, injection, and persistence. encoding/json sorts map keys, so the
+// marshaled form is canonical.
+func (p Partition) CanonicalObject() map[string]any {
+	obj := make(map[string]any, 3+len(p.Attributes))
+	obj["key"] = p.Key
+	if p.Fingerprint != "" {
+		obj["fingerprint"] = p.Fingerprint
+	}
+	if len(p.DependsOn) > 0 {
+		obj["dependsOn"] = append([]string(nil), p.DependsOn...)
+	}
+	for k, v := range p.Attributes {
+		obj[k] = v
+	}
+	return obj
+}
+
+// CanonicalJSON re-encodes the partition losslessly (sorted keys).
+func (p Partition) CanonicalJSON() ([]byte, error) {
+	return json.Marshal(p.CanonicalObject())
+}
+
+// EqualPayload reports whether two partitions are byte-identical after
+// canonical encoding (used to distinguish first-seen dedup from conflict).
+func (p Partition) EqualPayload(other Partition) bool {
+	a, err := p.CanonicalJSON()
+	if err != nil {
+		return false
+	}
+	b, err := other.CanonicalJSON()
+	if err != nil {
+		return false
+	}
+	return bytes.Equal(a, b)
+}
+
+// EncodePartitions returns the lossless normalized JSON array of partitions.
+func EncodePartitions(parts []Partition) ([]byte, error) {
+	return encodeNormalizedPartitionList(parts)
+}
+
+func encodeNormalizedPartitionList(parts []Partition) ([]byte, error) {
+	arr := make([]any, len(parts))
+	for i, p := range parts {
+		arr[i] = p.CanonicalObject()
+	}
+	return json.Marshal(arr)
+}
+
+type partitionAccumulator struct {
+	parts         []Partition
+	seen          map[string]Partition
+	maxPartitions int
+}
+
+func newPartitionAccumulator(maxPartitions int) *partitionAccumulator {
+	if maxPartitions <= 0 {
+		maxPartitions = DefaultMaxPartitions
+	}
+	return &partitionAccumulator{
+		seen:          make(map[string]Partition),
+		maxPartitions: maxPartitions,
+	}
+}
+
+func (a *partitionAccumulator) add(p Partition) error {
+	if existing, ok := a.seen[p.Key]; ok {
+		if existing.EqualPayload(p) {
+			return nil
+		}
+		return partitionErrorf("partition key %q emitted with conflicting payloads", p.Key)
+	}
+	if len(a.parts)+1 > a.maxPartitions {
+		return partitionErrorf("partition list exceeds count cap %d (offending key %q)", a.maxPartitions, p.Key)
+	}
+	encoded, err := p.CanonicalJSON()
+	if err != nil {
+		return fmt.Errorf("partition %q: canonical encode: %w", p.Key, err)
+	}
+	if len(encoded) > MaxPartitionObjectBytes {
+		return partitionErrorf("partition %q exceeds %d byte object cap (%d bytes)", p.Key, MaxPartitionObjectBytes, len(encoded))
+	}
+	a.seen[p.Key] = p
+	a.parts = append(a.parts, p)
+	return nil
+}
+
+func (a *partitionAccumulator) finish() ([]Partition, error) {
+	if len(a.parts) == 0 {
+		return nil, nil
+	}
+	encoded, err := encodeNormalizedPartitionList(a.parts)
+	if err != nil {
+		return nil, fmt.Errorf("marshalling partition list: %w", err)
+	}
+	if len(encoded) > MaxPartitionListBytes {
+		return nil, partitionErrorf("partition list exceeds %d byte limit (%d bytes)", MaxPartitionListBytes, len(encoded))
+	}
+	return a.parts, nil
+}
+
+func parsePartitionsArrayLine(payload string, acc *partitionAccumulator) error {
+	payload = strings.TrimSpace(payload)
+	if payload == "" {
+		return nil
+	}
+	var raw []json.RawMessage
+	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
+		return fmt.Errorf("malformed ##caesium::partitions JSON array: %w", err)
+	}
+	for _, elem := range raw {
+		p, err := parsePartitionElement(elem)
+		if err != nil {
+			return err
+		}
+		if err := acc.add(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func parsePartitionLine(payload string, acc *partitionAccumulator) error {
+	value := strings.TrimSpace(payload)
+	if value == "" {
+		return nil
+	}
+	p, err := partitionFromKey(value)
+	if err != nil {
+		return err
+	}
+	return acc.add(p)
+}
+
+func parsePartitionElement(raw json.RawMessage) (Partition, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return Partition{}, fmt.Errorf("partition element is empty")
+	}
+	switch trimmed[0] {
+	case '"':
+		var key string
+		if err := json.Unmarshal(trimmed, &key); err != nil {
+			return Partition{}, fmt.Errorf("partition string element: %w", err)
+		}
+		return partitionFromKey(key)
+	case '{':
+		return parsePartitionObject(trimmed)
+	default:
+		return Partition{}, fmt.Errorf("partition element is neither a string nor an object")
+	}
+}
+
+func parsePartitionObject(raw []byte) (Partition, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return Partition{}, fmt.Errorf("partition object: %w", err)
+	}
+	keyRaw, ok := fields["key"]
+	if !ok {
+		return Partition{}, fmt.Errorf("partition object missing key")
+	}
+	var key string
+	if err := json.Unmarshal(keyRaw, &key); err != nil {
+		return Partition{}, fmt.Errorf("partition object key: %w", err)
+	}
+	p, err := partitionFromKey(key)
+	if err != nil {
+		return p, err
+	}
+
+	if fpRaw, ok := fields["fingerprint"]; ok && !isJSONNull(fpRaw) {
+		var fp string
+		if err := json.Unmarshal(fpRaw, &fp); err != nil {
+			return Partition{}, fmt.Errorf("partition %q fingerprint: %w", p.Key, err)
+		}
+		if fp != "" && !validSHA256Ref(fp) {
+			return Partition{}, fmt.Errorf("partition %q fingerprint is not a valid sha256 digest", p.Key)
+		}
+		p.Fingerprint = fp
+	}
+
+	if depRaw, ok := fields["dependsOn"]; ok && !isJSONNull(depRaw) {
+		var deps []string
+		if err := json.Unmarshal(depRaw, &deps); err != nil {
+			return Partition{}, fmt.Errorf("partition %q dependsOn: %w", p.Key, err)
+		}
+		p.DependsOn = deps
+	}
+
+	attrs := make(map[string]string)
+	for k, v := range fields {
+		if _, reserved := reservedPartitionObjectKeys[k]; reserved {
+			continue
+		}
+		var decoded any
+		if err := json.Unmarshal(v, &decoded); err != nil {
+			return Partition{}, fmt.Errorf("partition %q attribute %q: %w", p.Key, k, err)
+		}
+		s, ok := scalarOutputValue(decoded)
+		if !ok {
+			return Partition{}, fmt.Errorf("partition %q attribute %q is not a scalar", p.Key, k)
+		}
+		attrs[k] = s
+	}
+	if len(attrs) > MaxPartitionAttributes {
+		return Partition{}, fmt.Errorf("partition %q has %d attributes (max %d)", p.Key, len(attrs), MaxPartitionAttributes)
+	}
+	if len(attrs) > 0 {
+		p.Attributes = attrs
+	}
+	return p, nil
+}
+
+func partitionFromKey(key string) (Partition, error) {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return Partition{}, fmt.Errorf("partition key is empty")
+	}
+	if !utf8.ValidString(key) {
+		return Partition{}, fmt.Errorf("partition key is not valid UTF-8")
+	}
+	if len(key) > MaxPartitionKeyBytes {
+		return Partition{}, fmt.Errorf("partition key %q exceeds %d bytes", truncateForErr(key), MaxPartitionKeyBytes)
+	}
+	return Partition{Key: key}, nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+func truncateForErr(s string) string {
+	if len(s) <= 64 {
+		return s
+	}
+	return s[:61] + "..."
+}

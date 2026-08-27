@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useLayoutEffect, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   X,
   Info,
@@ -14,12 +15,15 @@ import { toast } from "sonner";
 import { cn, formatDurationNs, formatKeyValueMap, formatUTCTimestamp } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { StatusBadge } from "@/components/ui/status-badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
-import { api, type Incident, type JobTask, type TaskRun } from "@/lib/api";
+import { api, type Incident, type JobTask, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
 import { TaskWhyView } from "./TaskWhyView";
 import { isTaskCached } from "./cache-utils";
+
+const PARTITION_STATUS_OPTIONS = ["succeeded", "failed", "running", "pending", "cached", "skipped"];
 
 interface TaskDetailPanelProps {
   taskId: string;
@@ -175,6 +179,7 @@ export function TaskDetailPanel({
 
   const resolvedType = taskType || "task";
   const status = runTask?.status ?? "pending";
+  const catalogTaskId = task?.id ?? runTask?.task_id ?? taskId;
   const cached = isTaskCached(runTask);
 
   const invalidateCacheMutation = useMutation({
@@ -381,6 +386,15 @@ export function TaskDetailPanel({
                 />
               </div>
 
+              {(runTask?.partition_count ?? 0) > 1 && (
+                <PartitionTable
+                  jobId={jobId}
+                  runId={runId}
+                  taskId={catalogTaskId}
+                  partitionCount={runTask?.partition_count ?? 0}
+                />
+              )}
+
               <TaskWhyView
                 jobId={jobId}
                 runId={runId}
@@ -416,6 +430,180 @@ export function TaskDetailPanel({
             sizeVersion={panelWidth}
           />
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Virtualized, status-filterable table of a fanned task's instances.
+ * Fetches independently of the parent so the status filter can refetch
+ * without disturbing the rest of the detail panel.
+ */
+function PartitionTable({
+  jobId,
+  runId,
+  taskId,
+  partitionCount,
+}: {
+  jobId: string;
+  runId: string;
+  taskId: string;
+  partitionCount: number;
+}) {
+  const queryClient = useQueryClient();
+  const [statusFilter, setStatusFilter] = useState("");
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["partitions", jobId, runId, taskId, statusFilter],
+    queryFn: () => api.getPartitions(jobId, runId, taskId, statusFilter || undefined),
+  });
+  const rows = data?.partitions ?? [];
+
+  // The fingerprint/depends-on columns only carry information for a
+  // structured (ordered) group — hide them entirely for a plain bag of
+  // partitions rather than rendering a column of dashes.
+  const showOrderingColumns = rows.some(
+    (row) => !!row.fingerprint || (row.depends_on?.length ?? 0) > 0,
+  );
+
+  const retryPartition = useMutation({
+    mutationFn: (index: number) => api.retryPartition(jobId, runId, taskId, index),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["partitions", jobId, runId, taskId] });
+      toast.success("Partition retry requested");
+    },
+    onError: (err: Error) => {
+      toast.error(`Failed to retry partition: ${err.message}`);
+    },
+  });
+
+  // eslint-disable-next-line react-hooks/incompatible-library -- TanStack Virtual's returned helpers (getVirtualItems/getTotalSize) are intentionally not memoized; this component re-renders on every scroll frame already
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 30,
+    overscan: 8,
+    // Without a real layout pass (e.g. under jsdom, or before the first
+    // ResizeObserver callback fires in the browser) the scroll element's
+    // measured size is 0 and no rows would render at all — seed a
+    // reasonable size so the table is never empty before it is measured.
+    initialRect: { width: 640, height: 240 },
+  });
+
+  const gridTemplateColumns = showOrderingColumns
+    ? "1fr 88px 64px 76px 60px 96px 130px 64px"
+    : "1fr 88px 64px 76px 60px 64px";
+
+  return (
+    <div className="mt-3" data-testid="partition-table">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Partitions ×{partitionCount}
+        </div>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          data-testid="partition-status-filter"
+          className="rounded border border-border/50 bg-card px-1.5 py-0.5 text-[10px] text-foreground focus:outline-none focus:ring-1 focus:ring-cyan/40"
+        >
+          <option value="">All statuses</option>
+          {PARTITION_STATUS_OPTIONS.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="rounded border border-border/60">
+        <div
+          className="grid gap-0 border-b border-border/40 bg-muted/30 px-2 py-1 text-[10px] font-medium text-muted-foreground"
+          style={{ gridTemplateColumns }}
+        >
+          <span>Value</span>
+          <span>Status</span>
+          <span>Attempt</span>
+          <span>Duration</span>
+          <span>Cache</span>
+          {showOrderingColumns && <span>Fingerprint</span>}
+          {showOrderingColumns && <span>Depends on</span>}
+          <span aria-hidden="true" />
+        </div>
+
+        <div ref={scrollRef} className="max-h-48 overflow-auto">
+          {isLoading ? (
+            <div className="px-2 py-3 text-[11px] text-muted-foreground">Loading partitions…</div>
+          ) : rows.length === 0 ? (
+            <div className="px-2 py-3 text-[11px] text-muted-foreground">
+              No partitions match this filter.
+            </div>
+          ) : (
+            <div style={{ height: rowVirtualizer.getTotalSize(), position: "relative" }}>
+              {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                const row: PartitionInstance = rows[virtualRow.index];
+                return (
+                  <div
+                    key={row.task_run_id}
+                    data-testid="partition-row"
+                    data-index={virtualRow.index}
+                    className="grid items-center gap-0 border-b border-border/30 px-2 text-[11px]"
+                    style={{
+                      gridTemplateColumns,
+                      position: "absolute",
+                      top: 0,
+                      left: 0,
+                      width: "100%",
+                      height: `${virtualRow.size}px`,
+                      transform: `translateY(${virtualRow.start}px)`,
+                    }}
+                  >
+                    <span className="truncate font-mono" title={row.value}>
+                      {row.value}
+                    </span>
+                    <span>
+                      <StatusBadge status={row.status} size="sm" />
+                    </span>
+                    <span className="font-mono">{row.attempt}</span>
+                    <span className="truncate font-mono">{row.duration ?? "—"}</span>
+                    <span>
+                      {row.cache_hit ? (
+                        <Archive className="h-3 w-3 text-cached" aria-label="cache hit" />
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </span>
+                    {showOrderingColumns && (
+                      <span className="truncate font-mono" title={row.fingerprint}>
+                        {row.fingerprint ? row.fingerprint.slice(0, 12) : "—"}
+                      </span>
+                    )}
+                    {showOrderingColumns && (
+                      <span className="truncate font-mono" title={(row.depends_on ?? []).join(", ")}>
+                        {(row.depends_on ?? []).join(", ") || "—"}
+                      </span>
+                    )}
+                    <span>
+                      {row.status === "failed" && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-6 text-[10px]"
+                          data-testid="partition-retry-button"
+                          disabled={retryPartition.isPending}
+                          onClick={() => retryPartition.mutate(row.index)}
+                        >
+                          Retry
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

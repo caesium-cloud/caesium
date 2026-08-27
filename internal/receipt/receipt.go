@@ -56,6 +56,17 @@ type TaskEntry struct {
 	// It is the sort key for deterministic aggregation.
 	TaskName string `json:"task_name"`
 
+	// Partition is the fan-out instance key this entry attests, empty for an
+	// unfanned task. A fanned step executes N instances with N DISTINCT identity
+	// hashes; collapsing them to one entry would attest a single arbitrary
+	// partition and silently drop the other N-1 from the receipt. So a fanned
+	// step contributes one entry per partition, discriminated by this field.
+	//
+	// It is omit-when-empty in both the JSON and the canonical digest line, so
+	// receipts for unfanned runs keep byte-identical digests and need no Version
+	// bump.
+	Partition string `json:"partition,omitempty"`
+
 	// IdentityHash is the persisted TaskRun.Hash — the content-addressed cache
 	// key computed by internal/cache.HashInput.Compute. Empty when the task
 	// never had a hash computed (caching disabled for it); such a task cannot
@@ -139,8 +150,32 @@ type Receipt struct {
 // separator). The "degraded" bit is included so that an unpinned task and a
 // pinned one with the same tag can never collide on the same digest.
 func canonicalTaskLine(t TaskEntry) string {
-	return fmt.Sprintf("task\x00%s\x00hash\x00%s\x00image\x00%s\x00digest\x00%s\x00pinned\x00%t\n",
+	line := fmt.Sprintf("task\x00%s\x00hash\x00%s\x00image\x00%s\x00digest\x00%s\x00pinned\x00%t",
 		t.TaskName, t.IdentityHash, t.Image, t.ResolvedImageDigest, t.DigestPinned)
+	// The partition segment is appended ONLY for a fan-out instance. An unfanned
+	// task therefore folds the exact bytes it always did, so digests committed
+	// before fan-out shipped still verify and Version stays at 1.
+	if t.Partition != "" {
+		line += fmt.Sprintf("\x00partition\x00%s", t.Partition)
+	}
+	return line + "\n"
+}
+
+// Label is the entry's display name: the task name for an unfanned task, and
+// "task[partition]" for a fan-out instance. Drift reports and the degraded-task
+// summary use it so two instances of the same step are distinguishable.
+func (t TaskEntry) Label() string {
+	if t.Partition == "" {
+		return t.TaskName
+	}
+	return t.TaskName + "[" + t.Partition + "]"
+}
+
+// key is the entry's identity for pairing across two receipts: name plus
+// partition. Pairing on the name alone would collapse a fanned step's N entries
+// onto one map slot and hide N-1 instances from drift detection.
+func (t TaskEntry) key() string {
+	return t.TaskName + "\x00" + t.Partition
 }
 
 // computeDigest derives the receipt digest from already-sorted task entries
@@ -170,14 +205,17 @@ func writeHashf(h hash.Hash, format string, args ...any) {
 	_, _ = fmt.Fprintf(h, format, args...)
 }
 
-// sortTasks orders entries by TaskName, then by IdentityHash as a tiebreaker
-// (a single task name should not repeat in a run, but the tiebreaker keeps the
-// aggregation total and deterministic even if it somehow does). It sorts in
-// place and returns the slice for chaining.
+// sortTasks orders entries by TaskName, then Partition (so a fanned step's
+// instances aggregate in a stable, value-addressed order rather than in
+// database row order or emission order), then by IdentityHash as a final
+// tiebreaker. It sorts in place and returns the slice for chaining.
 func sortTasks(tasks []TaskEntry) []TaskEntry {
 	sort.Slice(tasks, func(i, j int) bool {
 		if tasks[i].TaskName != tasks[j].TaskName {
 			return tasks[i].TaskName < tasks[j].TaskName
+		}
+		if tasks[i].Partition != tasks[j].Partition {
+			return tasks[i].Partition < tasks[j].Partition
 		}
 		return tasks[i].IdentityHash < tasks[j].IdentityHash
 	})
@@ -194,7 +232,7 @@ func (r *Receipt) finalize() {
 	degraded := make([]string, 0)
 	for i := range r.Tasks {
 		if r.Tasks[i].Degraded {
-			degraded = append(degraded, r.Tasks[i].TaskName)
+			degraded = append(degraded, r.Tasks[i].Label())
 		}
 	}
 	sort.Strings(degraded)

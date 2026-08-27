@@ -1,10 +1,16 @@
 // Package why implements the causal-explainer endpoint (data-plane-memory A3):
 //
-//	GET /v1/jobs/:id/runs/:run_id/why?task=<task-name-or-id>
+//	GET /v1/jobs/:id/runs/:run_id/why?task=<task-name-or-id>[&partition=<value>]
 //
 // It returns a field-by-field explanation of why the given task in the run
 // executed, hit the cache, or re-ran — diffing the persisted HashInput blobs and
 // joining trigger-side causation from the event store.
+//
+// Fan-out: a fanned step has N task_runs rows for one (run, task), so `?task=`
+// alone cannot name an instance. Without `partition` the response is the GROUP
+// summary (partition count, status histogram, first failure, aggregate timing);
+// with `partition=<value>` it is that one instance's full explanation. An
+// unknown partition value is a 404 whose message lists the available values.
 package why
 
 import (
@@ -46,9 +52,15 @@ func Get(c *echo.Context) error {
 		return echo.NewHTTPError(http.StatusInternalServerError, "internal server error").Wrap(err)
 	}
 
-	explanation, err := whysvc.New(ctx).Why(runID, task)
+	partition := c.QueryParam("partition")
+
+	explanation, err := whysvc.New(ctx).WhyPartition(runID, task, partition)
 	if err != nil {
 		switch {
+		case errors.Is(err, runstorage.ErrPartitionNotFound):
+			// Surface the message verbatim: it enumerates the partition values,
+			// which is the whole point of asking.
+			return echo.NewHTTPError(http.StatusNotFound, err.Error())
 		case errors.Is(err, gorm.ErrRecordNotFound), errors.Is(err, runstorage.ErrTaskRunNotFound):
 			return echo.ErrNotFound
 		default:

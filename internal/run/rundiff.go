@@ -43,17 +43,20 @@ type RunDiff struct {
 	LeftTrigger  WhyTrigger `json:"leftTrigger"`
 	RightTrigger WhyTrigger `json:"rightTrigger"`
 
-	TriggerChanges []FieldChange `json:"triggerChanges,omitempty"`
-	ParamChanges   []FieldChange `json:"paramChanges,omitempty"`
-	Tasks          []RunDiffTask `json:"tasks"`
-	TasksAdded     []string      `json:"tasksAdded,omitempty"`
-	TasksRemoved   []string      `json:"tasksRemoved,omitempty"`
-	GeneratedAt    time.Time     `json:"generatedAt"`
+	TriggerChanges    []FieldChange `json:"triggerChanges,omitempty"`
+	ParamChanges      []FieldChange `json:"paramChanges,omitempty"`
+	Tasks             []RunDiffTask `json:"tasks"`
+	TasksAdded        []string      `json:"tasksAdded,omitempty"`
+	TasksRemoved      []string      `json:"tasksRemoved,omitempty"`
+	PartitionsAdded   []string      `json:"partitionsAdded,omitempty"`
+	PartitionsRemoved []string      `json:"partitionsRemoved,omitempty"`
+	GeneratedAt       time.Time     `json:"generatedAt"`
 }
 
 // RunDiffTask is one paired task-name comparison in a RunDiff.
 type RunDiffTask struct {
-	TaskName string `json:"taskName"`
+	TaskName  string `json:"taskName"`
+	Partition string `json:"partition,omitempty"`
 
 	LeftTaskRunID  uuid.UUID `json:"leftTaskRunId"`
 	RightTaskRunID uuid.UUID `json:"rightTaskRunId"`
@@ -135,11 +138,26 @@ func (s *Store) DiffRuns(ctx context.Context, jobID, leftRunID, rightRunID uuid.
 		rightTask, rightOK := rightTasks[taskName]
 		switch {
 		case !leftOK:
-			out.TasksAdded = append(out.TasksAdded, taskName)
+			label := runDiffInstanceKey(rightTask.TaskName, rightTask.PartitionValue)
+			if rightTask.PartitionValue != "" {
+				out.PartitionsAdded = append(out.PartitionsAdded, label)
+			} else {
+				out.TasksAdded = append(out.TasksAdded, label)
+			}
 		case !rightOK:
-			out.TasksRemoved = append(out.TasksRemoved, taskName)
+			label := runDiffInstanceKey(leftTask.TaskName, leftTask.PartitionValue)
+			if leftTask.PartitionValue != "" {
+				out.PartitionsRemoved = append(out.PartitionsRemoved, label)
+			} else {
+				out.TasksRemoved = append(out.TasksRemoved, label)
+			}
 		default:
-			out.Tasks = append(out.Tasks, diffRunTask(taskName, leftTask.TaskRun, rightTask.TaskRun))
+			dt := diffRunTask(leftTask.TaskName, leftTask.TaskRun, rightTask.TaskRun)
+			dt.Partition = leftTask.PartitionValue
+			if dt.Partition == "" {
+				dt.Partition = rightTask.PartitionValue
+			}
+			out.Tasks = append(out.Tasks, dt)
 		}
 	}
 
@@ -173,11 +191,19 @@ func (s *Store) latestTerminalTaskRunsByName(ctx context.Context, runID uuid.UUI
 
 	byName := make(map[string]runDiffTaskRunRow, len(rows))
 	for _, row := range rows {
-		if current, ok := byName[row.TaskName]; !ok || laterTerminalTaskRun(row.TaskRun, current.TaskRun) {
-			byName[row.TaskName] = row
+		key := runDiffInstanceKey(row.TaskName, row.PartitionValue)
+		if current, ok := byName[key]; !ok || laterTerminalTaskRun(row.TaskRun, current.TaskRun) {
+			byName[key] = row
 		}
 	}
 	return byName, nil
+}
+
+func runDiffInstanceKey(taskName, partition string) string {
+	if partition == "" {
+		return taskName
+	}
+	return taskName + ":" + partition
 }
 
 func terminalTaskStatuses() []string {

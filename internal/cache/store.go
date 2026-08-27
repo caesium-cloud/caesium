@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/models"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -29,8 +30,13 @@ type Entry struct {
 	// on the cache entry so a cache hit can be explained field-by-field, not
 	// only attested by the opaque digest. nil when not computed.
 	HashInputBlob []byte
-	CreatedAt     time.Time
-	ExpiresAt     *time.Time
+	// Partitions is the normalized partition list a fan-out producer emitted.
+	// It is what lets a CACHED producer still expand its group: the fan-out
+	// expansion needs the list, and a cache hit skips the container that would
+	// have printed it. nil for every task that is not a fan-out producer.
+	Partitions []pkgtask.Partition `json:"partitions,omitempty"`
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time
 }
 
 // Store provides cache operations backed by GORM.
@@ -75,7 +81,7 @@ func (s *Store) Put(entry *Entry) error {
 
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "hash"}},
-		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "resolved_image_digest", "hash_input_blob", "created_at", "expires_at"}),
+		DoUpdates: clause.AssignmentColumns([]string{"job_id", "task_name", "result", "output", "branch_selections", "run_id", "task_run_id", "resolved_image_digest", "hash_input_blob", "partitions", "created_at", "expires_at"}),
 	}).Create(model).Error
 }
 
@@ -209,6 +215,12 @@ func modelToEntry(model *models.TaskCache) (*Entry, error) {
 		}
 	}
 
+	if len(model.Partitions) > 0 {
+		if err := json.Unmarshal(model.Partitions, &entry.Partitions); err != nil {
+			return nil, err
+		}
+	}
+
 	return entry, nil
 }
 
@@ -243,6 +255,20 @@ func entryToModel(entry *Entry) (*models.TaskCache, error) {
 			return nil, err
 		}
 		model.BranchSelections = datatypes.JSON(encoded)
+	}
+
+	// Encoded with the struct's own JSON tags, NOT pkgtask.EncodePartitions.
+	// EncodePartitions emits the canonical *wire* form, which flattens a
+	// partition's scalar attributes to top-level object keys; unmarshalling that
+	// back into a Partition (whose Attributes field is a nested "attributes"
+	// object) silently drops them. This column exists to be read back, so the
+	// two directions must be symmetric.
+	if len(entry.Partitions) > 0 {
+		encoded, err := json.Marshal(entry.Partitions)
+		if err != nil {
+			return nil, err
+		}
+		model.Partitions = datatypes.JSON(encoded)
 	}
 
 	return model, nil

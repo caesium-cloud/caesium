@@ -566,6 +566,23 @@ var (
 		},
 		[]string{"type", "tier", "actor"},
 	)
+
+	FanOutPartitionsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "caesium_fanout_partitions_total",
+			Help: "Total fan-out instances materialized, by job alias and task name.",
+		},
+		[]string{"job", "task"},
+	)
+
+	FanOutGroupDurationSeconds = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "caesium_fanout_group_duration_seconds",
+			Help:    "Wall-clock duration of a fan-out group from first instance start to group resolve.",
+			Buckets: []float64{0.5, 1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600},
+		},
+		[]string{"job", "task"},
+	)
 )
 
 // Register registers all custom Caesium metrics with the default Prometheus registry.
@@ -630,6 +647,8 @@ func Register() {
 			IncidentsTotal,
 			IncidentResolutionSeconds,
 			AgentActionsTotal,
+			FanOutPartitionsTotal,
+			FanOutGroupDurationSeconds,
 		)
 	})
 }

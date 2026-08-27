@@ -1,6 +1,6 @@
 # Design: Dynamic Fan-Out (Data-Proportional Parallelism)
 
-> Status: Brainstorm/Design — proposal for runtime-materialized parallel task instances; nothing here is shipped. Grounded against the executor, run store, claimer, and cache identity code as of 2026-07, amended 2026-08-25 with [`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson) (re-grounded on that date).
+> Status: Shipped — runtime-materialized parallel task instances via `fanOut` and `##caesium::partitions`. Implementation: [`exec-plans/active/dynamic-fanout.md`](exec-plans/active/dynamic-fanout.md). Grounded against the executor, run store, claimer, and cache identity code as of 2026-07, amended 2026-08-25 with [`## Structured Partitions`](#structured-partitions-key--fingerprint--dependson) (re-grounded on that date).
 
 ## Problem
 

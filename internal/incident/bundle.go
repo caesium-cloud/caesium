@@ -50,6 +50,11 @@ type BundleClass struct {
 
 // BundleFailure carries the failing task's diagnostic signals. LogTail is
 // scrubbed; SchemaViolations and ExitCode come straight from the TaskRun.
+//
+// For a FANNED step the primary fields describe the first failed instance (the
+// one the incident was classified from) and Partitions enumerates every failed
+// sibling — an agent triaging "the extract step failed" must be able to see that
+// 3 of 12 partitions failed and which ones, not one arbitrary row.
 type BundleFailure struct {
 	Error            string         `json:"error,omitempty"`
 	LogTail          string         `json:"log_tail,omitempty"`
@@ -58,7 +63,35 @@ type BundleFailure struct {
 	ExitCode         *int           `json:"exit_code,omitempty"`
 	Image            string         `json:"image,omitempty"`
 	Result           string         `json:"result,omitempty"`
+	// Partition is the fan-out instance the fields above describe. Empty for an
+	// unfanned task.
+	Partition string `json:"partition,omitempty"`
+	// PartitionCount is the size of the fan-out group, 0 when unfanned.
+	PartitionCount int `json:"partition_count,omitempty"`
+	// Partitions lists every FAILED instance of the group (capped at
+	// bundleFailedPartitionCap). Nil for an unfanned task.
+	Partitions []BundleFailedPartition `json:"failed_partitions,omitempty"`
+	// PartitionsTruncated reports that Partitions was capped.
+	PartitionsTruncated bool `json:"failed_partitions_truncated,omitempty"`
 }
+
+// BundleFailedPartition is one failed fan-out instance. It carries the error and
+// exit code but NOT a log tail: N scrubbed log tails would blow the bundle far
+// past the size an agent session can hold, and the primary LogTail above already
+// carries the representative failure. The task_run_id is the handle for fetching
+// any specific instance's log from the logs endpoint.
+type BundleFailedPartition struct {
+	Partition string    `json:"partition"`
+	Index     int       `json:"partition_index"`
+	TaskRunID uuid.UUID `json:"task_run_id"`
+	Attempt   int       `json:"attempt"`
+	Error     string    `json:"error,omitempty"`
+	ExitCode  *int      `json:"exit_code,omitempty"`
+	Result    string    `json:"result,omitempty"`
+}
+
+// bundleFailedPartitionCap bounds the failed-instance list in a bundle.
+const bundleFailedPartitionCap = 50
 
 // BundleJob is the job definition + DAG topology.
 type BundleJob struct {
@@ -145,11 +178,18 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, profile
 	}
 
 	// Failing task detail (scrubbed log tail).
+	//
+	// A fanned step has N task_runs rows for one (run, task): `.First()` on that
+	// predicate could hand the agent a SUCCEEDED instance's empty log as "the
+	// failure". Load the whole group in partition order, describe the first
+	// FAILED instance, and enumerate the rest of the failed siblings.
 	if inc.RunID != nil && inc.TaskID != nil {
-		var tr models.TaskRun
+		var rows []models.TaskRun
 		if err := db.WithContext(ctx).
 			Where("job_run_id = ? AND task_id = ?", *inc.RunID, *inc.TaskID).
-			First(&tr).Error; err == nil {
+			Order("partition_index ASC, created_at ASC, id ASC").
+			Find(&rows).Error; err == nil && len(rows) > 0 {
+			tr := bundleAttributionRow(rows)
 			// The resolved secret env of the run is not persisted (secrets are
 			// never stored), so exact secret-value removal is not available
 			// post-hoc; the high-entropy token heuristic still strips
@@ -162,8 +202,13 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, profile
 			b.Failure.ExitCode = tr.ExitCode
 			b.Failure.Image = tr.Image
 			b.Failure.Result = tr.Result
+			b.Failure.Partition = tr.PartitionValue
 			if tr.Error != "" {
 				b.Failure.Error = tr.Error
+			}
+			if isFannedGroup(rows) {
+				b.Failure.PartitionCount = len(rows)
+				b.Failure.Partitions, b.Failure.PartitionsTruncated = failedPartitionEntries(rows)
 			}
 		}
 	}
@@ -191,6 +236,56 @@ func BuildBundle(ctx context.Context, db *gorm.DB, incidentID uuid.UUID, profile
 	b.Notes = loadNoteHints(ctx, db, inc.ID)
 
 	return b, nil
+}
+
+// bundleAttributionRow picks the instance the bundle describes: the first FAILED
+// row in partition order, falling back to the first row when nothing failed (the
+// incident may be run-level, or the group may still be settling).
+func bundleAttributionRow(rows []models.TaskRun) *models.TaskRun {
+	for i := range rows {
+		if rows[i].Status == taskStatusFailed {
+			return &rows[i]
+		}
+	}
+	return &rows[0]
+}
+
+// isFannedGroup reports whether the rows describe a fan-out group. A
+// single-instance group still carries a partition value and is still fanned.
+func isFannedGroup(rows []models.TaskRun) bool {
+	if len(rows) > 1 {
+		return true
+	}
+	return len(rows) == 1 && rows[0].PartitionValue != ""
+}
+
+// failedPartitionEntries renders every failed instance of a fanned group, capped
+// at bundleFailedPartitionCap. The bool reports truncation.
+func failedPartitionEntries(rows []models.TaskRun) ([]BundleFailedPartition, bool) {
+	out := make([]BundleFailedPartition, 0, len(rows))
+	total := 0
+	for i := range rows {
+		if rows[i].Status != taskStatusFailed {
+			continue
+		}
+		total++
+		if len(out) >= bundleFailedPartitionCap {
+			continue
+		}
+		out = append(out, BundleFailedPartition{
+			Partition: rows[i].PartitionValue,
+			Index:     rows[i].PartitionIndex,
+			TaskRunID: rows[i].ID,
+			Attempt:   rows[i].Attempt,
+			Error:     rows[i].Error,
+			ExitCode:  rows[i].ExitCode,
+			Result:    rows[i].Result,
+		})
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, total > len(out)
 }
 
 func loadJobTopology(ctx context.Context, db *gorm.DB, jobID uuid.UUID) (models.Job, []BundleTask, []BundleDAGEdge, error) {

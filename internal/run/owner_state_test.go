@@ -1,10 +1,12 @@
 package run
 
 import (
+	"encoding/json"
 	"sort"
 	"testing"
 
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 )
 
@@ -51,6 +53,48 @@ func contains(ids []uuid.UUID, want uuid.UUID) bool {
 		}
 	}
 	return false
+}
+
+func TestLiveAndReplayTraversalAgree(t *testing.T) {
+	b := newTopoBuilder()
+	a, c := b.task(""), b.task("")
+	b.edge(a, c)
+	topo := b.build()
+
+	live := NewRunState(topo, 0)
+	liveRes := live.ApplyCompletion(a, TaskStatusSucceeded, nil)
+
+	replay := NewRunState(topo, 0)
+	replayReady := replay.ApplyTerminalRow(a, TaskStatusSucceeded, liveRes.TerminalSequence)
+
+	if live.indegree[c] != replay.indegree[c] {
+		t.Fatalf("indegree diverged: live=%d replay=%d", live.indegree[c], replay.indegree[c])
+	}
+	if len(liveRes.Ready) != len(replayReady) {
+		t.Fatalf("ready diverged: live=%v replay=%v", liveRes.Ready, replayReady)
+	}
+}
+
+func TestRestore_RejectsOldCheckpointBlob(t *testing.T) {
+	b := newTopoBuilder()
+	b.task("")
+	topo := b.build()
+	old, err := json.Marshal(map[string]any{
+		"tasks":          map[string]any{},
+		"indegree":       map[string]any{},
+		"outcomes":       map[string]any{},
+		"ready":          []any{},
+		"sequence":       1,
+		"terminal_count": 0,
+		"total":          1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = Restore(topo, old)
+	if err == nil {
+		t.Fatal("expected old checkpoint blob to be rejected")
+	}
 }
 
 func TestRunState_LinearChain(t *testing.T) {
@@ -111,6 +155,54 @@ func TestRunState_FanOutFanIn(t *testing.T) {
 	res = rs.ApplyCompletion(r2, TaskStatusSucceeded, nil)
 	if !contains(res.Ready, j) {
 		t.Fatalf("j should ready after both predecessors, got %v", res.Ready)
+	}
+}
+
+func TestRunState_PartitionExpansion(t *testing.T) {
+	b := newTopoBuilder()
+	list, process, publish := b.task(""), b.task(""), b.task(jobdefschema.TriggerRuleAllSuccess)
+	b.edge(list, process)
+	b.edge(process, publish)
+	rs := NewRunState(b.build(), 0)
+
+	id0, id1, id2 := uuid.New(), uuid.New(), uuid.New()
+	exp := &FanOutExpansion{
+		ProducerTaskID: list,
+		Groups: []ExpandedGroup{{
+			TaskID: process,
+			Instances: []ExpandedInstance{
+				{TaskRunID: id0, TaskID: process, PartitionIndex: 0, Partition: pkgtask.Partition{Key: "a"}, OutstandingPredecessors: 1},
+				{TaskRunID: id1, TaskID: process, PartitionIndex: 1, Partition: pkgtask.Partition{Key: "b", DependsOn: []string{"a"}}, OutstandingPredecessors: 2},
+				{TaskRunID: id2, TaskID: process, PartitionIndex: 2, Partition: pkgtask.Partition{Key: "c"}, OutstandingPredecessors: 1},
+			},
+			Dependents: map[string][]string{"a": {"b"}},
+		}},
+	}
+	rs.ApplyExpansion(exp)
+
+	res := rs.ApplyCompletion(list, TaskStatusSucceeded, nil)
+	if !contains(res.Ready, id0) || !contains(res.Ready, id2) {
+		t.Fatalf("independent instances should ready after producer, got %v", res.Ready)
+	}
+	if contains(res.Ready, id1) {
+		t.Fatalf("b depends on a and must not ready yet, got %v", res.Ready)
+	}
+	if contains(res.Ready, publish) {
+		t.Fatalf("publish must wait for the whole group, got %v", res.Ready)
+	}
+
+	res = rs.ApplyCompletion(id0, TaskStatusSucceeded, nil)
+	if !contains(res.Ready, id1) {
+		t.Fatalf("b should ready after a, got %v", res.Ready)
+	}
+	if contains(res.Ready, publish) {
+		t.Fatalf("publish must still wait, got %v", res.Ready)
+	}
+
+	rs.ApplyCompletion(id1, TaskStatusSucceeded, nil)
+	res = rs.ApplyCompletion(id2, TaskStatusSucceeded, nil)
+	if !contains(res.Ready, publish) {
+		t.Fatalf("publish should ready after group resolve, got %v", res.Ready)
 	}
 }
 

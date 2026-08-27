@@ -306,6 +306,7 @@ func seedRunDiffTaskRun(t *testing.T, db *gorm.DB, runID, taskID uuid.UUID, atte
 		Hash:             hash,
 		HashInputBlob:    datatypes.JSON(blob),
 		TerminalSequence: int64(attempt),
+		PartitionIndex:   attempt - 1,
 		StartedAt:        &now,
 		CompletedAt:      &now,
 		CreatedAt:        now,

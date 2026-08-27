@@ -96,6 +96,8 @@ func Protected(g *echo.Group, bus internal_event.Bus) {
 		g.POST("/jobs/:id/runs/:run_id/callbacks/retry", run.RetryCallbacks)
 		g.POST("/jobs/:id/runs/:run_id/replay", replayctrl.Post)
 		g.POST("/jobs/:id/runs/:run_id/retry", run.Retry)
+		g.GET("/jobs/:id/runs/:run_id/tasks/:task_id/partitions", run.ListPartitions)
+		g.POST("/jobs/:id/runs/:run_id/tasks/:task_id/partitions/:index/retry", run.RetryPartition)
 		g.POST("/jobs/:id/run", run.Post)
 		g.POST("/jobs", job.Post)
 		g.PUT("/jobs/:id/pause", job.Pause)

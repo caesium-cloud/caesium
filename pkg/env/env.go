@@ -73,6 +73,10 @@ func validate() error {
 	// its own proposal. So the master gate refuses to enable the feature unless an
 	// authentication mode is active (api-key or any SSO provider). This keeps the
 	// design invariant "tier 3 always terminates at a human" true.
+	if variables.FanOutMaxPartitions < 1 {
+		return fmt.Errorf("CAESIUM_FANOUT_MAX_PARTITIONS must be greater than or equal to 1")
+	}
+
 	if variables.AgentRemediationEnabled {
 		mode := strings.ToLower(strings.TrimSpace(variables.AuthMode))
 		if (mode == "" || mode == "none") && !variables.SSOEnabled() {
@@ -164,7 +168,11 @@ type Environment struct {
 	// this is an operator guard against a runaway producer pinning arbitrarily
 	// large BYO storage, not a correctness control. A reference whose reported
 	// size exceeds this is rejected and the step's other outputs still apply.
-	OutputRefMaxBytes              ByteSize      `envconfig:"OUTPUT_REF_MAX_BYTES" default:"0"`
+	OutputRefMaxBytes ByteSize `envconfig:"OUTPUT_REF_MAX_BYTES" default:"0"`
+	// FanOutMaxPartitions is the server hard cap on partitions a producer may
+	// emit. The effective cap for a step is min(fanOut.maxPartitions, this).
+	// Overflow fails the producing task; the list is never truncated.
+	FanOutMaxPartitions            int           `envconfig:"FANOUT_MAX_PARTITIONS" default:"1024"`
 	OpenLineageEnabled             bool          `envconfig:"OPEN_LINEAGE_ENABLED" default:"false"`
 	OpenLineageTransport           string        `envconfig:"OPEN_LINEAGE_TRANSPORT" default:"http"`
 	OpenLineageURL                 string        `envconfig:"OPEN_LINEAGE_URL" default:""`

@@ -39,6 +39,26 @@ type RecoveryResult struct {
 // become Ready.  Wall-clock time is never consulted; ordering is by
 // terminal_sequence so recovery is deterministic and clock-skew-safe.
 func RecoverRunState(topo RunTopology, checkpoint *models.RunCheckpoint, terminalRows []models.TaskRun) (*RunState, RecoveryResult, error) {
+	return RecoverRunStateWithFanOut(topo, checkpoint, terminalRows, nil, nil)
+}
+
+// RecoverRunStateWithInstances additionally rebuilds fan-out in-group edges from
+// the run's instance rows.  Prefer RecoverRunStateWithFanOut: without the
+// catalog rows the recovered state cannot re-seed fanOut.maxParallel.
+func RecoverRunStateWithInstances(topo RunTopology, checkpoint *models.RunCheckpoint, terminalRows, instanceRows []models.TaskRun) (*RunState, RecoveryResult, error) {
+	return RecoverRunStateWithFanOut(topo, checkpoint, terminalRows, instanceRows, nil)
+}
+
+// RecoverRunStateWithFanOut is the full recovery entry point.  catalog carries
+// the run's catalog Task rows so the rehydrated state re-seeds the fan-out
+// scheduling metadata (maxParallel, step names) the checkpoint deliberately does
+// not snapshot — the catalog is its single source of truth.
+func RecoverRunStateWithFanOut(
+	topo RunTopology,
+	checkpoint *models.RunCheckpoint,
+	terminalRows, instanceRows []models.TaskRun,
+	catalog []models.Task,
+) (*RunState, RecoveryResult, error) {
 	var (
 		rs    *RunState
 		start int64
@@ -57,11 +77,17 @@ func RecoverRunState(topo RunTopology, checkpoint *models.RunCheckpoint, termina
 		rs = NewRunState(topo, 0)
 	}
 
+	rs.RehydrateInGroupEdges(instanceRows, catalog)
+
 	var res RecoveryResult
 	expected := start + 1
 	for i := range terminalRows {
 		row := &terminalRows[i]
-		rs.ApplyTerminalRow(row.TaskID, TaskStatus(row.Status), row.TerminalSequence)
+		id := row.TaskID
+		if row.ID != uuid.Nil && (row.PartitionCount > 0 || row.PartitionValue != "") {
+			id = row.ID
+		}
+		rs.ApplyTerminalRow(id, TaskStatus(row.Status), row.TerminalSequence)
 
 		// Dense-sequence gap check: every persisted terminal_sequence should be
 		// the next after the previous. A hole means a sequence was allocated but

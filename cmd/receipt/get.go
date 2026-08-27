@@ -63,6 +63,16 @@ var getCmd = &cobra.Command{
 		}
 		pretty = append(pretty, '\n')
 
+		// A fanned run attests one entry PER PARTITION (task[partition]), so the
+		// entry count exceeds the step count. Say so on stderr — stdout must stay
+		// the receipt bytes and nothing else, so the file written by `-o` and the
+		// piped output are byte-identical to what the server returned.
+		if fanned := fannedEntries(&r); len(fanned) > 0 {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(),
+				"note: %d of %d receipt entries are fan-out instances, attested one per partition: %s\n",
+				len(fanned), len(r.Tasks), strings.Join(fanned, ", "))
+		}
+
 		if r.Degraded {
 			// A degraded receipt is emitted (it is still the honest record) but
 			// the operator must know it does not attest reproducibility.
@@ -72,6 +82,28 @@ var getCmd = &cobra.Command{
 		}
 		return writeOut(cmd, pretty)
 	},
+}
+
+// fannedEntries returns the display labels of the receipt entries that are
+// fan-out instances, capped so a 10k-partition run does not print a 10k-item
+// note. Empty for a run with no fanned step.
+func fannedEntries(r *ireceipt.Receipt) []string {
+	const maxListed = 10
+	out := make([]string, 0, maxListed)
+	total := 0
+	for i := range r.Tasks {
+		if r.Tasks[i].Partition == "" {
+			continue
+		}
+		total++
+		if len(out) < maxListed {
+			out = append(out, r.Tasks[i].Label())
+		}
+	}
+	if total > maxListed {
+		out = append(out, fmt.Sprintf("(+%d more)", total-maxListed))
+	}
+	return out
 }
 
 // writeOut writes the receipt bytes to --output (if set) or stdout.

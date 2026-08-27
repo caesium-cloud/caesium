@@ -117,6 +117,7 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `automountServiceAccountToken` | boolean | optional | Kubernetes pod service-account token setting for this step. |
 | `kueue` | object | optional | Delegate this step's admission to a Kueue LocalQueue (kubernetes engine only). See [Kueue](#kueue) below. Excluded from the cache identity hash — it is scheduling metadata, not an execution input. |
 | `rateLimit` | object | optional | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Scheduling metadata excluded from the cache identity hash. |
+| `fanOut` | object | optional | Materialize N parallel task instances from a predecessor's `##caesium::partitions` marker. See [Fan-Out](#fan-out) below. Scheduling metadata excluded from the cache identity hash. |
 | `replaySafe` | boolean | optional | Marks this step as eligible for quarantined what-if replay. The effective value (`metadata.replaySafe` or this field) is recorded on the baseline task run and excluded from the cache identity hash. |
 | `next` | array[string] | optional | Successor steps triggered when this step completes. Accepts either a string or list in manifests. |
 | `dependsOn` | array[string] | optional | Predecessor steps that must complete before this step can run. |
@@ -151,6 +152,21 @@ Each step represents a DAG node backed by a task/atom pair. Steps default to the
 | `queueName` | string | required | The Kueue LocalQueue (in the pod's namespace) to admit through. Becomes the value of the `kueue.x-k8s.io/queue-name` label. |
 
 The queue is **scheduling metadata, not an execution input**, so it is excluded from the cache identity hash exactly like secrets and workload identity: two otherwise-identical tasks that differ only in queue share one cache identity, and re-queuing a task never busts its cache. Your cluster must have Kueue installed with the LocalQueue (and a backing ClusterQueue) provisioned; see [`kubernetes-deployment.md`](kubernetes-deployment.md#delegating-scheduling-to-kueue).
+
+### Fan-Out
+
+`fanOut` materializes N parallel `TaskRun` instances of this step from a predecessor's partition list. The DAG shape stays one catalog task; only the run-scoped instance count is dynamic. The partition *key*, optional `fingerprint`, and scalar attributes enter the instance cache identity; `dependsOn` and the `fanOut` block itself do not.
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `from` | string | required | Predecessor step whose `##caesium::partitions` / `##caesium::partition` markers drive expansion. |
+| `env` | string | optional | Injected env-var name for the partition key. Defaults to `CAESIUM_PARTITION`. May not be `CAESIUM_PARTITION_JSON` or live in the `CAESIUM_PARAM_*` / `CAESIUM_OUTPUT_*` namespaces. |
+| `maxPartitions` | integer | required | Cap on emitted partitions (`> 0`, `<=` `CAESIUM_FANOUT_MAX_PARTITIONS`, default 1024). Overflow fails the producer; the list is never truncated. |
+| `maxParallel` | integer | optional | In-flight cap for this group. Orthogonal to job-level `maxParallelTasks`. |
+| `onEmpty` | string | optional | `skip` (default) or `fail` when the producer emits no partitions. |
+| `failurePolicy` | string | optional | `fail_fast` (default) or `continue` when an instance exhausts retries. |
+
+Each instance also receives `CAESIUM_PARTITION_JSON` carrying the normalized partition object (`{key, fingerprint, dependsOn, …scalar attributes}`). `dependsOn` is a scheduling instruction — a container must not derive data behavior from it. An array element may be a bare string (the key) or that object form.
 
 ## Datasets & Freshness
 

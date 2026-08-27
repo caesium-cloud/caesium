@@ -777,3 +777,71 @@ func TestCanonicalJSON_KueueQueueOnlyOmitsKubernetes(t *testing.T) {
 	blob := unmarshalBlob(t, data)
 	assert.Nil(t, blob.Kubernetes, "a queue-only KubernetesSpec must not appear in the blob")
 }
+
+// Frozen 2026-08-26 against the pre-partition HashInput of baseInput().
+// omit-when-empty partition fields must not change this digest, and
+// CacheVersion is unchanged.
+const goldenStringFormHash = "5d6290009f017f6307aa5e20a383b88b81c7197322018b7c148f45d65bb95007"
+
+func TestCompute_StringFormPartitionKeepsLegacyHash(t *testing.T) {
+	legacy := baseInput()
+	withEmpty := baseInput()
+	withEmpty.Partition = ""
+	withEmpty.PartitionFingerprint = ""
+	withEmpty.PartitionAttributes = nil
+	assert.Equal(t, legacy.Compute(), withEmpty.Compute(),
+		"empty partition fields must not change the hash")
+}
+
+func TestCompute_PartitionKeyChangesHash(t *testing.T) {
+	a := baseInput()
+	b := baseInput()
+	b.Partition = "file-a.csv"
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_PartitionFingerprintChangesHash(t *testing.T) {
+	a := baseInput()
+	a.Partition = "dim_customer"
+	b := a
+	b.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_PartitionAttributesChangeHash(t *testing.T) {
+	a := baseInput()
+	a.Partition = "app-api"
+	b := a
+	b.PartitionAttributes = map[string]string{"root": "stacks/api"}
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+func TestCompute_DependsOnNotHashed(t *testing.T) {
+	// dependsOn is a scheduling instruction and is not a HashInput field.
+	// Two instances that differ only in dependsOn share an identity.
+	a := baseInput()
+	a.Partition = "fct_orders"
+	a.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	b := a
+	assert.Equal(t, a.Compute(), b.Compute())
+}
+
+func TestCanonicalJSON_PartitionFieldsRoundTrip(t *testing.T) {
+	in := baseInput()
+	in.Partition = "dim_customer"
+	in.PartitionFingerprint = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	in.PartitionAttributes = map[string]string{"root": "models", "materialization": "table"}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, in.Partition, blob.Partition)
+	assert.Equal(t, in.PartitionFingerprint, blob.PartitionFingerprint)
+	assert.Equal(t, in.PartitionAttributes, blob.PartitionAttributes)
+}
+
+func TestCompute_GoldenStringFormUnchanged(t *testing.T) {
+	got := baseInput().Compute()
+	assert.Equal(t, goldenStringFormHash, got,
+		"string-form (empty partition fields) hashes must stay byte-identical; no CacheVersion bump")
+	assert.Equal(t, 1, baseInput().CacheVersion, "CacheVersion must not be bumped for partition fields")
+}

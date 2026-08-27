@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { describe, it, expect } from 'vitest';
 import { ReactFlowProvider } from 'reactflow';
 import { TaskNode } from '../TaskNode';
@@ -184,5 +184,61 @@ describe('TaskNode', () => {
     expect(screen.getByTestId('runtime-volume-badge')).toHaveTextContent('2');
     expect(screen.getByTestId('runtime-identity-badge')).toHaveTextContent('SA');
     expect(screen.getByTitle('ServiceAccount caesium-writer')).toBeInTheDocument();
+  });
+
+  it('renders the fan-out badge and stacked-card affordance for a fanned task with no status breakdown', () => {
+    renderTaskNode({
+      label: 'process-file',
+      status: 'running',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'partition'] },
+      engine: 'docker',
+      command: ['echo', 'partition'],
+      partitionCount: 3,
+    });
+
+    expect(screen.getByTestId('fanout-badge')).toHaveTextContent('×3');
+    expect(screen.getAllByTestId('fanout-stack-card')).toHaveLength(2);
+    // No `partition_status_counts` was supplied, so only the badge renders.
+    expect(screen.queryByTestId('fanout-status-strip')).not.toBeInTheDocument();
+  });
+
+  it('does not render fan-out chrome for an unfanned task', () => {
+    renderTaskNode({
+      label: 'single-run',
+      status: 'succeeded',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: [] },
+      engine: 'docker',
+      command: [],
+      partitionCount: 1,
+    });
+
+    expect(screen.queryByTestId('fanout-badge')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('fanout-stack-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('fanout-status-strip')).not.toBeInTheDocument();
+  });
+
+  it('renders a fan-out status strip proportional to partition_status_counts', () => {
+    renderTaskNode({
+      label: 'process-file',
+      status: 'running',
+      atom: { image: 'alpine:3.23', engine: 'docker', command: ['echo', 'partition'] },
+      engine: 'docker',
+      command: ['echo', 'partition'],
+      partitionCount: 4,
+      partitionStatusCounts: { succeeded: 2, failed: 1, running: 1 },
+    });
+
+    const strip = screen.getByTestId('fanout-status-strip');
+    const segments = within(strip).getAllByTestId('fanout-status-segment');
+    // Canonical order is succeeded, cached, failed, skipped, running, pending —
+    // only statuses present in the map render, in that order.
+    expect(segments.map((segment) => segment.getAttribute('data-status'))).toEqual([
+      'succeeded',
+      'failed',
+      'running',
+    ]);
+    expect(segments[0]).toHaveStyle({ width: '50%' });
+    expect(segments[1]).toHaveStyle({ width: '25%' });
+    expect(segments[2]).toHaveStyle({ width: '25%' });
   });
 });

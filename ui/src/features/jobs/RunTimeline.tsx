@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { JobTask, TaskRun } from "@/lib/api";
 import { shortId } from "@/lib/utils";
 import { statusMeta } from "@/lib/status";
+import { fanoutStatusSegments } from "@/lib/fanout";
 
 interface Props {
   tasks: TaskRun[];
@@ -106,16 +107,16 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
           const color = colorFor(task.status);
           const label = taskLabel(task, taskDefinitions);
           const duration = end - start;
+          const isFanned = typeof task.partition_count === "number" && task.partition_count > 1;
+          const displayLabel = isFanned ? `${label} ×${task.partition_count}` : label;
+          const densitySegments = isFanned ? fanoutStatusSegments(task.partition_status_counts) : [];
 
-          return (
-            <g
-              key={task.id}
-              data-testid="run-timeline-task-row"
-              data-task-id={task.task_id}
-              data-task-name={label}
-              data-started-at={task.started_at ?? ""}
-            >
-              {/* Task label */}
+          // The group envelope bar and per-instance density strip below it —
+          // rendered only for a fanned step, so an unfanned row is byte-identical
+          // to before.
+          const rowBody = (
+            <>
+              {/* Task label (shows ×N for a fanned group) */}
               <text
                 x={LABEL_W - 8}
                 y={i * ROW_H + ROW_H / 2 + 4}
@@ -124,7 +125,7 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
                 fill="currentColor"
                 className="fill-muted-foreground"
               >
-                {label.length > 18 ? label.substring(0, 16) + "…" : label}
+                {displayLabel.length > 18 ? displayLabel.substring(0, 16) + "…" : displayLabel}
               </text>
 
               {/* Bar background */}
@@ -137,7 +138,7 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
                 rx={3}
               />
 
-              {/* Bar */}
+              {/* Bar (group envelope: first-start → last-end for a fanned step) */}
               <rect
                 x={barX}
                 y={i * ROW_H + BAR_Y_OFFSET}
@@ -171,6 +172,33 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
                 </text>
               )}
 
+              {/* Density strip: proportion of instances per status, when known */}
+              {densitySegments.length > 0 && (
+                <g data-testid="run-timeline-density-strip">
+                  {densitySegments.reduce<{ elements: ReactNode[]; offset: number }>(
+                    (acc, segment) => {
+                      const segWidth = Math.max(1, segment.fraction * barW);
+                      acc.elements.push(
+                        <rect
+                          key={segment.status}
+                          data-testid="run-timeline-density-segment"
+                          data-status={segment.status}
+                          x={barX + acc.offset}
+                          y={i * ROW_H + BAR_Y_OFFSET + BAR_H + 2}
+                          width={segWidth}
+                          height={4}
+                          fill={colorFor(segment.status)}
+                          rx={1}
+                        />,
+                      );
+                      acc.offset += segWidth;
+                      return acc;
+                    },
+                    { elements: [], offset: 0 },
+                  ).elements}
+                </g>
+              )}
+
               {/* Status dot */}
               <circle
                 cx={barX + barW + 6}
@@ -178,6 +206,19 @@ export function RunTimeline({ tasks, taskDefinitions, runStartedAt }: Props) {
                 r={3}
                 fill={color}
               />
+            </>
+          );
+
+          return (
+            <g
+              key={task.id}
+              data-testid="run-timeline-task-row"
+              data-task-id={task.task_id}
+              data-task-name={label}
+              data-started-at={task.started_at ?? ""}
+              data-partition-count={task.partition_count ?? 0}
+            >
+              {isFanned ? <g data-testid="run-timeline-group-row">{rowBody}</g> : rowBody}
             </g>
           );
         })}

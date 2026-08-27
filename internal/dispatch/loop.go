@@ -340,8 +340,12 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		p := peers[idx%uint64(len(peers))]
 
 		req := DispatchRequest{
-			RunID:           runID,
-			TaskID:          task.TaskID,
+			RunID:  runID,
+			TaskID: task.TaskID,
+			// PendingTasksForDispatch returns rows, and a fanned step has N rows
+			// sharing one task_id; naming the row is what stops the worker from
+			// having to disambiguate siblings.
+			TaskRunID:       task.ID,
 			OwnerGeneration: generation,
 			Attempt:         task.Attempt,
 			// nodeID matches the recipient's CAESIUM_NODE_ADDRESS so the
@@ -359,7 +363,7 @@ func (l *DispatchLoop) dispatchRun(ctx context.Context, runID uuid.UUID, generat
 		go func(p peer, req DispatchRequest) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID); !ok {
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, req.TaskRunID); !ok {
 				return
 			}
 			l.postOne(ctx, runID, p, req, task.Quarantine)
@@ -391,7 +395,10 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 	now := time.Now().UTC()
 	filtered := ready[:0]
 	for _, dt := range ready {
-		if l.rateLimitDelayed(runID, dt.TaskID, now) {
+		// Rate-limit parking is per *row*: RateLimitTask stamps
+		// rate_limit_retry_after on one instance, so one parked sibling must not
+		// hold back the rest of its group.
+		if l.rateLimitDelayed(runID, dt.ExecutionRef(), now) {
 			continue
 		}
 		filtered = append(filtered, dt)
@@ -418,32 +425,47 @@ func (l *DispatchLoop) dispatchRunInMemory(ctx context.Context, runID uuid.UUID,
 		}
 		idx := l.counter.Add(1) - 1
 		p := peers[idx%uint64(len(peers))]
+		// Carry both identities: the catalog task id (what every catalog lookup,
+		// including the rate-limit rule, is keyed by) and the instance TaskRun id
+		// (what the worker executes and fences its completion against).
 		req := DispatchRequest{
 			RunID:           runID,
 			TaskID:          dt.TaskID,
+			TaskRunID:       dt.TaskRunID,
 			OwnerGeneration: generation,
 			Attempt:         dt.Attempt,
 			WorkerNode:      p.nodeID,
 			OwnerBaseURL:    l.ownerBaseURL,
 			Deadline:        time.Now().UTC().Add(l.cfg.Deadline),
 		}
+		execRef := dt.ExecutionRef()
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(p peer, req DispatchRequest) {
+		go func(p peer, req DispatchRequest, execRef uuid.UUID) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if ok := l.acquireRateLimit(ctx, runID, req.TaskID); !ok {
+			if ok := l.acquireRateLimit(ctx, runID, req.TaskID, execRef); !ok {
 				return
 			}
 			l.postOne(ctx, runID, p, req, false)
-		}(p, req)
+		}(p, req, execRef)
 	}
 	wg.Wait()
 }
 
-func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID uuid.UUID) bool {
+// acquireRateLimit resolves and consumes the task's declared rate-limit budget.
+//
+// taskID must be the *catalog* task id: ratelimit.RuleForTask joins task_runs to
+// tasks on task_id, so an instance id matches no row and the limit is silently
+// skipped.  execRef is the row to park when the budget is exhausted — the
+// instance for a fanned task, the catalog task otherwise — so one parked
+// instance does not delay its siblings.
+func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID, execRef uuid.UUID) bool {
 	if l.cfg.RateLimiter == nil || l.cfg.RateLimitDB == nil {
 		return true
+	}
+	if execRef == uuid.Nil {
+		execRef = taskID
 	}
 	rule, ok, err := ratelimit.RuleForTask(ctx, l.cfg.RateLimitDB, runID, taskID)
 	if err != nil {
@@ -473,14 +495,14 @@ func (l *DispatchLoop) acquireRateLimit(ctx context.Context, runID, taskID uuid.
 	}
 	now := time.Now().UTC()
 	retryAfter := now.Add(ratelimit.RetryAfter(now, rule.Window))
-	if err := updater.RateLimitTask(ctx, runID, taskID, retryAfter); err != nil {
+	if err := updater.RateLimitTask(ctx, runID, execRef, retryAfter); err != nil {
 		if ctx.Err() == nil {
 			log.Warn("dispatch loop: rate limit requeue failed", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "error", err)
 		}
 		return false
 	}
 	if l.cfg.OwnerManager != nil {
-		l.rememberRateLimitDelay(runID, taskID, retryAfter)
+		l.rememberRateLimitDelay(runID, execRef, retryAfter)
 	}
 	metrics.RunSkippedTotal.WithLabelValues(rule.JobAlias, "rate_limit").Inc()
 	log.Info("dispatch loop: task delayed by rate limit", "run_id", runID, "task_id", taskID, "resource", rule.Resource, "retry_after", retryAfter)
@@ -563,7 +585,14 @@ func (l *DispatchLoop) postOne(ctx context.Context, runID uuid.UUID, p peer, req
 	// leaves the ready queue and becomes running (re-dispatched on lease expiry).
 	if l.cfg.OwnerManager != nil {
 		leaseMs := time.Now().Add(l.cfg.Deadline).UnixMilli()
-		l.cfg.OwnerManager.MarkDispatched(runID, req.TaskID, p.nodeID, req.Attempt, leaseMs)
+		// RunState is keyed by instance identity for a fanned task; marking the
+		// catalog task would leave the instance on the ready queue and
+		// re-dispatch it every tick.
+		dispatched := req.TaskRunID
+		if dispatched == uuid.Nil {
+			dispatched = req.TaskID
+		}
+		l.cfg.OwnerManager.MarkDispatched(runID, dispatched, p.nodeID, req.Attempt, leaseMs)
 	}
 	log.Debug("dispatch loop: task dispatched",
 		"run_id", runID,

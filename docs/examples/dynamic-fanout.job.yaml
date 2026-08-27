@@ -1,0 +1,51 @@
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: dynamic-fanout-demo
+  labels:
+    team: platform
+    scenario: dynamic-fanout
+  annotations:
+    owner: platform-oncall
+    purpose: "Runtime-materialized parallel instances from a partition list"
+trigger:
+  type: cron
+  configuration:
+    cron: "0 2 * * *"
+    timezone: "UTC"
+steps:
+  - name: list-files
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo '##caesium::partitions [{"key":"alpha","fingerprint":"sha256:8ed3f6ad685b959ead7022518e1af76cd816f8e8ec7ccdda1ed4018e8f2223f8"},{"key":"bravo","fingerprint":"sha256:f144a6907dc4284d1f9fe6a7d9b9ff53c02c1d07ba68f24d413d7ff7f757a782","dependsOn":["alpha"]},{"key":"charlie","fingerprint":"sha256:b9dd960c1753459a78115d3cb845a57d924b6877e805b08bd01086ccdf34433c"}]'
+    next: [process-file]
+
+  - name: process-file
+    engine: docker
+    image: alpine:3.23
+    command:
+      - sh
+      - -c
+      - |
+        echo "processing $CAESIUM_PARTITION"
+        echo "##caesium::output {\"file\": \"$CAESIUM_PARTITION\"}"
+    dependsOn: [list-files]
+    fanOut:
+      from: list-files
+      env: CAESIUM_PARTITION
+      maxPartitions: 64
+      maxParallel: 4
+      onEmpty: skip
+      failurePolicy: continue
+    next: [publish]
+
+  - name: publish
+    engine: docker
+    image: alpine:3.23
+    command: ["sh", "-c", "echo publishing"]
+    dependsOn: [process-file]

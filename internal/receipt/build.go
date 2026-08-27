@@ -69,6 +69,12 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 	// corrupt the (order-sensitive) Merkle aggregation. Without this, two equal
 	// task names would both fold into the digest and `caesium why`/verify drift
 	// detection would key on an arbitrary attempt.
+	//
+	// Fan-out makes the collapse key (TaskID, PartitionValue), NOT TaskID: a
+	// fanned step has N live instance rows with N DISTINCT identity hashes, and
+	// collapsing them by TaskID would attest ONE arbitrary partition and silently
+	// drop the other N-1 from the receipt — a receipt that claims to describe the
+	// whole run while omitting most of the work it did.
 	taskRuns = terminalAttempts(taskRuns)
 
 	// Resolve task names. TaskRun carries only TaskID; the human-meaningful
@@ -89,6 +95,7 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 		}
 		entry := TaskEntry{
 			TaskName:            name,
+			Partition:           tr.PartitionValue,
 			IdentityHash:        tr.Hash,
 			Image:               tr.Image,
 			ResolvedImageDigest: tr.ResolvedImageDigest,
@@ -109,29 +116,39 @@ func Build(ctx context.Context, db *gorm.DB, runID uuid.UUID) (*Receipt, error) 
 	return receipt, nil
 }
 
-// terminalAttempts collapses multiple TaskRun rows that share a TaskID (the
-// retry case) to the single terminal attempt per task, preserving input order
-// of the first time each TaskID is seen so the result is deterministic. The
-// terminal attempt is the highest Attempt; ties (which should not occur) break
-// on the later UpdatedAt, then the lexicographically larger row ID, so the
-// choice is fully determined and never depends on database row order.
+// terminalAttempts collapses multiple TaskRun rows that share an INSTANCE
+// identity — (TaskID, PartitionValue) — to the single terminal attempt for that
+// instance, preserving the input order in which each instance was first seen so
+// the result is deterministic. The terminal attempt is the highest Attempt;
+// ties (which should not occur) break on the later UpdatedAt, then the
+// lexicographically larger row ID, so the choice is fully determined and never
+// depends on database row order.
+//
+// The partition half of the key is what keeps a fanned step's N instances as N
+// entries: they are siblings, not retries of one another.
 func terminalAttempts(taskRuns []models.TaskRun) []models.TaskRun {
 	if len(taskRuns) <= 1 {
 		return taskRuns
 	}
 
-	bestIdx := make(map[uuid.UUID]int, len(taskRuns)) // TaskID -> index into out
+	type instanceKey struct {
+		taskID    uuid.UUID
+		partition string
+	}
+
+	bestIdx := make(map[instanceKey]int, len(taskRuns)) // instance -> index into out
 	out := make([]models.TaskRun, 0, len(taskRuns))
 
 	for i := range taskRuns {
 		tr := taskRuns[i]
-		if idx, ok := bestIdx[tr.TaskID]; ok {
+		key := instanceKey{taskID: tr.TaskID, partition: tr.PartitionValue}
+		if idx, ok := bestIdx[key]; ok {
 			if isLaterAttempt(tr, out[idx]) {
 				out[idx] = tr
 			}
 			continue
 		}
-		bestIdx[tr.TaskID] = len(out)
+		bestIdx[key] = len(out)
 		out = append(out, tr)
 	}
 	return out

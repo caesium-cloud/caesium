@@ -235,6 +235,25 @@ func configureConnectionPool(sqlDB *sql.DB, maxOpen, maxIdle int) {
 
 func Migrate() (err error) {
 	router := DefaultRouter()
+	// Explicit index migrations run BEFORE AutoMigrate: AutoMigrate skips any
+	// index whose NAME already exists, so a re-shaped index (same name, now
+	// UNIQUE and covering a new column) has to be dropped first or the old one
+	// survives forever on existing deployments. task_runs is a hot-path model, so
+	// this runs on every connection that carries the table.
+	if err = MigrateTaskRunUniquePartitionIndex(router.Catalog()); err != nil {
+		return err
+	}
+	if router.ShardCount() > 1 {
+		for _, shard := range router.HotShards() {
+			if err = MigrateTaskRunUniquePartitionIndex(shard); err != nil {
+				return err
+			}
+		}
+		if err = MigrateTaskRunUniquePartitionIndex(router.Cold()); err != nil {
+			return err
+		}
+	}
+
 	if err = migrateModels(router.Catalog(), models.All...); err != nil {
 		return err
 	}

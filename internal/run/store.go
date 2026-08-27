@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/caesium-cloud/caesium/internal/cache"
@@ -83,6 +84,26 @@ func IsSuccessfulTaskResult(result string) bool {
 	return taskStatusFromResult(result) == TaskStatusSucceeded
 }
 
+// effectiveTerminalStatus reconciles a REPORTED terminal status with the result
+// string that came with it.
+//
+// The two can disagree in exactly one direction, and it is the common one: a
+// container that ran and exited non-zero is reported as a COMPLETION
+// (status=succeeded, result="failure"), because from the executor's point of
+// view the task ran to a normal end and the result carries the verdict. Every
+// path that records a terminal status must fold the result back in, or the same
+// container produces "succeeded" on one route and "failed" on another.
+//
+// Only succeeded is re-derived. `cached` is a statement about where the result
+// came from, not about the result itself, and the cache-hit paths handle an
+// unsuccessful cached result on their own.
+func effectiveTerminalStatus(status TaskStatus, result string) TaskStatus {
+	if status == TaskStatusSucceeded {
+		return taskStatusFromResult(result)
+	}
+	return status
+}
+
 func taskStatusFromResult(result string) TaskStatus {
 	switch Result(result) {
 	case "", "success", "ok":
@@ -135,8 +156,21 @@ type TaskRun struct {
 	CompletedAt             *time.Time                `json:"completed_at,omitempty"`
 	Error                   string                    `json:"error,omitempty"`
 	OutstandingPredecessors int                       `json:"outstanding_predecessors"`
-	CreatedAt               time.Time                 `json:"created_at"`
-	UpdatedAt               time.Time                 `json:"updated_at"`
+	PartitionValue          string                    `json:"partition_value,omitempty"`
+	PartitionIndex          int                       `json:"partition_index,omitempty"`
+	PartitionCount          int                       `json:"partition_count,omitempty"`
+	PartitionFingerprint    string                    `json:"partition_fingerprint,omitempty"`
+	PartitionDependsOn      []string                  `json:"partition_depends_on,omitempty"`
+	// PartitionStatusCounts is the per-status histogram of a COLLAPSED fan-out
+	// group: {"succeeded":2,"failed":1,…}. Set only on the collapsed group entry
+	// that run-detail payloads return in place of N instance rows (see
+	// collapseFanOutGroups) — omitted for unfanned tasks and for the individual
+	// instance rows the partition endpoints return. Without it the UI can render
+	// partition_count but not the mix, so a 1000-instance group with one failure
+	// looks identical to one with 500.
+	PartitionStatusCounts map[string]int `json:"partition_status_counts,omitempty"`
+	CreatedAt             time.Time      `json:"created_at"`
+	UpdatedAt             time.Time      `json:"updated_at"`
 }
 
 type JobRun struct {
@@ -179,12 +213,75 @@ type Store struct {
 	// When nil, no run_leases rows are written and the system behaves
 	// byte-identically to Phase 1.
 	leaseStore *LeaseStore
+
+	// runStateCache is the in-memory advancement state layered over this store
+	// (the OwnerManager, under CAESIUM_RUN_OWNER_IN_MEMORY=true). It is a CACHE
+	// of what the task_runs rows say, so the store must tell it when it
+	// invalidates those rows out from under it — see invalidateRunState. Nil in
+	// every other configuration, and set once at construction; atomic so the
+	// race detector is satisfied about the one write.
+	runStateCache atomic.Pointer[runStateInvalidator]
+}
+
+// runStateInvalidator is the seam a cached in-memory run state exposes so the
+// store can discard it when a run is RE-OPENED.
+//
+// Only Drop is needed: rebuilding is lazy. The dispatch loop recovers a run it
+// does not own on its next tick, and that rebuild reads the current rows.
+type runStateInvalidator interface {
+	Drop(runID uuid.UUID)
+}
+
+// SetRunStateCache registers the in-memory run state layered over this store.
+// Called by NewOwnerManager so the wiring lives next to the thing being wired
+// rather than in the server bootstrap, where forgetting it would look like
+// nothing at all.
+func (s *Store) SetRunStateCache(inv runStateInvalidator) {
+	if s == nil || inv == nil {
+		return
+	}
+	s.runStateCache.Store(&inv)
+}
+
+// invalidateRunState discards any cached in-memory advancement state for a run
+// whose rows the store has just re-opened.
+//
+// A retry resets terminal task_runs rows back to pending and flips the run back
+// to running. The owner's in-memory RunState is a snapshot taken before that
+// and says the run is COMPLETE — and because the dispatch loop only rebuilds a
+// run it does not already own (dispatchRunInMemory calls Recover behind
+// `!mgr.Owns`), the stale snapshot is never refreshed: ReadyForDispatch returns
+// nothing, no task is ever pushed, and the retried run hangs until its harness
+// times out. Meanwhile the pull-path claimer will not touch it either, because
+// the run still holds a live lease and liveLeaseGuardSQL defers to the owner.
+//
+// Dropping the state is half the fix. The run's CHECKPOINT is the same snapshot
+// made durable, and recovery restores from it before replaying the terminal tail
+// — so a rebuild that consulted a checkpoint written when the run was complete
+// would reconstruct exactly the stale state that was just discarded. The tail
+// cannot correct it either: a reset row stops being terminal, and
+// TerminalTaskRunsSince reports rows that ARE terminal, never rows that stopped
+// being so. Both copies go, and recovery replays from the task_runs rows, which
+// are the system of record.
+func (s *Store) invalidateRunState(runID uuid.UUID) {
+	if s == nil {
+		return
+	}
+	if inv := s.runStateCache.Load(); inv != nil && *inv != nil {
+		(*inv).Drop(runID)
+	}
+	if err := s.DeleteCheckpoints(runID); err != nil {
+		// Best effort: a surviving checkpoint delays the retry until the lease
+		// expires and a clean takeover replays the rows, rather than losing work.
+		log.Warn("run: failed to discard checkpoints for re-opened run", "run_id", runID, "error", err)
+	}
 }
 
 type RegisterTaskInput struct {
 	Task                    *models.Task
 	Atom                    *models.Atom
 	OutstandingPredecessors int
+	PartitionIndex          int
 }
 
 type StartOptions struct {
@@ -248,6 +345,12 @@ var (
 	// retry is refused because the job is paused. A human pause outranks an agent
 	// retry (design-agent-in-the-loop.md, retry safety valves).
 	ErrJobPaused = errors.New("run: cannot retry while job is paused")
+	// ErrTaskRunNotTerminal is returned by RetryPartition when the addressed
+	// fan-out instance is still pending or running. Resetting a RUNNING instance
+	// mid-flight would orphan its container and let the eventual completion
+	// overwrite the fresh attempt, so a per-partition retry is terminal-only.
+	// The REST layer maps this to 409.
+	ErrTaskRunNotTerminal = errors.New("run: task instance is not terminal")
 )
 
 type admissionDecision int
@@ -434,9 +537,16 @@ func (s *Store) RenewLeases(ctx context.Context, nodeID string, ids []uuid.UUID,
 	return result.RowsAffected, nil
 }
 
-func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
+// SetTaskHash persists a task's identity hash. taskRef follows the
+// TaskRun-primary-key-or-catalog-task-ID contract, so a fan-out instance is
+// addressed by its own TaskRun ID.
+func (s *Store) SetTaskHash(runID, taskRef uuid.UUID, hash string) error {
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		return err
+	}
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Update("hash", hash).Error
 }
 
@@ -445,8 +555,8 @@ func (s *Store) SetTaskHash(runID, taskID uuid.UUID, hash string) error {
 // pinning is off or resolution failed; in that case only the hash is written
 // and the existing digest column (if any) is left untouched, keeping the row
 // consistent with the literal-tag cache key.
-func (s *Store) SetTaskHashWithDigest(runID, taskID uuid.UUID, hash, resolvedImageDigest string) error {
-	return s.SetTaskHashWithBlob(runID, taskID, hash, resolvedImageDigest, nil)
+func (s *Store) SetTaskHashWithDigest(runID, taskRef uuid.UUID, hash, resolvedImageDigest string) error {
+	return s.SetTaskHashWithBlob(runID, taskRef, hash, resolvedImageDigest, nil)
 }
 
 // SetTaskHashWithBlob persists the task identity hash, the resolved image
@@ -456,7 +566,13 @@ func (s *Store) SetTaskHashWithDigest(runID, taskID uuid.UUID, hash, resolvedIma
 // corresponding column untouched (so a literal-tag, blob-less run stays
 // consistent). The blob lets `caesium why` later diff two runs field-by-field
 // rather than only observing that the opaque hashes differ.
-func (s *Store) SetTaskHashWithBlob(runID, taskID uuid.UUID, hash, resolvedImageDigest string, hashInputBlob []byte) error {
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract. This
+// matters more here than almost anywhere else: with loadUniqueTaskRun, a fanned
+// step's per-instance identity write returned ErrAmbiguousTaskRun and the hash
+// was NEVER persisted, so `caesium why --partition`, `receipt get` and
+// `run retry --partition` had no identity to match and the local lane published
+// no per-partition cache entry.
+func (s *Store) SetTaskHashWithBlob(runID, taskRef uuid.UUID, hash, resolvedImageDigest string, hashInputBlob []byte) error {
 	updates := map[string]any{"hash": hash}
 	if resolvedImageDigest != "" {
 		updates["resolved_image_digest"] = resolvedImageDigest
@@ -464,8 +580,12 @@ func (s *Store) SetTaskHashWithBlob(runID, taskID uuid.UUID, hash, resolvedImage
 	if len(hashInputBlob) > 0 {
 		updates["hash_input_blob"] = datatypes.JSON(hashInputBlob)
 	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		return err
+	}
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Updates(updates).Error
 }
 
@@ -513,18 +633,25 @@ func (s *Store) UpdateTaskExecutionDescriptorSecretRefs(runID, taskID uuid.UUID,
 // PredecessorHashes falling back to the true hash. This is the only writer of
 // effective_hash, so a downstream reader observes either the proven prior
 // identity or nothing.
-func (s *Store) SetTaskEffectiveHash(runID, taskID uuid.UUID, effectiveHash string) error {
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract: a
+// value-verified short-circuit is proven per INSTANCE (its own output was
+// byte-identical), so it must be recorded on that instance's row.
+func (s *Store) SetTaskEffectiveHash(runID, taskRef uuid.UUID, effectiveHash string) error {
 	if effectiveHash == "" {
 		return nil
 	}
-	if err := s.mutateTaskExecutionDescriptor(runID, taskID, func(desc *models.TaskExecutionDescriptor) {
+	if err := s.mutateTaskExecutionDescriptor(runID, taskRef, func(desc *models.TaskExecutionDescriptor) {
 		desc.Baseline.EffectiveHash = effectiveHash
 		desc.Cache.EffectiveHash = effectiveHash
 	}); err != nil {
-		log.Warn("failed to update task execution descriptor effective hash", "run_id", runID, "task_id", taskID, "error", err)
+		log.Warn("failed to update task execution descriptor effective hash", "run_id", runID, "task_ref", taskRef, "error", err)
+	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		return err
 	}
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Update("effective_hash", effectiveHash).Error
 }
 
@@ -979,14 +1106,16 @@ func (s *Store) startRun(req startRunRequest) (*JobRun, error) {
 	return s.loadRunWithDB(conn, model.ID)
 }
 
-func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
+// fan-out instance mutates its own execution descriptor.
+func (s *Store) mutateTaskExecutionDescriptor(runID, taskRef uuid.UUID, mutate func(*models.TaskExecutionDescriptor)) error {
 	if mutate == nil {
 		return nil
 	}
 
 	for attempt := 0; attempt <= len(storeBusyRetryBackoffs); attempt++ {
-		var taskRun models.TaskRun
-		if err := s.db.Select("execution_descriptor").Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
+		taskRun, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+		if err != nil {
 			return err
 		}
 		previous := append([]byte(nil), taskRun.ExecutionDescriptor...)
@@ -1009,7 +1138,7 @@ func (s *Store) mutateTaskExecutionDescriptor(runID, taskID uuid.UUID, mutate fu
 		}
 
 		update := s.db.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			Where("id = ?", taskRun.ID)
 		if len(previous) == 0 {
 			update = update.Where("(execution_descriptor IS NULL OR execution_descriptor = '')")
 		} else {
@@ -1118,16 +1247,21 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		return nil
 	}
 
+	type instanceKey struct {
+		taskID uuid.UUID
+		index  int
+	}
 	taskIDs := make([]uuid.UUID, 0, len(inputs))
-	seenInputTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+	seenInputKeys := make(map[instanceKey]struct{}, len(inputs))
 	for _, input := range inputs {
 		if input.Task == nil || input.Atom == nil {
 			return errors.New("run: task and atom must be provided")
 		}
-		if _, ok := seenInputTaskIDs[input.Task.ID]; ok {
+		key := instanceKey{taskID: input.Task.ID, index: input.PartitionIndex}
+		if _, ok := seenInputKeys[key]; ok {
 			continue
 		}
-		seenInputTaskIDs[input.Task.ID] = struct{}{}
+		seenInputKeys[key] = struct{}{}
 		taskIDs = append(taskIDs, input.Task.ID)
 	}
 
@@ -1161,32 +1295,37 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 		counts.reset()
 		var attemptEvents []event.Event
 		err := s.db.Transaction(func(tx *gorm.DB) error {
-			existingTaskIDs := make([]uuid.UUID, 0)
+			var existingRows []struct {
+				TaskID         uuid.UUID
+				PartitionIndex int
+			}
 			if len(taskIDs) > 0 {
 				if err := tx.Model(&models.TaskRun{}).
+					Select("task_id", "partition_index").
 					Where("job_run_id = ? AND task_id IN ?", runID, taskIDs).
-					Pluck("task_id", &existingTaskIDs).Error; err != nil {
+					Find(&existingRows).Error; err != nil {
 					return err
 				}
 			}
-			existing := make(map[uuid.UUID]struct{}, len(existingTaskIDs))
-			for _, taskID := range existingTaskIDs {
-				existing[taskID] = struct{}{}
+			existing := make(map[instanceKey]struct{}, len(existingRows))
+			for _, row := range existingRows {
+				existing[instanceKey{taskID: row.TaskID, index: row.PartitionIndex}] = struct{}{}
 			}
 
 			records := make([]models.TaskRun, 0, len(inputs))
 			readyEvents := make([]event.Event, 0, len(inputs))
-			seenNewTaskIDs := make(map[uuid.UUID]struct{}, len(inputs))
+			seenNewKeys := make(map[instanceKey]struct{}, len(inputs))
 			for _, input := range inputs {
 				task := input.Task
 				atom := input.Atom
-				if _, ok := existing[task.ID]; ok {
+				key := instanceKey{taskID: task.ID, index: input.PartitionIndex}
+				if _, ok := existing[key]; ok {
 					continue
 				}
-				if _, ok := seenNewTaskIDs[task.ID]; ok {
+				if _, ok := seenNewKeys[key]; ok {
 					continue
 				}
-				seenNewTaskIDs[task.ID] = struct{}{}
+				seenNewKeys[key] = struct{}{}
 
 				command := atom.Command
 				if command == "" {
@@ -1247,6 +1386,7 @@ func (s *Store) RegisterTasks(runID uuid.UUID, inputs []RegisterTaskInput) error
 					NodeSelector:            maps.Clone(task.NodeSelector),
 					Attempt:                 1,
 					MaxAttempts:             maxAttempts,
+					PartitionIndex:          input.PartitionIndex,
 					OutstandingPredecessors: input.OutstandingPredecessors,
 					CacheEnabled:            resolvedCache.Enabled,
 					CacheTTL:                resolvedCache.TTL,
@@ -1591,7 +1731,11 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
+// StartTask marks a task run as running. taskRef is resolved by
+// loadTaskRunByIDOrUnique, so it may be either a TaskRun primary key (required
+// for a fan-out instance, where the catalog task ID matches N sibling rows) or a
+// catalog task ID (unfanned steps, which still have exactly one row).
+func (s *Store) StartTask(runID, taskRef uuid.UUID, runtimeID string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
@@ -1599,8 +1743,15 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
+			row, err := loadTaskRunByIDOrUnique(tx, runID, taskRef)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil
+				}
+				return err
+			}
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND status NOT IN ?", runID, taskID, terminalTaskStatuses()).
+				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses()).
 				Updates(map[string]interface{}{
 					"status":                 string(TaskStatusRunning),
 					"runtime_id":             runtimeID,
@@ -1622,7 +1773,7 @@ func (s *Store) StartTask(runID, taskID uuid.UUID, runtimeID string) error {
 			}
 			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
+				evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskStarted, runID, row, &counts)
 				if err != nil {
 					return err
 				}
@@ -1678,12 +1829,29 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			// in memory and did NOT decrement the DB counter, so the dispatched
 			// successor still shows outstanding>0 here — trustOwnerReadiness drops
 			// the predecessor check so the claim reflects the owner's decision.
-			where := "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
-			if trustOwnerReadiness {
-				where = "job_run_id = ? AND task_id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
+			row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskID)
+			if loadErr != nil {
+				if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+					return ErrTaskClaimMismatch
+				}
+				return loadErr
 			}
+			// fanOut.maxParallel is enforced as part of the claim UPDATE, not as a
+			// separate pre-check, so the cap and the claim are one statement (see
+			// fanOutMaxParallelPredicateTx).
+			capSQL, capArgs, capErr := s.fanOutMaxParallelPredicateTx(tx, row)
+			if capErr != nil {
+				return capErr
+			}
+			where := "id = ? AND status = ? AND claimed_by = '' AND outstanding_predecessors = 0 AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
+			whereArgs := []interface{}{row.ID, string(TaskStatusPending), ownerGeneration, now}
+			if trustOwnerReadiness {
+				where = "id = ? AND status = ? AND claimed_by = '' AND owner_generation <= ? AND (rate_limit_retry_after IS NULL OR rate_limit_retry_after <= ?)"
+			}
+			where += capSQL
+			whereArgs = append(whereArgs, capArgs...)
 			result := tx.Model(&models.TaskRun{}).
-				Where(where, runID, taskID, string(TaskStatusPending), ownerGeneration, now).
+				Where(where, whereArgs...).
 				Updates(map[string]interface{}{
 					"status":                 string(TaskStatusRunning),
 					"claimed_by":             workerNode,
@@ -1702,7 +1870,7 @@ func (s *Store) ClaimTaskForDispatch(runID, taskID uuid.UUID, workerNode string,
 			counts.addTaskRunStatus(1)
 
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
+				evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskStarted, runID, row, &counts)
 				if err != nil {
 					return err
 				}
@@ -1754,10 +1922,17 @@ func (s *Store) PendingTasksForDispatch(ctx context.Context, runID uuid.UUID, li
 // matching running row exists.  The dispatch handler uses this to obtain the
 // full execution spec (image/command/engine/etc.) to hand to the worker pool.
 func (s *Store) LoadDispatchedTaskRun(runID, taskID uuid.UUID, claimedBy string) (*models.TaskRun, error) {
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrTaskClaimMismatch
+		}
+		return nil, err
+	}
 	var taskRun models.TaskRun
-	err := s.db.
-		Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?",
-			runID, taskID, claimedBy, string(TaskStatusRunning)).
+	err = s.db.
+		Where("id = ? AND claimed_by = ? AND status = ?",
+			row.ID, claimedBy, string(TaskStatusRunning)).
 		First(&taskRun).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -1782,9 +1957,16 @@ func (s *Store) LoadDispatchedTaskRun(runID, taskID uuid.UUID, claimedBy string)
 // the task already advanced — e.g. a completion landed in the race window.
 func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, ownerGeneration int64) error {
 	return withStoreBusyRetry(func() error {
+		row, err := loadTaskRunByIDOrUnique(s.db, runID, taskID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
 		result := s.db.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ? AND (owner_generation = ? OR owner_generation = 0)",
-				runID, taskID, claimedBy, string(TaskStatusRunning), ownerGeneration).
+			Where("id = ? AND claimed_by = ? AND status = ? AND (owner_generation = ? OR owner_generation = 0)",
+				row.ID, claimedBy, string(TaskStatusRunning), ownerGeneration).
 			Updates(map[string]interface{}{
 				"status":           string(TaskStatusPending),
 				"claimed_by":       "",
@@ -1805,15 +1987,56 @@ func (s *Store) ReleaseTaskClaim(runID, taskID uuid.UUID, claimedBy string, owne
 
 // RateLimitTask leaves a task pending until retryAfter so rate-limit rejections
 // do not hold worker capacity or spin through immediate reclaims.
-func (s *Store) RateLimitTask(ctx context.Context, runID, taskID uuid.UUID, retryAfter time.Time) error {
+//
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract, so a
+// fan-out instance parks by its own TaskRun ID and its siblings keep running.
+//
+// G1 open question — settled here: the `status IN (pending, running)` predicate
+// is KEPT, and it is deliberate rather than a leftover. Both claim paths flip a
+// row to `running` at CLAIM time (ClaimTaskForDispatch, and the claimer's atomic
+// UPDATE), and the rate-limit rejection is only discovered afterwards, before any
+// container exists — so the row this parks is legitimately `running` and has
+// nothing in flight to orphan. What made the predicate dangerous was never the
+// status set; it was the `WHERE job_run_id = ? AND task_id = ?` predicate, which
+// re-pended every RUNNING sibling of a fanned group and orphaned their live
+// containers. Now that the write is keyed to one instance's primary key, matching
+// `running` affects exactly the row whose own rate-limit acquisition was
+// rejected. Callers must therefore pass the instance's TaskRun ID; passing a
+// catalog task ID for an expanded group now fails loudly with ErrAmbiguousTaskRun
+// instead of silently parking a sibling.
+// RateLimitTask parks ONE task instance until retryAfter, releasing its claim so
+// the next tick can re-acquire the rate-limit token.
+//
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract; a fanned
+// group must be addressed by instance, and a catalog task ID naming N siblings
+// is refused (ErrAmbiguousTaskRun) rather than parking an arbitrary one.
+//
+// The `status IN (pending, running)` predicate was G1's one open question — it
+// is KEPT, deliberately. Matching `running` looks like it could re-pend a live
+// instance and orphan its container, but the rate-limit rejection is discovered
+// AFTER the claim has already flipped the row to running and BEFORE any
+// container exists (acquireTaskRateLimit runs at dispatch, not mid-execution),
+// so the running row this matches has nothing in flight. What was a real bug is
+// now closed by the re-key: the old (job_run_id, task_id) predicate fanned the
+// re-pend across every sibling, so parking one instance re-pended its RUNNING
+// siblings and did orphan their containers. Pinned by
+// TestRateLimitTaskParksOneInstance.
+func (s *Store) RateLimitTask(ctx context.Context, runID, taskRef uuid.UUID, retryAfter time.Time) error {
 	if retryAfter.IsZero() {
 		retryAfter = time.Now().UTC()
 	}
 	retryAfter = retryAfter.UTC()
 
 	return withStoreBusyRetry(func() error {
+		row, err := loadTaskRunByIDOrUnique(s.db.WithContext(ctx), runID, taskRef)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
 		result := s.db.WithContext(ctx).Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ? AND status IN ?", runID, taskID, []string{string(TaskStatusPending), string(TaskStatusRunning)}).
+			Where("id = ? AND status IN ?", row.ID, []string{string(TaskStatusPending), string(TaskStatusRunning)}).
 			Updates(map[string]interface{}{
 				"status":                 string(TaskStatusPending),
 				"claimed_by":             "",
@@ -1833,7 +2056,10 @@ func (s *Store) RateLimitTask(ctx context.Context, runID, taskID uuid.UUID, retr
 	})
 }
 
-func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy string) error {
+// StartTaskClaimed is the distributed-lane counterpart of StartTask. taskRef
+// follows the same TaskRun-primary-key-or-catalog-task-ID contract, so a worker
+// executing a fan-out instance must pass the instance's TaskRun ID.
+func (s *Store) StartTaskClaimed(runID, taskRef uuid.UUID, runtimeID, claimedBy string) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
@@ -1841,8 +2067,15 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 		attemptEvents := make([]event.Event, 0, 1)
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
+			row, err := loadTaskRunByIDOrUnique(tx, runID, taskRef)
+			if err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return ErrTaskClaimMismatch
+				}
+				return err
+			}
 			result := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND claimed_by = ? AND status = ?", runID, taskID, claimedBy, string(TaskStatusRunning)).
+				Where("id = ? AND claimed_by = ? AND status = ?", row.ID, claimedBy, string(TaskStatusRunning)).
 				Updates(map[string]interface{}{
 					"runtime_id":             runtimeID,
 					"started_at":             now,
@@ -1856,7 +2089,7 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 			}
 			counts.addTaskRunStatus(1)
 			if s.eventStore != nil {
-				evt, err := s.recordTaskEventTx(tx, event.TypeTaskStarted, runID, taskID, &counts)
+				evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskStarted, runID, row, &counts)
 				if err != nil {
 					return err
 				}
@@ -1877,15 +2110,17 @@ func (s *Store) StartTaskClaimed(runID, taskID uuid.UUID, runtimeID, claimedBy s
 }
 
 func (s *Store) CompleteTask(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) error {
-	skipped, err := s.completeTask(runID, taskID, result, "", false, output, branchSelections)
+	skipped, _, err := s.completeTask(runID, taskID, uuid.Nil, result, "", false, output, branchSelections, nil)
 	_ = skipped
 	return err
 }
 
 // CompleteTaskResult holds the result of a task completion, including any
-// tasks that were skipped due to branch filtering.
+// tasks that were skipped due to branch filtering and any fan-out expansion
+// this completion performed.
 type CompleteTaskResult struct {
 	SkippedTaskIDs []uuid.UUID
+	Expansion      *FanOutExpansion
 }
 
 type TaskLogSnapshot struct {
@@ -1902,64 +2137,123 @@ type CacheHitSource struct {
 // CompleteTaskWithResult completes a task and returns details about branch
 // skips so the local executor can update its in-memory state.
 func (s *Store) CompleteTaskWithResult(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
-	skipped, err := s.completeTask(runID, taskID, result, "", false, output, branchSelections)
+	return s.CompleteTaskWithPartitions(runID, taskID, result, output, branchSelections, nil)
+}
+
+// CompleteTaskWithPartitions is CompleteTaskWithResult plus the producer's
+// parsed partition list, which is expanded inside the completion transaction.
+func (s *Store) CompleteTaskWithPartitions(runID, taskID uuid.UUID, result string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) (*CompleteTaskResult, error) {
+	skipped, expansion, err := s.completeTask(runID, taskID, uuid.Nil, result, "", false, output, branchSelections, partitions)
 	if err != nil {
 		return nil, err
 	}
-	return &CompleteTaskResult{SkippedTaskIDs: skipped}, nil
+	return &CompleteTaskResult{SkippedTaskIDs: skipped, Expansion: expansion}, nil
 }
 
 func (s *Store) CompleteTaskClaimed(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string, branchSelections []string) error {
-	_, err := s.completeTask(runID, taskID, result, claimedBy, true, output, branchSelections)
+	_, _, err := s.completeTask(runID, taskID, uuid.Nil, result, claimedBy, true, output, branchSelections, nil)
 	return err
+}
+
+func (s *Store) CompleteTaskClaimedWithPartitions(runID, taskID uuid.UUID, result, claimedBy string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
+	_, _, err := s.completeTask(runID, taskID, uuid.Nil, result, claimedBy, true, output, branchSelections, partitions)
+	return err
+}
+
+// CompleteTaskInstance completes a specific TaskRun (fan-out instance) by primary key.
+func (s *Store) CompleteTaskInstance(taskRunID uuid.UUID, result string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) (*CompleteTaskResult, error) {
+	var row models.TaskRun
+	if err := s.db.First(&row, "id = ?", taskRunID).Error; err != nil {
+		return nil, err
+	}
+	skipped, expansion, err := s.completeTask(row.JobRunID, row.TaskID, row.ID, result, "", false, output, branchSelections, partitions)
+	if err != nil {
+		return nil, err
+	}
+	return &CompleteTaskResult{SkippedTaskIDs: skipped, Expansion: expansion}, nil
 }
 
 // CacheHitTask marks a task as completed via cache hit (local mode).
 // It mirrors the CompleteTaskWithResult flow but sets status to "cached".
 func (s *Store) CacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result string, output map[string]string, branchSelections []string) (*CompleteTaskResult, error) {
-	skipped, err := s.cacheHitTask(runID, taskID, source, result, "", false, output, branchSelections)
+	return s.CacheHitTaskWithPartitions(runID, taskID, source, result, output, branchSelections, nil)
+}
+
+// CacheHitTaskWithPartitions is CacheHitTask plus the producer's parsed
+// partition list, expanded inside the SAME transaction that writes the cached
+// terminal row.
+//
+// A cache hit is a completion, and cacheHitTask is a different function from
+// completeTask — so an expansion hook placed only on the completion route is
+// unreachable whenever a producer's own work cache-hits, and the group silently
+// collapses to its single template row. That is the *common* path, not an edge
+// case: with per-unit fingerprints the whole point is that repeated work hits
+// the cache, and a cached producer still replays its partition list out of the
+// cache entry (internal/worker/runtime_executor.go reads entry.Partitions).
+//
+// The expansion runs the identical rules as the completion route — it calls
+// expandFanOutSuccessorsTx, so validation (cycles, dangling dependsOn keys,
+// caps), onEmpty handling, in-group indegree seeding and producer-list
+// persistence are one implementation, not a second copy that can drift.
+func (s *Store) CacheHitTaskWithPartitions(runID, taskID uuid.UUID, source CacheHitSource, result string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) (*CompleteTaskResult, error) {
+	skipped, expansion, err := s.cacheHitTask(runID, taskID, source, result, "", false, output, branchSelections, partitions)
 	if err != nil {
 		return nil, err
 	}
-	return &CompleteTaskResult{SkippedTaskIDs: skipped}, nil
+	return &CompleteTaskResult{SkippedTaskIDs: skipped, Expansion: expansion}, nil
 }
 
 // CacheHitTaskClaimed marks a claimed task as completed via cache hit (distributed mode).
 func (s *Store) CacheHitTaskClaimed(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, output map[string]string, branchSelections []string) error {
-	_, err := s.cacheHitTask(runID, taskID, source, result, claimedBy, true, output, branchSelections)
+	return s.CacheHitTaskClaimedWithPartitions(runID, taskID, source, result, claimedBy, output, branchSelections, nil)
+}
+
+// CacheHitTaskClaimedWithPartitions is the claim-fenced twin of
+// CacheHitTaskWithPartitions, and the method internal/worker/completion_sink.go
+// and internal/dispatch/dispatch.go resolve by INTERFACE ASSERTION
+// (cacheHitPartitionStore). Because the binding is an assertion rather than a
+// compile-time call, a signature drift here does not fail the build — it makes
+// the assertion miss, which those sites report as
+// "run store cannot persist producer partitions; fan-out group will not expand"
+// and then continue without expanding. Keep the signature in lockstep with
+// those declarations.
+func (s *Store) CacheHitTaskClaimedWithPartitions(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) error {
+	_, _, err := s.cacheHitTask(runID, taskID, source, result, claimedBy, true, output, branchSelections, partitions)
 	return err
 }
 
-func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
+func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) ([]uuid.UUID, *FanOutExpansion, error) {
 	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
+	var expansion *FanOutExpansion
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
 		attemptEvents := make([]event.Event, 0, 8)
 		attemptSkippedTaskIDs := make([]uuid.UUID, 0)
+		var attemptExpansion *FanOutExpansion
 
 		err := s.db.Transaction(func(tx *gorm.DB) error {
 			now := time.Now().UTC()
 
-			// Verify the task run exists (and matches claim if enforced).
-			var taskRun models.TaskRun
-			taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
-			if enforceClaim {
-				taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
-			}
-			if err := taskQuery.First(&taskRun).Error; err != nil {
+			taskRunPtr, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskID)
+			if loadErr != nil {
 				if enforceClaim {
 					return ErrTaskClaimMismatch
 				}
-				return err
+				return loadErr
+			}
+			taskRun := *taskRunPtr
+			taskID = taskRun.TaskID
+			if enforceClaim && taskRun.ClaimedBy != claimedBy {
+				return ErrTaskClaimMismatch
 			}
 			if IsTerminal(TaskStatus(taskRun.Status)) {
 				return nil
 			}
 
 			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, taskID)
+				Where("id = ?", taskRun.ID)
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
@@ -2038,7 +2332,9 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 
 			// Partition edges: skipped (branch-filtered) vs. predecessors to decrement.
 			var toDecrementIDs []uuid.UUID
+			allSuccessorIDs := make([]uuid.UUID, 0, len(edges))
 			for _, edge := range edges {
+				allSuccessorIDs = append(allSuccessorIDs, edge.ToTaskID)
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
 					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
@@ -2050,6 +2346,33 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 				}
 				toDecrementIDs = append(toDecrementIDs, edge.ToTaskID)
 			}
+
+			if isFanOutInstance(&taskRun) {
+				if err := s.decrementInGroupDependentsTx(tx, runID, &taskRun); err != nil {
+					return err
+				}
+				allTerm, gErr := s.groupAllTerminalTx(tx, runID, taskID)
+				if gErr != nil {
+					return gErr
+				}
+				if !allTerm {
+					return nil
+				}
+			}
+
+			// Expansion rides the cache-hit transaction exactly as it rides the
+			// completion transaction (completeTask), through the SAME function —
+			// so a cached producer's group is never half-expanded and never
+			// validated by a second, laxer copy of the rules. Ordering matches
+			// completeTask: after the in-group decrement and the group-terminal
+			// gate, before the cross-step decrement, so the instances this
+			// creates already carry their seeded outstanding_predecessors when
+			// the successors are decremented below.
+			exp, expErr := s.expandFanOutSuccessorsTx(tx, runID, taskID, &taskRun, taskModel.Name, allSuccessorIDs, partitions, &attemptEvents, &counts)
+			if expErr != nil {
+				return expErr
+			}
+			attemptExpansion = exp
 
 			// Batch-decrement outstanding_predecessors for all non-skipped successors.
 			updatedSuccessors, err := s.batchDecrementPredecessorsTx(tx, runID, toDecrementIDs)
@@ -2096,9 +2419,12 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 			}
 
 			if s.eventStore != nil {
-				// Build task_cached event and add to batch.
+				// Build task_cached event and add to batch. Read the row by its
+				// primary key: the (job_run_id, task_id) predicate matched an
+				// arbitrary sibling, so a fanned group emitted N task_cached
+				// events all describing partition 0.
 				var taskRunModel models.TaskRun
-				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
+				if err := tx.Where("id = ?", taskRun.ID).First(&taskRunModel).Error; err != nil {
 					return err
 				}
 				var jobRun models.JobRun
@@ -2134,6 +2460,7 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 		if err == nil {
 			pendingEvents = attemptEvents
 			skippedTaskIDs = attemptSkippedTaskIDs
+			expansion = attemptExpansion
 		}
 		return err
 	})
@@ -2141,16 +2468,28 @@ func (s *Store) cacheHitTask(runID, taskID uuid.UUID, source CacheHitSource, res
 		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
-	return skippedTaskIDs, err
+	return skippedTaskIDs, expansion, err
 }
 
-func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSnapshot) error {
+// SaveTaskLogSnapshot persists the captured log snapshot onto exactly one task
+// run. taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract: a
+// fan-out instance must be addressed by its TaskRun ID, otherwise the snapshot
+// would be broadcast across every sibling row sharing (job_run_id, task_id).
+func (s *Store) SaveTaskLogSnapshot(runID, taskRef uuid.UUID, snapshot *TaskLogSnapshot) error {
 	if snapshot == nil {
 		return nil
 	}
 
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Updates(map[string]interface{}{
 			"log_text":      snapshot.Text,
 			"log_truncated": snapshot.Truncated,
@@ -2161,14 +2500,31 @@ func (s *Store) SaveTaskLogSnapshot(runID, taskID uuid.UUID, snapshot *TaskLogSn
 // task completion onto the task run. The incident classifier reads this
 // alongside SchemaViolations/Result to bucket a failure into a failure_class.
 // Best-effort: a nil-safe no-op when the row is gone.
-func (s *Store) SetTaskExitCode(runID, taskID uuid.UUID, exitCode *int) error {
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract so a
+// fan-out instance records its own exit code instead of overwriting its
+// siblings'.
+func (s *Store) SetTaskExitCode(runID, taskRef uuid.UUID, exitCode *int) error {
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Update("exit_code", exitCode).Error
 }
 
-// SaveSchemaViolations persists schema validation violations for a task run.
-func (s *Store) SaveSchemaViolations(runID, taskID uuid.UUID, violations []pkgtask.SchemaViolation) error {
+// SaveSchemaViolations persists schema validation violations onto exactly one
+// task run. taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract:
+// a fan-out instance must be addressed by its TaskRun ID. The old
+// `WHERE job_run_id = ? AND task_id = ?` predicate broadcast one instance's
+// violations across every sibling row, so a single bad partition made all N look
+// schema-invalid. Resolving through loadTaskRunByIDOrUnique means an ambiguous
+// catalog task ID now fails loudly (ErrAmbiguousTaskRun) instead of fanning the
+// write.
+func (s *Store) SaveSchemaViolations(runID, taskRef uuid.UUID, violations []pkgtask.SchemaViolation) error {
 	if len(violations) == 0 {
 		return nil
 	}
@@ -2176,8 +2532,15 @@ func (s *Store) SaveSchemaViolations(runID, taskID uuid.UUID, violations []pkgta
 	if err != nil {
 		return err
 	}
+	row, err := loadTaskRunByIDOrUnique(s.db, runID, taskRef)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
 	return s.db.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ?", runID, taskID).
+		Where("id = ?", row.ID).
 		Update("schema_violations", datatypes.JSON(b)).Error
 }
 
@@ -2322,8 +2685,12 @@ func (s *Store) appendTaskReadyEventTx(tx *gorm.DB, runID, taskID uuid.UUID, pen
 	if err := s.eventStore.AppendTx(tx, &evt); err != nil {
 		return err
 	}
-	counts.addEventInsert(1)
-	*pendingEvents = append(*pendingEvents, evt)
+	if counts != nil {
+		counts.addEventInsert(1)
+	}
+	if pendingEvents != nil {
+		*pendingEvents = append(*pendingEvents, evt)
+	}
 	return nil
 }
 
@@ -2344,6 +2711,25 @@ func (s *Store) batchDecrementPredecessorsTx(tx *gorm.DB, runID uuid.UUID, succe
 	// SELECT the updated rows to determine which successors hit zero and are still pending.
 	var updated []models.TaskRun
 	if err := tx.Where("job_run_id = ? AND task_id IN ?", runID, successorIDs).Find(&updated).Error; err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+// batchDecrementSiblingPredecessorsTx decrements outstanding_predecessors for
+// specific TaskRun primary keys (in-group edges). Cross-step edges still use
+// batchDecrementPredecessorsTx's task_id IN form.
+func (s *Store) batchDecrementSiblingPredecessorsTx(tx *gorm.DB, runID uuid.UUID, instanceIDs []uuid.UUID) ([]models.TaskRun, error) {
+	if len(instanceIDs) == 0 {
+		return nil, nil
+	}
+	if err := tx.Model(&models.TaskRun{}).
+		Where("job_run_id = ? AND id IN ?", runID, instanceIDs).
+		UpdateColumn("outstanding_predecessors", gorm.Expr("CASE WHEN outstanding_predecessors > 0 THEN outstanding_predecessors - 1 ELSE 0 END")).Error; err != nil {
+		return nil, err
+	}
+	var updated []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND id IN ?", runID, instanceIDs).Find(&updated).Error; err != nil {
 		return nil, err
 	}
 	return updated, nil
@@ -2428,7 +2814,13 @@ func (s *Store) stampBatchEventQuarantineTx(tx *gorm.DB, evts []*event.Event) er
 		for _, row := range taskRows {
 			taskQuarantine[eventQuarantineKey{runID: row.JobRunID, taskID: row.TaskID}] = row.Quarantine
 		}
-		if len(taskRows) != len(ids) {
+		found := 0
+		for _, id := range ids {
+			if _, ok := taskQuarantine[eventQuarantineKey{runID: runID, taskID: id}]; ok {
+				found++
+			}
+		}
+		if found != len(ids) {
 			return fmt.Errorf("run: stamp event quarantine from task run batch: %w", gorm.ErrRecordNotFound)
 		}
 	}
@@ -2454,13 +2846,71 @@ func uuidSetValues(set map[uuid.UUID]struct{}) []uuid.UUID {
 	return values
 }
 
-func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
+// nextTerminalSequenceTx allocates the next per-run terminal_sequence for a row
+// the SQL advancement lane is about to make terminal.
+//
+// terminal_sequence used to be stamped only by the run-owner path
+// (CompleteTaskOwner), so every SQL-lane skip landed at 0 — and
+// TerminalTaskRunsSince selects `terminal_sequence > ?`, which excludes 0. A
+// skipped fan-out instance was therefore invisible to a recovering owner and to
+// the terminal-row replay tail. Allocating MAX(terminal_sequence)+1 for the run
+// keeps the space monotonic and, because it is read inside the caller's
+// transaction, dense across the rows one transaction marks terminal. It can
+// never collide with an owner-allocated value: owner-managed runs return before
+// the SQL lane is reached (dispatch.go short-circuits on res.Owned), and taking
+// max+1 always exceeds anything already persisted.
+func nextTerminalSequenceTx(tx *gorm.DB, runID uuid.UUID) (int64, error) {
+	var maxSeq int64
+	if err := tx.Model(&models.TaskRun{}).
+		Where("job_run_id = ?", runID).
+		Select("COALESCE(MAX(terminal_sequence), 0)").
+		Scan(&maxSeq).Error; err != nil {
+		return 0, err
+	}
+	return maxSeq + 1, nil
+}
+
+// markInstanceSkippedTx is THE terminal-skip primitive: it marks exactly one
+// TaskRun row skipped by primary key, stamps that row its own
+// terminal_sequence, and emits that row's own task_skipped event.
+//
+// Every skip route funnels through here — cross-step group skip
+// (markTaskSkippedTx), branch/trigger-rule descendant skip
+// (skipTaskAndDescendantsTx), and the fan-out in-group dependency cascade
+// (skipInGroupDependentsTx) — so a skipped instance is never a row that quietly
+// shares a sibling's sequence or a sibling's event payload.
+func (s *Store) markInstanceSkippedTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
+	return s.markInstanceSkippedFromTx(tx, runID, row, reason, []string{string(TaskStatusPending)}, pendingEvents, counts)
+}
+
+// markInstanceSkippedFromTx is markInstanceSkippedTx with an explicit set of
+// source statuses the transition is allowed from.
+//
+// It exists so a caller can state that set rather than inherit it. Every route
+// today passes {pending} — skipping a RUNNING row would strand a live container
+// whose worker still owns the claim, the orphaned-container shape behind the
+// local-mode replace-cancel bug — but the set is the caller's decision to make,
+// and stating it at the call site is what makes "fail_fast cancels PENDING
+// siblings" readable as a deliberate choice instead of an accident of this
+// primitive's default.
+func (s *Store) markInstanceSkippedFromTx(tx *gorm.DB, runID uuid.UUID, row *models.TaskRun, reason string, fromStatuses []string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
+	if row == nil {
+		return false, nil
+	}
+	if len(fromStatuses) == 0 {
+		fromStatuses = []string{string(TaskStatusPending)}
+	}
+	seq, err := nextTerminalSequenceTx(tx, runID)
+	if err != nil {
+		return false, err
+	}
 	result := tx.Model(&models.TaskRun{}).
-		Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
+		Where("id = ? AND status IN ?", row.ID, fromStatuses).
 		Updates(map[string]interface{}{
 			"status":              string(TaskStatusSkipped),
 			"completed_at":        time.Now().UTC(),
 			"error":               reason,
+			"terminal_sequence":   seq,
 			"cache_hit":           false,
 			"cache_origin_run_id": nil,
 			"cache_created_at":    nil,
@@ -2472,44 +2922,92 @@ func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason s
 	if result.RowsAffected == 0 {
 		return false, nil
 	}
-	counts.addTaskRunStatus(1)
+	if counts != nil {
+		counts.addTaskRunStatus(1)
+	}
+	row.Status = string(TaskStatusSkipped)
+	row.TerminalSequence = seq
+	row.Error = reason
 
-	if s.eventStore != nil {
-		evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, counts)
+	if s.eventStore != nil && pendingEvents != nil {
+		evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskSkipped, runID, row, counts)
 		if err != nil {
 			return false, err
 		}
 		*pendingEvents = append(*pendingEvents, *evt)
 	}
-
 	return true, nil
 }
 
-func (s *Store) predecessorStatusesTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]TaskStatus, error) {
-	if refs, replay, err := s.replayPredecessorRefsTx(tx, runID, taskID); err != nil {
+// markTaskSkippedTx marks the whole (runID, taskID) group skipped — the
+// cross-step case, where a predecessor step failed so every instance of the
+// fanned successor is skipped. It walks the instances and marks each ONE AT A
+// TIME through markInstanceSkippedTx, so each gets its own terminal_sequence and
+// its own task_skipped event carrying its own partition. The previous single
+// task-keyed UPDATE collapsed all N into one event and one (zero) sequence.
+// Returns true when at least one instance transitioned.
+func (s *Store) markTaskSkippedTx(tx *gorm.DB, runID, taskID uuid.UUID, reason string, pendingEvents *[]event.Event, counts *dbWriteCounts) (bool, error) {
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
+		Order("partition_index ASC").
+		Find(&rows).Error; err != nil {
+		return false, err
+	}
+	any := false
+	for i := range rows {
+		marked, err := s.markInstanceSkippedTx(tx, runID, &rows[i], reason, pendingEvents, counts)
+		if err != nil {
+			return any, err
+		}
+		any = any || marked
+	}
+	return any, nil
+}
+
+// predecessorRef is one resolved predecessor edge: the catalog task ID plus the
+// step name downstream consumers key outputs by. HasCatalogRow is false only on
+// the live path when the predecessor's catalog Task row could not be read, which
+// is the condition PredecessorOutputs has always treated as "skip this
+// predecessor".
+type predecessorRef struct {
+	TaskID        uuid.UUID
+	Name          string
+	HasCatalogRow bool
+}
+
+// resolvePredecessorsTx is THE predecessor-edge kernel (G7).
+//
+// Before it, replayPredecessorRefsTx forked the live and replay implementations
+// at FIVE separate call sites — predecessorStatusesTx, shouldRunTaskTx,
+// PredecessorOutputs, PredecessorDescriptorInputs and PredecessorHashes — each
+// of which had to independently remember that a quarantined replay run resolves
+// its DAG from the per-TaskRun execution descriptor rather than from the live
+// task_edges catalog. That duplication is the shape that produced four P1s in
+// one family: teach one copy about a new edge class and the other silently keeps
+// the old behavior. Now the fork exists in exactly one function and every
+// consumer is a pure function of its output.
+//
+// Live: task_edges into this task, plus the predecessors' catalog names.
+// Replay: the descriptor's frozen predecessor refs, so a later apply cannot
+// change what a replay run considers its inputs.
+func (s *Store) resolvePredecessorsTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]predecessorRef, error) {
+	refs, replay, err := s.replayPredecessorRefsTx(tx, runID, taskID)
+	if err != nil {
 		return nil, err
-	} else if replay {
-		if len(refs) == 0 {
-			return nil, nil
-		}
-		predIDs := make([]uuid.UUID, 0, len(refs))
+	}
+	if replay {
+		out := make([]predecessorRef, 0, len(refs))
 		for _, ref := range refs {
-			if ref.TaskID != uuid.Nil {
-				predIDs = append(predIDs, ref.TaskID)
+			if ref.TaskID == uuid.Nil {
+				continue
 			}
+			out = append(out, predecessorRef{
+				TaskID:        ref.TaskID,
+				Name:          firstNonEmpty(ref.TaskName, ref.TaskID.String()),
+				HasCatalogRow: true,
+			})
 		}
-		if len(predIDs) == 0 {
-			return nil, nil
-		}
-		var taskRuns []models.TaskRun
-		if err := tx.Select("status").Where("job_run_id = ? AND task_id IN ?", runID, predIDs).Find(&taskRuns).Error; err != nil {
-			return nil, err
-		}
-		statuses := make([]TaskStatus, 0, len(taskRuns))
-		for _, taskRun := range taskRuns {
-			statuses = append(statuses, TaskStatus(taskRun.Status))
-		}
-		return statuses, nil
+		return out, nil
 	}
 
 	var edges []models.TaskEdge
@@ -2519,22 +3017,92 @@ func (s *Store) predecessorStatusesTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]T
 	if len(edges) == 0 {
 		return nil, nil
 	}
-
-	predIDs := make([]uuid.UUID, 0, len(edges))
+	predTaskIDs := make([]uuid.UUID, 0, len(edges))
 	for _, edge := range edges {
-		predIDs = append(predIDs, edge.FromTaskID)
+		predTaskIDs = append(predTaskIDs, edge.FromTaskID)
 	}
 
-	var taskRuns []models.TaskRun
-	if err := tx.Where("job_run_id = ? AND task_id IN ?", runID, predIDs).Find(&taskRuns).Error; err != nil {
+	// Name resolution is best-effort and deliberately non-fatal: a predecessor
+	// whose catalog row is unreadable keeps its place in the STATUS list (so
+	// trigger rules are unchanged) but is dropped from the name-keyed OUTPUT map,
+	// which is exactly what the pre-G7 live path did.
+	namesByID := make(map[uuid.UUID]string, len(predTaskIDs))
+	var tasks []models.Task
+	if err := tx.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
+		log.Warn("failed to resolve predecessor task names", "run_id", runID, "task_id", taskID, "error", err)
+	} else {
+		for i := range tasks {
+			namesByID[tasks[i].ID] = firstNonEmpty(tasks[i].Name, tasks[i].ID.String())
+		}
+	}
+
+	out := make([]predecessorRef, 0, len(edges))
+	for _, edge := range edges {
+		name, ok := namesByID[edge.FromTaskID]
+		out = append(out, predecessorRef{TaskID: edge.FromTaskID, Name: name, HasCatalogRow: ok})
+	}
+	return out, nil
+}
+
+// predecessorTaskIDs projects the kernel's refs onto the ID list the row queries
+// take.
+func predecessorTaskIDs(refs []predecessorRef) []uuid.UUID {
+	ids := make([]uuid.UUID, 0, len(refs))
+	for _, ref := range refs {
+		ids = append(ids, ref.TaskID)
+	}
+	return ids
+}
+
+// predecessorTaskRunsTx loads every TaskRun row belonging to the resolved
+// predecessors, ordered by partition index so group aggregation is
+// deterministic. columns narrows the SELECT; empty means all columns.
+func predecessorTaskRunsTx(tx *gorm.DB, runID uuid.UUID, refs []predecessorRef, columns ...string) ([]models.TaskRun, error) {
+	ids := predecessorTaskIDs(refs)
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	q := tx.Where("job_run_id = ? AND task_id IN ?", runID, ids).Order("partition_index ASC")
+	if len(columns) > 0 {
+		cols := make([]interface{}, 0, len(columns)-1)
+		for _, c := range columns[1:] {
+			cols = append(cols, c)
+		}
+		q = q.Select(columns[0], cols...)
+	}
+	var rows []models.TaskRun
+	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
+	return rows, nil
+}
 
-	statuses := make([]TaskStatus, 0, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		statuses = append(statuses, TaskStatus(taskRun.Status))
+func (s *Store) predecessorStatusesTx(tx *gorm.DB, runID, taskID uuid.UUID) ([]TaskStatus, error) {
+	refs, err := s.resolvePredecessorsTx(tx, runID, taskID)
+	if err != nil {
+		return nil, err
 	}
-	return statuses, nil
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	taskRuns, err := predecessorTaskRunsTx(tx, runID, refs, "task_id", "status")
+	if err != nil {
+		return nil, err
+	}
+	return aggregatePredecessorStatuses(predecessorTaskIDs(refs), taskRuns), nil
+}
+
+func aggregatePredecessorStatuses(predIDs []uuid.UUID, taskRuns []models.TaskRun) []TaskStatus {
+	byTask := make(map[uuid.UUID][]models.TaskRun, len(predIDs))
+	for i := range taskRuns {
+		id := taskRuns[i].TaskID
+		byTask[id] = append(byTask[id], taskRuns[i])
+	}
+	statuses := make([]TaskStatus, 0, len(predIDs))
+	for _, id := range predIDs {
+		statuses = append(statuses, groupStatusFromInstances(byTask[id]))
+	}
+	return statuses
 }
 
 func satisfiesTriggerRule(rule string, predStatuses []TaskStatus) bool {
@@ -2593,34 +3161,43 @@ func normalizedTriggerRule(rule string) string {
 	return rule
 }
 
-func (s *Store) shouldRunTaskTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, string, error) {
-	if descriptor, replay, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID); err != nil {
-		return false, "", err
-	} else if replay {
-		rule := normalizedTriggerRule(descriptor.DAG.TriggerRule)
-		predStatuses, err := s.predecessorStatusesTx(tx, runID, taskID)
-		if err != nil {
-			return false, "", err
-		}
-		return satisfiesTriggerRule(rule, predStatuses), rule, nil
+// resolveTriggerRuleTx is the trigger-rule half of the G7 de-duplication: the
+// ONE place that knows a quarantined replay run reads its trigger rule from the
+// frozen execution descriptor while a live run reads it from the catalog. It
+// returns the raw rule (which satisfiesTriggerRule treats "" as all_success) and
+// its normalized form for reporting.
+func (s *Store) resolveTriggerRuleTx(tx *gorm.DB, runID, taskID uuid.UUID) (raw, normalized string, err error) {
+	descriptor, replay, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
+	if err != nil {
+		return "", "", err
 	}
-
+	if replay {
+		rule := normalizedTriggerRule(descriptor.DAG.TriggerRule)
+		return rule, rule, nil
+	}
 	var task models.Task
 	if err := tx.Select("trigger_rule").First(&task, "id = ?", taskID).Error; err != nil {
+		return "", "", err
+	}
+	return task.TriggerRule, normalizedTriggerRule(task.TriggerRule), nil
+}
+
+func (s *Store) shouldRunTaskTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, string, error) {
+	rawRule, rule, err := s.resolveTriggerRuleTx(tx, runID, taskID)
+	if err != nil {
 		return false, "", err
 	}
-
 	predStatuses, err := s.predecessorStatusesTx(tx, runID, taskID)
 	if err != nil {
 		return false, "", err
 	}
-
-	return satisfiesTriggerRule(task.TriggerRule, predStatuses), normalizedTriggerRule(task.TriggerRule), nil
+	return satisfiesTriggerRule(rawRule, predStatuses), rule, nil
 }
 
-func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string) ([]uuid.UUID, error) {
+func (s *Store) completeTask(runID, taskID, instanceID uuid.UUID, result, claimedBy string, enforceClaim bool, output map[string]string, branchSelections []string, partitions []pkgtask.Partition) ([]uuid.UUID, *FanOutExpansion, error) {
 	var pendingEvents []event.Event
 	var skippedTaskIDs []uuid.UUID
+	var expansion *FanOutExpansion
 	var counts dbWriteCounts
 	err := withStoreBusyRetry(func() error {
 		counts.reset()
@@ -2632,13 +3209,38 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 
 			status := taskStatusFromResult(result)
 
-			// Capture task metadata for metrics before updating.
-			var taskRun models.TaskRun
-			taskQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
-			if enforceClaim {
-				taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+			var taskRunPtr *models.TaskRun
+			var loadErr error
+			if instanceID != uuid.Nil {
+				var row models.TaskRun
+				loadErr = tx.Where("id = ? AND job_run_id = ?", instanceID, runID).First(&row).Error
+				if loadErr == nil {
+					taskRunPtr = &row
+					taskID = row.TaskID
+				}
+			} else {
+				taskRunPtr, loadErr = loadTaskRunByIDOrUnique(tx, runID, taskID)
+				if loadErr == nil && taskRunPtr != nil {
+					taskID = taskRunPtr.TaskID
+					instanceID = taskRunPtr.ID
+				}
 			}
-			if err := taskQuery.First(&taskRun).Error; err == nil {
+			if loadErr != nil {
+				if enforceClaim && (errors.Is(loadErr, gorm.ErrRecordNotFound) || errors.Is(loadErr, ErrAmbiguousTaskRun)) {
+					return ErrTaskClaimMismatch
+				}
+				if errors.Is(loadErr, gorm.ErrRecordNotFound) {
+					taskRunPtr = nil
+				} else {
+					return loadErr
+				}
+			}
+			var taskRun models.TaskRun
+			if taskRunPtr != nil {
+				taskRun = *taskRunPtr
+				if enforceClaim && taskRun.ClaimedBy != claimedBy {
+					return ErrTaskClaimMismatch
+				}
 				if IsTerminal(TaskStatus(taskRun.Status)) {
 					// A terminal task must not be resurrected by a late completion. In local
 					// execution mode a concurrency replace cancels the run's task while its
@@ -2663,12 +3265,14 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 						}
 					}
 				}
-			} else if enforceClaim && errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrTaskClaimMismatch
 			}
 
-			updateQuery := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			updateQuery := tx.Model(&models.TaskRun{})
+			if taskRunPtr != nil {
+				updateQuery = updateQuery.Where("id = ?", taskRun.ID)
+			} else {
+				updateQuery = updateQuery.Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			}
 			if enforceClaim {
 				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 			}
@@ -2723,14 +3327,21 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			counts.addTaskRunStatus(1)
 
 			if status == TaskStatusFailed {
-				if s.eventStore != nil {
-					evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID, &counts)
-					if err != nil {
-						return err
-					}
-					attemptEvents = append(attemptEvents, *evt)
+				// A non-zero container exit arrives HERE, not on FailTaskClaimed:
+				// the worker reports "the container ran and told us its result"
+				// through sink.Succeeded with result "failure". So this route owns
+				// the full set of failure consequences — the group's
+				// failurePolicy included — and shares one implementation with
+				// failTask rather than carrying a smaller copy that silently
+				// degraded fail_fast to `continue` in distributed mode.
+				var failedRow *models.TaskRun
+				if taskRunPtr != nil {
+					// resolveInstanceFailureTx reads the row's terminal state; the
+					// local copy predates the UPDATE above.
+					taskRun.Status = string(status)
+					failedRow = &taskRun
 				}
-				return nil
+				return s.resolveInstanceFailureTx(tx, runID, taskID, failedRow, &attemptEvents, &attemptSkippedTaskIDs, &counts)
 			}
 
 			descriptor, replayTask, err := s.replayTaskExecutionDescriptorTx(tx, runID, taskID)
@@ -2788,7 +3399,9 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 
 			// Partition edges: skipped (branch-filtered) vs. predecessors to decrement.
 			var toDecrementIDs []uuid.UUID
+			allSuccessorIDs := make([]uuid.UUID, 0, len(edges))
 			for _, edge := range edges {
+				allSuccessorIDs = append(allSuccessorIDs, edge.ToTaskID)
 				if branchSelectedIDs != nil && !branchSelectedIDs[edge.ToTaskID] {
 					reason := fmt.Sprintf("not selected by branch task %s", taskID)
 					skipped, err := s.skipTaskAndDescendantsTx(tx, runID, edge.ToTaskID, reason, &attemptEvents, &counts)
@@ -2799,6 +3412,26 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 					continue
 				}
 				toDecrementIDs = append(toDecrementIDs, edge.ToTaskID)
+			}
+
+			if taskRunPtr != nil {
+				if isFanOutInstance(&taskRun) {
+					if err := s.decrementInGroupDependentsTx(tx, runID, &taskRun); err != nil {
+						return err
+					}
+					allTerm, gErr := s.groupAllTerminalTx(tx, runID, taskID)
+					if gErr != nil {
+						return gErr
+					}
+					if !allTerm {
+						return nil
+					}
+				}
+				exp, expErr := s.expandFanOutSuccessorsTx(tx, runID, taskID, &taskRun, taskModel.Name, allSuccessorIDs, partitions, &attemptEvents, &counts)
+				if expErr != nil {
+					return expErr
+				}
+				expansion = exp
 			}
 
 			// Batch-decrement outstanding_predecessors for all non-skipped successors.
@@ -2846,9 +3479,15 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 			}
 
 			if s.eventStore != nil {
-				// Build task_succeeded event and add to batch.
+				// Build task_succeeded event and add to batch. Read the row by its
+				// primary key so each instance's event carries its own partition
+				// rather than an arbitrary sibling's.
 				var taskRunModel models.TaskRun
-				if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
+				succeededQuery := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID)
+				if taskRunPtr != nil {
+					succeededQuery = tx.Where("id = ?", taskRun.ID)
+				}
+				if err := succeededQuery.First(&taskRunModel).Error; err != nil {
 					return err
 				}
 				var jobRun models.JobRun
@@ -2891,17 +3530,23 @@ func (s *Store) completeTask(runID, taskID uuid.UUID, result, claimedBy string, 
 		counts.commit()
 		s.publishEvents(pendingEvents...)
 	}
-	return skippedTaskIDs, err
+	return skippedTaskIDs, expansion, err
 }
 
 // CompleteTaskOwner is the run-owner in-memory path's durable terminal write.
 // The owner has already advanced the DAG in memory (run.RunState), so this only
 // persists terminal rows — it does NOT decrement predecessors, evaluate trigger
 // rules, or resolve branches in SQL.  It writes the completed task's terminal
-// row (succeeded/failed) plus each owner-decided skip, stamping terminal_sequence
-// and owner_generation so a recovering owner can replay in order.  Claim-fenced
-// by claimedBy.  Cache-hit completions are not handled here (they remain on the
-// CacheHitTaskClaimed path); the owner routes only succeeded/failed through this.
+// row (succeeded/failed/cached) plus each owner-decided skip, stamping
+// terminal_sequence and owner_generation so a recovering owner can replay in
+// order.  Claim-fenced by claimedBy.
+//
+// Cache hits DO travel this path: a cache hit is a completion, and under
+// per-partition fingerprints a cache-hit prerequisite is the common case in an
+// ordered group, so the owner's Cached sink carries its TaskRunID through here
+// like any other terminal transition. (An earlier docstring claimed cache hits
+// stayed on CacheHitTaskClaimed; that stopped being true when the owner sink
+// gained instance identity.)
 func (s *Store) CompleteTaskOwner(
 	runID, taskID uuid.UUID,
 	status TaskStatus,
@@ -2910,6 +3555,7 @@ func (s *Store) CompleteTaskOwner(
 	branchSelections []string,
 	completedSeq, ownerGen int64,
 	skips []SkippedTask,
+	expansion *FanOutExpansion,
 ) error {
 	var pendingEvents []event.Event
 	var counts dbWriteCounts
@@ -2921,8 +3567,16 @@ func (s *Store) CompleteTaskOwner(
 			now := time.Now().UTC()
 
 			// Metrics for the completed task (mirrors completeTask).
-			var taskRun models.TaskRun
-			tq := tx.Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy)
+			row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskID)
+			if loadErr != nil {
+				if errors.Is(loadErr, gorm.ErrRecordNotFound) || errors.Is(loadErr, ErrAmbiguousTaskRun) {
+					return ErrTaskClaimMismatch
+				}
+				return loadErr
+			}
+			taskRun := *row
+			taskID = taskRun.TaskID
+			tq := tx.Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy)
 			if err := tq.First(&taskRun).Error; err == nil {
 				var jobRun models.JobRun
 				if err := tx.First(&jobRun, "id = ?", runID).Error; err == nil {
@@ -2971,7 +3625,7 @@ func (s *Store) CompleteTaskOwner(
 			}
 
 			res := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ? AND claimed_by = ?", runID, taskID, claimedBy).
+				Where("id = ? AND claimed_by = ?", taskRun.ID, claimedBy).
 				Updates(updates)
 			if res.Error != nil {
 				return res.Error
@@ -2986,7 +3640,7 @@ func (s *Store) CompleteTaskOwner(
 				if status == TaskStatusFailed {
 					evtType = event.TypeTaskFailed
 				}
-				evt, err := s.recordTaskEventTx(tx, evtType, runID, taskID, &counts)
+				evt, err := s.recordTaskEventTx(tx, evtType, runID, taskRun.ID, &counts)
 				if err != nil {
 					return err
 				}
@@ -2997,30 +3651,60 @@ func (s *Store) CompleteTaskOwner(
 			// with its own terminal_sequence.  RunState already enumerated the
 			// full transitive skip set, so this writes them directly without
 			// re-walking descendants.
+			if err := s.persistExpansionTx(tx, runID, expansion, &attemptEvents, &counts); err != nil {
+				return err
+			}
+
+			// RunState keys a skip by its INSTANCE identity (the TaskRun ID for a
+			// fan-out instance, the catalog task ID for an unfanned step), so
+			// resolve it to concrete rows and write each row by primary key. The
+			// previous code ran the same UPDATE twice — WHERE id, then, on
+			// RowsAffected == 0, WHERE job_run_id + task_id — and that second form
+			// is precisely the fan-across-siblings write G1 exists to remove: it
+			// would have marked all N instances of a group skipped under ONE
+			// terminal_sequence, making N-1 of them invisible to
+			// TerminalTaskRunsSince replay. When a skip legitimately names a whole
+			// group, each instance now gets its own allocated sequence.
 			for _, sk := range skips {
-				skRes := tx.Model(&models.TaskRun{}).
-					Where("job_run_id = ? AND task_id = ?", runID, sk.TaskID).
-					Where("status NOT IN ?", terminalStatusStrings()).
-					Updates(map[string]interface{}{
-						"status":            string(TaskStatusSkipped),
-						"completed_at":      now,
-						"error":             sk.Reason,
-						"terminal_sequence": sk.TerminalSequence,
-						"owner_generation":  ownerGen,
-					})
-				if skRes.Error != nil {
-					return skRes.Error
+				skipRows, resolveErr := resolveSkipTargetsTx(tx, runID, sk.TaskID)
+				if resolveErr != nil {
+					return resolveErr
 				}
-				if skRes.RowsAffected == 0 {
-					continue // already terminal; nothing to emit
-				}
-				counts.addTaskRunStatus(1)
-				if s.eventStore != nil {
-					evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, sk.TaskID, &counts)
-					if err != nil {
-						return err
+				for i := range skipRows {
+					seq := sk.TerminalSequence
+					if i > 0 {
+						// Siblings must never share a terminal_sequence: the replay
+						// tail is a strictly-ordered, dense space.
+						allocated, seqErr := nextTerminalSequenceTx(tx, runID)
+						if seqErr != nil {
+							return seqErr
+						}
+						seq = allocated
 					}
-					attemptEvents = append(attemptEvents, *evt)
+					skRes := tx.Model(&models.TaskRun{}).
+						Where("id = ?", skipRows[i].ID).
+						Where("status NOT IN ?", terminalStatusStrings()).
+						Updates(map[string]interface{}{
+							"status":            string(TaskStatusSkipped),
+							"completed_at":      now,
+							"error":             sk.Reason,
+							"terminal_sequence": seq,
+							"owner_generation":  ownerGen,
+						})
+					if skRes.Error != nil {
+						return skRes.Error
+					}
+					if skRes.RowsAffected == 0 {
+						continue // already terminal; nothing to emit
+					}
+					counts.addTaskRunStatus(1)
+					if s.eventStore != nil {
+						evt, err := s.recordTaskRunEventTx(tx, event.TypeTaskSkipped, runID, &skipRows[i], &counts)
+						if err != nil {
+							return err
+						}
+						attemptEvents = append(attemptEvents, *evt)
+					}
 				}
 			}
 			return nil
@@ -3054,6 +3738,29 @@ func failureMessage(result string) string {
 	default:
 		return result
 	}
+}
+
+// resolveSkipTargetsTx turns an owner skip identity into the concrete TaskRun
+// rows it names. The identity is a TaskRun primary key for a fan-out instance
+// and a catalog task ID for an unfanned step; a catalog task ID that names an
+// expanded group resolves to every one of its instances so the caller can stamp
+// each with its own terminal_sequence instead of broadcasting one UPDATE.
+func resolveSkipTargetsTx(tx *gorm.DB, runID, skipID uuid.UUID) ([]models.TaskRun, error) {
+	var byPK models.TaskRun
+	err := tx.Where("id = ? AND job_run_id = ?", skipID, runID).First(&byPK).Error
+	if err == nil {
+		return []models.TaskRun{byPK}, nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, err
+	}
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, skipID).
+		Order("partition_index ASC").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // terminalStatusStrings returns the terminal task statuses as strings for SQL IN
@@ -3125,7 +3832,9 @@ func (s *Store) skipTaskAndDescendantsTx(tx *gorm.DB, runID, taskID uuid.UUID, r
 		if err != nil {
 			return skipped, err
 		}
-		counts.addTaskRunStatus(len(successorIDs))
+		if counts != nil {
+			counts.addTaskRunStatus(len(successorIDs))
+		}
 
 		// Build a quick lookup map from the updated rows.
 		updatedByTaskID := make(map[uuid.UUID]*models.TaskRun, len(updatedSuccessors))
@@ -3171,28 +3880,49 @@ func (s *Store) FailTaskClaimed(runID, taskID uuid.UUID, failure error, claimedB
 	return s.failTask(runID, taskID, failure, claimedBy, true)
 }
 
-func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy string, enforceClaim bool) error {
+// failTask marks ONE task instance failed and runs the fan-out consequences
+// (in-group skip cascade, group resolution, cross-step advancement).
+//
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract and is
+// NEVER reassigned. It used to be: the metrics pre-read did `taskID =
+// loaded.TaskID`, overwriting the caller's argument with the CATALOG task id, so
+// the in-transaction re-resolve then looked up an id that names N rows and
+// returned ErrAmbiguousTaskRun — `FailTask(runID, instancePK, err)` could not
+// fail a fan-out instance at all. Row identity is carried in locals from here on
+// and `catalogTaskID` is used only where a catalog id is genuinely wanted
+// (metrics labels, group-level queries).
+//
+// A terminal row is left alone: re-failing would overwrite the first, truer
+// cause (a cascade skip, a cancellation, a racing sibling). Same guard
+// completeTask carries.
+func (s *Store) failTask(runID, taskRef uuid.UUID, failure error, claimedBy string, enforceClaim bool) error {
 	now := time.Now().UTC()
 	errMsg := ""
 	if failure != nil {
 		errMsg = failure.Error()
 	}
 
-	// Record task failure metrics.
-	var taskRun models.TaskRun
-	taskQuery := s.db.Where("job_run_id = ? AND task_id = ?", runID, taskID)
-	if enforceClaim {
-		taskQuery = taskQuery.Where("claimed_by = ?", claimedBy)
+	// Record task failure metrics. This read must not disturb taskRef.
+	var metricRow models.TaskRun
+	if loaded, loadErr := loadTaskRunByIDOrUnique(s.db, runID, taskRef); loadErr == nil && loaded != nil {
+		metricRow = *loaded
 	}
-	if err := taskQuery.First(&taskRun).Error; err == nil {
+	metricQuery := s.db.Where("id = ?", metricRow.ID)
+	if metricRow.ID == uuid.Nil {
+		metricQuery = s.db.Where("job_run_id = ? AND task_id = ?", runID, taskRef)
+	}
+	if enforceClaim {
+		metricQuery = metricQuery.Where("claimed_by = ?", claimedBy)
+	}
+	if err := metricQuery.First(&metricRow).Error; err == nil {
 		var jobRun models.JobRun
 		if err := s.db.First(&jobRun, "id = ?", runID).Error; err == nil {
-			if !taskRun.Quarantine && !jobRun.Quarantine {
+			if !metricRow.Quarantine && !jobRun.Quarantine {
 				jobID := jobRun.JobID.String()
-				engine := string(taskRun.Engine)
-				metrics.TaskRunsTotal.WithLabelValues(jobID, taskID.String(), engine, string(TaskStatusFailed)).Inc()
-				if taskRun.StartedAt != nil {
-					duration := now.Sub(*taskRun.StartedAt).Seconds()
+				engine := string(metricRow.Engine)
+				metrics.TaskRunsTotal.WithLabelValues(jobID, metricRow.TaskID.String(), engine, string(TaskStatusFailed)).Inc()
+				if metricRow.StartedAt != nil {
+					duration := now.Sub(*metricRow.StartedAt).Seconds()
 					metrics.TaskRunDurationSeconds.WithLabelValues(jobID, engine, string(TaskStatusFailed)).Observe(duration)
 				}
 			}
@@ -3201,40 +3931,63 @@ func (s *Store) failTask(runID, taskID uuid.UUID, failure error, claimedBy strin
 		return ErrTaskClaimMismatch
 	}
 
-	pendingEvents := make([]event.Event, 0, 1)
+	var pendingEvents []event.Event
 	var counts dbWriteCounts
-	err := s.db.Transaction(func(tx *gorm.DB) error {
-		updateQuery := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID)
-		if enforceClaim {
-			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
-		}
-		resultUpdate := updateQuery.
-			Updates(map[string]interface{}{
-				"status":              string(TaskStatusFailed),
-				"completed_at":        now,
-				"error":               errMsg,
-				"cache_hit":           false,
-				"cache_origin_run_id": nil,
-				"cache_created_at":    nil,
-				"cache_expires_at":    nil,
-			})
-		if resultUpdate.Error != nil {
-			return resultUpdate.Error
-		}
-		if enforceClaim && resultUpdate.RowsAffected == 0 {
-			return ErrTaskClaimMismatch
-		}
-		counts.addTaskRunStatus(1)
-
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, taskID, &counts)
-			if err != nil {
-				return err
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		attemptEvents := make([]event.Event, 0, 1)
+		txErr := s.db.Transaction(func(tx *gorm.DB) error {
+			row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskRef)
+			if loadErr != nil {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return loadErr
 			}
-			pendingEvents = append(pendingEvents, *evt)
+			if IsTerminal(TaskStatus(row.Status)) {
+				return nil
+			}
+			catalogTaskID := row.TaskID
+
+			updateQuery := tx.Model(&models.TaskRun{}).
+				Where("id = ? AND status NOT IN ?", row.ID, terminalTaskStatuses())
+			if enforceClaim {
+				updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
+			}
+			resultUpdate := updateQuery.
+				Updates(map[string]interface{}{
+					"status":              string(TaskStatusFailed),
+					"completed_at":        now,
+					"error":               errMsg,
+					"cache_hit":           false,
+					"cache_origin_run_id": nil,
+					"cache_created_at":    nil,
+					"cache_expires_at":    nil,
+				})
+			if resultUpdate.Error != nil {
+				return resultUpdate.Error
+			}
+			if resultUpdate.RowsAffected == 0 {
+				if enforceClaim {
+					return ErrTaskClaimMismatch
+				}
+				return nil
+			}
+			counts.addTaskRunStatus(1)
+			row.Status = string(TaskStatusFailed)
+
+			// Apply the group's failurePolicy, emit this instance's task_failed
+			// event, and release the fanned step's cross-step successors once the
+			// whole group is terminal. Shared with completeTask's failure branch —
+			// the route a non-zero container exit actually takes — so the two can
+			// never disagree about what a failed instance means.
+			var skipped []uuid.UUID
+			return s.resolveInstanceFailureTx(tx, runID, catalogTaskID, row, &attemptEvents, &skipped, &counts)
+		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
 		}
-		return nil
+		return txErr
 	})
 	if err == nil {
 		counts.commit()
@@ -3253,12 +4006,22 @@ func (s *Store) RetryTaskClaimed(runID, taskID uuid.UUID, attempt int, claimedBy
 	return s.retryTask(runID, taskID, attempt, claimedBy, true)
 }
 
-func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
+// retryTask resets ONE task instance for its next attempt. taskRef follows the
+// TaskRun-primary-key-or-catalog-task-ID contract: a fan-out instance must be
+// addressed by its own TaskRun ID, because this write resets output/result and
+// under the old (job_run_id, task_id) resolution a retry of one partition
+// discarded every sibling's results.
+func (s *Store) retryTask(runID, taskRef uuid.UUID, attempt int, claimedBy string, enforceClaim bool) error {
 	pendingEvents := make([]event.Event, 0, 2)
 	var counts dbWriteCounts
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		row, loadErr := loadTaskRunByIDOrUnique(tx, runID, taskRef)
+		if loadErr != nil {
+			return loadErr
+		}
+		taskID := row.TaskID
 		updateQuery := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ?", runID, taskID)
+			Where("id = ?", row.ID)
 		if enforceClaim {
 			updateQuery = updateQuery.Where("claimed_by = ?", claimedBy)
 		}
@@ -3291,10 +4054,7 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 
 		if s.eventStore != nil {
 			// Build retrying event payload.
-			var taskRunModel models.TaskRun
-			if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRunModel).Error; err != nil {
-				return err
-			}
+			taskRunModel := *row
 			var jobRun models.JobRun
 			if err := tx.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
 				return err
@@ -3344,33 +4104,17 @@ func (s *Store) retryTask(runID, taskID uuid.UUID, attempt int, claimedBy string
 	return err
 }
 
+// SkipTask skips a STEP: every caller uses it to skip a successor whose trigger
+// rule was not satisfied, so under fan-out it means the whole group. It routes
+// through markInstanceSkippedTx per instance, giving each its own
+// terminal_sequence and its own task_skipped event rather than one UPDATE
+// across the group.
 func (s *Store) SkipTask(runID, taskID uuid.UUID, reason string) error {
-	now := time.Now().UTC()
 	pendingEvents := make([]event.Event, 0, 1)
 	var counts dbWriteCounts
 	err := s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&models.TaskRun{}).
-			Where("job_run_id = ? AND task_id = ? AND status = ?", runID, taskID, string(TaskStatusPending)).
-			Updates(map[string]interface{}{
-				"status":              string(TaskStatusSkipped),
-				"completed_at":        now,
-				"error":               reason,
-				"cache_hit":           false,
-				"cache_origin_run_id": nil,
-				"cache_created_at":    nil,
-				"cache_expires_at":    nil,
-			}).Error; err != nil {
-			return err
-		}
-		counts.addTaskRunStatus(1)
-		if s.eventStore != nil {
-			evt, err := s.recordTaskEventTx(tx, event.TypeTaskSkipped, runID, taskID, &counts)
-			if err != nil {
-				return err
-			}
-			pendingEvents = append(pendingEvents, *evt)
-		}
-		return nil
+		_, err := s.markTaskSkippedTx(tx, runID, taskID, reason, &pendingEvents, &counts)
+		return err
 	})
 	if err == nil {
 		counts.commit()
@@ -4066,6 +4810,7 @@ func (s *Store) convertRunModelWithDB(conn *gorm.DB, model *models.JobRun) (*Job
 		}
 		runValue.Tasks = append(runValue.Tasks, convertRunTaskModel(task))
 	}
+	runValue.Tasks = collapseFanOutGroups(runValue.Tasks)
 	runValue.CacheHits, runValue.ExecutedTasks, runValue.TotalTasks = summarizeTasks(runValue.Tasks)
 
 	callbackRuns, err := s.loadCallbackRunsWithDB(conn, model.ID)
@@ -4090,7 +4835,7 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	}
 
 	task := &TaskRun{
-		ID:                      model.TaskID,
+		ID:                      model.ID,
 		JobRunID:                model.JobRunID,
 		TaskID:                  model.TaskID,
 		AtomID:                  model.AtomID,
@@ -4108,6 +4853,10 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		Result:                  model.Result,
 		Error:                   model.Error,
 		OutstandingPredecessors: model.OutstandingPredecessors,
+		PartitionValue:          model.PartitionValue,
+		PartitionIndex:          model.PartitionIndex,
+		PartitionCount:          model.PartitionCount,
+		PartitionFingerprint:    model.PartitionFingerprint,
 		CreatedAt:               model.CreatedAt,
 		UpdatedAt:               model.UpdatedAt,
 		CacheHit:                model.CacheHit || TaskStatus(model.Status) == TaskStatusCached,
@@ -4133,6 +4882,12 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 		var bs []string
 		if err := json.Unmarshal(model.BranchSelections, &bs); err == nil {
 			task.BranchSelections = bs
+		}
+	}
+	if len(model.PartitionDependsOn) > 0 {
+		var deps []string
+		if err := json.Unmarshal(model.PartitionDependsOn, &deps); err == nil {
+			task.PartitionDependsOn = deps
 		}
 	}
 
@@ -4166,6 +4921,81 @@ func convertRunTaskModel(model *models.TaskRun) *TaskRun {
 	}
 
 	return task
+}
+
+func collapseFanOutGroups(rows []*TaskRun) []*TaskRun {
+	if len(rows) == 0 {
+		return rows
+	}
+	order := make([]uuid.UUID, 0)
+	grouped := make(map[uuid.UUID][]*TaskRun)
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if _, ok := grouped[row.TaskID]; !ok {
+			order = append(order, row.TaskID)
+		}
+		grouped[row.TaskID] = append(grouped[row.TaskID], row)
+	}
+	out := make([]*TaskRun, 0, len(order))
+	for _, taskID := range order {
+		insts := grouped[taskID]
+		head := *insts[0]
+		n := len(insts)
+		if n > 1 || head.PartitionValue != "" {
+			head.PartitionCount = n
+		} else {
+			head.PartitionCount = 0
+		}
+		head.ID = taskID
+		if n > 1 {
+			modelsRows := make([]models.TaskRun, 0, n)
+			var firstStart *time.Time
+			var lastEnd *time.Time
+			for _, inst := range insts {
+				modelsRows = append(modelsRows, models.TaskRun{TaskID: inst.TaskID, Status: string(inst.Status)})
+				if inst.StartedAt != nil && (firstStart == nil || inst.StartedAt.Before(*firstStart)) {
+					t := *inst.StartedAt
+					firstStart = &t
+				}
+				if inst.CompletedAt != nil && (lastEnd == nil || inst.CompletedAt.After(*lastEnd)) {
+					t := *inst.CompletedAt
+					lastEnd = &t
+				}
+			}
+			head.Status = groupStatusFromInstances(modelsRows)
+			head.StartedAt = firstStart
+			head.CompletedAt = lastEnd
+			// The rolled-up status alone loses the mix; carry the histogram so a
+			// collapsed group renders "2 succeeded / 1 failed" without the client
+			// having to page the partitions endpoint for every group.
+			head.PartitionStatusCounts = PartitionStatusCounts(insts)
+		}
+		out = append(out, &head)
+	}
+	return out
+}
+
+// PartitionStatusCounts builds the per-status histogram of a fan-out group.
+// Keys are TaskStatus values; a status with no instances is absent rather than
+// zero, so the map stays small for a 10k-instance group. Returns nil for an
+// empty group so the field is omitted from JSON.
+func PartitionStatusCounts(instances []*TaskRun) map[string]int {
+	if len(instances) == 0 {
+		return nil
+	}
+	counts := make(map[string]int, 4)
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		counts[string(inst.Status)]++
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	return counts
 }
 
 func summarizeTasks(tasks []*TaskRun) (cacheHits, executedTasks, totalTasks int) {
@@ -4216,12 +5046,41 @@ func convertCallbackRunModel(model *models.CallbackRun) *CallbackRun {
 	}
 }
 
-func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, taskID uuid.UUID, counts *dbWriteCounts) (*event.Event, error) {
-	var taskRun models.TaskRun
-	if err := db.Where("job_run_id = ? AND task_id = ?", runID, taskID).First(&taskRun).Error; err != nil {
-		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_id", taskID)
+// recordTaskEventTx records a task lifecycle event for ONE task instance.
+// taskRef follows the TaskRun-primary-key-or-catalog-task-ID contract: a caller
+// holding a fan-out instance's TaskRun ID gets that instance's event, while an
+// unfanned catalog task ID still resolves to its single row. It used to
+// `.First()` the (job_run_id, task_id) predicate, so every sibling's event was
+// built from an arbitrary instance's row — N task_failed events all reporting
+// partition 0's error. Prefer recordTaskRunEventTx when the row is already in
+// hand.
+func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, taskRef uuid.UUID, counts *dbWriteCounts) (*event.Event, error) {
+	row, err := loadTaskRunByIDOrUnique(db, runID, taskRef)
+	if err != nil {
+		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_ref", taskRef)
 		return nil, err
 	}
+	return s.recordTaskRunEventTx(db, eventType, runID, row, counts)
+}
+
+// recordTaskRunEventTx builds and appends a task lifecycle event from a specific
+// TaskRun row. The payload's `id` is the TaskRun primary key and it carries the
+// instance's partition_value / partition_index / partition_count /
+// partition_fingerprint (see convertRunTaskModel), which is what lets a consumer
+// tell sibling events apart. evt.TaskID stays the CATALOG task ID so existing
+// per-step correlation is unchanged.
+func (s *Store) recordTaskRunEventTx(db *gorm.DB, eventType event.Type, runID uuid.UUID, taskRunRow *models.TaskRun, counts *dbWriteCounts) (*event.Event, error) {
+	if taskRunRow == nil {
+		return nil, gorm.ErrRecordNotFound
+	}
+	// Re-read by primary key so the payload reflects the committed row state
+	// (callers hand us a pre-update copy on some paths).
+	var taskRun models.TaskRun
+	if err := db.Where("id = ?", taskRunRow.ID).First(&taskRun).Error; err != nil {
+		log.Error("failed to fetch task run for event", "error", err, "run_id", runID, "task_run_id", taskRunRow.ID)
+		return nil, err
+	}
+	taskID := taskRun.TaskID
 
 	var jobRun models.JobRun
 	if err := db.Preload("Job").First(&jobRun, "id = ?", runID).Error; err != nil {
@@ -4233,7 +5092,8 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 	taskPayload.JobAlias = jobRun.Job.Alias
 	taskPayload.JobLabels = jsonmap.ToStringMap(jobRun.Job.Labels)
 	// Use task-run row ID for event payloads so downstream consumers can identify
-	// each task execution uniquely across retries/runs.
+	// each task execution uniquely across retries/runs — and, under fan-out, tell
+	// one instance of a group from its siblings.
 	taskPayload.ID = taskRun.ID
 
 	payload, err := json.Marshal(taskPayload)
@@ -4255,7 +5115,9 @@ func (s *Store) recordTaskEventTx(db *gorm.DB, eventType event.Type, runID, task
 		if err := s.eventStore.AppendTx(db, &evt); err != nil {
 			return nil, err
 		}
-		counts.addEventInsert(1)
+		if counts != nil {
+			counts.addEventInsert(1)
+		}
 	}
 	return &evt, nil
 }
@@ -4406,71 +5268,38 @@ func isStoreContentionErr(err error) bool {
 // PredecessorOutputs returns a map of step-name → output key-values for all
 // predecessors of the given task within a run.  This is used by the distributed
 // executor to inject CAESIUM_OUTPUT_* env vars before starting a task.
+// PredecessorOutputs returns each predecessor step's outputs keyed by step name.
+// One entry per PREDECESSOR (never per row): a fanned predecessor contributes
+// the group aggregate, see predecessorGroupOutput.
 func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[string]string, error) {
-	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
-		return nil, err
-	} else if replay {
-		return s.predecessorOutputsFromRefsTx(s.db, runID, refs)
-	}
-
-	// Find predecessor task IDs via edges.
-	var edges []models.TaskEdge
-	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+	refs, err := s.resolvePredecessorsTx(s.db, runID, taskID)
+	if err != nil {
 		return nil, err
 	}
-
-	if len(edges) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
 	}
 
-	// Batch-fetch predecessor tasks and task runs to avoid N+1 queries.
-	predTaskIDs := make([]uuid.UUID, len(edges))
-	for i, edge := range edges {
-		predTaskIDs[i] = edge.FromTaskID
-	}
-
-	var tasks []models.Task
-	if err := s.db.Where("id IN ?", predTaskIDs).Find(&tasks).Error; err != nil {
-		log.Warn("failed to find predecessor tasks for output", "run_id", runID, "task_id", taskID, "error", err)
-		return nil, nil
-	}
-	tasksByID := make(map[uuid.UUID]models.Task, len(tasks))
-	for i := range tasks {
-		tasksByID[tasks[i].ID] = tasks[i]
-	}
-
-	var taskRuns []models.TaskRun
-	if err := s.db.Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).Find(&taskRuns).Error; err != nil {
+	taskRuns, err := predecessorTaskRunsTx(s.db, runID, refs)
+	if err != nil {
 		log.Warn("failed to find predecessor task runs for output", "run_id", runID, "task_id", taskID, "error", err)
 		return nil, nil
 	}
-	taskRunsByTaskID := make(map[uuid.UUID]models.TaskRun, len(taskRuns))
-	for i := range taskRuns {
-		taskRunsByTaskID[taskRuns[i].TaskID] = taskRuns[i]
-	}
+	byTask := groupTaskRunsByTaskID(taskRuns)
 
-	result := make(map[string]map[string]string, len(edges))
-	for _, edge := range edges {
-		task, ok := tasksByID[edge.FromTaskID]
-		if !ok {
+	result := make(map[string]map[string]string, len(refs))
+	for _, ref := range refs {
+		// A predecessor whose catalog row could not be resolved has no step name
+		// to key by, and downstream env injection is name-based — so it is
+		// dropped, exactly as before G7.
+		if !ref.HasCatalogRow {
 			continue
 		}
-		taskRun, ok := taskRunsByTaskID[edge.FromTaskID]
-		if !ok || len(taskRun.Output) == 0 {
+		output, ok := predecessorGroupOutput(byTask[ref.TaskID])
+		if !ok || len(output) == 0 {
 			continue
 		}
-
-		var output map[string]string
-		if err := json.Unmarshal(taskRun.Output, &output); err != nil {
-			log.Warn("failed to unmarshal predecessor task output", "run_id", runID, "task_id", taskID, "predecessor_task_id", edge.FromTaskID, "error", err)
-			continue
-		}
-
-		stepName := task.Name
-		if stepName == "" {
-			stepName = task.ID.String()
-		}
-		result[stepName] = output
+		result[ref.Name] = output
 	}
 
 	if len(result) == 0 {
@@ -4479,134 +5308,113 @@ func (s *Store) PredecessorOutputs(runID, taskID uuid.UUID) (map[string]map[stri
 	return result, nil
 }
 
-func (s *Store) predecessorOutputsFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) (map[string]map[string]string, error) {
-	if len(refs) == 0 {
-		return nil, nil
+func groupTaskRunsByTaskID(rows []models.TaskRun) map[uuid.UUID][]models.TaskRun {
+	byTask := make(map[uuid.UUID][]models.TaskRun, len(rows))
+	for i := range rows {
+		byTask[rows[i].TaskID] = append(byTask[rows[i].TaskID], rows[i])
 	}
-	predTaskIDs := make([]uuid.UUID, 0, len(refs))
-	nameByID := make(map[uuid.UUID]string, len(refs))
-	for _, ref := range refs {
-		if ref.TaskID == uuid.Nil {
-			continue
-		}
-		predTaskIDs = append(predTaskIDs, ref.TaskID)
-		nameByID[ref.TaskID] = firstNonEmpty(ref.TaskName, ref.TaskID.String())
-	}
-	if len(predTaskIDs) == 0 {
-		return nil, nil
-	}
+	return byTask
+}
 
-	var taskRuns []models.TaskRun
-	if err := tx.Select("task_id", "output").
-		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
-		Find(&taskRuns).Error; err != nil {
-		return nil, err
-	}
-	result := make(map[string]map[string]string, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		if len(taskRun.Output) == 0 {
-			continue
+// predecessorGroupOutput resolves the ONE output map a predecessor step presents
+// downstream.
+//
+// Unfanned (the only shape before fan-out): the single row's decoded output,
+// byte-identical to the previous `taskRunsByTaskID[taskID]` lookup.
+//
+// Fanned: the group's AGGREGATE, produced by the same pkgtask.AggregateFanInOutputs
+// the local executor calls (internal/job/job.go, at the end of the fan-out group
+// runner) — each scalar key becomes a JSON object keyed by partition value, plus
+// PARTITION_COUNT / SUCCEEDED / FAILED. The map used to be keyed by task ID with
+// one row per entry, so N siblings collapsed last-writer-wins and the distributed
+// lane silently handed a downstream step ONE arbitrary partition's outputs while
+// the local lane handed it the aggregate. The two lanes must not disagree about
+// what a fan-in consumer sees.
+//
+// Counting matches the local lane exactly: terminal successes (succeeded and
+// cached) count as succeeded and contribute their output; failed instances count
+// as failed; instances that never ran (skipped by the in-group cascade) count as
+// neither.
+func predecessorGroupOutput(rows []models.TaskRun) (map[string]string, bool) {
+	switch {
+	case len(rows) == 0:
+		return nil, false
+	case len(rows) == 1 && !isFanOutInstance(&rows[0]):
+		if len(rows[0].Output) == 0 {
+			return nil, false
 		}
 		var output map[string]string
-		if err := json.Unmarshal(taskRun.Output, &output); err != nil {
-			log.Warn("failed to unmarshal replay predecessor task output", "run_id", runID, "predecessor_task_id", taskRun.TaskID, "error", err)
-			continue
+		if err := json.Unmarshal(rows[0].Output, &output); err != nil {
+			log.Warn("failed to unmarshal predecessor task output", "predecessor_task_id", rows[0].TaskID, "error", err)
+			return nil, false
 		}
-		if len(output) == 0 {
-			continue
+		return output, true
+	}
+
+	byPartition := make(map[string]map[string]string, len(rows))
+	succeeded, failed := 0, 0
+	for i := range rows {
+		row := &rows[i]
+		status := TaskStatus(row.Status)
+		switch {
+		case IsTerminalSuccess(status):
+			succeeded++
+			if len(row.Output) == 0 {
+				continue
+			}
+			var output map[string]string
+			if err := json.Unmarshal(row.Output, &output); err != nil {
+				log.Warn("failed to unmarshal fan-out instance output", "predecessor_task_id", row.TaskID, "partition", row.PartitionValue, "error", err)
+				continue
+			}
+			if len(output) > 0 {
+				byPartition[row.PartitionValue] = output
+			}
+		case status == TaskStatusFailed:
+			failed++
 		}
-		result[nameByID[taskRun.TaskID]] = output
 	}
-	if len(result) == 0 {
-		return nil, nil
-	}
-	return result, nil
+	return pkgtask.AggregateFanInOutputs(byPartition, succeeded, failed), true
 }
 
 // PredecessorDescriptorInputs returns predecessor outputs and effective hashes
 // keyed by predecessor task id for immutable execution-descriptor capture.
+//
+// Group-aware for the same reason PredecessorOutputs and PredecessorHashes are:
+// the descriptor records the inputs a task actually consumed, so it must record
+// the same aggregate the cache key was computed from. Unfanned predecessors are
+// byte-identical to the pre-fan-out behavior (one row, its own output map, its
+// own effective hash).
 func (s *Store) PredecessorDescriptorInputs(runID, taskID uuid.UUID) (map[uuid.UUID]map[string]string, map[uuid.UUID]string, error) {
-	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
-		return nil, nil, err
-	} else if replay {
-		return s.predecessorDescriptorInputsFromRefsTx(s.db, runID, refs)
-	}
-
-	var edges []models.TaskEdge
-	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+	refs, err := s.resolvePredecessorsTx(s.db, runID, taskID)
+	if err != nil {
 		return nil, nil, err
 	}
-	if len(edges) == 0 {
-		return nil, nil, nil
-	}
-
-	predTaskIDs := make([]uuid.UUID, len(edges))
-	for i, edge := range edges {
-		predTaskIDs[i] = edge.FromTaskID
-	}
-
-	var taskRuns []models.TaskRun
-	if err := s.db.
-		Select("task_id", "output", "hash", "effective_hash", "status").
-		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
-		Find(&taskRuns).Error; err != nil {
-		return nil, nil, err
-	}
-
-	outputs := make(map[uuid.UUID]map[string]string, len(taskRuns))
-	hashes := make(map[uuid.UUID]string, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		if len(taskRun.Output) > 0 {
-			var output map[string]string
-			if err := json.Unmarshal(taskRun.Output, &output); err == nil && len(output) > 0 {
-				outputs[taskRun.TaskID] = output
-			}
-		}
-		if taskRun.Status == string(TaskStatusSucceeded) || taskRun.Status == string(TaskStatusCached) {
-			hash := taskRun.Hash
-			if taskRun.EffectiveHash != "" {
-				hash = taskRun.EffectiveHash
-			}
-			if hash != "" {
-				hashes[taskRun.TaskID] = hash
-			}
-		}
-	}
-	return outputs, hashes, nil
-}
-
-func (s *Store) predecessorDescriptorInputsFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) (map[uuid.UUID]map[string]string, map[uuid.UUID]string, error) {
 	if len(refs) == 0 {
 		return nil, nil, nil
 	}
-	predTaskIDs := make([]uuid.UUID, 0, len(refs))
-	for _, ref := range refs {
-		if ref.TaskID != uuid.Nil {
-			predTaskIDs = append(predTaskIDs, ref.TaskID)
-		}
-	}
-	if len(predTaskIDs) == 0 {
-		return nil, nil, nil
-	}
-	var taskRuns []models.TaskRun
-	if err := tx.Select("task_id", "output", "hash", "effective_hash", "status").
-		Where("job_run_id = ? AND task_id IN ?", runID, predTaskIDs).
-		Find(&taskRuns).Error; err != nil {
+	taskRuns, err := predecessorTaskRunsTx(s.db, runID, refs,
+		"task_id", "id", "output", "hash", "effective_hash", "status",
+		"partition_value", "partition_index", "partition_count")
+	if err != nil {
 		return nil, nil, err
 	}
-	outputs := make(map[uuid.UUID]map[string]string, len(taskRuns))
-	hashes := make(map[uuid.UUID]string, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		if len(taskRun.Output) > 0 {
-			var output map[string]string
-			if err := json.Unmarshal(taskRun.Output, &output); err == nil && len(output) > 0 {
-				outputs[taskRun.TaskID] = output
+
+	byTask := groupTaskRunsByTaskID(taskRuns)
+	outputs := make(map[uuid.UUID]map[string]string, len(byTask))
+	hashes := make(map[uuid.UUID]string, len(byTask))
+	for predID, rows := range byTask {
+		if output, ok := predecessorGroupOutput(rows); ok && len(output) > 0 {
+			outputs[predID] = output
+		}
+		successes := make([]models.TaskRun, 0, len(rows))
+		for i := range rows {
+			if IsTerminalSuccess(TaskStatus(rows[i].Status)) {
+				successes = append(successes, rows[i])
 			}
 		}
-		if taskRun.Status == string(TaskStatusSucceeded) || taskRun.Status == string(TaskStatusCached) {
-			if hash := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); hash != "" {
-				hashes[taskRun.TaskID] = hash
-			}
+		if h := predecessorGroupHash(successes); h != "" {
+			hashes[predID] = h
 		}
 	}
 	return outputs, hashes, nil
@@ -4626,89 +5434,101 @@ func (s *Store) predecessorDescriptorInputsFromRefsTx(tx *gorm.DB, runID uuid.UU
 // hash and cache-hits. Falling back to hash (effective_hash empty) is the
 // common case and is byte-identical to the pre-D2 behavior.
 func (s *Store) PredecessorHashes(runID, taskID uuid.UUID) ([]string, error) {
-	if refs, replay, err := s.replayPredecessorRefsTx(s.db, runID, taskID); err != nil {
-		return nil, err
-	} else if replay {
-		return s.predecessorHashesFromRefsTx(s.db, runID, refs)
-	}
-
-	var edges []models.TaskEdge
-	if err := s.db.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+	refs, err := s.resolvePredecessorsTx(s.db, runID, taskID)
+	if err != nil {
 		return nil, err
 	}
-
-	if len(edges) == 0 {
+	if len(refs) == 0 {
 		return nil, nil
-	}
-
-	predTaskIDs := make([]uuid.UUID, len(edges))
-	for i, edge := range edges {
-		predTaskIDs[i] = edge.FromTaskID
 	}
 
 	var taskRuns []models.TaskRun
 	if err := s.db.
-		Select("hash", "effective_hash").
+		Select("task_id", "id", "hash", "effective_hash", "partition_value", "partition_index", "partition_count").
 		Where("job_run_id = ? AND task_id IN ? AND status IN ? AND hash <> ''",
 			runID,
-			predTaskIDs,
+			predecessorTaskIDs(refs),
 			[]string{string(TaskStatusSucceeded), string(TaskStatusCached)},
 		).
+		Order("partition_index ASC").
 		Find(&taskRuns).Error; err != nil {
 		log.Warn("failed to find predecessor task runs for hashes", "run_id", runID, "task_id", taskID, "error", err)
 		return nil, nil
 	}
-	if len(taskRuns) == 0 {
-		return nil, nil
-	}
-
-	hashes := make([]string, 0, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		if h := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); h != "" {
-			hashes = append(hashes, h)
-		}
-	}
-	if len(hashes) == 0 {
-		return nil, nil
-	}
-	sort.Strings(hashes)
-	return hashes, nil
+	return predecessorHashList(taskRuns), nil
 }
 
-func (s *Store) predecessorHashesFromRefsTx(tx *gorm.DB, runID uuid.UUID, refs []models.TaskExecutionEdgeRef) ([]string, error) {
-	if len(refs) == 0 {
-		return nil, nil
+// fanOutGroupHashPrefix namespaces a fan-out group's aggregate identity so it can
+// never be confused with a plain task hash.
+const fanOutGroupHashPrefix = "fanout-group:"
+
+// predecessorHashList turns predecessor TaskRun rows into the hash list a
+// downstream task folds into its cache identity — EXACTLY ONE entry per
+// predecessor step.
+//
+// Unfanned predecessor: its own effective hash, byte-for-byte what this function
+// returned before fan-out existed. This is load-bearing — any change here
+// re-keys every cached task in every existing deployment — and is pinned by a
+// golden test (TestPredecessorHashListUnfannedIsByteIdentical).
+//
+// Fanned predecessor: ONE deterministic group hash, defined as
+//
+//	sha256( "fanout-group:" || h(0) || "\n" || h(1) || "\n" || … )
+//
+// where h(i) is instance i's effective hash and instances are taken in
+// PARTITION-INDEX order (emission order — stable across runs and independent of
+// row insert order, scheduling order, or which instance finished last). Without
+// this a fanned predecessor contributed N entries, which changes the SHAPE of the
+// downstream identity key's `pred_hash:` lines: every downstream task would
+// cache-miss forever, and adding or removing a single partition would re-key the
+// whole subtree. One aggregate identity per predecessor is the same contract the
+// design fixes for status and for outputs.
+//
+// Instances that are not terminal successes never reach here (the caller filters
+// on status), so a partially-complete group contributes only the instances that
+// have succeeded — matching the old per-row behavior for the rows that existed.
+func predecessorHashList(rows []models.TaskRun) []string {
+	if len(rows) == 0 {
+		return nil
 	}
-	predTaskIDs := make([]uuid.UUID, 0, len(refs))
-	for _, ref := range refs {
-		if ref.TaskID != uuid.Nil {
-			predTaskIDs = append(predTaskIDs, ref.TaskID)
-		}
-	}
-	if len(predTaskIDs) == 0 {
-		return nil, nil
-	}
-	var taskRuns []models.TaskRun
-	if err := tx.Select("hash", "effective_hash").
-		Where("job_run_id = ? AND task_id IN ? AND status IN ? AND hash <> ''",
-			runID,
-			predTaskIDs,
-			[]string{string(TaskStatusSucceeded), string(TaskStatusCached)},
-		).
-		Find(&taskRuns).Error; err != nil {
-		return nil, err
-	}
-	hashes := make([]string, 0, len(taskRuns))
-	for _, taskRun := range taskRuns {
-		if h := effectiveTaskHash(taskRun.Hash, taskRun.EffectiveHash); h != "" {
+	byTask := groupTaskRunsByTaskID(rows)
+	hashes := make([]string, 0, len(byTask))
+	for _, group := range byTask {
+		if h := predecessorGroupHash(group); h != "" {
 			hashes = append(hashes, h)
 		}
 	}
 	if len(hashes) == 0 {
-		return nil, nil
+		return nil
 	}
 	sort.Strings(hashes)
-	return hashes, nil
+	return hashes
+}
+
+func predecessorGroupHash(rows []models.TaskRun) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	if len(rows) == 1 && !isFanOutInstance(&rows[0]) {
+		return effectiveTaskHash(rows[0].Hash, rows[0].EffectiveHash)
+	}
+	ordered := make([]models.TaskRun, len(rows))
+	copy(ordered, rows)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		if ordered[i].PartitionIndex != ordered[j].PartitionIndex {
+			return ordered[i].PartitionIndex < ordered[j].PartitionIndex
+		}
+		return ordered[i].ID.String() < ordered[j].ID.String()
+	})
+	hashes := make([]string, 0, len(ordered))
+	for i := range ordered {
+		hashes = append(hashes, effectiveTaskHash(ordered[i].Hash, ordered[i].EffectiveHash))
+	}
+	// One definition, shared with the local executor via the exported
+	// GroupIdentityHash: the two lanes must not disagree about a group's
+	// identity, or a downstream step cache-hits in one lane and misses in the
+	// other.
+	return GroupIdentityHash(hashes)
 }
 
 // effectiveTaskHash returns the identity a predecessor presents to downstream
@@ -4807,6 +5627,260 @@ func (s *Store) RetryFromFailureAdmitted(runID uuid.UUID) (*JobRun, error) {
 	return s.retryFromFailure(runID, true)
 }
 
+// retryResetColumns is the single definition of what "reset an instance for
+// re-execution" means. RetryFromFailure and RetryPartition MUST use the same
+// map: a per-partition retry that forgot claimed_by / claim_expires_at /
+// runtime_id would leave the instance owned by a worker that will never run it,
+// and forgetting the cache columns would leave a cache_hit=true row that the run
+// summary counts as a hit even though the instance is about to re-execute.
+func retryResetColumns() map[string]interface{} {
+	return map[string]interface{}{
+		"status":              string(TaskStatusPending),
+		"completed_at":        nil,
+		"result":              "",
+		"error":               "",
+		"started_at":          nil,
+		"claimed_by":          "",
+		"claim_expires_at":    nil,
+		"runtime_id":          "",
+		"attempt":             1,
+		"cache_hit":           false,
+		"cache_origin_run_id": nil,
+		"cache_created_at":    nil,
+		"cache_expires_at":    nil,
+	}
+}
+
+// satisfiedPredecessorTaskIDsTx returns the catalog task IDs whose whole
+// TaskRun group is a terminal success. G5's accounting rule: one succeeded
+// sibling does NOT satisfy a fanned predecessor — every live instance must be a
+// terminal success.
+func satisfiedPredecessorTaskIDsTx(tx *gorm.DB, runID uuid.UUID) (map[uuid.UUID]struct{}, error) {
+	var taskRuns []models.TaskRun
+	if err := tx.Where("job_run_id = ?", runID).Find(&taskRuns).Error; err != nil {
+		return nil, err
+	}
+	byTask := groupTaskRunsByTaskID(taskRuns)
+	satisfied := make(map[uuid.UUID]struct{}, len(byTask))
+	for taskID, rows := range byTask {
+		if predecessorGroupSatisfied(rows) {
+			satisfied[taskID] = struct{}{}
+		}
+	}
+	return satisfied, nil
+}
+
+// resetInstanceOutstandingTx recomputes and persists a reset instance's
+// outstanding_predecessors: one for every cross-step predecessor task whose
+// group is not fully satisfied, plus one for every in-group dependency sibling
+// that is not itself a terminal success (0 when the dependency already
+// succeeded, 1 when it is being retried alongside this one). Returns the value
+// written so the caller can decide whether the instance is immediately ready.
+func (s *Store) resetInstanceOutstandingTx(tx *gorm.DB, runID uuid.UUID, instanceID, taskID uuid.UUID, satisfied map[uuid.UUID]struct{}) (int, error) {
+	var edges []models.TaskEdge
+	if err := tx.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		return 0, err
+	}
+	outstanding := 0
+	for _, edge := range edges {
+		if _, ok := satisfied[edge.FromTaskID]; !ok {
+			outstanding++
+		}
+	}
+
+	var self models.TaskRun
+	if err := tx.Where("id = ?", instanceID).First(&self).Error; err != nil {
+		return 0, err
+	}
+	if len(self.PartitionDependsOn) > 0 {
+		var deps []string
+		_ = json.Unmarshal(self.PartitionDependsOn, &deps)
+		var siblings []models.TaskRun
+		if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&siblings).Error; err != nil {
+			return 0, err
+		}
+		byKey := make(map[string]models.TaskRun, len(siblings))
+		for i := range siblings {
+			byKey[siblings[i].PartitionValue] = siblings[i]
+		}
+		for _, dep := range deps {
+			sib, ok := byKey[dep]
+			if !ok || !IsTerminalSuccess(TaskStatus(sib.Status)) {
+				outstanding++
+			}
+		}
+	}
+
+	if err := tx.Model(&models.TaskRun{}).
+		Where("id = ?", instanceID).
+		Update("outstanding_predecessors", outstanding).Error; err != nil {
+		return 0, err
+	}
+	return outstanding, nil
+}
+
+// invalidateCheckpointsForRetryTx drops the run's owner checkpoints as part of a
+// retry.
+//
+// Checkpoints are a pure recovery cache: a recovering owner Restores the latest
+// full snapshot and replays only the terminal rows AFTER it. A retry mutates
+// rows the snapshot already recorded as terminal, so a surviving snapshot would
+// make a recovered owner re-adopt the pre-retry state and never dispatch the
+// reset instance — the retry would appear to succeed and then silently do
+// nothing under CAESIUM_RUN_OWNER_IN_MEMORY. Dropping them forces Recover down
+// its from-scratch path (checkpoint == nil → NewRunState + replay of the
+// currently-terminal rows), which is exactly the post-retry truth.
+func invalidateCheckpointsForRetryTx(tx *gorm.DB, runID uuid.UUID) error {
+	// RunCheckpoint keys the run as TEXT (run_id), matching the other
+	// run-owner tables.
+	return tx.Where("run_id = ?", runID.String()).Delete(&models.RunCheckpoint{}).Error
+}
+
+// RetryPartition resets ONE fan-out instance of a run for re-execution.
+//
+// It is the store half of `POST …/tasks/:task_id/partitions/:index/retry`. The
+// controller previously did a bare `db.Model(&row).Updates(...)`: no
+// transaction, no terminal-only guard (so a RUNNING instance could be reset
+// mid-flight, orphaning its container), no reset of claimed_by / started_at /
+// runtime_id / claim_expires_at / the cache columns, no
+// outstanding_predecessors re-seed (so an ordered instance came back ready even
+// though its in-group dependency had also been reset), no run re-open (so
+// retrying an instance of an already-terminal run left the run terminal and
+// nothing ever dispatched it), and no event.
+//
+// Semantics, mirroring retryFromFailure for exactly one row:
+//   - terminal instances only (ErrTaskRunNotTerminal otherwise)
+//   - the full retryResetColumns reset
+//   - outstanding_predecessors re-seeded over NON-TERMINAL dependencies only
+//   - the run re-opened when it had already finished
+//   - checkpoints invalidated so owner in-memory mode sees the reset
+//   - a task_ready event when the instance is immediately dispatchable
+//
+// The group is deliberately NOT re-expanded (the producer is terminal and the
+// recorded instances are reused), and dependents that already succeeded are NOT
+// cascaded — E2 requires the CLI to say so rather than silently re-running a
+// subtree.
+func (s *Store) RetryPartition(ctx context.Context, runID, taskRunID uuid.UUID) (*TaskRun, error) {
+	var (
+		pendingEvents []event.Event
+		counts        dbWriteCounts
+		reopened      bool
+		jobID         uuid.UUID
+		quarantine    bool
+	)
+
+	err := withStoreBusyRetry(func() error {
+		counts.reset()
+		attemptEvents := make([]event.Event, 0, 2)
+		reopened = false
+
+		txErr := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			var jobRun models.JobRun
+			if err := tx.First(&jobRun, "id = ?", runID).Error; err != nil {
+				return err
+			}
+			jobID = jobRun.JobID
+			quarantine = jobRun.Quarantine
+
+			var row models.TaskRun
+			if err := tx.Where("id = ? AND job_run_id = ?", taskRunID, runID).First(&row).Error; err != nil {
+				return err
+			}
+			if !IsTerminal(TaskStatus(row.Status)) {
+				return fmt.Errorf("%w: instance %s is %s", ErrTaskRunNotTerminal, taskRunID, row.Status)
+			}
+
+			// Re-open a finished run so the reset instance can actually be
+			// dispatched. readmitRetryTx with admit=false is the manual-retry
+			// path: unconditional, no concurrency re-admission (this is a human
+			// action on an existing run, not a new admission).
+			if jobRun.Status == string(StatusFailed) || jobRun.Status == string(StatusSucceeded) {
+				if err := s.readmitRetryTx(tx, &jobRun, false); err != nil {
+					return err
+				}
+				reopened = true
+			}
+
+			satisfied, err := satisfiedPredecessorTaskIDsTx(tx, runID)
+			if err != nil {
+				return err
+			}
+
+			if err := tx.Model(&models.TaskRun{}).
+				Where("id = ?", row.ID).
+				Updates(retryResetColumns()).Error; err != nil {
+				return err
+			}
+			counts.addTaskRunStatus(1)
+
+			outstanding, err := s.resetInstanceOutstandingTx(tx, runID, row.ID, row.TaskID, satisfied)
+			if err != nil {
+				return err
+			}
+
+			if err := invalidateCheckpointsForRetryTx(tx, runID); err != nil {
+				return err
+			}
+
+			if outstanding == 0 {
+				if err := s.appendTaskReadyEventTx(tx, runID, row.TaskID, &attemptEvents, &counts); err != nil {
+					return err
+				}
+			}
+			if reopened && s.eventStore != nil {
+				loaded, loadErr := s.loadRunWithDB(tx, runID)
+				if loadErr != nil {
+					return loadErr
+				}
+				payload, marshalErr := json.Marshal(loaded)
+				if marshalErr != nil {
+					return marshalErr
+				}
+				evt := event.Event{
+					Type:       event.TypeRunRetried,
+					JobID:      jobRun.JobID,
+					RunID:      runID,
+					Timestamp:  time.Now().UTC(),
+					Payload:    payload,
+					Quarantine: jobRun.Quarantine,
+				}
+				if err := s.eventStore.AppendTx(tx, &evt); err != nil {
+					return err
+				}
+				attemptEvents = append(attemptEvents, evt)
+			}
+			return nil
+		})
+		if txErr == nil {
+			pendingEvents = attemptEvents
+		}
+		return txErr
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	counts.commit()
+	s.publishEvents(pendingEvents...)
+	// Even a single-partition retry invalidates the snapshot: the instance is
+	// pending again, and a state that still calls it terminal will never
+	// dispatch it.
+	s.invalidateRunState(runID)
+
+	if reopened && !quarantine {
+		s.startedMu.Lock()
+		s.startedRuns[runID] = struct{}{}
+		s.startedMu.Unlock()
+		metrics.JobsActive.WithLabelValues(jobID.String()).Inc()
+	}
+
+	var refreshed models.TaskRun
+	if err := s.db.WithContext(ctx).Where("id = ?", taskRunID).First(&refreshed).Error; err != nil {
+		return nil, err
+	}
+	return convertRunTaskModel(&refreshed), nil
+}
+
 func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 	pendingEvents := make([]event.Event, 0, 2)
 	var jobID uuid.UUID
@@ -4848,71 +5922,54 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 			return err
 		}
 
-		// Build a set of task IDs that are in a terminal success state.
-		terminalSuccessIDs := make(map[uuid.UUID]struct{})
-		for i := range taskRuns {
-			tr := &taskRuns[i]
-			if IsTerminalSuccess(TaskStatus(tr.Status)) {
-				terminalSuccessIDs[tr.TaskID] = struct{}{}
-			}
+		terminalSuccessIDs, err := satisfiedPredecessorTaskIDsTx(tx, runID)
+		if err != nil {
+			return err
 		}
 
-		// 4. Reset failed and skipped tasks to pending.
-		// Leave succeeded and cached tasks as-is.
-		resetTaskIDs := make([]uuid.UUID, 0)
+		// 4. Reset failed and skipped *instances* to pending.
+		// Leave succeeded and cached instances as-is. A predecessor group is
+		// satisfied only when every live sibling is a terminal success.
+		type resetInstance struct {
+			id     uuid.UUID
+			taskID uuid.UUID
+		}
+		resetInstances := make([]resetInstance, 0)
+		resetTaskReadyOnce := make(map[uuid.UUID]struct{})
 		for i := range taskRuns {
 			tr := &taskRuns[i]
 			status := TaskStatus(tr.Status)
 			if status == TaskStatusFailed || status == TaskStatusSkipped {
-				updates := map[string]interface{}{
-					"status":              string(TaskStatusPending),
-					"completed_at":        nil,
-					"result":              "",
-					"error":               "",
-					"started_at":          nil,
-					"claimed_by":          "",
-					"claim_expires_at":    nil,
-					"runtime_id":          "",
-					"attempt":             1,
-					"cache_hit":           false,
-					"cache_origin_run_id": nil,
-					"cache_created_at":    nil,
-					"cache_expires_at":    nil,
-				}
-				if err := tx.Model(tr).Updates(updates).Error; err != nil {
+				if err := tx.Model(tr).Where("id = ?", tr.ID).Updates(retryResetColumns()).Error; err != nil {
 					return err
 				}
-				resetTaskIDs = append(resetTaskIDs, tr.TaskID)
+				resetInstances = append(resetInstances, resetInstance{id: tr.ID, taskID: tr.TaskID})
 			}
 		}
 
-		// 5. Recalculate outstanding_predecessors for each reset (pending) task.
-		// For each pending task, count predecessors that are NOT in terminal success state.
-		for _, taskID := range resetTaskIDs {
-			var edges []models.TaskEdge
-			if err := tx.Where("to_task_id = ?", taskID).Find(&edges).Error; err != nil {
+		// 5. Recalculate outstanding_predecessors for each reset instance.
+		for _, inst := range resetInstances {
+			outstanding, err := s.resetInstanceOutstandingTx(tx, runID, inst.id, inst.taskID, terminalSuccessIDs)
+			if err != nil {
 				return err
 			}
 
-			outstanding := 0
-			for _, edge := range edges {
-				if _, ok := terminalSuccessIDs[edge.FromTaskID]; !ok {
-					outstanding++
-				}
-			}
-
-			if err := tx.Model(&models.TaskRun{}).
-				Where("job_run_id = ? AND task_id = ?", runID, taskID).
-				Update("outstanding_predecessors", outstanding).Error; err != nil {
-				return err
-			}
-
-			// If all predecessors are already done, emit a task_ready event.
 			if outstanding == 0 {
-				if err := s.appendTaskReadyEventTx(tx, runID, taskID, &pendingEvents, &counts); err != nil {
+				if _, ok := resetTaskReadyOnce[inst.taskID]; ok {
+					continue
+				}
+				resetTaskReadyOnce[inst.taskID] = struct{}{}
+				if err := s.appendTaskReadyEventTx(tx, runID, inst.taskID, &pendingEvents, &counts); err != nil {
 					return err
 				}
 			}
+		}
+
+		// 5b. Invalidate the owner checkpoints the reset just made stale, so a
+		// run recovered under CAESIUM_RUN_OWNER_IN_MEMORY replays from the
+		// post-retry terminal rows instead of re-adopting the pre-retry snapshot.
+		if err := invalidateCheckpointsForRetryTx(tx, runID); err != nil {
+			return err
 		}
 
 		// 6. Emit a run_retried event.
@@ -4947,6 +6004,10 @@ func (s *Store) retryFromFailure(runID uuid.UUID, admit bool) (*JobRun, error) {
 
 	counts.commit()
 	s.publishEvents(pendingEvents...)
+	// The rows this transaction re-opened contradict any in-memory snapshot of
+	// them; drop it so the next dispatch tick rebuilds from what was just
+	// written.
+	s.invalidateRunState(runID)
 
 	if !quarantine {
 		// Track this run in the active set so Complete() will decrement the gauge.

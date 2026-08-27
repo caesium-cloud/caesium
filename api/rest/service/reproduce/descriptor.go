@@ -20,6 +20,14 @@ import (
 // predates execution-descriptor capture or otherwise lacks a stored descriptor.
 var ErrDescriptorUnavailable = errors.New("reproduce: descriptor unavailable")
 
+// ErrFannedTaskAmbiguous is returned when a task reference names a fan-out group
+// rather than one instance. The quarantined-replay surface is fail-closed by
+// design: a `(job_run_id, task_id)` `.Take` would have silently returned an
+// arbitrary sibling's descriptor, and reproducing the wrong partition's
+// container is worse than refusing. `caesium run replay` already refuses fanned
+// baselines; this closes the descriptor path the same way.
+var ErrFannedTaskAmbiguous = errors.New("reproduce: task is a fan-out group; descriptors are per-partition and this surface does not select one")
+
 // Service loads task execution descriptors for the REST controller.
 type Service struct {
 	ctx context.Context
@@ -54,6 +62,8 @@ type taskDescriptorRow struct {
 	Result              string
 	Output              datatypes.JSON
 	ReplaySafe          bool
+	PartitionValue      string
+	PartitionCount      int
 	ExecutionDescriptor datatypes.JSON
 }
 
@@ -133,25 +143,43 @@ func (s *Service) resolveTaskRun(taskRef string, runID uuid.UUID) (*taskDescript
 }
 
 func (s *Service) resolveTaskRunByName(taskName string, runID uuid.UUID) (*taskDescriptorRow, error) {
-	var row taskDescriptorRow
-	err := s.baseDescriptorQuery(runID).
+	var rows []taskDescriptorRow
+	if err := s.baseDescriptorQuery(runID).
 		Where("tasks.name = ?", taskName).
-		Take(&row).Error
-	if err != nil {
+		Order("task_runs.partition_index ASC").
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return &row, nil
+	return assertUnfanned(rows)
 }
 
 func (s *Service) resolveTaskRunByID(taskID, runID uuid.UUID) (*taskDescriptorRow, error) {
-	var row taskDescriptorRow
-	err := s.baseDescriptorQuery(runID).
+	var rows []taskDescriptorRow
+	if err := s.baseDescriptorQuery(runID).
 		Where("task_runs.task_id = ?", taskID).
-		Take(&row).Error
-	if err != nil {
+		Order("task_runs.partition_index ASC").
+		Find(&rows).Error; err != nil {
 		return nil, err
 	}
-	return &row, nil
+	return assertUnfanned(rows)
+}
+
+// assertUnfanned is the descriptor path's assert-unfanned answer to the
+// (job_run_id, task_id) identity question: exactly one row is returned, zero
+// rows is not-found, and two or more is refused rather than resolved to an
+// arbitrary sibling.
+func assertUnfanned(rows []taskDescriptorRow) (*taskDescriptorRow, error) {
+	switch len(rows) {
+	case 0:
+		return nil, gorm.ErrRecordNotFound
+	case 1:
+		if rows[0].PartitionCount > 1 {
+			return nil, ErrFannedTaskAmbiguous
+		}
+		return &rows[0], nil
+	default:
+		return nil, ErrFannedTaskAmbiguous
+	}
 }
 
 func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
@@ -165,6 +193,8 @@ func (s *Service) baseDescriptorQuery(runID uuid.UUID) *gorm.DB {
 				"task_runs.result AS result, "+
 				"task_runs.output AS output, "+
 				"task_runs.replay_safe AS replay_safe, "+
+				"task_runs.partition_value AS partition_value, "+
+				"task_runs.partition_count AS partition_count, "+
 				"task_runs.execution_descriptor AS execution_descriptor",
 		).
 		Joins("JOIN job_runs ON job_runs.id = task_runs.job_run_id").

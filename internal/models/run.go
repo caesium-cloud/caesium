@@ -44,9 +44,9 @@ type JobRun struct {
 
 type TaskRun struct {
 	ID             uuid.UUID  `gorm:"type:uuid;primaryKey" json:"id"`
-	JobRunID       uuid.UUID  `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
+	JobRunID       uuid.UUID  `gorm:"type:uuid;uniqueIndex:idx_taskrun_jobrun_task;index;index:idx_taskrun_terminal_seq,priority:1;not null" json:"job_run_id"`
 	JobRun         JobRun     `gorm:"constraint:OnDelete:CASCADE" json:"-"`
-	TaskID         uuid.UUID  `gorm:"type:uuid;index:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
+	TaskID         uuid.UUID  `gorm:"type:uuid;uniqueIndex:idx_taskrun_jobrun_task;index;not null" json:"task_id"`
 	Task           Task       `gorm:"constraint:OnDelete:CASCADE" json:"-"`
 	AtomID         uuid.UUID  `gorm:"type:uuid;index;not null" json:"atom_id"`
 	Engine         AtomEngine `gorm:"type:text;not null" json:"engine"`
@@ -150,6 +150,39 @@ type TaskRun struct {
 	CompletedAt      *time.Time `json:"completed_at,omitempty"`
 	CreatedAt        time.Time  `gorm:"not null;index:idx_taskrun_claim_priority,priority:4,sort:asc" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"not null" json:"updated_at"`
+
+	// PartitionValue is empty for an unfanned task. For a fanned instance it is
+	// the partition key (the value injected as CAESIUM_PARTITION).
+	PartitionValue string `gorm:"type:text;not null;default:''" json:"partition_value,omitempty"`
+	// PartitionIndex is emission order (never topological order). Unfanned and
+	// the rewritten template row are 0. Unique with (job_run_id, task_id).
+	//
+	// The composite index kept its pre-fan-out NAME (idx_taskrun_jobrun_task)
+	// while changing shape from a non-unique two-column index to a UNIQUE
+	// three-column one. GORM's AutoMigrate matches indexes by name only and
+	// leaves an existing one untouched, so these tags alone would give a fresh
+	// database the correct index and every existing deployment the old one, with
+	// the uniqueness invariant silently unenforced. The explicit migration in
+	// pkg/db/migrations.go (MigrateTaskRunUniquePartitionIndex) drops the stale
+	// index before AutoMigrate runs. Do not rename or re-shape this index without
+	// updating that migration.
+	PartitionIndex int `gorm:"not null;default:0;uniqueIndex:idx_taskrun_jobrun_task" json:"partition_index"`
+	// PartitionCount is 0 for unfanned tasks and N for every instance of a
+	// fanned group.
+	PartitionCount int `gorm:"not null;default:0" json:"partition_count"`
+	// PartitionFingerprint is the optional per-unit content address
+	// (sha256:<64 hex>). Empty when the producer emitted a string-form partition.
+	PartitionFingerprint string `gorm:"type:text;not null;default:''" json:"partition_fingerprint,omitempty"`
+	// PartitionAttributes is the JSON object of scalar attributes from a
+	// structured partition (omit-when-empty).
+	PartitionAttributes datatypes.JSON `gorm:"type:json" json:"partition_attributes,omitempty"`
+	// PartitionDependsOn is the JSON array of sibling keys this instance waits
+	// on. Empty for string-form partitions and for instances with no in-group
+	// edges.
+	PartitionDependsOn datatypes.JSON `gorm:"type:json" json:"partition_depends_on,omitempty"`
+	// Partitions is the normalized emitted list, persisted on the *producer's*
+	// row for observability/why/replay. Empty on consumer instances.
+	Partitions datatypes.JSON `gorm:"type:json" json:"partitions,omitempty"`
 }
 
 const TaskExecutionDescriptorSchemaVersion = 1
@@ -289,6 +322,13 @@ type TaskCache struct {
 	// HashInput that produced Hash, mirrored from the originating TaskRun so a
 	// cache *hit* can also be explained field-by-field. Nullable.
 	HashInputBlob datatypes.JSON `gorm:"type:json"`
-	CreatedAt     time.Time
-	ExpiresAt     *time.Time `gorm:"index:idx_task_cache_expires"`
+	// Partitions is the normalized partition list a fan-out PRODUCER emitted,
+	// mirrored from its TaskRun so a cache hit on the producer can still expand
+	// the downstream group. Without it a warm run replays the producer's result
+	// but has nothing to fan out from, and the group collapses to its single
+	// template row. Nullable: nil for every non-producer task and for every
+	// entry written before this column existed.
+	Partitions datatypes.JSON `gorm:"type:json"`
+	CreatedAt  time.Time
+	ExpiresAt  *time.Time `gorm:"index:idx_task_cache_expires"`
 }

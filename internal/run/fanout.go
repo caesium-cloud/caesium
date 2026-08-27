@@ -1,0 +1,841 @@
+package run
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/caesium-cloud/caesium/internal/event"
+	"github.com/caesium-cloud/caesium/internal/metrics"
+	"github.com/caesium-cloud/caesium/internal/models"
+	"github.com/caesium-cloud/caesium/pkg/env"
+	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
+	"github.com/google/uuid"
+	"gorm.io/datatypes"
+	"gorm.io/gorm"
+)
+
+// ExpandedInstance is one materialized fan-out TaskRun the local executor
+// needs because it never re-reads the store mid-run.
+type ExpandedInstance struct {
+	TaskRunID               uuid.UUID
+	TaskID                  uuid.UUID
+	PartitionIndex          int
+	Partition               pkgtask.Partition
+	OutstandingPredecessors int
+}
+
+// FanOutExpansion is the payload CompleteTaskResult returns so all three
+// advancement paths observe the same instance set.
+type FanOutExpansion struct {
+	ProducerTaskID uuid.UUID
+	Partitions     []pkgtask.Partition
+	Groups         []ExpandedGroup
+}
+
+// ExpandedGroup is the N instances of one fanned successor step.
+type ExpandedGroup struct {
+	TaskID      uuid.UUID
+	TaskName    string
+	OnEmpty     string
+	Skipped     bool
+	MaxParallel int
+	Instances   []ExpandedInstance
+	Dependents  map[string][]string
+}
+
+func fanOutServerCap() int {
+	cap := env.Variables().FanOutMaxPartitions
+	if cap <= 0 {
+		return jobdefschema.DefaultFanOutMaxPartitions
+	}
+	return cap
+}
+
+func (s *Store) persistProducerPartitionsTx(tx *gorm.DB, producerID uuid.UUID, parts []pkgtask.Partition) error {
+	if len(parts) == 0 {
+		return nil
+	}
+	encoded, err := pkgtask.EncodePartitions(parts)
+	if err != nil {
+		return fmt.Errorf("run: encode partitions: %w", err)
+	}
+	return tx.Model(&models.TaskRun{}).Where("id = ?", producerID).Update("partitions", datatypes.JSON(encoded)).Error
+}
+
+func (s *Store) expandFanOutSuccessorsTx(
+	tx *gorm.DB,
+	runID, producerTaskID uuid.UUID,
+	producerRow *models.TaskRun,
+	producerName string,
+	successorTaskIDs []uuid.UUID,
+	partitions []pkgtask.Partition,
+	pendingEvents *[]event.Event,
+	counts *dbWriteCounts,
+) (*FanOutExpansion, error) {
+	return s.expandFanOutSuccessors(tx, runID, producerTaskID, producerRow, producerName, successorTaskIDs, partitions, pendingEvents, counts, true)
+}
+
+// PlanFanOutExpansion validates partitions and assigns instance IDs without
+// writing rows. The owner in-memory path applies this to RunState first, then
+// persists the same IDs inside CompleteTaskOwner.
+//
+// The producer is addressed by its catalog task id, which resolves its TaskRun
+// only while that task is UNFANNED. Use PlanFanOutExpansionForRow when the
+// producer may itself be a fanned instance.
+func (s *Store) PlanFanOutExpansion(runID, producerTaskID uuid.UUID, partitions []pkgtask.Partition) (*FanOutExpansion, error) {
+	return s.PlanFanOutExpansionForRow(runID, producerTaskID, producerTaskID, partitions)
+}
+
+// PlanFanOutExpansionForRow is PlanFanOutExpansion with the producer's two
+// identities stated separately, because the function genuinely needs both:
+// producerTaskID is the CATALOG task (the Task row whose name fanOut.from
+// matches, and the from_task_id the successor edges hang off), while
+// producerRowRef names the TaskRun that actually ran.
+//
+// Collapsing them broke every fanned producer. A fanned step that emits
+// partitions of its own — and, more commonly, ANY instance completing through
+// OwnerManager.CompleteInstance, which plans an expansion on every success —
+// resolves its catalog id to N rows, so the single-row load failed with
+// ErrAmbiguousTaskRun. The owner treats a planning error as the task having
+// FAILED, so a partition that succeeded was recorded failed, and under the
+// default fail_fast policy that killed its pending siblings and the run. The
+// error surfaced only as a `record not found` line in the query log.
+//
+// producerRowRef follows the usual TaskRun-primary-key-or-catalog-task-ID
+// contract, so an unfanned producer may still pass its catalog id.
+func (s *Store) PlanFanOutExpansionForRow(runID, producerTaskID, producerRowRef uuid.UUID, partitions []pkgtask.Partition) (*FanOutExpansion, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("run: plan fan-out: nil store")
+	}
+	var producer models.Task
+	if err := s.db.First(&producer, "id = ?", producerTaskID).Error; err != nil {
+		return nil, err
+	}
+	if producerRowRef == uuid.Nil {
+		producerRowRef = producerTaskID
+	}
+	producerRow, err := loadTaskRunByIDOrUnique(s.db, runID, producerRowRef)
+	if err != nil {
+		return nil, err
+	}
+	var edges []models.TaskEdge
+	if err := s.db.Where("from_task_id = ?", producerTaskID).Find(&edges).Error; err != nil {
+		return nil, err
+	}
+	succIDs := make([]uuid.UUID, 0, len(edges))
+	for _, e := range edges {
+		succIDs = append(succIDs, e.ToTaskID)
+	}
+	return s.expandFanOutSuccessors(s.db, runID, producerTaskID, producerRow, producer.Name, succIDs, partitions, nil, nil, false)
+}
+
+func (s *Store) expandFanOutSuccessors(
+	tx *gorm.DB,
+	runID, producerTaskID uuid.UUID,
+	producerRow *models.TaskRun,
+	producerName string,
+	successorTaskIDs []uuid.UUID,
+	partitions []pkgtask.Partition,
+	pendingEvents *[]event.Event,
+	counts *dbWriteCounts,
+	persist bool,
+) (*FanOutExpansion, error) {
+	if producerRow == nil {
+		return nil, nil
+	}
+	if persist {
+		if err := s.persistProducerPartitionsTx(tx, producerRow.ID, partitions); err != nil {
+			return nil, err
+		}
+	}
+
+	expansion := &FanOutExpansion{ProducerTaskID: producerTaskID, Partitions: partitions}
+	serverCap := fanOutServerCap()
+
+	for _, succID := range successorTaskIDs {
+		var succTask models.Task
+		if err := tx.First(&succTask, "id = ?", succID).Error; err != nil {
+			return nil, err
+		}
+		fo, err := decodeFanOutConfig(succTask.FanOutConfig)
+		if err != nil {
+			return nil, err
+		}
+		if fo == nil || fo.From != producerName {
+			continue
+		}
+
+		cap := fo.MaxPartitions
+		if cap <= 0 || cap > serverCap {
+			cap = serverCap
+		}
+		if len(partitions) > cap {
+			// partitions[cap] is the first element past the cap and always exists
+			// here, so it names the offending key without a second bounds test.
+			return nil, &pkgtask.PartitionError{Msg: fmt.Sprintf("partition list exceeds count cap %d (offending key %q)", cap, partitions[cap].Key)}
+		}
+
+		graph, err := pkgtask.ValidatePartitionGraph(partitions)
+		if err != nil {
+			return nil, asFanOutProducerError(err)
+		}
+
+		group := ExpandedGroup{TaskID: succID, TaskName: succTask.Name, OnEmpty: fo.OnEmpty, MaxParallel: fo.MaxParallel}
+		if graph != nil {
+			group.Dependents = graph.Dependents
+		}
+
+		template, err := loadUniqueTaskRun(tx, runID, succID)
+		if err != nil {
+			return nil, fmt.Errorf("run: fan-out template for %s: %w", succTask.Name, err)
+		}
+
+		if len(partitions) == 0 {
+			onEmpty := fo.OnEmpty
+			if onEmpty == "" {
+				onEmpty = jobdefschema.FanOutOnEmptySkip
+			}
+			if onEmpty == jobdefschema.FanOutOnEmptyFail {
+				return nil, &pkgtask.PartitionError{Msg: fmt.Sprintf("fan-out produced no partitions for step %q", succTask.Name)}
+			}
+			if persist {
+				if _, err := s.skipTaskAndDescendantsTx(tx, runID, succID, "fan-out produced no partitions", pendingEvents, counts); err != nil {
+					return nil, err
+				}
+			}
+			group.Skipped = true
+			expansion.Groups = append(expansion.Groups, group)
+			continue
+		}
+
+		n := len(partitions)
+		if persist {
+			// The metric's labels are {job alias, task name} — producerName is a
+			// TASK name and was landing in the job-alias slot, so every series was
+			// mislabelled. Resolve the run's job alias once per expanded group.
+			metrics.FanOutPartitionsTotal.WithLabelValues(s.jobAliasForRunTx(tx, runID), succTask.Name).Add(float64(n))
+		}
+
+		instances := make([]models.TaskRun, 0, n)
+		for i, p := range partitions {
+			attrs, err := encodePartitionMap(p.Attributes)
+			if err != nil {
+				return nil, err
+			}
+			deps, err := json.Marshal(p.DependsOn)
+			if err != nil {
+				return nil, err
+			}
+			indegree := 0
+			if graph != nil {
+				indegree = graph.Indegree[p.Key]
+			}
+			outstanding := template.OutstandingPredecessors + indegree
+			row := *template
+			if i == 0 {
+				row.ID = template.ID
+			} else {
+				row.ID = uuid.New()
+				row.CreatedAt = template.CreatedAt
+			}
+			row.PartitionValue = p.Key
+			row.PartitionIndex = i
+			row.PartitionCount = n
+			row.PartitionFingerprint = p.Fingerprint
+			row.PartitionAttributes = attrs
+			row.PartitionDependsOn = datatypes.JSON(deps)
+			row.OutstandingPredecessors = outstanding
+			row.Status = string(TaskStatusPending)
+			row.ClaimedBy = ""
+			row.RuntimeID = ""
+			row.StartedAt = nil
+			row.CompletedAt = nil
+			instances = append(instances, row)
+			group.Instances = append(group.Instances, ExpandedInstance{
+				TaskRunID:               row.ID,
+				TaskID:                  succID,
+				PartitionIndex:          i,
+				Partition:               p,
+				OutstandingPredecessors: outstanding,
+			})
+		}
+
+		if persist {
+			if err := s.persistExpandedGroupTx(tx, template.ID, instances, counts); err != nil {
+				return nil, err
+			}
+		}
+		expansion.Groups = append(expansion.Groups, group)
+	}
+
+	return expansion, nil
+}
+
+func (s *Store) persistExpansionTx(tx *gorm.DB, runID uuid.UUID, expansion *FanOutExpansion, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	if expansion == nil {
+		return nil
+	}
+	if producer, err := loadUniqueTaskRun(tx, runID, expansion.ProducerTaskID); err == nil && producer != nil {
+		if err := s.persistProducerPartitionsTx(tx, producer.ID, expansion.Partitions); err != nil {
+			return err
+		}
+	}
+	for _, g := range expansion.Groups {
+		if g.Skipped || len(g.Instances) == 0 {
+			continue
+		}
+		template, err := loadUniqueTaskRun(tx, runID, g.TaskID)
+		if err != nil {
+			return err
+		}
+		rows := make([]models.TaskRun, 0, len(g.Instances))
+		for _, inst := range g.Instances {
+			attrs, err := encodePartitionMap(inst.Partition.Attributes)
+			if err != nil {
+				return err
+			}
+			deps, err := json.Marshal(inst.Partition.DependsOn)
+			if err != nil {
+				return err
+			}
+			row := *template
+			row.ID = inst.TaskRunID
+			row.PartitionValue = inst.Partition.Key
+			row.PartitionIndex = inst.PartitionIndex
+			row.PartitionCount = len(g.Instances)
+			row.PartitionFingerprint = inst.Partition.Fingerprint
+			row.PartitionAttributes = attrs
+			row.PartitionDependsOn = datatypes.JSON(deps)
+			row.OutstandingPredecessors = inst.OutstandingPredecessors
+			row.Status = string(TaskStatusPending)
+			row.ClaimedBy = ""
+			row.RuntimeID = ""
+			row.StartedAt = nil
+			row.CompletedAt = nil
+			rows = append(rows, row)
+		}
+		if err := s.persistExpandedGroupTx(tx, template.ID, rows, counts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) persistExpandedGroupTx(tx *gorm.DB, templateID uuid.UUID, instances []models.TaskRun, counts *dbWriteCounts) error {
+	if len(instances) == 0 {
+		return nil
+	}
+	if err := tx.Model(&models.TaskRun{}).Where("id = ?", templateID).Updates(map[string]any{
+		"partition_value":          instances[0].PartitionValue,
+		"partition_index":          instances[0].PartitionIndex,
+		"partition_count":          instances[0].PartitionCount,
+		"partition_fingerprint":    instances[0].PartitionFingerprint,
+		"partition_attributes":     instances[0].PartitionAttributes,
+		"partition_depends_on":     instances[0].PartitionDependsOn,
+		"outstanding_predecessors": instances[0].OutstandingPredecessors,
+	}).Error; err != nil {
+		return err
+	}
+	if len(instances) == 1 {
+		return nil
+	}
+	rest := instances[1:]
+	existing := make(map[uuid.UUID]struct{}, len(rest))
+	ids := make([]uuid.UUID, 0, len(rest))
+	for i := range rest {
+		ids = append(ids, rest[i].ID)
+	}
+	var found []models.TaskRun
+	if err := tx.Select("id").Where("id IN ?", ids).Find(&found).Error; err != nil {
+		return err
+	}
+	for i := range found {
+		existing[found[i].ID] = struct{}{}
+	}
+	toCreate := make([]models.TaskRun, 0, len(rest))
+	for i := range rest {
+		if _, ok := existing[rest[i].ID]; ok {
+			continue
+		}
+		toCreate = append(toCreate, rest[i])
+	}
+	if len(toCreate) == 0 {
+		return nil
+	}
+	if err := tx.Create(&toCreate).Error; err != nil {
+		return err
+	}
+	if counts != nil {
+		counts.addTaskRunInsert(len(toCreate))
+	}
+	return nil
+}
+
+// fanOutMaxParallelPredicateTx returns an extra WHERE fragment (and its bound
+// args) that caps a fanned group's in-flight instances at fanOut.maxParallel.
+// Empty string when the row is not a fan-out instance or the step declares no
+// cap.
+//
+// This is a PREDICATE, not a pre-check, deliberately. The previous form ran a
+// separate `COUNT(*) … status='running'` and returned early — correct only if
+// nothing can start a sibling between the count and the claim UPDATE. Under
+// dqlite every write serializes through Raft, so two concurrent owner dispatches
+// cannot interleave *within* one transaction's writes; but the count ran on the
+// transaction's read snapshot, and a sibling claimed by the worker-pull path
+// (internal/worker/claimer.go, which caps the same group with its own subquery
+// inside its single atomic UPDATE) could commit between the two statements in
+// the same tx. Folding the count into the guarded UPDATE removes the window
+// entirely and matches the claimer's shape: the cap is evaluated by the same
+// statement that takes the claim, so an over-claim can only manifest as
+// RowsAffected == 0 → ErrTaskClaimMismatch, which the caller already handles by
+// leaving the instance pending for the next tick.
+//
+// Deadlock is impossible for an ordered chain deeper than maxParallel: readiness
+// comes from outstanding_predecessors reaching zero, which is driven by TERMINAL
+// siblings, never by a free slot. a→b→c with maxParallel=1 runs a, and only once
+// a is terminal does b become ready — at which point the running count is 0.
+func (s *Store) fanOutMaxParallelPredicateTx(tx *gorm.DB, row *models.TaskRun) (string, []interface{}, error) {
+	if row == nil || !isFanOutInstance(row) {
+		return "", nil, nil
+	}
+	var task models.Task
+	if err := tx.First(&task, "id = ?", row.TaskID).Error; err != nil {
+		return "", nil, err
+	}
+	fo, err := decodeFanOutConfig(task.FanOutConfig)
+	if err != nil || fo == nil || fo.MaxParallel <= 0 {
+		return "", nil, err
+	}
+	return " AND (SELECT COUNT(*) FROM task_runs sib WHERE sib.job_run_id = ? AND sib.task_id = ? AND sib.status = ?) < ?",
+		[]interface{}{row.JobRunID, row.TaskID, string(TaskStatusRunning), fo.MaxParallel},
+		nil
+}
+
+// IsFanOutInstance reports whether a TaskRun row is one instance of a fanned
+// group. Exported so internal/worker can ask the question from the SAME
+// definition the SQL lane uses rather than re-deriving "does this row have a
+// partition" from the column set — the two drifting is how a fanned instance
+// ends up treated as an ordinary task on one path only.
+func IsFanOutInstance(tr *models.TaskRun) bool {
+	return isFanOutInstance(tr)
+}
+
+func isFanOutInstance(tr *models.TaskRun) bool {
+	if tr == nil {
+		return false
+	}
+	return tr.PartitionCount > 1 || (tr.PartitionCount > 0 && tr.PartitionValue != "")
+}
+
+func (s *Store) advanceCrossStepSuccessorsTx(
+	tx *gorm.DB,
+	runID, taskID uuid.UUID,
+	pendingEvents *[]event.Event,
+	skippedIDs *[]uuid.UUID,
+	counts *dbWriteCounts,
+) error {
+	var taskModel models.Task
+	if err := tx.First(&taskModel, "id = ?", taskID).Error; err != nil {
+		return err
+	}
+	edges, err := s.successorEdgesForRunTx(tx, runID, taskID, taskModel)
+	if err != nil {
+		return err
+	}
+	toDecrement := make([]uuid.UUID, 0, len(edges))
+	for _, edge := range edges {
+		toDecrement = append(toDecrement, edge.ToTaskID)
+	}
+	updated, err := s.batchDecrementPredecessorsTx(tx, runID, toDecrement)
+	if err != nil {
+		return err
+	}
+	if counts != nil {
+		counts.addTaskRunStatus(len(toDecrement))
+	}
+	for i := range updated {
+		successor := &updated[i]
+		if successor.OutstandingPredecessors != 0 || successor.Status != string(TaskStatusPending) {
+			continue
+		}
+		shouldRun, rule, err := s.shouldRunTaskTx(tx, runID, successor.TaskID)
+		if err != nil {
+			return err
+		}
+		if shouldRun {
+			if err := s.appendTaskReadyEventTx(tx, runID, successor.TaskID, pendingEvents, counts); err != nil {
+				return err
+			}
+			continue
+		}
+		skipRuleReason := fmt.Sprintf("trigger rule %q not satisfied", rule)
+		skipped, err := s.skipTaskAndDescendantsTx(tx, runID, successor.TaskID, skipRuleReason, pendingEvents, counts)
+		if err != nil {
+			return err
+		}
+		if skippedIDs != nil {
+			*skippedIDs = append(*skippedIDs, skipped...)
+		}
+	}
+	return nil
+}
+
+// jobAliasForRunTx resolves a run's job alias for metric labelling. Best effort:
+// an unresolvable alias yields "" rather than failing the completion
+// transaction, because a mislabelled metric must never fail a run.
+func (s *Store) jobAliasForRunTx(tx *gorm.DB, runID uuid.UUID) string {
+	var row struct {
+		Alias string
+	}
+	if err := tx.Table("job_runs").
+		Select("jobs.alias AS alias").
+		Joins("join jobs on jobs.id = job_runs.job_id").
+		Where("job_runs.id = ?", runID).
+		Take(&row).Error; err != nil {
+		return ""
+	}
+	return row.Alias
+}
+
+// groupAllTerminalTx reports whether every instance of a fan-out group is
+// terminal, and — on the transition that makes that true — observes the group's
+// wall-clock duration (min StartedAt → max CompletedAt) on
+// FanOutGroupDurationSeconds. The owner in-memory lane observes the same
+// histogram from owner_manager.go; this is the SQL lane's half, without which
+// the metric only ever has data under CAESIUM_RUN_OWNER_IN_MEMORY.
+func (s *Store) groupAllTerminalTx(tx *gorm.DB, runID, taskID uuid.UUID) (bool, error) {
+	var rows []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, taskID).Find(&rows).Error; err != nil {
+		return false, err
+	}
+	if len(rows) == 0 {
+		return true, nil
+	}
+	for i := range rows {
+		if !IsTerminal(TaskStatus(rows[i].Status)) {
+			return false, nil
+		}
+	}
+	s.observeFanOutGroupDurationTx(tx, runID, taskID, rows)
+	return true, nil
+}
+
+// observeFanOutGroupDurationTx records the fanned group's span. Unfanned tasks
+// (a single instance with no partition value) are not groups and are skipped, so
+// the series stays fan-out-only.
+func (s *Store) observeFanOutGroupDurationTx(tx *gorm.DB, runID, taskID uuid.UUID, rows []models.TaskRun) {
+	fanned := false
+	for i := range rows {
+		if isFanOutInstance(&rows[i]) {
+			fanned = true
+			break
+		}
+	}
+	if !fanned {
+		return
+	}
+	var firstStart, lastEnd *time.Time
+	for i := range rows {
+		if rows[i].StartedAt != nil && (firstStart == nil || rows[i].StartedAt.Before(*firstStart)) {
+			firstStart = rows[i].StartedAt
+		}
+		if rows[i].CompletedAt != nil && (lastEnd == nil || rows[i].CompletedAt.After(*lastEnd)) {
+			lastEnd = rows[i].CompletedAt
+		}
+	}
+	if firstStart == nil || lastEnd == nil || lastEnd.Before(*firstStart) {
+		return
+	}
+	var task models.Task
+	if err := tx.Select("name").First(&task, "id = ?", taskID).Error; err != nil {
+		return
+	}
+	metrics.FanOutGroupDurationSeconds.
+		WithLabelValues(s.jobAliasForRunTx(tx, runID), task.Name).
+		Observe(lastEnd.Sub(*firstStart).Seconds())
+}
+
+func decodeFanOutConfig(raw []byte) (*jobdefschema.FanOut, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var fo jobdefschema.FanOut
+	if err := json.Unmarshal(raw, &fo); err != nil {
+		return nil, fmt.Errorf("decode fanOut config: %w", err)
+	}
+	return &fo, nil
+}
+
+func encodePartitionMap(attrs map[string]string) (datatypes.JSON, error) {
+	if len(attrs) == 0 {
+		return nil, nil
+	}
+	b, err := json.Marshal(attrs)
+	if err != nil {
+		return nil, err
+	}
+	return datatypes.JSON(b), nil
+}
+
+func asFanOutProducerError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, ok := err.(*pkgtask.PartitionError); ok {
+		return err
+	}
+	return &pkgtask.PartitionError{Msg: err.Error()}
+}
+
+func (s *Store) decrementInGroupDependentsTx(tx *gorm.DB, runID uuid.UUID, completed *models.TaskRun) error {
+	if completed == nil || completed.PartitionCount == 0 || completed.PartitionValue == "" {
+		return nil
+	}
+	var siblings []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ? AND id <> ?", runID, completed.TaskID, completed.ID).Find(&siblings).Error; err != nil {
+		return err
+	}
+	var ids []uuid.UUID
+	for i := range siblings {
+		var deps []string
+		if len(siblings[i].PartitionDependsOn) > 0 {
+			_ = json.Unmarshal(siblings[i].PartitionDependsOn, &deps)
+		}
+		for _, d := range deps {
+			if d == completed.PartitionValue {
+				ids = append(ids, siblings[i].ID)
+				break
+			}
+		}
+	}
+	_, err := s.batchDecrementSiblingPredecessorsTx(tx, runID, ids)
+	return err
+}
+
+// resolveInstanceFailureTx is THE SQL lane's terminal-failure resolution: one
+// instance has just been written terminal-failed, and everything that follows
+// from that — the group's failurePolicy, the task_failed event carrying this
+// instance's identity, and the group-terminal gate that releases the fanned
+// step's cross-step successors — happens here, once.
+//
+// It exists because the SQL lane reaches a failed instance by TWO routes and
+// they must not drift:
+//
+//	failTask        — the task never produced a result (image pull failed,
+//	                  attempts exhausted, an infrastructure error).
+//	completeTask    — the container RAN and reported a non-zero exit. The
+//	                  distributed worker calls sink.Succeeded with result
+//	                  "failure" for this (internal/worker/runtime_executor.go),
+//	                  so it lands on CompleteTaskClaimed, not FailTaskClaimed;
+//	                  the later sink.Failed finds the row already terminal and
+//	                  returns early.
+//
+// The second is the COMMON case — an exit-1 partition — and it had its own,
+// smaller copy of the consequences (the dependency cascade only). fail_fast was
+// therefore route-dependent: it held under the local executor's in-memory Kahn
+// loop and under failTask, and silently degraded to `continue` for exactly the
+// scenario it exists for, a partition that exits non-zero under
+// CAESIUM_EXECUTION_MODE=distributed. That is the mode-dependent-defect shape
+// the plan's route-completeness contract exists to prevent, so there is one
+// implementation and both routes call it.
+//
+// catalogTaskID is the catalog task id (group-level queries and metric labels);
+// row is the instance that failed, already updated to its terminal status. row
+// may be nil on completeTask's unclaimed path when the TaskRun row could not be
+// loaded — then only the event is recorded, keyed by catalogTaskID.
+func (s *Store) resolveInstanceFailureTx(
+	tx *gorm.DB,
+	runID, catalogTaskID uuid.UUID,
+	row *models.TaskRun,
+	pendingEvents *[]event.Event,
+	skippedTaskIDs *[]uuid.UUID,
+	counts *dbWriteCounts,
+) error {
+	if row != nil {
+		if err := s.resolveGroupOnInstanceFailureTx(tx, runID, row, pendingEvents, counts); err != nil {
+			return err
+		}
+	}
+
+	if s.eventStore != nil {
+		var (
+			evt *event.Event
+			err error
+		)
+		if row != nil {
+			evt, err = s.recordTaskRunEventTx(tx, event.TypeTaskFailed, runID, row, counts)
+		} else {
+			evt, err = s.recordTaskEventTx(tx, event.TypeTaskFailed, runID, catalogTaskID, counts)
+		}
+		if err != nil {
+			return err
+		}
+		if pendingEvents != nil {
+			*pendingEvents = append(*pendingEvents, *evt)
+		}
+	}
+
+	// Only a fanned group has a group to resolve. An unfanned task's successors
+	// are advanced by the ordinary trigger-rule path, not from here.
+	if row == nil || !isFanOutInstance(row) {
+		return nil
+	}
+	allTerminal, err := s.groupAllTerminalTx(tx, runID, catalogTaskID)
+	if err != nil || !allTerminal {
+		return err
+	}
+	return s.advanceCrossStepSuccessorsTx(tx, runID, catalogTaskID, pendingEvents, skippedTaskIDs, counts)
+}
+
+// resolveGroupOnInstanceFailureTx applies the group's fanOut.failurePolicy when
+// one instance fails. It is the SQL lane's half of the policy
+// RunState.ApplyCompletion implements in memory (internal/run/owner_state.go),
+// and the two must agree: a policy that holds under
+// CAESIUM_RUN_OWNER_IN_MEMORY=true and degrades to `continue` in the default SQL
+// configuration is exactly the mode-dependent stall the plan's route-completeness
+// contract exists to prevent — it passes CI in the configuration nobody varied.
+//
+//	fail_fast (the DEFAULT — pkg/jobdef's validateSteps normalizes "" to it):
+//	  the first instance failure stops the group taking on any MORE work. Every
+//	  PENDING sibling is resolved skipped with its own terminal_sequence and its
+//	  own task_skipped event, so none is ever dispatched and a takeover does not
+//	  re-dispatch it. This is a strict SUPERSET of the dependency cascade (a
+//	  dependent of the failure was by definition still pending), so the two
+//	  branches are mutually exclusive.
+//	continue:
+//	  only the failed instance's TRANSITIVE in-group dependents are skipped
+//	  (skipInGroupDependentsTx); independent siblings run to completion and the
+//	  group resolves when the last one lands.
+//
+// Either way every affected instance ends terminal, which is what lets
+// groupAllTerminalTx fire and the group's cross-step successors be handled by
+// the normal trigger-rule path.
+func (s *Store) resolveGroupOnInstanceFailureTx(tx *gorm.DB, runID uuid.UUID, failed *models.TaskRun, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	if failed == nil || !isFanOutInstance(failed) {
+		return nil
+	}
+	failFast, err := s.groupFailsFastTx(tx, failed.TaskID)
+	if err != nil {
+		return err
+	}
+	if !failFast {
+		return s.skipInGroupDependentsTx(tx, runID, failed, pendingEvents, counts)
+	}
+	return s.failFastSkipSiblingsTx(tx, runID, failed, pendingEvents, counts)
+}
+
+// groupFailsFastTx reads a fanned step's effective failure policy from the
+// catalog. An absent fanOut block, an unreadable one, or an empty
+// failurePolicy all resolve to fail_fast, matching normalizeFanOutFailurePolicy
+// in the owner engine and validateSteps in pkg/jobdef. Treating "" as
+// `continue` would silently ship the wrong default to every job that never
+// wrote the field.
+func (s *Store) groupFailsFastTx(tx *gorm.DB, taskID uuid.UUID) (bool, error) {
+	var task models.Task
+	if err := tx.Select("id", "fan_out_config").First(&task, "id = ?", taskID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return true, nil
+		}
+		return false, err
+	}
+	fo, err := decodeFanOutConfig(task.FanOutConfig)
+	if err != nil {
+		return false, err
+	}
+	if fo == nil {
+		return true, nil
+	}
+	return fo.FailurePolicy != jobdefschema.FanOutFailureContinue, nil
+}
+
+// failFastSkipSiblingsTx resolves every PENDING sibling of a failed instance,
+// each through the shared terminal-skip primitive so it gets its own
+// terminal_sequence and its own task_skipped event carrying its own partition.
+// The reason string is the exact one the owner lane emits, because consumers
+// (and the integration lane) match on it.
+//
+// PENDING, not merely non-terminal, is the design's contract: fail_fast
+// "cancels pending siblings" (docs/design-dynamic-fanout.md:324, :691, :1111 —
+// :691 is the decisive one, reasoning explicitly in terms of pending). A
+// RUNNING sibling is left alone deliberately, for a reason beyond the doc:
+// Caesium cannot kill a running container, so marking one skipped would claim a
+// terminal state for live work and invite its worker's later completion to
+// contradict the row — the same shape as the local-mode replace-cancel
+// resurrection bug. The run loses nothing by waiting: an in-flight instance
+// reaches a terminal row on its own, at which point groupAllTerminalTx fires and
+// the cross-step successors are resolved against a group that already contains a
+// failure (the failed sibling alone fixes group status, so the fan-in is skipped
+// by its trigger rule either way). What fail_fast buys is that no FURTHER
+// instance is ever dispatched.
+//
+// The owner in-memory lane is pending-only too, deliberately and for the same
+// reasons: RunState.ApplyCompletion (internal/run/owner_state.go) skips only
+// siblings whose status is pending. The two lanes agree.
+func (s *Store) failFastSkipSiblingsTx(tx *gorm.DB, runID uuid.UUID, failed *models.TaskRun, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	var siblings []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ? AND id <> ? AND status = ?",
+		runID, failed.TaskID, failed.ID, string(TaskStatusPending)).
+		Order("partition_index ASC").
+		Find(&siblings).Error; err != nil {
+		return err
+	}
+	for i := range siblings {
+		if _, err := s.markInstanceSkippedTx(tx, runID, &siblings[i],
+			"fan-out group failed fast", pendingEvents, counts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) skipInGroupDependentsTx(tx *gorm.DB, runID uuid.UUID, failed *models.TaskRun, pendingEvents *[]event.Event, counts *dbWriteCounts) error {
+	if failed == nil || failed.PartitionCount == 0 || failed.PartitionValue == "" {
+		return nil
+	}
+	var siblings []models.TaskRun
+	if err := tx.Where("job_run_id = ? AND task_id = ?", runID, failed.TaskID).Find(&siblings).Error; err != nil {
+		return err
+	}
+	dependents := map[string][]string{}
+	byKey := map[string]*models.TaskRun{}
+	for i := range siblings {
+		byKey[siblings[i].PartitionValue] = &siblings[i]
+		var deps []string
+		if len(siblings[i].PartitionDependsOn) > 0 {
+			_ = json.Unmarshal(siblings[i].PartitionDependsOn, &deps)
+		}
+		for _, d := range deps {
+			dependents[d] = append(dependents[d], siblings[i].PartitionValue)
+		}
+	}
+	queue := []string{failed.PartitionValue}
+	seen := map[string]struct{}{failed.PartitionValue: {}}
+	reason := fmt.Sprintf("fan-out dependency %s failed", failed.PartitionValue)
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		for _, dep := range dependents[cur] {
+			if _, ok := seen[dep]; ok {
+				continue
+			}
+			seen[dep] = struct{}{}
+			queue = append(queue, dep)
+			row := byKey[dep]
+			if row == nil || IsTerminal(TaskStatus(row.Status)) {
+				continue
+			}
+			// Route through the shared terminal-skip primitive rather than a raw
+			// UPDATE. The raw form left terminal_sequence at 0 and emitted no
+			// task_skipped event, so a cascade-skipped instance was invisible both
+			// to the event stream and to TerminalTaskRunsSince replay — a
+			// recovering owner would believe the instance was still pending.
+			if _, err := s.markInstanceSkippedTx(tx, runID, row, reason, pendingEvents, counts); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}

@@ -106,6 +106,19 @@ export interface TaskRun {
   cache_expires_at?: string;
   error?: string;
   outstanding_predecessors?: number;
+  partition_value?: string;
+  partition_index?: number;
+  partition_count?: number;
+  partition_fingerprint?: string;
+  partition_depends_on?: string[];
+  /**
+   * Per-status instance counts for a fanned (grouped) task, e.g.
+   * `{ succeeded: 2, running: 1 }`. Optional: only present once the backend
+   * computes it for a collapsed group; absent for unfanned tasks and for
+   * servers that predate this field. Consumers must render degrade
+   * gracefully (badge-only) when it is missing.
+   */
+  partition_status_counts?: Record<string, number>;
   started_at?: string;
   completed_at?: string;
   created_at: string;
@@ -1364,4 +1377,26 @@ export const api = {
     request<Backfill>(`/jobs/${jobId}/backfills/${backfillId}/cancel`, {
       method: "PUT",
     }),
+  getPartitions: (jobId: string, runId: string, taskId: string, status?: string) =>
+    request<{ partitions: PartitionInstance[] }>(
+      `/jobs/${jobId}/runs/${runId}/tasks/${taskId}/partitions${status ? `?status=${encodeURIComponent(status)}` : ""}`,
+    ),
+  retryPartition: (jobId: string, runId: string, taskId: string, index: number) =>
+    request<{ retried: boolean; index: number; value: string }>(
+      `/jobs/${jobId}/runs/${runId}/tasks/${taskId}/partitions/${index}/retry`,
+      { method: "POST" },
+    ),
 };
+
+export interface PartitionInstance {
+  value: string;
+  index: number;
+  status: string;
+  attempt: number;
+  cache_hit: boolean;
+  duration?: string;
+  error?: string;
+  fingerprint?: string;
+  depends_on?: string[];
+  task_run_id: string;
+}

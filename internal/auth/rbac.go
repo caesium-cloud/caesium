@@ -77,6 +77,7 @@ var endpointPolicy = map[string]models.Role{
 	"GET /v1/lineage/impact":                    models.RoleViewer,
 
 	"GET /v1/jobs/:id/runs/:id/tasks/:id/descriptor": models.RoleViewer,
+	"GET /v1/jobs/:id/runs/:id/tasks/:id/partitions": models.RoleViewer,
 	// Incident operator read API (agent-in-the-loop D2).
 	"GET /v1/incidents":     models.RoleViewer,
 	"GET /v1/incidents/:id": models.RoleViewer,
@@ -102,13 +103,14 @@ var endpointPolicy = map[string]models.Role{
 	"POST /v1/agent/incidents/:id/mcp":      models.RoleRunner,
 
 	// Runner
-	"POST /v1/jobs/:id/run":                      models.RoleRunner,
-	"POST /v1/jobs/:id/runs/:id/replay":          models.RoleRunner,
-	"POST /v1/jobs/:id/runs/:id/retry":           models.RoleRunner,
-	"POST /v1/jobs/:id/runs/:id/callbacks/retry": models.RoleRunner,
-	"POST /v1/jobs/:id/backfill":                 models.RoleRunner,
-	"POST /v1/events":                            models.RoleRunner,
-	"POST /v1/triggers/:id/fire":                 models.RoleRunner,
+	"POST /v1/jobs/:id/run":                                     models.RoleRunner,
+	"POST /v1/jobs/:id/runs/:id/replay":                         models.RoleRunner,
+	"POST /v1/jobs/:id/runs/:id/retry":                          models.RoleRunner,
+	"POST /v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry": models.RoleRunner,
+	"POST /v1/jobs/:id/runs/:id/callbacks/retry":                models.RoleRunner,
+	"POST /v1/jobs/:id/backfill":                                models.RoleRunner,
+	"POST /v1/events":                                           models.RoleRunner,
+	"POST /v1/triggers/:id/fire":                                models.RoleRunner,
 
 	// Operator
 	"POST /v1/jobs":                         models.RoleOperator,

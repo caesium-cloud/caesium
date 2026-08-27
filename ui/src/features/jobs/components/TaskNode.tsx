@@ -2,6 +2,8 @@ import { memo } from 'react';
 import { Handle, Position, type NodeProps } from 'reactflow';
 import { isRecord } from '@/lib/typeGuards';
 import { cn, formatUTCTimestamp } from '@/lib/utils';
+import { statusMeta } from '@/lib/status';
+import { fanoutStatusSegments } from '@/lib/fanout';
 import { getHandleVisibility } from './node-edges';
 import {
   Activity,
@@ -24,10 +26,12 @@ import {
 import { Duration } from '@/components/duration';
 
 export const TaskNode = memo(({ data }: NodeProps) => {
-  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter } = data;
+  const { label, atom, status, isSelected, startedAt, completedAt, engine, command, error, rateLimitRetryAfter, partitionCount, partitionStatusCounts } = data;
   const taskLabel = typeof label === 'string' ? label : '';
   const runtimeHints = getRuntimeHints(atom?.spec);
   const { showTargetHandle, showSourceHandle } = getHandleVisibility(data.edgeDegree);
+  const isFanned = typeof partitionCount === 'number' && partitionCount > 1;
+  const fanoutSegments = fanoutStatusSegments(partitionStatusCounts as Record<string, number> | undefined);
 
   const getStatusIcon = () => {
     switch (status) {
@@ -105,13 +109,28 @@ export const TaskNode = memo(({ data }: NodeProps) => {
   };
 
   return (
-    <div
-      className={cn(
-        'relative h-[148px] w-[300px] overflow-hidden rounded-xl border-2 px-4 py-2 transition-all duration-300',
-        getStatusColor(),
-        isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
+    <div className="relative h-[148px] w-[300px]">
+      {isFanned && (
+        <>
+          <div
+            aria-hidden="true"
+            data-testid="fanout-stack-card"
+            className="absolute inset-0 -z-20 translate-x-2 translate-y-2 rounded-xl border-2 border-caesium-cyan/10 bg-node-surface/30"
+          />
+          <div
+            aria-hidden="true"
+            data-testid="fanout-stack-card"
+            className="absolute inset-0 -z-10 translate-x-1 translate-y-1 rounded-xl border-2 border-caesium-cyan/20 bg-node-surface/55"
+          />
+        </>
       )}
-    >
+      <div
+        className={cn(
+          'relative h-full w-full overflow-hidden rounded-xl border-2 px-4 py-2 transition-all duration-300',
+          getStatusColor(),
+          isSelected ? 'ring-2 ring-primary ring-offset-2 ring-offset-background' : ''
+        )}
+      >
       {showTargetHandle ? (
         <Handle
           data-testid="task-node-target-handle"
@@ -172,6 +191,11 @@ export const TaskNode = memo(({ data }: NodeProps) => {
             </div>
           </div>
           <div className="flex min-h-[30px] min-w-[44px] flex-col items-end justify-between gap-1">
+            {isFanned && (
+              <span data-testid="fanout-badge" className="text-[9px] font-mono font-bold text-caesium-cyan">
+                ×{partitionCount}
+              </span>
+            )}
             {getStatusIcon()}
             <div className={cn("text-[9px] font-mono text-muted-foreground", !startedAt && "invisible")}>
               {startedAt ? (
@@ -183,9 +207,31 @@ export const TaskNode = memo(({ data }: NodeProps) => {
           </div>
         </div>
 
+        {fanoutSegments.length > 0 && (
+          <div
+            data-testid="fanout-status-strip"
+            title="Partition status breakdown"
+            className="flex h-1.5 w-full shrink-0 overflow-hidden rounded-full bg-muted/40"
+          >
+            {fanoutSegments.map((segment) => (
+              <div
+                key={segment.status}
+                data-testid="fanout-status-segment"
+                data-status={segment.status}
+                title={`${segment.status}: ${segment.count}`}
+                style={{
+                  width: `${segment.fraction * 100}%`,
+                  backgroundColor: statusMeta(segment.status).fg,
+                }}
+              />
+            ))}
+          </div>
+        )}
+
         <div
           className={cn(
-            "custom-scrollbar h-[72px] overflow-y-auto rounded-lg border px-2.5 py-1.5 shadow-inner",
+            "custom-scrollbar overflow-y-auto rounded-lg border px-2.5 py-1.5 shadow-inner",
+            fanoutSegments.length > 0 ? "h-16" : "h-[72px]",
             error && status !== 'skipped'
               ? "border-danger/20 bg-danger/10"
               : error && status === 'skipped'
@@ -262,6 +308,7 @@ export const TaskNode = memo(({ data }: NodeProps) => {
           className="h-3 w-3 border-2 border-dag-bg bg-caesium-cyan"
         />
       ) : null}
+      </div>
     </div>
   );
 });

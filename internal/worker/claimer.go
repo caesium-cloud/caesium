@@ -245,6 +245,11 @@ func (c *Claimer) claimNextSingleStatementTx(tx *gorm.DB, now, leaseExpiry time.
 		return nil, uuid.Nil, err
 	}
 
+	maxParallelSQL, err := c.fanOutMaxParallelSQL(tx.Name(), "tr", "t")
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+
 	sql := `
 UPDATE task_runs
 SET claimed_by = ?, claim_expires_at = ?, claim_attempt = claim_attempt + 1, status = ?, updated_at = ?, rate_limit_retry_after = NULL
@@ -252,6 +257,7 @@ WHERE id = (
 	SELECT tr.id
 	FROM task_runs AS tr
 	JOIN job_runs AS jr ON jr.id = tr.job_run_id
+	LEFT JOIN tasks AS t ON t.id = tr.task_id
 	WHERE jr.status = ?
 		AND tr.status = ?
 		AND tr.outstanding_predecessors = ?
@@ -259,6 +265,7 @@ WHERE id = (
 		AND (tr.rate_limit_retry_after IS NULL OR tr.rate_limit_retry_after <= ?)
 		AND ` + selectorSQL + `
 		AND ` + liveLeaseGuard + `
+		AND ` + maxParallelSQL + `
 	ORDER BY tr.priority DESC, tr.created_at ASC
 	LIMIT 1
 )
@@ -305,6 +312,22 @@ RETURNING *, (SELECT job_id FROM job_runs WHERE id = task_runs.job_run_id) AS cl
 //   - No run_leases row           → NOT EXISTS true → claimable (owner mode off).
 //   - Live lease (expires_at > ?) → NOT EXISTS false → defer to owner's dispatch loop.
 //   - Expired lease               → NOT EXISTS true → claimable (recovery path).
+func (c *Claimer) fanOutMaxParallelSQL(dialect, trAlias, taskAlias string) (string, error) {
+	var extract string
+	switch dialect {
+	case "dqlite", "sqlite":
+		extract = "CAST(json_extract(" + taskAlias + ".fan_out_config, '$.maxParallel') AS INTEGER)"
+	case "postgres":
+		extract = "CAST((" + taskAlias + ".fan_out_config->>'maxParallel') AS INTEGER)"
+	default:
+		return "", fmt.Errorf("worker claimer: unsupported dialect %q for fan-out maxParallel", dialect)
+	}
+	return "(" + taskAlias + ".fan_out_config IS NULL OR " + extract + " IS NULL OR " + extract + " <= 0 OR (" +
+		"SELECT COUNT(*) FROM task_runs mp WHERE mp.job_run_id = " + trAlias + ".job_run_id " +
+		"AND mp.task_id = " + trAlias + ".task_id AND mp.status = '" + string(run.TaskStatusRunning) + "'" +
+		") < " + extract + ")", nil
+}
+
 func (c *Claimer) liveLeaseGuardSQL(dialect, tableAlias string) (string, error) {
 	// job_run_id is a native UUID column on Postgres; a text column on
 	// SQLite/dqlite.  run_leases.run_id is always TEXT.  Cast only on Postgres.

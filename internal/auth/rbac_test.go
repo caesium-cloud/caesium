@@ -88,6 +88,8 @@ func TestRequiredRoleBackfilledProtectedEndpoints(t *testing.T) {
 	}{
 		{"GET", "/v1/jobs/:id/runs/diff", models.RoleViewer},
 		{"GET", "/v1/jobs/:id/runs/:id/why", models.RoleViewer},
+		{"GET", "/v1/jobs/:id/runs/:id/tasks/:id/partitions", models.RoleViewer},
+		{"POST", "/v1/jobs/:id/runs/:id/tasks/:id/partitions/:id/retry", models.RoleRunner},
 		{"GET", "/v1/jobs/:id/blame", models.RoleViewer},
 		{"GET", "/v1/jobs/:id/runs/:id/receipt", models.RoleViewer},
 		{"POST", "/v1/jobs/:id/runs/:id/receipt/verify", models.RoleViewer},

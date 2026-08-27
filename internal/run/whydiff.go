@@ -89,6 +89,9 @@ type hashInputBlob struct {
 	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
 	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
 	RunParams            map[string]string            `json:"runParams,omitempty"`
+	Partition            string                       `json:"partition,omitempty"`
+	PartitionFingerprint string                       `json:"partitionFingerprint,omitempty"`
+	PartitionAttributes  map[string]string            `json:"partitionAttributes,omitempty"`
 	CacheVersion         int                          `json:"cacheVersion"`
 
 	Oversized *oversizedBlob `json:"oversized,omitempty"`
@@ -247,6 +250,9 @@ func diffBlobs(before, after *hashInputBlob) []FieldChange {
 	changes = append(changes, diffPredecessorHashes(before.PredecessorHashes, after.PredecessorHashes)...)
 	changes = append(changes, diffPredecessorOutputs(before.PredecessorOutputs, after.PredecessorOutputs)...)
 	changes = append(changes, diffStringMap("runParams", before.RunParams, after.RunParams)...)
+	addScalar("partition", before.Partition, after.Partition)
+	addScalar("partitionFingerprint", before.PartitionFingerprint, after.PartitionFingerprint)
+	changes = append(changes, diffStringMap("partitionAttributes", before.PartitionAttributes, after.PartitionAttributes)...)
 
 	addStructural := func(field string, b, a json.RawMessage) {
 		if !rawJSONEqual(b, a) {

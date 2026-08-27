@@ -22,6 +22,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/replay"
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/container"
+	"github.com/caesium-cloud/caesium/pkg/env"
 	jobdefschema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/caesium-cloud/caesium/pkg/log"
 	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
@@ -148,6 +149,20 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		taskName = descriptor.Baseline.TaskName
 	}
 
+	// fanOut is the step's fan-out scheduling metadata. It is NOT part of the
+	// cache identity (only the per-instance partition is); it is read here for
+	// the injected env var's name, which fanOut.env may rename and which the
+	// local lane already honours.
+	var fanOut *jobdefschema.FanOut
+	if hasTaskModel {
+		decoded, foErr := jobdefruntime.DecodeFanOutConfig(taskModel.FanOutConfig)
+		if foErr != nil {
+			log.Warn("failed to decode fanOut config for worker task", "task_id", taskRun.TaskID, "error", foErr)
+		} else {
+			fanOut = decoded
+		}
+	}
+
 	var atomSpec container.Spec
 	if descriptor != nil {
 		atomSpec = descriptor.ContainerSpec
@@ -190,8 +205,23 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		PinDigests: taskRun.CachePinDigests,
 		DigestTTL:  taskRun.CacheDigestTTL,
 	}
-	if cacheCfg.Enabled {
-		cacheStore = cache.NewStore(e.store.DB())
+	// A fanned instance's identity hash is persisted whether or not caching is
+	// on, exactly as the local lane does (internal/job/job.go's per-instance
+	// dispatch computes and writes it outside its `if cacheCfg.Enabled` block).
+	// The hash is what makes ONE PARTITION addressable — `caesium receipt get`,
+	// `caesium why --partition`, `run retry --partition` and the receipt's
+	// per-partition attestation all match on it — and caching is only one of its
+	// consumers. Gating the write on caching meant a distributed run with the
+	// cache off left every instance row's hash empty, so the partitions of a
+	// group were no longer distinguishable units of work.
+	//
+	// Caching still gates what caching owns: the lookup below and the publish
+	// after a successful run.
+	needsIdentityHash := cacheCfg.Enabled || run.IsFanOutInstance(taskRun)
+	if needsIdentityHash {
+		if cacheCfg.Enabled {
+			cacheStore = cache.NewStore(e.store.DB())
+		}
 
 		// Look up job alias for hash computation.
 		cacheJobAlias := resolveJobAlias()
@@ -224,11 +254,21 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		// When digest pinning is on, resolve the image tag to its content
 		// digest and fold the digest into the cache key. A resolution failure
 		// falls back to the literal tag — a cache miss is always safe.
-		if descriptor != nil && descriptor.Runtime.ResolvedImageDigest != "" {
-			resolvedImageDigest = descriptor.Runtime.ResolvedImageDigest
-		} else if cacheCfg.PinDigests {
-			if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
-				resolvedImageDigest = digest
+		//
+		// Gated on cacheCfg.Enabled, matching the local lane's
+		// resolveTaskCacheIdentity (`if cacheCfg.Enabled && cacheCfg.PinDigests`):
+		// the digest exists only to make a cache key miss on a moved tag, so with
+		// the cache off there is no key to protect. It must also stay empty here
+		// or the two lanes would fold DIFFERENT fields into one partition's
+		// identity and the same unit of work would hash differently depending on
+		// which executor ran it.
+		if cacheCfg.Enabled {
+			if descriptor != nil && descriptor.Runtime.ResolvedImageDigest != "" {
+				resolvedImageDigest = descriptor.Runtime.ResolvedImageDigest
+			} else if cacheCfg.PinDigests {
+				if digest, derr := imagecheck.Default().Resolve(ctx, taskRun.Engine, taskRun.Image, cacheCfg.DigestTTL); derr == nil {
+					resolvedImageDigest = digest
+				}
 			}
 		}
 
@@ -246,7 +286,15 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			PredecessorHashes:    predHashes,
 			PredecessorOutputs:   predOutputs,
 			RunParams:            runParams,
-			CacheVersion:         cacheCfg.Version,
+			Partition:            taskRun.PartitionValue,
+			PartitionFingerprint: taskRun.PartitionFingerprint,
+			// All three partition fields, exactly as the local lane sets them
+			// (internal/job/job.go). Dropping the attributes here would let the
+			// two lanes disagree about one instance's cache identity, so the same
+			// unit of work would hash differently depending on which executor ran
+			// it — a permanent cache miss that looks like cache flakiness.
+			PartitionAttributes: decodePartitionAttributes(taskRun.PartitionAttributes),
+			CacheVersion:        cacheCfg.Version,
 		}
 		cacheHash = hashInput.Compute()
 		// Serialize the decomposed input to a canonical, secret-redacted blob so
@@ -260,10 +308,16 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			blob = nil
 		}
 		hashInputBlob = blob
-		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.TaskID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+		// Address the INSTANCE, not the catalog task: SetTaskHashWithBlob resolves
+		// its reference through loadTaskRunByIDOrUnique, so a fanned step's
+		// catalog id names N rows and the write is refused — the instance's own
+		// hash and hash-input blob would never land, leaving `caesium why
+		// --partition`, `receipt get` and `run retry --partition` with no identity
+		// to match. The descriptor write below already passes taskRun.ID.
+		if err := e.store.SetTaskHashWithBlob(taskRun.JobRunID, taskRun.ID, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
 			log.Warn("cache: failed to persist task hash", "task_id", taskRun.TaskID, "hash", cacheHash, "error", err)
 		}
-		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.TaskID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
+		if err := e.store.UpdateTaskExecutionDescriptorInputs(taskRun.JobRunID, taskRun.ID, descriptorPredOutputs, descriptorPredHashes, cacheHash, resolvedImageDigest, hashInputBlob); err != nil {
 			log.Warn("cache: failed to persist task execution descriptor inputs", "task_id", taskRun.TaskID, "error", err)
 		}
 
@@ -273,11 +327,21 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
 			} else if found {
 				log.Info("cache hit for worker task", "task_id", taskRun.TaskID, "hash", cacheHash, "cached_run_id", entry.RunID)
-				if err := sink.Cached(ctx, taskRun, run.CacheHitSource{
+				source := run.CacheHitSource{
 					RunID:     entry.RunID,
 					CreatedAt: entry.CreatedAt,
 					ExpiresAt: entry.ExpiresAt,
-				}, entry.Result, entry.Output, entry.BranchSelections); err != nil {
+				}
+				// A cache hit is a completion, and for a fan-out producer it is
+				// the completion that must still expand the group: the cached
+				// partition list stands in for the container output nobody ran.
+				var cacheErr error
+				if withParts, ok := sink.(cachedPartitionSink); ok && len(entry.Partitions) > 0 {
+					cacheErr = withParts.CachedWithPartitions(ctx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections, entry.Partitions)
+				} else {
+					cacheErr = sink.Cached(ctx, taskRun, source, entry.Result, entry.Output, entry.BranchSelections)
+				}
+				if err := cacheErr; err != nil {
 					if errors.Is(err, run.ErrTaskClaimMismatch) {
 						log.Info("worker task claim changed during cache hit", "task_id", taskRun.TaskID, "run_id", taskRun.JobRunID)
 						return
@@ -305,11 +369,14 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 	var lastErr error
 	for attempt := currentAttempt; attempt <= maxAttempts; attempt++ {
-		execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor)
+		emitted, execErr := e.executeTask(ctx, taskRun, sink, atomSpec, runParams, resolveJobAlias(), descriptor, fanOut)
 		if execErr == nil {
-			// Store successful result in cache.
+			// Store successful result in cache, including any partition list this
+			// producer emitted: a later hit replays the result without running
+			// the container that printed the markers, so the entry is the only
+			// place the group's shape can come from.
 			if cacheStore != nil && cacheHash != "" && !taskRun.Quarantine {
-				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun, resolveJobAlias())
+				e.storeCacheEntry(cacheStore, cacheCfg, cacheHash, resolvedImageDigest, hashInputBlob, taskRun, resolveJobAlias(), emitted)
 			} else if taskRun.Quarantine && cacheStore != nil && cacheHash != "" {
 				log.Info("quarantined worker task skipped cache publication", "task_id", taskRun.TaskID, "hash", cacheHash)
 			}
@@ -442,6 +509,68 @@ func (e *runtimeExecutor) loadRunParams(runID uuid.UUID) (map[string]string, err
 	return params, nil
 }
 
+// decodePartitionAttributes decodes the scalar attributes persisted on a fan-out
+// instance row.  A decode failure yields nil rather than an error: the caller is
+// building a cache identity, and a nil map simply means "no attributes" — the
+// same value an unfanned or bare-string partition carries.
+func decodePartitionAttributes(raw []byte) map[string]string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var attrs map[string]string
+	if err := json.Unmarshal(raw, &attrs); err != nil {
+		log.Warn("failed to decode partition attributes", "error", err)
+		return nil
+	}
+	if len(attrs) == 0 {
+		return nil
+	}
+	return attrs
+}
+
+// partitionFromTaskRun rebuilds the normalized partition object from the columns
+// the expansion transaction persisted.  All four fields round-trip, so
+// CAESIUM_PARTITION_JSON in a distributed container is byte-identical to the
+// local lane's — a producer's `dependsOn` and attributes are visible to the
+// container that consumes the partition, not silently dropped on one lane.
+func partitionFromTaskRun(taskRun *models.TaskRun) pkgtask.Partition {
+	part := pkgtask.Partition{
+		Key:         taskRun.PartitionValue,
+		Fingerprint: taskRun.PartitionFingerprint,
+		Attributes:  decodePartitionAttributes(taskRun.PartitionAttributes),
+	}
+	if len(taskRun.PartitionDependsOn) > 0 {
+		var deps []string
+		if err := json.Unmarshal(taskRun.PartitionDependsOn, &deps); err != nil {
+			log.Warn("failed to decode partition dependsOn", "task_id", taskRun.TaskID, "error", err)
+		} else if len(deps) > 0 {
+			part.DependsOn = deps
+		}
+	}
+	return part
+}
+
+// partitionEnv builds the fan-out env vars injected into a fanned instance's
+// container: the partition key under fanOut.env (default CAESIUM_PARTITION) and
+// the normalized object under the fixed CAESIUM_PARTITION_JSON, which validation
+// forbids renaming.  Returns nil for an unfanned task.
+func partitionEnv(taskRun *models.TaskRun, fanOut *jobdefschema.FanOut) map[string]string {
+	if taskRun == nil || taskRun.PartitionValue == "" {
+		return nil
+	}
+	envName := jobdefschema.DefaultFanOutEnv
+	if fanOut != nil && fanOut.Env != "" {
+		envName = fanOut.Env
+	}
+	out := map[string]string{envName: taskRun.PartitionValue}
+	if raw, err := partitionFromTaskRun(taskRun).CanonicalJSON(); err == nil {
+		out[jobdefschema.FanOutPartitionJSONEnv] = string(raw)
+	} else {
+		log.Warn("failed to encode partition object", "task_id", taskRun.TaskID, "error", err)
+	}
+	return out
+}
+
 func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string) map[string]string {
 	env := make(map[string]string, len(params)+2)
 	env["CAESIUM_RUN_ID"] = runID.String()
@@ -452,7 +581,10 @@ func buildRunParamEnv(runID uuid.UUID, jobAlias string, params map[string]string
 	return env
 }
 
-func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor) error {
+// executeTask runs one attempt and returns the partition list the container
+// emitted (nil for a non-producer), which the caller folds into the task's cache
+// entry so a later hit can still expand the group.
+func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskRun, sink CompletionSink, atomSpec container.Spec, runParams map[string]string, jobAlias string, descriptor *models.TaskExecutionDescriptor, fanOut *jobdefschema.FanOut) ([]pkgtask.Partition, error) {
 	taskCtx := ctx
 	cancel := func() {}
 	if e.taskTimeout > 0 {
@@ -466,22 +598,28 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 	engine, err := engineFactory(taskCtx, taskRun.Engine)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	command := parseTaskCommand(taskRun.Command)
 	atomName := fmt.Sprintf("%s-%s", taskRun.TaskID, taskRun.JobRunID)
+	// Fan-out siblings share (TaskID, JobRunID); without the instance identity
+	// every sibling after the first collides on the container name. Mirrors
+	// run.isFanOutInstance.
+	if taskRun.PartitionCount > 1 || (taskRun.PartitionCount > 0 && taskRun.PartitionValue != "") {
+		atomName = fmt.Sprintf("%s-%s", atomName, taskRun.ID)
+	}
 	if taskRun.ClaimAttempt > 0 {
 		atomName = fmt.Sprintf("%s-attempt%d", atomName, taskRun.ClaimAttempt)
 	}
 
 	spec, secretIdentities, err := jobdefruntime.ResolveContainerSpecSecretsWithIdentities(taskCtx, e.secretResolver, atomSpec)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if descriptor != nil && taskRun.Quarantine {
 		if err := replay.VerifyReplaySecretIdentities(taskCtx, e.secretResolver, descriptor.SecretRefs, secretIdentities, spec.Env); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if len(secretIdentities) > 0 && !taskRun.Quarantine {
@@ -489,7 +627,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		for _, resolved := range secretIdentities {
 			refs = append(refs, run.SecretIdentityDescriptorRef(resolved.EnvKey, resolved.Ref, resolved.Identity))
 		}
-		if err := e.store.UpdateTaskExecutionDescriptorSecretRefs(taskRun.JobRunID, taskRun.TaskID, refs); err != nil {
+		if err := e.store.UpdateTaskExecutionDescriptorSecretRefs(taskRun.JobRunID, taskRun.ID, refs); err != nil {
 			log.Warn("failed to persist worker task execution descriptor secret identity", "task_id", taskRun.TaskID, "error", err)
 		}
 	}
@@ -500,8 +638,8 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	}
 	paramEnv := buildRunParamEnv(taskRun.JobRunID, jobAlias, runParams)
 	outputEnv := pkgtask.BuildOutputEnv(predOutputs)
-	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 {
-		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv))
+	if len(spec.Env) > 0 || len(paramEnv) > 0 || len(outputEnv) > 0 || taskRun.PartitionValue != "" {
+		merged := make(map[string]string, len(spec.Env)+len(paramEnv)+len(outputEnv)+2)
 		for k, v := range spec.Env {
 			merged[k] = v
 		}
@@ -509,6 +647,9 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 			merged[k] = v
 		}
 		for k, v := range outputEnv {
+			merged[k] = v
+		}
+		for k, v := range partitionEnv(taskRun, fanOut) {
 			merged[k] = v
 		}
 		spec.Env = merged
@@ -521,16 +662,16 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 		Spec:    spec,
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.TaskID, a.ID(), taskRun.ClaimedBy); err != nil {
-		return err
+	if err := e.store.StartTaskClaimed(taskRun.JobRunID, taskRun.ID, a.ID(), taskRun.ClaimedBy); err != nil {
+		return nil, err
 	}
 
 	finalAtom, monitorErr := e.monitorTask(taskCtx, taskRun, engine, a)
 	if monitorErr != nil {
-		return monitorErr
+		return nil, monitorErr
 	}
 	// monitorTask returns the post-Wait atom snapshot whose Result/State
 	// reflect actual execution. The original `a` from Create() is pre-execution
@@ -540,7 +681,7 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// Capture the raw exit code before Result() folds it into a coarse status and
 	// the incident classifier loses it. Best-effort: a persistence failure must
 	// not fail an otherwise-complete task.
-	if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.TaskID, a.ExitCode()); err != nil {
+	if err := e.store.SetTaskExitCode(taskRun.JobRunID, taskRun.ID, a.ExitCode()); err != nil {
 		log.Warn("failed to persist task exit code", "task_id", taskRun.TaskID, "error", err)
 	}
 
@@ -549,17 +690,23 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// engine.Stop runs, because Stop tears down the underlying container/pod.
 	var taskOutput map[string]string
 	var branchSelections []string
+	var partitions []pkgtask.Partition
 	var logSnapshot *run.TaskLogSnapshot
 	logs, logErr := engine.Logs(&atom.EngineLogsRequest{ID: a.ID()})
 	if logErr == nil {
-		markers, parseErr := pkgtask.CaptureMarkers(logs, pkgtask.MaxLogSnapshotBytes)
+		markers, parseErr := pkgtask.CaptureMarkersWithLimits(logs, pkgtask.MaxLogSnapshotBytes, 0, env.Variables().FanOutMaxPartitions)
 		if closeErr := logs.Close(); closeErr != nil {
 			log.Warn("failed to close log stream", "task_id", taskRun.TaskID, "error", closeErr)
 		}
 		if parseErr != nil {
+			var pe *pkgtask.PartitionError
+			if errors.As(parseErr, &pe) {
+				return nil, parseErr
+			}
 			log.Warn("failed to parse task markers", "task_id", taskRun.TaskID, "error", parseErr)
 		} else if markers != nil {
 			taskOutput = markers.Output
+			partitions = markers.Partitions
 			if len(markers.Branches) > 0 {
 				branchSelections = markers.Branches
 			}
@@ -579,20 +726,26 @@ func (e *runtimeExecutor) executeTask(ctx context.Context, taskRun *models.TaskR
 	// Runtime schema validation: if the task declares an outputSchema and the job has
 	// schemaValidation enabled, validate the actual output against the schema.
 	if err := e.runSchemaValidation(taskRun, taskOutput); err != nil {
-		return err
+		return nil, err
 	}
 
-	if err := sink.Succeeded(ctx, taskRun, string(a.Result()), taskOutput, branchSelections); err != nil {
-		return err
+	if withParts, ok := sink.(interface {
+		SucceededWithPartitions(context.Context, *models.TaskRun, string, map[string]string, []string, []pkgtask.Partition) error
+	}); ok && len(partitions) > 0 {
+		if err := withParts.SucceededWithPartitions(ctx, taskRun, string(a.Result()), taskOutput, branchSelections, partitions); err != nil {
+			return nil, err
+		}
+	} else if err := sink.Succeeded(ctx, taskRun, string(a.Result()), taskOutput, branchSelections); err != nil {
+		return nil, err
 	}
-	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.TaskID, logSnapshot); err != nil {
+	if err := e.store.SaveTaskLogSnapshot(taskRun.JobRunID, taskRun.ID, logSnapshot); err != nil {
 		log.Warn("failed to persist task log snapshot", "task_id", taskRun.TaskID, "error", err)
 	}
 	if !run.IsSuccessfulTaskResult(string(a.Result())) {
-		return fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
+		return partitions, fmt.Errorf("task %s failed with result %q", taskRun.TaskID, a.Result())
 	}
 
-	return nil
+	return partitions, nil
 }
 
 func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output map[string]string) error {
@@ -603,15 +756,18 @@ func (e *runtimeExecutor) runSchemaValidation(taskRun *models.TaskRun, output ma
 }
 
 // storeCacheEntry reads back the completed task run and stores the result in the cache.
-func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun, jobAlias string) {
+func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobdefschema.CacheConfig, hash, resolvedImageDigest string, hashInputBlob []byte, taskRun *models.TaskRun, jobAlias string, partitions []pkgtask.Partition) {
 	if taskRun.Quarantine {
 		log.Info("quarantined worker task suppressed cache store entry", "task_id", taskRun.TaskID, "hash", hash)
 		return
 	}
 
 	// Read back the completed task run to get output and result.
+	// Keyed on the TaskRun primary key: (job_run_id, task_id) names N rows for a
+	// fanned step, so this read would cache an arbitrary sibling's result under
+	// this instance's hash.
 	var completed models.TaskRun
-	if err := e.store.DB().Where("job_run_id = ? AND task_id = ?", taskRun.JobRunID, taskRun.TaskID).First(&completed).Error; err != nil {
+	if err := e.store.DB().Where("id = ?", taskRun.ID).First(&completed).Error; err != nil {
 		log.Warn("cache: failed to read completed task run for caching", "task_id", taskRun.TaskID, "error", err)
 		return
 	}
@@ -667,7 +823,12 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 	} else if effectiveHash := cache.EquivalentPriorHash(hash, output, priors); effectiveHash != hash {
 		metrics.TaskCacheShortCircuitsTotal.WithLabelValues(jobAlias, taskModel.Name).Inc()
 		log.Info("value-verified short-circuit for worker task", "task_id", taskRun.TaskID, "new_hash", hash, "effective_hash", effectiveHash)
-		if scErr := e.store.SetTaskEffectiveHash(taskRun.JobRunID, taskRun.TaskID, effectiveHash); scErr != nil {
+		// Address the INSTANCE, not the catalog task. SetTaskEffectiveHash
+		// resolves its second argument through loadTaskRunByIDOrUnique, so a
+		// catalog task ID naming N fan-out siblings returns ErrAmbiguousTaskRun
+		// and the short-circuit hash is never persisted — silently, because the
+		// failure is only logged. Matches the SetTaskHashWithBlob call above.
+		if scErr := e.store.SetTaskEffectiveHash(taskRun.JobRunID, taskRun.ID, effectiveHash); scErr != nil {
 			log.Warn("short-circuit: failed to persist effective hash", "task_id", taskRun.TaskID, "error", scErr)
 		}
 	}
@@ -683,6 +844,7 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 		TaskRunID:           completed.ID,
 		ResolvedImageDigest: resolvedImageDigest,
 		HashInputBlob:       hashInputBlob,
+		Partitions:          partitions,
 		CreatedAt:           time.Now().UTC(),
 	}
 

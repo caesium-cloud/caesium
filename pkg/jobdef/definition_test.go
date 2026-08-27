@@ -644,6 +644,139 @@ steps:
       resource: api
       units: -1
 `,
+		"fanOut unknown from": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: missing, maxPartitions: 10}
+`,
+		"fanOut from not predecessor": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: other
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: other, maxPartitions: 10}
+`,
+		"fanOut chained": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: list, maxPartitions: 10}
+    next: [inner]
+  - name: inner
+    image: alpine:3.23
+    dependsOn: [process]
+    fanOut: {from: process, maxPartitions: 10}
+`,
+		"fanOut on branch": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+    next: [choose]
+  - name: choose
+    type: branch
+    image: alpine:3.23
+    dependsOn: [list]
+    next: [a]
+    fanOut: {from: list, maxPartitions: 10}
+  - name: a
+    image: alpine:3.23
+    dependsOn: [choose]
+`,
+		"fanOut over-cap maxPartitions": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: list, maxPartitions: 1025}
+`,
+		"fanOut reserved env": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: list, maxPartitions: 10, env: CAESIUM_OUTPUT_LIST_X}
+`,
+		"fanOut partition json env": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: list, maxPartitions: 10, env: CAESIUM_PARTITION_JSON}
+`,
+		"fanOut missing maxPartitions": `apiVersion: v1
+kind: Job
+metadata:
+  alias: test
+trigger:
+  type: cron
+  configuration: {cron: "* * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut: {from: list}
+`,
 	}
 
 	for name, src := range cases {
@@ -717,6 +850,39 @@ steps:
 // engine reads to stamp the kueue.x-k8s.io/queue-name label), and that a docker
 // step is unaffected. Validation already rejects kueue on non-kubernetes steps;
 // here a queue-only kubernetes step must still materialize a KubernetesSpec.
+func TestFanOutValidDefinition(t *testing.T) {
+	src := `
+apiVersion: v1
+kind: Job
+metadata:
+  alias: fanout-valid
+trigger:
+  type: cron
+  configuration: {cron: "0 * * * *"}
+steps:
+  - name: list
+    image: alpine:3.23
+    next: [process]
+  - name: process
+    image: alpine:3.23
+    dependsOn: [list]
+    fanOut:
+      from: list
+      maxPartitions: 32
+      maxParallel: 4
+      onEmpty: skip
+      failurePolicy: continue
+`
+	def, err := Parse([]byte(src))
+	require.NoError(t, err)
+	require.NotNil(t, def.Steps[1].FanOut)
+	require.Equal(t, "list", def.Steps[1].FanOut.From)
+	require.Equal(t, DefaultFanOutEnv, def.Steps[1].FanOut.Env)
+	require.Equal(t, 32, def.Steps[1].FanOut.MaxPartitions)
+	require.Equal(t, FanOutOnEmptySkip, def.Steps[1].FanOut.OnEmpty)
+	require.Equal(t, FanOutFailureContinue, def.Steps[1].FanOut.FailurePolicy)
+}
+
 func TestKueueDelegationRuntimeSpec(t *testing.T) {
 	src := `
 apiVersion: v1

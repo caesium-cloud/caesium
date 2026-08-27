@@ -33,6 +33,7 @@ import (
 	"github.com/caesium-cloud/caesium/internal/run"
 	"github.com/caesium-cloud/caesium/pkg/dqlite"
 	"github.com/caesium-cloud/caesium/pkg/log"
+	pkgtask "github.com/caesium-cloud/caesium/pkg/task"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
@@ -109,8 +110,12 @@ var ValidCompleteStatuses = map[string]bool{
 // DispatchRequest is the envelope pushed by the owner to a worker to ask it
 // to execute a specific task.
 type DispatchRequest struct {
-	RunID           uuid.UUID `json:"run_id"`
-	TaskID          uuid.UUID `json:"task_id"`
+	RunID  uuid.UUID `json:"run_id"`
+	TaskID uuid.UUID `json:"task_id"`
+	// TaskRunID identifies the specific instance. Empty on older workers;
+	// the owner falls back to the unique (run, task) row and rejects
+	// ambiguity when more than one instance exists.
+	TaskRunID       uuid.UUID `json:"task_run_id,omitempty"`
 	OwnerGeneration int64     `json:"owner_generation"`
 	Attempt         int       `json:"attempt"`
 	WorkerNode      string    `json:"worker_node"`
@@ -128,6 +133,7 @@ type DispatchRequest struct {
 type CompleteRequest struct {
 	RunID           uuid.UUID         `json:"run_id"`
 	TaskID          uuid.UUID         `json:"task_id"`
+	TaskRunID       uuid.UUID         `json:"task_run_id,omitempty"`
 	OwnerGeneration int64             `json:"owner_generation"`
 	Attempt         int               `json:"attempt"`
 	WorkerNode      string            `json:"worker_node"`
@@ -138,7 +144,10 @@ type CompleteRequest struct {
 	// task chose at runtime. The owner uses this to propagate `skipped` to the
 	// non-selected branches. Empty for non-branch tasks.
 	BranchSelections []string `json:"branch_selections,omitempty"`
-	Error            string   `json:"error,omitempty"`
+	// Partitions is the producer's parsed partition list. Empty for non-producers
+	// and for older workers (the owner then treats the group as unfanned).
+	Partitions []pkgtask.Partition `json:"partitions,omitempty"`
+	Error      string              `json:"error,omitempty"`
 }
 
 // CompleteResponse is the JSON body returned by /internal/complete.
@@ -313,7 +322,7 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// outstanding_predecessors counter is intentionally stale), so trust the
 	// owner's readiness decision rather than re-checking it here.
 	trustOwnerReadiness := h.ownerManager != nil
-	if err := h.store.ClaimTaskForDispatch(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
+	if err := h.store.ClaimTaskForDispatch(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration, ttl, trustOwnerReadiness); err != nil {
 		if err == run.ErrTaskClaimMismatch {
 			writeJSON(w, http.StatusConflict, ErrorResponse{
 				Code:    ReasonTaskNotRunning,
@@ -336,7 +345,7 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	// Load the full task row to execute (image/command/engine/etc.).  If the
 	// row vanished between claim and load (reclaimed by another node in the
 	// race window), roll back and reject.
-	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, req.TaskID, h.nodeID)
+	taskRun, err := h.store.LoadDispatchedTaskRun(req.RunID, dispatchTaskRef(req), h.nodeID)
 	if err != nil {
 		h.rollbackClaim(req)
 		// Surface the underlying error rather than dropping it: a missing row is
@@ -382,12 +391,26 @@ func (h *Handler) HandleDispatch(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// dispatchTaskRef is the row this dispatch addresses.  The claim, the load, and
+// the rollback must all resolve the *same* row, and for a fanned step the
+// catalog task id names N of them: every one of ClaimTaskForDispatch /
+// LoadDispatchedTaskRun / ReleaseTaskClaim resolves through
+// loadTaskRunByIDOrUnique, which rejects that ambiguity rather than picking a
+// sibling.  An older owner omits TaskRunID, and the catalog id then still names
+// exactly one row (the rolling-upgrade fallback).
+func dispatchTaskRef(req DispatchRequest) uuid.UUID {
+	if req.TaskRunID != uuid.Nil {
+		return req.TaskRunID
+	}
+	return req.TaskID
+}
+
 // rollbackClaim reverts a just-claimed task back to the dispatchable pending
 // state so the owner re-dispatches it.  Logged but not surfaced to the caller
 // beyond the 409 the caller already returns; a failed rollback is rare (the
 // claim lease still expires and ClaimNext recovery covers it).
 func (h *Handler) rollbackClaim(req DispatchRequest) {
-	if err := h.store.ReleaseTaskClaim(req.RunID, req.TaskID, h.nodeID, req.OwnerGeneration); err != nil {
+	if err := h.store.ReleaseTaskClaim(req.RunID, dispatchTaskRef(req), h.nodeID, req.OwnerGeneration); err != nil {
 		log.Error("dispatch: failed to roll back claim after worker rejected task",
 			"run_id", req.RunID,
 			"task_id", req.TaskID,
@@ -484,9 +507,9 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	// (no per-transition SQL advancement).  A run not tracked here (Owned=false)
 	// falls through to the SQL path below as a safety net.
 	if h.ownerManager != nil {
-		res, omErr := h.ownerManager.Complete(
-			req.RunID, req.TaskID, run.TaskStatus(req.Status),
-			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections,
+		res, omErr := h.ownerManager.CompleteInstance(
+			req.RunID, req.TaskID, req.TaskRunID, run.TaskStatus(req.Status),
+			req.Result, req.Error, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions,
 		)
 		if omErr != nil {
 			if dqlite.IsContentionError(omErr) {
@@ -524,9 +547,17 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	case run.TaskStatusSucceeded, run.TaskStatusFailed:
 		var applyErr error
 		if run.TaskStatus(req.Status) == run.TaskStatusSucceeded {
-			applyErr = h.store.CompleteTaskClaimed(req.RunID, req.TaskID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+			completeID := req.TaskID
+			if req.TaskRunID != uuid.Nil {
+				completeID = req.TaskRunID
+			}
+			applyErr = h.store.CompleteTaskClaimedWithPartitions(req.RunID, completeID, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
 		} else {
-			applyErr = h.store.FailTaskClaimed(req.RunID, req.TaskID, fmt.Errorf("%s", req.Error), req.WorkerNode)
+			failID := req.TaskID
+			if req.TaskRunID != uuid.Nil {
+				failID = req.TaskRunID
+			}
+			applyErr = h.store.FailTaskClaimed(req.RunID, failID, fmt.Errorf("%s", req.Error), req.WorkerNode)
 		}
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
@@ -556,7 +587,20 @@ func (h *Handler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	case run.TaskStatusCached:
 		source := run.CacheHitSource{RunID: req.RunID}
-		applyErr := h.store.CacheHitTaskClaimed(req.RunID, req.TaskID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+		cacheID := req.TaskID
+		if req.TaskRunID != uuid.Nil {
+			cacheID = req.TaskRunID
+		}
+		// A cached fan-out producer still carries its partition list, and the SQL
+		// lane expands the group inside the cache-hit transaction. Called
+		// directly so removing the store method is a build error, never a
+		// silently un-expanded group.
+		var applyErr error
+		if len(req.Partitions) > 0 {
+			applyErr = h.store.CacheHitTaskClaimedWithPartitions(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections, req.Partitions)
+		} else {
+			applyErr = h.store.CacheHitTaskClaimed(req.RunID, cacheID, source, req.Result, req.WorkerNode, req.Outputs, req.BranchSelections)
+		}
 		if applyErr == run.ErrTaskClaimMismatch {
 			recordRejected(ReasonWrongWorker)
 			writeJSON(w, http.StatusConflict, ErrorResponse{

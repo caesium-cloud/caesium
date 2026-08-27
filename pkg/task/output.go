@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -364,6 +366,7 @@ func ParseBranches(logs io.Reader) ([]string, error) {
 type Markers struct {
 	Output       map[string]string
 	Branches     []string
+	Partitions   []Partition
 	LogText      string
 	LogTruncated bool
 }
@@ -373,7 +376,13 @@ type Markers struct {
 // markers.  This is more memory-efficient than calling ParseOutput and
 // ParseBranches separately, as it avoids buffering the entire log stream.
 func ParseMarkers(logs io.Reader) (*Markers, error) {
-	return parseMarkers(logs, nil, 0)
+	return parseMarkers(logs, nil, 0, 0)
+}
+
+// ParseMarkersWithLimits is ParseMarkers plus operator/executor caps on
+// large-object references and the partition count.
+func ParseMarkersWithLimits(logs io.Reader, maxRefBytes int64, maxPartitions int) (*Markers, error) {
+	return parseMarkers(logs, nil, maxRefBytes, maxPartitions)
 }
 
 // CaptureMarkers reads container log output in a single pass, extracting
@@ -389,12 +398,18 @@ func CaptureMarkers(logs io.Reader, maxSnapshotBytes int) (*Markers, error) {
 // cap is dropped (the producer's other outputs still apply); see
 // env.Environment.OutputRefMaxBytes for the rationale.
 func CaptureMarkersWithRefLimit(logs io.Reader, maxSnapshotBytes int, maxRefBytes int64) (*Markers, error) {
+	return CaptureMarkersWithLimits(logs, maxSnapshotBytes, maxRefBytes, 0)
+}
+
+// CaptureMarkersWithLimits is CaptureMarkersWithRefLimit plus the executor's
+// effective partition count cap.
+func CaptureMarkersWithLimits(logs io.Reader, maxSnapshotBytes int, maxRefBytes int64, maxPartitions int) (*Markers, error) {
 	if maxSnapshotBytes <= 0 {
-		return parseMarkers(logs, nil, maxRefBytes)
+		return parseMarkers(logs, nil, maxRefBytes, maxPartitions)
 	}
 
 	snapshot := &boundedSnapshotWriter{limit: maxSnapshotBytes}
-	result, err := parseMarkers(logs, snapshot, maxRefBytes)
+	result, err := parseMarkers(logs, snapshot, maxRefBytes, maxPartitions)
 	if err != nil {
 		return nil, err
 	}
@@ -405,10 +420,11 @@ func CaptureMarkersWithRefLimit(logs io.Reader, maxSnapshotBytes int, maxRefByte
 	return result, nil
 }
 
-func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Markers, error) {
+func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64, maxPartitions int) (*Markers, error) {
 	output := make(map[string]string)
 	var branches []string
 	branchSeen := make(map[string]struct{})
+	acc := newPartitionAccumulator(maxPartitions)
 
 	reader := logs
 	if snapshot != nil {
@@ -444,6 +460,18 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Marke
 			}
 		}
 
+		if idx := strings.Index(line, partitionsMarker); idx >= 0 {
+			payload := strings.TrimSpace(line[idx+len(partitionsMarker):])
+			if err := parsePartitionsArrayLine(payload, acc); err != nil {
+				return nil, asPartitionError(err)
+			}
+		} else if idx := strings.Index(line, partitionMarker); idx >= 0 {
+			payload := line[idx+len(partitionMarker):]
+			if err := parsePartitionLine(payload, acc); err != nil {
+				return nil, asPartitionError(err)
+			}
+		}
+
 		// Check for branch marker (same line could theoretically match both,
 		// but in practice markers are distinct).
 		if idx := strings.Index(line, branchMarker); idx >= 0 {
@@ -476,6 +504,11 @@ func parseMarkers(logs io.Reader, snapshot io.Writer, maxRefBytes int64) (*Marke
 	}
 
 	result.Branches = branches
+	parts, err := acc.finish()
+	if err != nil {
+		return nil, err
+	}
+	result.Partitions = parts
 	return result, nil
 }
 
@@ -573,4 +606,52 @@ func BuildOutputEnv(predecessorOutputs map[string]map[string]string) map[string]
 		return nil
 	}
 	return env
+}
+
+// AggregateFanInOutputs folds per-partition instance outputs into the fan-in
+// contract: each scalar key becomes a JSON object keyed by partition value,
+// plus synthetic _PARTITION_COUNT / _SUCCEEDED / _FAILED.
+func AggregateFanInOutputs(byPartition map[string]map[string]string, succeeded, failed int) map[string]string {
+	if len(byPartition) == 0 {
+		return map[string]string{
+			"PARTITION_COUNT": strconv.Itoa(succeeded + failed),
+			"SUCCEEDED":       strconv.Itoa(succeeded),
+			"FAILED":          strconv.Itoa(failed),
+		}
+	}
+	keys := map[string]struct{}{}
+	partKeys := make([]string, 0, len(byPartition))
+	for p, outs := range byPartition {
+		partKeys = append(partKeys, p)
+		for k := range outs {
+			keys[k] = struct{}{}
+		}
+	}
+	sort.Strings(partKeys)
+	out := make(map[string]string, len(keys)+3)
+	for key := range keys {
+		obj := make(map[string]string, len(partKeys))
+		for _, p := range partKeys {
+			if v, ok := byPartition[p][key]; ok {
+				obj[p] = v
+			}
+		}
+		encoded, err := json.Marshal(obj)
+		if err != nil {
+			continue
+		}
+		out[key] = string(encoded)
+	}
+	out["PARTITION_COUNT"] = strconv.Itoa(len(byPartition))
+	out["SUCCEEDED"] = strconv.Itoa(succeeded)
+	out["FAILED"] = strconv.Itoa(failed)
+	encoded, err := json.Marshal(out)
+	if err == nil && len(encoded) > MaxOutputBytes {
+		return map[string]string{
+			"PARTITION_COUNT": strconv.Itoa(len(byPartition)),
+			"SUCCEEDED":       strconv.Itoa(succeeded),
+			"FAILED":          strconv.Itoa(failed),
+		}
+	}
+	return out
 }

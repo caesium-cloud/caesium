@@ -89,6 +89,9 @@ type HashInputBlob struct {
 	PredecessorHashes    []string                     `json:"predecessorHashes,omitempty"`
 	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
 	RunParams            map[string]string            `json:"runParams,omitempty"`
+	Partition            string                       `json:"partition,omitempty"`
+	PartitionFingerprint string                       `json:"partitionFingerprint,omitempty"`
+	PartitionAttributes  map[string]string            `json:"partitionAttributes,omitempty"`
 	CacheVersion         int                          `json:"cacheVersion"`
 
 	// Oversized is set (with Digest/EnvCount/PredecessorOutputCount populated
@@ -172,6 +175,9 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		PredecessorHashes:    sortedCopy(h.PredecessorHashes),
 		PredecessorOutputs:   h.PredecessorOutputs,
 		RunParams:            h.RunParams,
+		Partition:            h.Partition,
+		PartitionFingerprint: h.PartitionFingerprint,
+		PartitionAttributes:  h.PartitionAttributes,
 		CacheVersion:         h.CacheVersion,
 	}
 
@@ -283,7 +289,16 @@ type HashInput struct {
 	PredecessorHashes    []string
 	PredecessorOutputs   map[string]map[string]string
 	RunParams            map[string]string
-	CacheVersion         int
+	// Partition is the instance key. Hashed only when non-empty so unfanned
+	// tasks and pre-fan-out hashes stay byte-identical (no CacheVersion bump).
+	Partition string
+	// PartitionFingerprint is the optional per-unit content address.
+	// Hashed only when non-empty. dependsOn is NOT hashed.
+	PartitionFingerprint string
+	// PartitionAttributes are free-form scalar attributes, hashed with sorted
+	// keys only when the map is non-empty.
+	PartitionAttributes map[string]string
+	CacheVersion        int
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
@@ -391,6 +406,23 @@ func (h HashInput) Compute() string {
 	sort.Strings(paramKeys)
 	for _, k := range paramKeys {
 		w(digest, "param:%s=%s\n", k, h.RunParams[k])
+	}
+
+	if h.Partition != "" {
+		w(digest, "partition:%s\n", h.Partition)
+	}
+	if h.PartitionFingerprint != "" {
+		w(digest, "partition_fingerprint:%s\n", h.PartitionFingerprint)
+	}
+	if len(h.PartitionAttributes) > 0 {
+		attrKeys := make([]string, 0, len(h.PartitionAttributes))
+		for k := range h.PartitionAttributes {
+			attrKeys = append(attrKeys, k)
+		}
+		sort.Strings(attrKeys)
+		for _, k := range attrKeys {
+			w(digest, "partition_attr:%s=%s\n", k, h.PartitionAttributes[k])
+		}
 	}
 
 	w(digest, "cache_version:%d\n", h.CacheVersion)

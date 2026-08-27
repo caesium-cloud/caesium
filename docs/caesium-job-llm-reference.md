@@ -159,6 +159,7 @@ steps:
 | `datasets` | object | no | Freshness and contract surface: `consumes` (dataset names or `{name, schema}` objects) and `produces` (datasets with `freshness`/`maxStaleness`/`watermark` SLOs plus optional `schema`/`schemaFrom`/`version`). Excluded from the cache hash. See [Datasets & Freshness](#datasets--freshness-opt-in) |
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
+| `fanOut` | object | no | Materialize N parallel instances from a predecessor's `##caesium::partitions` marker: `{from, env?, maxPartitions, maxParallel?, onEmpty?, failurePolicy?}`. Scheduling metadata — excluded from the cache hash. Each instance gets `$CAESIUM_PARTITION` and `$CAESIUM_PARTITION_JSON`. `dependsOn` on a partition object is a scheduling instruction, not data. |
 | `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
@@ -346,6 +347,26 @@ $CAESIUM_OUTPUT_<STEP_NAME>_<KEY>
 ```
 
 Keys are uppercased: `row_count` → `ROW_COUNT`, step name `extract` → `EXTRACT`.
+
+### Dynamic fan-out
+
+A producer emits a partition list; a downstream step with `fanOut` materializes N instances:
+
+```sh
+echo '##caesium::partitions ["2026-07-01","2026-07-02"]'
+echo '##caesium::partitions [{"key":"dim_customer","fingerprint":"sha256:796463f964d8191727cb1126593e42a46ce2c032c3ed4daabb05f2db6dcdca2a","dependsOn":[]}]'
+echo '##caesium::partition 2026-07-01'
+```
+
+Each instance sees `$CAESIUM_PARTITION` (or `fanOut.env`) and `$CAESIUM_PARTITION_JSON` (the normalized object). `dependsOn` is a scheduling instruction — a container must not derive data behavior from it. Overflow, cycles, dangling `dependsOn`, and conflicting duplicate keys fail the producer (named key) and insert zero instance rows.
+
+Causal tooling is fan-out aware — each verb answers about the group or names one instance, never an arbitrary sibling:
+
+- `caesium why <run> --task <t>` on a fanned step returns a **group summary** (`partitionCount`, `statusCounts`, `cacheHits`, `partitions[]` capped at 50 + `partitionsTruncated`, `firstFailure{partition,partitionIndex,taskRunId,status,attempt,error}`, `baseline.kind: "per_partition"`); `--partition <value>` (`GET .../why?task=<t>&partition=<v>`) returns the full single-instance explanation (`partition`, `taskRunId`); an unknown value 404s listing available partitions.
+- `GET .../runs/:run_id/logs?task_id=<uuid>` on a fanned task with no selector → `400` `{message, partition_count, instances:[{task_run_id,partition,partition_index,status}]}`; select with `&task_run_id=<uuid>` or `&partition=<value>`; responses carry `X-Caesium-Task-Run-ID`/`X-Caesium-Partition` headers.
+- `caesium receipt get` attests one entry per instance (`partition` key, label `step[value]`); no partition filter by design (it would change what the digest covers).
+- `caesium run diff` aligns instances by partition value (never index): `Partitions added:`/`Partitions removed:` lines, a `PARTITION` column when any row has one, per-row `step[value] changes` blocks; `--json` carries `partition`, `partitionsAdded`, `partitionsRemoved`.
+- `caesium run replay` refuses a fanned baseline (`409` — its instance set is a runtime property of the producer's output) and points at `caesium run partitions` instead.
 
 ### Declaring Schemas
 

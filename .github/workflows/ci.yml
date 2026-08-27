@@ -182,6 +182,25 @@ jobs:
       - name: Distributed integration tests (amd64)
         run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-distributed
 
+  build-and-integration-test-owner-memory:
+    needs: builder
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@just
+      - uses: docker/setup-docker-action@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: builder-amd64
+          path: /tmp
+      - name: Load builder images
+        run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      - name: Build release image (amd64)
+        run: just tag=${{ env.IMAGE_TAG }}-amd64 build
+      - name: Owner in-memory fan-out integration tests (amd64)
+        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-owner-memory
+
   build-and-integration-test-agent-auth:
     needs: builder
     runs-on: ubuntu-24.04
@@ -552,6 +571,7 @@ jobs:
       - ui-e2e-auth
       - build-and-integration-test
       - build-and-integration-test-distributed
+      - build-and-integration-test-owner-memory
       - build-and-integration-test-agent-auth
       - build-and-integration-test-arm64
       - helm-lint
