@@ -659,13 +659,24 @@ renders the summary and shows the reference.
       `lint`, a `pack-test` step in `unit-test`, and the new job in
       `publish`'s `needs`.
 
-- [ ] H-2. Publish the pack images. Extend the `publish` job to build and push
+- [x] H-2. Publish the pack images. Extend the `publish` job to build and push
       multi-arch manifests for `caesiumcloud/git-source`, `tf-discover`,
       `tf-warm`, `tf-runner` with the same tag scheme as `caesiumcloud/caesium`,
       and pin `TF_VERSION` in one place (the Dockerfile ARG default, surfaced as
       a justfile variable). Files: `.github/workflows/ci.yml`, `justfile`,
       `build/Dockerfile.pack`.
       Depends on: H-1.
+      > `TF_VERSION`/`TF_DIST` pinning (Dockerfile ARG default + `tf_version`/
+      > `tf_dist` justfile vars) already landed with H-1 (W1-β) — no further
+      > change needed there. This item adds arm64 pack-image build/save/upload
+      > steps to `build-and-integration-test-arm64` (amd64 pack images already
+      > come out of `build-and-integration-test-infra`'s existing
+      > `integration-test-infra` → `build-pack` chain) and a "Push pack
+      > multi-arch manifests" step in `publish` that mirrors the existing
+      > `caesium` push/manifest step exactly, looping over the four roles.
+      > Could not be exercised locally (no Docker Hub credentials / tag push in
+      > this environment); validated via YAML parse + `actionlint` (zero new
+      > findings) and `just build-pack` for the host arch.
 
 #### Deferred (harness)
 
