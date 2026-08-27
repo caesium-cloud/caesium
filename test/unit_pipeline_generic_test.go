@@ -153,7 +153,7 @@ func (s *IntegrationTestSuite) TestGenericUnitPipelineCachesPerUnit() {
 
 	manifest := unitPipelineManifest(alias, "sha-a-1", "sha-b-1", "endpoint-v1")
 	// The genericity guarantee, asserted rather than merely intended: this
-	// binding is five shell contracts over alpine. If a pack image ever leaks
+	// binding is five shell contracts over alpine:3.23 images; if a pack image leaks
 	// into this fixture the test stops proving the pattern is tool-agnostic.
 	s.Require().NotContains(manifest, "caesiumcloud/",
 		"the generic binding must never reference a pack image")

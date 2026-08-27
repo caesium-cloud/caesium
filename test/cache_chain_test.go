@@ -12,7 +12,7 @@ import (
 
 // cache_chain_test.go drives `cache.chain: values` and `cache.ttl: never`
 // through the real surface (infra-deploy A5): the live server, the real CLI
-// binary, and an ordinary alpine pipeline with no Terraform anywhere.
+// binary, and an ordinary alpine:3.23 pipeline with no Terraform anywhere.
 //
 // The behaviour under test is the one the whole feature exists for. A shared
 // upstream step's identity hash is computed BEFORE it runs, so it can only
