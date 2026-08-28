@@ -44,6 +44,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/terraform-exec/tfexec"
 
@@ -182,9 +183,17 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	mirrorDir := filepath.Join(cfg.CacheDir, "providers", key)
 
 	if _, err := os.Stat(marker); err == nil {
-		_, _ = fmt.Fprintf(logOut, "%s: mirror %s already warm (%d lock files, %d providers); nothing to do\n",
+		_, _ = fmt.Fprintf(logOut, "%s: mirror %s already warm (%d lock files, %d providers)\n",
 			roleName, key, len(lockPaths), len(providers))
-		return nil
+		// The mirror is content-addressed per key, but the CLI configuration
+		// that POINTS at one is a single fixed filename. Two jobs sharing a
+		// cache volume with different provider sets -- the deploy + drift
+		// topology design §6.6 prescribes, whose sparse checkouts need not
+		// match -- each rewrite it. Returning here without re-asserting the file
+		// would leave a warm that found its own marker pointing consumers at
+		// another key's mirror, so every init fails offline with a diagnosis
+		// that points nowhere near the cause. Re-asserting is idempotent.
+		return ensureTerraformRC(cfg, key, logOut)
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("check warm marker %s: %w", marker, err)
 	}
@@ -192,17 +201,28 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	_, _ = fmt.Fprintf(logOut, "%s: mirroring %d providers for %v into %s (key %s)\n",
 		roleName, len(providers), cfg.Platforms, mirrorDir, key)
 
-	staging := filepath.Join(cfg.CacheDir, "providers.tmp."+key)
-	// A staging directory left by a killed warm is scratch by construction: it
-	// is never read by anything (only the renamed, keyed directory is), so
-	// clearing it is safe and keeps a half-populated mirror from being promoted.
-	if err := os.RemoveAll(staging); err != nil {
-		return fmt.Errorf("clear staging directory %s: %w", staging, err)
-	}
-	if err := os.MkdirAll(staging, 0o755); err != nil {
-		return fmt.Errorf("create staging directory %s: %w", staging, err)
+	// The staging directory is per-PROCESS, not per-key.
+	//
+	// Design §3.5 and §6.3 both justify having no named lock by saying that
+	// concurrent warms of one key are benign, because the write is
+	// content-addressed and promoted by an atomic rename. A staging path derived
+	// from the key alone breaks precisely that: two warms of the same key share
+	// one directory, and the second one clearing it mid-flight leaves the first
+	// to finish `providers mirror` successfully, promote a directory missing a
+	// package, and drop a marker vouching for it. Every later run then exits
+	// fast on that marker and every consuming `init` fails offline, until a
+	// human deletes it. The marker is the thing that lies, which is the failure
+	// the self-healing design exists to eliminate. MkdirTemp gives each process
+	// its own directory, so two warms can only race at the rename below, where
+	// the adoption path already handles it.
+	staging, err := os.MkdirTemp(cfg.CacheDir, "providers.tmp."+key+".")
+	if err != nil {
+		return fmt.Errorf("create staging directory in %s: %w", cfg.CacheDir, err)
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
+	// Swept by AGE, never unconditionally: another process's staging directory
+	// may be a mirror in flight.
+	sweepStaleStaging(cfg.CacheDir, staging, logOut)
 
 	if err := mirrorProviders(ctx, cfg, providers, staging, logOut); err != nil {
 		return err
@@ -221,8 +241,7 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 		_, _ = fmt.Fprintf(logOut, "%s: mirror %s was populated concurrently; adopting it\n", roleName, key)
 	}
 
-	consumerMirror := filepath.Join(cfg.MountPath, "providers", key)
-	if err := writeFileAtomic(filepath.Join(cfg.CacheDir, "terraformrc"), []byte(tf.TerraformRC(consumerMirror)), 0o644); err != nil {
+	if err := ensureTerraformRC(cfg, key, logOut); err != nil {
 		return err
 	}
 
@@ -236,8 +255,73 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 		return err
 	}
 
-	_, _ = fmt.Fprintf(logOut, "%s: mirror %s ready at %s\n", roleName, key, consumerMirror)
+	_, _ = fmt.Fprintf(logOut, "%s: mirror %s ready at %s\n", roleName, key, consumerMirrorPath(cfg, key))
 	return nil
+}
+
+// consumerMirrorPath is the mirror directory as CONSUMING containers resolve it.
+func consumerMirrorPath(cfg config, key string) string {
+	return filepath.Join(cfg.MountPath, "providers", key)
+}
+
+// ensureTerraformRC writes the CLI configuration unless it already names exactly
+// this mirror.
+//
+// KNOWN LIMITATION: the file is a single global slot. A cache volume shared by
+// two jobs whose provider sets differ serves whichever warm ran last; this
+// function guarantees only that a warm which RUNS leaves the file pointing at
+// its own key, including on the marker fast path. Making it robust needs a
+// per-key path (`providers/<key>/terraformrc`) that a manifest's
+// TF_CLI_CONFIG_FILE addresses, which is a manifest-facing change rather than a
+// role-internal one. Until then the supported topology is one cache volume per
+// provider set.
+func ensureTerraformRC(cfg config, key string, logOut io.Writer) error {
+	path := filepath.Join(cfg.CacheDir, "terraformrc")
+	want := tf.TerraformRC(consumerMirrorPath(cfg, key))
+
+	current, err := os.ReadFile(path) //nolint:gosec // path derived from CACHE_DIR.
+	switch {
+	case err == nil && string(current) == want:
+		return nil
+	case err == nil:
+		_, _ = fmt.Fprintf(logOut, "%s: %s named a different mirror; re-pointing it at %s\n",
+			roleName, path, consumerMirrorPath(cfg, key))
+	case !errors.Is(err, fs.ErrNotExist):
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	return writeFileAtomic(path, []byte(want), 0o644)
+}
+
+// stagingMaxAge is how long an abandoned staging directory is left alone. It is
+// generously longer than any real `providers mirror` run, because deleting a
+// SIBLING'S in-flight mirror is the failure this sweep exists to avoid and a
+// leaked scratch directory is only wasted bytes.
+const stagingMaxAge = 6 * time.Hour
+
+// sweepStaleStaging removes staging directories abandoned by killed warms: only
+// those older than stagingMaxAge, and never our own.
+func sweepStaleStaging(cacheDir, own string, logOut io.Writer) {
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-stagingMaxAge)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "providers.tmp.") {
+			continue
+		}
+		path := filepath.Join(cacheDir, entry.Name())
+		if path == own {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.RemoveAll(path); err == nil {
+			_, _ = fmt.Fprintf(logOut, "%s: swept abandoned staging directory %s\n", roleName, path)
+		}
+	}
 }
 
 // mirrorProviders runs `terraform providers mirror` into target.

@@ -38,11 +38,27 @@ type ResourceChange struct {
 // "no changes" from "this key was omitted" is a renderer that will eventually
 // show an empty panel for a real plan.
 type Summary struct {
-	Add     int `json:"add"`
-	Change  int `json:"change"`
-	Destroy int `json:"destroy"`
-	Replace int `json:"replace"`
-	Import  int `json:"import"`
+	// Changes is Terraform's OWN answer to "would this plan do anything",
+	// carried verbatim from `plan -detailed-exitcode`.
+	//
+	// Without it the question is decided twice by two mechanisms: tf-plan gates
+	// the artifact and the branch marker on Terraform's boolean, while tf-apply
+	// gates whether to invoke Terraform on the counts below. The counts are
+	// derived by actionLabel, which deliberately does not count an action set it
+	// does not recognise — so the day Terraform introduces one, a plan Terraform
+	// called non-empty arrives at an apply that reads all zeros, logs "proposed
+	// no changes", never invokes Terraform, and the run is GREEN. That is the
+	// cardinal failure (design §8): a green run that deployed nothing.
+	//
+	// A pointer so a proposal written before this field existed decodes as nil
+	// and falls back to the counts, rather than decoding as false and skipping
+	// an apply that should run.
+	Changes *bool `json:"changes,omitempty"`
+	Add     int   `json:"add"`
+	Change  int   `json:"change"`
+	Destroy int   `json:"destroy"`
+	Replace int   `json:"replace"`
+	Import  int   `json:"import"`
 	// Outputs counts root-module output changes.
 	//
 	// It is a first-class count, not a detail. A plan whose only change is an
@@ -65,7 +81,19 @@ type Summary struct {
 // the presence of a file would be a decision derived from the filesystem rather
 // than from the proposal that was actually reviewed.
 func (s Summary) HasChanges() bool {
+	// Terraform's own answer wins whenever the producer recorded it. The counts
+	// are a summary FOR PEOPLE; they must never be the thing that decides
+	// whether infrastructure is touched.
+	if s.Changes != nil {
+		return *s.Changes
+	}
 	return s.Add+s.Change+s.Destroy+s.Replace+s.Import+s.Outputs > 0
+}
+
+// WithChanges records Terraform's own -detailed-exitcode answer on the summary.
+func (s Summary) WithChanges(changes bool) Summary {
+	s.Changes = &changes
+	return s
 }
 
 // Encode renders the summary as the JSON string the marker carries.

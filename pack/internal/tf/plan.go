@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -180,9 +181,43 @@ func (r *Runner) ShowPlanFile(ctx context.Context, path string) (*tfjson.Plan, e
 
 	plan, err := r.tf.ShowPlanFile(ctx, path)
 	if err != nil {
-		return nil, fmt.Errorf("terraform show %s: %w", path, err)
+		return nil, sanitizeDecodeError(fmt.Sprintf("terraform show %s", path), err)
 	}
 	return plan, nil
+}
+
+// sanitizeDecodeError replaces an encoding/json failure with a payload-free
+// message, leaving every other error untouched.
+//
+// terraform-exec's JSON commands end in a bare `json.Decoder.Decode`, so a
+// response the decoder dislikes surfaces as an encoding/json error — and
+// json.UnmarshalTypeError carries the offending VALUE in its Value field for
+// numbers, while a future encoding/json is free to carry more. That error then
+// flows to Emitter.FailClosed, to stderr, and into the persisted task log. It is
+// the same leak shape as teeing the raw response into the log, one layer down,
+// and against `terraform output -json` — which prints sensitive values in full —
+// it would defeat the withholding this package does immediately afterwards.
+//
+// Offsets and struct-field paths are kept: they are what makes the failure
+// diagnosable, and neither is a value.
+func sanitizeDecodeError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return fmt.Errorf("%s: response is not valid JSON (syntax error at byte offset %d)", op, syntaxErr.Offset)
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		field := typeErr.Field
+		if field == "" {
+			field = "(root)"
+		}
+		return fmt.Errorf("%s: response has an unexpected shape for field %q at byte offset %d "+
+			"(value withheld: it may be sensitive)", op, field, typeErr.Offset)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // Apply applies exactly the saved plan at path — never a fresh plan computed at
@@ -209,7 +244,7 @@ func (r *Runner) Outputs(ctx context.Context) (map[string]tfexec.OutputMeta, err
 
 	outputs, err := r.tf.Output(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("terraform output in %s: %w", r.root, err)
+		return nil, sanitizeDecodeError(fmt.Sprintf("terraform output in %s", r.root), err)
 	}
 	return outputs, nil
 }
