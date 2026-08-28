@@ -234,14 +234,28 @@ jobs:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@just
       - uses: docker/setup-docker-action@v5
+        id: setup-docker
       - uses: actions/download-artifact@v8
         with:
           name: builder-amd64
           path: /tmp
       - name: Load builder images
         run: gunzip -c /tmp/builder-amd64.tar.gz | docker load
+      # docker/setup-docker-action provisions its own daemon and switches the
+      # active docker context to it, so everything built/loaded in this job
+      # (including the git-source/tf-discover/tf-warm/tf-runner pack images
+      # `integration-test-infra` builds via `build-pack`) lands there rather
+      # than on the runner's stock /var/run/docker.sock. The infra server
+      # container bind-mounts CAESIUM_SOCK as its own docker socket to launch
+      # step containers, so it must point at that same daemon — otherwise it
+      # falls back to the stock socket, which has never seen the pack images
+      # and tries (and fails) to pull caesiumcloud/<role> from the registry.
+      # Other lanes don't hit this because their fixture images (alpine,
+      # busybox, curl) are public and pull fine from either daemon.
       - name: Infra pack integration tests (amd64)
-        run: CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-infra
+        run: |
+          sock="${{ steps.setup-docker.outputs.sock }}"
+          CAESIUM_SOCK="${sock#unix://}" CAESIUM_EVENT_INGEST_API_KEY=integration-test-key just tag=${{ env.IMAGE_TAG }}-amd64 integration-test-infra
       - name: Save pack images
         run: |
           docker save \
