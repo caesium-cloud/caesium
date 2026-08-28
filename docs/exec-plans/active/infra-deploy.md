@@ -781,7 +781,7 @@ renders the summary and shows the reference.
 
 ## Navigational / Organizational Improvements
 
-- [ ] N-1. User guide `docs/infrastructure-deployment.md`: the unit-pipeline
+- [x] N-1. User guide `docs/infrastructure-deployment.md`: the unit-pipeline
       pattern (five roles, the §5.2 contracts as env/marker tables, the bindings
       table for dbt / monorepo CI / migrations), the Terraform binding (each
       image's env contract, exit codes, the `IMPORT_OUTPUTS_FROM` wiring, the
@@ -800,6 +800,25 @@ renders the summary and shows the reference.
       Files: new `docs/infrastructure-deployment.md`, `docs/README.md`,
       `docs/caesium-job-llm-reference.md`, `docs/job-definitions.md`.
       Depends on: C4, D2.
+      > Shipped (W3-α). Corrections to the item text, checked against the
+      > working tree as instructed: dynamic fan-out (including the
+      > structured-partition amendment this pattern needs) **shipped in #349**
+      > — the "requires dynamic fan-out — not yet shipped" framing would now be
+      > false, so the fan-out snippet is worded as "mechanically valid, not
+      > promoted to a lint-validated `docs/examples/` file this wave" instead.
+      > The real `caesium cache invalidate` flag is `--job-id <uuid>`, not
+      > `--job <alias>`. Also documents: `tf-drift` honours
+      > `IMPORT_OUTPUTS_FROM` only when an apply step precedes it in the same
+      > job, which the drift job's own shape never has, so
+      > `infra-drift.job.yaml`'s `drift-app-web` pins `TF_VAR_vpc_id` directly
+      > instead; `tfcache` serves exactly one provider set per volume (two
+      > jobs/stacks with different lock-file unions must not share one); the
+      > first warm of a given provider set needs outbound network to the
+      > registry (the CI infra lane relies on runner egress for it; everything
+      > after is offline, verified hermetic elsewhere in this plan); and the
+      > plan artifact's digest changes on every re-plan (Terraform embeds a
+      > timestamp), so apply re-running whenever plan re-runs is expected, not
+      > a bug.
 - [ ] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in

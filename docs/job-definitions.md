@@ -430,6 +430,8 @@ Supported source kinds:
 
 Kubernetes `claimTemplate` creates an inline ephemeral PVC for one pod/step. Use a pre-provisioned RWX `pvc` for shared cross-step storage. In distributed Docker/Podman deployments, named volumes are node-local; use a `bind` path backed by shared network storage when steps may run on different workers.
 
+[`infrastructure-deployment.md`](infrastructure-deployment.md) is a worked example of exactly this shared-storage requirement at scale: a Terraform deployment pipeline shares a source tree and a provider-mirror volume across nine steps, needs `pvc:` (not `claimTemplate`) for both, and needs `ReadWriteMany` on the provider mirror because parallel `init` calls read it from different pods.
+
 Workload identity is also bring-your-own. For Kubernetes, create and secure the ServiceAccount in the cluster, then reference it with `serviceAccountName`. Operators should bound which ServiceAccounts Caesium may use through Kubernetes RBAC and admission policy; otherwise a user who can apply a job may select an overly privileged ServiceAccount.
 
 ## Caching

@@ -217,6 +217,14 @@ steps:
 
 **Sharp edge:** an upstream change that alters behaviour without altering its declared outputs leaves consumers cached. Make the upstream step's outputs a faithful summary of what it produced (a content digest, not a timestamp), and prefer per-step `chain` over the job-wide default. `caesium why` always renders `predecessor hashes excluded (chain: values)` so a skip is never unexplainable.
 
+The shipped, worked example of this pattern is dependency-ordered Terraform
+deployment: a per-stack `plan`/`apply` pair uses `chain: values` (plus
+`ttl: never` on `apply`) to stop a shared checkout's churn from invalidating
+every stack on every commit, while a changed upstream stack's *output* (e.g.
+`vpc_id`) still busts its consumers. See
+[`infrastructure-deployment.md`](infrastructure-deployment.md) and
+`docs/examples/infra-deploy.job.yaml`.
+
 ### Delegating scheduling to Kueue
 
 Caesium does not bin-pack, prioritize, or gang-schedule — it delegates that to [Kueue](https://kueue.sigs.k8s.io/), the Kubernetes-native queueing controller. Set `kueue.queueName` on a `kubernetes` step and Caesium stamps the `kueue.x-k8s.io/queue-name` label on the pod; Kueue's webhook then gates the pod (via the `kueue.x-k8s.io/admission` scheduling gate it injects) until the named LocalQueue has quota, and un-gates it on admission.

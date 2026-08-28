@@ -15,6 +15,7 @@ This directory separates current-source operator documentation from forward-look
 - [reproduce.md](reproduce.md): Operator reference for `caesium reproduce` flags, exit codes, fidelity, image overrides, and local secret resolution.
 - [kubernetes-deployment.md](kubernetes-deployment.md): Deploying Caesium to Kubernetes with Helm.
 - [airflow-parity.md](airflow-parity.md): Implemented Airflow-style authoring and operator semantics.
+- [infrastructure-deployment.md](infrastructure-deployment.md): Dependency-ordered Terraform (and other unit-pipeline binding) deployment via `cache.chain: values` and the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` image pack.
 - [examples/](examples/): Example job manifests used by docs and conformance tests.
 
 ## Strategy & Roadmap
