@@ -576,7 +576,8 @@ Two mechanisms close the gap, and neither is this amendment's to invent:
   output**. It does not help here: one changed model in three hundred changes one
   fingerprint, the emitted list is no longer byte-identical, and the substitution
   is (correctly) refused. It is conservative by construction and stays that way.
-- **`cache.chain: values`** — the step-level knob proposed in
+- **`cache.chain: values`** — the step-level knob added, and shipped (Stream A
+  of `exec-plans/active/infra-deploy.md`), by
   [`2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
   §4, which excludes `PredecessorHashes` from a step's key while still hashing
   `PredecessorOutputs`. That is the chain break, and it is orthogonal to this

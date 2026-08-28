@@ -819,7 +819,7 @@ renders the summary and shows the reference.
       > plan artifact's digest changes on every re-plan (Terraform embeds a
       > timestamp), so apply re-running whenever plan re-runs is expected, not
       > a bug.
-- [ ] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
+- [x] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in
       `docs/exec-plans/active/dynamic-fanout.md` and
@@ -829,6 +829,22 @@ renders the summary and shows the reference.
       Files: `docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`,
       `docs/roadmap.md`, `docs/exec-plans/active/dynamic-fanout.md`,
       `docs/design-dynamic-fanout.md`, this file.
+      > Shipped (W3-α), scoped per this stream's workspace rules: banner
+      > flipped, roadmap row flipped, cache.chain cross-links confirmed
+      > accurate (one tense fix in `design-dynamic-fanout.md`: "the knob
+      > proposed in §4" → "added, and shipped (Stream A), by §4" — no
+      > "deferred to" phrasing was found anywhere referencing `cache.chain`).
+      > **`## Progress` sync and the move to `exec-plans/completed/` are
+      > deliberately NOT done here** — common.md's workspace rules reserve
+      > both to the orchestrator ("Do NOT: move the plan doc to `completed/`,
+      > edit `## Progress`... the orchestrator does the Progress sync +
+      > archive"), which overrides this item's literal text. Coordination
+      > note: the spec's banner and the roadmap row both link to
+      > `exec-plans/active/infra-deploy.md`; whoever performs the
+      > `completed/` move should grep both files (and this plan's own
+      > cross-references) for that path and update it in the same change,
+      > matching how `dynamic-fanout.md`'s "Shipped" roadmap row currently
+      > still points at its own `active/` path pending the same move there.
       Depends on: A–E, H, N-1.
 
 ## Sequencing & Dependencies
