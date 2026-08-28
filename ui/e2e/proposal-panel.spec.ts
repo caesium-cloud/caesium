@@ -47,11 +47,18 @@ test("task detail panel renders a terraform.plan.v1 proposal from a propose step
   await expect(proposal).toBeVisible();
   await expect(proposal.getByTestId("proposal-kind")).toContainText("terraform.plan.v1");
 
+  // Exactly the three action buckets the fixture's summary carries — never
+  // `changes` or `outputs`, which the fixture also carries (mirroring the
+  // real `pack/internal/tf.Summary` wire shape) precisely because they used
+  // to leak through as bogus action badges before the explicit skip list in
+  // proposal-renderers.ts.
   const counts = proposal.getByTestId("proposal-count");
   await expect(counts).toHaveCount(3);
   await expect(proposal.locator('[data-testid="proposal-count"][data-action="add"]')).toContainText("2");
   await expect(proposal.locator('[data-testid="proposal-count"][data-action="change"]')).toContainText("1");
   await expect(proposal.locator('[data-testid="proposal-count"][data-action="destroy"]')).toContainText("0");
+  await expect(proposal.locator('[data-testid="proposal-count"][data-action="changes"]')).toHaveCount(0);
+  await expect(proposal.locator('[data-testid="proposal-count"][data-action="outputs"]')).toHaveCount(0);
 
   const rows = proposal.getByTestId("proposal-resource-row");
   await expect(rows).toHaveCount(3);
@@ -70,10 +77,16 @@ test("task detail panel renders a terraform.plan.v1 proposal from a propose step
 });
 
 function buildProposalDefinition(alias: string): ProposalFixtureDefinition {
+  // Shaped like the real `pack/internal/tf.Summary` wire payload
+  // (pack/internal/tf/summary.go): `changes` and `outputs` are both present
+  // on every real proposal (Outputs has no `omitempty`), so they belong in
+  // this fixture even though this scenario doesn't exercise Terraform.
   const summary = {
+    changes: true,
     add: 2,
     change: 1,
     destroy: 0,
+    outputs: 0,
     resources: [
       { address: "aws_instance.web", action: "add" },
       { address: "aws_instance.api", action: "add" },

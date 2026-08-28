@@ -219,4 +219,52 @@ describe("ProposalPanel", () => {
     expect(screen.queryByTestId("proposal-artifact")).not.toBeInTheDocument();
     expect(screen.queryByTestId("proposal-artifact-missing")).not.toBeInTheDocument();
   });
+
+  it("never renders `outputs` or `resources_truncated` as action badges against the real tf-plan summary shape", () => {
+    // The literal JSON `pack/internal/tf.Summary.Encode()` produces for a
+    // populated plan — same key set and field order as the struct tags in
+    // pack/internal/tf/summary.go: `changes`, `add`, `change`, `destroy`,
+    // `replace`, `import`, `outputs`, `resources`, `resources_truncated`.
+    // `outputs` has no `omitempty`, so it is present on every real proposal;
+    // `resources_truncated` is present whenever a plan exceeds
+    // MaxProposalResources. Neither is an action, and before the explicit
+    // skip list both rendered as bogus badges ("Outputs 0", "Resources_
+    // truncated 3") because the fallback loop treated "numeric" as "action".
+    const realSummaryFixture = JSON.stringify({
+      changes: true,
+      add: 2,
+      change: 1,
+      destroy: 0,
+      replace: 0,
+      import: 0,
+      outputs: 4,
+      resources: [
+        { address: "aws_instance.web", action: "add" },
+        { address: "aws_instance.api", action: "add" },
+        { address: "aws_security_group.web", action: "change" },
+      ],
+      resources_truncated: 3,
+    });
+
+    render(
+      <ProposalPanel
+        output={{
+          proposal_kind: "terraform.plan.v1",
+          proposal_summary: realSummaryFixture,
+        }}
+      />,
+    );
+
+    const counts = screen.getAllByTestId("proposal-count");
+    // Exactly the five known action buckets — never `changes`, `outputs`, or
+    // `resources_truncated`.
+    expect(counts.map((el) => el.dataset.action).sort()).toEqual(
+      ["add", "change", "destroy", "import", "replace"].sort(),
+    );
+    expect(counts.find((el) => el.dataset.action === "outputs")).toBeUndefined();
+    expect(counts.find((el) => el.dataset.action === "resources_truncated")).toBeUndefined();
+    expect(counts.find((el) => el.dataset.action === "changes")).toBeUndefined();
+
+    expect(screen.getAllByTestId("proposal-resource-row")).toHaveLength(3);
+  });
 });
