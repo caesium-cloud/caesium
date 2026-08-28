@@ -89,7 +89,7 @@ names the binary.
 | Env | Meaning |
 |---|---|
 | `GIT_URL` | repository to clone (`https://`, `ssh://`, `git@host:path`, `file://`) |
-| `GIT_REF` | branch, tag, or full commit sha (required) |
+| `GIT_REF` | branch, tag, or full commit sha (required) — a **literal** value; see the interpolation note below |
 | `GIT_SPARSE` | space-separated, repo-root-relative path patterns (e.g. `stacks/** modules/**`); each must contain a `/` and is used both as the sparse-checkout pattern and, with `:(glob)` magic, as the tree-digest pathspec — an unanchored pattern would stage more than it digests, so `GIT_SPARSE` rejects `!` negation, a leading `/`, and unanchored (no-`/`) patterns |
 | `GIT_SSH_KEY` | private key, already resolved from a `secret://` URI by Caesium |
 | `GIT_SSH_KNOWN_HOSTS` | known_hosts content for the forge — supplying it turns on strict host-key checking; the role never disables checking on its own |
@@ -105,6 +105,17 @@ volume, or a Kubernetes `pvc:`, as opposed to a fresh-per-run source) still
 holds the previous run's tree, so a hand-written pipeline needs an explicit
 `cache: false` step ahead of checkout that clears the destination — see
 `docs/examples/infra-deploy.job.yaml`'s `prepare` step.
+
+**Known limitation: env values are literal — there is no `${…}`
+interpolation.** Caesium passes a step's `env:` values through unchanged. Run
+parameters arrive as their own `CAESIUM_PARAM_<KEY>` variables inside the
+container, and the pack roles are Go binaries with no shell, so a manifest
+writing `GIT_REF: "${CAESIUM_PARAM_SHA}"` — as the design spec's illustrative
+§5.5 snippet does — hands `git-source` that literal string and the checkout
+fails. The reference manifest therefore pins a literal `GIT_REF: "main"`, and
+deploying a specific commit means editing and re-applying the manifest. **A
+`GIT_REF`-from-run-param mechanism is a follow-up**, and it is the one piece of
+this pattern that a per-commit deploy trigger genuinely wants.
 
 ### `tf-discover`
 

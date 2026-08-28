@@ -708,6 +708,14 @@ has no warnings channel, while the server lint response already carries
       > idempotent — the residual (two jobs whose lock-file unions diverge would
       > flip the shared `terraformrc`) is the pre-existing one-provider-set-per-
       > `tfcache` limitation and is now written down.
+      > Fix round 2 (W3-β): `checkout`'s `GIT_REF` was
+      > `"${CAESIUM_PARAM_SHA}"`, copied from the spec's illustrative §5.5
+      > snippet — but Caesium does not interpolate `${…}` in env values (run
+      > params arrive as their own `CAESIUM_PARAM_<KEY>` variables, and
+      > `git-source` is a Go binary with no shell), so the flagship example's
+      > FIRST step would have failed on a literal string. Pinned to
+      > `GIT_REF: "main"`, the proven fixture shape, with the limitation
+      > written up in the guide's `git-source` section and its env table.
 
 ### Stream E — Console proposal panel
 
