@@ -7,11 +7,11 @@
 # backstop on top of this — see docs/infrastructure-deployment.md).
 #
 # Reuses infra-deploy.job.yaml's checkout/warm-cache shape and its `tfcache`
-# and `tfstate` physical volumes (same docker/podman volume names, same
-# kubernetes pvc names) so drift is checked against the SAME provider mirror
-# and the SAME state the deploy job manages — not an empty or unrelated one.
-# `src` here is this job's own scratch checkout; it does not need to be the
-# same physical volume as the deploy job's.
+# and per-stack `tfstate-<stack>` physical volumes (same docker/podman volume
+# names, same kubernetes pvc names) so drift is checked against the SAME
+# provider mirror and the SAME state the deploy job manages — not an empty or
+# unrelated one. `src` here is this job's own scratch checkout; it does not
+# need to be the same physical volume as the deploy job's.
 #
 # Every drift step below carries an explicit `cache: false`. An OMITTED
 # `cache` block is cacheable, not "no cache", whenever
@@ -22,14 +22,20 @@
 # defeat it"). Explicit `cache: false` is what actually guarantees that,
 # regardless of the server's cache default.
 #
-# `src`/`src-reset` use `pvc:` on Kubernetes (a pre-provisioned, shared PVC),
-# not `claimTemplate` — see the matching note in infra-deploy.job.yaml: a
+# `src` uses `pvc:` on Kubernetes (a pre-provisioned, shared PVC), not
+# `claimTemplate` — see the matching note in infra-deploy.job.yaml: a
 # `claimTemplate` PVC is scoped to one pod/step, and this volume is mounted
-# by every step in the pipeline. The same aliasing note applies here too:
-# `prepare` writes `src-reset`, `checkout` writes `src`, both names resolving
-# to the identical physical volume, so the pair does not trip the
-# multi-writer volume lint warning despite being dependsOn-serialized writers
-# of the same storage.
+# by every step in the pipeline. `prepare` and `checkout` are its only two
+# writers and are DAG-ordered by `next`/`dependsOn`, so the multi-writer
+# volume lint (design §8) stays quiet without any volume aliasing; every
+# other step mounts `src` `readOnly: true`.
+#
+# State is one volume PER STACK, exactly as in infra-deploy.job.yaml, and for
+# the same reason: the three `drift-<stack>` steps run in parallel, and
+# carving a single shared volume up with `subPath:` would not isolate them on
+# the Docker engine, which does not apply `VolumeMount.SubPath` at all.
+# `accessMode: ReadWriteMany` is declared on every volume more than one step
+# mounts.
 $schema: https://yourorg.io/schemas/job.v1.json
 apiVersion: v1
 kind: Job
@@ -54,15 +60,6 @@ volumes:
         volume: caesium-infra-drift-src
       kubernetes:
         pvc: caesium-infra-drift-src-rwx
-  - name: src-reset
-    accessMode: ReadWriteMany
-    sources:
-      docker:
-        volume: caesium-infra-drift-src
-      podman:
-        volume: caesium-infra-drift-src
-      kubernetes:
-        pvc: caesium-infra-drift-src-rwx
   - name: tfcache
     accessMode: ReadWriteMany
     sources:
@@ -72,21 +69,40 @@ volumes:
         volume: caesium-infra-deploy-tfcache
       kubernetes:
         pvc: caesium-infra-deploy-tfcache-rwx
-  - name: tfstate
+  - name: tfstate-network
+    accessMode: ReadWriteMany
     sources:
       docker:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-network
       podman:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-network
       kubernetes:
-        pvc: caesium-infra-deploy-tfstate
+        pvc: caesium-infra-deploy-tfstate-network-rwx
+  - name: tfstate-account
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate-account
+      podman:
+        volume: caesium-infra-deploy-tfstate-account
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate-account-rwx
+  - name: tfstate-app-web
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate-app-web
+      podman:
+        volume: caesium-infra-deploy-tfstate-app-web
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate-app-web-rwx
 steps:
   - name: prepare
     image: alpine:3.23
     cache: false
     command: ["sh", "-c", "find /src -mindepth 1 -delete && echo cleared"]
     volumeMounts:
-      - {volume: src-reset, path: /src}
+      - {volume: src, path: /src}
     next: [checkout]
 
   - name: checkout
@@ -127,7 +143,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: network}
+      - {volume: tfstate-network, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
 
   - name: drift-account
@@ -143,7 +159,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: account}
+      - {volume: tfstate-account, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
 
   # app-web's own Terraform config declares `variable "vpc_id"` with NO
@@ -173,5 +189,5 @@ steps:
       TF_VAR_vpc_id: "vpc-REPLACE-WITH-infra-deploy-demo's-apply-network-vpc_id-output"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: app-web}
+      - {volume: tfstate-app-web, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}

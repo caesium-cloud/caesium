@@ -11,7 +11,7 @@
 # Once they are, pin every reference to a digest, e.g.:
 #   caesiumcloud/git-source@sha256:<64-hex-digest>
 # and re-pin whenever the pack images are rebuilt — see
-# docs/infrastructure-deployment.md for the digest-pinning workflow.
+# docs/infrastructure-deployment.md#pinning-the-pack-images-to-a-digest.
 #
 # `src` uses `pvc:` on Kubernetes, not `claimTemplate`, though the design
 # spec's own reference manifest shows `claimTemplate` there. Per this repo's
@@ -19,23 +19,44 @@
 # Identity"), `claimTemplate` provisions an inline EPHEMERAL PVC scoped to
 # ONE pod/step; `src` here is mounted by nine steps across the run (prepare,
 # checkout, three discovers, three plans, three applies), so it needs a
-# pre-provisioned, shared `pvc:`, exactly like `tfcache` and `tfstate` below.
-# This is a grounding correction to the spec, in the same spirit as the two
-# already recorded in the plan doc's intro.
+# pre-provisioned, shared `pvc:`, exactly like `tfcache` and the per-stack
+# state volumes below. This is a grounding correction to the spec, in the same
+# spirit as the two already recorded in the plan doc's intro.
 #
-# Volume aliasing, explained once: `src`/`src-reset` and `tfstate`/`tfstate-apply`
-# are each declared TWICE, pointing at the identical physical store (same
-# docker/podman named-volume name, same kubernetes pvc name). Each pair has
-# exactly one write-mounting step per logical name, so the pair does not trip
-# the multi-writer volume lint warning (internal/jobdef/lint, design §8 "two
-# read-write mounts on one volume") even though, physically, two steps do
-# write the same storage. That is by design, not a bug: `prepare` clears the
-# workspace and `checkout` repopulates it (dependsOn-serialized, so there is
-# no concurrent access — see D1's own "legitimate two-writer case" note), and
-# a stack's `plan` step writes the proposal artifact and Terraform state lock
-# that its own `apply` step reads back (also dependsOn-serialized). The lint
-# check compares volume mounts structurally and cannot see the `dependsOn`
-# edge that makes both pairs safe.
+# Volumes, and why there is exactly one logical name per physical store:
+#
+#   * `src`     — written by `prepare` (clears the tree) and `checkout`
+#                 (repopulates it), which are DAG-ordered by `next`/`dependsOn`
+#                 and therefore never concurrent. Every other step mounts it
+#                 `readOnly: true`: `tf-discover` scans without writing, and
+#                 `tf-runner` relocates TF_DATA_DIR to ARTIFACT_DIR so plan and
+#                 apply never write into the configuration itself. `tf-runner`
+#                 also passes `-lockfile=readonly` to `terraform init`, so a
+#                 `.terraform.lock.hcl` that no longer matches the stack's
+#                 provider requirements FAILS with Terraform's own
+#                 "Provider dependency changes detected" error instead of
+#                 silently attempting a write into this read-only mount.
+#                 Regenerate and commit the lock file when that happens
+#                 (`terraform providers lock -platform=...`).
+#   * `tfcache` — the shared provider mirror. `warm-cache` holds the only
+#                 read-write mount; every consumer mounts it `readOnly: true`.
+#   * `tfstate-<stack>` — ONE state volume per stack, each written only by that
+#                 stack's own `plan` → `apply` pair, which are DAG-ordered. A
+#                 single shared `tfstate` volume carved up with `subPath:` would
+#                 NOT work: the Docker engine does not apply
+#                 `VolumeMount.SubPath` (only Kubernetes and Podman do), so on
+#                 Docker every stack would land on the same `/state` root and
+#                 the three stacks' `terraform.tfstate` files would silently
+#                 clobber each other — the "green run that deployed the wrong
+#                 thing" failure from design §8.
+#
+# The multi-writer volume lint (internal/jobdef/lint, design §8) is quiet on
+# every one of these without aliasing: it warns only for writers that can run
+# CONCURRENTLY, and each shared volume here is a DAG-ordered handoff.
+#
+# `accessMode: ReadWriteMany` is declared on every volume mounted by more than
+# one step, state volumes included: a stack's `plan` and `apply` are separate
+# pods and may be scheduled onto different nodes.
 $schema: https://yourorg.io/schemas/job.v1.json
 apiVersion: v1
 kind: Job
@@ -69,15 +90,6 @@ volumes:
         volume: caesium-infra-deploy-src
       kubernetes:
         pvc: caesium-infra-deploy-src-rwx
-  - name: src-reset
-    accessMode: ReadWriteMany
-    sources:
-      docker:
-        volume: caesium-infra-deploy-src
-      podman:
-        volume: caesium-infra-deploy-src
-      kubernetes:
-        pvc: caesium-infra-deploy-src-rwx
   - name: tfcache
     accessMode: ReadWriteMany
     sources:
@@ -87,34 +99,46 @@ volumes:
         volume: caesium-infra-deploy-tfcache
       kubernetes:
         pvc: caesium-infra-deploy-tfcache-rwx
-  - name: tfstate
+  - name: tfstate-network
+    accessMode: ReadWriteMany
     sources:
       docker:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-network
       podman:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-network
       kubernetes:
-        pvc: caesium-infra-deploy-tfstate
-  - name: tfstate-apply
+        pvc: caesium-infra-deploy-tfstate-network-rwx
+  - name: tfstate-account
+    accessMode: ReadWriteMany
     sources:
       docker:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-account
       podman:
-        volume: caesium-infra-deploy-tfstate
+        volume: caesium-infra-deploy-tfstate-account
       kubernetes:
-        pvc: caesium-infra-deploy-tfstate
+        pvc: caesium-infra-deploy-tfstate-account-rwx
+  - name: tfstate-app-web
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate-app-web
+      podman:
+        volume: caesium-infra-deploy-tfstate-app-web
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate-app-web-rwx
 steps:
   # ── MATERIALIZE ────────────────────────────────────────────────────────
   # `git-source` refuses to clone into a non-empty destination, and `src` is
   # a persistent volume that survives across runs, so the tree is cleared
-  # before every checkout. See the volume-aliasing note above for why
-  # `prepare` mounts `src-reset` rather than `src`.
+  # before every checkout. `prepare` and `checkout` are the only two steps
+  # that write `src`, and the `next`/`dependsOn` edge between them is what
+  # makes that safe.
   - name: prepare
     image: alpine:3.23
     cache: false
     command: ["sh", "-c", "find /src -mindepth 1 -delete && echo cleared"]
     volumeMounts:
-      - {volume: src-reset, path: /src}
+      - {volume: src, path: /src}
     next: [checkout]
 
   - name: checkout
@@ -221,7 +245,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: network}
+      - {volume: tfstate-network, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
     outputSchema:
       type: object
@@ -252,7 +276,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate-apply, path: /state, subPath: network}
+      - {volume: tfstate-network, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
 
   # ── PROPOSE + APPLY: account (independent of network; container no-op —
@@ -272,7 +296,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: account}
+      - {volume: tfstate-account, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
     outputSchema:
       type: object
@@ -303,7 +327,7 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate-apply, path: /state, subPath: account}
+      - {volume: tfstate-account, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
 
   # ── PROPOSE + APPLY: app-web (leaf — no consumer of ITS outputs, so it
@@ -332,7 +356,7 @@ steps:
       APPLY_STEP: "apply-app-web"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate, path: /state, subPath: app-web}
+      - {volume: tfstate-app-web, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
     outputSchema:
       type: object
@@ -363,5 +387,5 @@ steps:
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
-      - {volume: tfstate-apply, path: /state, subPath: app-web}
+      - {volume: tfstate-app-web, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
