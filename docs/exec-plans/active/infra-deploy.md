@@ -1,6 +1,6 @@
 # DAG-Native Infrastructure Deployment — `cache.chain` + the Terraform pack
 
-Last updated: 2026-08-26
+Last updated: 2026-08-28
 
 This plan ships the design in
 [`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`](../../superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md):
@@ -36,6 +36,196 @@ Questions.
 
 This plan follows the `exec-plan-wave` skill's structural convention:
 `## Progress` is a wave-by-wave dashboard, `## Streams` is the work
+backlog, `## Sequencing & Dependencies` captures cross-stream order,
+and `## Acceptance Criteria` lists the gates that close out the entire
+plan. Any agent can:
+
+1. Pick a numbered checklist item from `## Streams` whose dependencies
+   are satisfied (per `## Sequencing & Dependencies`).
+2. Land it as a self-contained PR.
+3. Run the verification block under `## Verification (Run For Every
+   PR)`.
+4. Tick the checkbox and update the active wave's per-stream bullet in
+   `## Progress`.
+
+For wave orchestration of the streams below, see
+[`.claude/skills/exec-plan-wave/`](../../../.claude/skills/exec-plan-wave/).
+For drafting new plans in this same shape, see
+[`.claude/skills/draft-exec-plan/`](../../../.claude/skills/draft-exec-plan/).
+
+## Strategic Decisions
+
+Settled by the spec (§3, §7, §12) and binding on every item:
+
+- **Caesium declares, orders, and mounts.** No HCL parsing, no Terraform
+  execution, no cloud credentials, no state storage, no HTTP-backend protocol,
+  no Terraform plugin in Caesium's Go. Terraform knowledge lives only inside
+  the pack images (`terraform-exec` + `terraform-json`, per spec §6.7).
+- **The pack is a separate Go module** (`pack/go.mod`, no dependency on the root
+  module). This keeps `hashicorp/terraform-exec` / `terraform-json` out of the
+  root `go.mod`/`go.sum` (Caesium core unaffected; no `go.sum` collision with
+  sibling plans) and lets the images build from plain `golang:` + a pinned
+  Terraform binary rather than the CGO/dqlite builder image. The cost — the
+  root `just lint`/`just unit-test` do not cover `./pack/...` — is paid by
+  dedicated `pack-lint`/`pack-test` targets wired into CI (B1, H-1).
+- **Fingerprint gate, drift job mandatory** (spec §3.2/§6.6): the drift job is
+  part of the feature, not an optional extra, and its steps never carry a
+  `cache` block.
+- **Warm-once, consume read-only** (spec §3.4): `filesystem_mirror`, never
+  `TF_PLUGIN_CACHE_DIR`; RWX storage on Kubernetes; RWO/node-affinity deferred.
+- **Out of scope, each with an existing home**: approval gates (roadmap §3.2),
+  named exclusive locks, step-group templates (roadmap §2.2), node affinity,
+  matrix fan-out, forge/PR-comment callbacks, a `caesium` Terraform provider.
+- **Dynamic fan-out and structured partitions are owned by
+  `docs/exec-plans/active/dynamic-fanout.md`** (Streams A/C there). This plan
+  ships the hand-written per-stack form, which works today; the five-step
+  fan-out form is documented as forward-looking and lands as an example only
+  once fan-out ships. The fanout plan in turn defers the chain break to this
+  plan's Stream A — the two plans meet at `cache.chain`, and neither may invent
+  a second mechanism for the other's half.
+
+## Source-Of-Truth Note
+
+When this plan and
+`docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`
+disagree, the spec wins — for intent, scope, the role contracts (§5.2), the
+`cache.chain` semantics (§4.3), the Terraform binding's behaviour (§6), the
+security requirements (§6.4 sensitive handling), the failure modes (§8), and
+the test scenarios (§9). The two exceptions recorded above (registry naming;
+the branch-form cascade) are grounding corrections, not scope changes — if the
+spec is amended to address them, the amended spec wins. Where the spec touches
+the YAML contract, `pkg/jobdef/definition.go` is authoritative for the
+*current* shape and Stream A changes it. Dynamic fan-out and structured
+partition objects are owned by `docs/exec-plans/active/dynamic-fanout.md` and
+`docs/design-dynamic-fanout.md`; tracking for them continues there.
+
+## Progress (as of 2026-08-28)
+
+All three implementation waves shipped on the `infra-deploy` integration
+branch (master `b49d631` → `c0e35c4`, 49 commits, one PR pending). Every
+stream was implemented by a worktree-isolated sub-agent, reviewed per stream
+(spec compliance + code quality) with scoped re-reviews of each fix round, and
+gated on the merged branch with the full chain: `just lint`, `just unit-test`,
+`just pack-lint` / `pack-test` / `build-pack`, `just integration-test`,
+`CAESIUM_INFRA_LANE=true just integration-test-infra` (10 `TestInfra*`
+scenarios), `just ui-lint` / `ui-test` / `ui-e2e`. **All Acceptance Criteria
+(1–8) hold** — see the per-stream notes under `## Streams` for the deviations
+each stream recorded against the item text (the spec won every time).
+
+### Wave 1 (2026-08-27) — A, B + H-1, D1, E1 in parallel
+
+- **W1-α — Stream A (A1–A7), Opus.** `cache.chain: {transitive|values}` and
+  `cache.ttl: never` ship end to end: resolved config + `Validate()`, a
+  byte-identical-by-golden-test transitive hash, the mode threaded through the
+  local / worker / replay lanes and persisted on `TaskRun` + the execution
+  descriptor, the exclusion rendered by `caesium why` (stdout, table + `--json`,
+  fanned groups included) and the Console, regenerated schema reference and
+  prose docs, and `test/cache_chain_test.go` + `test/unit_pipeline_generic_test.go`
+  driving the live server and CLI (the generic binding never references a pack
+  image). Review round 1 fixed group-level `why` notes, a mis-explained
+  chain-mode switch, and a short-circuit-confounded A6 assertion (negative
+  control verified). Also fixed `caesium cache list` writing JSON to stderr.
+- **W1-β — Stream B (B1–B5) + H-1, Opus.** The nested `pack/` module
+  (`protocol` emitters with `FailClosed`, `fingerprint`, `tf.ReadManifest`),
+  `build/Dockerfile.pack` on checksum-verified Terraform 1.15.9 (`TF_DIST`
+  switchable), `git-source` (ls-files digest, `GIT_SSH_KNOWN_HOSTS`,
+  `--end-of-options` + `GIT_ALLOW_PROTOCOL`, userinfo scrubbed from errors),
+  `tf-discover` (relocated `TF_DATA_DIR` so `src` stays read-only; remote
+  module dirs resolved against the data dir; deterministic `(Name, Path)`
+  ordering with duplicate rejection), the hermetic `pack/testdata/infra`
+  fixture (incl. a `git::file://` remote-module stack), the
+  `integration-test-infra` lane with `CAESIUM_CACHE_ENABLED=true`, CI wiring
+  (`pack-lint`/`pack-test`, `build-and-integration-test-infra`), a golden-seam
+  test that feeds pack-emitted `##caesium::partitions` bytes through
+  `pkg/task`'s parser, and six `TestInfra*` scenarios (§9 #7, #8, #10, the
+  git-source contract, multi-root fan-out).
+- **W1-γ — D1, Sonnet.** `internal/jobdef/lint.CheckVolumeWriters`, wired into
+  server lint `resp.Warnings` and a new local `caesium job lint` warnings
+  block (exit 0), with local + server integration coverage. Review round 1
+  added subPath containment and raw `mounts: [{type: volume}]` coverage;
+  refined again in W3-β (below).
+- **W1-δ — E1, Sonnet.** `ProposalPanel` + `proposal-renderers.ts` registry
+  (generic key/value fallback, `terraform.plan.v1` renderer with counts,
+  resource table, artifact digest/size/path and no download) mounted in
+  `TaskDetailPanel`; 12 Vitest cases + 1 Playwright scenario. Established the
+  wire rule the runner follows: `proposal_summary` is a JSON-encoded *string*.
+
+### Wave 2 (2026-08-27) — C, H-2, E2
+
+- **W2-α — Stream C (C1–C6), Opus.** `tf-warm` (content-addressed provider
+  mirror, per-process staging + atomic promotion, self-healing marker,
+  `terraformrc` re-asserted on the fast path) and `tf-runner`
+  (`tf-plan` / `tf-apply` / `tf-drift` on terraform-exec + terraform-json;
+  typed `sensitive_values` stripping, digest-verified plan artifacts, a single
+  `changes` answer shared by plan and apply, always-emit apply outputs,
+  step-exact `IMPORT_OUTPUTS_FROM` with collision refusal, drift going red).
+  `test/infra_deploy_test.go` asserts the exact re-ran / cached / skipped
+  partition for §9 #1–#6, #9, #11 (with #2 load-bearing) plus the drift
+  scenario and a diamond import. Three live defects found by dry-running the
+  binaries (plan / output JSON teed into the task log; refresh-only exit 2 on
+  output-only changes) and two review rounds (concurrent-warm race, sentinel
+  collision on diamond imports) are all fixed and regression-tested.
+- **W2-β — H-2, Sonnet.** `publish` builds and pushes multi-arch manifests for
+  the four pack images with the caesium tag scheme; arm64 pack images are
+  build-verified only (known gap recorded in the H-2 note).
+- **W2-γ — E2, Sonnet.** `RunProposalSummary` on `RunDetailPage` aggregating
+  proposal counts across a run, rows opening the task panel.
+
+### Wave 3 (2026-08-27/28) — D2, N-1, N-2, and the D1 refinement
+
+- **W3-α — D2 + N-1 + N-2, Sonnet.** `docs/examples/infra-deploy.job.yaml`
+  and `infra-drift.job.yaml`, `docs/infrastructure-deployment.md` (indexed in
+  `docs/README.md`), spec banner and roadmap row flipped to Shipped,
+  dynamic-fanout cross-links confirmed. Grounding corrections recorded:
+  Kubernetes `pvc:` (not `claimTemplate`) for the shared `src`;
+  `caesium cache invalidate --job-id`; `schemaFrom: output` needs an
+  `outputSchema`; drift and warm steps need explicit `cache: false`.
+- **W3-β — fix round, Opus.** The D1 lint now models the real §8 hazard:
+  only writers that can run *concurrently* warn (DAG-ordered pairs are
+  exempt via `pkg/jobdef.DeriveStepSuccessors`; unresolvable graphs fail
+  closed) and it is engine-aware (the docker engine drops
+  `VolumeMount.SubPath`). That let the manifests drop volume aliasing and
+  fixed the bug it masked (per-stack state on one shared volume collapsed to
+  one state file on docker): state is now one volume per stack, RWX
+  everywhere, the drift job has its own `ARTIFACT_DIR` and a concurrency
+  block, `GIT_REF` is a literal ref, and `terraform init` runs
+  `-lockfile=readonly` so `src` can stay read-only.
+
+### Stream Status
+
+| Stream | Scope | Priority | Status |
+|--------|-------|----------|--------|
+| A | `cache.chain` + `ttl: never` — schema, hash semantics + golden test, wiring at all three `HashInput` sites, `caesium why` rendering, integration + generic-binding scenarios, generated schema reference | **P0** | Shipped (W1-α) |
+| B | Pack scaffold (nested module, `build/Dockerfile.pack`, protocol package) + `git-source` + `tf-discover` + hermetic fixture repo + discover/materialize integration scenarios | **P0** | Shipped (W1-β) |
+| C | `tf-warm` + `tf-runner` (`tf-plan` / `tf-apply` / `tf-drift`) + the Terraform end-to-end scenarios (cache-skip, module edits, output chaining, warm marker, empty plan, sensitive values, drift) | **P0** | Shipped (W2-α) |
+| D | Multi-writer volume lint warning + reference manifests (`infra-deploy`, `infra-drift`) in `docs/examples/` | P1 | Shipped (W1-γ, W3-α, W3-β) |
+| E | Console proposal panel — `proposal_kind` renderer registry with generic fallback, `terraform.plan.v1` renderer, optional run-level aggregate | P2 | Shipped (W1-δ, W2-γ) |
+| H | Harness — `integration-test-infra` lane + CI job, `pack-lint`/`pack-test` in CI, multi-arch publish of the four pack images | P1 | Shipped (W1-β, W2-β) |
+| N | Docs — `docs/infrastructure-deployment.md` user guide + README index; roadmap row + spec status close-out | P1 | Shipped (W3-α) |
+
+### Follow-ups outside this plan (found while shipping)
+
+- `caesium job lint --server`'s breaking-contract gate is unscoped to the
+  lint target (`internal/contract/derive.go`, `cmd/job/lint.go`) — any
+  unrelated breaking pair on a shared server fails every later server lint.
+- The Docker engine ignores `VolumeMount.SubPath` (podman and kubernetes
+  honour it); the lint is engine-aware, but the engine gap itself stands.
+- No env-value interpolation exists, so a run param cannot reach `GIT_REF`;
+  a `GIT_REF`-from-param mechanism (in `git-source` or the scheduler) is the
+  next step for per-commit deploy triggers.
+- `/cache/terraformrc` is a single slot: one provider set per `tfcache`
+  volume until the manifest can address a per-key config file.
+- The lossy `BuildOutputEnv` key round-trip means only snake_case Terraform
+  output names survive `IMPORT_OUTPUTS_FROM` exactly.
+- Fan-out partitions of one step writing one volume are not modelled as
+  separate writers by the lint (documented).
+- arm64 pack images are build-verified only until the infra lane has an
+  arm64 twin; the infra lane needs `registry.terraform.io` egress for the
+  first warm.
+- `CAESIUM_CACHE_ENABLED` is unset on the default `integration-up` lane
+  (scenarios there rely on `metadata.cache: true`).
+
+## Streams` is the work
 backlog, `## Sequencing & Dependencies` captures cross-stream order,
 and `## Acceptance Criteria` lists the gates that close out the entire
 plan. Any agent can:
