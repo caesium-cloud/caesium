@@ -227,21 +227,22 @@ func (s *IntegrationTestSuite) awaitPartitionStatuses(
 
 // partitionSnapshot is one sampled observation of a group's instance statuses.
 type partitionSnapshot struct {
-	At       time.Time
 	Statuses map[string]string
-	// RunStatus is the run's status at the same sample.
-	RunStatus string
 }
 
 // observePartitionStates samples a fanned group every interval until its run
 // reaches a terminal status, returning every snapshot taken (including the
 // terminal one).
 //
-// Concurrency and ordering claims are asserted over these snapshots rather than
-// over wall-clock timestamps: the partitions endpoint exposes no per-instance
-// started_at/completed_at, and a snapshot showing "d running while b is still
-// pending" is a definite ordering violation regardless of clock skew or lane
-// speed.
+// Concurrency and ordering claims are asserted over these snapshots — via
+// maxConcurrent/startedByLastSnapshot — rather than over wall-clock
+// timestamps, because the three lanes this suite runs in (local, distributed,
+// run-owner in-memory) dispatch on cadences that differ by an order of
+// magnitude, so "after N seconds, X" is lane-specific. The partitions endpoint
+// DOES expose per-instance started_at/completed_at (see partitionInstance);
+// assertFailFastGroup reads those directly off the endpoint rather than off a
+// sampled snapshot, since fail_fast's ordering claim needs the actual
+// timestamps, not just which status was observed at which poll.
 func (s *IntegrationTestSuite) observePartitionStates(
 	jobID, runID, taskRef string,
 	interval, timeout time.Duration,
@@ -260,9 +261,7 @@ func (s *IntegrationTestSuite) observePartitionStates(
 			&parts,
 		); err == nil {
 			snapshots = append(snapshots, partitionSnapshot{
-				At:        time.Now(),
-				Statuses:  partitionStatusMap(s.expandedPartitions(parts.Partitions)),
-				RunStatus: runState.Status,
+				Statuses: partitionStatusMap(s.expandedPartitions(parts.Partitions)),
 			})
 		}
 

@@ -334,6 +334,49 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 
 		if cacheStore != nil {
 			entry, found, getErr := cacheStore.Get(cacheHash)
+			// A cache entry with no recorded partition list (nil, not merely
+			// empty — see cache.Entry.Partitions) is ambiguous for a task with a
+			// downstream fan-out consumer: it might be a pre-fan-out entry (or
+			// one written before the parser learned to record an explicit `[]`)
+			// that never had the chance to record one. The worker is the only
+			// place that can still choose to run the container for real, so
+			// decide HERE, before ever reporting a cache hit — once this reports
+			// "cached" to the owner (in-memory or SQL), the container is never
+			// coming back. Treat the combination as a miss, exactly like `found`
+			// were false; ordinary tasks are unaffected since
+			// HasAnyFanOutConsumerForRun/HasFanOutSuccessor are false for them.
+			//
+			// BOTH lookup errors below fail CLOSED — treat the hit as a MISS, exactly
+			// as a cacheStore.Get error already does in this same block. An
+			// inconclusive answer from either query would otherwise let an
+			// unrecorded-partitions entry resolve "cached" on a run that DOES use
+			// fan-out: the group expands to nothing and the consumer is silently
+			// skipped via onEmpty — the exact collapse this gate exists to prevent.
+			// The cost of failing closed is one extra execution of this task on a
+			// rare transient read error; the cost of failing open is a silently
+			// empty group. (The per-run pre-filter is still what keeps ordinary
+			// hits cheap — it only changes what happens when that query ERRORS.)
+			if found && entry.Partitions == nil {
+				hasAnyFanOut, hafErr := e.store.HasAnyFanOutConsumerForRun(taskRun.JobRunID)
+				switch {
+				case hafErr != nil:
+					log.Warn("cache: failed to check whether this run uses fan-out; treating the hit as unusable (fail closed)",
+						"task_id", taskRun.TaskID, "hash", cacheHash, "error", hafErr)
+					found = false
+				case hasAnyFanOut:
+					hasConsumer, hcErr := e.store.HasFanOutSuccessor(taskRun.JobRunID, taskRun.TaskID)
+					switch {
+					case hcErr != nil:
+						log.Warn("cache: failed to check for a fan-out consumer; treating the hit as unusable (fail closed)",
+							"task_id", taskRun.TaskID, "hash", cacheHash, "error", hcErr)
+						found = false
+					case hasConsumer:
+						log.Info("cache: no partition list recorded on the cache entry; re-running producer to record one",
+							"task_id", taskRun.TaskID, "hash", cacheHash)
+						found = false
+					}
+				}
+			}
 			if getErr != nil {
 				log.Warn("cache: lookup failed", "task_id", taskRun.TaskID, "hash", cacheHash, "error", getErr)
 			} else if found {

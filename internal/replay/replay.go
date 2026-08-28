@@ -530,6 +530,15 @@ func (c *Constructor) cacheSourceForUnchanged(ctx context.Context, task *baselin
 		return cacheSource{}, fmt.Errorf("%w: step %q baseline result %q is not successful", ErrUnavailableBaselineProof, task.taskName, task.row.Result)
 	}
 
+	// entry.Partitions (F7, see cache.Entry's own doc comment) is deliberately
+	// not read or threaded onto cacheSource here: Replay refuses any baseline
+	// containing a fanned group before it ever reaches this function
+	// (ErrFannedBaseline, checked earlier in this file), so a resolved "cache
+	// hit" step here is never a fan-out producer with a group to expand — this
+	// is the one remaining cacheStore.Get in the tree with no F7 gate, and it
+	// needs none. If replay ever learns to replay fanned baselines, this site
+	// needs the same treatment as internal/job/job.go and
+	// internal/worker/runtime_executor.go.
 	cacheStore := cache.NewStore(c.store.DB())
 	if entry, found, err := cacheStore.Get(replayHash); err != nil {
 		return cacheSource{}, fmt.Errorf("replay: cache lookup for unchanged step %q hash %s: %w", task.taskName, shortHash(replayHash), err)

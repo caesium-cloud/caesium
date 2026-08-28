@@ -272,13 +272,31 @@ func TestParseMarkers_NullPartitionsArrayRejected(t *testing.T) {
 }
 
 // TestParseMarkers_EmptyPartitionsArrayStillValid: `[]` is the documented way to
-// emit an empty work list and must keep routing through onEmpty.
+// emit an empty work list and must keep routing through onEmpty. It must also
+// come back as a NON-NIL empty slice, not nil: cache.Entry.Partitions and
+// run.Store.HasFanOutSuccessor's cache-hit gate rely on nil-vs-non-nil-empty to
+// tell "recorded, and it was empty" apart from "the marker was never emitted at
+// all" — collapsing the two here would make a legitimately-empty producer
+// permanently un-cacheable (F7 P1-1).
 func TestParseMarkers_EmptyPartitionsArrayStillValid(t *testing.T) {
 	logs := strings.NewReader(`##caesium::partitions []
 `)
 	got, err := ParseMarkers(logs)
 	require.NoError(t, err)
 	assert.Empty(t, got.Partitions)
+	require.NotNil(t, got.Partitions, "an explicitly-emitted empty array must round-trip as a non-nil empty slice, not nil")
+}
+
+// TestParseMarkers_NoPartitionsMarkerStaysNil pins the OTHER half of the same
+// invariant: a log stream that never mentions partitions at all (not a fan-out
+// producer, or a producer that forgot the marker) must yield a NIL slice, not an
+// empty one — the only way this signal can reach cache.Entry.Partitions and the
+// F7 cache-hit gate correctly.
+func TestParseMarkers_NoPartitionsMarkerStaysNil(t *testing.T) {
+	logs := strings.NewReader("ordinary output\nno markers here\n")
+	got, err := ParseMarkers(logs)
+	require.NoError(t, err)
+	require.Nil(t, got.Partitions)
 }
 
 // TestParseMarkers_NonArrayPartitionsRejected: any non-array top-level token is

@@ -139,6 +139,15 @@ type partitionAccumulator struct {
 	parts         []Partition
 	seen          map[string]Partition
 	maxPartitions int
+	// arrayMarkerSeen is set once a `##caesium::partitions [...]` line has been
+	// seen and validly parsed as a JSON array — including `[]`, "the documented
+	// way to declare an empty work list" (see parsePartitionsArrayLine). It is
+	// what lets finish() tell "the producer explicitly emitted zero partitions"
+	// apart from "the producer never emitted the marker at all" (not a fan-out
+	// producer, or a script bug): only the array form can make that declaration,
+	// since the single-value ##caesium::partition marker has no way to say
+	// "zero, on purpose".
+	arrayMarkerSeen bool
 }
 
 func newPartitionAccumulator(maxPartitions int) *partitionAccumulator {
@@ -175,6 +184,16 @@ func (a *partitionAccumulator) add(p Partition) error {
 
 func (a *partitionAccumulator) finish() ([]Partition, error) {
 	if len(a.parts) == 0 {
+		if a.arrayMarkerSeen {
+			// The producer explicitly declared an empty work list
+			// (`##caesium::partitions []`) rather than never mentioning
+			// partitions at all. A non-nil, zero-length slice carries that fact
+			// forward — callers (notably cache.Entry.Partitions, and
+			// run.Store.HasFanOutSuccessor's cache-hit gate) rely on nil vs.
+			// non-nil-empty to tell "recorded, and it was empty" apart from
+			// "never recorded".
+			return []Partition{}, nil
+		}
 		return nil, nil
 	}
 	encoded, err := encodeNormalizedPartitionList(a.parts)
@@ -204,6 +223,10 @@ func parsePartitionsArrayLine(payload string, acc *partitionAccumulator) error {
 	if err := json.Unmarshal([]byte(payload), &raw); err != nil {
 		return fmt.Errorf("malformed ##caesium::partitions JSON array: %w", err)
 	}
+	// A valid array token was parsed — even `[]` — so the producer explicitly
+	// addressed its partition list this run. finish() uses this to distinguish
+	// "recorded, empty" from "the marker was never emitted".
+	acc.arrayMarkerSeen = true
 	for _, elem := range raw {
 		p, err := parsePartitionElement(elem)
 		if err != nil {

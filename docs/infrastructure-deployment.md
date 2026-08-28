@@ -477,7 +477,7 @@ the shipped schema". It was not — and the gap it papered over is not
 cosmetic, so a copy-pasteable snippet would have been worse than nothing.
 
 Some of the machinery genuinely did ship.
-[Dynamic fan-out](exec-plans/active/dynamic-fanout.md) landed in #349 with the
+[Dynamic fan-out](exec-plans/completed/dynamic-fanout.md) landed in #349 with the
 structured-partition amendment this pattern needs (`{key, fingerprint,
 dependsOn}` objects, not bare strings), and each instance's per-partition
 fingerprint really does fold into its cache identity
@@ -927,7 +927,7 @@ Ordered by damage:
 - [`design-incremental-execution.md`](design-incremental-execution.md#chain-mode-cachechain) —
   cache-chain implementation notes and its relationship to the value-verified
   short-circuit.
-- [`exec-plans/active/dynamic-fanout.md`](exec-plans/active/dynamic-fanout.md) —
+- [`exec-plans/completed/dynamic-fanout.md`](exec-plans/completed/dynamic-fanout.md) —
   the fan-out mechanism itself, which shipped; the plan → apply handoff this
   pattern would need on top of it has [not](#the-fan-out-form-not-yet-supported).
 - `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md` —

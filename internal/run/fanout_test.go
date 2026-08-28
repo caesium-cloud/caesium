@@ -298,6 +298,82 @@ func TestPlanFanOutExpansionRejectsCycle(t *testing.T) {
 	require.Error(t, err)
 }
 
+// --- HasFanOutSuccessor ----------------------------------------------------
+//
+// F7 (dynamic-fanout closeout): a cache-hit call site (internal/job/job.go,
+// internal/worker/runtime_executor.go) must know, BEFORE trusting a cache
+// entry with no recorded partition list as an empty group, whether the
+// producer even has a downstream fan-out consumer — otherwise a pre-fan-out
+// cache entry silently collapses a real group to onEmpty forever. This is the
+// standalone gate those call sites use.
+
+func TestHasFanOutSuccessorTrueWhenConsumerMatches(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	has, err := f.store.HasFanOutSuccessor(f.runID, f.producer.ID)
+	require.NoError(t, err)
+	assert.True(t, has, "the consumer's fanOut.from names this producer")
+}
+
+func TestHasFanOutSuccessorFalseWhenSuccessorNamesSomeoneElse(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "some-other-step", MaxPartitions: 16})
+
+	has, err := f.store.HasFanOutSuccessor(f.runID, f.producer.ID)
+	require.NoError(t, err)
+	assert.False(t, has, "the successor fans out from a different step, not this producer")
+}
+
+func TestHasFanOutSuccessorFalseWhenNoSuccessorFansOut(t *testing.T) {
+	f := newFanOutFixture(t, nil) // consumer has no FanOutConfig at all
+
+	has, err := f.store.HasFanOutSuccessor(f.runID, f.producer.ID)
+	require.NoError(t, err)
+	assert.False(t, has, "an ordinary (non-fan-out) successor must not report a consumer")
+}
+
+func TestHasFanOutSuccessorFalseForLeafTask(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	// The CONSUMER has no successors of its own.
+	has, err := f.store.HasFanOutSuccessor(f.runID, f.consumer.ID)
+	require.NoError(t, err)
+	assert.False(t, has)
+}
+
+// TestHasFanOutSuccessorFalseWhenTemplateAlreadyExpanded pins P3-4: the
+// predicate must honour fanOutTemplateExpandable exactly like
+// expandFanOutSuccessors does, so a consumer the DAG has ALREADY expanded (N
+// instance rows, not an unexpanded template) does not force a needless
+// producer re-run just because its fanOut.from still names this producer.
+func TestHasFanOutSuccessorFalseWhenTemplateAlreadyExpanded(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	_, err := f.expand(t, strParts("a", "b"))
+	require.NoError(t, err)
+
+	has, err := f.store.HasFanOutSuccessor(f.runID, f.producer.ID)
+	require.NoError(t, err)
+	assert.False(t, has, "an already-expanded group has no unexpanded template left to fan out into")
+}
+
+// --- HasAnyFanOutConsumerForRun --------------------------------------------
+
+func TestHasAnyFanOutConsumerForRunTrueWhenJobUsesFanOut(t *testing.T) {
+	f := newFanOutFixture(t, &jobdefschema.FanOut{From: "discover", MaxPartitions: 16})
+
+	has, err := f.store.HasAnyFanOutConsumerForRun(f.runID)
+	require.NoError(t, err)
+	assert.True(t, has)
+}
+
+func TestHasAnyFanOutConsumerForRunFalseWhenJobHasNoFanOutStep(t *testing.T) {
+	f := newFanOutFixture(t, nil) // consumer has no FanOutConfig at all
+
+	has, err := f.store.HasAnyFanOutConsumerForRun(f.runID)
+	require.NoError(t, err)
+	assert.False(t, has, "a job with no fanOut-configured step anywhere must short-circuit the F7 gate")
+}
+
 // --- decrementInGroupDependentsTx ----------------------------------------
 
 func TestDecrementInGroupDependentsOnlyTouchesDependents(t *testing.T) {
