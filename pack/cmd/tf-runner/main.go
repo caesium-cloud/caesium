@@ -353,21 +353,20 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 		return nil, nil
 	}
 
-	prefixes := make(map[string]string, len(steps))
+	named := make(map[string]string, len(steps))
 	for _, step := range steps {
-		prefix := "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
-		if existing, dup := prefixes[prefix]; dup {
+		prefix := stepEnvPrefix(step)
+		if existing, dup := named[prefix]; dup {
 			return nil, fmt.Errorf("IMPORT_OUTPUTS_FROM names %q and %q, which normalize to the same environment prefix %s",
 				existing, step, prefix)
 		}
-		prefixes[prefix] = step
+		named[prefix] = step
 	}
 	// Two NAMED steps whose prefixes nest ("apply-network" and
-	// "apply-network-2") cannot be told apart in the environment: every variable
-	// of the longer one also carries the shorter one's prefix, so the shorter
-	// one would silently swallow them. Refuse rather than guess.
-	for prefix, step := range prefixes {
-		for other, otherStep := range prefixes {
+	// "apply-network-2") cannot be told apart by the shorter one's own
+	// iteration, so refuse rather than guess.
+	for prefix, step := range named {
+		for other, otherStep := range named {
 			if prefix != other && strings.HasPrefix(other, prefix) {
 				return nil, fmt.Errorf(
 					"IMPORT_OUTPUTS_FROM names both %q and %q: %q's environment prefix contains %q's, "+
@@ -382,6 +381,10 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 			present[key] = struct{}{}
 		}
 	}
+	// Every OTHER step whose outputs are in this environment, identified
+	// exactly. See discoverStepPrefixes: this is what makes the match
+	// step-exact instead of merely prefix-based.
+	siblings := discoverStepPrefixes(present, named)
 
 	type source struct{ step, envKey string }
 	exported := make(map[string]source)
@@ -390,10 +393,18 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 		if !ok {
 			continue
 		}
-		for prefix, step := range prefixes {
+		for prefix, step := range named {
 			rest, found := strings.CutPrefix(key, prefix)
 			if !found || rest == "" {
 				continue
+			}
+			// The key belongs to a LONGER step name that merely starts with
+			// this one. Without this, `IMPORT_OUTPUTS_FROM=apply-network` also
+			// imports `apply-network-extra`'s outputs — silently, because
+			// `extra_foo` is a perfectly good Terraform identifier and an
+			// undeclared TF_VAR_ is ignored.
+			if owner, taken := longestOwner(siblings, key); taken && owner != prefix {
+				break
 			}
 			// A companion _DIGEST belongs to an output reference whose base key
 			// carries the path; it is not a value any Terraform variable wants.
@@ -405,6 +416,15 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 				}
 			}
 			name := strings.ToLower(rest)
+			// The published-count sentinel is protocol, never a Terraform
+			// variable. Every tf-apply emits it, so without this skip a stack
+			// importing from two upstream applies — the diamond form the
+			// contract explicitly allows — collides with ITSELF on
+			// TF_VAR_caesium_outputs_published and fails at plan time, naming a
+			// key the operator never wrote.
+			if name == publishedCountKey {
+				break
+			}
 			if prior, dup := exported[name]; dup {
 				// Last-write-wins here would resolve a real ambiguity by
 				// os.Environ() ordering — an implementation detail of whichever
@@ -437,6 +457,57 @@ func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]s
 		_, _ = fmt.Fprintf(log, "tf-runner: TF_VAR_%s <- %s (step %q)\n", name, exported[name].envKey, exported[name].step)
 	}
 	return names, nil
+}
+
+// stepEnvPrefix is the environment prefix Caesium gives one step's outputs.
+func stepEnvPrefix(step string) string {
+	return "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+}
+
+// discoverStepPrefixes identifies, exactly, every step whose outputs are in this
+// environment, by looking for the published-count sentinel.
+//
+// Caesium provides no list of predecessor step names, and a single
+// CAESIUM_OUTPUT_<STEP>_<KEY> variable cannot be split back into step and key —
+// both halves are uppercased with "_" separators, so the boundary is not
+// recoverable from one name. The sentinel recovers it: EVERY tf-apply publishes
+// caesium_outputs_published, so a key ending in that suffix names its step
+// exactly, and everything before the suffix is that step's prefix.
+//
+// That is what turns "starts with the named step's prefix" into "belongs to the
+// named step". RESIDUAL: a producer that is not a tf-apply publishes no
+// sentinel, so a hypothetical non-apply sibling whose normalized name extends a
+// named step's would still be matched by prefix. IMPORT_OUTPUTS_FROM names
+// upstream APPLY steps by contract, so every real sibling is discoverable; the
+// per-variable log above is the backstop for anything else.
+func discoverStepPrefixes(present map[string]struct{}, named map[string]string) map[string]struct{} {
+	suffix := "_" + normalizeStepName(publishedCountKey)
+	prefixes := make(map[string]struct{}, len(present))
+	for key := range present {
+		if !strings.HasPrefix(key, "CAESIUM_OUTPUT_") {
+			continue
+		}
+		stepPrefix, ok := strings.CutSuffix(key, suffix)
+		if !ok {
+			continue
+		}
+		prefixes[stepPrefix+"_"] = struct{}{}
+	}
+	for prefix := range named {
+		prefixes[prefix] = struct{}{}
+	}
+	return prefixes
+}
+
+// longestOwner returns the longest known step prefix that key starts with.
+func longestOwner(prefixes map[string]struct{}, key string) (string, bool) {
+	best := ""
+	for prefix := range prefixes {
+		if strings.HasPrefix(key, prefix) && len(prefix) > len(best) {
+			best = prefix
+		}
+	}
+	return best, best != ""
 }
 
 // normalizeStepName mirrors pkg/task.NormalizeStepName, which is how Caesium

@@ -283,7 +283,17 @@ func threeStackDeploy() []deployStack {
 	return []deployStack{
 		{Name: "network"},
 		{Name: "account"},
-		{Name: "app-web", ImportFrom: []string{"apply-network"}, Leaf: true},
+		// app-web imports from BOTH upstream applies — the diamond form the
+		// contract allows (`IMPORT_OUTPUTS_FROM=<step>[,<step>]`). A
+		// single-element import would leave the whole multi-import path
+		// unexercised by the lane, and that path is where a shared protocol key
+		// published by every apply collides with itself: two upstream applies
+		// each carrying `caesium_outputs_published` used to fail this plan step
+		// outright, naming a variable no operator ever wrote. app-web declares
+		// no `account_id` variable, which is the normal case and the reason
+		// TF_VAR_ rather than -var is the transport: an upstream stack's outputs
+		// serve every consumer, not just this one.
+		{Name: "app-web", ImportFrom: []string{"apply-network", "apply-account"}, Leaf: true},
 	}
 }
 
@@ -423,6 +433,18 @@ func (s *IntegrationTestSuite) TestInfraDeployReAppliesOnlyWhatChanged() {
 	s.Require().NotEmpty(vpcID, "apply-network published no vpc_id")
 	s.Contains(first.outputs["apply-app-web"]["endpoint"], vpcID,
 		"app-web did not receive network's vpc_id as TF_VAR_vpc_id")
+
+	// The diamond import, end to end: both upstream applies' outputs arrive as
+	// TF_VAR_*, and the protocol sentinel every apply publishes does NOT — it
+	// would otherwise collide with itself across the two steps and fail this
+	// plan.
+	planLog := s.taskLog(job.ID, first.run.ID, s.jobTaskIDByName(job.ID, "plan-app-web"))
+	s.Contains(planLog, "TF_VAR_vpc_id <- CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID",
+		"plan-app-web did not import network's output")
+	s.Contains(planLog, "TF_VAR_account_id <- CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID",
+		"plan-app-web did not import account's output; the multi-step import is unexercised")
+	s.NotContains(planLog, "TF_VAR_caesium_outputs_published",
+		"the protocol sentinel was exported as a Terraform variable")
 
 	// §9 #9: the sensitive output must not have escaped anywhere.
 	s.assertSensitiveOutputNeverEscaped(f, job, first)

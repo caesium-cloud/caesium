@@ -219,6 +219,15 @@ func warm(ctx context.Context, cfg config, logOut io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create staging directory in %s: %w", cfg.CacheDir, err)
 	}
+	// MkdirTemp creates 0700, and this directory is RENAMED into place as the
+	// mirror root every consuming container resolves through terraformrc. A
+	// 0700 mirror is readable only by the warm step's uid, so the moment a pod
+	// security context overrides runAsUser, an fsGroup is relied on, or a
+	// non-pack image consumes the cache volume, every `init` fails offline with
+	// a "provider not available" diagnosis that points nowhere near the cause.
+	if err := os.Chmod(staging, 0o755); err != nil {
+		return fmt.Errorf("make staging directory %s world-readable: %w", staging, err)
+	}
 	defer func() { _ = os.RemoveAll(staging) }()
 	// Swept by AGE, never unconditionally: another process's staging directory
 	// may be a mirror in flight.
