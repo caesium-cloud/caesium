@@ -283,7 +283,17 @@ func threeStackDeploy() []deployStack {
 	return []deployStack{
 		{Name: "network"},
 		{Name: "account"},
-		{Name: "app-web", ImportFrom: []string{"apply-network"}, Leaf: true},
+		// app-web imports from BOTH upstream applies — the diamond form the
+		// contract allows (`IMPORT_OUTPUTS_FROM=<step>[,<step>]`). A
+		// single-element import would leave the whole multi-import path
+		// unexercised by the lane, and that path is where a shared protocol key
+		// published by every apply collides with itself: two upstream applies
+		// each carrying `caesium_outputs_published` used to fail this plan step
+		// outright, naming a variable no operator ever wrote. app-web declares
+		// no `account_id` variable, which is the normal case and the reason
+		// TF_VAR_ rather than -var is the transport: an upstream stack's outputs
+		// serve every consumer, not just this one.
+		{Name: "app-web", ImportFrom: []string{"apply-network", "apply-account"}, Leaf: true},
 	}
 }
 
@@ -424,6 +434,18 @@ func (s *IntegrationTestSuite) TestInfraDeployReAppliesOnlyWhatChanged() {
 	s.Contains(first.outputs["apply-app-web"]["endpoint"], vpcID,
 		"app-web did not receive network's vpc_id as TF_VAR_vpc_id")
 
+	// The diamond import, end to end: both upstream applies' outputs arrive as
+	// TF_VAR_*, and the protocol sentinel every apply publishes does NOT — it
+	// would otherwise collide with itself across the two steps and fail this
+	// plan.
+	planLog := s.taskLog(job.ID, first.run.ID, s.jobTaskIDByName(job.ID, "plan-app-web"))
+	s.Contains(planLog, "TF_VAR_vpc_id <- CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID",
+		"plan-app-web did not import network's output")
+	s.Contains(planLog, "TF_VAR_account_id <- CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID",
+		"plan-app-web did not import account's output; the multi-step import is unexercised")
+	s.NotContains(planLog, "TF_VAR_caesium_outputs_published",
+		"the protocol sentinel was exported as a Terraform variable")
+
 	// §9 #9: the sensitive output must not have escaped anywhere.
 	s.assertSensitiveOutputNeverEscaped(f, job, first)
 
@@ -540,7 +562,21 @@ func (s *IntegrationTestSuite) assertSensitiveOutputNeverEscaped(f *infraDeployF
 	body := s.rawGET(fmt.Sprintf("/v1/jobs/%s/runs/%s", job.ID, r.run.ID))
 	s.NotContains(body, secret, "the sensitive value reached the run API response")
 
-	// 3. caesium why --json, captured on stdout only.
+	// 3. The persisted task log. This is the surface a real leak actually
+	//    reached: terraform-exec tees a JSON command's raw response into the
+	//    handle's stdout writer, so `show -json` and `terraform output -json` —
+	//    which prints sensitive values IN FULL — landed there before that was
+	//    fixed. The log is persisted and served by
+	//    GET /v1/jobs/:id/runs/:run_id/logs, so it is API-reachable, and unit
+	//    tests over the offline fixture would not notice a regression against
+	//    the real image and the real server.
+	for _, step := range []string{"plan-network", "apply-network"} {
+		taskLog := s.taskLog(job.ID, r.run.ID, s.jobTaskIDByName(job.ID, step))
+		s.Require().NotEmpty(taskLog, "%s produced no log; this assertion would be vacuous", step)
+		s.NotContainsf(taskLog, secret, "the sensitive value reached %s's persisted task log", step)
+	}
+
+	// 4. caesium why --json, captured on stdout only.
 	out, err := s.runCLIStdout("why", r.run.ID, "--job-id", job.ID, "--task", "apply-network",
 		"--json", "--server", s.caesiumURL)
 	s.Require().NoError(err, "caesium why failed")
@@ -632,17 +668,40 @@ func (s *IntegrationTestSuite) driftManifest(f *infraDeployFixture, alias, spars
 	return b.String()
 }
 
-// driftStacks is the drift job's unit set: one stack whose provider read
-// consults the real world (so drift can actually be detected) and one that is
-// merely along for the ride, to prove drift is attributed per stack rather than
-// smeared across the run.
-func driftStacks(statePath string) []deployStack {
+// driftDeployStacks is what the drift scenario deploys first: network, the
+// canary whose provider read consults the real world, and app-web — which
+// declares a required variable with no default and consumes it from network.
+func driftDeployStacks(canaryPath string) []deployStack {
 	return []deployStack{
 		{Name: "network"},
 		{
 			Name: "canary",
 			Root: "drift/canary",
-			Env:  map[string]string{"TF_VAR_canary_path": statePath},
+			Env:  map[string]string{"TF_VAR_canary_path": canaryPath},
+		},
+		{Name: "app-web", ImportFrom: []string{"apply-network"}, Leaf: true},
+	}
+}
+
+// driftJobStacks is the drift job's unit set over the same stacks.
+//
+// app-web is the reason this is a separate list. A drift job contains NO apply
+// steps (design §6.6: checkout + warm + one tf-drift per stack), so
+// IMPORT_OUTPUTS_FROM has nothing to import from — and app-web declares
+// `variable "vpc_id"` with no default on purpose, so `plan -refresh-only
+// -input=false` over it fails outright with "No value for required variable".
+// A drift job must therefore PIN its cross-stack variables in its own step env,
+// which is what TF_VAR_vpc_id does here. Without app-web the drift job would
+// ship covering only the stacks that happen to have no cross-stack inputs, and
+// an operator would meet the gap as a red drift run.
+func driftJobStacks(canaryPath, vpcID string) []deployStack {
+	return []deployStack{
+		{Name: "network"},
+		{Name: "app-web", Env: map[string]string{"TF_VAR_vpc_id": vpcID}},
+		{
+			Name: "canary",
+			Root: "drift/canary",
+			Env:  map[string]string{"TF_VAR_canary_path": canaryPath},
 		},
 	}
 }
@@ -660,15 +719,20 @@ func (s *IntegrationTestSuite) TestInfraDriftJobGoesRedOnAnOutOfBandChange() {
 
 	f := s.newInfraDeployFixture("drift")
 	canaryFile := filepath.Join(f.state, "canary.txt")
-	stacks := driftStacks("/state/canary.txt")
 
 	// Deploy first: a drift job over a stack that was never applied has nothing
 	// to refresh, and "clean" would be indistinguishable from "empty".
 	deployAlias := fmt.Sprintf("infra-drift-deploy-%d", time.Now().UnixNano())
-	deployJob := s.applyDeployJob(f, deployAlias, "stacks/** modules/** drift/**", stacks)
+	deployJob := s.applyDeployJob(f, deployAlias, "stacks/** modules/** drift/**", driftDeployStacks("/state/canary.txt"))
 	deployed := s.runDeploy(deployJob, "deploy")
 	s.requireGreen(deployed, "deploy")
 	s.Require().FileExists(canaryFile, "the deploy did not create the resource the drift job watches")
+
+	// The drift job pins app-web's cross-stack variable itself, because it has
+	// no apply step to import it from.
+	vpcID := deployed.outputs["apply-network"]["vpc_id"]
+	s.Require().NotEmpty(vpcID, "apply-network published no vpc_id to pin")
+	stacks := driftJobStacks("/state/canary.txt", vpcID)
 
 	driftAlias := fmt.Sprintf("infra-drift-%d", time.Now().UnixNano())
 	dir := s.writeJobManifest(s.driftManifest(f, driftAlias, "stacks/** modules/** drift/**", stacks))
@@ -679,7 +743,7 @@ func (s *IntegrationTestSuite) TestInfraDriftJobGoesRedOnAnOutOfBandChange() {
 	// ---- Clean state: green, drift=false --------------------------------
 	clean := s.runDeploy(driftJob, "drift run 1 (clean)")
 	s.requireGreen(clean, "drift run 1: a clean stack must not raise an incident")
-	for _, stack := range []string{"network", "canary"} {
+	for _, stack := range []string{"network", "canary", "app-web"} {
 		step := "drift-" + stack
 		s.Equal("succeeded", clean.statuses[step], "%s should have run and passed", step)
 		s.Equal("false", clean.outputs[step]["drift"], "%s reported drift on a clean stack", step)
@@ -714,10 +778,13 @@ func (s *IntegrationTestSuite) TestInfraDriftJobGoesRedOnAnOutOfBandChange() {
 	// The healthy stack is still reported healthy, and — the point of `cache:
 	// false` — it RAN rather than replaying the previous run's answer. A cached
 	// drift step would report clean forever.
-	s.Equal("succeeded", drifted.statuses["drift-network"], "the healthy stack's drift step should still pass")
-	s.NotEqual("cached", drifted.statuses["drift-network"],
-		"a cached drift step defeats the entire purpose of the drift job")
-	s.Equal("false", drifted.outputs["drift-network"]["drift"])
+	for _, stack := range []string{"network", "app-web"} {
+		step := "drift-" + stack
+		s.Equal("succeeded", drifted.statuses[step], "the healthy stack %q should still pass", stack)
+		s.NotEqual("cached", drifted.statuses[step],
+			"a cached drift step defeats the entire purpose of the drift job")
+		s.Equal("false", drifted.outputs[step]["drift"])
+	}
 
 	// And the failure is legible in the log, which is what an operator opens
 	// first.
@@ -835,6 +902,6 @@ output "base_tags" {
 		"plan-account": "succeeded", "apply-account": "succeeded",
 		"plan-app-web": "succeeded", "apply-app-web": "succeeded",
 	})
-	s.Contains(second.outputs["apply-account"]["tags"], "nested-edit",
+	s.Contains(second.outputs["apply-account"]["account_tags"], "nested-edit",
 		"the nested module's new value did not reach the applied stack")
 }

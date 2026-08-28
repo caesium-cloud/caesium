@@ -54,6 +54,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/caesium-cloud/caesium/pack/internal/protocol"
@@ -264,7 +265,7 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 	if err != nil {
 		return err
 	}
-	imported, err := exportImportedOutputs(cfg.ImportOutputsFrom, os.Environ())
+	imported, err := exportImportedOutputs(cfg.ImportOutputsFrom, os.Environ(), log)
 	if err != nil {
 		return err
 	}
@@ -289,7 +290,7 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 		// A zero-count summary, no artifact and no branch marker. The summary is
 		// still emitted: the apply step reads it to decide there is nothing to
 		// do, and the Console renders "no changes" rather than an empty panel.
-		summary, err := tf.Summary{Resources: []tf.ResourceChange{}}.Encode()
+		summary, err := tf.Summary{Resources: []tf.ResourceChange{}}.WithChanges(false).Encode()
 		if err != nil {
 			return err
 		}
@@ -308,7 +309,10 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 	// on this line: the plan JSON that reaches anything we emit carries no
 	// sensitive_values, and the summary is computed from the already-stripped
 	// object rather than from the original.
-	summary, err := tf.SummarizePlan(tf.StripSensitive(plan)).Encode()
+	// WithChanges carries Terraform's own -detailed-exitcode answer, so the
+	// apply step's decision to invoke Terraform can no longer disagree with the
+	// plan step's decision to produce an artifact.
+	summary, err := tf.SummarizePlan(tf.StripSensitive(plan)).WithChanges(changes).Encode()
 	if err != nil {
 		return err
 	}
@@ -344,38 +348,166 @@ func runPlan(ctx context.Context, cfg config, e *protocol.Emitter, log io.Writer
 // A companion _DIGEST variable is skipped: it belongs to an output reference,
 // whose base key already carries the path, and a digest is not a value any
 // Terraform variable wants.
-func exportImportedOutputs(steps []string, environ []string) ([]string, error) {
+func exportImportedOutputs(steps []string, environ []string, log io.Writer) ([]string, error) {
 	if len(steps) == 0 {
 		return nil, nil
 	}
-	prefixes := make([]string, 0, len(steps))
+
+	named := make(map[string]string, len(steps))
 	for _, step := range steps {
-		prefixes = append(prefixes, "CAESIUM_OUTPUT_"+normalizeStepName(step)+"_")
+		prefix := stepEnvPrefix(step)
+		if existing, dup := named[prefix]; dup {
+			return nil, fmt.Errorf("IMPORT_OUTPUTS_FROM names %q and %q, which normalize to the same environment prefix %s",
+				existing, step, prefix)
+		}
+		named[prefix] = step
+	}
+	// Two NAMED steps whose prefixes nest ("apply-network" and
+	// "apply-network-2") cannot be told apart by the shorter one's own
+	// iteration, so refuse rather than guess.
+	for prefix, step := range named {
+		for other, otherStep := range named {
+			if prefix != other && strings.HasPrefix(other, prefix) {
+				return nil, fmt.Errorf(
+					"IMPORT_OUTPUTS_FROM names both %q and %q: %q's environment prefix contains %q's, "+
+						"so their outputs cannot be told apart", step, otherStep, otherStep, step)
+			}
+		}
 	}
 
-	var exported []string
+	present := make(map[string]struct{}, len(environ))
+	for _, kv := range environ {
+		if key, _, ok := strings.Cut(kv, "="); ok {
+			present[key] = struct{}{}
+		}
+	}
+	// Every OTHER step whose outputs are in this environment, identified
+	// exactly. See discoverStepPrefixes: this is what makes the match
+	// step-exact instead of merely prefix-based.
+	siblings := discoverStepPrefixes(present, named)
+
+	type source struct{ step, envKey string }
+	exported := make(map[string]source)
 	for _, kv := range environ {
 		key, value, ok := strings.Cut(kv, "=")
 		if !ok {
 			continue
 		}
-		for _, prefix := range prefixes {
+		for prefix, step := range named {
 			rest, found := strings.CutPrefix(key, prefix)
 			if !found || rest == "" {
 				continue
 			}
-			if strings.HasSuffix(rest, "_DIGEST") {
+			// The key belongs to a LONGER step name that merely starts with
+			// this one. Without this, `IMPORT_OUTPUTS_FROM=apply-network` also
+			// imports `apply-network-extra`'s outputs — silently, because
+			// `extra_foo` is a perfectly good Terraform identifier and an
+			// undeclared TF_VAR_ is ignored.
+			if owner, taken := longestOwner(siblings, key); taken && owner != prefix {
 				break
 			}
-			name := strings.ToLower(rest)
-			if err := tf.ExportVariable(name, value); err != nil {
-				return nil, err
+			// A companion _DIGEST belongs to an output reference whose base key
+			// carries the path; it is not a value any Terraform variable wants.
+			// The base key has to actually exist, or a legitimate output named
+			// `foo_digest` would be swallowed.
+			if base, isDigest := strings.CutSuffix(key, "_DIGEST"); isDigest {
+				if _, companion := present[base]; companion {
+					break
+				}
 			}
-			exported = append(exported, name)
+			name := strings.ToLower(rest)
+			// The published-count sentinel is protocol, never a Terraform
+			// variable. Every tf-apply emits it, so without this skip a stack
+			// importing from two upstream applies — the diamond form the
+			// contract explicitly allows — collides with ITSELF on
+			// TF_VAR_caesium_outputs_published and fails at plan time, naming a
+			// key the operator never wrote.
+			if name == publishedCountKey {
+				break
+			}
+			if prior, dup := exported[name]; dup {
+				// Last-write-wins here would resolve a real ambiguity by
+				// os.Environ() ordering — an implementation detail of whichever
+				// engine formatted the environment — and log nothing.
+				return nil, fmt.Errorf(
+					"IMPORT_OUTPUTS_FROM: %s and %s both map to TF_VAR_%s; "+
+						"rename one of the outputs or import only one of the steps",
+					prior.envKey, key, name)
+			}
+			if err := tf.ExportVariable(name, value); err != nil {
+				return nil, fmt.Errorf("importing %s from step %q: %w", key, step, err)
+			}
+			exported[name] = source{step: step, envKey: key}
 			break
 		}
 	}
-	return exported, nil
+
+	names := protocol.SortedKeys(exported)
+	// Logged individually because the failure mode this guards against is
+	// silent: an undeclared TF_VAR_ is ignored by Terraform, so a variable that
+	// arrived under the wrong name produces no error anywhere — only a stack
+	// planned against a default. The log is the one place an operator can see
+	// what actually crossed the boundary.
+	//
+	// KNOWN LIMITATION: the round trip through Caesium's environment naming is
+	// lossy. pkg/task.BuildOutputEnv uppercases the output key and maps "-" and
+	// "." to "_", so a Terraform output named `vpcId` arrives as `vpcid` and
+	// `vpc-id` as `vpc_id`. Only snake_case output names round-trip exactly.
+	for _, name := range names {
+		_, _ = fmt.Fprintf(log, "tf-runner: TF_VAR_%s <- %s (step %q)\n", name, exported[name].envKey, exported[name].step)
+	}
+	return names, nil
+}
+
+// stepEnvPrefix is the environment prefix Caesium gives one step's outputs.
+func stepEnvPrefix(step string) string {
+	return "CAESIUM_OUTPUT_" + normalizeStepName(step) + "_"
+}
+
+// discoverStepPrefixes identifies, exactly, every step whose outputs are in this
+// environment, by looking for the published-count sentinel.
+//
+// Caesium provides no list of predecessor step names, and a single
+// CAESIUM_OUTPUT_<STEP>_<KEY> variable cannot be split back into step and key —
+// both halves are uppercased with "_" separators, so the boundary is not
+// recoverable from one name. The sentinel recovers it: EVERY tf-apply publishes
+// caesium_outputs_published, so a key ending in that suffix names its step
+// exactly, and everything before the suffix is that step's prefix.
+//
+// That is what turns "starts with the named step's prefix" into "belongs to the
+// named step". RESIDUAL: a producer that is not a tf-apply publishes no
+// sentinel, so a hypothetical non-apply sibling whose normalized name extends a
+// named step's would still be matched by prefix. IMPORT_OUTPUTS_FROM names
+// upstream APPLY steps by contract, so every real sibling is discoverable; the
+// per-variable log above is the backstop for anything else.
+func discoverStepPrefixes(present map[string]struct{}, named map[string]string) map[string]struct{} {
+	suffix := "_" + normalizeStepName(publishedCountKey)
+	prefixes := make(map[string]struct{}, len(present))
+	for key := range present {
+		if !strings.HasPrefix(key, "CAESIUM_OUTPUT_") {
+			continue
+		}
+		stepPrefix, ok := strings.CutSuffix(key, suffix)
+		if !ok {
+			continue
+		}
+		prefixes[stepPrefix+"_"] = struct{}{}
+	}
+	for prefix := range named {
+		prefixes[prefix] = struct{}{}
+	}
+	return prefixes
+}
+
+// longestOwner returns the longest known step prefix that key starts with.
+func longestOwner(prefixes map[string]struct{}, key string) (string, bool) {
+	best := ""
+	for prefix := range prefixes {
+		if strings.HasPrefix(key, prefix) && len(prefix) > len(best) {
+			best = prefix
+		}
+	}
+	return best, best != ""
 }
 
 // normalizeStepName mirrors pkg/task.NormalizeStepName, which is how Caesium
@@ -448,15 +580,29 @@ func runApply(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 	if len(withheld) > 0 {
 		_, _ = fmt.Fprintf(log, "tf-apply: withheld %d sensitive output(s): %v\n", len(withheld), withheld)
 	}
-	if len(values) == 0 {
-		// A stack with no non-sensitive outputs has nothing to publish, and the
-		// emitter rejects an empty output map. Nothing downstream can be reading
-		// this stack's values, so there is nothing to keep alive.
-		_, _ = fmt.Fprintf(log, "tf-apply: %s exports no publishable outputs\n", runner.Root())
-		return nil
+	// The row is published unconditionally, even when every output was withheld.
+	//
+	// The dangerous case is not a stack that never had outputs; it is a stack
+	// that STOPS having publishable ones — someone marks the last non-sensitive
+	// output `sensitive = true`. Emitting nothing then makes a vanished VALUE
+	// indistinguishable from a vanished STACK: the consumer's TF_VAR_ simply
+	// disappears, and because an undeclared TF_VAR_ is silently ignored (the
+	// very property that makes env the right transport, see tf.ExportVariable),
+	// the consumer plans against the variable's default and the run is green.
+	// The count is the sentinel that keeps the row non-empty and makes the
+	// change visible to a consumer's cache key.
+	if _, taken := values[publishedCountKey]; taken {
+		return fmt.Errorf("output %q is reserved by tf-apply; rename it", publishedCountKey)
 	}
+	values[publishedCountKey] = strconv.Itoa(len(values))
 	return e.Output(values)
 }
+
+// publishedCountKey is the reserved output key carrying how many of the stack's
+// outputs were published. It exists so the output row is never empty (see
+// runApply) and so a stack that stops publishing a value moves its consumers'
+// cache keys instead of silently starving them.
+const publishedCountKey = "caesium_outputs_published"
 
 // proposal is what a plan step told this apply step.
 type proposal struct {
@@ -548,7 +694,12 @@ func runDrift(ctx context.Context, cfg config, e *protocol.Emitter, log io.Write
 	if err != nil {
 		return err
 	}
-	if _, err := exportImportedOutputs(cfg.ImportOutputsFrom, os.Environ()); err != nil {
+	// A drift job contains no apply steps, so IMPORT_OUTPUTS_FROM has nothing to
+	// import from and a stack with a required cross-stack variable would fail
+	// with "No value for required variable". Such a job must pin those variables
+	// in its own step env (TF_VAR_*, which passes straight through); this call
+	// stays so a drift job that DOES follow an apply behaves like tf-plan.
+	if _, err := exportImportedOutputs(cfg.ImportOutputsFrom, os.Environ(), log); err != nil {
 		return err
 	}
 	if err := runner.Init(ctx, cfg.BackendConfig); err != nil {

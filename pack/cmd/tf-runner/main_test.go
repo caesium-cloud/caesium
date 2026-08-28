@@ -731,3 +731,268 @@ func TestSubcommandsCoverEveryDocumentedPhase(t *testing.T) {
 		t.Fatalf("subcommands = %v", subcommandNames())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+// I2. "Are there changes?" must be decided ONCE, by Terraform. The counts are a
+// summary for people; if they are also the thing that decides whether apply
+// invokes Terraform, then the day Terraform introduces an action set
+// actionLabel does not recognise, a plan Terraform called non-empty reaches an
+// apply that reads all zeros and does nothing — and the run is green.
+func TestApplyTrustsTerraformsChangeAnswerOverTheCounts(t *testing.T) {
+	cfg := newStack(t)
+	planLines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	values := outputs(t, planLines)
+	summary, err := tf.DecodeSummary(values["proposal_summary"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Changes == nil || !*summary.Changes {
+		t.Fatalf("tf-plan did not record Terraform's own change answer: %+v", summary)
+	}
+
+	// Simulate the future action set: Terraform says there are changes, the
+	// counts say nothing was recognised.
+	blind := tf.Summary{Resources: []tf.ResourceChange{}}.WithChanges(true)
+	encoded, err := blind.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	plannedEnv(t, "plan-offline", planLines)
+	t.Setenv("CAESIUM_OUTPUT_PLAN_OFFLINE_PROPOSAL_SUMMARY", encoded)
+	cfg.PlanStep = "plan-offline"
+
+	_, log, err := emitWithLog(t, runApply, cfg)
+	if err != nil {
+		t.Fatalf("tf-apply: %v", err)
+	}
+	if strings.Contains(log, "not invoking terraform apply") {
+		t.Fatalf("apply skipped a plan Terraform called non-empty — a green run that deployed nothing:\n%s", log)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Root, "terraform.tfstate")); err != nil {
+		t.Fatalf("apply did not run: %v", err)
+	}
+}
+
+// A proposal written before the field existed decodes as nil and must fall back
+// to the counts, not decode as false and skip an apply that should run.
+func TestSummaryWithoutTheChangesFieldFallsBackToTheCounts(t *testing.T) {
+	summary, err := tf.DecodeSummary(`{"add":1,"change":0,"destroy":0,"replace":0,"import":0,"outputs":0,"resources":[]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Changes != nil {
+		t.Fatalf("Changes should be absent, got %v", *summary.Changes)
+	}
+	if !summary.HasChanges() {
+		t.Fatal("a legacy proposal with a non-zero count reported no changes")
+	}
+}
+
+// I3. A stack that STOPS having publishable outputs must still publish a row.
+// Emitting nothing makes a vanished VALUE indistinguishable from a vanished
+// STACK: the consumer's TF_VAR_ disappears, an undeclared TF_VAR_ is silently
+// ignored by Terraform, and the consumer plans against a default — green.
+func TestApplyPublishesARowEvenWhenEveryOutputIsSensitive(t *testing.T) {
+	cfg := newStack(t)
+	allSensitive := `terraform {
+  required_version = ">= 1.10.0"
+  backend "local" {
+    path = "terraform.tfstate"
+  }
+}
+
+resource "terraform_data" "canary" {
+  input = "hello"
+}
+
+output "token" {
+  value     = "` + sensitiveCanary + `"
+  sensitive = true
+}
+`
+	if err := os.WriteFile(filepath.Join(cfg.Root, "main.tf"), []byte(allSensitive), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	planLines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	plannedEnv(t, "plan-offline", planLines)
+	cfg.PlanStep = "plan-offline"
+
+	lines, err := emit(t, runApply, cfg)
+	if err != nil {
+		t.Fatalf("tf-apply: %v", err)
+	}
+	values := outputs(t, lines)
+	if values == nil {
+		t.Fatal("tf-apply published no output row at all; a vanished value is now indistinguishable from a vanished stack")
+	}
+	if values["caesium_outputs_published"] != "0" {
+		t.Fatalf("the published-count sentinel is wrong: %v", values)
+	}
+	if strings.Contains(strings.Join(lines, "\n"), sensitiveCanary) {
+		t.Fatal("the sensitive value was published")
+	}
+}
+
+func TestApplyReportsHowManyOutputsItPublished(t *testing.T) {
+	cfg := newStack(t)
+	planLines, err := emit(t, runPlan, cfg)
+	if err != nil {
+		t.Fatalf("tf-plan: %v", err)
+	}
+	plannedEnv(t, "plan-offline", planLines)
+	cfg.PlanStep = "plan-offline"
+
+	lines, err := emit(t, runApply, cfg)
+	if err != nil {
+		t.Fatalf("tf-apply: %v", err)
+	}
+	// greeting + structured, with token withheld.
+	if got := outputs(t, lines)["caesium_outputs_published"]; got != "2" {
+		t.Fatalf("caesium_outputs_published = %q, want 2", got)
+	}
+}
+
+// I4. The environment prefix of one step can contain another's, and a silent
+// last-write-wins on a collision resolves a real ambiguity by os.Environ()
+// ordering — an implementation detail of whichever engine formatted it.
+func TestImportedOutputsAreStepExactAndFailClosedOnAmbiguity(t *testing.T) {
+	t.Run("nested step prefixes are refused", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network", "apply-network-2"},
+			[]string{"CAESIUM_OUTPUT_APPLY_NETWORK_2_VPC_ID=vpc-1"}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "cannot be told apart") {
+			t.Fatalf("want a nested-prefix refusal, got %v", err)
+		}
+	})
+
+	t.Run("colliding variable names are refused", func(t *testing.T) {
+		_, err := exportImportedOutputs([]string{"apply-network", "apply-account"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_REGION=us-east-1",
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_REGION=eu-west-1",
+		}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "TF_VAR_region") {
+			t.Fatalf("want a collision refusal naming the variable, got %v", err)
+		}
+	})
+
+	t.Run("a legitimate output named foo_digest is not swallowed", func(t *testing.T) {
+		t.Setenv("TF_VAR_content_digest", "")
+		t.Setenv("TF_VAR_plan", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CONTENT_DIGEST=sha256:abc",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_PLAN=/src/tf.plan",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_PLAN_DIGEST=sha256:def",
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "content_digest,plan" {
+			t.Fatalf("exported %v; a real output named *_digest must survive while an output reference's companion is skipped", names)
+		}
+	})
+
+	t.Run("every export is logged with its source", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpc_id", "")
+		var log bytes.Buffer
+		if _, err := exportImportedOutputs([]string{"apply-network"},
+			[]string{"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-9"}, &log); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(log.String(), "TF_VAR_vpc_id <- CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID") {
+			t.Fatalf("the export was not logged; a mis-named variable would be invisible: %q", log.String())
+		}
+	})
+
+	// The step-exact half. `apply-network-extra`'s environment keys all begin
+	// with `apply-network`'s prefix, and `extra_foo` is a perfectly good
+	// Terraform identifier, so prefix matching imports a sibling's outputs into
+	// this stack silently — the manifest never named that step. Every tf-apply
+	// publishes the count sentinel, which is what makes the sibling's own prefix
+	// recoverable and the match exact.
+	t.Run("an unnamed sibling step's outputs are not imported", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpc_id", "")
+		t.Setenv("TF_VAR_extra_foo", "")
+		names, err := exportImportedOutputs([]string{"apply-network"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_FOO=leaked",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_CAESIUM_OUTPUTS_PUBLISHED=1",
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("exportImportedOutputs: %v", err)
+		}
+		if strings.Join(names, ",") != "vpc_id" {
+			t.Fatalf("exported %v; apply-network-extra's outputs belong to a step the manifest never named", names)
+		}
+		if os.Getenv("TF_VAR_extra_foo") == "leaked" {
+			t.Fatal("a sibling step's output reached this stack as a Terraform variable")
+		}
+	})
+
+	// NC1. Every tf-apply publishes the sentinel, so importing from two upstream
+	// applies — the diamond form the contract explicitly allows — used to
+	// collide with itself on a key the operator never wrote.
+	t.Run("the reserved sentinel never becomes a variable", func(t *testing.T) {
+		t.Setenv("TF_VAR_vpc_id", "")
+		t.Setenv("TF_VAR_account_id", "")
+		t.Setenv("TF_VAR_caesium_outputs_published", "")
+		names, err := exportImportedOutputs([]string{"apply-network", "apply-account"}, []string{
+			"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID=vpc-1",
+			"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED=2",
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_ACCOUNT_ID=acct-1",
+			"CAESIUM_OUTPUT_APPLY_ACCOUNT_CAESIUM_OUTPUTS_PUBLISHED=2",
+		}, io.Discard)
+		if err != nil {
+			t.Fatalf("importing from two upstream applies must work; got %v", err)
+		}
+		if strings.Join(names, ",") != "account_id,vpc_id" {
+			t.Fatalf("exported %v", names)
+		}
+		if got := os.Getenv("TF_VAR_caesium_outputs_published"); got != "" {
+			t.Fatalf("the protocol sentinel was exported as a Terraform variable (%q)", got)
+		}
+	})
+}
+
+// discoverStepPrefixes is what makes the match step-exact; it has to recover a
+// step's prefix from the sentinel and leave a step that publishes no sentinel
+// alone rather than inventing a boundary.
+func TestDiscoverStepPrefixesRecoversStepsFromTheSentinel(t *testing.T) {
+	present := map[string]struct{}{
+		"CAESIUM_OUTPUT_APPLY_NETWORK_CAESIUM_OUTPUTS_PUBLISHED":       {},
+		"CAESIUM_OUTPUT_APPLY_NETWORK_VPC_ID":                          {},
+		"CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_CAESIUM_OUTPUTS_PUBLISHED": {},
+		"CAESIUM_OUTPUT_CHECKOUT_COMMIT":                               {},
+		"PATH":                                                         {},
+	}
+	got := discoverStepPrefixes(present, map[string]string{"CAESIUM_OUTPUT_DISCOVER_NETWORK_": "discover-network"})
+
+	for _, want := range []string{
+		"CAESIUM_OUTPUT_APPLY_NETWORK_",
+		"CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_",
+		"CAESIUM_OUTPUT_DISCOVER_NETWORK_",
+	} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("did not discover %s (got %v)", want, got)
+		}
+	}
+	// checkout publishes no sentinel, so its boundary is not recoverable and
+	// must not be guessed at.
+	if _, ok := got["CAESIUM_OUTPUT_CHECKOUT_"]; ok {
+		t.Fatalf("invented a step boundary for a producer with no sentinel: %v", got)
+	}
+
+	owner, ok := longestOwner(got, "CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_FOO")
+	if !ok || owner != "CAESIUM_OUTPUT_APPLY_NETWORK_EXTRA_" {
+		t.Fatalf("longestOwner = %q, %v; the longer step must win", owner, ok)
+	}
+}

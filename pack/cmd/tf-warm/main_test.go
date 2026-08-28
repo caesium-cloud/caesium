@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/caesium-cloud/caesium/pack/internal/tf"
 )
@@ -55,6 +58,11 @@ echo "$*" >> "` + recordPath + `"
 for a in "$@"; do target="$a"; done
 mkdir -p "$target/registry.terraform.io/hashicorp/null"
 echo mirrored > "$target/registry.terraform.io/hashicorp/null/index.json"
+# A real mirror writes one package at a time. Pausing between them is what makes
+# a concurrent warm able to observe — or destroy — a half-populated directory.
+[ -n "${CAESIUM_FAKE_MIRROR_DELAY:-}" ] && sleep "$CAESIUM_FAKE_MIRROR_DELAY"
+mkdir -p "$target/registry.terraform.io/hashicorp/random"
+echo mirrored > "$target/registry.terraform.io/hashicorp/random/index.json"
 cp providers.tf "$target/providers.tf.seen" 2>/dev/null || true
 exit ` + strconv.Itoa(exitCode) + `
 `
@@ -146,8 +154,8 @@ func TestWarmPopulatesTheMirrorAndDropsItsMarker(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(cache, "providers", key, "registry.terraform.io", "hashicorp", "null", "index.json")); err != nil {
 		t.Fatalf("mirror was not promoted: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(cache, "providers.tmp."+key)); !os.IsNotExist(err) {
-		t.Fatalf("staging directory survived: %v", err)
+	if leftovers := stagingDirs(t, cache); len(leftovers) != 0 {
+		t.Fatalf("staging directories survived: %v", leftovers)
 	}
 
 	rc, err := os.ReadFile(filepath.Join(cache, "terraformrc")) //nolint:gosec // test-local path.
@@ -395,5 +403,175 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	env["CACHE_DIR"] = "relative/cache"
 	if _, err := loadConfig(func(k string) string { return env[k] }); err == nil {
 		t.Fatal("loadConfig accepted a relative CACHE_DIR")
+	}
+}
+
+// stagingDirs lists the staging directories left in a cache volume.
+func stagingDirs(t *testing.T, cache string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range entries {
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), "providers.tmp.") {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
+}
+
+// Design §3.5 and §6.3 both justify having NO named lock by saying concurrent
+// warms of one key are benign. They are only benign if each warm stages into a
+// directory of its own: sharing one directory per key lets a second warm clear
+// it mid-flight, after which the first promotes an incomplete mirror and drops a
+// marker vouching for it — and every later run exits fast on that marker while
+// every consuming init fails offline.
+//
+// With the shared-staging implementation this test fails: one of the two mirrors
+// is promoted missing a provider.
+func TestConcurrentWarmsOfOneKeyBothPromoteACompleteMirror(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	execPath, record := fakeTerraform(t, 0)
+	t.Setenv("CAESIUM_FAKE_MIRROR_DELAY", "0.4")
+	cfg := warmConfig(t, src, cache, execPath)
+
+	// The second warm is staggered into the MIDDLE of the first one's mirror, so
+	// it clears staging after the first package has been written and before the
+	// second. Starting them simultaneously does not reproduce the bug: both
+	// would clear an empty directory before either had written anything.
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if i > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
+			errs[i] = warm(context.Background(), cfg, io.Discard)
+		}()
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("warm %d: %v", i, err)
+		}
+	}
+
+	entries, err := os.ReadDir(filepath.Join(cache, ".warm"))
+	if err != nil {
+		t.Fatalf("read marker directory: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want exactly one marker for one provider set, got %v", entries)
+	}
+	key := entries[0].Name()
+
+	// The promoted mirror must hold EVERY package. A marker over a truncated
+	// mirror is the silent failure this whole design is built to avoid.
+	for _, provider := range []string{"null", "random"} {
+		path := filepath.Join(cache, "providers", key, "registry.terraform.io", "hashicorp", provider, "index.json")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("the promoted mirror is missing %s, yet a marker vouches for it: %v", provider, err)
+		}
+	}
+	if leftovers := stagingDirs(t, cache); len(leftovers) != 0 {
+		t.Fatalf("staging directories survived: %v", leftovers)
+	}
+
+	// The invariant, asserted directly rather than raced for: the two warms
+	// staged into DIFFERENT directories.
+	//
+	// Racing for the truncated-promotion outcome is not deterministic — it needs
+	// the second warm's clear to land in the window between the first one's last
+	// package write and its rename, which no seam here controls. The property
+	// that makes the outcome impossible is testable exactly, and it is the one
+	// design §3.5 and §6.3 actually claim ("concurrent warms of the same key are
+	// benign"): with a shared per-key staging path this assertion fails, because
+	// both mirrors are handed the same target.
+	targets := map[string]struct{}{}
+	for _, invocation := range invocations(t, record) {
+		fields := strings.Fields(invocation)
+		targets[fields[len(fields)-1]] = struct{}{}
+	}
+	if len(targets) < 2 {
+		t.Fatalf("both warms staged into the same directory (%v); "+
+			"one clearing it mid-flight can leave the other promoting a truncated mirror and vouching for it", targets)
+	}
+}
+
+// A staging directory abandoned by a killed warm is swept, but only by AGE —
+// deleting a sibling's in-flight staging directory is the failure the sweep
+// exists to avoid.
+func TestWarmSweepsOnlyAbandonedStagingDirectories(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	execPath, _ := fakeTerraform(t, 0)
+
+	stale := filepath.Join(cache, "providers.tmp.deadbeef.oldrun")
+	fresh := filepath.Join(cache, "providers.tmp.deadbeef.liverun")
+	for _, dir := range []string{stale, fresh} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-2 * stagingMaxAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := warm(context.Background(), warmConfig(t, src, cache, execPath), io.Discard); err != nil {
+		t.Fatalf("warm: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("an abandoned staging directory was not swept: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("a possibly in-flight staging directory was deleted: %v", err)
+	}
+}
+
+// The mirror is keyed, but the CLI configuration pointing at one is a single
+// global filename. A warm that exits fast on its own marker must still repair a
+// terraformrc another provider set clobbered, or every consuming init resolves
+// against the wrong mirror and fails offline with an unrelated diagnosis.
+func TestWarmFastPathRepairsATerraformRCPointingElsewhere(t *testing.T) {
+	src, cache := newWarmFixture(t)
+	execPath, record := fakeTerraform(t, 0)
+	cfg := warmConfig(t, src, cache, execPath)
+
+	if err := warm(context.Background(), cfg, io.Discard); err != nil {
+		t.Fatalf("first warm: %v", err)
+	}
+	before := len(invocations(t, record))
+	rcPath := filepath.Join(cache, "terraformrc")
+	if err := os.WriteFile(rcPath, []byte(tf.TerraformRC("/cache/providers/some-other-key")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var log bytes.Buffer
+	if err := warm(context.Background(), cfg, &log); err != nil {
+		t.Fatalf("second warm: %v", err)
+	}
+	if after := len(invocations(t, record)); after != before {
+		t.Fatalf("the fast path re-ran terraform (%d invocations, was %d)", after, before)
+	}
+	rc, err := os.ReadFile(rcPath) //nolint:gosec // test-local path.
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rc), "some-other-key") {
+		t.Fatalf("the fast path left terraformrc pointing at another mirror:\n%s", rc)
+	}
+	entries, err := os.ReadDir(filepath.Join(cache, ".warm"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rc), entries[0].Name()) {
+		t.Fatalf("terraformrc does not name this warm's mirror:\n%s", rc)
+	}
+	if !strings.Contains(log.String(), "re-pointing") {
+		t.Fatalf("the repair was not reported: %q", log.String())
 	}
 }
