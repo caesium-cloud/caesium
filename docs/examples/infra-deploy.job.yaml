@@ -67,8 +67,15 @@ metadata:
     feature: infra-deploy
   annotations:
     purpose: "Dependency-ordered Terraform deployment: network -> account, app-web"
-  # Only one deploy may run at a time; a second trigger while one is in flight
-  # queues rather than racing the shared warm-cache and Terraform state.
+  # LOAD-BEARING, not hygiene. Without a concurrency block a job admits
+  # unlimited overlapping runs, and every volume below is PERSISTENT — so run
+  # 2's `prepare` (which deletes the whole tree) could execute while run 1's
+  # `plan` is still reading it. The multi-writer volume lint evaluates DAG
+  # ordering WITHIN a single run, so it is silent on that pair by design; this
+  # block is what actually makes its silence correct. Keep it if you copy this
+  # manifest, especially if you swap the HTTP trigger for a frequent cron.
+  # `queue` rather than `skip` because a deploy that missed its slot still
+  # needs to happen.
   concurrency:
     maxRuns: 1
     strategy: queue

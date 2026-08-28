@@ -622,6 +622,17 @@ has no warnings channel, while the server lint response already carries
       > explicitly parallel off a `seed` fan-out, plus new ordered-pair
       > (silent, local **and** `--server`) and docker-vs-kubernetes subPath
       > fixtures.
+      > Fix round 1 (W3-β) bounds the exemption's SCOPE, after review flagged
+      > that both limits were stated unconditionally: ordering is evaluated
+      > within a SINGLE run (persistent volumes shared by overlapping runs of
+      > one job are not covered — constrain them with `metadata.concurrency`,
+      > which is therefore load-bearing for this check's silence rather than
+      > hygiene), and the check runs per DEFINITION (two jobs whose volumes
+      > resolve to the same physical store are never compared). Both are now
+      > documented gaps in the function's doc comment and in N-1. The warning
+      > text now says "not all pairwise ordered": a bridged cluster can
+      > legitimately contain an ordered pair, and the old wording sent
+      > operators hunting for a missing edge between them.
 - [x] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes
@@ -681,6 +692,22 @@ has no warnings channel, while the server lint response already carries
       > every volume more than one step mounts (state volumes included — a
       > stack's plan and apply are separate pods and may land on different
       > nodes) and the kubernetes PVC names carry the matching `-rwx` suffix.
+      > Fix round 1 (W3-β): the drift job shares the deploy job's `tfcache` and
+      > `tfstate-<stack>` STORES across definitions, which the per-definition
+      > lint cannot see — and both jobs used `ARTIFACT_DIR: /state/artifacts`,
+      > so a concurrent drift and deploy of one stack would have run two
+      > `terraform init -reconfigure` into the same `<ARTIFACT_DIR>/tfdata`
+      > `.terraform/` (silent corruption; Terraform's state lock does not cover
+      > the data directory). `infra-drift-demo` now uses
+      > `/state/drift-artifacts` and carries `metadata.concurrency: {maxRuns:
+      > 1, strategy: skip}`, and `infra-deploy-demo`'s existing block is
+      > re-commented as load-bearing for the lint's silence rather than
+      > queueing hygiene. The shared provider mirror needed no change: `tf-warm`
+      > stages into its own `MkdirTemp`, promotes by atomic rename and adopts
+      > the winner on a lost race, so concurrent warms of one key are
+      > idempotent — the residual (two jobs whose lock-file unions diverge would
+      > flip the shared `terraformrc`) is the pre-existing one-provider-set-per-
+      > `tfcache` limitation and is now written down.
 
 ### Stream E — Console proposal panel
 
@@ -871,11 +898,17 @@ renders the summary and shows the reference.
       > contract (including `tf-runner`'s `-lockfile=readonly` and the
       > `terraform providers lock -platform=…` remedy), and the refined
       > multi-writer lint semantics (ordered writers silent, parallel writers
-      > warn, docker `subPath` warns, plus the three documented false
-      > negatives). Two new failure-mode rows (`subPath` relied on for
+      > warn, docker `subPath` warns, plus the documented false negatives).
+      > Two new failure-mode rows (`subPath` relied on for
       > isolation; `terraform init` rewriting a read-only `src`), and a
       > caveat on the fan-out snippet that per-unit state isolation is an
       > open edge in that form.
+      > Fix round 1 (W3-β) adds a "Sharing stores across jobs" subsection (why
+      > the drift job aliases the deploy job's stores on purpose, and the three
+      > load-bearing mitigations: a per-job `concurrency` block, distinct
+      > `ARTIFACT_DIR`s, and idempotent warms), restructures the lint's Known
+      > gaps into "what it compares" vs "the scope it reasons in", and adds a
+      > failure-mode row for two jobs sharing one physical store.
 - [x] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in

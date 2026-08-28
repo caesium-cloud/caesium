@@ -13,6 +13,38 @@
 # unrelated one. `src` here is this job's own scratch checkout; it does not
 # need to be the same physical volume as the deploy job's.
 #
+# THAT CROSS-JOB SHARING IS DELIBERATE, AND THE LINT CANNOT SEE IT.
+# `caesium job lint`'s multi-writer check runs per job definition, so it has no
+# idea that this job's `tfcache` and `tfstate-<stack>` name the very stores
+# infra-deploy-demo also mounts read-write. Three things make the overlap safe,
+# and all three are load-bearing:
+#
+#   1. `metadata.concurrency` below caps this job at one run and SKIPS rather
+#      than queues — a drift check that missed its slot is worthless by the
+#      time the queue drains, and a queued pile-up would itself create the
+#      overlap this is meant to avoid. It does NOT constrain infra-deploy-demo,
+#      which is a separate job with its own admission (concurrency is keyed on
+#      job id), so points 2 and 3 have to hold on their own.
+#   2. `ARTIFACT_DIR` here is `/state/drift-artifacts`, NOT the deploy job's
+#      `/state/artifacts`. `tf-runner` derives TF_DATA_DIR as
+#      `<ARTIFACT_DIR>/tfdata` and every phase runs `terraform init
+#      -reconfigure` into it; two concurrent inits rewriting one `.terraform/`
+#      (backend config, provider links, module manifest) corrupt it SILENTLY —
+#      Terraform's state lock does not cover the data directory. Distinct
+#      artifact directories are what keep a drift run and a deploy run of the
+#      same stack from colliding there.
+#   3. The shared provider mirror tolerates concurrent warms *of the same key*
+#      by construction (design §3.5/§6.3): `tf-warm` stages into its own
+#      `MkdirTemp` directory, promotes it with an atomic rename, adopts the
+#      winner if it loses the race, and writes its marker last. Two warms of
+#      the same key are therefore idempotent, which is why no named lock is
+#      needed. This holds only while both jobs resolve to the SAME provider
+#      set: if their `.terraform.lock.hcl` unions ever diverge, they derive
+#      different keys and would flip the shared `/cache/terraformrc` back and
+#      forth between two mirrors — that is the pre-existing "one `tfcache`
+#      volume serves one provider set" limitation, and the two jobs must then
+#      be given separate cache volumes.
+#
 # Every drift step below carries an explicit `cache: false`. An OMITTED
 # `cache` block is cacheable, not "no cache", whenever
 # CAESIUM_CACHE_ENABLED=true (the server-wide default) — and a cached drift
@@ -46,6 +78,13 @@ metadata:
     feature: infra-deploy
   annotations:
     purpose: "Scheduled drift detection over the stacks infra-deploy-demo manages"
+  # One drift run at a time, and `skip` rather than `queue`: a drift check that
+  # missed its window is stale by the time a queue drains, and overlapping runs
+  # would write the same shared state volumes and provider mirror concurrently.
+  # See point 1 of the cross-job sharing note above.
+  concurrency:
+    maxRuns: 1
+    strategy: skip
 trigger:
   type: cron
   configuration:
@@ -139,7 +178,7 @@ steps:
       STACK_ROOT: "/src/stacks/network"
       TF_WORKSPACE: "default"
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
-      ARTIFACT_DIR: "/state/artifacts"
+      ARTIFACT_DIR: "/state/drift-artifacts"
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
@@ -155,7 +194,7 @@ steps:
       STACK_ROOT: "/src/stacks/account"
       TF_WORKSPACE: "default"
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
-      ARTIFACT_DIR: "/state/artifacts"
+      ARTIFACT_DIR: "/state/drift-artifacts"
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
@@ -184,7 +223,7 @@ steps:
       STACK_ROOT: "/src/stacks/app-web"
       TF_WORKSPACE: "default"
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
-      ARTIFACT_DIR: "/state/artifacts"
+      ARTIFACT_DIR: "/state/drift-artifacts"
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
       TF_VAR_vpc_id: "vpc-REPLACE-WITH-infra-deploy-demo's-apply-network-vpc_id-output"
     volumeMounts:

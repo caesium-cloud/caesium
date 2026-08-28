@@ -29,13 +29,13 @@ type writeEntry struct {
 //
 //  1. **No DAG ordering.** If one step is reachable from the other along the
 //     definition's resolved edges (`dependsOn`/`next`, or the implicit
-//     sequential chain a definition with no explicit edges gets), the two can
-//     never run at the same time and their shared volume is a handoff, not a
-//     race — the `prepare` → `checkout` and `plan` → `apply` pairs of the
-//     infrastructure-deployment pattern are exactly that. Edges come from
-//     pkg/jobdef's own DeriveStepSuccessors, so this check cannot disagree
-//     with the scheduler about what the DAG is. Steps on parallel branches
-//     ARE flagged.
+//     sequential chain a definition with no explicit edges gets), the two
+//     cannot run at the same time WITHIN ONE RUN, and their shared volume is a
+//     handoff, not a race — the `prepare` → `checkout` and `plan` → `apply`
+//     pairs of the infrastructure-deployment pattern are exactly that. Edges
+//     come from pkg/jobdef's own DeriveStepSuccessors, so this check cannot
+//     disagree with the scheduler about what the DAG is. Steps on parallel
+//     branches ARE flagged.
 //  2. **Overlapping regions.** Overlap is decided by containment, not exact
 //     match: a mount with no subPath exposes the ENTIRE volume, so it
 //     overlaps every other write mount of that volume; a subPath overlaps
@@ -80,6 +80,24 @@ type writeEntry struct {
 //     fan-out form has to come from the container (a per-partition path or
 //     backend key), not from the mount — see
 //     docs/infrastructure-deployment.md's fan-out section.
+//   - **Ordering is evaluated within a SINGLE run.** These volumes are
+//     persistent (named volumes, pre-provisioned PVCs), and a job with no
+//     `metadata.concurrency` block admits unlimited overlapping runs
+//     (internal/run/store.go admits everything when MaxRuns <= 0) — so run
+//     2's `prepare` can genuinely race run 1's `checkout` on one volume, and
+//     the ordering exemption above says nothing about it. Constrain
+//     overlapping runs with `metadata.concurrency`; the reference manifests
+//     do, and that block is load-bearing for this check's silence rather
+//     than mere hygiene.
+//   - **The check runs per DEFINITION.** Two jobs whose `volumes:` entries
+//     resolve to the SAME physical docker volume or PVC are never compared,
+//     so a cross-job pair of read-write mounts is invisible here no matter
+//     how the DAG inside either job is shaped. docs/examples/'s deploy and
+//     drift jobs deliberately share stores and mitigate it in the manifests
+//     themselves (a `metadata.concurrency` block on each, distinct
+//     `ARTIFACT_DIR`s so the two `terraform init -reconfigure` data
+//     directories cannot collide, and a provider mirror whose warms are
+//     idempotent under an atomic rename).
 func CheckVolumeWriters(defs []schema.Definition) []string {
 	warnings := make([]string, 0)
 
@@ -122,7 +140,7 @@ func checkNamedVolumeWriters(def schema.Definition, ordering dagOrdering) []stri
 	for _, volumeName := range volumeOrder {
 		for _, steps := range conflictingStepGroups(byVolume[volumeName], ordering) {
 			msg := fmt.Sprintf(
-				"volume %q is mounted read-write by steps that are not ordered by the DAG and write overlapping regions: %s; "+
+				"volume %q is mounted read-write by steps that are not all pairwise ordered by the DAG and write overlapping regions: %s; "+
 					"add readOnly: true to steps that only read, order the writers with dependsOn, or give each writer a "+
 					"non-overlapping subPath (kubernetes/podman only — the docker engine ignores subPath, so every docker "+
 					"mount covers the whole volume)",
@@ -161,7 +179,7 @@ func checkRawMountVolumeWriters(def schema.Definition, ordering dagOrdering) []s
 	for _, source := range sourceOrder {
 		for _, steps := range conflictingStepGroups(bySource[source], ordering) {
 			msg := fmt.Sprintf(
-				"volume %q (mounts: type: volume) is mounted read-write by steps that are not ordered by the DAG: %s; "+
+				"volume %q (mounts: type: volume) is mounted read-write by steps that are not all pairwise ordered by the DAG: %s; "+
 					"add readOnly: true to steps that only read, or order the writers with dependsOn",
 				source, strings.Join(steps, ", "))
 			warnings = append(warnings, withAliasPrefix(def, msg))

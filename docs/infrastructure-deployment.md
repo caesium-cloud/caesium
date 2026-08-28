@@ -453,7 +453,10 @@ against the *same* per-stack `tfstate-<stack>` (and ideally `tfcache`)
 physical volumes the deploy job manages — otherwise it is checking drift
 against the wrong (or empty) state. The drift steps run in parallel, one per
 stack, which is another reason state is one volume per stack rather than one
-volume carved up by `subPath`. Drift steps carry **`cache: false` explicitly**, not merely an
+volume carved up by `subPath`. Sharing those stores across two job definitions
+is invisible to the multi-writer lint and needs three deliberate mitigations —
+a `concurrency` block, a distinct `ARTIFACT_DIR`, and a provider mirror whose
+warms are idempotent. See [Sharing stores across jobs](#sharing-stores-across-jobs). Drift steps carry **`cache: false` explicitly**, not merely an
 omitted `cache` block: with `CAESIUM_CACHE_ENABLED=true` an omitted block is
 cacheable, and a cached drift step would replay `drift: false` forever —
 caching the one thing whose entire purpose is to detect out-of-band change
@@ -498,8 +501,8 @@ sharing model right is what keeps a pipeline from being green and wrong.
 | Volume | Written by | Read by | Sharing |
 |---|---|---|---|
 | `src` | `prepare` (clears), then `checkout` (repopulates) — DAG-ordered | every discover/plan/apply, `readOnly: true` | one per job |
-| `tfcache` | `warm-cache` only | every plan/apply/drift, `readOnly: true` | shared across the deploy and drift jobs |
-| `tfstate-<stack>` | that stack's `plan` then its `apply` — DAG-ordered (and the drift job's `drift-<stack>`) | — | **one volume per stack** |
+| `tfcache` | `warm-cache` only, in each job | every plan/apply/drift, `readOnly: true` | shared across the deploy and drift jobs — see [Sharing stores across jobs](#sharing-stores-across-jobs) |
+| `tfstate-<stack>` | that stack's `plan` then its `apply` — DAG-ordered (and the drift job's `drift-<stack>`, under a separate `ARTIFACT_DIR`) | — | **one volume per stack**, shared with the drift job |
 
 ### One logical volume per physical store
 
@@ -522,6 +525,41 @@ declare one `tfstate` volume and carve it up with `subPath: <stack>` — do not:
 
 With one volume per stack the backend path can stay identical across stacks
 (`path=/state/terraform.tfstate`), and the isolation is real on every engine.
+
+### Sharing stores across jobs
+
+The drift job deliberately points its `tfcache` and `tfstate-<stack>` volumes
+at the **deploy job's** physical stores — otherwise it would be checking drift
+against empty or unrelated state, which is the whole point of the job. That is
+the one case where the "one logical volume per physical store" rule is applied
+*across* definitions, and **the lint cannot see it**: `caesium job lint`
+examines each definition on its own, so a cross-job pair of read-write mounts
+is invisible to it however either job's DAG is shaped.
+
+Three things make it safe, and all three are load-bearing:
+
+1. **A `metadata.concurrency` block on each job.** Admission is keyed on job
+   id, so `infra-deploy-demo`'s `maxRuns: 1` constrains only itself — each job
+   needs its own. The drift job uses `strategy: skip` (a drift check that
+   missed its window is stale by the time a queue drains); the deploy job uses
+   `queue` (a deploy that missed its slot still needs to happen). Neither
+   prevents a *deploy* run and a *drift* run overlapping, which is what points
+   2 and 3 are for.
+2. **Distinct `ARTIFACT_DIR`s.** `tf-runner` derives `TF_DATA_DIR` as
+   `<ARTIFACT_DIR>/tfdata` and every phase runs `terraform init -reconfigure`
+   into it. Two concurrent inits rewriting one `.terraform/` — backend config,
+   provider links, module manifest — corrupt it **silently**; Terraform's state
+   lock protects the state file, not the data directory. So the drift job uses
+   `/state/drift-artifacts` where the deploy job uses `/state/artifacts`.
+3. **Warms of one key are idempotent.** `tf-warm` stages into its own
+   `MkdirTemp` directory, promotes it with an atomic rename, adopts the winner
+   if it loses the race, and writes its marker last — which is why design
+   §3.5/§6.3 needs no named lock for the shared mirror. This holds only while
+   both jobs resolve to the **same provider set**: diverging
+   `.terraform.lock.hcl` unions derive different keys and would flip the
+   shared `/cache/terraformrc` between two mirrors, which is the
+   one-provider-set-per-`tfcache` limitation above. Give them separate cache
+   volumes if that day comes.
 
 ### RWX requirement and RWO deferral
 
@@ -617,14 +655,33 @@ What it *will* flag, and should:
 - Two steps sharing a raw `mounts: [{type: volume, source: …}]` volume without
   an ordering edge (that form has no `subPath` at all).
 
-Known gaps, all of them false negatives: two `volumes:` entries resolving to
-one physical store are treated as two volumes; the job-level `volumes:` form
-and the raw `mounts:` form are not cross-referenced; `accessMode:
-ReadOnlyMany` is not read as making step-level `readOnly: true` redundant; and
-a step is never checked against itself, so a `fanOut:` step whose partitions
-all write one volume is not flagged even though those instances do run
-concurrently (the open edge noted in
-[the fan-out form](#the-fan-out-form-forward-looking-mechanically-valid-now)).
+**Known gaps, all of them false negatives.** Two are about what the check
+compares:
+
+- Two `volumes:` entries resolving to one physical store are treated as two
+  volumes, and the job-level `volumes:` form is not cross-referenced against
+  the raw `mounts:` form.
+- `accessMode: ReadOnlyMany` is not read as making step-level `readOnly: true`
+  redundant.
+- A step is never checked against itself, so a `fanOut:` step whose partitions
+  all write one volume is not flagged even though those instances do run
+  concurrently — the open edge noted in
+  [the fan-out form](#the-fan-out-form-forward-looking-mechanically-valid-now).
+
+The other two are about the **scope** the ordering exemption reasons in, and
+they matter more because the reference manifests depend on facts outside it:
+
+- **Ordering holds within a single run.** These volumes are persistent, and a
+  job with no `metadata.concurrency` block admits unlimited overlapping runs —
+  so run 2's `prepare` can delete a tree run 1's `plan` is still reading, on a
+  pair the lint is silent about by design. **`metadata.concurrency` is
+  load-bearing for that silence**, not hygiene; `infra-deploy-demo` carries
+  `{maxRuns: 1, strategy: queue}` and `infra-drift-demo` `{maxRuns: 1,
+  strategy: skip}` for exactly this reason. Keep the block if you copy a
+  manifest, especially onto a frequent cron.
+- **The check runs per definition.** Two *jobs* whose volumes resolve to the
+  same physical store are never compared. The shipped examples do exactly
+  that on purpose — see [Sharing stores across jobs](#sharing-stores-across-jobs).
 
 ## Cache chain: the sharp edge
 
@@ -695,6 +752,7 @@ Ordered by damage:
 | **RWX unavailable** | Runtime mount failure with a clear message; RWO remains unsupported until node affinity lands. |
 | **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8), which flags writers that can run CONCURRENTLY — a pair cooperating through a `dependsOn` edge, like this pattern's own `prepare`/`checkout` and `plan`/`apply` handoffs, is legitimate and stays silent. See [Volumes](#the-multi-writer-lint-design-8). |
 | **`subPath` relied on for isolation** | Docker drops `VolumeMount.SubPath` entirely, so a "partitioned" shared volume is one shared directory there. The multi-writer lint reads docker mounts as root mounts and flags them; the manifests use one volume per stack instead ([Volumes](#one-logical-volume-per-physical-store)). |
+| **Two jobs sharing one physical store** | Invisible to the multi-writer lint, which runs per definition. Mitigated in the manifests: a `metadata.concurrency` block on each job, distinct `ARTIFACT_DIR`s so two `terraform init -reconfigure` data directories cannot collide, and a provider mirror whose warms are idempotent ([Sharing stores across jobs](#sharing-stores-across-jobs)). |
 | **`terraform init` rewriting a read-only `src`** | `tf-runner` passes `-lockfile=readonly`, so a drifted `.terraform.lock.hcl` fails with Terraform's own dependency-change diagnostic instead of an opaque permission error ([`src` is mounted read-only](#src-is-mounted-read-only-for-discover-plan-and-apply)). |
 | **Concurrent applies of one stack** | Terraform's backend state lock errors out; `metadata.concurrency: {maxRuns: 1, strategy: queue}` prevents the race at the job level before it reaches Terraform. |
 
