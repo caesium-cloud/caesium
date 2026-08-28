@@ -52,7 +52,7 @@ Forward-looking or partially-shipped designs with open work. Each carries a `> S
 
 Live execution plans with unchecked work, orchestrated wave-by-wave via the `exec-plan-wave` skill. Feature exec plans that have a design record are linked from that record above; plans whose design of record is a superpowers spec are listed here.
 
-- `exec-plans/active/infra-deploy.md`: DAG-native infrastructure deployment — `cache.chain: values` + `ttl: never` (the one core change), the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` image pack implementing the generic unit-pipeline pattern with Terraform as the first binding, a multi-writer volume lint warning, reference manifests + mandatory drift job, and a Console proposal panel (drafted 2026-08-26; spec `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`).
+- `exec-plans/completed/infra-deploy.md`: DAG-native infrastructure deployment — `cache.chain: values` + `ttl: never` (the one core change), the `caesiumcloud/{git-source,tf-discover,tf-warm,tf-runner}` image pack implementing the generic unit-pipeline pattern with Terraform as the first binding, a multi-writer volume lint warning, reference manifests + mandatory drift job, and a Console proposal panel (drafted 2026-08-26; spec `superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md`).
 
 ## Load Testing
 

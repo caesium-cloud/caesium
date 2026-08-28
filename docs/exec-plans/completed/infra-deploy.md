@@ -1128,7 +1128,7 @@ renders the summary and shows the reference.
       > edit `## Progress`... the orchestrator does the Progress sync +
       > archive"), which overrides this item's literal text. Coordination
       > note: the spec's banner and the roadmap row both link to
-      > `exec-plans/active/infra-deploy.md`; whoever performs the
+      > `exec-plans/completed/infra-deploy.md`; whoever performs the
       > `completed/` move should grep both files (and this plan's own
       > cross-references) for that path and update it in the same change,
       > matching how `dynamic-fanout.md`'s "Shipped" roadmap row currently
