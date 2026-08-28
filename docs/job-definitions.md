@@ -635,6 +635,8 @@ In this manifest, `fetch-data` inherits the job-level 24-hour TTL, `transform` o
   - Freshness fan-in cascade — two upstreams joined into a mart, then a rollup derived down the lineage (`freshness-fanin-cascade.job.yaml`).
   - Cross-job contract enforcement with a producer `schemaFrom: output` dataset and a consumer `consumes[].schema` requirement (`contract-enforcement.job.yaml`).
   - Agent-in-the-loop remediation policy with tiered autonomy and escalation (`agent-remediation.job.yaml`).
+  - Dependency-ordered Terraform deployment via the unit-pipeline pattern, with `cache.chain: values` breaking the checkout's identity-hash chain per stack (`infra-deploy.job.yaml`).
+  - Mandatory scheduled drift detection over the stacks `infra-deploy.job.yaml` manages (`infra-drift.job.yaml`).
 
 The CLI surfaces both `caesium job apply` and `caesium job lint`; REST automation is available via `POST /v1/jobdefs/apply`, which accepts the same `force` and `prune` controls as the CLI apply workflow.
 

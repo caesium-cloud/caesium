@@ -1,0 +1,163 @@
+# The mandatory drift-detection companion to infra-deploy.job.yaml (design
+# §3.2, §6.6). The fingerprint gate in infra-deploy.job.yaml answers "did my
+# code change?" and is blind to drift by construction — a resource edited by
+# hand in a cloud console persists until something else catches it. This job
+# is the only thing that closes that hole, so it is not optional: run it on a
+# schedule (a weekly full-apply with caching disabled is the recommended
+# backstop on top of this — see docs/infrastructure-deployment.md).
+#
+# Reuses infra-deploy.job.yaml's checkout/warm-cache shape and its `tfcache`
+# and `tfstate` physical volumes (same docker/podman volume names, same
+# kubernetes pvc names) so drift is checked against the SAME provider mirror
+# and the SAME state the deploy job manages — not an empty or unrelated one.
+# `src` here is this job's own scratch checkout; it does not need to be the
+# same physical volume as the deploy job's.
+#
+# Every drift step below carries an explicit `cache: false`. An OMITTED
+# `cache` block is cacheable, not "no cache", whenever
+# CAESIUM_CACHE_ENABLED=true (the server-wide default) — and a cached drift
+# step would replay `drift: false` forever, defeating the one thing this job
+# exists to do (design §6.6: "Drift steps carry no cache block ... caching
+# the thing whose entire purpose is to detect out-of-band change would
+# defeat it"). Explicit `cache: false` is what actually guarantees that,
+# regardless of the server's cache default.
+#
+# `src`/`src-reset` use `pvc:` on Kubernetes (a pre-provisioned, shared PVC),
+# not `claimTemplate` — see the matching note in infra-deploy.job.yaml: a
+# `claimTemplate` PVC is scoped to one pod/step, and this volume is mounted
+# by every step in the pipeline. The same aliasing note applies here too:
+# `prepare` writes `src-reset`, `checkout` writes `src`, both names resolving
+# to the identical physical volume, so the pair does not trip the
+# multi-writer volume lint warning despite being dependsOn-serialized writers
+# of the same storage.
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: infra-drift-demo
+  labels:
+    team: platform
+    feature: infra-deploy
+  annotations:
+    purpose: "Scheduled drift detection over the stacks infra-deploy-demo manages"
+trigger:
+  type: cron
+  configuration:
+    expression: "0 6 * * *"
+volumes:
+  - name: src
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-drift-src
+      podman:
+        volume: caesium-infra-drift-src
+      kubernetes:
+        pvc: caesium-infra-drift-src-rwx
+  - name: src-reset
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-drift-src
+      podman:
+        volume: caesium-infra-drift-src
+      kubernetes:
+        pvc: caesium-infra-drift-src-rwx
+  - name: tfcache
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfcache
+      podman:
+        volume: caesium-infra-deploy-tfcache
+      kubernetes:
+        pvc: caesium-infra-deploy-tfcache-rwx
+  - name: tfstate
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate
+      podman:
+        volume: caesium-infra-deploy-tfstate
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate
+steps:
+  - name: prepare
+    image: alpine:3.23
+    cache: false
+    command: ["sh", "-c", "find /src -mindepth 1 -delete && echo cleared"]
+    volumeMounts:
+      - {volume: src-reset, path: /src}
+    next: [checkout]
+
+  - name: checkout
+    image: caesiumcloud/git-source:latest
+    cache: false
+    dependsOn: [prepare]
+    env:
+      GIT_URL: "git@github.com:acme/infra.git"
+      GIT_REF: "main"
+      GIT_SPARSE: "stacks/** modules/**"
+      GIT_SSH_KEY: "secret://env/DEPLOY_KEY"
+    volumeMounts:
+      - {volume: src, path: /src}
+    next: [warm-cache]
+
+  - name: warm-cache
+    image: caesiumcloud/tf-warm:latest
+    cache: false
+    dependsOn: [checkout]
+    env:
+      SRC: "/src"
+      CACHE_DIR: "/cache"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfcache, path: /cache}
+    next: [drift-network, drift-account, drift-app-web]
+
+  - name: drift-network
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-drift"]
+    cache: false
+    dependsOn: [warm-cache]
+    env:
+      STACK_ROOT: "/src/stacks/network"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: network}
+      - {volume: tfcache, path: /cache, readOnly: true}
+
+  - name: drift-account
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-drift"]
+    cache: false
+    dependsOn: [warm-cache]
+    env:
+      STACK_ROOT: "/src/stacks/account"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: account}
+      - {volume: tfcache, path: /cache, readOnly: true}
+
+  - name: drift-app-web
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-drift"]
+    cache: false
+    dependsOn: [warm-cache]
+    env:
+      STACK_ROOT: "/src/stacks/app-web"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: app-web}
+      - {volume: tfcache, path: /cache, readOnly: true}

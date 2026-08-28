@@ -596,7 +596,7 @@ has no warnings channel, while the server lint response already carries
       > `docs/examples/k8s-workload-identity-volume.job.yaml` (`plan-access`
       > moved from the volume root to a sibling `subPath: plans`, disjoint
       > from `write-cloud-report`'s `subPath: reports`).
-- [ ] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
+- [x] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes
       `pvc` with `ReadWriteMany` for `tfcache`, `claimTemplate` for `src`),
@@ -613,6 +613,35 @@ has no warnings channel, while the server lint response already carries
       Files: new `docs/examples/infra-deploy.job.yaml`, new
       `docs/examples/infra-drift.job.yaml`.
       Depends on: A1, C3, C4.
+      > Shipped (W3-α). Grounding correction: `src` uses kubernetes `pvc:`, not
+      > `claimTemplate` — `docs/job-definitions.md`'s own volumes section
+      > documents `claimTemplate` as an inline PVC scoped to **one pod/step**,
+      > and `src` here is mounted by all nine pipeline steps (prepare through
+      > every plan/apply). Two volumes are each declared TWICE under different
+      > logical names, aliasing the identical physical store (same
+      > docker/podman volume name, same kubernetes pvc name): `src`/`src-reset`
+      > (checkout vs. prepare) and `tfstate`/`tfstate-apply` (a stack's plan vs.
+      > its own apply). Each alias has exactly one write-mounting step, so
+      > `internal/jobdef/lint.CheckVolumeWriters` sees no conflict, even though
+      > the two steps of a pair really do write the same storage — safely,
+      > because a `dependsOn` edge serializes them and the lint check has no
+      > way to see that edge. `discover`/`plan`/`apply` mount `src` `readOnly:
+      > true` (verified empirically against the pinned Terraform 1.15.9 that
+      > `init` needs no write access to the root module directory when
+      > `.terraform.lock.hcl` is already committed and `TF_DATA_DIR` is
+      > relocated via `ARTIFACT_DIR`); only `prepare`+`checkout` write it.
+      > `datasets.produces` on apply omits `schemaFrom: output` (an apply step
+      > has no static `outputSchema` — its outputs are whatever the stack
+      > exports), matching C5's own gate manifest. `warm-cache` carries
+      > `cache: false` in both files (an omitted block is cacheable when
+      > `CAESIUM_CACHE_ENABLED=true`, and warm must always run and self-check
+      > its marker — spec §6.3). `infra-drift.job.yaml`'s three `drift-<stack>`
+      > steps run in parallel (`dependsOn: [warm-cache]` each), not serialized
+      > as C5's test fixture does — `propagateSkipped`
+      > (`internal/job/job.go:803`) only cascades skips along DAG edges, so an
+      > unrelated sibling's failure cannot skip a parallel step; C5's
+      > serialization was test-determinism hygiene, not a manifest
+      > requirement.
 
 ### Stream E — Console proposal panel
 

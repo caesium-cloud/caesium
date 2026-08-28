@@ -1,0 +1,367 @@
+# Terraform infrastructure deployment via the unit-pipeline pattern
+# (docs/superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md).
+# Three stacks (network, account, app-web) deployed in dependency order, with
+# unchanged stacks skipped and the provider set warmed once.
+#
+# Hydrate-safe: this job uses an HTTP trigger, so it is visible in the UI
+# after `just hydrate` but only runs when explicitly triggered.
+#
+# Image references are tag-pinned (":latest") because caesiumcloud/git-source,
+# tf-discover, tf-warm and tf-runner are not published yet (plan item H-2).
+# Once they are, pin every reference to a digest, e.g.:
+#   caesiumcloud/git-source@sha256:<64-hex-digest>
+# and re-pin whenever the pack images are rebuilt — see
+# docs/infrastructure-deployment.md for the digest-pinning workflow.
+#
+# `src` uses `pvc:` on Kubernetes, not `claimTemplate`, though the design
+# spec's own reference manifest shows `claimTemplate` there. Per this repo's
+# volumes documentation (docs/job-definitions.md, "Volumes And Workload
+# Identity"), `claimTemplate` provisions an inline EPHEMERAL PVC scoped to
+# ONE pod/step; `src` here is mounted by nine steps across the run (prepare,
+# checkout, three discovers, three plans, three applies), so it needs a
+# pre-provisioned, shared `pvc:`, exactly like `tfcache` and `tfstate` below.
+# This is a grounding correction to the spec, in the same spirit as the two
+# already recorded in the plan doc's intro.
+#
+# Volume aliasing, explained once: `src`/`src-reset` and `tfstate`/`tfstate-apply`
+# are each declared TWICE, pointing at the identical physical store (same
+# docker/podman named-volume name, same kubernetes pvc name). Each pair has
+# exactly one write-mounting step per logical name, so the pair does not trip
+# the multi-writer volume lint warning (internal/jobdef/lint, design §8 "two
+# read-write mounts on one volume") even though, physically, two steps do
+# write the same storage. That is by design, not a bug: `prepare` clears the
+# workspace and `checkout` repopulates it (dependsOn-serialized, so there is
+# no concurrent access — see D1's own "legitimate two-writer case" note), and
+# a stack's `plan` step writes the proposal artifact and Terraform state lock
+# that its own `apply` step reads back (also dependsOn-serialized). The lint
+# check compares volume mounts structurally and cannot see the `dependsOn`
+# edge that makes both pairs safe.
+$schema: https://yourorg.io/schemas/job.v1.json
+apiVersion: v1
+kind: Job
+metadata:
+  alias: infra-deploy-demo
+  labels:
+    team: platform
+    feature: infra-deploy
+  annotations:
+    purpose: "Dependency-ordered Terraform deployment: network -> account, app-web"
+  # Only one deploy may run at a time; a second trigger while one is in flight
+  # queues rather than racing the shared warm-cache and Terraform state.
+  concurrency:
+    maxRuns: 1
+    strategy: queue
+  # Every step's outputSchema is enforced; a discover/plan step that silently
+  # under-reports its outputs fails the run instead of looking like a clean
+  # skip (design §8's "green run that deployed nothing").
+  schemaValidation: fail
+trigger:
+  type: http
+  configuration:
+    path: "/hooks/examples/infra-deploy"
+volumes:
+  - name: src
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-src
+      podman:
+        volume: caesium-infra-deploy-src
+      kubernetes:
+        pvc: caesium-infra-deploy-src-rwx
+  - name: src-reset
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-src
+      podman:
+        volume: caesium-infra-deploy-src
+      kubernetes:
+        pvc: caesium-infra-deploy-src-rwx
+  - name: tfcache
+    accessMode: ReadWriteMany
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfcache
+      podman:
+        volume: caesium-infra-deploy-tfcache
+      kubernetes:
+        pvc: caesium-infra-deploy-tfcache-rwx
+  - name: tfstate
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate
+      podman:
+        volume: caesium-infra-deploy-tfstate
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate
+  - name: tfstate-apply
+    sources:
+      docker:
+        volume: caesium-infra-deploy-tfstate
+      podman:
+        volume: caesium-infra-deploy-tfstate
+      kubernetes:
+        pvc: caesium-infra-deploy-tfstate
+steps:
+  # ── MATERIALIZE ────────────────────────────────────────────────────────
+  # `git-source` refuses to clone into a non-empty destination, and `src` is
+  # a persistent volume that survives across runs, so the tree is cleared
+  # before every checkout. See the volume-aliasing note above for why
+  # `prepare` mounts `src-reset` rather than `src`.
+  - name: prepare
+    image: alpine:3.23
+    cache: false
+    command: ["sh", "-c", "find /src -mindepth 1 -delete && echo cleared"]
+    volumeMounts:
+      - {volume: src-reset, path: /src}
+    next: [checkout]
+
+  - name: checkout
+    image: caesiumcloud/git-source:latest
+    cache: false
+    dependsOn: [prepare]
+    env:
+      GIT_URL: "git@github.com:acme/infra.git"
+      GIT_REF: "${CAESIUM_PARAM_SHA}"
+      GIT_SPARSE: "stacks/** modules/**"
+      GIT_SSH_KEY: "secret://env/DEPLOY_KEY"
+    volumeMounts:
+      - {volume: src, path: /src}
+    outputSchema:
+      type: object
+      required: [commit, treeDigest, path]
+      properties:
+        commit: {type: string}
+        treeDigest: {type: string}
+        path: {type: string}
+    next: [warm-cache, discover-network, discover-account, discover-app-web]
+
+  # ── WARM ───────────────────────────────────────────────────────────────
+  # Never cached (design §6.3): a cache hit would mean no container looked
+  # inside the volume, and a recreated PVC would then fail every offline
+  # `terraform init` with no warning. Always running and self-checking the
+  # `.warm/<key>` marker makes a recreated volume self-healing.
+  - name: warm-cache
+    image: caesiumcloud/tf-warm:latest
+    cache: false
+    dependsOn: [checkout]
+    env:
+      SRC: "/src"
+      CACHE_DIR: "/cache"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfcache, path: /cache}
+
+  # ── DISCOVER (one per stack — the fan-out form needs dynamic fan-out,
+  # not yet shipped; see docs/infrastructure-deployment.md) ───────────────
+  - name: discover-network
+    image: caesiumcloud/tf-discover:latest
+    dependsOn: [checkout]
+    env:
+      SCAN_ROOT: "/src/stacks/network"
+      TF_WORKSPACE: "default"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+    outputSchema:
+      type: object
+      required: [fingerprint]
+      properties:
+        fingerprint: {type: string}
+    next: [plan-network]
+
+  - name: discover-account
+    image: caesiumcloud/tf-discover:latest
+    dependsOn: [checkout]
+    env:
+      SCAN_ROOT: "/src/stacks/account"
+      TF_WORKSPACE: "default"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+    outputSchema:
+      type: object
+      required: [fingerprint]
+      properties:
+        fingerprint: {type: string}
+    next: [plan-account]
+
+  - name: discover-app-web
+    image: caesiumcloud/tf-discover:latest
+    dependsOn: [checkout]
+    env:
+      SCAN_ROOT: "/src/stacks/app-web"
+      TF_WORKSPACE: "default"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+    outputSchema:
+      type: object
+      required: [fingerprint]
+      properties:
+        fingerprint: {type: string}
+    next: [plan-app-web]
+
+  # ── PROPOSE + APPLY: network ─────────────────────────────────────────
+  # Not a leaf (app-web consumes its `vpc_id` output), so it uses the
+  # container no-op form: apply always runs and always publishes outputs,
+  # applying Terraform only when the proposal has non-zero counts. A
+  # branch-skipped apply has no outputs and would strand every consumer
+  # (see the plan doc's grounding note on the branch-form cascade).
+  - name: plan-network
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-plan"]
+    cache:
+      version: 1
+      chain: values
+    dependsOn: [discover-network, warm-cache]
+    env:
+      STACK_ROOT: "/src/stacks/network"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: network}
+      - {volume: tfcache, path: /cache, readOnly: true}
+    outputSchema:
+      type: object
+      required: [proposal_kind, proposal_summary]
+      properties:
+        proposal_kind: {type: string}
+        proposal_summary: {type: string}
+        proposal_artifact: {type: string}
+    next: [apply-network]
+
+  - name: apply-network
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-apply"]
+    cache:
+      version: 1
+      chain: values
+      ttl: never
+    dependsOn: [plan-network]
+    datasets:
+      produces:
+        - name: "stack:demo/network"
+    env:
+      PLAN_STEP: "plan-network"
+      STACK_ROOT: "/src/stacks/network"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate-apply, path: /state, subPath: network}
+      - {volume: tfcache, path: /cache, readOnly: true}
+
+  # ── PROPOSE + APPLY: account (independent of network; container no-op —
+  # it has no consumers today, but a future stack could import its outputs) ──
+  - name: plan-account
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-plan"]
+    cache:
+      version: 1
+      chain: values
+    dependsOn: [discover-account, warm-cache]
+    env:
+      STACK_ROOT: "/src/stacks/account"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: account}
+      - {volume: tfcache, path: /cache, readOnly: true}
+    outputSchema:
+      type: object
+      required: [proposal_kind, proposal_summary]
+      properties:
+        proposal_kind: {type: string}
+        proposal_summary: {type: string}
+        proposal_artifact: {type: string}
+    next: [apply-account]
+
+  - name: apply-account
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-apply"]
+    cache:
+      version: 1
+      chain: values
+      ttl: never
+    dependsOn: [plan-account]
+    datasets:
+      produces:
+        - name: "stack:demo/account"
+    env:
+      PLAN_STEP: "plan-account"
+      STACK_ROOT: "/src/stacks/account"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate-apply, path: /state, subPath: account}
+      - {volume: tfcache, path: /cache, readOnly: true}
+
+  # ── PROPOSE + APPLY: app-web (leaf — no consumer of ITS outputs, so it
+  # uses the branch form: the plan step becomes `type: branch` and skips
+  # the apply step by NOT emitting a branch marker when the plan is empty.
+  # This is the more honest rendering for a stack nothing downstream reads
+  # from — the run visibly shows apply as `skipped`.) ──────────────────────
+  - name: plan-app-web
+    image: caesiumcloud/tf-runner:latest
+    type: branch
+    command: ["tf-plan"]
+    cache:
+      version: 1
+      chain: values
+    dependsOn: [discover-app-web, warm-cache, apply-network]
+    env:
+      STACK_ROOT: "/src/stacks/app-web"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+      # Every CAESIUM_OUTPUT_APPLY_NETWORK_<KEY> is exported as TF_VAR_<key> —
+      # the cross-stack wiring. Deliberately not terraform_remote_state,
+      # which would need granting app-web read credentials on network's state.
+      IMPORT_OUTPUTS_FROM: "apply-network"
+      APPLY_STEP: "apply-app-web"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate, path: /state, subPath: app-web}
+      - {volume: tfcache, path: /cache, readOnly: true}
+    outputSchema:
+      type: object
+      required: [proposal_kind, proposal_summary]
+      properties:
+        proposal_kind: {type: string}
+        proposal_summary: {type: string}
+        proposal_artifact: {type: string}
+    next: [apply-app-web]
+
+  - name: apply-app-web
+    image: caesiumcloud/tf-runner:latest
+    command: ["tf-apply"]
+    cache:
+      version: 1
+      chain: values
+      ttl: never
+    dependsOn: [plan-app-web]
+    datasets:
+      produces:
+        - name: "stack:demo/app-web"
+    env:
+      PLAN_STEP: "plan-app-web"
+      STACK_ROOT: "/src/stacks/app-web"
+      TF_WORKSPACE: "default"
+      TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/artifacts"
+      BACKEND_CONFIG: "path=/state/terraform.tfstate"
+    volumeMounts:
+      - {volume: src, path: /src, readOnly: true}
+      - {volume: tfstate-apply, path: /state, subPath: app-web}
+      - {volume: tfcache, path: /cache, readOnly: true}
