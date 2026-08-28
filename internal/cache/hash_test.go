@@ -925,3 +925,314 @@ func TestCompute_PartitionIdentityStillDeterministic(t *testing.T) {
 		assert.Equal(t, first, in.Compute())
 	}
 }
+
+// ---------------------------------------------------------------------------
+// cache.chain (infra-deploy A1/A2)
+// ---------------------------------------------------------------------------
+
+// TestChainConstantsMatchJobdef pins internal/cache's duplicated chain constants
+// to the jobdef spellings users actually write. They are duplicated rather than
+// imported because pkg/jobdef's own tests import this package, so a non-test
+// import of pkg/jobdef here would be a test-build import cycle — this assertion
+// is what keeps the duplication honest.
+func TestChainConstantsMatchJobdef(t *testing.T) {
+	assert.Equal(t, schema.CacheChainTransitive, ChainTransitive)
+	assert.Equal(t, schema.CacheChainValues, ChainValues)
+}
+
+// TestCompute_GoldenTransitiveChainUnchanged is THE guard on this feature: the
+// default transitive mode must write nothing new into the digest, or every cache
+// entry in every existing deployment is silently invalidated on upgrade. The
+// expected value is a string LITERAL frozen from the pre-chain code (it is the
+// same digest TestCompute_GoldenStringFormUnchanged pins), never a recomputation
+// through the function under test.
+func TestCompute_GoldenTransitiveChainUnchanged(t *testing.T) {
+	// Chain unset — how every existing caller constructs a HashInput today.
+	assert.Equal(t, goldenStringFormHash, baseInput().Compute(),
+		"an unset Chain must hash byte-identically to the pre-chain era")
+
+	// Chain explicitly transitive — how every caller constructs one AFTER A3
+	// threads the resolved config through, since ResolveCacheConfig defaults to
+	// "transitive" rather than "". These two MUST agree.
+	explicit := baseInput()
+	explicit.Chain = ChainTransitive
+	assert.Equal(t, goldenStringFormHash, explicit.Compute(),
+		"an explicit transitive Chain must hash byte-identically to an unset one")
+
+	// And the blob is likewise unchanged: no `chain` key appears.
+	data, err := canonicalBlob(t, explicit)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), `"chain"`,
+		"transitive blobs must not gain a chain field; HashInputBlobVersion stays 1")
+	assert.Equal(t, HashInputBlobVersion, unmarshalBlob(t, data).BlobVersion)
+}
+
+// TestCompute_ValuesChainIgnoresPredecessorHashes is the core semantic: a
+// checkout step's hash churns on every commit and that churn propagates through
+// PredecessorHashes to every downstream stack. Under chain: values it must not.
+func TestCompute_ValuesChainIgnoresPredecessorHashes(t *testing.T) {
+	a := baseInput()
+	a.Chain = ChainValues
+
+	b := a
+	b.PredecessorHashes = []string{"totally", "different", "upstream", "hashes"}
+
+	assert.Equal(t, a.Compute(), b.Compute(),
+		"under chain: values a changed predecessor identity hash must not change the key")
+
+	// Removing them entirely is likewise a no-op.
+	c := a
+	c.PredecessorHashes = nil
+	assert.Equal(t, a.Compute(), c.Compute())
+}
+
+// TestCompute_ValuesChainStillHashesPredecessorOutputs is the other half of the
+// contract: outputs still chain, so changing the network stack's vpc_id output
+// re-plans every consumer even though their code is untouched (spec §4.3).
+func TestCompute_ValuesChainStillHashesPredecessorOutputs(t *testing.T) {
+	a := baseInput()
+	a.Chain = ChainValues
+
+	b := a
+	b.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "CHANGED"}}
+
+	assert.NotEqual(t, a.Compute(), b.Compute(),
+		"under chain: values a changed predecessor OUTPUT must still change the key")
+
+	// A new output key on an existing producer also counts.
+	c := a
+	c.PredecessorOutputs = map[string]map[string]string{"step1": {"key": "val", "extra": "1"}}
+	assert.NotEqual(t, a.Compute(), c.Compute())
+}
+
+// TestCompute_ValuesChainDiffersFromTransitive: the mode is part of the identity.
+// Two otherwise-identical inputs in different modes must not collide, or a step
+// switched to values mode would inherit a key computed under different rules.
+func TestCompute_ValuesChainDiffersFromTransitive(t *testing.T) {
+	transitive := baseInput()
+	values := baseInput()
+	values.Chain = ChainValues
+	assert.NotEqual(t, transitive.Compute(), values.Compute())
+
+	// True even with no predecessor hashes at all: the marker is unconditional.
+	noPredsTransitive := baseInput()
+	noPredsTransitive.PredecessorHashes = nil
+	noPredsValues := noPredsTransitive
+	noPredsValues.Chain = ChainValues
+	assert.NotEqual(t, noPredsTransitive.Compute(), noPredsValues.Compute())
+}
+
+// TestCompute_ValuesChainOnlyForExactValue guards against a near-miss spelling
+// silently excluding predecessor hashes. Anything that is not exactly "values"
+// keeps the transitive behaviour — the safe direction (an extra re-run, never a
+// stale hit). Validate() is what surfaces the typo to the user.
+func TestCompute_ValuesChainOnlyForExactValue(t *testing.T) {
+	for _, chain := range []string{"", "transitive", "Values", "value", "VALUES"} {
+		in := baseInput()
+		in.Chain = chain
+		assert.Equal(t, goldenStringFormHash, in.Compute(),
+			"chain %q must fall back to the transitive hash", chain)
+	}
+}
+
+// TestCanonicalJSON_ChainRoundTrips: `caesium why` reads the blob, so the mode
+// has to survive serialization, and PredecessorHashes must still be recorded
+// (they are provenance even when they are not key material).
+func TestCanonicalJSON_ChainRoundTrips(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+
+	blob := unmarshalBlob(t, data)
+	assert.Equal(t, ChainValues, blob.Chain)
+	assert.Equal(t, in.Compute(), blob.Hash, "the blob must decompose the digest it carries")
+	assert.Equal(t, []string{"abc123", "def456"}, blob.PredecessorHashes,
+		"values mode still records predecessor hashes as provenance")
+	assert.Equal(t, HashInputBlobVersion, blob.BlobVersion,
+		"chain is additive+omitempty, so the blob version must not move")
+}
+
+// TestCanonicalJSON_OversizedChainMarksExclusion: when the blob degrades to the
+// compact summary, the exclusion must still be nameable — PredecessorCount on a
+// values-mode blob would otherwise read as "N inputs that entered the key".
+func TestCanonicalJSON_OversizedChainMarksExclusion(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	in.Env = make(map[string]string, 4096)
+	for i := 0; i < 4096; i++ {
+		in.Env["VAR_"+strconv.Itoa(i)] = strings.Repeat("x", 64)
+	}
+	data, err := canonicalBlob(t, in)
+	require.NoError(t, err)
+	require.LessOrEqual(t, len(data), maxHashInputBlobBytes)
+
+	blob := unmarshalBlob(t, data)
+	require.NotNil(t, blob.Oversized, "this input must exceed the blob bound")
+	assert.True(t, blob.Oversized.PredecessorHashesExcluded)
+	assert.Equal(t, ChainValues, blob.Chain)
+}
+
+// ---------------------------------------------------------------------------
+// cache.chain values-mode predecessor-output framing (greptile 3881714384)
+// ---------------------------------------------------------------------------
+
+// TestCompute_ValuesChainPredecessorOutputFramingIsUnambiguous pins the exact
+// collision greptile reported. Output values are arbitrary producer-supplied
+// text and may contain newlines, so the legacy line form
+// "pred_output:<step>:<key>=<value>\n" is not injective: for producer "p",
+// {"a": "x\npred_output:p:b=y"} and {"a": "x", "b": "y"} both serialize to
+// "pred_output:p:a=x\npred_output:p:b=y\n".
+//
+// Under chain: values the predecessor identity hashes are deliberately excluded,
+// so the outputs ARE the upstream identity and this aliasing is a stale
+// downstream cache hit — the consumer replays a result computed from a
+// different upstream value map.
+func TestCompute_ValuesChainPredecessorOutputFramingIsUnambiguous(t *testing.T) {
+	forged := baseInput()
+	forged.Chain = ChainValues
+	forged.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x\npred_output:p:b=y"},
+	}
+
+	honest := baseInput()
+	honest.Chain = ChainValues
+	honest.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x", "b": "y"},
+	}
+
+	assert.NotEqual(t, forged.Compute(), honest.Compute(),
+		"an output value with an embedded record separator must not alias a second output")
+}
+
+// TestCompute_ValuesChainOutputKeyValueSeparatorUnambiguous covers the "=" split
+// specifically: key "a" with value "b=c" must not alias key "a=b" with value "c".
+func TestCompute_ValuesChainOutputKeyValueSeparatorUnambiguous(t *testing.T) {
+	a := baseInput()
+	a.Chain = ChainValues
+	a.PredecessorOutputs = map[string]map[string]string{"p": {"a": "b=c"}}
+
+	b := baseInput()
+	b.Chain = ChainValues
+	b.PredecessorOutputs = map[string]map[string]string{"p": {"a=b": "c"}}
+
+	assert.NotEqual(t, a.Compute(), b.Compute())
+}
+
+// TestCompute_ValuesChainProducerNameFramingIsUnambiguous: the producer name is
+// the outer ":"-delimited field and aliases the same way — one producer "p"
+// whose value embeds a newline plus a second producer prefix must not collide
+// with two real producers.
+func TestCompute_ValuesChainProducerNameFramingIsUnambiguous(t *testing.T) {
+	forged := baseInput()
+	forged.Chain = ChainValues
+	forged.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x\npred_output:q:b=y"},
+	}
+
+	honest := baseInput()
+	honest.Chain = ChainValues
+	honest.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x"},
+		"q": {"b": "y"},
+	}
+
+	assert.NotEqual(t, forged.Compute(), honest.Compute())
+}
+
+// TestCompute_TransitiveChainOutputFramingUnchanged is the compatibility half:
+// the legacy line form is retained under the default chain, so the aliasing
+// above still exists there by design. It is contained because the predecessor
+// identity hashes — which values mode removes — already separate the two inputs,
+// and changing the transitive encoding would invalidate every cache entry in
+// every existing deployment.
+func TestCompute_TransitiveChainOutputFramingUnchanged(t *testing.T) {
+	forged := baseInput()
+	forged.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x\npred_output:p:b=y"},
+	}
+
+	honest := baseInput()
+	honest.PredecessorOutputs = map[string]map[string]string{
+		"p": {"a": "x", "b": "y"},
+	}
+
+	assert.Equal(t, forged.Compute(), honest.Compute(),
+		"the legacy transitive encoding is frozen for cache compatibility; values mode is where the framing is fixed")
+}
+
+// TestCompute_ValuesChainNilAndEmptyOutputsAgree: nil and allocated-but-empty
+// maps mean the same thing and must fold in identically, at both nesting levels.
+func TestCompute_ValuesChainNilAndEmptyOutputsAgree(t *testing.T) {
+	nilOuter := baseInput()
+	nilOuter.Chain = ChainValues
+	nilOuter.PredecessorOutputs = nil
+
+	emptyOuter := baseInput()
+	emptyOuter.Chain = ChainValues
+	emptyOuter.PredecessorOutputs = map[string]map[string]string{}
+
+	assert.Equal(t, nilOuter.Compute(), emptyOuter.Compute(),
+		"a nil predecessor-output map must hash identically to an empty one")
+
+	nilInner := baseInput()
+	nilInner.Chain = ChainValues
+	nilInner.PredecessorOutputs = map[string]map[string]string{"p": nil}
+
+	emptyInner := baseInput()
+	emptyInner.Chain = ChainValues
+	emptyInner.PredecessorOutputs = map[string]map[string]string{"p": {}}
+
+	assert.Equal(t, nilInner.Compute(), emptyInner.Compute(),
+		"a producer with a nil output map must hash identically to one with an empty map")
+}
+
+// TestCompute_ValuesChainFramingStillDeterministic: canonical JSON must be
+// stable across calls and insensitive to Go map iteration order.
+func TestCompute_ValuesChainFramingStillDeterministic(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	in.PredecessorOutputs = map[string]map[string]string{
+		"network": {"vpc_id": "vpc-1", "subnet_ids": `["a","b"]`, "region": "eu-west-1"},
+		"account": {"account_id": "1234", "org": "acme"},
+	}
+	first := in.Compute()
+	for i := 0; i < 32; i++ {
+		assert.Equal(t, first, in.Compute())
+	}
+}
+
+// Frozen 2026-08-28 against the values-mode framing of baseInput() (greptile
+// 3881714384). Values mode ships in this release, so unlike the transitive
+// golden this digest pins a NEW encoding rather than preserving an old one — but
+// from here on it is the compatibility contract for every `chain: values` cache
+// entry, and any change to the values-mode fold needs a CacheVersion bump.
+const goldenValuesChainHash = "76215b46b4601fe23eb95294e8ce99f25f9168ee2e9430299328d5a1a9fbd9e3"
+
+func TestCompute_GoldenValuesChainFraming(t *testing.T) {
+	in := baseInput()
+	in.Chain = ChainValues
+	assert.Equal(t, goldenValuesChainHash, in.Compute(),
+		"the values-mode framing is a cache-key contract; changing it needs a CacheVersion bump")
+
+	// And it must NOT equal the transitive golden: the mode is part of the key.
+	assert.NotEqual(t, goldenStringFormHash, in.Compute())
+}
+
+// TestFramedPredecessorOutputs_CanonicalShape pins the framed record itself, not
+// just the digest it produces, so a reader can see exactly what values mode
+// folds in — sorted keys, JSON-escaped values, empty maps normalized.
+func TestFramedPredecessorOutputs_CanonicalShape(t *testing.T) {
+	assert.Equal(t, `{}`, canonicalJSON(framedPredecessorOutputs(nil)))
+	assert.Equal(t, `{"p":{}}`,
+		canonicalJSON(framedPredecessorOutputs(map[string]map[string]string{"p": nil})))
+	assert.Equal(t, `{"account":{"id":"1"},"network":{"a":"1","vpc":"2"}}`,
+		canonicalJSON(framedPredecessorOutputs(map[string]map[string]string{
+			"network": {"vpc": "2", "a": "1"},
+			"account": {"id": "1"},
+		})), "producer and key order must be canonical, not map-iteration order")
+	assert.Equal(t, `{"p":{"a":"x\npred_output:p:b=y"}}`,
+		canonicalJSON(framedPredecessorOutputs(map[string]map[string]string{
+			"p": {"a": "x\npred_output:p:b=y"},
+		})), "embedded record separators must be escaped, not passed through")
+}

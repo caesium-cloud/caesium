@@ -365,6 +365,10 @@ type taskHashInputArgs struct {
 	PredecessorOutputs   map[string]map[string]string
 	RunParams            map[string]string
 	CacheVersion         int
+	// Chain is the resolved cache.chain mode. Under CacheChainValues the
+	// PredecessorHashes above are carried for provenance but excluded from the
+	// key; see cache.HashInput.Chain.
+	Chain string
 
 	Partition            string
 	PartitionFingerprint string
@@ -388,6 +392,7 @@ func buildTaskHashInput(a taskHashInputArgs) cache.HashInput {
 		PredecessorHashes:    a.PredecessorHashes,
 		PredecessorOutputs:   a.PredecessorOutputs,
 		RunParams:            a.RunParams,
+		Chain:                a.Chain,
 		Partition:            a.Partition,
 		PartitionFingerprint: a.PartitionFingerprint,
 		PartitionAttributes:  a.PartitionAttributes,
@@ -1208,6 +1213,7 @@ func (j *job) Run(ctx context.Context) error {
 			PredecessorOutputs:   predOutputs,
 			RunParams:            snapshot.Params,
 			CacheVersion:         cacheCfg.Version,
+			Chain:                cacheCfg.Chain,
 		}, predHashByID
 	}
 
@@ -1539,11 +1545,7 @@ func (j *job) Run(ctx context.Context) error {
 				if taskQuarantined {
 					log.Info("quarantined partition skipped cache publication", "task", taskName, "partition", m.partition.Key)
 				} else {
-					var expiresAt *time.Time
-					if cacheCfg.TTL > 0 {
-						exp := time.Now().Add(cacheCfg.TTL)
-						expiresAt = &exp
-					}
+					expiresAt := cache.EntryExpiry(time.Now(), cacheCfg.TTL, cacheCfg.TTLNever)
 					if putErr := getCacheStore().Put(&cache.Entry{
 						Hash:                inputHash,
 						JobID:               j.id,
@@ -2137,11 +2139,7 @@ func (j *job) Run(ctx context.Context) error {
 							}
 						}
 
-						var expiresAt *time.Time
-						if cacheCfg.TTL > 0 {
-							t := time.Now().Add(cacheCfg.TTL)
-							expiresAt = &t
-						}
+						expiresAt := cache.EntryExpiry(time.Now(), cacheCfg.TTL, cacheCfg.TTLNever)
 						if putErr := cacheStore.Put(&cache.Entry{
 							Hash:             inputHash,
 							JobID:            j.id,

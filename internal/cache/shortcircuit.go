@@ -82,7 +82,8 @@ func EquivalentPriorHash(newHash string, newOutput map[string]string, priors []P
 			continue
 		}
 		// The proof: byte-identical output — exactly the bytes HashInput.Compute
-		// folds into a downstream cache key (its pred_output line). For a
+		// folds into a downstream cache key (its pred_output line under the
+		// transitive chain, its pred_outputs JSON record under values). For a
 		// large-object reference those bytes embed the sha256 content digest, so a
 		// re-emitted byte-identical payload proves content equality. This is
 		// deliberately no weaker than the cache key itself: if the output differs

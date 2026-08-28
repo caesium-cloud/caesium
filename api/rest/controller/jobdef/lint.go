@@ -8,6 +8,7 @@ import (
 
 	contractsvc "github.com/caesium-cloud/caesium/api/rest/service/contract"
 	internaljobdef "github.com/caesium-cloud/caesium/internal/jobdef"
+	"github.com/caesium-cloud/caesium/internal/jobdef/lint"
 	"github.com/caesium-cloud/caesium/pkg/db"
 	schema "github.com/caesium-cloud/caesium/pkg/jobdef"
 	"github.com/labstack/echo/v5"
@@ -71,6 +72,11 @@ func Lint(c *echo.Context) error {
 	if len(resp.Errors) == 0 {
 		if err := internaljobdef.ValidateAgentProfileRefs(c.Request().Context(), db.Connection(), req.Definitions); err != nil {
 			resp.Errors = append(resp.Errors, LintMessage{Message: err.Error()})
+		}
+	}
+	if len(resp.Errors) == 0 {
+		for _, msg := range lint.CheckVolumeWriters(req.Definitions) {
+			resp.Warnings = append(resp.Warnings, LintMessage{Message: msg})
 		}
 	}
 
