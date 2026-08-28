@@ -21,6 +21,10 @@ output "account_id" {
   value = "acct-000000000001"
 }
 
-output "tags" {
+output "account_tags" {
+  # Deliberately NOT "tags": network exports one too, and a stack importing
+  # from both (the diamond form) would collide on TF_VAR_tags. Two upstream
+  # stacks exporting the same name is a real ambiguity the runner refuses; the
+  # fixture disambiguates so the diamond itself stays exercisable.
   value = module.tags.tags
 }

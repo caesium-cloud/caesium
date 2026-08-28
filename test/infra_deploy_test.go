@@ -902,6 +902,6 @@ output "base_tags" {
 		"plan-account": "succeeded", "apply-account": "succeeded",
 		"plan-app-web": "succeeded", "apply-app-web": "succeeded",
 	})
-	s.Contains(second.outputs["apply-account"]["tags"], "nested-edit",
+	s.Contains(second.outputs["apply-account"]["account_tags"], "nested-edit",
 		"the nested module's new value did not reach the applied stack")
 }
