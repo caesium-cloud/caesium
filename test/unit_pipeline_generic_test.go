@@ -174,6 +174,10 @@ var unitPipelineUnitSteps = []string{"propose-a", "propose-b", "apply-a", "apply
 // bump re-runs exactly one unit, and a changed apply OUTPUT re-runs its
 // consumer.
 func (s *IntegrationTestSuite) TestGenericUnitPipelineCachesPerUnit() {
+	if s.engineType == "kubernetes" {
+		s.T().Skipf("needs an RWX-capable storage class; the kind cluster's default class is RWO — covered on the docker + podman lanes")
+	}
+
 	alias := fmt.Sprintf("integration-unit-pipeline-%d", time.Now().UnixNano())
 
 	manifest := unitPipelineManifest(alias, "sha-a-1", "sha-b-1", "endpoint-v1", "warm-r1")
