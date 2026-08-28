@@ -74,6 +74,12 @@ type writeEntry struct {
 //   - `Volume.AccessMode: ReadOnlyMany` is not consulted: it makes
 //     step-level `readOnly: true` redundant, but its absence is still what
 //     this check reads.
+//   - A step is never checked against ITSELF, so a `fanOut:` step whose N
+//     partitions all write one volume is not flagged even though those
+//     instances really do run concurrently. Per-unit isolation in the
+//     fan-out form has to come from the container (a per-partition path or
+//     backend key), not from the mount — see
+//     docs/infrastructure-deployment.md's fan-out section.
 func CheckVolumeWriters(defs []schema.Definition) []string {
 	warnings := make([]string, 0)
 

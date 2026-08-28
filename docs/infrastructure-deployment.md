@@ -619,9 +619,12 @@ What it *will* flag, and should:
 
 Known gaps, all of them false negatives: two `volumes:` entries resolving to
 one physical store are treated as two volumes; the job-level `volumes:` form
-and the raw `mounts:` form are not cross-referenced; and
-`accessMode: ReadOnlyMany` is not read as making step-level `readOnly: true`
-redundant.
+and the raw `mounts:` form are not cross-referenced; `accessMode:
+ReadOnlyMany` is not read as making step-level `readOnly: true` redundant; and
+a step is never checked against itself, so a `fanOut:` step whose partitions
+all write one volume is not flagged even though those instances do run
+concurrently (the open edge noted in
+[the fan-out form](#the-fan-out-form-forward-looking-mechanically-valid-now)).
 
 ## Cache chain: the sharp edge
 
