@@ -29,6 +29,7 @@ import { IncidentRibbon } from "@/features/incidents/IncidentRibbon";
 import { api, type Incident, type JobTask, type PartitionInstance, type TaskRun } from "@/lib/api";
 import { LogViewer } from "./LogViewer";
 import { TaskWhyView } from "./TaskWhyView";
+import { ProposalPanel } from "./ProposalPanel";
 import { isTaskCached } from "./cache-utils";
 
 const PARTITION_STATUS_OPTIONS = ["succeeded", "failed", "running", "pending", "cached", "skipped"];
@@ -479,6 +480,9 @@ export function TaskDetailPanel({
                 runId={runId}
                 taskName={task?.name}
               />
+
+              {/* Proposal (spec §5.6): rendered only when the output carries proposal_kind */}
+              <ProposalPanel output={runTask?.output} />
 
               {/* Outputs */}
               {runTask?.output && Object.keys(runTask.output).length > 0 && (

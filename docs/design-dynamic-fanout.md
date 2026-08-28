@@ -395,7 +395,7 @@ express its pattern on bare-string partitions. That spec is one consumer; the
 capability is data-engineering-first and is specified here, not there. The
 converse also holds: the chain break (`cache.chain: values`, spec §4) that makes
 a per-unit fingerprint *effective* is specified there and implemented by Stream
-A of `exec-plans/active/infra-deploy.md`, not here.
+A of `exec-plans/completed/infra-deploy.md`, not here.
 
 ### Why a bare string is not enough
 
@@ -576,7 +576,8 @@ Two mechanisms close the gap, and neither is this amendment's to invent:
   output**. It does not help here: one changed model in three hundred changes one
   fingerprint, the emitted list is no longer byte-identical, and the substitution
   is (correctly) refused. It is conservative by construction and stays that way.
-- **`cache.chain: values`** — the step-level knob proposed in
+- **`cache.chain: values`** — the step-level knob added, and shipped (Stream A
+  of `exec-plans/completed/infra-deploy.md`), by
   [`2026-08-25-dag-native-infrastructure-deployment-design.md`](superpowers/specs/2026-08-25-dag-native-infrastructure-deployment-design.md)
   §4, which excludes `PredecessorHashes` from a step's key while still hashing
   `PredecessorOutputs`. That is the chain break, and it is orthogonal to this

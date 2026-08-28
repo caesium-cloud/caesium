@@ -575,12 +575,19 @@ export type ApiErrorKind =
 
 export interface FieldChange {
   field: string;
-  kind: "scalar" | "map_entry" | "structural" | string;
+  /**
+   * "excluded" marks an input that was deliberately kept OUT of the identity
+   * hash (today: predecessor hashes under `cache.chain: values`). It is NOT a
+   * field that differed, so counts and "what changed" pickers must skip it.
+   */
+  kind: "scalar" | "map_entry" | "structural" | "excluded" | string;
   before?: string;
   after?: string;
   added?: boolean;
   removed?: boolean;
   redacted?: boolean;
+  /** Human-readable qualifier shown instead of a before/after comparison. */
+  note?: string;
 }
 
 export interface WhyTrigger {
@@ -596,6 +603,13 @@ export interface BlobDiff {
   baselineHash?: string;
   changes?: FieldChange[];
   degraded?: string;
+  /**
+   * Qualifiers about how the key was computed rather than which input differed
+   * — today, "predecessor hashes excluded (chain: values)". Rendering it is
+   * required: a task that stayed cached while its predecessor visibly changed is
+   * otherwise an unexplainable skip.
+   */
+  notes?: string[];
 }
 
 export type RunDiffVerdict = "WOULD_CACHE_HIT" | "RERAN" | "DEGRADED";
@@ -653,6 +667,19 @@ export interface WhyBaseline {
 
 export type WhyVerdict = "CACHE_HIT" | "CACHE_MISS" | "CACHE_DISABLED" | "UNKNOWN";
 
+/**
+ * WhyGroup is the aggregate answer the server returns for a FANNED step
+ * addressed without a partition selector. Only the fields the Console reads are
+ * typed; a group has N identity hashes and no `diff`, so `notes` is where its
+ * key-construction qualifiers (the `chain: values` exclusion) live.
+ */
+export interface WhyGroup {
+  partitionCount?: number;
+  statusCounts?: Record<string, number>;
+  cacheHits?: number;
+  notes?: string[];
+}
+
 export interface WhyExplanation {
   runId: string;
   jobId: string;
@@ -667,6 +694,7 @@ export interface WhyExplanation {
   trigger: WhyTrigger;
   baseline: WhyBaseline;
   diff?: BlobDiff;
+  group?: WhyGroup;
 }
 
 export interface BlameOptions {

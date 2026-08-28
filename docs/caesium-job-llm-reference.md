@@ -160,7 +160,7 @@ steps:
 | `replaySafe` | bool | no | Durable mark that allows this step to be re-executed by quarantined what-if replay. Job-level `metadata.replaySafe: true` marks all steps; step-level `replaySafe: true` marks one. Recorded on the baseline task run; excluded from the cache hash |
 | `rateLimit` | object | no | Consume units from a job-level `metadata.rateLimits` resource: `{resource, units}`. Excluded from the cache hash |
 | `fanOut` | object | no | Materialize N parallel instances from a predecessor's `##caesium::partitions` marker: `{from, env?, maxPartitions, maxParallel?, onEmpty?, failurePolicy?}`. Scheduling metadata — excluded from the cache hash. Each instance gets `$CAESIUM_PARTITION` and `$CAESIUM_PARTITION_JSON`. `dependsOn` on a partition object is a scheduling instruction, not data. |
-| `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
+| `cache` | bool or object | no | Task caching — `true`, `{ttl: "12h", version: 2}`, `{ttl: "never"}` for no expiry at all, `{chain: "values"}` (see [Cache chain](#cache-chain-breaking-a-noisy-upstream)), or `{pinDigests: true}` to resolve the image tag to its content digest and fold the digest (not the mutable tag) into the cache key so a moved tag misses instead of serving a stale hit (default `CAESIUM_CACHE_PIN_DIGESTS`). The resolved tag→digest mapping is a perf cache reused for `digestTTL` (default `CAESIUM_CACHE_DIGEST_TTL`, 5m); a moved tag is re-detected only after that window, or immediately with `{pinDigests: true, digestTTL: 0}` |
 | `type` | string | no | `task` (default) or `branch` for conditional fan-out |
 | `workdir` / `mounts` / `nodeSelector` | string / array / map | no | Working dir, bind mounts (`source`/`target`/`readOnly`), and distributed-mode node labels — full shape in the [generated reference](job-schema-reference.md) |
 | `volumeMounts` | array | no | Mount a declared job volume: `{volume, path, readOnly?, subPath?}` |
@@ -187,6 +187,43 @@ steps:
 ```
 
 Caesium records the effective value on the baseline `TaskRun` when that task runs. Later applies cannot retroactively authorize an older unsafe baseline, and `replaySafe` is excluded from the cache identity hash because it is control-plane metadata, not an execution input.
+
+### Cache chain: breaking a noisy upstream
+
+A step's identity hash is computed **before** it runs, so it can only contain the step's *inputs* — and by default those include every predecessor's identity hash. A shared upstream step whose identity churns therefore invalidates everything downstream of it. The canonical case is a source checkout: its hash contains the git ref, which moves on every commit.
+
+`cache.chain: values` excludes predecessor identity hashes from a step's key while still hashing predecessor **outputs**:
+
+| | `transitive` (default) | `values` |
+|---|---|---|
+| Predecessor identity hashes | hashed | **excluded** |
+| Predecessor outputs | hashed | hashed |
+| Everything else | hashed | hashed |
+
+```yaml
+steps:
+  - name: checkout                 # identity moves on every commit
+    image: ghcr.io/acme/git-checkout:1.4
+    next: [plan]
+  - name: plan
+    image: ghcr.io/acme/planner:1.4
+    cache:
+      version: 1
+      chain: values                # do not inherit checkout's churn
+      ttl: never                   # keyed on a fingerprint, not a wall clock
+```
+
+`chain` layers job (`metadata.cache.chain`) → step like `pinDigests`. The mode is part of the identity, so switching a step between the two invalidates its existing entries.
+
+**Sharp edge:** an upstream change that alters behaviour without altering its declared outputs leaves consumers cached. Make the upstream step's outputs a faithful summary of what it produced (a content digest, not a timestamp), and prefer per-step `chain` over the job-wide default. `caesium why` always renders `predecessor hashes excluded (chain: values)` so a skip is never unexplainable.
+
+The shipped, worked example of this pattern is dependency-ordered Terraform
+deployment: a per-stack `plan`/`apply` pair uses `chain: values` (plus
+`ttl: never` on `apply`) to stop a shared checkout's churn from invalidating
+every stack on every commit, while a changed upstream stack's *output* (e.g.
+`vpc_id`) still busts its consumers. See
+[`infrastructure-deployment.md`](infrastructure-deployment.md) and
+`docs/examples/infra-deploy.job.yaml`.
 
 ### Delegating scheduling to Kueue
 

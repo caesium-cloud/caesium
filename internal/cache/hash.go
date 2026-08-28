@@ -27,6 +27,21 @@ const HashInputBlobVersion = 1
 // the field-level explanation degrades gracefully rather than bloating dqlite.
 const maxHashInputBlobBytes = 64 * 1024
 
+// Cache chain modes. They mirror jobdef.CacheChainTransitive /
+// jobdef.CacheChainValues and are duplicated here rather than imported:
+// pkg/jobdef's own tests import this package, so a non-test import of pkg/jobdef
+// from internal/cache would be an import cycle in the jobdef test build.
+// TestChainConstantsMatchJobdef pins the two spellings in lockstep.
+const (
+	// ChainTransitive is the default and hashes predecessor identity hashes,
+	// exactly as every hash before this feature did.
+	ChainTransitive = "transitive"
+	// ChainValues excludes predecessor identity hashes from the key while still
+	// hashing predecessor OUTPUTS: "my key is what I consume, not my
+	// predecessors' internal churn".
+	ChainValues = "values"
+)
+
 // redactedEnvValue is the placeholder stored in place of a non-secret-reference
 // env value. The value is replaced by a digest so `caesium why` can still
 // detect that an env var changed (the digest differs) without ever persisting
@@ -90,6 +105,16 @@ type HashInputBlob struct {
 	PredecessorOutputs   map[string]map[string]string `json:"predecessorOutputs,omitempty"`
 	RunParams            map[string]string            `json:"runParams,omitempty"`
 
+	// Chain records the cache chain mode ONLY when it is ChainValues; the
+	// default transitive mode writes nothing, so every blob produced before this
+	// field existed stays byte-identical and HashInputBlobVersion stays 1. It is
+	// what lets `caesium why` say "predecessor hashes excluded (chain: values)"
+	// rather than reporting a predecessor-hash change that never discriminated
+	// the two keys. PredecessorHashes are still recorded verbatim in values mode:
+	// they are real provenance and useful to a reader, they simply did not enter
+	// the digest.
+	Chain string `json:"chain,omitempty"`
+
 	// Partition / PartitionFingerprint / PartitionAttributes mirror, field by
 	// field, the single framed partition_identity record Compute() folds in (see
 	// HashInput.partitionIdentity). They are kept as three separate JSON fields
@@ -119,6 +144,10 @@ type oversizedBlob struct {
 	EnvCount               int `json:"envCount"`
 	PredecessorCount       int `json:"predecessorCount"`
 	PredecessorOutputCount int `json:"predecessorOutputCount"`
+	// PredecessorHashesExcluded marks a values-mode blob so the degraded summary
+	// can still name the exclusion. Without it PredecessorCount reads as "N
+	// inputs that entered the key", which is exactly wrong under chain: values.
+	PredecessorHashesExcluded bool `json:"predecessorHashesExcluded,omitempty"`
 }
 
 // secretRefPrefix is the scheme prefix identifying a secret:// reference. It
@@ -190,6 +219,7 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		Partition:            h.Partition,
 		PartitionFingerprint: h.PartitionFingerprint,
 		PartitionAttributes:  h.PartitionAttributes,
+		Chain:                h.blobChain(),
 		CacheVersion:         h.CacheVersion,
 	}
 
@@ -209,11 +239,13 @@ func (h HashInput) CanonicalJSON(precomputed string) ([]byte, error) {
 		TaskName:            h.TaskName,
 		Image:               h.Image,
 		ResolvedImageDigest: h.ResolvedImageDigest,
+		Chain:               h.blobChain(),
 		CacheVersion:        h.CacheVersion,
 		Oversized: &oversizedBlob{
-			EnvCount:               len(h.Env),
-			PredecessorCount:       len(h.PredecessorHashes),
-			PredecessorOutputCount: len(h.PredecessorOutputs),
+			EnvCount:                  len(h.Env),
+			PredecessorCount:          len(h.PredecessorHashes),
+			PredecessorOutputCount:    len(h.PredecessorOutputs),
+			PredecessorHashesExcluded: h.excludesPredecessorHashes(),
 		},
 	}
 	data, err = json.Marshal(oversized)
@@ -310,7 +342,29 @@ type HashInput struct {
 	// PartitionAttributes are free-form scalar attributes, hashed with sorted
 	// keys only when the map is non-empty.
 	PartitionAttributes map[string]string
-	CacheVersion        int
+	// Chain selects whether PredecessorHashes enter the key: ChainTransitive
+	// (the default, and what an empty string means) or ChainValues. It carries
+	// the resolved jobdef cache config's Chain and is threaded through every
+	// HashInput construction site so the local, worker and replay lanes cannot
+	// disagree about one task's identity.
+	Chain        string
+	CacheVersion int
+}
+
+// excludesPredecessorHashes reports whether this input is in values mode, i.e.
+// PredecessorHashes are carried for provenance but do NOT enter the digest.
+func (h HashInput) excludesPredecessorHashes() bool {
+	return h.Chain == ChainValues
+}
+
+// blobChain is the value persisted in HashInputBlob.Chain: the mode name only in
+// values mode, empty in the default transitive mode, so blobs written before this
+// field existed stay byte-identical and the blob version need not move.
+func (h HashInput) blobChain() string {
+	if h.excludesPredecessorHashes() {
+		return ChainValues
+	}
+	return ""
 }
 
 // Compute returns the SHA-256 hex digest of the canonicalized input.
@@ -376,37 +430,83 @@ func (h HashInput) Compute() string {
 		}
 	}
 
-	// Sorted predecessor hashes
-	predHashes := make([]string, len(h.PredecessorHashes))
-	copy(predHashes, h.PredecessorHashes)
-	sort.Strings(predHashes)
-	for _, ph := range predHashes {
-		w(digest, "pred_hash:%s\n", ph)
+	// Predecessor identity hashes.
+	//
+	// Under the default transitive chain they are folded in sorted, exactly as
+	// they always have been — nothing new is written, so every pre-existing cache
+	// entry keeps its key (TestCompute_GoldenTransitiveChainUnchanged).
+	//
+	// Under chain: values they are EXCLUDED and a single framed marker line is
+	// written instead. The marker is unconditional in values mode (even with no
+	// predecessors) because the mode is itself part of the identity: the same
+	// step must not silently share a key with its transitive-mode self, where the
+	// key means a different thing. The predecessor OUTPUTS below are still
+	// hashed — that is the whole point of the mode, and it is what makes a
+	// changed upstream VALUE still invalidate every consumer.
+	if h.excludesPredecessorHashes() {
+		w(digest, "cache_chain:%s\n", ChainValues)
+	} else {
+		predHashes := make([]string, len(h.PredecessorHashes))
+		copy(predHashes, h.PredecessorHashes)
+		sort.Strings(predHashes)
+		for _, ph := range predHashes {
+			w(digest, "pred_hash:%s\n", ph)
+		}
 	}
 
-	// Sorted predecessor outputs. This is also where a large-object *reference*
-	// digest folds into the key: a reference output (see pkg/task.OutputRef) is
-	// carried in this same map as its canonical encoded value, and that encoding
-	// embeds the content digest. So a predecessor that re-emits a byte-identical
-	// payload — hence an identical sha256 digest — produces an identical
-	// pred_output line and an identical hash (a cache hit), while a changed
-	// payload changes the digest and forces a miss. Reference values must NOT be
-	// special-cased out of this loop: the digest entering the key here is exactly
-	// what makes the downstream skip value-verified rather than heuristic.
-	predNames := make([]string, 0, len(h.PredecessorOutputs))
-	for name := range h.PredecessorOutputs {
-		predNames = append(predNames, name)
-	}
-	sort.Strings(predNames)
-	for _, name := range predNames {
-		outputs := h.PredecessorOutputs[name]
-		outKeys := make([]string, 0, len(outputs))
-		for k := range outputs {
-			outKeys = append(outKeys, k)
+	// Predecessor outputs. This is also where a large-object *reference* digest
+	// folds into the key: a reference output (see pkg/task.OutputRef) is carried
+	// in this same map as its canonical encoded value, and that encoding embeds
+	// the content digest. So a predecessor that re-emits a byte-identical
+	// payload — hence an identical sha256 digest — produces an identical record
+	// and an identical hash (a cache hit), while a changed payload changes the
+	// digest and forces a miss. Reference values must NOT be special-cased out
+	// of this fold: the digest entering the key here is exactly what makes the
+	// downstream skip value-verified rather than heuristic.
+	//
+	// FRAMING. Output values are arbitrary producer-supplied text and may contain
+	// newlines, so the legacy "pred_output:<step>:<key>=<value>\n" line form is
+	// NOT injective: for producer "p", {"a": "x\npred_output:p:b=y"} and
+	// {"a": "x", "b": "y"} serialize to the identical byte stream. Under the
+	// default transitive chain that aliasing is contained — the predecessor
+	// identity hashes folded in above already separate the two producers — but
+	// under chain: values those hashes are deliberately excluded, so the OUTPUTS
+	// are the entire upstream identity and the collision becomes a stale
+	// downstream cache hit (a consumer replaying a result computed from a
+	// different upstream value map).
+	//
+	// Values mode therefore folds the whole map in as ONE canonical-JSON record:
+	// encoding/json escapes control characters and quotes and sorts map keys, so
+	// the encoding is canonical and injective. Transitive mode keeps the legacy
+	// line form byte-for-byte — changing it would silently invalidate every
+	// existing cache entry in every deployment on upgrade
+	// (TestCompute_GoldenTransitiveChainUnchanged).
+	//
+	// This fold deliberately does not lean on the fact that today's schedulers
+	// (internal/job, internal/worker) also inject the same output values as env
+	// and fold THOSE in above, which incidentally separates most single-value
+	// forgeries. That env fold is lossy — pkg/task.NormalizeStepName collapses
+	// "-" and "." to "_" and uppercases, so two distinct output keys can share
+	// one env key — and it is a caller's choice, not a property of this type.
+	// Compute() is the identity contract, so it has to be injective on its own.
+	if h.excludesPredecessorHashes() {
+		w(digest, "pred_outputs:%s\n", canonicalJSON(framedPredecessorOutputs(h.PredecessorOutputs)))
+	} else {
+		predNames := make([]string, 0, len(h.PredecessorOutputs))
+		for name := range h.PredecessorOutputs {
+			predNames = append(predNames, name)
 		}
-		sort.Strings(outKeys)
-		for _, k := range outKeys {
-			w(digest, "pred_output:%s:%s=%s\n", name, k, outputs[k])
+		sort.Strings(predNames)
+		for _, name := range predNames {
+			outputs := h.PredecessorOutputs[name]
+			outKeys := make([]string, 0, len(outputs))
+			for k := range outputs {
+				outKeys = append(outKeys, k)
+			}
+			sort.Strings(outKeys)
+			for _, k := range outKeys {
+				w(digest, "pred_output:%s:%s=%s\n", name, k, outputs[k])
+			}
 		}
 	}
 
@@ -458,6 +558,24 @@ func canonicalJSON(value any) string {
 		return fmt.Sprintf("%v", value)
 	}
 	return string(data)
+}
+
+// framedPredecessorOutputs normalizes the predecessor output map for the
+// canonical-JSON framing used by chain: values. Nil maps become empty maps so a
+// producer that emitted nothing hashes identically whether its map was
+// allocated-and-empty or never allocated, and so a task with no predecessors at
+// all folds in a stable "{}" rather than a "null" that depends on how the caller
+// built the struct. encoding/json sorts map keys, so no explicit sort is needed.
+func framedPredecessorOutputs(outputs map[string]map[string]string) map[string]map[string]string {
+	framed := make(map[string]map[string]string, len(outputs))
+	for name, kv := range outputs {
+		inner := make(map[string]string, len(kv))
+		for k, v := range kv {
+			inner[k] = v
+		}
+		framed[name] = inner
+	}
+	return framed
 }
 
 // partitionIdentity is the typed, self-delimiting representation of the three

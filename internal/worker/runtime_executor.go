@@ -204,6 +204,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 		Version:    taskRun.CacheVersion,
 		PinDigests: taskRun.CachePinDigests,
 		DigestTTL:  taskRun.CacheDigestTTL,
+		// Scheduler-set on the row (internal/run/store.go) so a worker builds
+		// the SAME identity key as local execution. An empty CacheChain — every
+		// row written before the column existed — means transitive, whose hash
+		// is byte-identical to the pre-chain era.
+		Chain:    taskRun.CacheChain,
+		TTLNever: taskRun.CacheTTLNever,
 	}
 	// A fanned instance's identity hash is persisted whether or not caching is
 	// on, exactly as the local lane does (internal/job/job.go's per-instance
@@ -294,7 +300,12 @@ func (e *runtimeExecutor) Execute(ctx context.Context, taskRun *models.TaskRun) 
 			// unit of work would hash differently depending on which executor ran
 			// it — a permanent cache miss that looks like cache flakiness.
 			PartitionAttributes: decodePartitionAttributes(taskRun.PartitionAttributes),
-			CacheVersion:        cacheCfg.Version,
+			// The chain mode, exactly as the local lane sets it. Dropping it
+			// here would let the two lanes fold DIFFERENT fields into one task's
+			// identity, so the same unit of work would hash differently
+			// depending on which executor ran it.
+			Chain:        cacheCfg.Chain,
+			CacheVersion: cacheCfg.Version,
 		}
 		cacheHash = hashInput.Compute()
 		// Serialize the decomposed input to a canonical, secret-redacted blob so
@@ -950,10 +961,7 @@ func (e *runtimeExecutor) storeCacheEntry(cacheStore *cache.Store, cacheCfg jobd
 		CreatedAt:           time.Now().UTC(),
 	}
 
-	if cacheCfg.TTL > 0 {
-		expiresAt := entry.CreatedAt.Add(cacheCfg.TTL)
-		entry.ExpiresAt = &expiresAt
-	}
+	entry.ExpiresAt = cache.EntryExpiry(entry.CreatedAt, cacheCfg.TTL, cacheCfg.TTLNever)
 
 	if err := cacheStore.Put(entry); err != nil {
 		log.Warn("cache: failed to store entry", "task_id", taskRun.TaskID, "hash", hash, "error", err)

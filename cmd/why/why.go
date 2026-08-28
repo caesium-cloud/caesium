@@ -66,7 +66,11 @@ type explanation struct {
 		SubjectHash  string `json:"subjectHash"`
 		BaselineHash string `json:"baselineHash"`
 		Degraded     string `json:"degraded"`
-		Changes      []struct {
+		// Notes are qualifiers about how the key was computed rather than which
+		// input differed — today, the `chain: values` predecessor-hash exclusion,
+		// which the table must render or a values-mode skip is unexplainable.
+		Notes   []string `json:"notes"`
+		Changes []struct {
 			Field    string `json:"field"`
 			Kind     string `json:"kind"`
 			Before   string `json:"before"`
@@ -74,6 +78,7 @@ type explanation struct {
 			Added    bool   `json:"added"`
 			Removed  bool   `json:"removed"`
 			Redacted bool   `json:"redacted"`
+			Note     string `json:"note"`
 		} `json:"changes"`
 	} `json:"diff"`
 }
@@ -88,6 +93,35 @@ type groupSummary struct {
 	PartitionsTruncated bool           `json:"partitionsTruncated"`
 	FirstFailure        *groupFailure  `json:"firstFailure"`
 	DurationMS          int64          `json:"durationMs"`
+	// Notes mirrors run.WhyGroup.Notes: the group-level channel for
+	// key-construction qualifiers, which a group needs because it carries no
+	// diff to hang them on.
+	Notes []string `json:"notes"`
+}
+
+// explanationNotes collects the key-construction notes from whichever channel
+// this answer shape uses — a single instance carries them on its diff, a fanned
+// group on the group summary — de-duplicated so a future shape carrying both
+// does not print the same line twice. It mirrors run.explanationNotes.
+func explanationNotes(exp *explanation) []string {
+	var notes []string
+	seen := make(map[string]struct{}, 2)
+	add := func(candidates []string) {
+		for _, n := range candidates {
+			if _, dup := seen[n]; dup {
+				continue
+			}
+			seen[n] = struct{}{}
+			notes = append(notes, n)
+		}
+	}
+	if exp.Diff != nil {
+		add(exp.Diff.Notes)
+	}
+	if exp.Group != nil {
+		add(exp.Group.Notes)
+	}
+	return notes
 }
 
 // groupFailure mirrors run.WhyGroupFailure.
@@ -210,6 +244,17 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	}
 	_ = tw.Flush()
 
+	// Notes are printed on EVERY path — degraded blobs and fanned groups
+	// included, and BEFORE either early return below. The chain: values exclusion
+	// is the reason a task can stay cached while its predecessor visibly changed,
+	// so hiding it behind a `return` would leave exactly the skips spec §4.3 says
+	// must be explainable unexplained. A fanned group carries no Diff (N hashes,
+	// N baselines), so its note rides on group.notes.
+	for _, note := range explanationNotes(exp) {
+		_, _ = fmt.Fprintln(out)
+		_, _ = fmt.Fprintf(out, "note: %s\n", note)
+	}
+
 	if exp.Group != nil {
 		renderGroup(out, exp.Group)
 		return
@@ -218,12 +263,25 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	if exp.Diff == nil {
 		return
 	}
+
 	if exp.Diff.Degraded != "" {
 		_, _ = fmt.Fprintln(out)
 		_, _ = fmt.Fprintf(out, "note: %s\n", exp.Diff.Degraded)
 		return
 	}
-	if len(exp.Diff.Changes) == 0 {
+
+	// An excluded entry records an input that was deliberately kept OUT of the
+	// key; it is rendered above as a note, and counting it as a discriminating
+	// field would report a cache hit as having a changed field.
+	changes := exp.Diff.Changes[:0:0]
+	for _, ch := range exp.Diff.Changes {
+		if ch.Kind == "excluded" {
+			continue
+		}
+		changes = append(changes, ch)
+	}
+
+	if len(changes) == 0 {
 		_, _ = fmt.Fprintln(out)
 		if exp.Diff.HashEqual {
 			_, _ = fmt.Fprintln(out, "All hashed inputs are identical (no discriminating field).")
@@ -234,10 +292,10 @@ func renderTable(cmd *cobra.Command, exp *explanation) {
 	}
 
 	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintf(out, "Discriminating fields (%d):\n", len(exp.Diff.Changes))
+	_, _ = fmt.Fprintf(out, "Discriminating fields (%d):\n", len(changes))
 	dw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(dw, "FIELD\tCHANGE\tBEFORE\tAFTER")
-	for _, ch := range exp.Diff.Changes {
+	for _, ch := range changes {
 		before, after := ch.Before, ch.After
 		if ch.Redacted {
 			if before != "" {

@@ -39,6 +39,27 @@ type Entry struct {
 	ExpiresAt  *time.Time
 }
 
+// EntryExpiry is the single decision every cache-entry writer makes about when
+// an entry stops being valid. A nil result means "never expires", which Get()
+// already honours (it only rejects a non-nil ExpiresAt in the past).
+//
+// `cache.ttl: never` (ttlNever) wins over any TTL, including the inherited
+// CAESIUM_CACHE_TTL default: a step keyed purely on a content fingerprint —
+// an infrastructure apply, a build artifact — should not be re-executed because
+// a wall clock moved. A zero/negative ttl likewise means no expiry.
+//
+// It lives here rather than being reimplemented at each writer because the
+// local lane, its fan-out publisher and the distributed worker all publish
+// entries, and a lane that forgot the ttlNever check would expire exactly the
+// entries the feature exists to keep.
+func EntryExpiry(createdAt time.Time, ttl time.Duration, ttlNever bool) *time.Time {
+	if ttlNever || ttl <= 0 {
+		return nil
+	}
+	expiresAt := createdAt.Add(ttl)
+	return &expiresAt
+}
+
 // Store provides cache operations backed by GORM.
 type Store struct {
 	db *gorm.DB

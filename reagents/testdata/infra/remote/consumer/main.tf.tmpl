@@ -1,0 +1,29 @@
+# A stack whose module source is NOT a local path — the shape of nearly every
+# real Terraform repo, and the one the fixture otherwise never exercises.
+#
+# Terraform installs such a module into TF_DATA_DIR and records that install
+# path as the manifest entry's Dir. discover relocates TF_DATA_DIR to a per-run
+# scratch directory (so the source mount can stay read-only), which makes that
+# Dir a per-run absolute path: it must be read from, and must never reach the
+# fingerprint. The module's stable identity is its source and version.
+#
+# __SUBREPO__ is substituted by the test helper with the absolute path of the
+# git repository it builds from ../subrepo. A committed file cannot carry that
+# path, and go-getter's file:// transport requires an absolute one.
+module "remote" {
+  source = "git::file://__SUBREPO__"
+  stack  = "consumer"
+}
+
+module "local" {
+  source = "../../modules/tags"
+  stack  = "consumer"
+}
+
+output "labels" {
+  value = module.remote.labels
+}
+
+output "tags" {
+  value = module.local.tags
+}
