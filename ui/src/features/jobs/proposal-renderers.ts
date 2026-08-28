@@ -28,6 +28,19 @@ const MAX_RESOURCES_RENDERED = 200;
 /** Known Terraform plan action buckets, in the order they should render. */
 const TERRAFORM_ACTION_ORDER = ["add", "change", "destroy", "import", "replace"];
 
+/**
+ * Every numeric or boolean top-level key `pack/internal/tf.Summary` encodes
+ * that is NOT an action bucket: `changes` (Terraform's own boolean verdict),
+ * `outputs` (root-module output-change count), `resources` (the address
+ * list itself, not a count), and `resources_truncated` (how many addresses
+ * were dropped by the server-side cap). Forward-compat treats "numeric" as
+ * "action" by default, which without this explicit list renders `outputs`
+ * and `resources_truncated` as bogus action badges (an "Outputs 0" badge on
+ * every proposal, or a "Resources_truncated 25" badge that reads as if 25
+ * resources had that action) on every real `terraform.plan.v1` summary.
+ */
+const SUMMARY_NON_ACTION_KEYS = new Set(["resources", "resources_truncated", "changes", "outputs"]);
+
 export interface ActionCount {
   action: string;
   count: number;
@@ -132,9 +145,12 @@ function renderTerraformPlanV1(summary: unknown, summaryRaw: string, parseError:
     }
   }
   // Forward-compat: an action bucket this renderer doesn't know about yet
-  // still shows up rather than silently vanishing.
+  // still shows up rather than silently vanishing. Known non-action fields
+  // (SUMMARY_NON_ACTION_KEYS) are skipped explicitly rather than inferred
+  // from "is it numeric" — `outputs` and `resources_truncated` are both
+  // numbers and neither is an action.
   for (const [key, value] of Object.entries(summary)) {
-    if (key === "resources" || seenActions.has(key)) {
+    if (SUMMARY_NON_ACTION_KEYS.has(key) || seenActions.has(key)) {
       continue;
     }
     if (typeof value === "number" && Number.isFinite(value)) {
