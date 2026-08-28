@@ -146,6 +146,19 @@ steps:
       - {volume: tfstate, path: /state, subPath: account}
       - {volume: tfcache, path: /cache, readOnly: true}
 
+  # app-web's own Terraform config declares `variable "vpc_id"` with NO
+  # default (a deliberate fail-closed choice in the stack itself — see
+  # infra-deploy.job.yaml's plan-app-web step). infra-deploy.job.yaml's
+  # `plan`/`apply` steps supply it via IMPORT_OUTPUTS_FROM=apply-network,
+  # because an apply step precedes them in that job's DAG. `tf-drift` DOES
+  # honour IMPORT_OUTPUTS_FROM the same way `tf-plan` does — but THIS job has
+  # no apply step to import from at all (drift never applies), so
+  # IMPORT_OUTPUTS_FROM would have nothing to read. The cross-stack variable
+  # must be pinned directly instead. Keep this value in sync with
+  # infra-deploy-demo's actual `apply-network` output — a stale pin here
+  # makes drift compare against the wrong VPC, not against no VPC (the
+  # variable has no default, so an unset value fails the step outright rather
+  # than masking the problem).
   - name: drift-app-web
     image: caesiumcloud/tf-runner:latest
     command: ["tf-drift"]
@@ -157,6 +170,7 @@ steps:
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
       ARTIFACT_DIR: "/state/artifacts"
       BACKEND_CONFIG: "path=/state/terraform.tfstate"
+      TF_VAR_vpc_id: "vpc-REPLACE-WITH-infra-deploy-demo's-apply-network-vpc_id-output"
     volumeMounts:
       - {volume: src, path: /src, readOnly: true}
       - {volume: tfstate, path: /state, subPath: app-web}
