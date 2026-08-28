@@ -242,12 +242,24 @@ func (s *IntegrationTestSuite) deployManifest(f *infraDeployFixture, alias, spar
 
 // writeRunnerEnv emits the environment every tf-runner phase of one stack
 // shares.
+//
+// ARTIFACT_DIR is stack-scoped (`/state/<stack>-artifacts`), not the shipped
+// manifests' fixed `/state/artifacts`. The two shipped examples give every
+// stack its own physical `tfstate-<stack>` volume mounted at `/state`, so a
+// fixed subpath never collides; this lane's fixture mounts ONE shared
+// `tfstate` volume at `/state` for every stack (see newInfraDeployFixture),
+// differentiated only by BACKEND_CONFIG's filename. Reusing the shipped
+// fixed subpath here would point every stack's `tf-runner` at the same
+// TF_DATA_DIR (`<ARTIFACT_DIR>/tfdata`) and let concurrent stacks' `terraform
+// init -reconfigure` corrupt one another's `.terraform/` — see the
+// cross-job-sharing note in docs/examples/infra-drift.job.yaml point 2.
 func (s *IntegrationTestSuite) writeRunnerEnv(b *strings.Builder, _ *infraDeployFixture, stack deployStack) {
 	fmt.Fprintf(b, `      STACK_ROOT: "/src/%s"
       TF_WORKSPACE: "default"
       TF_CLI_CONFIG_FILE: "/cache/terraformrc"
+      ARTIFACT_DIR: "/state/%s-artifacts"
       BACKEND_CONFIG: "path=/state/%s.tfstate"
-`, stack.root(), stack.Name)
+`, stack.root(), stack.Name, stack.Name)
 	for _, key := range sortedKeys(stack.Env) {
 		fmt.Fprintf(b, "      %s: %q\n", key, stack.Env[key])
 	}
@@ -255,13 +267,21 @@ func (s *IntegrationTestSuite) writeRunnerEnv(b *strings.Builder, _ *infraDeploy
 
 // writeRunnerMounts emits the volume mounts every tf-runner phase shares.
 //
+// `src` is readOnly here, mirroring both shipped manifests
+// (docs/examples/infra-deploy.job.yaml, docs/examples/infra-drift.job.yaml):
+// discover, plan, apply, and drift all read the checked-out tree but never
+// write to it, and ARTIFACT_DIR above relocates Terraform's data directory
+// and plan artifact onto the state volume so nothing needs to write under
+// `/src`. Without this the lane exercised a mount shape (read-write `src`,
+// default in-tree ARTIFACT_DIR) that neither shipped example uses.
+//
 // The cache volume is readOnly on every step but warm-cache. That is the
 // single-writer invariant of design §3.4: a filesystem mirror is safe under
 // parallel `init` only because nothing else writes to it, and `readOnly: true`
 // is the shipped primitive that enforces it (§5.7).
 func (s *IntegrationTestSuite) writeRunnerMounts(b *strings.Builder) {
 	b.WriteString(`    volumeMounts:
-      - {volume: src, path: /src}
+      - {volume: src, path: /src, readOnly: true}
       - {volume: tfstate, path: /state}
       - {volume: tfcache, path: /cache, readOnly: true}
 `)
@@ -423,7 +443,10 @@ func (s *IntegrationTestSuite) TestInfraDeployReAppliesOnlyWhatChanged() {
 		"proposal_artifact names key %q, whose stored value is not an output reference: %q",
 		planOut["proposal_artifact"], planOut[planOut["proposal_artifact"]])
 	s.Equal(1, artifact.Ref, "the reference should carry its encoding version")
-	s.True(strings.HasPrefix(artifact.Path, "/src/stacks/network/"), "artifact path = %q", artifact.Path)
+	// The artifact lives under ARTIFACT_DIR (writeRunnerEnv), not under `/src`:
+	// `src` is mounted readOnly for plan/apply (writeRunnerMounts), mirroring
+	// both shipped manifests, so `tf-runner` cannot place it there.
+	s.True(strings.HasPrefix(artifact.Path, "/state/network-artifacts/"), "artifact path = %q", artifact.Path)
 	s.True(strings.HasPrefix(artifact.Digest, "sha256:"), "artifact digest = %q", artifact.Digest)
 	s.Positive(artifact.Size, "the artifact reference reported no size")
 
