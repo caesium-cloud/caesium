@@ -596,6 +596,32 @@ has no warnings channel, while the server lint response already carries
       > `docs/examples/k8s-workload-identity-volume.job.yaml` (`plan-access`
       > moved from the volume root to a sibling `subPath: plans`, disjoint
       > from `write-cloud-report`'s `subPath: reports`).
+      > Refined (W3-β) on two counts, both of which changed what the check
+      > means rather than only what it catches:
+      > **(1) DAG ordering.** The §8 hazard is CONCURRENT writers, so a pair
+      > of write mounts whose steps are connected by a path of resolved
+      > `dependsOn`/`next` edges (transitively, and including the implicit
+      > sequential chain a definition with no explicit edges gets) is no
+      > longer flagged — that is a handoff, not a race, and it is exactly
+      > what `prepare` → `checkout` and `plan-<stack>` → `apply-<stack>` are.
+      > Writers on parallel branches still warn. Edges come from
+      > `pkg/jobdef.DeriveStepSuccessors`, the definition's own edge builder,
+      > so the lint cannot disagree with the scheduler; an unresolvable graph
+      > falls back to "no ordering proven" and still warns.
+      > **(2) Engine awareness.** `internal/atom/docker`'s `convertMounts`
+      > never sets `VolumeOptions.Subpath`, so on docker (and on an unset
+      > engine, which pkg/jobdef defaults to docker) EVERY mount covers the
+      > whole volume no matter what `subPath` says. The check now treats
+      > docker mounts as root mounts and only honours `subPath` for
+      > kubernetes/podman. Two parallel docker steps with `subPath: a` and
+      > `subPath: b` therefore warn — which is correct, and is the class of
+      > silent state-clobbering the D2 manifests had before W3-β.
+      > This made the previous integration fixtures ambiguous (their steps
+      > had no explicit edges, so they were implicitly ordered and would have
+      > gone silent for the wrong reason): every "warns" fixture is now wired
+      > explicitly parallel off a `seed` fan-out, plus new ordered-pair
+      > (silent, local **and** `--server`) and docker-vs-kubernetes subPath
+      > fixtures.
 - [x] D2. Reference manifests in `docs/examples/`. `infra-deploy.job.yaml` — the
       hand-written three-stack form from C5 with an HTTP trigger (hydrate-safe),
       engine-keyed volume sources (docker/podman named volumes, kubernetes
@@ -617,15 +643,7 @@ has no warnings channel, while the server lint response already carries
       > `claimTemplate` — `docs/job-definitions.md`'s own volumes section
       > documents `claimTemplate` as an inline PVC scoped to **one pod/step**,
       > and `src` here is mounted by all nine pipeline steps (prepare through
-      > every plan/apply). Two volumes are each declared TWICE under different
-      > logical names, aliasing the identical physical store (same
-      > docker/podman volume name, same kubernetes pvc name): `src`/`src-reset`
-      > (checkout vs. prepare) and `tfstate`/`tfstate-apply` (a stack's plan vs.
-      > its own apply). Each alias has exactly one write-mounting step, so
-      > `internal/jobdef/lint.CheckVolumeWriters` sees no conflict, even though
-      > the two steps of a pair really do write the same storage — safely,
-      > because a `dependsOn` edge serializes them and the lint check has no
-      > way to see that edge. `discover`/`plan`/`apply` mount `src` `readOnly:
+      > every plan/apply). `discover`/`plan`/`apply` mount `src` `readOnly:
       > true` (verified empirically against the pinned Terraform 1.15.9 that
       > `init` needs no write access to the root module directory when
       > `.terraform.lock.hcl` is already committed and `TF_DATA_DIR` is
@@ -642,6 +660,27 @@ has no warnings channel, while the server lint response already carries
       > unrelated sibling's failure cannot skip a parallel step; C5's
       > serialization was test-determinism hygiene, not a manifest
       > requirement.
+      > De-aliased (W3-β), together with D1's refinement. The volume aliasing
+      > this note originally described (`src`/`src-reset`,
+      > `tfstate`/`tfstate-apply` — one physical store under two logical
+      > names, so the multi-writer lint saw one writer each) is **gone**: the
+      > refined D1 rule exempts DAG-ordered writers directly, so both
+      > manifests now declare one logical name per physical store and are
+      > silent honestly rather than by hiding a real pair of writers from the
+      > check. Also fixed a correctness bug the aliasing had masked: per-stack
+      > Terraform state was isolated by mounting one shared `tfstate` volume
+      > with `subPath: <stack>` while every stack used the identical
+      > `BACKEND_CONFIG: path=/state/terraform.tfstate` — and the **Docker
+      > engine drops `VolumeMount.SubPath` entirely**
+      > (`internal/atom/docker/engine.go`; only kubernetes and podman apply
+      > it), so on the default engine all three stacks wrote the same state
+      > file and the last apply to finish silently won. Replaced with one
+      > volume per stack (`tfstate-network` / `tfstate-account` /
+      > `tfstate-app-web`, no `subPath`), each written only by its own
+      > DAG-ordered `plan` → `apply`. `accessMode: ReadWriteMany` is now on
+      > every volume more than one step mounts (state volumes included — a
+      > stack's plan and apply are separate pods and may land on different
+      > nodes) and the kubernetes PVC names carry the matching `-rwx` suffix.
 
 ### Stream E — Console proposal panel
 
@@ -819,6 +858,24 @@ renders the summary and shows the reference.
       > plan artifact's digest changes on every re-plan (Terraform embeds a
       > timestamp), so apply re-running whenever plan re-runs is expected, not
       > a bug.
+      > Extended (W3-β): adds the **digest-pinning** section the manifests'
+      > own comments cross-referenced but that did not exist
+      > (`#pinning-the-pack-images-to-a-digest` — why a tag is a mutable
+      > pointer for the thing doing the applying, how to resolve a digest with
+      > or without pulling, the `tf-warm`/`tf-runner` version coupling that
+      > makes re-pinning safe, and the manifest-list-vs-platform-manifest
+      > trap). Replaces "RWX requirement and RWO deferral" with a fuller
+      > **Volumes** section: one logical volume per physical store, the Docker
+      > `subPath` caveat as a call-out, `accessMode: ReadWriteMany` on every
+      > multi-step volume with `-rwx`-suffixed PVC names, the read-only `src`
+      > contract (including `tf-runner`'s `-lockfile=readonly` and the
+      > `terraform providers lock -platform=…` remedy), and the refined
+      > multi-writer lint semantics (ordered writers silent, parallel writers
+      > warn, docker `subPath` warns, plus the three documented false
+      > negatives). Two new failure-mode rows (`subPath` relied on for
+      > isolation; `terraform init` rewriting a read-only `src`), and a
+      > caveat on the fan-out snippet that per-unit state isolation is an
+      > open edge in that form.
 - [x] N-2. Close-out. Flip the spec's `**Status:** Proposed` banner to Shipped
       with a link to this plan; update the Phase 4 roadmap row added at draft
       time to **Shipped**; confirm the `cache.chain` cross-links in

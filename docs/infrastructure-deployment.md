@@ -167,7 +167,7 @@ different provider/version unions must not share the same `tfcache` volume —
 the second job's `init` would either miss the mirror for a provider the first
 job never needed, or silently reuse a stale mirror. Give each independent
 provider set its own `tfcache` volume (physical name), even if you reuse the
-same `tfstate` volume convention across jobs.
+same `tfstate-<stack>` volume convention across jobs.
 
 **First warm needs outbound network; every later run is offline.**
 `terraform providers mirror` needs to reach `registry.terraform.io` (or your
@@ -231,6 +231,12 @@ false-alarm-looking summary.
 **Every phase fails closed**: an error exits non-zero having emitted no
 marker at all. An absent fingerprint or proposal is never read as "unchanged."
 
+**Every phase's `terraform init` runs `-lockfile=readonly`**, so a
+`.terraform.lock.hcl` that no longer matches the stack's provider requirements
+fails with Terraform's own diagnostic rather than being silently rewritten (or
+failing with a permission error) inside the read-only `src` mount — see
+[`src` is mounted read-only](#src-is-mounted-read-only-for-discover-plan-and-apply).
+
 **The plan artifact's digest changes on every re-plan, even for an identical
 diff** — Terraform embeds a timestamp in the plan file, so the bytes really
 are different. This is why `apply-<stack>` re-runs whenever `plan-<stack>`
@@ -262,6 +268,59 @@ discards that writer's output for the duration of those two calls specifically
 so the unsanitized plan JSON and `terraform output -json` (which prints
 sensitive values in full — the CLI only masks them in human-rendered output)
 never reach the task log.
+
+## Pinning the pack images to a digest
+
+`docs/examples/infra-deploy.job.yaml` and `infra-drift.job.yaml` reference the
+pack images by tag (`caesiumcloud/tf-runner:latest`). **That is a placeholder,
+not a recommendation.** A tag is a mutable pointer: the registry can move
+`:latest` — or any release tag — to different bytes at any time, and Caesium
+resolves the reference when a task starts, so two runs of the "same" pipeline
+can execute two different `tf-runner` builds. For a pipeline that applies
+infrastructure, that is an unreviewed change to the thing doing the applying.
+
+A digest reference is immutable — `sha256:<64 hex>` *is* the manifest's
+content hash, so the registry can only serve those exact bytes or nothing:
+
+```yaml
+    image: caesiumcloud/tf-runner@sha256:5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03
+```
+
+Resolve the digest for a tag you have already pulled:
+
+```sh
+docker image inspect --format '{{index .RepoDigests 0}}' caesiumcloud/tf-runner:v1.2.3
+```
+
+or without pulling, straight from the registry:
+
+```sh
+docker buildx imagetools inspect caesiumcloud/tf-runner:v1.2.3 --format '{{.Manifest.Digest}}'
+```
+
+Pin all four roles (`git-source`, `tf-discover`, `tf-warm`, `tf-runner`) from
+the same build, and re-pin deliberately — a pack rebuild is a change to the
+pipeline and should land as a reviewed commit to the manifest, exactly like a
+change to a stack. Two things make re-pinning cheap rather than a chore:
+
+- **`tf-warm` is version-coupled to `tf-runner`.** The mirror `tf-warm`
+  populates is keyed on the provider set *and* the Terraform version baked
+  into the image, and every `terraform init` afterwards runs offline against
+  it. Bumping `tf-runner`'s Terraform version without bumping `tf-warm`'s is
+  the one mismatch that produces a confusing failure rather than a clear one.
+- **`warm-cache` self-heals.** It always runs and re-checks its `.warm/<key>`
+  marker (`cache: false`), so a re-pin that changes the mirror key repopulates
+  the volume on the next run with no manual step.
+
+One caveat specific to a multi-arch pack: a digest taken from a *manifest list*
+(the multi-arch index) still resolves per-architecture, which is what you want.
+A digest taken from a single platform's manifest pins that platform and will
+fail to pull on any other node — take the digest from the tag, not from a
+platform-specific `docker manifest inspect` entry.
+
+Until the images are published (plan item H-2 of the infra-deploy exec plan),
+the reference manifests stay tag-pinned so they remain readable; treat the
+tags as "fill in a digest here."
 
 ## Both forms: container no-op vs. the branch form
 
@@ -369,6 +428,17 @@ no-op form above, for every partition, always. See
 (`maxParallel`, `onEmpty`, `failurePolicy`, in-group `dependsOn` ordering,
 retry-by-partition).
 
+**State isolation is the open edge in this form.** One step definition serves
+every unit, so the per-stack state volumes of the hand-written form
+([Volumes](#volumes)) are not expressible: the snippet mounts a single
+`tfstate` volume and up to `maxParallel` partitions write it concurrently.
+`subPath` cannot stand in for that — it is fixed per step definition, and
+Docker ignores it entirely — and `tf-runner` takes `BACKEND_CONFIG` verbatim
+from its environment with no partition substitution, so a per-unit state path
+cannot be written into the manifest either. Isolation has to come from the
+backend itself deriving a per-unit key. Settle that before promoting the
+fan-out form to a `docs/examples/` manifest.
+
 ## The drift job (mandatory)
 
 The fingerprint gate answers *"did my code change?"*; it is blind to drift by
@@ -379,9 +449,11 @@ not an optional extra.**
 
 `docs/examples/infra-drift.job.yaml` is a separate, cron-triggered job reusing
 the deploy job's checkout/warm-cache shape, running `tf-drift` per stack
-against the *same* `tfstate` (and ideally `tfcache`) physical volumes the
-deploy job manages — otherwise it is checking drift against the wrong (or
-empty) state. Drift steps carry **`cache: false` explicitly**, not merely an
+against the *same* per-stack `tfstate-<stack>` (and ideally `tfcache`)
+physical volumes the deploy job manages — otherwise it is checking drift
+against the wrong (or empty) state. The drift steps run in parallel, one per
+stack, which is another reason state is one volume per stack rather than one
+volume carved up by `subPath`. Drift steps carry **`cache: false` explicitly**, not merely an
 omitted `cache` block: with `CAESIUM_CACHE_ENABLED=true` an omitted block is
 cacheable, and a cached drift step would replay `drift: false` forever —
 caching the one thing whose entire purpose is to detect out-of-band change
@@ -418,26 +490,138 @@ invalidate --job infra-prod` might suggest — `cmd/cache/invalidate.go` takes
 no alias-resolving flag. Add `--task <name>` to invalidate one step's cache
 instead of the whole job.
 
-## RWX requirement and RWO deferral
+## Volumes
 
-The shared provider mirror (`tfcache`) is a warm-once, read-many volume: one
-`warm-cache` step holds the only read-write mount, and every other step mounts
-it `readOnly: true`. On Kubernetes this needs `ReadWriteMany` storage — a
-`filesystem_mirror` shared by parallel `init` calls across pods on different
-nodes cannot live on `ReadWriteOnce` storage. `ReadWriteOnce` support is
-**deferred** until a node-affinity / co-location primitive lands (design §12),
-which would let every step in a run schedule onto the same node as the volume.
-Until then, provision `tfcache` (and, for the propose/apply state-sharing
-pattern below, `tfstate`) from an RWX-capable storage class.
+The reference manifests use three kinds of volume, and getting each one's
+sharing model right is what keeps a pipeline from being green and wrong.
 
-`src` (the staged source tree) also needs to be shared across every step in
-the run — nine steps in the reference manifest (materialize through every
-plan/apply). **Use a pre-provisioned `pvc:`, not `claimTemplate`, for a volume
-mounted by more than one step.** `claimTemplate` provisions an inline
-*ephemeral* PVC scoped to one pod/step (see "Volumes And Workload Identity" in
+| Volume | Written by | Read by | Sharing |
+|---|---|---|---|
+| `src` | `prepare` (clears), then `checkout` (repopulates) — DAG-ordered | every discover/plan/apply, `readOnly: true` | one per job |
+| `tfcache` | `warm-cache` only | every plan/apply/drift, `readOnly: true` | shared across the deploy and drift jobs |
+| `tfstate-<stack>` | that stack's `plan` then its `apply` — DAG-ordered (and the drift job's `drift-<stack>`) | — | **one volume per stack** |
+
+### One logical volume per physical store
+
+Give each physical store exactly one entry under `volumes:`. Declaring the
+same docker volume / Kubernetes PVC twice under two names to make a pipeline
+look like it has fewer writers does not make it have fewer writers — it only
+hides them from the lint below, which keys on the logical name.
+
+The per-stack state volumes are the sharp version of this. It is tempting to
+declare one `tfstate` volume and carve it up with `subPath: <stack>` — do not:
+
+> **The Docker engine does not apply `VolumeMount.SubPath`.** Kubernetes
+> (`v1.VolumeMount.SubPath`) and Podman (`specgen.NamedVolume.SubPath`) both
+> honour it; `internal/atom/docker`'s mount conversion never sets it. On
+> Docker — the default engine, and the one `caesium dev` and `just run` use —
+> every `subPath` mount of a volume resolves to the volume ROOT. Three stacks
+> sharing one `tfstate` volume by `subPath` with the same
+> `BACKEND_CONFIG: path=/state/terraform.tfstate` would all write the same
+> file, and the last apply to finish would silently win.
+
+With one volume per stack the backend path can stay identical across stacks
+(`path=/state/terraform.tfstate`), and the isolation is real on every engine.
+
+### RWX requirement and RWO deferral
+
+Declare **`accessMode: ReadWriteMany` on every volume more than one step
+mounts** — `src`, `tfcache`, and the per-stack state volumes included. A
+stack's `plan` and `apply` are separate pods and may be scheduled onto
+different nodes, so state is not an exception. The field is documentary (the
+Kubernetes engine does not translate it into anything; it tells whoever
+provisions the PVC what is required), which is exactly why it has to match
+reality: an operator provisioning from this manifest will follow it literally.
+Name RWX PVCs with an `-rwx` suffix so the requirement is visible at the
+`kubectl get pvc` level.
+
+The shared provider mirror (`tfcache`) is the strictest case: it is a
+warm-once, read-many volume — one `warm-cache` step holds the only read-write
+mount, every other step mounts it `readOnly: true` — and a `filesystem_mirror`
+shared by parallel `init` calls across pods on different nodes cannot live on
+`ReadWriteOnce` storage. `ReadWriteOnce` support is **deferred** until a
+node-affinity / co-location primitive lands (design §12), which would let every
+step in a run schedule onto the same node as the volume.
+
+`src` (the staged source tree) is shared across every step in the run — nine
+steps in the reference manifest (materialize through every plan/apply). **Use
+a pre-provisioned `pvc:`, not `claimTemplate`, for a volume mounted by more
+than one step.** `claimTemplate` provisions an inline *ephemeral* PVC scoped to
+one pod/step (see "Volumes And Workload Identity" in
 [`job-definitions.md`](job-definitions.md)); the design spec's own §5.5
 reference manifest uses `claimTemplate` for `src` and that is wrong for this
 pattern's purposes — a grounding correction recorded on this plan's D2 item.
+
+### `src` is mounted read-only for discover, plan, and apply
+
+Only `prepare` and `checkout` write `src`. Everything downstream mounts it
+`readOnly: true`, and both roles are built to make that hold:
+
+- `tf-discover` scans its root without writing — it puts its own `TF_DATA_DIR`
+  in a temp directory of its own making.
+- `tf-runner` puts `TF_DATA_DIR` at `<ARTIFACT_DIR>/tfdata` rather than the
+  stack's own `.terraform/`. `ARTIFACT_DIR` itself defaults to `<root>/.caesium`
+  — inside `src` — so **set it explicitly onto the state volume**, as the
+  reference manifests do (`ARTIFACT_DIR: /state/artifacts`). Leaving it at the
+  default is what would put Terraform's working directory back inside the
+  read-only mount.
+- `tf-runner`'s `terraform init` runs with **`-lockfile=readonly`**. `init`
+  rewrites `.terraform.lock.hcl` whenever the recorded provider set no longer
+  matches what the configuration requires — a new provider, a pruned one, a
+  hash for a platform the lock file has not seen. Under a read-only mount that
+  write would surface as a bare permission error from inside Terraform;
+  `-lockfile=readonly` turns it into Terraform's own *"Provider dependency
+  changes detected … the lock file is read-only"* diagnostic instead.
+
+  **What to do when you see it:** regenerate and commit the lock file, in the
+  repository the pipeline checks out — never by loosening the mount:
+
+  ```sh
+  terraform providers lock -platform=linux_amd64 -platform=linux_arm64
+  ```
+
+  Lock every platform your runners can schedule onto. A lock file missing the
+  running platform's hash is a lock-file update as far as `init` is concerned,
+  so it fails the same way.
+
+  An operator who sets `TF_CLI_ARGS_init` with their own `-lockfile=` value
+  keeps it; anything else in that variable is preserved and appended to.
+
+### The multi-writer lint (design §8)
+
+`caesium job lint` warns when a named volume is mounted read-write by two or
+more steps **that can run concurrently and write overlapping regions**. It is a
+warning, never an error (spec §11 Open Question 2), and it prints on both the
+local path and `--server`.
+
+What it does *not* flag, and why:
+
+- **DAG-ordered writers.** If a path of `dependsOn`/`next` edges runs between
+  the two steps (directly or transitively), they can never overlap in time and
+  the volume is a handoff, not a race. `prepare` → `checkout` and
+  `plan-<stack>` → `apply-<stack>` are exactly that, which is why the reference
+  manifests are silent without any aliasing. A definition that declares no
+  explicit edges at all is auto-linked into a sequential chain, and the lint
+  reads that the same way the scheduler does.
+- **Genuinely disjoint subPaths on kubernetes/podman.** `subPath: a` and
+  `subPath: b` address different subtrees. Containment still counts: a mount
+  with no `subPath` exposes the whole volume and overlaps everything, and
+  `reports` overlaps `reports/2026`.
+
+What it *will* flag, and should:
+
+- Two steps on parallel branches writing the same volume.
+- Two **docker** steps with different `subPath`s of one volume — because, per
+  the box above, docker ignores `subPath` and both mounts cover the root. A
+  step with no `engine:` is a docker step.
+- Two steps sharing a raw `mounts: [{type: volume, source: …}]` volume without
+  an ordering edge (that form has no `subPath` at all).
+
+Known gaps, all of them false negatives: two `volumes:` entries resolving to
+one physical store are treated as two volumes; the job-level `volumes:` form
+and the raw `mounts:` form are not cross-referenced; and
+`accessMode: ReadOnlyMany` is not read as making step-level `readOnly: true`
+redundant.
 
 ## Cache chain: the sharp edge
 
@@ -506,7 +690,9 @@ Ordered by damage:
 | **`chain: values` surprise** | Documented here and surfaced by `caesium why`. |
 | **Warm volume recreated** | `tf-warm` always runs and self-checks its marker — self-healing by construction. |
 | **RWX unavailable** | Runtime mount failure with a clear message; RWO remains unsupported until node affinity lands. |
-| **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8). It is a *warning*, not an error — a legitimate two-writer case (two steps that genuinely cooperate through a `dependsOn` edge, like this pattern's own `plan`/`apply` state sharing) is real and should not be blocked outright. |
+| **Two read-write mounts on one volume** | `internal/jobdef/lint`'s multi-writer warning (design §8), which flags writers that can run CONCURRENTLY — a pair cooperating through a `dependsOn` edge, like this pattern's own `prepare`/`checkout` and `plan`/`apply` handoffs, is legitimate and stays silent. See [Volumes](#the-multi-writer-lint-design-8). |
+| **`subPath` relied on for isolation** | Docker drops `VolumeMount.SubPath` entirely, so a "partitioned" shared volume is one shared directory there. The multi-writer lint reads docker mounts as root mounts and flags them; the manifests use one volume per stack instead ([Volumes](#one-logical-volume-per-physical-store)). |
+| **`terraform init` rewriting a read-only `src`** | `tf-runner` passes `-lockfile=readonly`, so a drifted `.terraform.lock.hcl` fails with Terraform's own dependency-change diagnostic instead of an opaque permission error ([`src` is mounted read-only](#src-is-mounted-read-only-for-discover-plan-and-apply)). |
 | **Concurrent applies of one stack** | Terraform's backend state lock errors out; `metadata.concurrency: {maxRuns: 1, strategy: queue}` prevents the race at the job level before it reaches Terraform. |
 
 ## See also
