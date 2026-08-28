@@ -98,6 +98,18 @@ func (r *Runner) Root() string { return r.root }
 // being re-materialized on every run. Reconfigure is passed alongside it so a
 // data directory left by an earlier run with different settings is replaced
 // rather than prompting for a state migration in a non-interactive container.
+//
+// Init also runs with `-lockfile=readonly`. The reference manifests mount the
+// staged source tree READ-ONLY for plan/apply/drift — nothing in a propose or
+// apply step should be rewriting the configuration it is deploying — and
+// `terraform init` rewrites `.terraform.lock.hcl` in the root module whenever
+// the recorded provider set no longer matches what the configuration requires
+// (adding an entry, pruning a stale one, recording a hash for a new platform).
+// Without the flag that write lands as a bare EROFS/permission error from deep
+// inside Terraform; with it, Terraform fails with its own
+// "Provider dependency changes detected ... the lock file is read-only"
+// diagnostic, which says what to actually do (regenerate and commit the lock
+// file with `terraform providers lock -platform=...`).
 func (r *Runner) Init(ctx context.Context, backendConfig []string) error {
 	opts := []tfexec.InitOption{tfexec.Upgrade(false)}
 	for _, cfg := range backendConfig {
@@ -106,10 +118,62 @@ func (r *Runner) Init(ctx context.Context, backendConfig []string) error {
 	if len(backendConfig) > 0 {
 		opts = append(opts, tfexec.Reconfigure(true))
 	}
+
+	restore, err := withReadonlyLockfile()
+	if err != nil {
+		return fmt.Errorf("terraform init in %s: %w", r.root, err)
+	}
+	defer restore()
+
 	if err := r.tf.Init(ctx, opts...); err != nil {
 		return fmt.Errorf("terraform init in %s: %w", r.root, err)
 	}
 	return nil
+}
+
+// initArgsEnvVar is Terraform's own mechanism for injecting extra arguments
+// into one subcommand.
+const initArgsEnvVar = "TF_CLI_ARGS_init"
+
+// lockfileReadonlyArg makes `terraform init` refuse to rewrite
+// .terraform.lock.hcl instead of attempting the write.
+const lockfileReadonlyArg = "-lockfile=readonly"
+
+// withReadonlyLockfile installs TF_CLI_ARGS_init=-lockfile=readonly for the
+// duration of one Init and returns a function that puts the environment back.
+//
+// terraform-exec v0.25.3 has no Lockfile InitOption (see tfexec/init.go's
+// initConfig), and its SetEnv REJECTS the whole TF_CLI_ARGS_ prefix — but its
+// buildEnv copies os.Environ() verbatim when the handle's env is nil, which is
+// the mode NewRunner deliberately leaves it in so cross-stack TF_VAR_* survive.
+// Setting the variable on the runner's own process is therefore the supported
+// route, and it is the same one ExportVariable already uses for TF_VAR_*.
+//
+// An operator who has pinned -lockfile= themselves is left alone; anything else
+// already in TF_CLI_ARGS_init is preserved and appended to.
+func withReadonlyLockfile() (func(), error) {
+	previous, had := os.LookupEnv(initArgsEnvVar)
+	if err := os.Setenv(initArgsEnvVar, initCLIArgs(previous)); err != nil {
+		return nil, fmt.Errorf("set %s: %w", initArgsEnvVar, err)
+	}
+	return func() {
+		if !had {
+			_ = os.Unsetenv(initArgsEnvVar)
+			return
+		}
+		_ = os.Setenv(initArgsEnvVar, previous)
+	}, nil
+}
+
+// initCLIArgs folds -lockfile=readonly into an existing TF_CLI_ARGS_init value.
+func initCLIArgs(existing string) string {
+	if strings.Contains(existing, "-lockfile=") {
+		return existing
+	}
+	if strings.TrimSpace(existing) == "" {
+		return lockfileReadonlyArg
+	}
+	return existing + " " + lockfileReadonlyArg
 }
 
 // SelectWorkspace switches to workspace, creating it if it does not exist yet.
